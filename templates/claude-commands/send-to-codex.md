@@ -49,7 +49,14 @@ cwd: <current working directory from pwd — always include>
 <Any additional context that helps the reviewer — links to plans, related issues, constraints>
 ```
 
-5. **Auto-deliver via cmux.** After writing the file, find Codex's surface and send the read command:
+5. **Verify before delivering.** After writing the file, read it back and confirm:
+   - The `---` frontmatter delimiters are intact
+   - Required fields exist: `type`, `from`, `timestamp`, `workspace`
+   - If autonomous: `workflow`, `phase`, `round`, `max-rounds` are present
+   - The body is not empty or truncated
+   If verification fails, fix the file before delivering.
+
+6. **Auto-deliver via cmux.** After verification passes, find Codex's surface and send the read command:
    ```bash
    # Find the other terminal surface in this workspace (not the one marked "◀ here")
    CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" | grep 'surface:' | grep '\[terminal\]' | grep -v '◀ here' | head -1 | sed 's/.*\(surface:[0-9]*\).*/\1/')
@@ -57,7 +64,7 @@ cwd: <current working directory from pwd — always include>
    cmux send --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
    ```
 
-6. Confirm to the user that the message was written, and delivery was attempted to Codex's pane.
+7. Confirm to the user that the message was verified and delivery attempted.
 
 **If the user provides specific instructions** (e.g., "tell codex to focus on the error handling"), incorporate those into the Review focus section.
 
