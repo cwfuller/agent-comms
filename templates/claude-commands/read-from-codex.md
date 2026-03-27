@@ -60,7 +60,8 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    - Advisory findings are optional. Fix them when they are cheap, clearly correct, or naturally part of the same change, but do not extend the loop just to polish non-blocking issues.
    - For plan workflows: refine the plan based on findings
    - For implement workflows: fix the code based on findings
-   - **Send back to Codex** with updated frontmatter:
+   - **Send back to Codex** to `$COMMS_ROOT/to-codex/`:
+     - Filename: `${WORKSPACE}_YYYY-MM-DDTHH-MM-SS_round-N.md` (use the workspace name from step 2 and current round number)
      - Increment `round` by 1
      - Keep same `workflow`, `phase`, `max-rounds`
      - **Keep the message body focused on stable context, not fix narration.** Do NOT narrate what you fixed per finding — that anchors the reviewer on verification instead of re-review. Instead include:
