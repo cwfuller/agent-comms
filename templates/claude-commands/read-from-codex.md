@@ -20,9 +20,16 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 
 4. Read the most recent matching message (or all if user asks).
 
-4. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or modifying any files. This ensures you're working in the correct worktree.
+5. **Validate the message.** Before acting on it, check:
+   - The file starts with `---` and has a closing `---` (valid frontmatter)
+   - Required fields are present: `type`, `from`, `timestamp`
+   - If `workflow` is present: `phase`, `round`, `max-rounds`, `verdict` must also be present
+   - The body below frontmatter is not empty
+   If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Codex: [describe what's wrong]. File: [filename]". In autonomous mode, send an error reply back to Codex requesting a clean resend.
 
-5. **Check for autonomous workflow mode.** Parse the `workflow` field from frontmatter. If it exists, follow the autonomous rules below. If not, follow the standard (manual) flow.
+6. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or modifying any files. This ensures you're working in the correct worktree.
+
+7. **Check for autonomous workflow mode.** Parse the `workflow` field from frontmatter. If it exists, follow the autonomous rules below. If not, follow the standard (manual) flow.
 
 ---
 

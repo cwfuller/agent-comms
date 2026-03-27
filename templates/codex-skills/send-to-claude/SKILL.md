@@ -67,7 +67,16 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT>
 <Any questions for Claude to address>
 ```
 
-5. **Auto-deliver via cmux.** After writing the file, find Claude's surface and send the read command:
+5. **Write safely.** When writing the message file, use a heredoc with quoted delimiter (`<<'EOF'`) or write via a tool that does not interpolate shell variables or backticks in the body. Never embed the message body inside an interpolated shell string — Markdown backticks will be evaluated.
+
+6. **Verify before delivering.** After writing the file, read it back and confirm:
+   - The `---` frontmatter delimiters are intact
+   - Required fields exist: `type`, `from`, `timestamp`, `workspace`
+   - If autonomous: `workflow`, `phase`, `round`, `max-rounds`, `verdict` are present
+   - The body is not empty or truncated
+   If verification fails, fix the file before delivering. Do not deliver a malformed message.
+
+7. **Auto-deliver via cmux.** After verification passes, find Claude's surface and send the read command:
    ```bash
    # Find the other terminal surface in this workspace (not the one marked "◀ here")
    CLAUDE_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" | grep 'surface:' | grep '\[terminal\]' | grep -v '◀ here' | head -1 | sed 's/.*\(surface:[0-9]*\).*/\1/')
@@ -75,6 +84,6 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT>
    cmux send-key --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.2 && cmux send --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" 'i' && sleep 0.2 && cmux send --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '/read-from-codex' && sleep 0.5 && cmux send-key --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
    ```
 
-6. Confirm to the user that the message was queued and delivery attempted.
+8. Confirm to the user that the message was verified and delivery attempted.
 
 If the user provides specific instructions, incorporate them into the appropriate section.
