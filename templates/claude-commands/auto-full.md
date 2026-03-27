@@ -18,7 +18,9 @@ Full autonomous cycle: plan+review until approved, then implement+review until a
 
 4. **Start with the plan phase.** This works exactly like `/auto-plan` but with `workflow: auto-full`:
    - Create the plan
-   - Send to Codex with this frontmatter:
+   - Send to Codex with:
+   - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-full.md` (workspace name from step 3)
+   - Use this frontmatter:
 
 ```markdown
 ---
