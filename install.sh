@@ -5,10 +5,11 @@ set -euo pipefail
 # Sets up Claude Code <-> Codex autonomous communication via cmux
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/chadfuller/agent-comms/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash
 #   or: git clone ... && cd agent-comms && ./install.sh
 
-REPO_RAW="https://raw.githubusercontent.com/chadfuller/agent-comms/main"
+REPO_RAW_DEFAULT="https://raw.githubusercontent.com/cwfuller/agent-comms/main"
+REPO_RAW="${AGENT_COMMS_REPO_RAW:-$REPO_RAW_DEFAULT}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" 2>/dev/null)" && pwd 2>/dev/null || echo "")"
 
 # Detect if running from cloned repo or curl pipe
@@ -95,16 +96,16 @@ if [ -f "$AGENTS_MD" ]; then
 
 ## Agent Communication Protocol
 
-This project uses a local file-based message queue + cmux for autonomous communication between Claude Code and Codex.
+This project uses a local file-based message queue for communication between Claude Code and Codex, with optional cmux auto-delivery.
 
 - **Your inbox:** `.comms/to-codex/` — Claude writes review requests and responses here
 - **Your outbox:** `.comms/to-claude/` — Write your findings and feedback here
 
 **Skills:**
 - `$read-from-claude` — Read the latest message from Claude Code and act on it
-- `$send-to-claude` — Write your findings back to Claude Code AND auto-deliver via cmux
+- `$send-to-claude` — Write your findings back to Claude Code and auto-deliver via cmux when available
 
-**Auto-delivery:** When you use `$send-to-claude`, it will automatically type `/read-from-codex` into Claude's cmux pane so Claude picks up your message without manual intervention. Claude does the same when sending to you.
+**Auto-delivery:** When `cmux` is available, `$send-to-claude` automatically types `/read-from-codex` into Claude's pane. Without `cmux`, messages are still written to `.comms/` for manual pickup.
 
 When the user asks you to "check for messages from Claude" or "review what Claude did", use `$read-from-claude`. After completing a review, use `$send-to-claude` to send your findings back.
 PROTOCOL
@@ -116,16 +117,16 @@ else
   cat > "$AGENTS_MD" << 'PROTOCOL'
 ## Agent Communication Protocol
 
-This project uses a local file-based message queue + cmux for autonomous communication between Claude Code and Codex.
+This project uses a local file-based message queue for communication between Claude Code and Codex, with optional cmux auto-delivery.
 
 - **Your inbox:** `.comms/to-codex/` — Claude writes review requests and responses here
 - **Your outbox:** `.comms/to-claude/` — Write your findings and feedback here
 
 **Skills:**
 - `$read-from-claude` — Read the latest message from Claude Code and act on it
-- `$send-to-claude` — Write your findings back to Claude Code AND auto-deliver via cmux
+- `$send-to-claude` — Write your findings back to Claude Code and auto-deliver via cmux when available
 
-**Auto-delivery:** When you use `$send-to-claude`, it will automatically type `/read-from-codex` into Claude's cmux pane so Claude picks up your message without manual intervention. Claude does the same when sending to you.
+**Auto-delivery:** When `cmux` is available, `$send-to-claude` automatically types `/read-from-codex` into Claude's pane. Without `cmux`, messages are still written to `.comms/` for manual pickup.
 
 When the user asks you to "check for messages from Claude" or "review what Claude did", use `$read-from-claude`. After completing a review, use `$send-to-claude` to send your findings back.
 PROTOCOL
@@ -142,4 +143,4 @@ echo "    Claude: 'implement X, then /send-to-codex'"
 echo "    Codex:  '\$read-from-claude'"
 echo "    Auto:   '/auto-plan build feature X'"
 echo ""
-echo "  requires: cmux (https://cmux.com) for auto-delivery between panes"
+echo "  optional: cmux (https://cmux.com) for auto-delivery between panes"

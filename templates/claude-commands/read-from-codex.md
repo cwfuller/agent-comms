@@ -7,14 +7,26 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
    ```
 
-2. **Get the workspace name** for filtering:
+2. **Get the workspace name** for filtering. Prefer the active `cmux` workspace when available; otherwise fall back to the current branch name, then the repo name:
    ```bash
-   WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" | grep 'workspace:' | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+   WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+     CMUX_WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'workspace:' | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+     [ -n "$CMUX_WORKSPACE" ] && WORKSPACE="$CMUX_WORKSPACE"
+   fi
    ```
 
-3. **List matching messages** using this exact command:
+3. **List matching messages** using this exact command sequence:
    ```bash
-   COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms" && WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" | grep 'workspace:' | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr ' ' '-' | tr '[:upper:]' '[:lower:]') && find "$COMMS_ROOT/to-claude" -maxdepth 1 -type f -name "${WORKSPACE}_*" | sort -r
+   COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
+   WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+     CMUX_WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'workspace:' | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+     [ -n "$CMUX_WORKSPACE" ] && WORKSPACE="$CMUX_WORKSPACE"
+   fi
+   find "$COMMS_ROOT/to-claude" -maxdepth 1 -type f -name "${WORKSPACE}_*" | sort -r
    ```
    If no files are returned, tell the user there are no messages from Codex for this workspace.
 
@@ -77,10 +89,18 @@ Read and act on messages from Codex in `.comms/to-claude/`.
        - For implement: `git diff --stat` showing changed files
        - **Stable metadata** (always include): what validation ran (typecheck, tests, lint), whether they passed, and any non-obvious constraints or gotchas
        - Brief one-line note: "Addressed N findings from round X. Please re-review holistically."
-   - **Auto-deliver via cmux:**
+   - **Auto-deliver via cmux when available; otherwise skip delivery and tell the user the file is ready for manual pickup:**
      ```bash
-     CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" | grep 'surface:' | grep '\[terminal\]' | grep -v '◀ here' | head -1 | sed 's/.*\(surface:[0-9]*\).*/\1/')
-     cmux send --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
+     if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+       CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'surface:' | grep '\[terminal\]' | grep -v '◀ here' | head -1 | sed 's/.*\(surface:[0-9]*\).*/\1/')
+       if [ -n "$CODEX_SURFACE" ]; then
+         cmux send --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
+       else
+         echo "warning: could not find a Codex surface; message written for manual pickup"
+       fi
+     else
+       echo "warning: cmux not available; message written for manual pickup"
+     fi
      ```
    - **Auto-archive** the incoming message to `$COMMS_ROOT/archive/`
 
