@@ -18,9 +18,14 @@ Write a structured message to Claude Code via `.comms/to-claude/` and auto-deliv
    COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
    ```
 
-3. **Get the workspace name** for scoping:
+3. **Get the workspace name** for scoping. Prefer the active `cmux` workspace when available; otherwise fall back to the current branch name, then the repo name:
    ```bash
-   WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" | grep 'workspace:' | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+   WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+     CMUX_WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'workspace:' | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+     [ -n "$CMUX_WORKSPACE" ] && WORKSPACE="$CMUX_WORKSPACE"
+   fi
    ```
 
 4. Create a timestamped markdown file in `$COMMS_ROOT/to-claude/`:
@@ -76,12 +81,20 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT>
    - The body is not empty or truncated
    If verification fails, fix the file before delivering. Do not deliver a malformed message.
 
-7. **Auto-deliver via cmux.** After verification passes, find Claude's surface and send the read command:
+7. **Auto-deliver via cmux when available.** After verification passes, find Claude's surface and send the read command. If `cmux` or `CMUX_WORKSPACE_ID` is unavailable, skip auto-delivery and tell the user the verified file was written for manual pickup:
    ```bash
-   # Find the other terminal surface in this workspace (not the one marked "◀ here")
-   CLAUDE_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" | grep 'surface:' | grep '\[terminal\]' | grep -v '◀ here' | head -1 | sed 's/.*\(surface:[0-9]*\).*/\1/')
-   # Claude uses vim mode — ensure insert mode before typing, then submit
-   cmux send-key --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.2 && cmux send --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" 'i' && sleep 0.2 && cmux send --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '/read-from-codex' && sleep 0.5 && cmux send-key --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
+   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+     # Find the other terminal surface in this workspace (not the one marked "◀ here")
+     CLAUDE_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'surface:' | grep '\[terminal\]' | grep -v '◀ here' | head -1 | sed 's/.*\(surface:[0-9]*\).*/\1/')
+     if [ -n "$CLAUDE_SURFACE" ]; then
+       # Claude uses vim mode — ensure insert mode before typing, then submit
+       cmux send-key --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.2 && cmux send --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" 'i' && sleep 0.2 && cmux send --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '/read-from-codex' && sleep 0.5 && cmux send-key --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CLAUDE_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
+     else
+       echo "warning: could not find a Claude surface; message written for manual pickup"
+     fi
+   else
+     echo "warning: cmux not available; message written for manual pickup"
+   fi
    ```
 
 8. Confirm to the user that the message was verified and delivery attempted.

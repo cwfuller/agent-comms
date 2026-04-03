@@ -1,6 +1,6 @@
 # agent-comms
 
-Autonomous communication between Claude Code and Codex via [cmux](https://cmux.com).
+Autonomous communication between Claude Code and Codex, with optional [cmux](https://cmux.com) auto-delivery.
 
 Drop a file, deliver it to the other agent's terminal pane, get a response back — no manual intervention.
 
@@ -8,15 +8,22 @@ Drop a file, deliver it to the other agent's terminal pane, get a response back 
 
 ```bash
 # From any git project root:
-curl -fsSL https://raw.githubusercontent.com/chadfuller/agent-comms/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash
 ```
 
 Or clone and run:
 
 ```bash
-git clone https://github.com/chadfuller/agent-comms.git
+git clone https://github.com/cwfuller/agent-comms.git
 cd your-project
 ../agent-comms/install.sh
+```
+
+If you're installing from your own fork via a downloaded script, point template downloads at that fork:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<you>/agent-comms/main/install.sh -o /tmp/agent-comms-install.sh
+AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" bash /tmp/agent-comms-install.sh
 ```
 
 ## What it installs
@@ -40,10 +47,10 @@ cd your-project
 ## How it works
 
 1. Agent writes a markdown message to `.comms/to-codex/` or `.comms/to-claude/`
-2. `cmux send` types the read command into the other agent's terminal pane
+2. When available, `cmux send` types the read command into the other agent's terminal pane
 3. The other agent reads the message, acts on it, and responds
 
-Messages are workspace-scoped (each cmux workspace pair is independent), worktree-safe (always resolves to the main repo root), and auto-archived after processing.
+Messages are workspace-scoped when running under `cmux`, fall back to branch/repo-scoped filenames outside `cmux`, are worktree-safe (always resolve to the main repo root), and auto-archive after processing.
 
 ## Autonomous loops
 
@@ -63,8 +70,8 @@ Claude creates a plan, sends it to Codex for review. Codex reviews, sends findin
 
 ## Requirements
 
-- [cmux](https://cmux.com) — terminal multiplexer with `send` command for cross-pane delivery
-- Claude Code and Codex running in adjacent cmux panes
+- [cmux](https://cmux.com) — optional terminal multiplexer for cross-pane auto-delivery
+- Claude Code and Codex running in adjacent cmux panes when using auto-delivery
 - Git repository
 
 ## Protocol
