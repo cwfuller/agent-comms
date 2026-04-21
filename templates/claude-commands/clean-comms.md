@@ -7,14 +7,28 @@ Delete messages from `.comms/` directories.
    COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
    ```
 
-2. **Get the workspace name.** Prefer the active `cmux` workspace when available; otherwise fall back to the current branch name, then the repo name:
+2. **Get the workspace name.** Run this block verbatim — cmux first, git branch second, repo dir last. Dropping the cmux lookup silently falls back to a branch name like `main` and corrupts filenames that other agents filter on:
    ```bash
-   WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+   # Precedence: cmux workspace → git branch → repo dir.
+   # Keep the cmux block; other agents' filename filters depend on it.
+   WORKSPACE=""
    if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     CMUX_WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'workspace:' | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-     [ -n "$CMUX_WORKSPACE" ] && WORKSPACE="$CMUX_WORKSPACE"
+     WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null \
+       | grep -E 'workspace workspace:[0-9]+ "' \
+       | head -1 \
+       | sed 's/.*"\([^"]*\)".*/\1/' \
+       | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
    fi
+   [ -n "$WORKSPACE" ] || WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
+     case "$WORKSPACE" in
+       main|master|trunk|develop)
+         echo "warning: cmux is active but workspace resolved to '$WORKSPACE' — verify the cmux tree grep/sed still matches the tool's output format" >&2
+         ;;
+     esac
+   fi
+   echo "WORKSPACE=$WORKSPACE"
    ```
 
 3. Based on the argument provided (use `$COMMS_ROOT` for all paths):
