@@ -11,6 +11,29 @@ Drop a file, deliver it to the other agent's terminal pane, get a response back 
 curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash
 ```
 
+The installer opens a menu:
+
+```
+1) Global + project init (recommended)
+2) Global only
+3) Project init only
+4) Local pinned install
+5) Cancel
+```
+
+Global installs reusable Claude commands to `~/.claude/commands/` and Codex skills to `~/.codex/skills/`, so updates only need to be installed once. Project init creates `.comms/`, updates `.gitignore`, and adds the protocol note to `.codex/AGENTS.md`.
+
+If an existing project already has local copies under `.claude/commands/` or `.agents/skills/`, those may shadow the global install. The installer warns when it sees likely agent-comms local copies.
+
+For non-interactive installs, pass a scope explicitly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=both
+curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=global
+curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=project
+curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=local
+```
+
 Or clone and run:
 
 ```bash
@@ -23,7 +46,7 @@ If you're installing from your own fork via a downloaded script, point template 
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/<you>/agent-comms/main/install.sh -o /tmp/agent-comms-install.sh
-AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" bash /tmp/agent-comms-install.sh
+AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" bash /tmp/agent-comms-install.sh --scope=both
 ```
 
 ## What it installs
@@ -131,9 +154,10 @@ Autonomous replies preserve the workflow metadata and add a `verdict: APPROVE | 
   to-codex/                      # Claude writes, Codex reads
   to-claude/                     # Codex writes, Claude reads
   archive/                       # processed messages
-.claude/commands/                # Claude Code skills
+.claude/commands/                # Claude Code commands
   send-to-codex.md
   read-from-codex.md
+  ask-codex.md
   auto-plan.md
   auto-implement.md
   auto-full.md
@@ -144,3 +168,5 @@ Autonomous replies preserve the workflow metadata and add a `verdict: APPROVE | 
   send-to-claude/SKILL.md
 .codex/AGENTS.md                 # protocol docs for Codex
 ```
+
+Global installs place the same Claude command files under `~/.claude/commands/` and the same Codex skills under `~/.codex/skills/`.
