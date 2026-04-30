@@ -59,9 +59,14 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
 1. Parse the frontmatter and content:
    - **type: review-request** — Review the listed files, focusing on the "Review focus" section.
    - **type: response** — Claude addressed your previous feedback. Check the fixes, then do a fresh scoped re-review.
-   - **type: question** — Claude is asking for input. Answer based on codebase analysis.
+   - **type: question** — Claude is asking for input (sent via `/ask-codex`). Answer based on codebase analysis and the `## Current Thinking` section. Reply with `type: response` and no `verdict`. Body: `## Summary` + `## Codex Take`. Skip review framing — this is a one-off consult, not a review.
    - **type: ping** — Simple connectivity test. Respond with an acknowledgment.
-2. **Auto-archive:** Move processed message(s) to `$COMMS_ROOT/archive/` (create if needed).
+2. **Auto-archive — your inbox only.** Move only the message(s) you just read from `$COMMS_ROOT/to-codex/` to `$COMMS_ROOT/archive/` (create if needed). **Do not touch `$COMMS_ROOT/to-claude/`** — that's Claude's inbox; Claude archives its own side. Use an idempotent move so an already-archived file is a no-op rather than an error:
+   ```bash
+   for f in <files-you-just-read>; do
+     [ -f "$f" ] && mv "$f" "$COMMS_ROOT/archive/" || true
+   done
+   ```
 3. After completing the review or task, use `$send-to-claude` to write your findings back.
 
 ---
@@ -127,7 +132,7 @@ Keep `APPROVE` and include comments when findings are advisory, such as:
 
 **Send your review immediately via `$send-to-claude`.** The message MUST preserve the workflow metadata. Use `$send-to-claude` which will copy `workflow`, `phase`, `round`, `max-rounds` into your reply frontmatter along with your `verdict`.
 
-**Auto-archive** the incoming message to `$COMMS_ROOT/archive/` (create if needed).
+**Auto-archive the incoming message** from `$COMMS_ROOT/to-codex/` to `$COMMS_ROOT/archive/` (create if needed). Your inbox only — do not touch `to-claude/`. Use the idempotent move from the standard flow above.
 
 **Important:** In autonomous mode, do NOT ask the user how to proceed. Review and respond immediately. The loop continues until you APPROVE or max rounds are reached.
 

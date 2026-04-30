@@ -40,9 +40,14 @@ Write a structured message to Claude Code via `.comms/to-claude/` and auto-deliv
    - Put non-blocking notes under `Advisory` while keeping `APPROVE`
    - Do not use `COMMENT` in autonomous review loops; reserve it for manual questions or side-channel notes
 
+   When answering a `type: question` from `/ask-codex`:
+   - Use `type: response`
+   - Omit `verdict` entirely — questions are not reviews
+   - Body shape: `## Summary` (one line) + `## Codex Take` (your answer, with reasoning and tradeoffs). No `## Findings`, no blocking/advisory split.
+
 ```markdown
 ---
-type: review-feedback | question | request
+type: review-feedback | response | question | request
 from: codex
 timestamp: <ISO 8601>
 branch: <current branch>
@@ -53,7 +58,7 @@ workflow: <copy from incoming message if present — auto-plan | auto-implement 
 phase: <copy from incoming message if present — plan | implement>
 round: <copy from incoming message if present>
 max-rounds: <copy from incoming message if present>
-verdict: <APPROVE | REQUEST_CHANGES | COMMENT>
+verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question>
 ---
 
 ## Summary

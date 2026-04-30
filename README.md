@@ -33,6 +33,7 @@ AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" 
 |---|---|
 | `/send-to-codex` | One-shot send with auto-delivery |
 | `/read-from-codex` | Read and act on Codex's response |
+| `/ask-codex` | One-off question — get Codex's take, no review framing |
 | `/auto-plan` | Autonomous plan + review cycle |
 | `/auto-implement` | Autonomous implement + review cycle |
 | `/auto-full` | Plan cycle then implement cycle |
@@ -52,6 +53,14 @@ AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" 
 3. The other agent reads the message, acts on it, and responds
 
 Messages are workspace-scoped when running under `cmux`, fall back to branch/repo-scoped filenames outside `cmux`, are worktree-safe (always resolve to the main repo root), and auto-archive after processing.
+
+## One-off questions
+
+```
+/ask-codex should we use a Postgres LISTEN/NOTIFY queue or just poll the table?
+```
+
+Claude writes a `type: question` message with `## Question / ## Context / ## Current Thinking` and delivers it. Codex answers as a `type: response` with no verdict — single round, then archive. Use this for design judgment calls; use `/send-to-codex` when you want a real review.
 
 ## Autonomous loops
 
