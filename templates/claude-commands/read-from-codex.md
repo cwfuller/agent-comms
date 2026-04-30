@@ -66,7 +66,12 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 ### Standard (manual) flow — no `workflow` field
 
 1. Parse the message and summarize what Codex is saying
-2. **Auto-archive:** Move processed message(s) to `$COMMS_ROOT/archive/`
+2. **Auto-archive — your inbox only.** Move only the message(s) you just read from `$COMMS_ROOT/to-claude/` to `$COMMS_ROOT/archive/`. **Do not touch `$COMMS_ROOT/to-codex/`** — that's Codex's inbox; Codex archives its own side. Use an idempotent move so an already-archived file is a no-op rather than an error:
+   ```bash
+   for f in <files-you-just-read>; do
+     [ -f "$f" ] && mv "$f" "$COMMS_ROOT/archive/" || true
+   done
+   ```
 3. Ask the user how to proceed:
    - "Address all findings" — work through each item
    - "Address specific items" — let user pick
@@ -120,7 +125,7 @@ Read and act on messages from Codex in `.comms/to-claude/`.
        echo "warning: cmux not available; message written for manual pickup"
      fi
      ```
-   - **Auto-archive** the incoming message to `$COMMS_ROOT/archive/`
+   - **Auto-archive the incoming message** from `$COMMS_ROOT/to-claude/` to `$COMMS_ROOT/archive/`. Your inbox only — do not touch `to-codex/`. Use the idempotent move from the standard flow above.
 
 **Review protocol for autonomous loops:**
 - Default to a pass-oriented loop. `REQUEST_CHANGES` means blocking issues only.
