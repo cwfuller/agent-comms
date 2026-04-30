@@ -41,7 +41,7 @@ if [ "$SOURCE" = "remote" ]; then
   echo "  source: remote ($REPO_RAW)"
   mkdir -p "$TEMPLATE_DIR/claude-commands" "$TEMPLATE_DIR/codex-skills/read-from-claude" "$TEMPLATE_DIR/codex-skills/send-to-claude"
 
-  for f in send-to-codex.md read-from-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md; do
+  for f in send-to-codex.md read-from-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md fleet.md; do
     curl -fsSL "$REPO_RAW/templates/claude-commands/$f" -o "$TEMPLATE_DIR/claude-commands/$f"
   done
   curl -fsSL "$REPO_RAW/templates/codex-skills/read-from-claude/SKILL.md" -o "$TEMPLATE_DIR/codex-skills/read-from-claude/SKILL.md"
@@ -63,7 +63,7 @@ mkdir -p "$PROJECT_ROOT/.codex"
 
 # Copy Claude commands
 echo "  installing claude commands..."
-for f in send-to-codex.md read-from-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md; do
+for f in send-to-codex.md read-from-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md fleet.md; do
   cp "$TEMPLATE_DIR/claude-commands/$f" "$PROJECT_ROOT/.claude/commands/$f"
 done
 
@@ -135,7 +135,7 @@ fi
 
 echo ""
 echo "  done! installed:"
-echo "    Claude: /send-to-codex, /read-from-codex, /auto-plan, /auto-implement, /auto-full, /clean-comms"
+echo "    Claude: /send-to-codex, /read-from-codex, /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
 echo "    Codex:  \$read-from-claude, \$send-to-claude"
 echo ""
 echo "  usage:"

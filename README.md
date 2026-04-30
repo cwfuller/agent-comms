@@ -37,6 +37,7 @@ AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" 
 | `/auto-implement` | Autonomous implement + review cycle |
 | `/auto-full` | Plan cycle then implement cycle |
 | `/clean-comms` | Delete messages |
+| `/fleet` | Orchestrate auto-loops across N cmux workspaces |
 
 **Codex skills:**
 | Skill | Description |
@@ -61,6 +62,21 @@ Messages are workspace-scoped when running under `cmux`, fall back to branch/rep
 Claude creates a plan, sends it to Codex for review. Codex reviews, sends findings back. Claude refines, sends again. Loop continues until Codex approves or max rounds (10) is reached.
 
 `/auto-implement` does the same for code. `/auto-full` chains both: plan until approved, then implement until approved.
+
+## Fleet orchestration
+
+When you have multiple cmux workspaces each running a Claude+Codex pair (`ws-1`, `ws-2`, …) plus a control workspace, `/fleet` dispatches briefs across them from one place:
+
+```
+/fleet status                                  # who's idle, who's working, what got approved
+/fleet dispatch ws-2 docs/plans/caching.md     # clear ws-2 and fire /auto-implement
+/fleet dispatch-all brief1.md brief2.md ...    # auto-assign briefs to free workspaces
+/fleet harvest                                 # workspaces idle + approved, ready for next brief
+/fleet clear ws-2                              # /new both panes
+/fleet help                                    # full usage
+```
+
+Override the workspace name prefix with `FLEET_PREFIX=tide` and the concurrency cap with `FLEET_MAX=5`. The cap defaults to 3 to protect a shared on-disk working tree from cross-staged commits and `index.lock` collisions; bump or `--force` if each workspace has its own `git worktree add`.
 
 **Review quality:**
 - Round 1: full contextual review with provided focus areas
@@ -113,6 +129,7 @@ Autonomous replies preserve the workflow metadata and add a `verdict: APPROVE | 
   auto-implement.md
   auto-full.md
   clean-comms.md
+  fleet.md
 .agents/skills/                  # Codex skills
   read-from-claude/SKILL.md
   send-to-claude/SKILL.md
