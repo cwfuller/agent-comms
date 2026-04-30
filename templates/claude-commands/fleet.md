@@ -50,22 +50,47 @@ echo "$FLEET_LIST" | while read -r name ref; do
   # Active detection — classify by LEADING GLYPH first, then text. Rules:
   #   * Braille-range prefix (U+2800–U+28FF): ALWAYS active — Claude Code /
   #     Codex render a braille spinner whenever the app is processing.
-  #   * Any other prefix glyph (`✳`, `•`, etc.): strip it and check remainder.
-  #     Bare "Claude Code" / repo-name / empty = idle. Task name after a
-  #     non-spinner glyph = "waiting on monitor events" — treat as active.
-  classify_pane() {
+  #   * Bare "Claude Code" / repo-name / empty: idle.
+  #   * Other prefix glyph (`✳`, `•`, etc.) + task name: AMBIGUOUS — the title
+  #     may be stale residue from a finished loop. Returns "task" here; the
+  #     call site corroborates against archive mtime + Codex pane state to
+  #     decide whether this is `active` (mid-loop) or `stale` (label leftover).
+  classify_title() {
     python3 -c 'import sys, re
 s = sys.argv[1].lstrip()
 repo = sys.argv[2]
 if not s:
-    print("idle"); sys.exit()
+    print("bare"); sys.exit()
 if 0x2800 <= ord(s[0]) <= 0x28FF:
-    print("active"); sys.exit()
+    print("spin"); sys.exit()
 s = re.sub(r"^[^\w\s]+\s+", "", s)
-print("idle" if s in ("", "Claude Code", repo) else "active")' "$1" "$REPO_NAME" 2>/dev/null
+print("bare" if s in ("", "Claude Code", repo) else "task")' "$1" "$REPO_NAME" 2>/dev/null
   }
-  CLAUDE_STATE="$(classify_pane "$CLAUDE_TITLE")"
-  CODEX_STATE="$( classify_pane "$CODEX_TITLE")"
+  CLAUDE_TYPE="$(classify_title "$CLAUDE_TITLE")"
+  CODEX_TYPE="$( classify_title "$CODEX_TITLE")"
+
+  # Composite state — one of: active | idle | stale.
+  # ✳+task only counts as `active` if corroborated by braille on Codex OR
+  # an archive mtime within the last 10 min. Otherwise it's `stale` (the
+  # title is residue; the workspace is likely free, but verify before
+  # dispatching — could also be Claude in a long shell await with no
+  # spinner, e.g. a multi-hour `godot --headless --baseline`).
+  NOW=$(date +%s)
+  resolve_state() {
+    local pane_type="$1"; local archive_mt="$2"; local other_type="$3"
+    case "$pane_type" in
+      spin) echo active ;;
+      bare) echo idle ;;
+      task)
+        local age=$(( NOW - ${archive_mt:-0} ))
+        if [ "$other_type" = spin ] || [ "$age" -lt 600 ]; then
+          echo active
+        else
+          echo stale
+        fi
+        ;;
+    esac
+  }
 
   # Latest archive entry — surfaces round + workflow + verdict.
   LATEST="$(find "$COMMS_ROOT/archive" -maxdepth 1 -type f -name "${name}_*.md" 2>/dev/null | sort | tail -1)"
@@ -89,6 +114,11 @@ print("idle" if s in ("", "Claude Code", repo) else "active")' "$1" "$REPO_NAME"
   else
     LATEST_MTIME=0
   fi
+
+  # Resolve composite state now that LATEST_MTIME is known.
+  CLAUDE_STATE="$(resolve_state "$CLAUDE_TYPE" "$LATEST_MTIME" "$CODEX_TYPE")"
+  CODEX_STATE="$( resolve_state "$CODEX_TYPE"  "$LATEST_MTIME" "$CLAUDE_TYPE")"
+
   count_fresh() {
     local dir="$1"
     find "$dir" -maxdepth 1 -type f -name "${name}_*.md" 2>/dev/null \
@@ -99,14 +129,16 @@ print("idle" if s in ("", "Claude Code", repo) else "active")' "$1" "$REPO_NAME"
         done \
       | wc -l | tr -d ' '
   }
-  # Only report in/out when Claude is idle. When active, pending files are
-  # either in-flight or stale orphans — the count is ambiguous noise.
-  if [ "$CLAUDE_STATE" = idle ]; then
-    PENDING_IN="$(count_fresh "$COMMS_ROOT/to-claude")"
-    PENDING_OUT="$(count_fresh "$COMMS_ROOT/to-codex")"
-  else
+  # Only report in/out when Claude is not actively running. When active,
+  # pending files are either in-flight or stale orphans — the count is
+  # ambiguous noise. When stale, surface the count: it helps the user
+  # decide whether the workspace is actually free or has unread mail.
+  if [ "$CLAUDE_STATE" = active ]; then
     PENDING_IN="-"
     PENDING_OUT="-"
+  else
+    PENDING_IN="$(count_fresh "$COMMS_ROOT/to-claude")"
+    PENDING_OUT="$(count_fresh "$COMMS_ROOT/to-codex")"
   fi
 
   printf "%-8s  claude=%-6s  codex=%-6s  %-45s  in=%s out=%s\n" \
@@ -116,14 +148,23 @@ done
 
 **Interpret the output** and summarize for the user:
 
-- `claude=active codex=active` = full loop in flight
+- `claude=active codex=active` = full loop in flight (Claude rendering, Codex reviewing)
 - `claude=active codex=idle` = Claude working, review not sent yet
 - `claude=idle codex=idle` + recent archive `APPROVE` = **ready to harvest** (fire next brief here)
 - `claude=idle codex=idle` + no archive = freshly-cleared or never-dispatched workspace
+- `claude=stale codex=idle` = pane 1 has a `✳ <task>` title but no braille spinner and the latest
+  archive is >10 min old. The label is residue from a finished loop — workspace is *probably* free.
+  Two confounders to verify before dispatching:
+  1. **Long shell await.** Claude may be sitting in a multi-hour subprocess (e.g. `godot --headless
+     --baseline`) that doesn't render braille. The title shows the agent's last task name, not the
+     bash command it's waiting on. Cross-check by looking at recent commits or asking the user.
+  2. **Just-fired loop.** A loop that fired in the last few seconds will have ✳+task before braille
+     starts. Should resolve on the next status read once braille kicks in.
 - `in=N` > 0 means N message(s) from Codex waiting for Claude to read — `/read-from-codex` hasn't run
 - `out=N` > 0 similar for outbound
 
-Report the table + a one-line verdict (e.g. "ws-2 and ws-5 are free; ws-1/3/4 in flight").
+Report the table + a one-line verdict (e.g. "ws-2 and ws-5 are free; ws-1/3/4 in flight"). When
+reporting `stale`, name the verification step rather than asserting idle.
 
 ---
 
@@ -145,20 +186,20 @@ case "$*" in *--force*) FLEET_FORCE=true ;; *) FLEET_FORCE=false ;; esac
 fleet_preflight() {
   local REJECT="" WARNINGS="" ACTIVE_COUNT=0 ACTIVE_NAMES=""
 
-  # Count currently-active Claude panes across the fleet.
+  # Count currently-active Claude panes across the fleet. For the cap check
+  # we want braille-only — ✳+task without a spinner is "stale label"
+  # (workspace is idle or in a long shell await), not a slot consumer.
   local tmp; tmp="$(mktemp)"
   echo "$FLEET_LIST" | while read -r pf_name pf_ref; do
     [ -z "$pf_name" ] && continue
     local pf_tree pf_title pf_state
     pf_tree="$(cmux tree --workspace "$pf_ref" 2>/dev/null)"
     pf_title="$(echo "$pf_tree" | awk '/├── pane|└── pane/{n++} n==1 && /surface surface:/{print; exit}' | sed -n 's/.*\[terminal\] "\([^"]*\)".*/\1/p')"
-    pf_state="$(python3 -c 'import sys, re
+    # Spinner-only classifier: braille = active, everything else = idle.
+    pf_state="$(python3 -c 'import sys
 s = sys.argv[1].lstrip()
-repo = sys.argv[2]
-if not s: print("idle"); sys.exit()
-if 0x2800 <= ord(s[0]) <= 0x28FF: print("active"); sys.exit()
-s = re.sub(r"^[^\w\s]+\s+", "", s)
-print("idle" if s in ("", "Claude Code", repo) else "active")' "$pf_title" "$REPO_NAME" 2>/dev/null)"
+if s and 0x2800 <= ord(s[0]) <= 0x28FF: print("active")
+else: print("idle")' "$pf_title" 2>/dev/null)"
     [ "$pf_state" = active ] && echo "$pf_name"
   done > "$tmp"
   ACTIVE_COUNT="$(wc -l < "$tmp" | tr -d ' ')"
@@ -283,15 +324,14 @@ echo "$FLEET_LIST" | while read -r name ref; do
   TREE="$(cmux tree --workspace "$ref" 2>/dev/null)"
   CLAUDE_LINE="$(echo "$TREE" | awk '/├── pane|└── pane/{n++} n==1 && /surface surface:/{print; exit}')"
   CLAUDE_TITLE="$(echo "$CLAUDE_LINE" | sed -n 's/.*\[terminal\] "\([^"]*\)".*/\1/p')"
-  STATE="$(python3 -c 'import sys, re
+  # Spinner-only: braille = busy, anything else = candidate. ✳+task without
+  # a spinner is stale label OR long shell await — both fine for dispatch
+  # because /fleet dispatch /new's the panes first. The archive verdict
+  # check below is the real gate.
+  STATE="$(python3 -c 'import sys
 s = sys.argv[1].lstrip()
-repo = sys.argv[2]
-if not s:
-    print("idle"); sys.exit()
-if 0x2800 <= ord(s[0]) <= 0x28FF:
-    print("active"); sys.exit()
-s = re.sub(r"^[^\w\s]+\s+", "", s)
-print("idle" if s in ("", "Claude Code", repo) else "active")' "$CLAUDE_TITLE" "$REPO_NAME" 2>/dev/null)"
+if s and 0x2800 <= ord(s[0]) <= 0x28FF: print("active")
+else: print("idle")' "$CLAUDE_TITLE" 2>/dev/null)"
   [ "$STATE" = idle ] || continue
   LATEST="$(find "$COMMS_ROOT/archive" -maxdepth 1 -type f -name "${name}_*.md" 2>/dev/null | sort | tail -1)"
   if [ -z "$LATEST" ]; then
@@ -336,15 +376,11 @@ echo "$FLEET_LIST" | while read -r name ref; do
   [ -z "$name" ] && continue
   TREE="$(cmux tree --workspace "$ref" 2>/dev/null)"
   CLAUDE_TITLE="$(echo "$TREE" | awk '/├── pane|└── pane/{n++} n==1 && /surface surface:/{print; exit}' | sed -n 's/.*\[terminal\] "\([^"]*\)".*/\1/p')"
-  STATE="$(python3 -c 'import sys, re
+  # Spinner-only: braille = busy, anything else = harvest candidate.
+  STATE="$(python3 -c 'import sys
 s = sys.argv[1].lstrip()
-repo = sys.argv[2]
-if not s:
-    print("idle"); sys.exit()
-if 0x2800 <= ord(s[0]) <= 0x28FF:
-    print("active"); sys.exit()
-s = re.sub(r"^[^\w\s]+\s+", "", s)
-print("idle" if s in ("", "Claude Code", repo) else "active")' "$CLAUDE_TITLE" "$REPO_NAME" 2>/dev/null)"
+if s and 0x2800 <= ord(s[0]) <= 0x28FF: print("active")
+else: print("idle")' "$CLAUDE_TITLE" 2>/dev/null)"
   [ "$STATE" = idle ] || continue
   LATEST="$(find "$COMMS_ROOT/archive" -maxdepth 1 -type f -name "${name}_*.md" 2>/dev/null | sort | tail -1)"
   if [ -z "$LATEST" ]; then
