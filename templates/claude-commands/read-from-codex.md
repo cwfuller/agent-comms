@@ -115,7 +115,21 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    - **Auto-deliver via cmux when available; otherwise skip delivery and tell the user the file is ready for manual pickup:**
      ```bash
      if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-       CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'surface:' | grep '\[terminal\]' | grep -v '◀ here' | head -1 | sed 's/.*\(surface:[0-9]*\).*/\1/')
+       # Pane-aware picker — exclude the entire pane containing "◀ here", not just that one surface.
+       # Falls back to any other terminal surface for single-pane multi-tab layouts.
+       CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
+         /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
+         /surface:.*\[terminal\]/ {
+           if (match($0, /surface:[0-9]+/)) {
+             n++; surf[n]=substr($0,RSTART,RLENGTH); pane[n]=cur_pane
+             here[n] = ($0 ~ /◀ here/) ? 1 : 0
+             if (here[n]) here_pane=cur_pane
+           }
+         }
+         END {
+           for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { print surf[i]; exit }
+           for (i=1;i<=n;i++) if (!here[i]) { print surf[i]; exit }
+         }')
        if [ -n "$CODEX_SURFACE" ]; then
          cmux send --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
        else

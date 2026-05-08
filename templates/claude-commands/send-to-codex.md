@@ -79,8 +79,23 @@ cwd: <current working directory from pwd — always include>
 6. **Auto-deliver via cmux when available.** After verification passes, find Codex's surface and send the read command. If `cmux` or `CMUX_WORKSPACE_ID` is unavailable, skip auto-delivery and tell the user the verified file was written for manual pickup:
    ```bash
    if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     # Find the other terminal surface in this workspace (not the one marked "◀ here")
-     CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'surface:' | grep '\[terminal\]' | grep -v '◀ here' | head -1 | sed 's/.*\(surface:[0-9]*\).*/\1/')
+     # Pane-aware Codex surface picker. Prefers a [terminal] surface in a pane
+     # OTHER than the one marked "◀ here", so sibling tabs in Claude's own pane
+     # don't get picked. Falls back to any other terminal surface for single-pane
+     # multi-tab layouts where Claude and Codex share a pane.
+     CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
+       /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
+       /surface:.*\[terminal\]/ {
+         if (match($0, /surface:[0-9]+/)) {
+           n++; surf[n]=substr($0,RSTART,RLENGTH); pane[n]=cur_pane
+           here[n] = ($0 ~ /◀ here/) ? 1 : 0
+           if (here[n]) here_pane=cur_pane
+         }
+       }
+       END {
+         for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { print surf[i]; exit }
+         for (i=1;i<=n;i++) if (!here[i]) { print surf[i]; exit }
+       }')
      if [ -n "$CODEX_SURFACE" ]; then
        # Send the read command, brief pause, then hit enter (pause needed for cmux to place text)
        cmux send --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
