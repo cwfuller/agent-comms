@@ -8,13 +8,19 @@
 # Subcommands:
 #   root                        print the main repo's .comms path (worktree-safe)
 #   workspace                   print the workspace name (cmux > branch > repo dir)
-#   list --as <claude|codex>    list pending inbox messages for this workspace, newest first
+#   list --as <claude|codex> [--thread <t>]   pending inbox messages, newest first
 #   status                      one-screen loop state: latest archive, verdict, pending counts
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
+#   verdict <file>              normalized (trimmed, uppercased) verdict from frontmatter
 #   archive --as <claude|codex> <file...>   idempotent move to archive/; own inbox only
-#   deliver <claude|codex>      nudge the other agent's pane via cmux (no-op warning without cmux)
+#   deliver <claude|codex>      nudge the other agent's pane via cmux; reports delivered/
+#                               manual-pickup/FAILED explicitly (never hard-fails)
 #   send --to <claude|codex> <file> [--archive-inbound <file>]
-#                               validate, deliver, then (only after both) archive the inbound
+#                               validate, deliver, update thread state, then archive inbound
+#   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
+#   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
+#   clean --as <claude|codex> [workspace|all|archive|<file>] [--yes]
+#                               guarded delete; dry-run without --yes; own-inbox default
 set -euo pipefail
 
 die() { echo "comms.sh: $*" >&2; exit 1; }
@@ -61,10 +67,11 @@ inbox_for() {
 }
 
 cmd_list() {
-  local as=""
+  local as="" thread=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --as) shift; as="${1:-}" ;;
+      --thread) shift; thread="${1:-}" ;;
       *) die "list: unknown argument '$1'" ;;
     esac
     shift
@@ -74,6 +81,16 @@ cmd_list() {
   root="$(cmd_root)"; ws="$(cmd_workspace)"; inbox="$(inbox_for "$as")"
   local files
   files="$(find "$root/$inbox" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null | sort -r)"
+  if [ -n "$thread" ] && [ -n "$files" ]; then
+    # Thread-scoped read: only messages whose frontmatter thread matches.
+    # Prevents one loop from consuming another loop's replies in a shared workspace.
+    local f matched=""
+    while IFS= read -r f; do
+      [ "$(frontmatter_field "$f" thread)" = "$thread" ] && matched="${matched}${matched:+
+}$f"
+    done <<< "$files"
+    files="$matched"
+  fi
   if [ -n "$files" ]; then
     echo "$files"
   else
@@ -115,19 +132,27 @@ cmd_validate() {
     val="$(frontmatter_field "$file" "$field")"
     [ -n "$val" ] || errors="${errors}  missing required field: $field\n"
   done
-  local workflow from_agent
+  local workflow from_agent msg_type
   workflow="$(frontmatter_field "$file" workflow)"
   from_agent="$(frontmatter_field "$file" from)"
+  msg_type="$(frontmatter_field "$file" type)"
   if [ -n "$workflow" ]; then
     for field in phase round max-rounds; do
       val="$(frontmatter_field "$file" "$field")"
       [ -n "$val" ] || errors="${errors}  workflow message missing field: $field\n"
     done
-    # Only reviewer->author legs carry a verdict; claude->codex requests do not.
-    if [ "$from_agent" = "codex" ]; then
+    # Only reviewer->author legs carry a verdict; claude->codex requests do not,
+    # and the error lane (type: error) is verdict-free in both directions.
+    if [ "$from_agent" = "codex" ] && [ "$msg_type" != "error" ]; then
       val="$(frontmatter_field "$file" verdict)"
       [ -n "$val" ] || errors="${errors}  workflow reply from codex missing field: verdict\n"
     fi
+    # Protocol v2 soft requirements — warn, don't reject, so in-flight loops
+    # started on older templates survive a mid-loop upgrade.
+    [ -n "$(frontmatter_field "$file" thread)" ] || \
+      echo "warning: workflow message has no thread field — concurrent loops in this workspace can collide" >&2
+    [ -n "$(frontmatter_field "$file" message_id)" ] || \
+      echo "warning: workflow message has no message_id field — replies cannot be threaded via in-reply-to" >&2
   fi
   if [ -n "$fm_end" ]; then
     local body
@@ -204,22 +229,29 @@ cmd_deliver() {
     echo "warning: could not find a $target surface; message written for manual pickup"
     return 0
   fi
+  # Capture mid-sequence cmux failures explicitly: a half-typed nudge must not
+  # surface as a terse aborted command — report it so the caller/state can record it.
+  local seq_ok=true
   case "$target" in
     codex)
-      cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5
-      cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3
-      cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" enter
+      { cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 \
+        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 \
+        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" enter; } || seq_ok=false
       ;;
     claude)
       # Claude Code in vim mode: ensure insert mode before typing, then submit.
-      cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.2
-      cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" 'i' && sleep 0.2
-      cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '/read-from-codex' && sleep 0.5
-      cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3
-      cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" enter
+      { cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.2 \
+        && cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" 'i' && sleep 0.2 \
+        && cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '/read-from-codex' && sleep 0.5 \
+        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 \
+        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" enter; } || seq_ok=false
       ;;
   esac
-  echo "delivered to $surface"
+  if [ "$seq_ok" = true ]; then
+    echo "delivered to $surface"
+  else
+    echo "warning: delivery FAILED mid-sequence to $surface — the message is safely on disk; retry with 'comms.sh send --to $target <file>' (refreshes delivery state) or nudge the pane manually"
+  fi
 }
 
 cmd_status() {
@@ -248,6 +280,187 @@ cmd_status() {
   done
 }
 
+# ---------- protocol v2: thread state (.comms/state/<ws>_<thread>.json) ----------
+
+state_dir() { echo "$(cmd_root)/state"; }
+
+# Filesystem-safe name: thread/message values become filename components, so
+# anything outside [A-Za-z0-9._-] is mapped to '_' (a '/' would otherwise turn
+# the state path into a non-existent subdirectory and abort send mid-flow).
+safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+
+# Minimal JSON string escaping so embedded quotes/backslashes can't produce
+# invalid state files.
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+json_get() {  # json_get <file> <key> — one key per line in our writer, so sed suffices
+  sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" | head -1
+}
+
+# state_update_from <message-file> <delivery-outcome> — derive thread state from
+# an outbound workflow message's frontmatter. The ONLY writers of state are this
+# (via send) and `state complete`; readers must treat it as advisory ground truth.
+state_update_from() {
+  local mf="$1" outcome="${2:-unknown}"
+  local thread wf
+  thread="$(frontmatter_field "$mf" thread)"
+  wf="$(frontmatter_field "$mf" workflow)"
+  [ -n "$thread" ] && [ -n "$wf" ] || return 0   # one-shot or pre-v2 message: no state
+  local ws fm_ws phase round maxr from awaiting_from mid dir
+  # Key on the RESOLVED workspace — the same resolver every reader uses — so a
+  # divergent frontmatter workspace value can't make the state file invisible.
+  ws="$(cmd_workspace)"
+  fm_ws="$(frontmatter_field "$mf" workspace)"
+  [ -n "$fm_ws" ] && [ "$fm_ws" != "$ws" ] && \
+    echo "warning: message workspace '$fm_ws' differs from resolved workspace '$ws' — state keyed on '$ws'" >&2
+  phase="$(frontmatter_field "$mf" phase)"
+  round="$(frontmatter_field "$mf" round)"
+  maxr="$(frontmatter_field "$mf" max-rounds)"
+  from="$(frontmatter_field "$mf" from)"
+  case "$from" in
+    claude) awaiting_from=codex ;;
+    codex)  awaiting_from=claude ;;
+    *)      awaiting_from=unknown ;;
+  esac
+  mid="$(frontmatter_field "$mf" message_id)"
+  [ -n "$mid" ] || mid="$(basename "$mf" .md)"
+  dir="$(state_dir)"
+  # Every failure in here must be non-fatal — state is advisory ground truth and
+  # must never abort send between delivery and the inbound archive (e.g. when
+  # .comms/state exists as a FILE, or is unwritable).
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "warning: cannot create state dir $dir — skipping thread-state write" >&2
+    return 0
+  fi
+  # Non-fatal write: a state hiccup must never abort send between delivery and
+  # the inbound archive (that is the half-applied desync state exists to prevent).
+  printf '{\n  "workspace": "%s",\n  "thread": "%s",\n  "workflow": "%s",\n  "phase": "%s",\n  "round": "%s",\n  "max_rounds": "%s",\n  "status": "in-progress",\n  "awaiting_from": "%s",\n  "awaiting_since": "%s",\n  "awaiting_since_epoch": "%s",\n  "last_sent": "%s",\n  "last_delivery": "%s"\n}\n' \
+    "$(json_escape "$ws")" "$(json_escape "$thread")" "$(json_escape "$wf")" \
+    "$(json_escape "$phase")" "$(json_escape "$round")" "$(json_escape "$maxr")" \
+    "$awaiting_from" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date +%s)" \
+    "$(json_escape "$mid")" "$outcome" \
+    > "$dir/$(safe_name "$ws")_$(safe_name "$thread").json" \
+    || echo "warning: could not write thread state for '$thread' — continuing" >&2
+}
+
+cmd_state() {
+  local sub="${1:-list}"; shift || true
+  local dir ws
+  dir="$(state_dir)"; ws="$(cmd_workspace)"
+  case "$sub" in
+    get)
+      local thread="${1:-}"
+      [ -n "$thread" ] || die "state get: thread argument required"
+      local sfile="$dir/$(safe_name "$ws")_$(safe_name "$thread").json"
+      [ -f "$sfile" ] || die "state get: no state for thread '$thread'"
+      cat "$sfile"
+      ;;
+    list)
+      local f found=false
+      for f in "$dir/${ws}_"*.json; do
+        [ -f "$f" ] || continue
+        found=true
+        printf '%s: %s/%s r%s/%s status=%s awaiting=%s delivery=%s\n' \
+          "$(json_get "$f" thread)" "$(json_get "$f" workflow)" "$(json_get "$f" phase)" \
+          "$(json_get "$f" round)" "$(json_get "$f" max_rounds)" "$(json_get "$f" status)" \
+          "$(json_get "$f" awaiting_from)" "$(json_get "$f" last_delivery)"
+      done
+      [ "$found" = true ] || echo "no thread state for workspace '$ws'"
+      ;;
+    complete)
+      local thread="${1:-}"
+      [ -n "$thread" ] || die "state complete: thread argument required"
+      local f="$dir/$(safe_name "$ws")_$(safe_name "$thread").json"
+      [ -f "$f" ] || die "state complete: no state for thread '$thread'"
+      awk '{gsub(/"status": "[^"]*"/, "\"status\": \"complete\"");
+            gsub(/"awaiting_from": "[^"]*"/, "\"awaiting_from\": \"none\""); print}' "$f" > "$f.tmp" \
+        && mv "$f.tmp" "$f"
+      echo "thread '$thread' marked complete"
+      ;;
+    *) die "state: unknown subcommand '$sub' (get|list|complete)" ;;
+  esac
+}
+
+cmd_stalled() {
+  local mins="${1:-15}" dir ws now f age_s since
+  dir="$(state_dir)"; ws="$(cmd_workspace)"; now="$(date +%s)"
+  local any=false
+  for f in "$dir/${ws}_"*.json; do
+    [ -f "$f" ] || continue
+    [ "$(json_get "$f" awaiting_from)" = "none" ] && continue
+    [ "$(json_get "$f" status)" = "complete" ] && continue
+    since="$(json_get "$f" awaiting_since_epoch)"
+    case "$since" in ''|*[!0-9]*) since=$now ;; esac  # garbage epoch must not crash
+    age_s=$(( now - since ))
+    if [ "$age_s" -gt $(( mins * 60 )) ]; then
+      any=true
+      printf 'STALLED %sm: thread=%s %s/%s r%s awaiting=%s last_delivery=%s\n' \
+        "$(( age_s / 60 ))" "$(json_get "$f" thread)" "$(json_get "$f" workflow)" \
+        "$(json_get "$f" phase)" "$(json_get "$f" round)" \
+        "$(json_get "$f" awaiting_from)" "$(json_get "$f" last_delivery)"
+    fi
+  done
+  if [ "$any" = false ]; then
+    echo "no stalled threads (threshold: ${mins}m)"
+  fi
+}
+
+cmd_verdict() {
+  local file="${1:-}"
+  [ -n "$file" ] || die "verdict: file argument required"
+  frontmatter_field "$file" verdict | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'
+}
+
+cmd_clean() {
+  local as="" yes=false mode="" targets=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --as) shift; as="${1:-}" ;;
+      --yes) yes=true ;;
+      *) [ -z "$mode" ] && mode="$1" || die "clean: unexpected argument '$1'" ;;
+    esac
+    shift
+  done
+  [ -n "$as" ] || die "clean: --as <claude|codex> is required"
+  [ -n "$mode" ] || mode="workspace"
+  local root ws inbox
+  root="$(cmd_root)"; ws="$(cmd_workspace)"; inbox="$(inbox_for "$as")"
+  case "$mode" in
+    workspace)
+      # Own inbox + shared archive only — never the other agent's unread mail.
+      while IFS= read -r f; do [ -n "$f" ] && targets+=("$f"); done \
+        < <(find "$root/$inbox" "$root/archive" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null)
+      ;;
+    all)
+      while IFS= read -r f; do [ -n "$f" ] && targets+=("$f"); done \
+        < <(find "$root/to-claude" "$root/to-codex" "$root/archive" -maxdepth 1 -type f 2>/dev/null)
+      ;;
+    archive)
+      while IFS= read -r f; do [ -n "$f" ] && targets+=("$f"); done \
+        < <(find "$root/archive" -maxdepth 1 -type f 2>/dev/null)
+      ;;
+    *)
+      # Specific filename — locate by basename within the three message dirs.
+      local d
+      for d in to-claude to-codex archive; do
+        [ -f "$root/$d/$(basename "$mode")" ] && targets+=("$root/$d/$(basename "$mode")")
+      done
+      [ "${#targets[@]}" -gt 0 ] || die "clean: '$mode' not found in to-claude/, to-codex/, or archive/"
+      ;;
+  esac
+  if [ "${#targets[@]}" -eq 0 ]; then
+    echo "nothing to clean (mode: $mode)"
+    return 0
+  fi
+  if [ "$yes" != true ]; then
+    echo "would delete ${#targets[@]} file(s) (mode: $mode) — re-run with --yes to delete:"
+    printf '  %s\n' "${targets[@]}"
+    return 0
+  fi
+  rm -f "${targets[@]}"
+  echo "deleted ${#targets[@]} file(s) (mode: $mode)"
+}
+
 cmd_send() {
   local to="" file="" archive_inbound="" as=""
   while [ "$#" -gt 0 ]; do
@@ -262,9 +475,21 @@ cmd_send() {
   [ -n "$file" ] || die "send: outbound file argument required"
   # Atomicity guard: never deliver or archive on a malformed outbound message.
   cmd_validate "$file" || die "send: refusing to deliver malformed message (and not archiving inbound)"
-  cmd_deliver "$to"
+  local del_out outcome=manual
+  del_out="$(cmd_deliver "$to")"
+  echo "$del_out"
+  case "$del_out" in
+    *"delivered to"*) outcome=delivered ;;
+    *FAILED*)         outcome=failed ;;
+  esac
+  # Record thread ground truth (workflow messages with a thread only). The
+  # ||-context also suppresses errexit inside the function, so NO state failure
+  # mode — mkdir, redirect, parse — can abort send before the inbound archive.
+  state_update_from "$file" "$outcome" || echo "warning: thread state not recorded" >&2
   if [ -n "$archive_inbound" ]; then
-    # Archive the inbound only after the outbound was validated and delivery attempted.
+    # Archive the inbound only after the outbound was validated and delivery
+    # attempted. A failed nudge still archives — the inbound WAS processed; the
+    # retry surface is delivery (state last_delivery=failed + the warning above).
     case "$to" in
       codex) cmd_archive --as claude "$archive_inbound" ;;
       claude) cmd_archive --as codex "$archive_inbound" ;;
@@ -278,11 +503,15 @@ case "${1:-}" in
   list)      shift; cmd_list "$@" ;;
   status)    shift; cmd_status "$@" ;;
   validate)  shift; cmd_validate "$@" ;;
+  verdict)   shift; cmd_verdict "$@" ;;
   archive)   shift; cmd_archive "$@" ;;
   deliver)   shift; cmd_deliver "$@" ;;
   send)      shift; cmd_send "$@" ;;
+  state)     shift; cmd_state "$@" ;;
+  stalled)   shift; cmd_stalled "$@" ;;
+  clean)     shift; cmd_clean "$@" ;;
   ""|help|-h|--help)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown subcommand '${1}' — run 'comms.sh help'" ;;
 esac

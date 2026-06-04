@@ -83,6 +83,9 @@ fm() {
     inFM && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print; exit}' "$1"
 }
 
+# Normalized verdict (trimmed, uppercased) so " approve" still gates correctly.
+norm_verdict() { fm "$1" verdict | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'; }
+
 cmd_status() {
   local now name ref tree ctitle xtitle ctype xtype latest latest_mt
   now="$(date +%s)"
@@ -99,9 +102,22 @@ cmd_status() {
       local round maxr wflow phase verdict
       round="$(fm "$latest" round)"; maxr="$(fm "$latest" max-rounds)"
       wflow="$(fm "$latest" workflow)"; phase="$(fm "$latest" phase)"
-      verdict="$(fm "$latest" verdict)"
+      verdict="$(norm_verdict "$latest")"
       summary="$wflow/$phase r${round}/${maxr} ${verdict:-in-progress}"
       latest_mt="$(mtime_of "$latest")"
+    fi
+
+    # Protocol v2 ground truth: newest thread-state file for this workspace.
+    local state_note="" sf st_status owes since_epoch
+    sf="$(ls -t "$COMMS_ROOT/state/${name}_"*.json 2>/dev/null | head -1 || true)"
+    if [ -n "$sf" ]; then
+      st_status="$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$sf" | head -1)"
+      owes="$(sed -n 's/.*"awaiting_from": "\([^"]*\)".*/\1/p' "$sf" | head -1)"
+      since_epoch="$(sed -n 's/.*"awaiting_since_epoch": "\([^"]*\)".*/\1/p' "$sf" | head -1)"
+      if [ "$st_status" != complete ] && [ -n "$owes" ] && [ "$owes" != none ]; then
+        case "$since_epoch" in ''|*[!0-9]*) since_epoch=$now ;; esac  # garbage epoch must not crash status
+        state_note=" owes=${owes} $(( ( now - since_epoch ) / 60 ))m"
+      fi
     fi
 
     # Composite state: ✳+task counts as active only if corroborated by braille
@@ -137,8 +153,8 @@ cmd_status() {
       done < <(find "$COMMS_ROOT/to-codex" -maxdepth 1 -type f -name "${name}_*.md" 2>/dev/null)
     fi
 
-    printf "%-8s  claude=%-6s  codex=%-6s  %-45s  in=%s out=%s\n" \
-      "$name" "$cstate" "$xstate" "$summary" "$pin" "$pout"
+    printf "%-8s  claude=%-6s  codex=%-6s  %-45s  in=%s out=%s%s\n" \
+      "$name" "$cstate" "$xstate" "$summary" "$pin" "$pout" "$state_note"
   done
 }
 
@@ -266,7 +282,7 @@ cmd_dispatch_all() {
     [ "$state" = idle ] || continue
     latest="$(latest_archive "$name")"
     if [ -n "$latest" ]; then
-      verdict="$(fm "$latest" verdict)"
+      verdict="$(norm_verdict "$latest")"
       [ "$verdict" = APPROVE ] || continue
       latest_mt="$(mtime_of "$latest")"
     else
@@ -336,7 +352,7 @@ cmd_harvest() {
       echo "$name: idle, no archive (never dispatched or freshly cleared)"
       continue
     fi
-    verdict="$(fm "$latest" verdict)"
+    verdict="$(norm_verdict "$latest")"
     phase="$(fm "$latest" phase)"
     wflow="$(fm "$latest" workflow)"
     round="$(fm "$latest" round)"
