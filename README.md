@@ -142,6 +142,8 @@ timestamp: 2026-03-27T01:40:47Z
 branch: feat/my-feature
 workspace: my-workspace
 cwd: /path/to/working/directory
+message_id: my-workspace_2026-03-27T01-40-47_auto-plan-12345   # filename sans .md
+thread: caching-layer-12345  # names the loop; constant across all its messages
 workflow: auto-plan          # triggers autonomous mode
 phase: plan
 round: 1
@@ -153,7 +155,9 @@ max-rounds: 10
 ## Review focus
 ```
 
-Autonomous replies preserve the workflow metadata and add a `verdict: APPROVE | REQUEST_CHANGES`. Replies from Codex use `type: review-feedback` for reviews and `type: response` for `/ask-codex` answers (no verdict).
+Autonomous replies preserve the workflow metadata (including `thread`), set `in-reply-to` to the `message_id` they answer, and add a `verdict: APPROVE | REQUEST_CHANGES`. Replies from Codex use `type: review-feedback` for reviews and `type: response` for `/ask-codex` answers (no verdict). A `type: error` message reports a malformed counterpart and requests a clean resend without consuming a round.
+
+Loop ground truth lives in `.comms/state/<workspace>_<thread>.json` (written automatically by the helper's `send`): workflow/phase/round, who owes the next message, and the last delivery outcome (`delivered`/`manual`/`failed`). `comms.sh stalled` lists threads awaiting a reply too long — the recovery surface for dropped delivery nudges.
 
 ## File structure
 

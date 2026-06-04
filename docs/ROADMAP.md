@@ -88,8 +88,8 @@ fm() unbounded frontmatter scan) — both fixed with regression tests.
   regression-tested.
 
 Deferred from PR 2 (follow-ups):
-- [ ] `comms.sh clean` subcommand so `/clean-comms` gets the same guardrails as archive
-  (own-inbox default enforced by code, not prose) — self-review advisory.
+- [x] `comms.sh clean` subcommand so `/clean-comms` gets the same guardrails as archive
+  (own-inbox default enforced by code, not prose) — landed in PR 3.
 - [ ] Harness coverage for the remote/curl install path (local http.server fixture).
 
 Token notes beyond the extraction:
@@ -101,25 +101,30 @@ Token notes beyond the extraction:
 
 ## PR 3 — protocol v2 (from the field reports + audit)
 
-- [ ] **Threading:** `message_id` + `thread:` (feature slug) + `in-reply-to` in *both*
-  directions; readers filter on thread. Fixes the live two-agents-one-workspace collision
-  (an agent can consume and archive the other's review round today).
-- [ ] **State:** `.comms/state/<workspace>_<thread>.json` (workflow, phase, round,
-  awaiting-since, last-delivered) — survives compaction/restart, gives `max-rounds` ground
-  truth (today a dropped `round:` field defeats the cap), gives `/fleet` real state
-  instead of pane-title inference.
-- [ ] **Delivery ack + liveness:** delivery is fire-and-forget keystrokes; a dropped
-  keystroke presents as "Codex is slow" and stalls the loop silently (top audit + field
-  finding). Write a `.delivered` marker after nudging; on next wake, if no reply matching
-  (thread, round) within a bounded window, escalate to the user with re-delivery
-  instructions.
-- [ ] **Error lane:** `type: error` + retry semantics. Today `read-from-codex.md` says
-  "send an error reply back to Codex" but no such message type exists; reviewer-side
-  failure (refusal, crash, policy false-positive) has no protocol lane.
-- [ ] **Advisory carry-over:** APPROVE + advisories terminates the loop and the advisories
-  evaporate; append un-actioned advisories to a tracked `docs/advisories.md` (or friction
-  log) on loop close.
-- [ ] **Meta/process-feedback channel:** loop messages carry a standing `## Meta` section
+**Status: implemented 2026-06-04 (Codex loop pending).** Harness: 79 checks green.
+
+- [x] **Threading:** `message_id` + `thread:` + `in-reply-to` in *both* directions;
+  `comms.sh list --thread` scopes reads so concurrent loops in one workspace can't
+  consume each other's replies. Soft-required (validate warns, doesn't reject) so
+  in-flight pre-v2 loops survive a mid-loop template upgrade.
+- [x] **State:** `.comms/state/<workspace>_<thread>.json` written automatically by
+  `comms.sh send` for workflow messages (workflow/phase/round, awaiting_from,
+  awaiting_since, last_sent, last_delivery); `state get|list|complete`; fleet status
+  surfaces `owes=<agent> <N>m` from it.
+- [x] **Delivery ack + liveness:** deliver reports delivered / manual-pickup /
+  **FAILED mid-sequence** explicitly (Codex r3 Process ask); outcome recorded in state;
+  `comms.sh stalled [minutes]` lists threads awaiting a reply too long — the recovery
+  surface for dropped nudges.
+- [x] **Error lane:** `type: error` (verdict-free, never consumes a round) wired into
+  both read skills' malformed-message paths + both message-format specs.
+- [x] **Advisory carry-over:** read-from-codex's APPROVE branch now appends un-actioned
+  advisories to `docs/advisories.md` (date, thread, items) and `### Process` items to the
+  friction log before closing the loop.
+- [x] **Verdict normalization:** `comms.sh verdict <file>` (trim/uppercase); fleet gates
+  on `norm_verdict` so `" approve"` still terminates a loop.
+- [x] **`comms.sh clean`** (deferred from PR 2): guarded delete with dry-run default,
+  own-inbox `workspace` mode enforced in code; `/clean-comms` is now a thin wrapper.
+- [x] **Meta/process-feedback channel:** loop messages carry a standing `## Meta` section
   asking the reviewer to flag friction with the comms process *itself* (delivery, archive,
   message shape, round semantics) separately from code findings; meta feedback never gates
   the verdict and gets appended to the friction log / this roadmap on loop close. (Requested
@@ -162,8 +167,15 @@ Token notes beyond the extraction:
   missing → no-archive bypass of the pending scan). Lesson: when a reviewer flags one
   branch of a predicate, self-audit the full state matrix before resending — would have
   collapsed three rounds into two.
-- [ ] **Verdict normalization:** trim/case-normalize `verdict:` parsing; exact-string
-  `APPROVE` match is fragile to phrasing drift.
+- *2026-06-04, PR3 loop r2 (Codex, Process):* outside cmux, `send` keys thread state on
+  the fallback (branch) workspace, which can diverge from a cmux-scoped message's prefix —
+  the audit's original workspace-divergence class resurfacing at the state layer. Mitigated
+  by the resolved-vs-frontmatter mismatch warning; proper fix is a single workspace
+  identity carried in state/frontmatter from loop start (v2.1 candidate).
+- *2026-06-04, PR3 loop (observed):* "the guard covers the changed branch, not the whole
+  path" recurred twice more (state-write guard missed mkdir; norm_verdict sweep missed the
+  restructured dispatch-all site). When making a crosscutting change, grep for ALL sites of
+  the old pattern — including ones restructured earlier in the same PR.
 
 ## Explicitly considered and rejected (audit refuted — don't re-litigate without new evidence)
 
