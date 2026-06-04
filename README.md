@@ -60,7 +60,7 @@ AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" 
 | `/auto-plan` | Autonomous plan + review cycle |
 | `/auto-implement` | Autonomous implement + review cycle |
 | `/auto-full` | Plan cycle then implement cycle |
-| `/clean-comms` | Delete messages |
+| `/clean-comms` | Delete messages — default scopes to this workspace's own inbox + archive; `all`, `archive`, or a filename |
 | `/fleet` | Orchestrate auto-loops across N cmux workspaces |
 
 **Codex skills:**
@@ -120,6 +120,8 @@ Override the workspace name prefix with `FLEET_PREFIX=tide` and the concurrency 
 
 - [cmux](https://cmux.com) — optional terminal multiplexer for cross-pane auto-delivery
 - Claude Code and Codex running in adjacent cmux panes when using auto-delivery
+- Claude Code with **vim mode** enabled when using Codex→Claude auto-delivery — the delivery keystrokes assume modal input (`escape`, `i`, type, `enter`); without vim mode the injected command arrives garbled
+- `python3` on PATH for `/fleet` (pane-title spinner classification)
 - Git repository
 
 ## Protocol
@@ -145,7 +147,7 @@ max-rounds: 10
 ## Review focus
 ```
 
-Autonomous replies preserve the workflow metadata and add a `verdict: APPROVE | REQUEST_CHANGES`.
+Autonomous replies preserve the workflow metadata and add a `verdict: APPROVE | REQUEST_CHANGES`. Replies from Codex use `type: review-feedback` for reviews and `type: response` for `/ask-codex` answers (no verdict).
 
 ## File structure
 
