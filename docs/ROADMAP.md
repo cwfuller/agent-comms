@@ -66,26 +66,31 @@ daily. Items are grouped into sequenced PRs. Check items off as they land.
 
 ## PR 2 — shared comms helper (the token-efficiency project)
 
-The workspace-resolution block (~23 lines) appears **9×** across the templates (twice in
-`read-from-codex.md` alone); the surface-picker/delivery block (~25 lines) appears **7×**.
-These are LLM prompt files: every duplicated line is re-tokenized on every command
-invocation, every round, every workspace. Drift has already happened once (the Codex-side
-skills still run the older, looser workspace grep with no sanity guard).
+**Status: implemented 2026-06-04 (Codex loop in progress).** Templates: 1,537 → 732 lines
+(-52%); fleet.md 511 → 68 (-87%). Test harness: 53 checks green (hermetic, stubbed cmux).
+Adversarial self-review before handoff caught 2 blocking bugs (dispatch-all exit-vs-skip;
+fm() unbounded frontmatter scan) — both fixed with regression tests.
 
-- [ ] Ship installed helper script(s) (e.g. `~/.claude/agent-comms/comms.sh`) with
-  subcommands: `root`, `workspace`, `deliver claude|codex`, `write` (validate frontmatter,
-  refuse malformed), `archive <file>`, `status`.
-- [ ] Port the **hardened** workspace block (cmux-first, strict
-  `grep -E 'workspace workspace:[0-9]+ "'`, main/master sanity warning) into the helper so
-  the Claude and Codex sides provably cannot drift.
-- [ ] Shrink every template to one-line helper calls. Targets: auto-* commands ~105 → ~55
-  lines each; `read-from-codex.md` 151 → ~90; `fleet.md` 481 → <150 by moving subcommand
-  bash into installed scripts.
-- [ ] `install.sh` installs helpers for global and local scopes; `.agents/skills` and
-  `~/.codex/skills` reference the same helper.
-- [ ] Atomicity for free: `comms.sh reply --in <file> --deliver --archive` refuses to
-  archive unless the outbound reply was written and validated (the interrupted-turn
-  corruption two Codex reviewers hit in the field).
+- [x] Ship installed helper scripts `~/.agent-comms/{comms.sh,fleet.sh}` (local pin at
+  `<repo>/.agent-comms/`): `root`, `workspace`, `list --as`, `validate`, `archive --as`
+  (own-inbox, idempotent), `deliver claude|codex`, `send --to ... --archive-inbound ...`,
+  `status`; fleet engine with status/dispatch/dispatch-all/harvest/clear.
+- [x] Port the **hardened** workspace block into the helper so the Claude and Codex sides
+  provably cannot drift (both sides resolve via the same script).
+- [x] Shrink every template to helper calls (also kills the `$N` substitution class for
+  all extracted code — scripts on disk are never rendered).
+- [x] `install.sh` installs helpers for global and local scopes (remote/curl path too);
+  `.agent-comms/` gitignored on project init; shadow warning + pin note cover helpers.
+- [x] Atomicity: `comms.sh send --archive-inbound` refuses to deliver/archive on a
+  malformed outbound (the interrupted-turn corruption two Codex reviewers hit).
+- [x] Repeatable shell test harness (`tests/run.sh`, Codex's meta-channel ask): 53 checks,
+  stubbed cmux with call log, throwaway git fixtures, bash+zsh callers, both blockers
+  regression-tested.
+
+Deferred from PR 2 (follow-ups):
+- [ ] `comms.sh clean` subcommand so `/clean-comms` gets the same guardrails as archive
+  (own-inbox default enforced by code, not prose) — self-review advisory.
+- [ ] Harness coverage for the remote/curl install path (local http.server fixture).
 
 Token notes beyond the extraction:
 - `read-from-codex.md` round messages: keep "stable context, not fix narration" (it's the
@@ -138,6 +143,25 @@ Token notes beyond the extraction:
 - *2026-06-04, PR1 loop (observed):* argument-less invocation renders bare dollar-zero as
   EMPTY (not left literal) — the old installed read-from-codex rendered `match(, ...)`,
   invalid awk. The substitution corruption class affects no-arg invocations too.
+- *2026-06-04, PR2 (observed):* the first test-harness run inherited the live session's
+  `CMUX_WORKSPACE_ID` and real cmux — "no cmux" tests resolved the real workspace and one
+  deliver test **sent an actual keystroke nudge to the live Codex pane**. Tests against
+  agent-comms must be hermetic: `env -u CMUX_WORKSPACE_ID` + PATH-stubbed cmux, and
+  canonicalize fixture paths (`pwd -P`) for macOS `/var` → `/private/var`.
+- *2026-06-04, PR2 (process win):* adversarial self-review before handoff caught 2
+  blocking bugs the reviewer would have bounced — pre-hardening measurably shortens loops
+  (matches the earlier field report).
+- *2026-06-04, PR2 loop r3 (Codex):* helper extraction + tests/run.sh "substantially
+  improves reviewability." Remaining friction: a live cmux send can fail AFTER outbound
+  validation and BEFORE archive — inbound is safely preserved, but the failure surfaces
+  only as a terse command result. → PR 3 delivery-ack/liveness item should make
+  send report delivery outcome explicitly (and write the .delivered marker only on
+  confirmed nudge).
+- *2026-06-04, PR2 loop (observed):* rounds 1→3 each caught a successively narrower edge
+  of the same dispatch-all free-predicate state machine (--force dropped → pending scan
+  missing → no-archive bypass of the pending scan). Lesson: when a reviewer flags one
+  branch of a predicate, self-audit the full state matrix before resending — would have
+  collapsed three rounds into two.
 - [ ] **Verdict normalization:** trim/case-normalize `verdict:` parsing; exact-string
   `APPROVE` match is fragile to phrasing drift.
 
