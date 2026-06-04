@@ -9,9 +9,19 @@ Orchestrate a fleet of cmux execution workspaces (`ws-1`, `ws-2`, …) from a co
 
 ## Instructions
 
-1. **Parse the subcommand** from the first argument word. Supported: `status`, `dispatch`, `dispatch-all`, `harvest`, `clear`, `help`. If no arg, default to `status`.
+1. **Parse the subcommand** from the first argument word. Supported: `status`, `dispatch`, `dispatch-all`, `harvest`, `clear`, `help`. If no arg, default to `status`. Capture the raw argument text once for the blocks below:
 
-2. **Resolve shared vars** up front — every subcommand needs these:
+   ```bash
+   # Claude Code replaces the ARGUMENTS placeholder on the next line with the raw /fleet
+   # argument text at render time.
+   # EDITOR NOTE: never write bare dollar-digit tokens (dollar-zero through dollar-nine)
+   # or dollar-star in this file's code blocks — slash-command argument substitution
+   # clobbers them at render time. awk fields are written $(0)/$(2); bash functions take
+   # input via named FLEET_* variables instead of positional params.
+   FLEET_ARGS="$ARGUMENTS"
+   ```
+
+2. **Resolve shared vars** up front — every subcommand needs these. **Shell state does not persist across separate tool calls:** when executing a subcommand, paste this block (plus the Preflight block for dispatch paths) into the *same* shell invocation as the subcommand's block.
 
    ```bash
    FLEET_PREFIX="${FLEET_PREFIX:-ws}"
@@ -23,8 +33,8 @@ Orchestrate a fleet of cmux execution workspaces (`ws-1`, `ws-2`, …) from a co
    #                         "  workspace:79  ws-1"
    FLEET_LIST="$(cmux list-workspaces 2>/dev/null \
      | sed 's/^\* //' \
-     | awk -v pfx="$FLEET_PREFIX" '$0 ~ "workspace:[0-9]+[[:space:]]+" pfx "-[0-9]+" {print $2, $1}' \
-     | sort)"
+     | awk -v pfx="$FLEET_PREFIX" '$(0) ~ "workspace:[0-9]+[[:space:]]+" pfx "-[0-9]+" {print $(2), $(1)}' \
+     | sort -V)"
    # FLEET_LIST is now lines like: "ws-1 workspace:79"
    echo "$FLEET_LIST"
    ```
@@ -55,6 +65,7 @@ echo "$FLEET_LIST" | while read -r name ref; do
   #     may be stale residue from a finished loop. Returns "task" here; the
   #     call site corroborates against archive mtime + Codex pane state to
   #     decide whether this is `active` (mid-loop) or `stale` (label leftover).
+  # Input via FLEET_TITLE (named var, not positional — see EDITOR NOTE in step 1).
   classify_title() {
     python3 -c 'import sys, re
 s = sys.argv[1].lstrip()
@@ -64,10 +75,10 @@ if not s:
 if 0x2800 <= ord(s[0]) <= 0x28FF:
     print("spin"); sys.exit()
 s = re.sub(r"^[^\w\s]+\s+", "", s)
-print("bare" if s in ("", "Claude Code", repo) else "task")' "$1" "$REPO_NAME" 2>/dev/null
+print("bare" if s in ("", "Claude Code", repo) else "task")' "$FLEET_TITLE" "$REPO_NAME" 2>/dev/null
   }
-  CLAUDE_TYPE="$(classify_title "$CLAUDE_TITLE")"
-  CODEX_TYPE="$( classify_title "$CODEX_TITLE")"
+  FLEET_TITLE="$CLAUDE_TITLE"; CLAUDE_TYPE="$(classify_title)"
+  FLEET_TITLE="$CODEX_TITLE";  CODEX_TYPE="$(classify_title)"
 
   # Composite state — one of: active | idle | stale.
   # ✳+task only counts as `active` if corroborated by braille on Codex OR
@@ -76,14 +87,14 @@ print("bare" if s in ("", "Claude Code", repo) else "task")' "$1" "$REPO_NAME" 2
   # dispatching — could also be Claude in a long shell await with no
   # spinner, e.g. a multi-hour `godot --headless --baseline`).
   NOW=$(date +%s)
+  # Inputs via FLEET_PANE_TYPE / FLEET_ARCHIVE_MT / FLEET_OTHER_TYPE (named vars).
   resolve_state() {
-    local pane_type="$1"; local archive_mt="$2"; local other_type="$3"
-    case "$pane_type" in
+    case "$FLEET_PANE_TYPE" in
       spin) echo active ;;
       bare) echo idle ;;
       task)
-        local age=$(( NOW - ${archive_mt:-0} ))
-        if [ "$other_type" = spin ] || [ "$age" -lt 600 ]; then
+        local age=$(( NOW - ${FLEET_ARCHIVE_MT:-0} ))
+        if [ "$FLEET_OTHER_TYPE" = spin ] || [ "$age" -lt 600 ]; then
           echo active
         else
           echo stale
@@ -95,11 +106,11 @@ print("bare" if s in ("", "Claude Code", repo) else "task")' "$1" "$REPO_NAME" 2
   # Latest archive entry — surfaces round + workflow + verdict.
   LATEST="$(find "$COMMS_ROOT/archive" -maxdepth 1 -type f -name "${name}_*.md" 2>/dev/null | sort | tail -1)"
   if [ -n "$LATEST" ]; then
-    ROUND="$(grep -m1 '^round:'      "$LATEST" | awk '{print $2}')"
-    MAXR=" $(grep -m1 '^max-rounds:' "$LATEST" | awk '{print $2}')"
-    WFLOW="$(grep -m1 '^workflow:'   "$LATEST" | awk '{print $2}')"
-    PHASE="$(grep -m1 '^phase:'      "$LATEST" | awk '{print $2}')"
-    VERDICT="$(grep -m1 '^verdict:'  "$LATEST" | awk '{print $2}')"
+    ROUND="$(grep -m1 '^round:'      "$LATEST" | awk '{print $(2)}')"
+    MAXR=" $(grep -m1 '^max-rounds:' "$LATEST" | awk '{print $(2)}')"
+    WFLOW="$(grep -m1 '^workflow:'   "$LATEST" | awk '{print $(2)}')"
+    PHASE="$(grep -m1 '^phase:'      "$LATEST" | awk '{print $(2)}')"
+    VERDICT="$(grep -m1 '^verdict:'  "$LATEST" | awk '{print $(2)}')"
     ARCHIVE_SUMMARY="$WFLOW/$PHASE r${ROUND}${MAXR} ${VERDICT:-in-progress}"
   else
     ARCHIVE_SUMMARY="(no archive yet)"
@@ -116,12 +127,13 @@ print("bare" if s in ("", "Claude Code", repo) else "task")' "$1" "$REPO_NAME" 2
   fi
 
   # Resolve composite state now that LATEST_MTIME is known.
-  CLAUDE_STATE="$(resolve_state "$CLAUDE_TYPE" "$LATEST_MTIME" "$CODEX_TYPE")"
-  CODEX_STATE="$( resolve_state "$CODEX_TYPE"  "$LATEST_MTIME" "$CLAUDE_TYPE")"
+  FLEET_ARCHIVE_MT="$LATEST_MTIME"
+  FLEET_PANE_TYPE="$CLAUDE_TYPE"; FLEET_OTHER_TYPE="$CODEX_TYPE";  CLAUDE_STATE="$(resolve_state)"
+  FLEET_PANE_TYPE="$CODEX_TYPE";  FLEET_OTHER_TYPE="$CLAUDE_TYPE"; CODEX_STATE="$(resolve_state)"
 
+  # Input via FLEET_DIR (named var).
   count_fresh() {
-    local dir="$1"
-    find "$dir" -maxdepth 1 -type f -name "${name}_*.md" 2>/dev/null \
+    find "$FLEET_DIR" -maxdepth 1 -type f -name "${name}_*.md" 2>/dev/null \
       | while read -r f; do
           local m
           m=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)
@@ -137,8 +149,8 @@ print("bare" if s in ("", "Claude Code", repo) else "task")' "$1" "$REPO_NAME" 2
     PENDING_IN="-"
     PENDING_OUT="-"
   else
-    PENDING_IN="$(count_fresh "$COMMS_ROOT/to-claude")"
-    PENDING_OUT="$(count_fresh "$COMMS_ROOT/to-codex")"
+    FLEET_DIR="$COMMS_ROOT/to-claude"; PENDING_IN="$(count_fresh)"
+    FLEET_DIR="$COMMS_ROOT/to-codex";  PENDING_OUT="$(count_fresh)"
   fi
 
   printf "%-8s  claude=%-6s  codex=%-6s  %-45s  in=%s out=%s\n" \
@@ -170,13 +182,13 @@ reporting `stale`, name the verification step rather than asserting idle.
 
 ### Preflight — shared function every dispatch must call
 
-Every dispatch path **must** call `fleet_preflight` before any `cmux send`. Failures abort with a clear message; `--force` (passed in the original args) overrides the rejection-level checks. Define it once in the shared-vars step so both `/fleet dispatch` and `/fleet dispatch-all` can call it:
+Every dispatch path **must** call `fleet_preflight` before any `cmux send`. Failures abort with a clear message; `--force` (passed in the original args) overrides the rejection-level checks. This block defines the function — paste it (after the step-1 and step-2 blocks) into the same shell invocation as any dispatch block:
 
 Why: by default, all `<prefix>-N` panes operate on one on-disk working tree (the same `.git/index`, the same lock files). Too many concurrent briefs = `index.lock` collisions, cross-sweeping of staged files, and merge conflicts on hot files. If you've given each workspace its own `git worktree add`, the cap is unnecessary — bump `FLEET_MAX` or use `--force`.
 
 ```bash
 FLEET_MAX="${FLEET_MAX:-3}"
-case "$*" in *--force*) FLEET_FORCE=true ;; *) FLEET_FORCE=false ;; esac
+case " $FLEET_ARGS " in *" --force "*) FLEET_FORCE=true ;; *) FLEET_FORCE=false ;; esac
 
 # fleet_preflight — returns 0 if dispatch should proceed, 1 to abort.
 # Always prints WARNINGs to stderr; prints REJECT and exits non-zero unless --force.
@@ -243,16 +255,19 @@ else: print("idle")' "$pf_title" 2>/dev/null)"
 Dispatch a brief to a specific workspace. Default mode runs `/auto-implement <brief-path>` (the brief is already a plan). Passing `--plan-first` switches to `/auto-full <brief-path>` — use when the "brief" is a freeform feature description rather than a pre-drafted plan. Passing `--force` skips preflight (concurrency cap) — use rarely and with intent.
 
 ```bash
-ARGS="$*"
+# Shell-portable token parse: awk does the word-splitting (bash splits unquoted
+# scalars in for-loops, zsh does not — never rely on ambient splitting). Flags
+# match only as whole tokens, so a brief path containing "--plan-first" or
+# "--force" as a substring is never corrupted.
 MODE="auto-implement"
-case "$ARGS" in *--plan-first*) MODE="auto-full" ;; esac
-# Strip flags + subcommand, leaving positional args
-REST="$(echo "$ARGS" | sed 's/--plan-first//g; s/--force//g' | awk '{for(i=2;i<=NF;i++) printf "%s ", $i}')"
-TARGET_NAME="$(echo "$REST" | awk '{print $1}')"
-BRIEF_PATH="$(echo "$REST" | awk '{for(i=2;i<=NF;i++) printf "%s ", $i}' | sed 's/ *$//')"
-TARGET_REF="$(echo "$FLEET_LIST" | awk -v n="$TARGET_NAME" '$1==n {print $2}')"
+case " $FLEET_ARGS " in *" --plan-first "*) MODE="auto-full" ;; esac
+CLEAN="$(echo "$FLEET_ARGS" | awk '{out=""; for(i=1;i<=NF;i++) if ($(i)!="--plan-first" && $(i)!="--force") out=out $(i) " "; print out}')"
+SUBCOMMAND="$( echo "$CLEAN" | awk '{print $(1)}')"
+TARGET_NAME="$(echo "$CLEAN" | awk '{print $(2)}')"
+BRIEF_PATH="$( echo "$CLEAN" | awk '{for(i=3;i<=NF;i++) printf "%s%s", $(i), (i<NF?" ":"")}')"
+TARGET_REF="$(echo "$FLEET_LIST" | awk -v n="$TARGET_NAME" '$(1)==n {print $(2)}')"
 if [ -z "$TARGET_REF" ]; then
-  echo "unknown workspace: $TARGET_NAME — known: $(echo "$FLEET_LIST" | awk '{print $1}' | tr '\n' ' ')"
+  echo "unknown workspace: $TARGET_NAME — known: $(echo "$FLEET_LIST" | awk '{print $(1)}' | tr '\n' ' ')"
   exit 1
 fi
 if [ -z "$BRIEF_PATH" ]; then
@@ -271,16 +286,29 @@ fi
 
 # Resolve pane surfaces in the target workspace (pane 1 = Claude, pane 2 = Codex)
 TREE="$(cmux tree --workspace "$TARGET_REF" 2>/dev/null)"
-CLAUDE_SURF="$(echo "$TREE" | awk '/├── pane|└── pane/{n++} n==1 && /surface surface:/{match($0, /surface:[0-9]+/); print substr($0, RSTART, RLENGTH); exit}')"
-CODEX_SURF="$( echo "$TREE" | awk '/├── pane|└── pane/{n++} n==2 && /surface surface:/{match($0, /surface:[0-9]+/); print substr($0, RSTART, RLENGTH); exit}')"
+CLAUDE_SURF="$(echo "$TREE" | awk '/├── pane|└── pane/{n++} n==1 && /surface surface:/{match($(0), /surface:[0-9]+/); print substr($(0), RSTART, RLENGTH); exit}')"
+CODEX_SURF="$( echo "$TREE" | awk '/├── pane|└── pane/{n++} n==2 && /surface surface:/{match($(0), /surface:[0-9]+/); print substr($(0), RSTART, RLENGTH); exit}')"
 
 if [ -z "$CLAUDE_SURF" ] || [ -z "$CODEX_SURF" ]; then
   echo "could not resolve both panes in $TARGET_NAME (claude=$CLAUDE_SURF, codex=$CODEX_SURF)"
   exit 1
 fi
 
+# Target busy-check: never /new a workspace whose Claude pane is actively
+# running (braille spinner) — that would destroy an in-flight loop. The
+# fleet-wide preflight cap below does NOT check the specific target.
+TARGET_TITLE="$(echo "$TREE" | awk '/├── pane|└── pane/{n++} n==1 && /surface surface:/{print; exit}' | sed -n 's/.*\[terminal\] "\([^"]*\)".*/\1/p')"
+TARGET_BUSY="$(python3 -c 'import sys
+s = sys.argv[1].lstrip()
+if s and 0x2800 <= ord(s[0]) <= 0x28FF: print("active")
+else: print("idle")' "$TARGET_TITLE" 2>/dev/null)"
+if [ "$TARGET_BUSY" = active ] && [ "$FLEET_FORCE" != true ]; then
+  echo "REJECTED: $TARGET_NAME's Claude pane is actively running — dispatching would clobber the in-flight loop. Wait, /fleet clear $TARGET_NAME deliberately, or pass --force."
+  exit 1
+fi
+
 # Preflight — concurrency cap, staged-file warning, index.lock warning.
-# Defined in step 2; aborts unless --force.
+# Defined in the Preflight section; aborts unless --force.
 fleet_preflight || exit 1
 
 echo "dispatching: $TARGET_NAME ($TARGET_REF)  claude=$CLAUDE_SURF  codex=$CODEX_SURF  mode=/$MODE"
@@ -310,15 +338,19 @@ echo "dispatched — watch $TARGET_NAME for progress, or run /fleet status later
 Auto-assign briefs to free workspaces. Finds workspaces whose Claude pane is idle (no spinner) AND whose latest archive entry either does not exist or has `verdict: APPROVE`. Assigns briefs in order.
 
 ```bash
-ARGS="$*"
+# Shell-portable token parse — awk splits (zsh doesn't split unquoted scalars),
+# flags match whole tokens only, brief paths are never mutated. First non-flag
+# token is the subcommand; the rest are briefs, one per line.
 MODE="auto-implement"
-case "$ARGS" in *--plan-first*) MODE="auto-full" ;; esac
-BRIEFS="$(echo "$ARGS" | sed 's/--plan-first//g; s/--force//g' | awk '{for(i=2;i<=NF;i++) printf "%s\n", $i}')"
+case " $FLEET_ARGS " in *" --plan-first "*) MODE="auto-full" ;; esac
+BRIEFS="$(echo "$FLEET_ARGS" | awk '{n=0; for(i=1;i<=NF;i++) if ($(i)!="--plan-first" && $(i)!="--force") {n++; if (n>1) print $(i)}}')"
 
 # Build list of free workspaces: Claude pane idle AND latest archive
 # missing OR verdict=APPROVE. We deliberately exclude REQUEST_CHANGES,
 # in-progress, and max-rounds-stop verdicts — those workspaces have
 # unresolved state that the user should look at before reusing.
+FREE_LIST="$(mktemp)"
+trap 'rm -f "$FREE_LIST"' EXIT
 echo "$FLEET_LIST" | while read -r name ref; do
   [ -z "$name" ] && continue
   TREE="$(cmux tree --workspace "$ref" 2>/dev/null)"
@@ -338,38 +370,37 @@ else: print("idle")' "$CLAUDE_TITLE" 2>/dev/null)"
     echo "$name"
     continue
   fi
-  VERDICT="$(grep -m1 '^verdict:' "$LATEST" | awk '{print $2}')"
-  STATUS="$( grep -m1 '^status:'  "$LATEST" | awk '{print $2}')"
-  if [ "$VERDICT" = APPROVE ] || [ "$STATUS" = complete ]; then
+  # verdict=APPROVE is the protocol's only completion signal (nothing ever
+  # writes status:complete — don't reintroduce checks for it).
+  VERDICT="$(grep -m1 '^verdict:' "$LATEST" | awk '{print $(2)}')"
+  if [ "$VERDICT" = APPROVE ]; then
     echo "$name"
   fi
-done > /tmp/_fleet_free.$$
+done > "$FREE_LIST"
 
-FREE_COUNT=$(wc -l < /tmp/_fleet_free.$$ | tr -d ' ')
+FREE_COUNT=$(wc -l < "$FREE_LIST" | tr -d ' ')
 BRIEF_COUNT=$(echo "$BRIEFS" | grep -c .)
 echo "free workspaces: $FREE_COUNT / briefs to dispatch: $BRIEF_COUNT / mode: /$MODE"
 
 if [ "$BRIEF_COUNT" -gt "$FREE_COUNT" ]; then
   echo "not enough free workspaces — clear some with /fleet clear <workspace> first, or run /fleet status"
-  cat /tmp/_fleet_free.$$
-  rm -f /tmp/_fleet_free.$$
+  cat "$FREE_LIST"
   exit 1
 fi
 
 # Report the assignment mapping before firing
-paste <(echo "$BRIEFS") <(cat /tmp/_fleet_free.$$) | head -"$BRIEF_COUNT"
-rm -f /tmp/_fleet_free.$$
+paste <(echo "$BRIEFS") <(cat "$FREE_LIST") | head -"$BRIEF_COUNT"
 ```
 
 After producing the assignment mapping, **do not fire automatically** — print the mapping and ask the user to confirm with explicit `/fleet dispatch <ws> <brief>` calls, OR with a single follow-up "yes fire all". Rationale: `dispatch-all` is high-blast-radius (multiple panes start churning at once); the confirmation step is cheap insurance against a typoed brief path.
 
-If the user confirms "fire all" / "yes" / "go", loop the paste output and invoke the dispatch block above for each pair in sequence (with ~2s sleep between dispatches so cmux has time to cycle).
+If the user confirms "fire all" / "yes" / "go", loop the paste output and invoke the dispatch block above for each pair in sequence (with ~2s sleep between dispatches so cmux has time to cycle). **The free-list above is a snapshot taken before the confirmation round-trip — a workspace can go busy in the window.** The dispatch block's target busy-check re-validates each workspace at fire time; when it rejects one, skip that pair, report it, and continue with the remaining pairs.
 
 ---
 
 ### `/fleet harvest`
 
-Identify workspaces ready for the next brief: Claude pane idle + latest archive message has `verdict: APPROVE` (or `status: complete`) + newer than the latest `to-claude/` or `to-codex/` pending message for that workspace.
+Identify workspaces ready for the next brief: Claude pane idle + latest archive message has `verdict: APPROVE` + newer than the latest `to-claude/` or `to-codex/` pending message for that workspace.
 
 ```bash
 echo "$FLEET_LIST" | while read -r name ref; do
@@ -387,11 +418,10 @@ else: print("idle")' "$CLAUDE_TITLE" 2>/dev/null)"
     echo "$name: idle, no archive (never dispatched or freshly cleared)"
     continue
   fi
-  VERDICT="$(grep -m1 '^verdict:' "$LATEST" | awk '{print $2}')"
-  STATUS="$( grep -m1 '^status:'  "$LATEST" | awk '{print $2}')"
-  PHASE="$(  grep -m1 '^phase:'   "$LATEST" | awk '{print $2}')"
-  WFLOW="$(  grep -m1 '^workflow:' "$LATEST" | awk '{print $2}')"
-  ROUND="$(  grep -m1 '^round:'   "$LATEST" | awk '{print $2}')"
+  VERDICT="$(grep -m1 '^verdict:' "$LATEST" | awk '{print $(2)}')"
+  PHASE="$(  grep -m1 '^phase:'   "$LATEST" | awk '{print $(2)}')"
+  WFLOW="$(  grep -m1 '^workflow:' "$LATEST" | awk '{print $(2)}')"
+  ROUND="$(  grep -m1 '^round:'   "$LATEST" | awk '{print $(2)}')"
   LATEST_MTIME=$(stat -f %m "$LATEST" 2>/dev/null || stat -c %Y "$LATEST" 2>/dev/null)
 
   # Pending check: if any to-claude/ or to-codex/ file for this workspace is
@@ -413,14 +443,12 @@ else: print("idle")' "$CLAUDE_TITLE" 2>/dev/null)"
     continue
   fi
 
-  # Accept either verdict=APPROVE or status=complete as "done and ready".
+  # verdict=APPROVE is the protocol's only completion signal (nothing ever
+  # writes status:complete — don't reintroduce checks for it).
   case "$VERDICT" in
     APPROVE) echo "$name: READY — $WFLOW/$PHASE approved at round $ROUND (archive: $(basename "$LATEST"))" ; continue ;;
   esac
-  case "$STATUS" in
-    complete) echo "$name: READY — $WFLOW/$PHASE complete at round $ROUND (archive: $(basename "$LATEST"))" ; continue ;;
-  esac
-  echo "$name: idle but not approved — last archive: $WFLOW/$PHASE r$ROUND verdict=${VERDICT:-none} status=${STATUS:-none}"
+  echo "$name: idle but not approved — last archive: $WFLOW/$PHASE r$ROUND verdict=${VERDICT:-none}"
 done
 ```
 
@@ -433,15 +461,16 @@ Report the ready list. If the user asks "fire next" with a brief path, invoke `/
 Reset a workspace's Claude + Codex panes with `/new`. Useful after harvesting or if a loop wedged and needs a hard reset. Does NOT touch `.comms/`; use `/clean-comms` for that.
 
 ```bash
-TARGET_NAME="$2"
-TARGET_REF="$(echo "$FLEET_LIST" | awk -v n="$TARGET_NAME" '$1==n {print $2}')"
+# Second token of the argument text is the workspace name (first is "clear").
+TARGET_NAME="$(echo "$FLEET_ARGS" | awk '{print $(2)}')"
+TARGET_REF="$(echo "$FLEET_LIST" | awk -v n="$TARGET_NAME" '$(1)==n {print $(2)}')"
 if [ -z "$TARGET_REF" ]; then
   echo "unknown workspace: $TARGET_NAME"
   exit 1
 fi
 TREE="$(cmux tree --workspace "$TARGET_REF" 2>/dev/null)"
-CLAUDE_SURF="$(echo "$TREE" | awk '/├── pane|└── pane/{n++} n==1 && /surface surface:/{match($0, /surface:[0-9]+/); print substr($0, RSTART, RLENGTH); exit}')"
-CODEX_SURF="$( echo "$TREE" | awk '/├── pane|└── pane/{n++} n==2 && /surface surface:/{match($0, /surface:[0-9]+/); print substr($0, RSTART, RLENGTH); exit}')"
+CLAUDE_SURF="$(echo "$TREE" | awk '/├── pane|└── pane/{n++} n==1 && /surface surface:/{match($(0), /surface:[0-9]+/); print substr($(0), RSTART, RLENGTH); exit}')"
+CODEX_SURF="$( echo "$TREE" | awk '/├── pane|└── pane/{n++} n==2 && /surface surface:/{match($(0), /surface:[0-9]+/); print substr($(0), RSTART, RLENGTH); exit}')"
 for SURF in "$CLAUDE_SURF" "$CODEX_SURF"; do
   [ -z "$SURF" ] && continue
   cmux send     --surface "$SURF" --workspace "$TARGET_REF" '/new' && sleep 0.4
@@ -477,5 +506,6 @@ Env:
 - **Concurrency cap defaults to 3.** This is a guard against shared-worktree pain (cross-staged commits, `index.lock` collisions) when multiple `<prefix>-N` workspaces operate on one on-disk repo. If each workspace has its own `git worktree add`, the cap is unnecessary — set `FLEET_MAX=99` or use `--force`. The Preflight section is the place to add project-specific resource locks (e.g. exclusive game-engine project files, headless-browser sessions, slow database fixtures).
 - **`/auto-implement` is the default** because the typical workflow drafts briefs (which ARE the plans) before firing. Use `--plan-first` for freeform tasks where the executing agent should draft its own plan first.
 - **No queue.** `/fleet` tracks current state but does not queue work. The user (or the agent in auto mode) decides what fires next based on `/fleet status` + `/fleet harvest` output.
-- **Safety on dispatch-all.** Reports the assignment mapping and asks for confirmation before firing multiple panes at once. Auto mode can confirm through it, but the step is intentional. `dispatch-all` also runs preflight per brief — if the cap kicks in mid-sequence, remaining briefs are rejected and the user decides whether to wait or `--force`.
+- **Safety on dispatch-all.** Reports the assignment mapping and asks for confirmation before firing multiple panes at once. Auto mode can confirm through it, but the step is intentional. `dispatch-all` also runs preflight + the per-target busy-check per brief at fire time — if the cap kicks in or a snapshotted-free workspace went busy mid-sequence, those briefs are rejected/skipped and the user decides whether to wait or `--force`.
+- **Argument substitution is load-bearing for editors.** Claude Code substitutes bare dollar-digit tokens (and the ARGUMENTS placeholder) in this file at render time. All awk field refs are written `$(0)`/`$(2)` and bash functions take `FLEET_*` named vars instead of positional params so rendered code stays valid. Keep that convention when editing.
 - **Completion detection is inference, not ground truth.** `/fleet` reads `cmux tree` titles + archive mtimes. If a loop wedges in a weird state (Claude responded but never sent to Codex; Codex approved but the file is still in `to-claude/`), `/fleet status` will show the symptoms but won't auto-diagnose. For wedged workspaces: manually inspect, then `/fleet clear <ws>` if needed.
