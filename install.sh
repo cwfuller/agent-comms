@@ -11,7 +11,14 @@ set -euo pipefail
 
 REPO_RAW_DEFAULT="https://raw.githubusercontent.com/cwfuller/agent-comms/main"
 REPO_RAW="${AGENT_COMMS_REPO_RAW:-$REPO_RAW_DEFAULT}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" 2>/dev/null)" && pwd 2>/dev/null || echo "")"
+# When piped (curl | bash) BASH_SOURCE is unset — keep SCRIPT_DIR empty so the
+# templates probe below falls through to remote download instead of misreading
+# an unrelated templates/ dir in the caller's cwd.
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  SCRIPT_DIR=""
+fi
 CLAUDE_COMMANDS_DIR="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
 CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md fleet.md"
@@ -226,20 +233,31 @@ init_project_state() {
   mkdir -p "$PROJECT_ROOT/.comms/archive"
   mkdir -p "$PROJECT_ROOT/.codex"
 
-  # Add .comms/ to .gitignore if not already present
+  # Add .comms/ (and the installer-managed Codex protocol note) to .gitignore.
+  # Whole-line match so substrings like "docs/.comms/notes" don't false-positive.
   if [ -f "$PROJECT_ROOT/.gitignore" ]; then
-    if ! grep -qF '.comms/' "$PROJECT_ROOT/.gitignore"; then
+    MISSING=""
+    grep -qxF '.comms/' "$PROJECT_ROOT/.gitignore" || MISSING=".comms/"
+    grep -qxF '.codex/AGENTS.md' "$PROJECT_ROOT/.gitignore" || MISSING="$MISSING .codex/AGENTS.md"
+    if [ -n "$MISSING" ]; then
+      # Guard against a missing trailing newline swallowing our first appended line.
+      [ -n "$(tail -c1 "$PROJECT_ROOT/.gitignore")" ] && echo "" >> "$PROJECT_ROOT/.gitignore"
       echo "" >> "$PROJECT_ROOT/.gitignore"
       echo "# Local agent communication" >> "$PROJECT_ROOT/.gitignore"
-      echo ".comms/" >> "$PROJECT_ROOT/.gitignore"
-      echo "  added .comms/ to .gitignore"
+      for entry in $MISSING; do
+        echo "$entry" >> "$PROJECT_ROOT/.gitignore"
+      done
+      echo "  added to .gitignore:$( printf ' %s' $MISSING )"
     else
-      echo "  .gitignore already has .comms/"
+      echo "  .gitignore already covers .comms/ and .codex/AGENTS.md"
     fi
   else
-    echo "# Local agent communication" > "$PROJECT_ROOT/.gitignore"
-    echo ".comms/" >> "$PROJECT_ROOT/.gitignore"
-    echo "  created .gitignore with .comms/"
+    {
+      echo "# Local agent communication"
+      echo ".comms/"
+      echo ".codex/AGENTS.md"
+    } > "$PROJECT_ROOT/.gitignore"
+    echo "  created .gitignore with .comms/ and .codex/AGENTS.md"
   fi
 
   # Add protocol section to .codex/AGENTS.md if not already present
@@ -307,10 +325,18 @@ else
   fi
 fi
 
+note_local_pin() {
+  echo ""
+  echo "  note: project-local copies are pinned — they shadow any global install and"
+  echo "  do NOT pick up global updates. Re-run with --scope=local to refresh them, or"
+  echo "  delete .claude/commands/ + .agents/skills/ copies to fall back to global."
+}
+
 case "$SCOPE" in
   local)
     install_local_assets
     init_project_state
+    note_local_pin
     ;;
   global)
     install_global_assets
