@@ -40,7 +40,7 @@ Send a structured handoff message to Codex via `.comms/to-codex/` and auto-deliv
    ```
 
 4. Write a message file to `$COMMS_ROOT/to-codex/` with this format:
-   - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_<short-slug>.md`
+   - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_<short-slug>-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions)
    - Content structure:
 
 ```markdown
@@ -80,15 +80,16 @@ cwd: <current working directory from pwd — always include>
    ```bash
    if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
      # Pane-aware Codex surface picker. Prefers a [terminal] surface in a pane
+     # (awk fields are written $(0)/$(N) — bare dollar-digit tokens in command markdown are clobbered by slash-command argument substitution)
      # OTHER than the one marked "◀ here", so sibling tabs in Claude's own pane
      # don't get picked. Falls back to any other terminal surface for single-pane
      # multi-tab layouts where Claude and Codex share a pane.
      CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
        /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
        /surface:.*\[terminal\]/ {
-         if (match($0, /surface:[0-9]+/)) {
-           n++; surf[n]=substr($0,RSTART,RLENGTH); pane[n]=cur_pane
-           here[n] = ($0 ~ /◀ here/) ? 1 : 0
+         if (match($(0), /surface:[0-9]+/)) {
+           n++; surf[n]=substr($(0),RSTART,RLENGTH); pane[n]=cur_pane
+           here[n] = ($(0) ~ /◀ here/) ? 1 : 0
            if (here[n]) here_pane=cur_pane
          }
        }

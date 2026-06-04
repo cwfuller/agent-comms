@@ -29,10 +29,10 @@ Write a structured message to Claude Code via `.comms/to-claude/` and auto-deliv
    ```
 
 4. Create a timestamped markdown file in `$COMMS_ROOT/to-claude/`:
-   - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_<short-slug>.md`
+   - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_<short-slug>-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions)
    - Use the current timestamp
 
-4. Use this format. **If the incoming message had `workflow` fields, you MUST copy them into your reply:**
+5. Use this format. **If the incoming message had `workflow` fields, you MUST copy them into your reply:**
 
    In autonomous review loops:
    - Default to `verdict: APPROVE`
@@ -51,7 +51,7 @@ type: review-feedback | response | question | request
 from: codex
 timestamp: <ISO 8601>
 branch: <current branch>
-workspace: <workspace name from step 2>
+workspace: <workspace name from step 3>
 cwd: <current working directory>
 in-reply-to: <filename of the message you're responding to, if any>
 workflow: <copy from incoming message if present — auto-plan | auto-implement | auto-full>
@@ -77,19 +77,20 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
 <Any questions for Claude to address>
 ```
 
-5. **Write safely.** When writing the message file, use a heredoc with quoted delimiter (`<<'EOF'`) or write via a tool that does not interpolate shell variables or backticks in the body. Never embed the message body inside an interpolated shell string — Markdown backticks will be evaluated.
+6. **Write safely.** When writing the message file, use a heredoc with quoted delimiter (`<<'EOF'`) or write via a tool that does not interpolate shell variables or backticks in the body. Never embed the message body inside an interpolated shell string — Markdown backticks will be evaluated.
 
-6. **Verify before delivering.** After writing the file, read it back and confirm:
+7. **Verify before delivering.** After writing the file, read it back and confirm:
    - The `---` frontmatter delimiters are intact
    - Required fields exist: `type`, `from`, `timestamp`, `workspace`
    - If autonomous: `workflow`, `phase`, `round`, `max-rounds`, `verdict` are present
    - The body is not empty or truncated
    If verification fails, fix the file before delivering. Do not deliver a malformed message.
 
-7. **Auto-deliver via cmux when available.** After verification passes, find Claude's surface and send the read command. If `cmux` or `CMUX_WORKSPACE_ID` is unavailable, skip auto-delivery and tell the user the verified file was written for manual pickup:
+8. **Auto-deliver via cmux when available.** After verification passes, find Claude's surface and send the read command. If `cmux` or `CMUX_WORKSPACE_ID` is unavailable, skip auto-delivery and tell the user the verified file was written for manual pickup:
    ```bash
    if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
      # Pane-aware picker — exclude the entire pane containing "◀ here", not just that one surface.
+     # (awk fields are written $(0)/$(N) — bare dollar-digit tokens in command markdown are clobbered by slash-command argument substitution)
      # The original "grep -v '◀ here' | head -1" filter only excluded the current surface, so
      # in layouts where Codex's pane has more than one tab, sibling tabs would get picked instead
      # of Claude's pane. This excludes by pane, then falls back to any other terminal surface
@@ -97,9 +98,9 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
      CLAUDE_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
        /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
        /surface:.*\[terminal\]/ {
-         if (match($0, /surface:[0-9]+/)) {
-           n++; surf[n]=substr($0,RSTART,RLENGTH); pane[n]=cur_pane
-           here[n] = ($0 ~ /◀ here/) ? 1 : 0
+         if (match($(0), /surface:[0-9]+/)) {
+           n++; surf[n]=substr($(0),RSTART,RLENGTH); pane[n]=cur_pane
+           here[n] = ($(0) ~ /◀ here/) ? 1 : 0
            if (here[n]) here_pane=cur_pane
          }
        }
@@ -118,6 +119,6 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
    fi
    ```
 
-8. Confirm to the user that the message was verified and delivery attempted.
+9. Confirm to the user that the message was verified and delivery attempted.
 
 If the user provides specific instructions, incorporate them into the appropriate section.

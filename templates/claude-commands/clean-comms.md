@@ -32,11 +32,11 @@ Delete messages from `.comms/` directories.
    ```
 
 3. Based on the argument provided (use `$COMMS_ROOT` for all paths):
-   - **No argument or "workspace"** — Delete all messages for the current workspace (files starting with the workspace name) from both `to-codex/` and `to-claude/`, plus `archive/`
-   - **"all"** — Delete ALL messages from `to-codex/`, `to-claude/`, and `archive/`
+   - **No argument or "workspace"** — Delete this workspace's messages (files starting with the workspace name) from **your inbox (`to-claude/`) and `archive/` only**. Do NOT touch `to-codex/` — that's Codex's inbox and may hold messages Codex hasn't read yet; deleting those requires explicit `all`.
+   - **"all"** — Delete ALL messages from `to-codex/`, `to-claude/`, and `archive/` (both inboxes — this is the only mode that deletes the other agent's unread mail)
    - **"archive"** — Delete only archived messages in `archive/`
    - **A specific filename** — Delete just that file
 
-3. Show what will be deleted and confirm with the user before removing.
+4. Show what will be deleted and confirm with the user before removing.
 
-4. Report how many files were cleaned up.
+5. Report how many files were cleaned up.

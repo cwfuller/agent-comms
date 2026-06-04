@@ -46,7 +46,16 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
    find "$COMMS_ROOT/to-claude" -maxdepth 1 -type f -name "${WORKSPACE}_*" | sort -r
    ```
-   If no files are returned, tell the user there are no messages from Codex for this workspace.
+   If no files are returned, check the archive before declaring silence — a late delivery
+   nudge for an already-processed reply is common (the injected `/read-from-codex` queues in
+   Claude's input box while a turn is running and submits minutes later):
+   ```bash
+   LATEST_ARCHIVED="$(find "$COMMS_ROOT/archive" -maxdepth 1 -type f -name "${WORKSPACE}_*" 2>/dev/null | sort | tail -1)"
+   [ -n "$LATEST_ARCHIVED" ] && echo "no pending messages; latest archived: $(basename "$LATEST_ARCHIVED")"
+   ```
+   If the latest archived message is recent, tell the user: "No pending messages — [filename]
+   was already processed (likely a late delivery nudge for it; harmless)." Otherwise tell the
+   user there are no messages from Codex for this workspace.
 
 4. Read the most recent matching message (or all if user asks).
 
@@ -87,6 +96,7 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 1. **If verdict is `APPROVE`:**
    - Treat `APPROVE` as ship-ready. Codex may still include advisory notes; those do not reopen the loop.
    - If `workflow: auto-full` and `phase: plan` → **Transition to implement phase:**
+     - **Archive the approval message first** (idempotent move, your inbox only — same as the standard flow). Archiving before implementing prevents a re-triggered `/read-from-codex` from re-reading the stale approval and double-firing the implement phase.
      - Notify user: "Plan approved after N rounds. Starting implementation..."
      - Implement the approved plan
      - Send to Codex with updated frontmatter: `phase: implement`, `round: 1`, same `workflow` and `max-rounds`
@@ -103,7 +113,7 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    - For plan workflows: refine the plan based on findings
    - For implement workflows: fix the code based on findings
    - **Send back to Codex** to `$COMMS_ROOT/to-codex/`:
-     - Filename: `${WORKSPACE}_YYYY-MM-DDTHH-MM-SS_round-N.md` (use the workspace name from step 2 and current round number)
+     - Filename: `${WORKSPACE}_YYYY-MM-DDTHH-MM-SS_round-N-$RANDOM.md` (workspace name from step 2; N is the incremented round number; the `$RANDOM` suffix prevents same-second filename collisions)
      - Increment `round` by 1
      - Keep same `workflow`, `phase`, `max-rounds`
      - **Keep the message body focused on stable context, not fix narration.** Do NOT narrate what you fixed per finding — that anchors the reviewer on verification instead of re-review. Instead include:
@@ -116,13 +126,14 @@ Read and act on messages from Codex in `.comms/to-claude/`.
      ```bash
      if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
        # Pane-aware picker — exclude the entire pane containing "◀ here", not just that one surface.
+       # (awk fields are written $(0)/$(N) — bare dollar-digit tokens in command markdown are clobbered by slash-command argument substitution)
        # Falls back to any other terminal surface for single-pane multi-tab layouts.
        CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
          /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
          /surface:.*\[terminal\]/ {
-           if (match($0, /surface:[0-9]+/)) {
-             n++; surf[n]=substr($0,RSTART,RLENGTH); pane[n]=cur_pane
-             here[n] = ($0 ~ /◀ here/) ? 1 : 0
+           if (match($(0), /surface:[0-9]+/)) {
+             n++; surf[n]=substr($(0),RSTART,RLENGTH); pane[n]=cur_pane
+             here[n] = ($(0) ~ /◀ here/) ? 1 : 0
              if (here[n]) here_pane=cur_pane
            }
          }

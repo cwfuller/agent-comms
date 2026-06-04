@@ -45,7 +45,7 @@ Use this when you want Codex's judgment on a design choice, an open question, or
    - `## Grounding` — only if `--with-diff` or `--with-files` is set, or you're attaching specific evidence (command output, error messages). Inline as fenced blocks; don't paste full file contents — list paths.
 
 6. Write the message file to `$COMMS_ROOT/to-codex/`:
-   - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_ask-<slug>.md`
+   - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_ask-<slug>-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions)
    - Frontmatter:
 
 ```markdown
@@ -71,13 +71,14 @@ cwd: <current working directory from pwd>
    ```bash
    if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
      # Pane-aware picker — exclude the entire pane containing "◀ here", not just that one surface.
+     # (awk fields are written $(0)/$(N) — bare dollar-digit tokens in command markdown are clobbered by slash-command argument substitution)
      # Falls back to any other terminal surface for single-pane multi-tab layouts.
      CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
        /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
        /surface:.*\[terminal\]/ {
-         if (match($0, /surface:[0-9]+/)) {
-           n++; surf[n]=substr($0,RSTART,RLENGTH); pane[n]=cur_pane
-           here[n] = ($0 ~ /◀ here/) ? 1 : 0
+         if (match($(0), /surface:[0-9]+/)) {
+           n++; surf[n]=substr($(0),RSTART,RLENGTH); pane[n]=cur_pane
+           here[n] = ($(0) ~ /◀ here/) ? 1 : 0
            if (here[n]) here_pane=cur_pane
          }
        }
