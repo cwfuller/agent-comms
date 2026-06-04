@@ -1,0 +1,160 @@
+# agent-comms roadmap
+
+Backlog from the 2026-06-04 multi-agent audit (64 agents, 56 raw findings → 49 confirmed
+after adversarial verification) plus field reports from three agents running the loops
+daily. Items are grouped into sequenced PRs. Check items off as they land.
+
+## PR 1 — verified bug fixes (small, independent)
+
+**Status: implemented 2026-06-04, Codex-approved (auto-implement loop, 2 rounds).**
+
+- [x] **read-from-codex.md** — APPROVE + `auto-full`/plan→implement branch never archives
+  the consumed approval message; a re-triggered `/read-from-codex` can re-read it and
+  double-fire the implement phase. Add the idempotent archive to the transition branch.
+- [x] **install.sh:14** — `curl | bash` leaves `${BASH_SOURCE[0]}` unbound; the swallowed
+  error makes `SCRIPT_DIR` resolve to **cwd**, so a cwd containing `templates/` is
+  misdetected as a local checkout and foreign files get installed (reproduced). Guard with
+  `${BASH_SOURCE[0]:-}`. Also silences the `set -u` stderr leak on every piped run.
+- [x] **install.sh** — `local` scope installs shadowing files but never warns (excluded
+  from `warn_local_shadowing` *and* missing from the `local)` dispatch branch). Print a
+  dedicated "these now shadow any global install" note.
+- [x] **install.sh** — gitignore robustness: append can swallow the separator when the
+  existing `.gitignore` lacks a trailing newline; `grep -qF '.comms/'` false-matches
+  substrings (use line-anchored match). Also gitignore `.codex/AGENTS.md` boilerplate.
+- [x] **fleet.md dispatch** — never checks the *named* target's own pane state before
+  `/new`; below `FLEET_MAX` it clobbers a running loop. Classify the target's Claude pane
+  and abort if active unless `--force`.
+- [x] **fleet.md dispatch-all** — free-list is computed before user confirmation and never
+  re-validated at fire time (TOCTOU). Re-run the spinner check per-fire; skip+report
+  targets no longer idle.
+- [x] **fleet.md** — fresh-shell contract: step 2 claims `fleet_preflight` is defined in
+  shared-vars but it lives in its own section; dispatch/harvest/clear consume `FLEET_LIST`
+  without rebuilding it. Make every block self-contained or move definitions where claimed.
+- [x] **fleet.md** — `/tmp/_fleet_free.$$` → `mktemp` + trap (match `fleet_preflight`'s
+  existing pattern); orphaned on unhandled abort today.
+- [x] **fleet.md** — `sed 's/--plan-first//g; s/--force//g'` corrupts brief paths containing
+  those substrings and the `case *--plan-first*` substring-match flips mode; parse flags as
+  whole tokens (both dispatch and dispatch-all).
+- [x] **fleet.md** — `sort` → `sort -V` so `ws-10` doesn't precede `ws-2` in status/
+  dispatch-all assignment tables.
+- [x] **fleet.md** — remove dead `status: complete` branches (dispatch-all, harvest, prose):
+  nothing in the protocol ever writes it; `verdict: APPROVE` is the only real done-signal.
+  (Protocol v2's `state.json` supersedes the idea properly.)
+- [x] **clean-comms.md** — no-arg default deletes the *other agent's unread inbox* and the
+  shared archive. Default should clean own inbox + archive only; require explicit `all`
+  for cross-inbox deletion, with the existing confirm step.
+- [x] **send-to-claude/SKILL.md** — duplicate step "4" numbering; "workspace name from
+  step 2" points at the wrong step.
+- [x] **send templates** — timestamp-second filename collisions under rapid sends: add a
+  short random suffix to the filename convention.
+- [x] **README** — document the **vim-mode requirement** (Codex→Claude delivery types `i`
+  before the command — breaks without vim mode), **python3** requirement for `/fleet`,
+  fix the reply `type` enum (`review-feedback`), document `/clean-comms` args and its
+  workspace-scoped default.
+- [x] **ALL templates — `$N` argument-substitution corruption** *(discovered live while
+  dogfooding `/auto-implement` on this repo)*: Claude Code substitutes bare `$0`–`$9` and
+  `$ARGUMENTS` in command markdown at render time (`$0` = first arg word), and **no escape
+  mechanism exists** (confirmed against official docs). Every embedded awk `$0`/`$2` and
+  bash `"$*"`/`"$2"` is corrupted whenever a command is invoked with arguments — the
+  rendered awk picker silently returns no surface, which is a likely root cause of the
+  field-reported "delivery silently fails / Codex is slow" symptom. Fix: awk fields
+  written as `$(0)`/`$(2)` (same semantics, survives substitution); fleet captures args
+  via the documented `$ARGUMENTS` token and passes function inputs through named
+  `FLEET_*` vars instead of positional params. PR 2 eliminates the class entirely by
+  moving code into installed script files. Consider filing an upstream Claude Code issue
+  requesting an escape syntax.
+
+## PR 2 — shared comms helper (the token-efficiency project)
+
+The workspace-resolution block (~23 lines) appears **9×** across the templates (twice in
+`read-from-codex.md` alone); the surface-picker/delivery block (~25 lines) appears **7×**.
+These are LLM prompt files: every duplicated line is re-tokenized on every command
+invocation, every round, every workspace. Drift has already happened once (the Codex-side
+skills still run the older, looser workspace grep with no sanity guard).
+
+- [ ] Ship installed helper script(s) (e.g. `~/.claude/agent-comms/comms.sh`) with
+  subcommands: `root`, `workspace`, `deliver claude|codex`, `write` (validate frontmatter,
+  refuse malformed), `archive <file>`, `status`.
+- [ ] Port the **hardened** workspace block (cmux-first, strict
+  `grep -E 'workspace workspace:[0-9]+ "'`, main/master sanity warning) into the helper so
+  the Claude and Codex sides provably cannot drift.
+- [ ] Shrink every template to one-line helper calls. Targets: auto-* commands ~105 → ~55
+  lines each; `read-from-codex.md` 151 → ~90; `fleet.md` 481 → <150 by moving subcommand
+  bash into installed scripts.
+- [ ] `install.sh` installs helpers for global and local scopes; `.agents/skills` and
+  `~/.codex/skills` reference the same helper.
+- [ ] Atomicity for free: `comms.sh reply --in <file> --deliver --archive` refuses to
+  archive unless the outbound reply was written and validated (the interrupted-turn
+  corruption two Codex reviewers hit in the field).
+
+Token notes beyond the extraction:
+- `read-from-codex.md` round messages: keep "stable context, not fix narration" (it's the
+  design's best idea) but cap the prior-findings bundle at the latest round only (already
+  the rule — enforce it) and reference plan *files* by path instead of re-embedding full
+  plan text when the plan lives in-repo.
+- `fleet.md` is loaded in full for `/fleet help` — cheap win: helper script prints usage.
+
+## PR 3 — protocol v2 (from the field reports + audit)
+
+- [ ] **Threading:** `message_id` + `thread:` (feature slug) + `in-reply-to` in *both*
+  directions; readers filter on thread. Fixes the live two-agents-one-workspace collision
+  (an agent can consume and archive the other's review round today).
+- [ ] **State:** `.comms/state/<workspace>_<thread>.json` (workflow, phase, round,
+  awaiting-since, last-delivered) — survives compaction/restart, gives `max-rounds` ground
+  truth (today a dropped `round:` field defeats the cap), gives `/fleet` real state
+  instead of pane-title inference.
+- [ ] **Delivery ack + liveness:** delivery is fire-and-forget keystrokes; a dropped
+  keystroke presents as "Codex is slow" and stalls the loop silently (top audit + field
+  finding). Write a `.delivered` marker after nudging; on next wake, if no reply matching
+  (thread, round) within a bounded window, escalate to the user with re-delivery
+  instructions.
+- [ ] **Error lane:** `type: error` + retry semantics. Today `read-from-codex.md` says
+  "send an error reply back to Codex" but no such message type exists; reviewer-side
+  failure (refusal, crash, policy false-positive) has no protocol lane.
+- [ ] **Advisory carry-over:** APPROVE + advisories terminates the loop and the advisories
+  evaporate; append un-actioned advisories to a tracked `docs/advisories.md` (or friction
+  log) on loop close.
+- [ ] **Meta/process-feedback channel:** loop messages carry a standing `## Meta` section
+  asking the reviewer to flag friction with the comms process *itself* (delivery, archive,
+  message shape, round semantics) separately from code findings; meta feedback never gates
+  the verdict and gets appended to the friction log / this roadmap on loop close. (Requested
+  by user 2026-06-04; first used in the PR1 review loop, round 2.)
+
+## Friction log (meta-channel feedback + live-loop observations)
+
+- *2026-06-04, PR1 loop r2 (Codex):* stable-context message shape endorsed; remaining
+  friction is that validating prompt-embedded shell requires manually extracting and
+  re-running snippets — reviewer-dependent. PR 2's shared helper + a small test harness
+  makes shell-portability checks repeatable. → folded into PR 2 scope.
+- *2026-06-04, "phantom /read-from-codex" explained (seen in another workspace and this repo's
+  PR1 loop):* the delivery nudge is keystroke injection into Claude's INPUT BOX — if Claude
+  is mid-turn, the injected command queues and only submits when the current turn ends,
+  often minutes later. Meanwhile a file-watcher (or manual read) already consumed the reply,
+  so the late nudge fires `/read-from-codex` against an empty inbox. It LOOKS like a
+  premature/cross-session trigger relative to Codex's visible state; it's actually a stale
+  nudge from the PREVIOUS round. Benign but confusing. Mitigations: empty-inbox handler now
+  reports the latest archived message so the user sees "already processed" instead of "no
+  messages" (shipped post-PR1); full fix is PR 3 reconciliation (state.json + in-reply-to).
+- *2026-06-04, PR1 loop (observed):* argument-less invocation renders bare dollar-zero as
+  EMPTY (not left literal) — the old installed read-from-codex rendered `match(, ...)`,
+  invalid awk. The substitution corruption class affects no-arg invocations too.
+- [ ] **Verdict normalization:** trim/case-normalize `verdict:` parsing; exact-string
+  `APPROVE` match is fragile to phrasing drift.
+
+## Explicitly considered and rejected (audit refuted — don't re-litigate without new evidence)
+
+- Codex-side loose workspace grep producing a *currently* different name (verified
+  identical on current cmux output; it's a drift risk → solved structurally by PR 2).
+- Archive mtime/freshness misclassification in fleet status; "no exit from stale state";
+  workspace-death liveness gaps (mitigated by existing design).
+- `protocol-version` frontmatter field (speculative until PR 3 changes the format — revisit then).
+- Replacing prose verdict/findings with a structured machine block (PR 2's validator gets
+  most of the value without changing the message shape).
+- README `../agent-comms/install.sh` path (correct for the documented layout).
+
+## Field-report credits
+
+PR 3 items originate from in-the-field reflections by the agents running these loops
+(thread scoping, reply wake-up, state.json, advisory evaporation, picker fragility,
+reviewer-failure lane) and two Codex reviewers (comms CLI, delivery acks, schema
+validation, atomic reply→deliver→archive, message ids, stale-inbound reconciliation).
