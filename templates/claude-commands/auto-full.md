@@ -6,41 +6,20 @@ Full autonomous cycle: plan+review until approved, then implement+review until a
    - The argument text is the task/feature description
    - Default max rounds: 10 per phase. User can specify like "/auto-full 3 build feature X" for 3 rounds per phase.
 
-2. **Resolve the comms root** to the main repo (not a worktree):
+2. **Resolve the shared helper** — the single source of truth for comms root, workspace name, validation, delivery, and archiving. Local pin wins over global:
    ```bash
-   COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
+   COMMS_SH="$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || COMMS_SH="$HOME/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || echo "warning: agent-comms helpers not installed — re-run install.sh (global or local scope)" >&2
+   COMMS_ROOT="$("$COMMS_SH" root)"
+   WORKSPACE="$("$COMMS_SH" workspace)"
+   echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE"
    ```
 
-3. **Get workspace name.** Run this block verbatim — cmux first, git branch second, repo dir last. Dropping the cmux lookup silently falls back to a branch name like `main` and corrupts filenames that other agents filter on:
-   ```bash
-   # Precedence: cmux workspace → git branch → repo dir.
-   # Keep the cmux block; other agents' filename filters depend on it.
-   WORKSPACE=""
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null \
-       | grep -E 'workspace workspace:[0-9]+ "' \
-       | head -1 \
-       | sed 's/.*"\([^"]*\)".*/\1/' \
-       | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-   fi
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   # Sanity check: under cmux the workspace should not be a generic branch name.
-   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
-     case "$WORKSPACE" in
-       main|master|trunk|develop)
-         echo "warning: cmux is active but workspace resolved to '$WORKSPACE' — verify the cmux tree grep/sed still matches the tool's output format" >&2
-         ;;
-     esac
-   fi
-   echo "WORKSPACE=$WORKSPACE"
-   ```
-
-4. **Start with the plan phase.** This works exactly like `/auto-plan` but with `workflow: auto-full`:
+3. **Start with the plan phase.** This works exactly like `/auto-plan` but with `workflow: auto-full`:
    - Create the plan
-   - Send to Codex with:
-   - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-full-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions) (workspace name from step 3)
-   - Use this frontmatter:
+   - Write the message to `$COMMS_ROOT/to-codex/` with filename `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-full-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions); use a quoted heredoc (`<<'EOF'`) or a non-interpolating tool
+   - Use this frontmatter and body:
 
 ```markdown
 ---
@@ -66,39 +45,18 @@ status: in-progress
 ## Review focus
 Review this plan for completeness, architecture decisions, risks, and missed edge cases.
 
+## Meta — process feedback requested (standing section)
+Separate from plan findings: flag any friction with the comms process itself (delivery, archive sequencing, message shape, round semantics) under a `### Process` heading. Process feedback never gates the verdict.
+
 ## Context
 This is an autonomous full cycle (plan phase, round 1 of <N>). After the plan is approved, implementation will begin automatically. Reply with findings using the standard verdict format.
 ```
 
-5. **Auto-deliver via cmux when available.** If `cmux` or `CMUX_WORKSPACE_ID` is unavailable, skip delivery and tell the user the message was written for manual pickup:
+4. **Validate and deliver** — `send` refuses malformed messages and degrades to manual pickup without cmux:
    ```bash
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     # Pane-aware picker — exclude the entire pane containing "◀ here", not just that one surface.
-     # (awk fields are written $(0)/$(N) — bare dollar-digit tokens in command markdown are clobbered by slash-command argument substitution)
-     # Falls back to any other terminal surface for single-pane multi-tab layouts.
-     CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
-       /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
-       /surface:.*\[terminal\]/ {
-         if (match($(0), /surface:[0-9]+/)) {
-           n++; surf[n]=substr($(0),RSTART,RLENGTH); pane[n]=cur_pane
-           here[n] = ($(0) ~ /◀ here/) ? 1 : 0
-           if (here[n]) here_pane=cur_pane
-         }
-       }
-       END {
-         for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { print surf[i]; exit }
-         for (i=1;i<=n;i++) if (!here[i]) { print surf[i]; exit }
-       }')
-     if [ -n "$CODEX_SURFACE" ]; then
-       cmux send --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
-     else
-       echo "warning: could not find a Codex surface; message written for manual pickup"
-     fi
-   else
-     echo "warning: cmux not available; message written for manual pickup"
-   fi
+   "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
 
-6. **Notify user:** "Plan created and sent to Codex for autonomous review (plan phase, round 1 of N). Full cycle: plan→approve→implement→approve."
+5. **Notify user:** "Plan created and sent to Codex for autonomous review (plan phase, round 1 of N). Full cycle: plan→approve→implement→approve."
 
 **Note:** The phase transition (plan→implement) happens automatically in `/read-from-codex` when it receives an APPROVE verdict during the plan phase of an `auto-full` workflow.

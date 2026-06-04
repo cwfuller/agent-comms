@@ -11,46 +11,31 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
 
 ## Instructions
 
-1. **Resolve the comms root** to the main repo (not a worktree):
+1. **Resolve the shared helper** — the same script Claude's commands use, so both sides derive identical workspace names and comms paths. Local pin wins over global:
    ```bash
-   COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
+   COMMS_SH="$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || COMMS_SH="$HOME/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || echo "warning: agent-comms helpers not installed — re-run install.sh (global or local scope)" >&2
+   COMMS_ROOT="$("$COMMS_SH" root)"
    ```
 
-2. **Get the workspace name** for filtering. Prefer the active `cmux` workspace when available; otherwise fall back to the current branch name, then the repo name:
+2. **List pending messages** for this workspace, newest first:
    ```bash
-   WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     CMUX_WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'workspace:' | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-     [ -n "$CMUX_WORKSPACE" ] && WORKSPACE="$CMUX_WORKSPACE"
-   fi
+   "$COMMS_SH" list --as codex
    ```
+   On an empty inbox the helper exits non-zero and reports the latest archived message on stderr. If the latest archived message is recent, tell the user: "No pending messages — [filename] was already processed (likely a late delivery nudge; harmless)." Otherwise say there are no messages from Claude for this workspace.
 
-3. **List matching messages** using this exact command sequence:
+3. Read the most recent matching message (or all if user asks).
+
+4. **Validate the message:**
    ```bash
-   COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
-   WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     CMUX_WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | grep 'workspace:' | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-     [ -n "$CMUX_WORKSPACE" ] && WORKSPACE="$CMUX_WORKSPACE"
-   fi
-   find "$COMMS_ROOT/to-codex" -maxdepth 1 -type f -name "${WORKSPACE}_*" | sort -r
+   "$COMMS_SH" validate "<message file>"
    ```
-   If no files are returned, tell the user there are no messages from Claude for this workspace.
+   Checks frontmatter delimiters, required fields (`type`, `from`, `timestamp`), workflow fields (`phase`, `round`, `max-rounds`), and a non-empty body. If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Claude: [reasons]. File: [filename]". In autonomous mode, send an error reply back to Claude requesting a clean resend.
 
-4. Read the most recent matching message (or all if user asks).
+5. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or reviewing any files. This ensures you're looking at the correct worktree branch.
 
-5. **Validate the message.** Before acting on it, check:
-   - The file starts with `---` and has a closing `---` (valid frontmatter)
-   - Required fields are present: `type`, `from`, `timestamp`
-   - If `workflow` is present: `phase`, `round`, `max-rounds` must also be present
-   - The body below frontmatter is not empty
-   If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Claude: [describe what's wrong]. File: [filename]". In autonomous mode, send an error reply back to Claude requesting a clean resend.
-
-6. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or reviewing any files. This ensures you're looking at the correct worktree branch.
-
-7. **Check for autonomous workflow mode.** Parse the `workflow` field from frontmatter. If it exists, follow the autonomous rules below. If not, follow the standard flow.
+6. **Check for autonomous workflow mode.** Parse the `workflow` field from frontmatter. If it exists, follow the autonomous rules below. If not, follow the standard flow.
 
 ---
 
@@ -61,11 +46,9 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
    - **type: response** — Claude addressed your previous feedback. Check the fixes, then do a fresh scoped re-review.
    - **type: question** — Claude is asking for input (sent via `/ask-codex`). Answer based on codebase analysis and the `## Current Thinking` section. Reply with `type: response` and no `verdict`. Body: `## Summary` + `## Codex Take`. Skip review framing — this is a one-off consult, not a review.
    - **type: ping** — Simple connectivity test. Respond with an acknowledgment.
-2. **Auto-archive — your inbox only.** Move only the message(s) you just read from `$COMMS_ROOT/to-codex/` to `$COMMS_ROOT/archive/` (create if needed). **Do not touch `$COMMS_ROOT/to-claude/`** — that's Claude's inbox; Claude archives its own side. Use an idempotent move so an already-archived file is a no-op rather than an error:
+2. **Auto-archive — your inbox only** (the helper refuses files outside `to-codex/` and is idempotent):
    ```bash
-   for f in <files-you-just-read>; do
-     [ -f "$f" ] && mv "$f" "$COMMS_ROOT/archive/" || true
-   done
+   "$COMMS_SH" archive --as codex <files-you-just-read>
    ```
 3. After completing the review or task, use `$send-to-claude` to write your findings back.
 
@@ -126,13 +109,14 @@ Keep `APPROVE` and include comments when findings are advisory, such as:
 - Style or preference nits
 - Nice-to-have tests on otherwise low-risk changes
 
+#### Process feedback (meta channel)
+If the incoming message carries a `## Meta` section requesting process feedback: report friction with the comms process itself (delivery, archive sequencing, message shape, round semantics) under a `### Process` heading in your reply's Findings. Process feedback never gates the verdict — do not REQUEST_CHANGES over it.
+
 **After reviewing, determine your verdict:**
 - `APPROVE` — Ship-ready. Advisory comments may still be present.
 - `REQUEST_CHANGES` — Blocking issues must be addressed before approval.
 
-**Send your review immediately via `$send-to-claude`.** The message MUST preserve the workflow metadata. Use `$send-to-claude` which will copy `workflow`, `phase`, `round`, `max-rounds` into your reply frontmatter along with your `verdict`.
-
-**Auto-archive the incoming message** from `$COMMS_ROOT/to-codex/` to `$COMMS_ROOT/archive/` (create if needed). Your inbox only — do not touch `to-claude/`. Use the idempotent move from the standard flow above.
+**Send your review immediately via `$send-to-claude`.** The message MUST preserve the workflow metadata (`workflow`, `phase`, `round`, `max-rounds`) and add your `verdict`. `$send-to-claude`'s atomic send archives the incoming message only after your reply is validated and delivery attempted.
 
 **Important:** In autonomous mode, do NOT ask the user how to proceed. Review and respond immediately. The loop continues until you APPROVE or max rounds are reached.
 
@@ -153,6 +137,6 @@ cwd: /path/to/working/directory                     # if in a worktree, cd here 
 workflow: auto-plan | auto-implement | auto-full    # optional, triggers autonomous mode
 phase: plan | implement                              # optional
 round: 1                                             # optional
-max-rounds: 3                                        # optional
+max-rounds: 10                                       # optional
 ---
 ```

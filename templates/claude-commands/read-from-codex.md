@@ -2,84 +2,40 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 
 ## Instructions
 
-1. **Resolve the comms root** to the main repo (not a worktree):
+1. **Resolve the shared helper** — handles comms root, workspace name, listing, validation, delivery, and archiving. Local pin wins over global:
    ```bash
-   COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
+   COMMS_SH="$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || COMMS_SH="$HOME/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || echo "warning: agent-comms helpers not installed — re-run install.sh (global or local scope)" >&2
+   COMMS_ROOT="$("$COMMS_SH" root)"
    ```
 
-2. **Get the workspace name** for filtering. Run this block verbatim — cmux first, git branch second, repo dir last. Dropping the cmux lookup silently falls back to a branch name like `main` and you will miss messages filed under the cmux workspace name:
+2. **List pending messages** for this workspace, newest first:
    ```bash
-   # Precedence: cmux workspace → git branch → repo dir.
-   # Keep the cmux block; filename filters below depend on it.
-   WORKSPACE=""
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null \
-       | grep -E 'workspace workspace:[0-9]+ "' \
-       | head -1 \
-       | sed 's/.*"\([^"]*\)".*/\1/' \
-       | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-   fi
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
-     case "$WORKSPACE" in
-       main|master|trunk|develop)
-         echo "warning: cmux is active but workspace resolved to '$WORKSPACE' — verify the cmux tree grep/sed still matches the tool's output format" >&2
-         ;;
-     esac
-   fi
-   echo "WORKSPACE=$WORKSPACE"
+   "$COMMS_SH" list --as claude
    ```
+   On an empty inbox the helper exits non-zero and reports the latest archived message on stderr — a late delivery nudge for an already-processed reply is common (the injected `/read-from-codex` queues in Claude's input box while a turn is running and submits minutes later). If that's the case, tell the user: "No pending messages — [filename] was already processed (likely a late delivery nudge for it; harmless)." Otherwise tell the user there are no messages from Codex for this workspace.
 
-3. **List matching messages** using this exact command sequence (re-resolves `COMMS_ROOT` + `WORKSPACE` so the block is copy-paste-safe into a fresh shell):
+3. Read the most recent matching message (or all if user asks).
+
+4. **Validate the message:**
    ```bash
-   COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
-   WORKSPACE=""
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null \
-       | grep -E 'workspace workspace:[0-9]+ "' \
-       | head -1 \
-       | sed 's/.*"\([^"]*\)".*/\1/' \
-       | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-   fi
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   find "$COMMS_ROOT/to-claude" -maxdepth 1 -type f -name "${WORKSPACE}_*" | sort -r
+   "$COMMS_SH" validate "<message file>"
    ```
-   If no files are returned, check the archive before declaring silence — a late delivery
-   nudge for an already-processed reply is common (the injected `/read-from-codex` queues in
-   Claude's input box while a turn is running and submits minutes later):
-   ```bash
-   LATEST_ARCHIVED="$(find "$COMMS_ROOT/archive" -maxdepth 1 -type f -name "${WORKSPACE}_*" 2>/dev/null | sort | tail -1)"
-   [ -n "$LATEST_ARCHIVED" ] && echo "no pending messages; latest archived: $(basename "$LATEST_ARCHIVED")"
-   ```
-   If the latest archived message is recent, tell the user: "No pending messages — [filename]
-   was already processed (likely a late delivery nudge for it; harmless)." Otherwise tell the
-   user there are no messages from Codex for this workspace.
+   This checks frontmatter delimiters, required fields (`type`, `from`, `timestamp`), workflow fields (`phase`, `round`, `max-rounds`, plus `verdict` on replies from Codex), and a non-empty body. If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Codex: [reasons from the helper]. File: [filename]". In autonomous mode, send an error reply back to Codex requesting a clean resend.
 
-4. Read the most recent matching message (or all if user asks).
+5. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or modifying any files. This ensures you're working in the correct worktree.
 
-5. **Validate the message.** Before acting on it, check:
-   - The file starts with `---` and has a closing `---` (valid frontmatter)
-   - Required fields are present: `type`, `from`, `timestamp`
-   - If `workflow` is present: `phase`, `round`, `max-rounds`, `verdict` must also be present
-   - The body below frontmatter is not empty
-   If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Codex: [describe what's wrong]. File: [filename]". In autonomous mode, send an error reply back to Codex requesting a clean resend.
-
-6. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or modifying any files. This ensures you're working in the correct worktree.
-
-7. **Check for autonomous workflow mode.** Parse the `workflow` field from frontmatter. If it exists, follow the autonomous rules below. If not, follow the standard (manual) flow.
+6. **Check for autonomous workflow mode.** Parse the `workflow` field from frontmatter. If it exists, follow the autonomous rules below. If not, follow the standard (manual) flow.
 
 ---
 
 ### Standard (manual) flow — no `workflow` field
 
 1. Parse the message and summarize what Codex is saying
-2. **Auto-archive — your inbox only.** Move only the message(s) you just read from `$COMMS_ROOT/to-claude/` to `$COMMS_ROOT/archive/`. **Do not touch `$COMMS_ROOT/to-codex/`** — that's Codex's inbox; Codex archives its own side. Use an idempotent move so an already-archived file is a no-op rather than an error:
+2. **Auto-archive — your inbox only** (the helper refuses files outside `to-claude/` and is idempotent):
    ```bash
-   for f in <files-you-just-read>; do
-     [ -f "$f" ] && mv "$f" "$COMMS_ROOT/archive/" || true
-   done
+   "$COMMS_SH" archive --as claude <files-you-just-read>
    ```
 3. Ask the user how to proceed:
    - "Address all findings" — work through each item
@@ -94,63 +50,38 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 **Check termination conditions first:**
 
 1. **If verdict is `APPROVE`:**
-   - Treat `APPROVE` as ship-ready. Codex may still include advisory notes; those do not reopen the loop.
+   - Treat `APPROVE` as ship-ready. Codex may still include advisory notes; those do not reopen the loop. If the reply carries a `### Process` section (meta-channel feedback), log it to the project's friction log / roadmap so it drives protocol changes instead of evaporating.
    - If `workflow: auto-full` and `phase: plan` → **Transition to implement phase:**
-     - **Archive the approval message first** (idempotent move, your inbox only — same as the standard flow). Archiving before implementing prevents a re-triggered `/read-from-codex` from re-reading the stale approval and double-firing the implement phase.
+     - **Archive the approval message first** (`"$COMMS_SH" archive --as claude "<file>"`) — this prevents a re-triggered `/read-from-codex` from re-reading the stale approval and double-firing the implement phase
      - Notify user: "Plan approved after N rounds. Starting implementation..."
      - Implement the approved plan
-     - Send to Codex with updated frontmatter: `phase: implement`, `round: 1`, same `workflow` and `max-rounds`
-     - Auto-deliver via cmux
-   - Otherwise → **Stop. Notify user:** "Approved after N rounds." Archive the message.
+     - Write the implement-phase message with updated frontmatter: `phase: implement`, `round: 1`, same `workflow` and `max-rounds`
+     - Deliver: `"$COMMS_SH" send --to codex "<file>"`
+   - Otherwise → **Stop. Notify user:** "Approved after N rounds." Archive: `"$COMMS_SH" archive --as claude "<file>"`
 
 2. **If `round >= max-rounds`:**
    - **Stop. Escalate to user:** "Max rounds (N) reached. Remaining blocking issues from Codex:" then list the unresolved blocking findings.
-   - Archive the message.
+   - Archive the message via the helper.
 
 3. **If verdict is `REQUEST_CHANGES` and round < max-rounds:**
    - **Auto-address all blocking findings** from Codex's message
    - Advisory findings are optional. Fix them when they are cheap, clearly correct, or naturally part of the same change, but do not extend the loop just to polish non-blocking issues.
    - For plan workflows: refine the plan based on findings
    - For implement workflows: fix the code based on findings
-   - **Send back to Codex** to `$COMMS_ROOT/to-codex/`:
-     - Filename: `${WORKSPACE}_YYYY-MM-DDTHH-MM-SS_round-N-$RANDOM.md` (workspace name from step 2; N is the incremented round number; the `$RANDOM` suffix prevents same-second filename collisions)
-     - Increment `round` by 1
-     - Keep same `workflow`, `phase`, `max-rounds`
+   - **Write the reply** to `$COMMS_ROOT/to-codex/`:
+     - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_round-N-$RANDOM.md` (N is the incremented round number; the `$RANDOM` suffix prevents same-second filename collisions)
+     - Increment `round` by 1; keep same `workflow`, `phase`, `max-rounds`
      - **Keep the message body focused on stable context, not fix narration.** Do NOT narrate what you fixed per finding — that anchors the reviewer on verification instead of re-review. Instead include:
        - The latest Codex findings bundle from the prior round under a clear heading like `## Prior review context`, framed as stable context rather than an exhaustive checklist
        - For plan: the full updated plan content (so Codex can re-read it fresh)
        - For implement: `git diff --stat` showing changed files
        - **Stable metadata** (always include): what validation ran (typecheck, tests, lint), whether they passed, and any non-obvious constraints or gotchas
        - Brief one-line note: "Addressed N findings from round X. Please re-review holistically."
-   - **Auto-deliver via cmux when available; otherwise skip delivery and tell the user the file is ready for manual pickup:**
+       - The standing `## Meta — process feedback requested` section (process friction under `### Process`, never verdict-gating)
+   - **Validate, deliver, and archive the inbound in one atomic step** — the helper refuses to archive if the outbound is malformed:
      ```bash
-     if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-       # Pane-aware picker — exclude the entire pane containing "◀ here", not just that one surface.
-       # (awk fields are written $(0)/$(N) — bare dollar-digit tokens in command markdown are clobbered by slash-command argument substitution)
-       # Falls back to any other terminal surface for single-pane multi-tab layouts.
-       CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
-         /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
-         /surface:.*\[terminal\]/ {
-           if (match($(0), /surface:[0-9]+/)) {
-             n++; surf[n]=substr($(0),RSTART,RLENGTH); pane[n]=cur_pane
-             here[n] = ($(0) ~ /◀ here/) ? 1 : 0
-             if (here[n]) here_pane=cur_pane
-           }
-         }
-         END {
-           for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { print surf[i]; exit }
-           for (i=1;i<=n;i++) if (!here[i]) { print surf[i]; exit }
-         }')
-       if [ -n "$CODEX_SURFACE" ]; then
-         cmux send --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
-       else
-         echo "warning: could not find a Codex surface; message written for manual pickup"
-       fi
-     else
-       echo "warning: cmux not available; message written for manual pickup"
-     fi
+     "$COMMS_SH" send --to codex "<your reply file>" --archive-inbound "<the incoming message file>"
      ```
-   - **Auto-archive the incoming message** from `$COMMS_ROOT/to-claude/` to `$COMMS_ROOT/archive/`. Your inbox only — do not touch `to-codex/`. Use the idempotent move from the standard flow above.
 
 **Review protocol for autonomous loops:**
 - Default to a pass-oriented loop. `REQUEST_CHANGES` means blocking issues only.

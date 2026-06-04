@@ -10,42 +10,26 @@ Use this when you want Codex's judgment on a design choice, an open question, or
    - `--with-diff` — attach `git diff <default-branch> --stat` (and `--name-only` if non-trivial) under `## Grounding`. Use when the question is grounded in current changes (e.g. "is this approach sound?"). Default: off.
    - `--with-files <path>[,<path>…]` — attach the listed file paths under `## Grounding` so Codex knows what to look at without reviewing them.
 
-3. **Resolve the comms root** to the main repo (not a worktree):
+3. **Resolve the shared helper** — handles comms root, workspace name, validation, and delivery. Local pin wins over global:
    ```bash
-   COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
+   COMMS_SH="$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || COMMS_SH="$HOME/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || echo "warning: agent-comms helpers not installed — re-run install.sh (global or local scope)" >&2
+   COMMS_ROOT="$("$COMMS_SH" root)"
+   WORKSPACE="$("$COMMS_SH" workspace)"
+   echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE"
    ```
 
-4. **Get the workspace name** for scoping. Run this block verbatim — cmux first, git branch second, repo dir last:
-   ```bash
-   WORKSPACE=""
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null \
-       | grep -E 'workspace workspace:[0-9]+ "' \
-       | head -1 \
-       | sed 's/.*"\([^"]*\)".*/\1/' \
-       | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-   fi
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
-     case "$WORKSPACE" in
-       main|master|trunk|develop)
-         echo "warning: cmux is active but workspace resolved to '$WORKSPACE' — verify the cmux tree grep/sed still matches the tool's output format" >&2
-         ;;
-     esac
-   fi
-   echo "WORKSPACE=$WORKSPACE"
-   ```
-
-5. **Build the body.** Add a brief slug for the filename (kebab-case, ~3-5 words derived from the question). Sections:
+4. **Build the body.** Add a brief slug for the filename (kebab-case, ~3-5 words derived from the question). Sections:
 
    - `## Question` — the user's question, verbatim
    - `## Context` — short background: relevant files, links, constraints, what's been tried, what's *not* in scope. Skip the section entirely if there's nothing useful to add — better than padding it.
    - `## Current Thinking` — your draft answer or working hypothesis so Codex can validate, refine, or push back rather than start blank. Skip if you genuinely have no take.
    - `## Grounding` — only if `--with-diff` or `--with-files` is set, or you're attaching specific evidence (command output, error messages). Inline as fenced blocks; don't paste full file contents — list paths.
 
-6. Write the message file to `$COMMS_ROOT/to-codex/`:
+5. **Write the message file** to `$COMMS_ROOT/to-codex/`:
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_ask-<slug>-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions)
+   - Write with a quoted heredoc (`<<'EOF'`) or a non-interpolating tool
    - Frontmatter:
 
 ```markdown
@@ -61,42 +45,12 @@ cwd: <current working directory from pwd>
 
    No `workflow`, no `phase`, no `round`, no `max-rounds`, no `verdict`. Those are loop primitives — `/ask-codex` is single-shot.
 
-7. **Verify before delivering.** Read back and confirm:
-   - The `---` frontmatter delimiters are intact
-   - Required fields exist: `type` (must be `question`), `from`, `timestamp`, `workspace`
-   - The body has at least a non-empty `## Question` section
-   If verification fails, fix the file before delivering.
-
-8. **Auto-deliver via cmux when available.** If `cmux` or `CMUX_WORKSPACE_ID` is unavailable, skip auto-delivery and tell the user the verified file was written for manual pickup:
+6. **Validate and deliver** — `send` refuses malformed messages and degrades to manual pickup without cmux:
    ```bash
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     # Pane-aware picker — exclude the entire pane containing "◀ here", not just that one surface.
-     # (awk fields are written $(0)/$(N) — bare dollar-digit tokens in command markdown are clobbered by slash-command argument substitution)
-     # Falls back to any other terminal surface for single-pane multi-tab layouts.
-     CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
-       /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
-       /surface:.*\[terminal\]/ {
-         if (match($(0), /surface:[0-9]+/)) {
-           n++; surf[n]=substr($(0),RSTART,RLENGTH); pane[n]=cur_pane
-           here[n] = ($(0) ~ /◀ here/) ? 1 : 0
-           if (here[n]) here_pane=cur_pane
-         }
-       }
-       END {
-         for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { print surf[i]; exit }
-         for (i=1;i<=n;i++) if (!here[i]) { print surf[i]; exit }
-       }')
-     if [ -n "$CODEX_SURFACE" ]; then
-       cmux send --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
-     else
-       echo "warning: could not find a Codex surface; message written for manual pickup"
-     fi
-   else
-     echo "warning: cmux not available; message written for manual pickup"
-   fi
+   "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
 
-9. Tell the user the question was sent and where to look for the reply (`.comms/to-claude/`). When Codex replies, use `/read-from-codex` to surface the answer.
+7. Tell the user the question was sent and where to look for the reply (`.comms/to-claude/`). When Codex replies, use `/read-from-codex` to surface the answer.
 
 ## Notes
 

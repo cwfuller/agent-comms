@@ -6,44 +6,25 @@ Autonomous plan + review cycle. Creates a plan, sends to Codex for review, and a
    - The argument text is the task/feature description to plan for
    - Default max rounds: 10. If the user specifies a number (e.g., "/auto-plan 3 build feature X"), use that as max rounds.
 
-2. **Resolve the comms root** to the main repo (not a worktree):
+2. **Resolve the shared helper** — the single source of truth for comms root, workspace name, validation, delivery, and archiving. Local pin wins over global:
    ```bash
-   COMMS_ROOT="$(git worktree list --porcelain | head -1 | sed 's/^worktree //')/.comms"
+   COMMS_SH="$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || COMMS_SH="$HOME/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || echo "warning: agent-comms helpers not installed — re-run install.sh (global or local scope)" >&2
+   COMMS_ROOT="$("$COMMS_SH" root)"
+   WORKSPACE="$("$COMMS_SH" workspace)"
+   echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE"
    ```
 
-3. **Get workspace name.** Run this block verbatim — cmux first, git branch second, repo dir last. Dropping the cmux lookup silently falls back to a branch name like `main` and corrupts filenames that other agents filter on:
-   ```bash
-   # Precedence: cmux workspace → git branch → repo dir.
-   # Keep the cmux block; other agents' filename filters depend on it.
-   WORKSPACE=""
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     WORKSPACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null \
-       | grep -E 'workspace workspace:[0-9]+ "' \
-       | head -1 \
-       | sed 's/.*"\([^"]*\)".*/\1/' \
-       | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-   fi
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   [ -n "$WORKSPACE" ] || WORKSPACE=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-   # Sanity check: under cmux the workspace should not be a generic branch name.
-   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
-     case "$WORKSPACE" in
-       main|master|trunk|develop)
-         echo "warning: cmux is active but workspace resolved to '$WORKSPACE' — verify the cmux tree grep/sed still matches the tool's output format" >&2
-         ;;
-     esac
-   fi
-   echo "WORKSPACE=$WORKSPACE"
-   ```
-
-4. **Create the plan.** Based on the user's task description:
+3. **Create the plan.** Based on the user's task description:
    - Analyze the codebase as needed to inform the plan
    - Create a thorough implementation plan covering: approach, files to create/modify, key decisions, risks, and steps
    - Write the plan to a file if appropriate, or include it in the message body
 
-5. **Send to Codex with workflow metadata.** Write a message to `$COMMS_ROOT/to-codex/`:
+4. **Write the review request** to `$COMMS_ROOT/to-codex/`:
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-plan-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions)
-   - Use this frontmatter:
+   - Write with a quoted heredoc (`<<'EOF'`) or a non-interpolating tool so backticks and dollar signs in the body are never evaluated
+   - Use this frontmatter and body:
 
 ```markdown
 ---
@@ -64,45 +45,21 @@ status: in-progress
 <Summary of the plan created>
 
 ## Plan
-<The full plan content, or reference to the plan file>
-
-## Files changed
-<Any files created/modified>
+<The full plan content>
 
 ## Review focus
-Review this plan for completeness, architecture decisions, risks, and missed edge cases. Focus on critical and warning-level issues only.
+Review this plan for completeness, architecture decisions, risks, and missed edge cases.
+
+## Meta — process feedback requested (standing section)
+Separate from plan findings: flag any friction with the comms process itself (delivery, archive sequencing, message shape, round semantics) under a `### Process` heading. Process feedback never gates the verdict.
 
 ## Context
 This is an autonomous plan+review cycle (round 1 of <N>). Reply with findings using the standard verdict format. The cycle continues until you APPROVE or max rounds are reached.
 ```
 
-6. **Auto-deliver via cmux when available.** If `cmux` or `CMUX_WORKSPACE_ID` is unavailable, skip delivery and tell the user the message was written for manual pickup:
+5. **Validate and deliver** — `send` refuses malformed messages and degrades to manual pickup without cmux:
    ```bash
-   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-     # Pane-aware picker — exclude the entire pane containing "◀ here", not just that one surface.
-     # (awk fields are written $(0)/$(N) — bare dollar-digit tokens in command markdown are clobbered by slash-command argument substitution)
-     # Falls back to any other terminal surface for single-pane multi-tab layouts.
-     CODEX_SURFACE=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
-       /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
-       /surface:.*\[terminal\]/ {
-         if (match($(0), /surface:[0-9]+/)) {
-           n++; surf[n]=substr($(0),RSTART,RLENGTH); pane[n]=cur_pane
-           here[n] = ($(0) ~ /◀ here/) ? 1 : 0
-           if (here[n]) here_pane=cur_pane
-         }
-       }
-       END {
-         for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { print surf[i]; exit }
-         for (i=1;i<=n;i++) if (!here[i]) { print surf[i]; exit }
-       }')
-     if [ -n "$CODEX_SURFACE" ]; then
-       cmux send --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 && cmux send-key --surface "$CODEX_SURFACE" --workspace "$CMUX_WORKSPACE_ID" enter
-     else
-       echo "warning: could not find a Codex surface; message written for manual pickup"
-     fi
-   else
-     echo "warning: cmux not available; message written for manual pickup"
-   fi
+   "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
 
-7. **Notify user:** "Plan created and sent to Codex for autonomous review (round 1 of N). Watch both panes — I'll auto-refine based on feedback."
+6. **Notify user:** "Plan created and sent to Codex for autonomous review (round 1 of N). I'll refine it based on feedback until approved."
