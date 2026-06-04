@@ -40,6 +40,7 @@ timestamp: <ISO 8601>
 branch: <current branch>
 workspace: <workspace name>
 cwd: <current working directory from pwd>
+message_id: <the filename, without .md>
 ---
 ```
 

@@ -14,6 +14,7 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    ```bash
    "$COMMS_SH" list --as claude
    ```
+   When continuing a specific loop, scope the read to that loop's thread so concurrent loops in this workspace can't consume each other's replies: `"$COMMS_SH" list --as claude --thread <thread>`.
    On an empty inbox the helper exits non-zero and reports the latest archived message on stderr — a late delivery nudge for an already-processed reply is common (the injected `/read-from-codex` queues in Claude's input box while a turn is running and submits minutes later). If that's the case, tell the user: "No pending messages — [filename] was already processed (likely a late delivery nudge for it; harmless)." Otherwise tell the user there are no messages from Codex for this workspace.
 
 3. Read the most recent matching message (or all if user asks).
@@ -22,7 +23,9 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    ```bash
    "$COMMS_SH" validate "<message file>"
    ```
-   This checks frontmatter delimiters, required fields (`type`, `from`, `timestamp`), workflow fields (`phase`, `round`, `max-rounds`, plus `verdict` on replies from Codex), and a non-empty body. If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Codex: [reasons from the helper]. File: [filename]". In autonomous mode, send an error reply back to Codex requesting a clean resend.
+   This checks frontmatter delimiters, required fields (`type`, `from`, `timestamp`), workflow fields (`phase`, `round`, `max-rounds`, plus `verdict` on replies from Codex), and a non-empty body. If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Codex: [reasons from the helper]. File: [filename]". In autonomous mode, use the **error lane**: write a `type: error` reply (copy `workspace`/`workflow`/`phase`/`round`/`max-rounds`/`thread`, set `in-reply-to` to the malformed message's `message_id`, NO `verdict`, do NOT increment `round`) whose body states what is malformed and requests a clean resend, then `"$COMMS_SH" send --to codex "<error file>"`.
+
+   **If the incoming message is `type: error`** (Codex reporting YOUR last message was malformed): fix and resend your previous message with the same `round` — an error exchange never consumes a round.
 
 5. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or modifying any files. This ensures you're working in the correct worktree.
 
@@ -49,15 +52,18 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 
 **Check termination conditions first:**
 
-1. **If verdict is `APPROVE`:**
-   - Treat `APPROVE` as ship-ready. Codex may still include advisory notes; those do not reopen the loop. If the reply carries a `### Process` section (meta-channel feedback), log it to the project's friction log / roadmap so it drives protocol changes instead of evaporating.
+1. **If verdict is `APPROVE`** (read it normalized: `"$COMMS_SH" verdict "<file>"`):
+   - Treat `APPROVE` as ship-ready. Codex may still include advisory notes; those do not reopen the loop.
+   - **Carry over what would otherwise evaporate:**
+     - Un-actioned `### Advisory` items → append to `docs/advisories.md` (date, thread, items) so they survive the loop's end
+     - `### Process` items (meta-channel feedback) → append to the project's friction log / roadmap so they drive protocol changes
    - If `workflow: auto-full` and `phase: plan` → **Transition to implement phase:**
      - **Archive the approval message first** (`"$COMMS_SH" archive --as claude "<file>"`) — this prevents a re-triggered `/read-from-codex` from re-reading the stale approval and double-firing the implement phase
      - Notify user: "Plan approved after N rounds. Starting implementation..."
      - Implement the approved plan
-     - Write the implement-phase message with updated frontmatter: `phase: implement`, `round: 1`, same `workflow` and `max-rounds`
+     - Write the implement-phase message with updated frontmatter: `phase: implement`, `round: 1`, same `workflow`, `max-rounds`, and `thread`
      - Deliver: `"$COMMS_SH" send --to codex "<file>"`
-   - Otherwise → **Stop. Notify user:** "Approved after N rounds." Archive: `"$COMMS_SH" archive --as claude "<file>"`
+   - Otherwise → **Stop. Notify user:** "Approved after N rounds." Archive: `"$COMMS_SH" archive --as claude "<file>"`, then close the thread's state: `"$COMMS_SH" state complete "<thread>"`
 
 2. **If `round >= max-rounds`:**
    - **Stop. Escalate to user:** "Max rounds (N) reached. Remaining blocking issues from Codex:" then list the unresolved blocking findings.
@@ -70,7 +76,8 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    - For implement workflows: fix the code based on findings
    - **Write the reply** to `$COMMS_ROOT/to-codex/`:
      - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_round-N-$RANDOM.md` (N is the incremented round number; the `$RANDOM` suffix prevents same-second filename collisions)
-     - Increment `round` by 1; keep same `workflow`, `phase`, `max-rounds`
+     - Increment `round` by 1; keep same `workflow`, `phase`, `max-rounds`, and `thread`
+     - Set `message_id` (filename sans `.md`) and `in-reply-to` (the incoming message's `message_id`)
      - **Keep the message body focused on stable context, not fix narration.** Do NOT narrate what you fixed per finding — that anchors the reviewer on verification instead of re-review. Instead include:
        - The latest Codex findings bundle from the prior round under a clear heading like `## Prior review context`, framed as stable context rather than an exhaustive checklist
        - For plan: the full updated plan content (so Codex can re-read it fresh)

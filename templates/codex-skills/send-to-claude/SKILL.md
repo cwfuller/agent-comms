@@ -43,18 +43,20 @@ Write a structured message to Claude Code via `.comms/to-claude/` and auto-deliv
 
 ```markdown
 ---
-type: review-feedback | response | question | request
+type: review-feedback | response | question | request | error
 from: codex
 timestamp: <ISO 8601>
 branch: <current branch>
 workspace: <workspace name from step 2>
 cwd: <current working directory>
-in-reply-to: <filename of the message you're responding to, if any>
+message_id: <this file's name, without .md>
+thread: <copy from incoming message if present — identifies the loop>
+in-reply-to: <message_id of the message you're responding to, if any>
 workflow: <copy from incoming message if present — auto-plan | auto-implement | auto-full>
 phase: <copy from incoming message if present — plan | implement>
 round: <copy from incoming message if present>
 max-rounds: <copy from incoming message if present>
-verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question>
+verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question or sending type: error>
 ---
 
 ## Summary
@@ -82,7 +84,7 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
    ```bash
    "$COMMS_SH" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"
    ```
-   Without cmux the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk).
+   Without cmux the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk). A mid-sequence cmux failure is reported as `delivery FAILED` and recorded in the thread's state file; the reply stays safely on disk — retry with `"$COMMS_SH" send --to claude "<reply file>"` (re-attempts the nudge AND refreshes the recorded delivery state). `send` updates `.comms/state/<workspace>_<thread>.json` automatically for workflow messages.
 
 7. Confirm to the user that the message was verified and delivery attempted.
 

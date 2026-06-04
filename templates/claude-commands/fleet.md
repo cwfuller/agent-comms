@@ -44,6 +44,7 @@ Orchestrate a fleet of cmux execution workspaces (`ws-1`, `ws-2`, …) from a co
      Should resolve on the next status read.
 - `in=N` > 0 means N message(s) from Codex waiting for Claude to read — `/read-from-codex` hasn't run
 - `out=N` > 0 similar for outbound
+- `owes=<agent> <N>m` (when present) = protocol-v2 thread state: who owes the next message and for how long. A large age with `claude=idle codex=idle` means a delivery nudge was likely dropped — check `comms.sh stalled` and re-deliver.
 
 Report the table + a one-line verdict (e.g. "ws-2 and ws-5 are free; ws-1/3/4 in flight"). When
 reporting `stale`, name the verification step rather than asserting idle.

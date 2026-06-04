@@ -12,12 +12,17 @@ Delete messages from `.comms/` directories.
    echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE"
    ```
 
-2. Based on the argument provided (use `$COMMS_ROOT` for all paths):
-   - **No argument or "workspace"** — Delete this workspace's messages (files starting with the workspace name) from **your inbox (`to-claude/`) and `archive/` only**. Do NOT touch `to-codex/` — that's Codex's inbox and may hold messages Codex hasn't read yet; deleting those requires explicit `all`.
-   - **"all"** — Delete ALL messages from `to-codex/`, `to-claude/`, and `archive/` (both inboxes — this is the only mode that deletes the other agent's unread mail)
-   - **"archive"** — Delete only archived messages in `archive/`
-   - **A specific filename** — Delete just that file
+2. **Dry-run the requested mode** — the helper enforces inbox scoping in code (no hand-rolled `rm`):
+   ```bash
+   "$COMMS_SH" clean --as claude <mode>
+   ```
+   Modes: **no argument / `workspace`** (this workspace's files from your inbox `to-claude/` + `archive/` only — never Codex's unread mail), **`all`** (everything in both inboxes + archive — the only mode that touches the other agent's inbox), **`archive`** (archive/ only), or **a specific filename**.
 
-3. Show what will be deleted and confirm with the user before removing.
+3. Show the dry-run's "would delete" list to the user and confirm.
 
-4. Report how many files were cleaned up.
+4. On confirmation, re-run with `--yes`:
+   ```bash
+   "$COMMS_SH" clean --as claude <mode> --yes
+   ```
+
+5. Report how many files were cleaned up (the helper prints the count).

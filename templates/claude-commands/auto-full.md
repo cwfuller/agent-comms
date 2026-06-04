@@ -19,6 +19,7 @@ Full autonomous cycle: plan+review until approved, then implement+review until a
 3. **Start with the plan phase.** This works exactly like `/auto-plan` but with `workflow: auto-full`:
    - Create the plan
    - Write the message to `$COMMS_ROOT/to-codex/` with filename `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-full-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions); use a quoted heredoc (`<<'EOF'`) or a non-interpolating tool
+   - `thread` names this loop and stays constant across every message in the cycle; replies copy it. `message_id` is the filename sans `.md`
    - Use this frontmatter and body:
 
 ```markdown
@@ -29,6 +30,8 @@ timestamp: <ISO 8601>
 branch: <current branch>
 workspace: <workspace>
 cwd: <current working directory from pwd>
+message_id: <the filename, without .md>
+thread: <kebab-slug-of-task>-<same random suffix as the filename>
 workflow: auto-full
 phase: plan
 round: 1
@@ -57,6 +60,6 @@ This is an autonomous full cycle (plan phase, round 1 of <N>). After the plan is
    "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
 
-5. **Notify user:** "Plan created and sent to Codex for autonomous review (plan phase, round 1 of N). Full cycle: plan→approve→implement→approve."
+5. **Notify user:** "Plan created and sent to Codex for autonomous review (plan phase, round 1 of N). Full cycle: plan→approve→implement→approve." If the loop goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.
 
 **Note:** The phase transition (plan→implement) happens automatically in `/read-from-codex` when it receives an APPROVE verdict during the plan phase of an `auto-full` workflow.

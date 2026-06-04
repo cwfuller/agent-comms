@@ -24,6 +24,7 @@ Autonomous plan + review cycle. Creates a plan, sends to Codex for review, and a
 4. **Write the review request** to `$COMMS_ROOT/to-codex/`:
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-plan-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions)
    - Write with a quoted heredoc (`<<'EOF'`) or a non-interpolating tool so backticks and dollar signs in the body are never evaluated
+   - `thread` names this loop and stays constant across every message in the cycle; replies copy it. `message_id` is the filename sans `.md`. These let concurrent loops in one workspace coexist and let replies be threaded
    - Use this frontmatter and body:
 
 ```markdown
@@ -34,6 +35,8 @@ timestamp: <ISO 8601>
 branch: <current branch>
 workspace: <workspace>
 cwd: <current working directory from pwd>
+message_id: <the filename, without .md>
+thread: <kebab-slug-of-task>-<same random suffix as the filename>
 workflow: auto-plan
 phase: plan
 round: 1
@@ -62,4 +65,4 @@ This is an autonomous plan+review cycle (round 1 of <N>). Reply with findings us
    "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
 
-6. **Notify user:** "Plan created and sent to Codex for autonomous review (round 1 of N). I'll refine it based on feedback until approved."
+6. **Notify user:** "Plan created and sent to Codex for autonomous review (round 1 of N). I'll refine it based on feedback until approved." If the loop goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.

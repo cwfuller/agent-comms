@@ -33,6 +33,7 @@ timestamp: <ISO 8601>
 branch: <current branch>
 workspace: <workspace name from step 2>
 cwd: <current working directory from pwd — always include>
+message_id: <the filename, without .md>
 ---
 
 ## What was done

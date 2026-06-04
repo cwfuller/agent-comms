@@ -31,7 +31,9 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
    ```bash
    "$COMMS_SH" validate "<message file>"
    ```
-   Checks frontmatter delimiters, required fields (`type`, `from`, `timestamp`), workflow fields (`phase`, `round`, `max-rounds`), and a non-empty body. If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Claude: [reasons]. File: [filename]". In autonomous mode, send an error reply back to Claude requesting a clean resend.
+   Checks frontmatter delimiters, required fields (`type`, `from`, `timestamp`), workflow fields (`phase`, `round`, `max-rounds`), and a non-empty body. If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Claude: [reasons]. File: [filename]". In autonomous mode, use the **error lane**: write a `type: error` reply (copy `workspace`/`workflow`/`phase`/`round`/`max-rounds`/`thread`, set `in-reply-to` to the malformed message's `message_id`, NO `verdict`, same `round`) stating what is malformed and requesting a clean resend, then `"$COMMS_SH" send --to claude "<error file>"`.
+
+   **If the incoming message is `type: error`** (Claude reporting YOUR last reply was malformed): fix and resend your previous reply with the same `round` — an error exchange never consumes a round.
 
 5. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or reviewing any files. This ensures you're looking at the correct worktree branch.
 
@@ -128,15 +130,20 @@ Messages are markdown files with frontmatter:
 
 ```markdown
 ---
-type: review-request | response | question | ping
+type: review-request | response | question | ping | error
 from: claude
 timestamp: ISO 8601
 branch: branch-name
 workspace: workspace-name
 cwd: /path/to/working/directory                     # if in a worktree, cd here before reviewing
+message_id: <filename sans .md>                      # protocol v2
+thread: <loop-slug>                                  # protocol v2 — constant across a loop; copy into replies
+in-reply-to: <message_id being answered>             # protocol v2 — when replying
 workflow: auto-plan | auto-implement | auto-full    # optional, triggers autonomous mode
 phase: plan | implement                              # optional
 round: 1                                             # optional
 max-rounds: 10                                       # optional
 ---
 ```
+
+When several loops share one workspace, scope reads to your loop: `"$COMMS_SH" list --as codex --thread <thread>`.
