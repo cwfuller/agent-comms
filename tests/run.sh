@@ -51,7 +51,8 @@ done
 case "$cmd" in
   tree) cat "$CMUX_STUB_DIR/tree-${ref//:/_}.txt" 2>/dev/null ;;
   list-workspaces) cat "$CMUX_STUB_DIR/list.txt" 2>/dev/null ;;
-  send|send-key) exit 0 ;;
+  send) [ -n "${CMUX_STUB_FAIL:-}" ] && exit 1; exit 0 ;;
+  send-key) exit 0 ;;
 esac
 STUB
 chmod +x "$STUB_BIN/cmux"
@@ -320,6 +321,153 @@ GHOME="$WORK/ghome"
 [ -x "$GHOME/agent-comms/comms.sh" ] && ok "global scope installs executable helpers (env-overridden)" || fail "global scope installs executable helpers"
 [ -f "$GHOME/commands/fleet.md" ] && ok "global scope installs commands (env-overridden)" || fail "global scope installs commands"
 [ -f "$GHOME/skills/read-from-claude/SKILL.md" ] && ok "global scope installs skills (env-overridden)" || fail "global scope installs skills"
+
+echo "== comms.sh v2: thread filter + verdict normalization + error lane =="
+TA="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-00_alpha-1.md"
+TB="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-01_beta-1.md"
+cat > "$TA" <<'MSG'
+---
+type: review-feedback
+from: codex
+timestamp: 2026-06-04T13:00:00Z
+workspace: feature-helper-tests
+message_id: feature-helper-tests_2026-06-04T13-00-00_alpha-1
+thread: loop-alpha
+workflow: auto-implement
+phase: implement
+round: 1
+max-rounds: 10
+verdict:  approve
+---
+
+## Summary
+Alpha reply.
+MSG
+sed 's/alpha/beta/g; s/loop-beta/loop-beta/' "$TA" > "$TB"
+LIST_T="$(run_comms list --as claude --thread loop-alpha)"
+[ "$(echo "$LIST_T" | grep -c .)" = "1" ] && echo "$LIST_T" | grep -q alpha-1 && ok "list --thread isolates one loop's messages" || fail "list --thread isolation (got: $LIST_T)"
+[ "$(run_comms verdict "$TA")" = "APPROVE" ] && ok "verdict normalizes ' approve ' -> APPROVE" || fail "verdict normalization (got: $(run_comms verdict "$TA"))"
+ERRMSG="$WORK/error-lane.md"
+sed 's/type: review-feedback/type: error/; /^verdict:/d' "$TA" > "$ERRMSG"
+check "type: error from codex passes without verdict" run_comms validate "$ERRMSG"
+NOTHREAD="$WORK/nothread.md"
+grep -v '^thread:' "$TA" > "$NOTHREAD"
+WARN="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" validate "$NOTHREAD") 2>&1 1>/dev/null )"
+echo "$WARN" | grep -q "no thread field" && ok "workflow message without thread warns (soft, non-fatal)" || fail "thread soft warning (got: $WARN)"
+
+echo "== comms.sh v2: state lifecycle =="
+OUT_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-05-00_round-2-777.md"
+cat > "$OUT_WF" <<'MSG'
+---
+type: review-request
+from: claude
+timestamp: 2026-06-04T13:05:00Z
+workspace: feature-helper-tests
+message_id: feature-helper-tests_2026-06-04T13-05-00_round-2-777
+thread: loop-alpha
+workflow: auto-implement
+phase: implement
+round: 2
+max-rounds: 10
+---
+
+## What was done
+Round two.
+MSG
+check "send (manual pickup) succeeds" run_comms send --to codex "$OUT_WF"
+SF="$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json"
+[ -f "$SF" ] && ok "send writes thread state file" || fail "send writes thread state file"
+grep -q '"awaiting_from": "codex"' "$SF" && ok "state records who owes the next message" || fail "state awaiting_from"
+grep -q '"last_delivery": "manual"' "$SF" && ok "state records delivery outcome (manual)" || fail "state last_delivery manual"
+run_comms state list | grep -q 'loop-alpha.*r2/10' && ok "state list summarizes thread" || fail "state list (got: $(run_comms state list))"
+# stalled: backdate the awaiting epoch by an hour
+perl -pi -e 's/"awaiting_since_epoch": "\d+"/"awaiting_since_epoch": "'"$(( $(date +%s) - 3600 ))"'"/' "$SF"
+run_comms stalled 15 | grep -q 'STALLED.*loop-alpha' && ok "stalled flags threads awaiting too long" || fail "stalled detection (got: $(run_comms stalled 15))"
+check "state complete marks thread done" run_comms state complete loop-alpha
+grep -q '"status": "complete"' "$SF" && ok "state complete persists" || fail "state complete persists"
+run_comms stalled 15 | grep -q 'no stalled' && ok "completed thread is not stalled" || fail "completed thread is not stalled"
+
+echo "== comms.sh v2: delivery failure is explicit and recorded =="
+DELIV_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_FAIL=1 "$COMMS" deliver codex)"
+echo "$DELIV_OUT" | grep -q "FAILED mid-sequence" && ok "mid-sequence cmux failure reported explicitly" || fail "delivery failure report (got: $DELIV_OUT)"
+# Under stub cmux the RESOLVED workspace (test-project) keys the state file —
+# the helper warns about the frontmatter mismatch and keys on the resolver.
+(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_FAIL=1 "$COMMS" send --to codex "$OUT_WF") >/dev/null 2>&1
+SF_CMUX="$REPO_FIX/.comms/state/test-project_loop-alpha.json"
+grep -q '"last_delivery": "failed"' "$SF_CMUX" && ok "failed delivery recorded in state (resolved-ws key)" || fail "failed delivery recorded in state (state dir: $(ls "$REPO_FIX/.comms/state/" 2>/dev/null))"
+
+echo "== comms.sh v2: state hardening (slash thread, garbage epoch, quotes) =="
+SLASH_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-10-00_slash-1.md"
+SLASH_IN="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-09-00_slashin.md"
+sed 's/thread: loop-alpha/thread: fix-auth\/login-99/; s/round: 2/round: 3/' "$OUT_WF" > "$SLASH_WF"
+cp "$TA" "$SLASH_IN"
+check "send survives a thread containing a slash" run_comms send --to codex "$SLASH_WF" --archive-inbound "$SLASH_IN"
+[ ! -f "$SLASH_IN" ] && ok "inbound archived despite slash thread (no desync)" || fail "inbound archived despite slash thread"
+[ -f "$REPO_FIX/.comms/state/feature-helper-tests_fix-auth_login-99.json" ] && ok "slash thread sanitized into state filename" || fail "slash thread sanitized (state dir: $(ls "$REPO_FIX/.comms/state/" 2>/dev/null))"
+# garbage epoch must not crash stalled or fleet status
+perl -pi -e 's/"awaiting_since_epoch": "\d+"/"awaiting_since_epoch": "garbage"/' "$REPO_FIX/.comms/state/feature-helper-tests_fix-auth_login-99.json"
+check "stalled survives a garbage epoch" run_comms stalled 15
+QUOTE_WF="$WORK/quote-wf.md"
+sed 's/phase: implement/phase: fix "login" bug/' "$OUT_WF" > "$QUOTE_WF"
+(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$QUOTE_WF") >/dev/null 2>&1
+grep -q '\\"login\\"' "$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json" && ok "embedded quotes escaped in state JSON" || fail "embedded quotes escaped (got: $(grep phase "$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json"))"
+
+echo "== fleet.sh: dispatch-all accepts a lowercase/whitespace verdict (normalized) =="
+# Newest ws-2 archive gets a sloppy verdict — dispatch-all must still treat it as APPROVE
+sleep 1
+SLOPPY="$REPO_FIX/.comms/archive/ws-2_2026-06-04T12-50-00_review.md"
+sed 's/^verdict: APPROVE$/verdict:  approve /' "$APPROVED" > "$SLOPPY"
+DA_NORM="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$FLEET" dispatch-all "$TRICKY") 2>&1 )"
+echo "$DA_NORM" | grep -q -- "-> ws-2" && ok "dispatch-all normalizes verdict (' approve ' is eligible)" || fail "dispatch-all verdict normalization (got: $DA_NORM)"
+rm -f "$SLOPPY"
+
+echo "== comms.sh v2: state dir blocked as a FILE must not break send/archive =="
+mv "$REPO_FIX/.comms/state" "$REPO_FIX/.comms/state.bak"
+touch "$REPO_FIX/.comms/state"
+BLOCK_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-20-00_blocked-1.md"
+BLOCK_IN="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-19-00_blockedin.md"
+sed 's/round: 2/round: 4/' "$OUT_WF" > "$BLOCK_WF"
+cp "$TA" "$BLOCK_IN"
+BLOCK_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$BLOCK_WF" --archive-inbound "$BLOCK_IN") 2>&1 )"
+BLOCK_RC=$?
+[ "$BLOCK_RC" -eq 0 ] && ok "send succeeds when state dir is blocked (rc=0)" || fail "send succeeds when state dir is blocked (rc=$BLOCK_RC; out: $BLOCK_OUT)"
+[ ! -f "$BLOCK_IN" ] && ok "inbound archived despite blocked state dir (no desync)" || fail "inbound archived despite blocked state dir"
+echo "$BLOCK_OUT" | grep -q "cannot create state dir" && ok "blocked state dir produces explicit warning" || fail "blocked state dir warning (got: $BLOCK_OUT)"
+rm -f "$REPO_FIX/.comms/state"
+mv "$REPO_FIX/.comms/state.bak" "$REPO_FIX/.comms/state"
+
+echo "== fleet.sh: status shows thread-state owes note =="
+mkdir -p "$REPO_FIX/.comms/state"
+cat > "$REPO_FIX/.comms/state/ws-2_loop-x.json" <<JSON
+{
+  "workspace": "ws-2",
+  "thread": "loop-x",
+  "workflow": "auto-implement",
+  "phase": "implement",
+  "round": "1",
+  "max_rounds": "10",
+  "status": "in-progress",
+  "awaiting_from": "codex",
+  "awaiting_since": "2026-06-04T13:00:00Z",
+  "awaiting_since_epoch": "$(( $(date +%s) - 120 ))",
+  "last_sent": "x",
+  "last_delivery": "delivered"
+}
+JSON
+run_fleet status | grep '^ws-2 ' | grep -q 'owes=codex' && ok "fleet status surfaces state ground truth (owes=)" || fail "fleet status owes note (got: $(run_fleet status | grep '^ws-2 '))"
+rm -f "$REPO_FIX/.comms/state/ws-2_loop-x.json"
+
+echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
+PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
+DRY="$(run_comms clean --as claude workspace)"
+echo "$DRY" | grep -q "would delete" && ok "clean dry-runs without --yes" || fail "clean dry-run (got: $DRY)"
+POST_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
+[ "$PRE_COUNT" = "$POST_COUNT" ] && ok "dry-run deleted nothing" || fail "dry-run deleted nothing ($PRE_COUNT -> $POST_COUNT)"
+run_comms clean --as claude workspace --yes >/dev/null
+[ -z "$(find "$REPO_FIX/.comms/to-claude" -name 'feature-helper-tests_*' -type f 2>/dev/null)" ] && ok "clean --yes empties own inbox" || fail "clean --yes empties own inbox"
+[ -n "$(find "$REPO_FIX/.comms/to-codex" -name 'feature-helper-tests_*' -type f 2>/dev/null)" ] && ok "clean workspace mode never touches the other inbox" || fail "clean spares other inbox"
+run_comms clean --as claude all --yes >/dev/null
+[ -z "$(find "$REPO_FIX/.comms/to-codex" -type f 2>/dev/null)" ] && ok "clean all --yes wipes both inboxes" || fail "clean all wipes"
 
 echo ""
 echo "passed: $PASS  failed: $FAIL"
