@@ -23,6 +23,9 @@ CLAUDE_COMMANDS_DIR="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
 CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md fleet.md"
 CODEX_SKILLS="read-from-claude send-to-claude"
+# Shared helper scripts — the single source of truth both agents call.
+AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
+HELPERS="comms.sh fleet.sh"
 SCOPE=""
 
 usage() {
@@ -129,9 +132,11 @@ validate_scope() {
 if [ -d "$SCRIPT_DIR/templates" ]; then
   SOURCE="local"
   TEMPLATE_DIR="$SCRIPT_DIR/templates"
+  HELPER_SRC="$SCRIPT_DIR/helpers"
 else
   SOURCE="remote"
   TEMPLATE_DIR=$(mktemp -d)
+  HELPER_SRC="$TEMPLATE_DIR/helpers"
   trap 'rm -rf "$TEMPLATE_DIR"' EXIT
 fi
 
@@ -173,6 +178,13 @@ install_global_assets() {
     mkdir -p "$CODEX_SKILLS_DIR/$skill"
     cp "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md" "$CODEX_SKILLS_DIR/$skill/SKILL.md"
   done
+
+  echo "  installing shared helpers to $AGENT_COMMS_HOME..."
+  mkdir -p "$AGENT_COMMS_HOME"
+  for h in $HELPERS; do
+    cp "$HELPER_SRC/$h" "$AGENT_COMMS_HOME/$h"
+    chmod +x "$AGENT_COMMS_HOME/$h"
+  done
 }
 
 install_local_assets() {
@@ -187,6 +199,13 @@ install_local_assets() {
   for skill in $CODEX_SKILLS; do
     mkdir -p "$PROJECT_ROOT/.agents/skills/$skill"
     cp "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md" "$PROJECT_ROOT/.agents/skills/$skill/SKILL.md"
+  done
+
+  echo "  installing project-local shared helpers..."
+  mkdir -p "$PROJECT_ROOT/.agent-comms"
+  for h in $HELPERS; do
+    cp "$HELPER_SRC/$h" "$PROJECT_ROOT/.agent-comms/$h"
+    chmod +x "$PROJECT_ROOT/.agent-comms/$h"
   done
 }
 
@@ -215,6 +234,9 @@ warn_local_shadowing() {
   for skill in $CODEX_SKILLS; do
     [ -f "$PROJECT_ROOT/.agents/skills/$skill/SKILL.md" ] && shadowed="$shadowed .agents/skills/$skill/SKILL.md"
   done
+  for h in $HELPERS; do
+    [ -f "$PROJECT_ROOT/.agent-comms/$h" ] && shadowed="$shadowed .agent-comms/$h"
+  done
 
   if [ -n "$shadowed" ]; then
     echo "  warning: project-local agent-comms files exist and will shadow the global install:"
@@ -239,6 +261,7 @@ init_project_state() {
     MISSING=""
     grep -qxF '.comms/' "$PROJECT_ROOT/.gitignore" || MISSING=".comms/"
     grep -qxF '.codex/AGENTS.md' "$PROJECT_ROOT/.gitignore" || MISSING="$MISSING .codex/AGENTS.md"
+    grep -qxF '.agent-comms/' "$PROJECT_ROOT/.gitignore" || MISSING="$MISSING .agent-comms/"
     if [ -n "$MISSING" ]; then
       # Guard against a missing trailing newline swallowing our first appended line.
       [ -n "$(tail -c1 "$PROJECT_ROOT/.gitignore")" ] && echo "" >> "$PROJECT_ROOT/.gitignore"
@@ -256,8 +279,9 @@ init_project_state() {
       echo "# Local agent communication"
       echo ".comms/"
       echo ".codex/AGENTS.md"
+      echo ".agent-comms/"
     } > "$PROJECT_ROOT/.gitignore"
-    echo "  created .gitignore with .comms/ and .codex/AGENTS.md"
+    echo "  created .gitignore with .comms/, .codex/AGENTS.md, .agent-comms/"
   fi
 
   # Add protocol section to .codex/AGENTS.md if not already present
@@ -317,6 +341,10 @@ if needs_templates && [ "$SOURCE" = "remote" ]; then
   for skill in $CODEX_SKILLS; do
     curl -fsSL "$REPO_RAW/templates/codex-skills/$skill/SKILL.md" -o "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md"
   done
+  mkdir -p "$HELPER_SRC"
+  for h in $HELPERS; do
+    curl -fsSL "$REPO_RAW/helpers/$h" -o "$HELPER_SRC/$h"
+  done
 else
   if needs_templates; then
     echo "  source: local ($TEMPLATE_DIR)"
@@ -329,7 +357,8 @@ note_local_pin() {
   echo ""
   echo "  note: project-local copies are pinned — they shadow any global install and"
   echo "  do NOT pick up global updates. Re-run with --scope=local to refresh them, or"
-  echo "  delete .claude/commands/ + .agents/skills/ copies to fall back to global."
+  echo "  delete the .claude/commands/, .agents/skills/, and .agent-comms/ copies to"
+  echo "  fall back to global."
 }
 
 case "$SCOPE" in
@@ -363,6 +392,7 @@ case "$SCOPE" in
   global)
     echo "    Global Claude: /send-to-codex, /read-from-codex, /ask-codex, /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
     echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
+    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh}"
     ;;
   project)
     echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
@@ -370,6 +400,7 @@ case "$SCOPE" in
   both)
     echo "    Global Claude: /send-to-codex, /read-from-codex, /ask-codex, /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
     echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
+    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh}"
     echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
     ;;
 esac
