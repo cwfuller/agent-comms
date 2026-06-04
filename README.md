@@ -69,6 +69,12 @@ AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" 
 | `$read-from-claude` | Read and act on Claude's message |
 | `$send-to-claude` | Send findings back with auto-delivery |
 
+**Shared helpers** (installed to `~/.agent-comms/`, or `<repo>/.agent-comms/` for pinned local installs) — the single source of truth both agents call, so the two sides provably can't drift:
+| Helper | Description |
+|---|---|
+| `comms.sh` | workspace/root resolution, message validation, pane-aware cmux delivery, idempotent own-inbox archive, atomic send (refuses to archive the inbound unless the outbound validated) |
+| `fleet.sh` | the `/fleet` engine — status, dispatch (with per-target busy-check), dispatch-all (two-phase), harvest, clear |
+
 ## How it works
 
 1. Agent writes a markdown message to `.comms/to-codex/` or `.comms/to-claude/`
@@ -156,7 +162,7 @@ Autonomous replies preserve the workflow metadata and add a `verdict: APPROVE | 
   to-codex/                      # Claude writes, Codex reads
   to-claude/                     # Codex writes, Claude reads
   archive/                       # processed messages
-.claude/commands/                # Claude Code commands
+.claude/commands/                # Claude Code commands (thin wrappers over comms.sh)
   send-to-codex.md
   read-from-codex.md
   ask-codex.md
@@ -165,10 +171,13 @@ Autonomous replies preserve the workflow metadata and add a `verdict: APPROVE | 
   auto-full.md
   clean-comms.md
   fleet.md
-.agents/skills/                  # Codex skills
+.agents/skills/                  # Codex skills (same comms.sh)
   read-from-claude/SKILL.md
   send-to-claude/SKILL.md
+.agent-comms/                    # shared helpers (local pinned installs)
+  comms.sh
+  fleet.sh
 .codex/AGENTS.md                 # protocol docs for Codex
 ```
 
-Global installs place the same Claude command files under `~/.claude/commands/` and the same Codex skills under `~/.codex/skills/`.
+Global installs place the same Claude command files under `~/.claude/commands/`, the same Codex skills under `~/.codex/skills/`, and the helpers under `~/.agent-comms/`. The repo also ships `tests/run.sh` — a hermetic harness (stubbed cmux, throwaway git fixtures) covering the helpers and installer; run it with `bash tests/run.sh`.
