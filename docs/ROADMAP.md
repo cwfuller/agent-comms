@@ -177,6 +177,10 @@ Token notes beyond the extraction:
   restructured dispatch-all site). When making a crosscutting change, grep for ALL sites of
   the old pattern — including ones restructured earlier in the same PR.
 
+- *2026-06-04, docs loop r2 (Codex, Process — positive):* an interrupted archive left a
+  stale round-1 message in Codex's inbox alongside round 2; Codex identified it as stale
+  via the v2 thread/round fields, reviewed only the newer round, and archived the stale
+  file itself. First in-the-wild self-recovery from the exact desync class v2 targets.
 ## Explicitly considered and rejected (audit refuted — don't re-litigate without new evidence)
 
 - Codex-side loose workspace grep producing a *currently* different name (verified
