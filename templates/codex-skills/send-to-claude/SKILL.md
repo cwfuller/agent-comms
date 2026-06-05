@@ -84,6 +84,7 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
    ```bash
    "$COMMS_SH" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"
    ```
+   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual or failed outcome means Claude was NOT woken.
    Without cmux the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk). A mid-sequence cmux failure is reported as `delivery FAILED` and recorded in the thread's state file; the reply stays safely on disk — retry with `"$COMMS_SH" send --to claude "<reply file>"` (re-attempts the nudge AND refreshes the recorded delivery state). `send` updates `.comms/state/<workspace>_<thread>.json` automatically for workflow messages.
 
 7. Confirm to the user that the message was verified and delivery attempted.

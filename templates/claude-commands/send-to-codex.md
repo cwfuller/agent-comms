@@ -56,6 +56,7 @@ message_id: <the filename, without .md>
    ```bash
    "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
+   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual or failed outcome means Codex was NOT woken.
 
 5. Confirm to the user that the message was verified and delivery attempted.
 

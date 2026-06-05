@@ -50,6 +50,7 @@ message_id: <the filename, without .md>
    ```bash
    "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
+   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered`.
 
 7. Tell the user the question was sent and where to look for the reply (`.comms/to-claude/`). When Codex replies, use `/read-from-codex` to surface the answer.
 
