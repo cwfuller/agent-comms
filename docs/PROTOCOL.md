@@ -153,7 +153,10 @@ With cmux available, `comms.sh deliver <target>` resolves the target surface in 
    from the last successful delivery. Verified against the live tree when the tree is
    readable; **if the tree read itself fails, a binding is used optimistically** — a
    dead surface then fails the send sequence loudly (`RESULT: failed`, retryable),
-   which beats discarding a known target over a transient tree hiccup
+   which beats discarding a known target over a transient tree hiccup. Residual risk,
+   accepted: if cmux ever *reuses* a surface id for a different terminal while the tree
+   is unreadable, an optimistic send would land there and report `delivered` — identity
+   simply cannot be verified without a tree
 2. **pane-aware pick** — the *first* terminal surface (tree order = tab order) in a pane
    other than the caller's, falling back to the first other terminal anywhere
 

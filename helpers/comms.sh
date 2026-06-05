@@ -403,7 +403,7 @@ cmd_status() {
     deliv="$(json_get "$sf" last_delivery)"
     if [ "$st" != "complete" ] && [ -n "$deliv" ] && [ "$deliv" != "delivered" ]; then
       case "$owes" in claude|codex) target="$owes" ;; *) target="<agent>" ;; esac
-      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Run 'comms.sh deliver $target' (or trigger the pane by hand)."
+      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Run 'comms.sh deliver $target' (or trigger the pane by hand). This notice clears on the thread's next send."
     fi
   fi
 }
