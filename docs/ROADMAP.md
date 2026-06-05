@@ -130,7 +130,42 @@ Token notes beyond the extraction:
   the verdict and gets appended to the friction log / this roadmap on loop close. (Requested
   by user 2026-06-04; first used in the PR1 review loop, round 2.)
 
+## v2.1 — delivery identity & resilience (field-driven, 2026-06-04)
+
+**Status: implemented (Codex loop pending).** Driven by a live multi-terminal workspace
+incident: an intermittently-empty `cmux tree` broke surface picking ("could not find a
+claude surface") AND flapped workspace identity (splitting state files between the cmux
+name and the branch-name fallback); a manual recovery then nudged the wrong of two
+Claude tabs.
+
+- [x] `cmux_tree()` retries (3×) — one un-retried, error-swallowed call was the shared
+  root cause of the picker failure and the identity flap.
+- [x] **Latent abort fixed:** with cmux active but tree output unmatched, the workspace
+  pipeline's no-match grep killed the whole helper under `set -euo pipefail` (verified);
+  parsing is now failure-tolerant.
+- [x] **Workspace identity cache** per cmux workspace (`.comms/.cache/ws-*`): one good
+  resolution sticks; flaky reads reuse it (with a warning) instead of flapping to
+  `master` and splitting state.
+- [x] **Agent-aware delivery:** `comms.sh bind <agent> surface:N` pins the target;
+  successful deliveries auto-cache the working surface; bindings are ignored if the
+  surface vanishes. Picker preference is bound → first other-pane terminal (tab order),
+  with the convention that the live agent is the FIRST tab. Delivery output names the
+  surface and the selection reason.
+- [x] **Loud outcomes:** `send` ends with a `RESULT: delivered|manual|failed` line and
+  every template instructs the agent to relay non-delivered results verbatim — a quiet
+  manual outcome previously read as "sent".
+
 ## Friction log (meta-channel feedback + live-loop observations)
+
+- *2026-06-05, field (multi-terminal workspace):* Codex's reply never woke Claude —
+  picker found no surface, workspace flapped between cmux name and branch fallback
+  (duplicate split state files), and a manual re-nudge hit the second of two Claude tabs.
+  Root causes and fixes above (v2.1). Lesson: any cmux read used for identity or
+  targeting needs retry + memory; "some other terminal" is not an agent identity.
+- *2026-06-05, v2.1 loop r2 (Codex, Process — live-fire validation):* the cmux tree flake
+  recurred DURING the review session itself; the new identity cache absorbed it ("using
+  cached workspace") with no flap and no failed delivery. Fix validated in production
+  while under review.
 
 - *2026-06-04, PR1 loop r2 (Codex):* stable-context message shape endorsed; remaining
   friction is that validating prompt-embedded shell requires manually extracting and

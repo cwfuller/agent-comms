@@ -147,9 +147,19 @@ Inspection: `comms.sh state list | get <thread> | complete <thread>`, and
 
 ## Delivery
 
-With cmux available, `comms.sh deliver <target>` picks the other agent's terminal
-surface (pane-aware: prefers a surface in a pane other than the caller's) and types the
-read command into it:
+With cmux available, `comms.sh deliver <target>` resolves the target surface in order:
+
+1. **binding** — an explicit `comms.sh bind <target> surface:N`, or the surface cached
+   from the last successful delivery — used only if it still exists in the tree
+2. **pane-aware pick** — the *first* terminal surface (tree order = tab order) in a pane
+   other than the caller's, falling back to the first other terminal anywhere
+
+Convention when a workspace has several Claude/Codex tabs: **keep the live agent as the
+first tab in its pane**, or set an explicit binding — the picker cannot know agent
+identity from the tree alone. Delivery output names the chosen surface and why
+(`delivered to surface:146 (bound)`), so a wrong target is visible immediately.
+
+It then types the read command into the chosen surface:
 
 - → Codex: `$read-from-claude` + enter
 - → Claude: `escape, i, /read-from-codex, escape, enter` (assumes vim mode)
@@ -166,6 +176,17 @@ Three explicit outcomes, recorded in state by `send`:
 validates the outbound (refusing to deliver or archive if malformed), attempts delivery,
 records state, and only then archives the inbound. A failed nudge still archives — the
 inbound *was* processed; the retry surface is delivery, tracked in state.
+
+`send` always ends with a `RESULT:` line (`delivered` / `manual — the other agent was
+NOT nudged…` / `failed — …`). Agents must relay any non-`delivered` result to the user
+verbatim: a quietly-manual outcome is indistinguishable from "the reviewer is slow" and
+stalls the loop.
+
+**Identity resilience:** workspace resolution caches one good cmux-derived name per
+cmux workspace (`.comms/.cache/`); if a later `cmux tree` read flakes, the cached
+identity is reused instead of flapping to a branch-name fallback (which would split
+message prefixes and state files mid-loop). The tree fetch itself retries 3× before
+giving up.
 
 **Late nudges are normal.** The injected read command sits in the target's input box
 until its current turn ends — sometimes minutes. If the reply was already consumed by

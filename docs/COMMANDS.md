@@ -102,8 +102,9 @@ agnostic.
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
 | `verdict <file>` | normalized (trimmed, uppercased) verdict |
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
-| `deliver <claude\|codex>` | cmux pane nudge; prints `delivered` / manual-pickup / `FAILED` explicitly |
-| `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically |
+| `deliver <claude\|codex>` | cmux pane nudge; prints `delivered to <surface> (<how>)` / manual-pickup / `FAILED` explicitly |
+| `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line |
+| `bind <claude\|codex> [surface:N]` | pin which surface delivery targets (show current with no arg); successful deliveries auto-refresh it; ignored if the surface disappears |
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |
 | `clean --as <claude\|codex> [mode] [--yes]` | guarded delete; dry-run without `--yes` |
