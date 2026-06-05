@@ -44,14 +44,17 @@ safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 # field incident: under load it intermittently returns empty, which broke
 # workspace resolution AND surface picking in the same session.
 cmux_tree() {
-  local out try
-  for try in 1 2 3; do
+  # Backoff matters: a fixed 3x0.3s burst sits inside a single cmux contention
+  # window (observed in the field while a background terminal was attaching);
+  # spreading attempts over ~2.5s survives it.
+  local out delay
+  for delay in 0.3 0.7 1.2 0; do
     out="$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null)" || out=""
     if [ -n "$out" ]; then
       printf '%s\n' "$out"
       return 0
     fi
-    sleep 0.3
+    [ "$delay" = 0 ] || sleep "$delay"
   done
   return 1
 }
@@ -254,19 +257,31 @@ pick_surface() {  # pick_surface <target> — prints "<surface>\t<how>"
   #      in a pane OTHER than the one marked "◀ here"; fall back to the first
   #      other terminal anywhere. Convention: keep the live Claude/Codex as the
   #      FIRST tab in its pane, or set an explicit binding.
-  local target="$1" tree bound cachef
-  tree="$(cmux_tree || true)"
-  [ -n "$tree" ] || return 0   # caller reports not-found
+  local target="$1" tree bound="" cachef
   cachef="$(cache_path "surface-$target" || true)"
-  if [ -n "$cachef" ] && [ -f "$cachef" ]; then
-    bound="$(cat "$cachef" 2>/dev/null || true)"
-    if [ -n "$bound" ] && printf '%s\n' "$tree" | grep -qE "${bound}([^0-9]|\$)"; then
+  [ -n "$cachef" ] && [ -f "$cachef" ] && bound="$(cat "$cachef" 2>/dev/null || true)"
+  tree="$(cmux_tree || true)"
+  if [ -z "$tree" ]; then
+    # Tree unavailable. A known binding must NOT be discarded because of a
+    # flaky tree read — use it optimistically; a dead surface makes the send
+    # sequence fail loudly (RESULT: failed), which is accurate and retryable.
+    if [ -n "$bound" ]; then
+      printf '%s\tbound (tree unavailable — optimistic)\n' "$bound"
+      return 0
+    fi
+    echo "pick_surface: cmux tree unavailable after retries (target=$target, workspace=${CMUX_WORKSPACE_ID:-unset}, no binding cached at ${cachef:-n/a})" >&2
+    return 0   # caller reports not-found
+  fi
+  if [ -n "$bound" ]; then
+    if printf '%s\n' "$tree" | grep -qE "${bound}([^0-9]|\$)"; then
       printf '%s\tbound\n' "$bound"
       return 0
     fi
+    echo "pick_surface: bound $target surface '$bound' not present in current tree — falling back to picker" >&2
   fi
   # This is a real script — awk $0 is safe here.
-  printf '%s\n' "$tree" | awk '
+  local picked
+  picked="$(printf '%s\n' "$tree" | awk '
     /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
     /surface:.*\[terminal\]/ {
       if (match($0, /surface:[0-9]+/)) {
@@ -278,7 +293,13 @@ pick_surface() {  # pick_surface <target> — prints "<surface>\t<how>"
     END {
       for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { printf "%s\tfirst other-pane terminal\n", surf[i]; exit }
       for (i=1;i<=n;i++) if (!here[i]) { printf "%s\tfirst other terminal\n", surf[i]; exit }
-    }'
+    }')"
+  if [ -n "$picked" ]; then
+    printf '%s\n' "$picked"
+    return 0
+  fi
+  # Nothing eligible — say exactly why so a manual outcome is diagnosable.
+  echo "pick_surface: no eligible surface (target=$target, workspace=${CMUX_WORKSPACE_ID:-unset}, [terminal] surfaces in tree: $(printf '%s\n' "$tree" | grep -c '\[terminal\]' || true), binding: ${bound:-none})" >&2
 }
 
 cmd_bind() {  # bind <claude|codex> [surface:N] — set or show the target's surface binding
@@ -372,6 +393,19 @@ cmd_status() {
     echo "pending in $dir: $(find "$root/$dir" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null | wc -l | tr -d ' ')"
     [ -n "$label" ] && echo "$label"
   done
+  # Loud recovery surface: a pending message whose thread never got a real nudge
+  # is a stalled loop the operator must act on — make it impossible to miss.
+  local sf owes deliv st target
+  sf="$(ls -t "$root/state/${ws}_"*.json 2>/dev/null | head -1 || true)"
+  if [ -n "$sf" ]; then
+    st="$(json_get "$sf" status)"
+    owes="$(json_get "$sf" awaiting_from)"
+    deliv="$(json_get "$sf" last_delivery)"
+    if [ "$st" != "complete" ] && [ -n "$deliv" ] && [ "$deliv" != "delivered" ]; then
+      case "$owes" in claude|codex) target="$owes" ;; *) target="<agent>" ;; esac
+      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Run 'comms.sh deliver $target' (or trigger the pane by hand)."
+    fi
+  fi
 }
 
 # ---------- protocol v2: thread state (.comms/state/<ws>_<thread>.json) ----------
