@@ -150,9 +150,17 @@ Inspection: `comms.sh state list | get <thread> | complete <thread>`, and
 With cmux available, `comms.sh deliver <target>` resolves the target surface in order:
 
 1. **binding** — an explicit `comms.sh bind <target> surface:N`, or the surface cached
-   from the last successful delivery — used only if it still exists in the tree
+   from the last successful delivery. Verified against the live tree when the tree is
+   readable; **if the tree read itself fails, a binding is used optimistically** — a
+   dead surface then fails the send sequence loudly (`RESULT: failed`, retryable),
+   which beats discarding a known target over a transient tree hiccup
 2. **pane-aware pick** — the *first* terminal surface (tree order = tab order) in a pane
    other than the caller's, falling back to the first other terminal anywhere
+
+Every path that ends in "no surface" emits a stderr diagnostic naming the target,
+workspace id, binding state, and what the tree contained — a manual outcome is always
+explainable. `comms.sh status` adds an `ACTION NEEDED` line whenever the newest thread's
+last delivery wasn't a real nudge.
 
 Convention when a workspace has several Claude/Codex tabs: **keep the live agent as the
 first tab in its pane**, or set an explicit binding — the picker cannot know agent

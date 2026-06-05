@@ -155,8 +155,25 @@ Claude tabs.
   every template instructs the agent to relay non-delivered results verbatim — a quiet
   manual outcome previously read as "sent".
 
+### v2.1.1 follow-up (field incident #2, 2026-06-05)
+
+A bound target was discarded because the tree read used to *verify* it failed —
+the verification gate became the single point of failure ("guard the whole path",
+again). Fixes: bindings are used optimistically when the tree is unreadable (a dead
+surface fails the send loudly and retryably instead of silently going manual);
+`cmux_tree` retries now back off across ~2.5s instead of bursting inside one
+contention window; every empty pick emits a stderr diagnostic (target, workspace id,
+binding, tree contents); `status` prints `ACTION NEEDED` when the newest thread's
+last delivery wasn't a real nudge.
+
 ## Friction log (meta-channel feedback + live-loop observations)
 
+- *2026-06-05, field incident #2 (atlas):* send returned `RESULT: manual` despite an
+  existing binding to a live surface — pick_surface required a successful tree read
+  BEFORE consulting the binding, so a transient tree failure (3 burst retries inside one
+  contention window, likely while a background terminal attached) discarded a known
+  target. The new RESULT contract worked (Codex relayed it; the loop didn't silently
+  stall — the human was told). Fixed in v2.1.1.
 - *2026-06-05, field (multi-terminal workspace):* Codex's reply never woke Claude —
   picker found no surface, workspace flapped between cmux name and branch fallback
   (duplicate split state files), and a manual re-nudge hit the second of two Claude tabs.
