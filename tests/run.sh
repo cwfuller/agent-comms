@@ -49,7 +49,9 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 case "$cmd" in
-  tree) cat "$CMUX_STUB_DIR/tree-${ref//:/_}.txt" 2>/dev/null ;;
+  tree)
+    [ -n "${CMUX_STUB_TREE_EMPTY:-}" ] && exit 0
+    cat "$CMUX_STUB_DIR/tree-${ref//:/_}.txt" 2>/dev/null ;;
   list-workspaces) cat "$CMUX_STUB_DIR/list.txt" 2>/dev/null ;;
   send) [ -n "${CMUX_STUB_FAIL:-}" ] && exit 1; exit 0 ;;
   send-key) exit 0 ;;
@@ -435,6 +437,37 @@ BLOCK_RC=$?
 echo "$BLOCK_OUT" | grep -q "cannot create state dir" && ok "blocked state dir produces explicit warning" || fail "blocked state dir warning (got: $BLOCK_OUT)"
 rm -f "$REPO_FIX/.comms/state"
 mv "$REPO_FIX/.comms/state.bak" "$REPO_FIX/.comms/state"
+
+echo "== comms.sh v2.1: workspace resilience (empty cmux tree must not abort or flap) =="
+rm -f "$REPO_FIX/.comms/.cache/ws-workspace_10"
+WS_EMPTY="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" workspace) 2>/dev/null )"
+WS_EMPTY_RC=$?
+[ "$WS_EMPTY_RC" -eq 0 ] && ok "empty cmux tree does not abort the helper (rc=0)" || fail "empty cmux tree aborts helper (rc=$WS_EMPTY_RC)"
+[ "$WS_EMPTY" = "feature-helper-tests" ] && ok "no-cache fallback resolves branch name" || fail "no-cache fallback (got: $WS_EMPTY)"
+# Prime the cache with a good resolution, then break the tree: identity must stick.
+(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" workspace) >/dev/null
+WS_STICKY="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" workspace) 2>/dev/null )"
+[ "$WS_STICKY" = "test-project" ] && ok "cached identity survives a flaky tree (no atlas/master flap)" || fail "cached identity sticks (got: $WS_STICKY)"
+
+echo "== comms.sh v2.1: surface binding =="
+check "bind sets an explicit surface" env -u X bash -c "cd '$REPO_FIX' && PATH='$STUB_BIN:$PATH' CMUX_WORKSPACE_ID=workspace:10 '$COMMS' bind claude surface:11"
+: > "$CMUX_STUB_LOG"
+BOUND_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver claude)"
+echo "$BOUND_OUT" | grep -q "delivered to surface:11 (bound)" && ok "deliver honors the binding over the picker" || fail "deliver honors binding (got: $BOUND_OUT)"
+(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:999) >/dev/null
+BOUND_GONE="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver claude)"
+echo "$BOUND_GONE" | grep -q "delivered to surface:22" && ok "absent bound surface falls back to picker" || fail "absent binding falls back (got: $BOUND_GONE)"
+grep -q "delivered to surface:22" <<<"$BOUND_GONE" && [ "$(cd "$REPO_FIX" && cat .comms/.cache/surface-claude-workspace_10)" = "surface:22" ] && ok "successful delivery refreshes the surface cache" || fail "delivery refreshes surface cache"
+
+echo "== comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line =="
+RES_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUT_WF") 2>/dev/null )"
+echo "$RES_OUT" | grep -q "^RESULT: manual" && ok "manual outcome includes RESULT: manual" || fail "RESULT line (got: $(echo "$RES_OUT" | tail -1))"
+# The autonomous path (--archive-inbound) must ALSO end with RESULT, not "archived:".
+RES_IN="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-30-00_resin.md"
+cp "$TA" "$RES_IN"
+RES_TAIL="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUT_WF" --archive-inbound "$RES_IN") 2>/dev/null | tail -1 )"
+case "$RES_TAIL" in RESULT:*) ok "tail -1 of send --archive-inbound is the RESULT line" ;; *) fail "final line on archive path (got: $RES_TAIL)" ;; esac
+[ ! -f "$RES_IN" ] && ok "inbound still archived on the RESULT-last path" || fail "inbound archived on RESULT-last path"
 
 echo "== fleet.sh: status shows thread-state owes note =="
 mkdir -p "$REPO_FIX/.comms/state"

@@ -19,6 +19,7 @@
 #                               validate, deliver, update thread state, then archive inbound
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
+#   bind <claude|codex> [surface:N]   pin which surface delivery targets (show with no arg)
 #   clean --as <claude|codex> [workspace|all|archive|<file>] [--yes]
 #                               guarded delete; dry-run without --yes; own-inbox default
 set -euo pipefail
@@ -36,16 +37,62 @@ cmd_root() {
   echo "$r/.comms"
 }
 
+# Filesystem-safe name (defined early — cache paths below need it).
+safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+
+# Retried cmux tree fetch. A single un-retried call was the root cause of a
+# field incident: under load it intermittently returns empty, which broke
+# workspace resolution AND surface picking in the same session.
+cmux_tree() {
+  local out try
+  for try in 1 2 3; do
+    out="$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null)" || out=""
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    sleep 0.3
+  done
+  return 1
+}
+
+cache_path() {  # cache_path <kind> — per-cmux-workspace cache file; fails outside repo/cmux
+  local root
+  root="$(main_repo_root)"
+  [ -n "$root" ] && [ -n "${CMUX_WORKSPACE_ID:-}" ] || return 1
+  echo "$root/.comms/.cache/${1}-$(safe_name "$CMUX_WORKSPACE_ID")"
+}
+
 cmd_workspace() {
-  local ws=""
+  local ws="" cachef=""
   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-    ws=$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null \
+    # Failure-tolerant parse: an empty or unmatched tree must fall through —
+    # without the || true, pipefail+set -e silently kills the whole helper.
+    ws="$(cmux_tree \
       | grep -E 'workspace workspace:[0-9]+ "' \
       | head -1 \
       | sed 's/.*"\([^"]*\)".*/\1/' \
-      | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
+      | tr ' ' '-' | tr '[:upper:]' '[:lower:]' || true)"
+    cachef="$(cache_path ws || true)"
+    if [ -n "$ws" ]; then
+      # Cache the identity per cmux workspace: one good resolution sticks, so a
+      # later flaky tree read can't flap the name mid-loop (and split state files).
+      if [ -n "$cachef" ]; then
+        { mkdir -p "$(dirname "$cachef")" && printf '%s' "$ws" > "$cachef"; } 2>/dev/null || true
+      fi
+      echo "$ws"
+      return 0
+    fi
+    if [ -n "$cachef" ] && [ -f "$cachef" ]; then
+      ws="$(cat "$cachef" 2>/dev/null || true)"
+      if [ -n "$ws" ]; then
+        echo "warning: cmux tree parse failed — using cached workspace '$ws'" >&2
+        echo "$ws"
+        return 0
+      fi
+    fi
   fi
-  [ -n "$ws" ] || ws=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
+  ws=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
   [ -n "$ws" ] || ws=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
   # Sanity check: under cmux the workspace should not be a generic branch name.
   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
@@ -197,11 +244,29 @@ cmd_archive() {
   done
 }
 
-pick_other_surface() {
-  # Pane-aware picker: prefer a [terminal] surface in a pane OTHER than the one
-  # marked "◀ here"; fall back to any other terminal surface (single-pane
-  # multi-tab layouts). This is a real script — awk $0 is safe here.
-  cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null | awk '
+pick_surface() {  # pick_surface <target> — prints "<surface>\t<how>"
+  # Order of preference:
+  #   1. a bound/remembered surface for this target (set via `bind`, or cached
+  #      from the last successful delivery) — IF it still exists in the tree.
+  #      With several terminal surfaces in a workspace, "some other terminal"
+  #      is a coin toss; agent identity has to come from a binding.
+  #   2. pane-aware pick: the FIRST [terminal] surface (tree order = tab order)
+  #      in a pane OTHER than the one marked "◀ here"; fall back to the first
+  #      other terminal anywhere. Convention: keep the live Claude/Codex as the
+  #      FIRST tab in its pane, or set an explicit binding.
+  local target="$1" tree bound cachef
+  tree="$(cmux_tree || true)"
+  [ -n "$tree" ] || return 0   # caller reports not-found
+  cachef="$(cache_path "surface-$target" || true)"
+  if [ -n "$cachef" ] && [ -f "$cachef" ]; then
+    bound="$(cat "$cachef" 2>/dev/null || true)"
+    if [ -n "$bound" ] && printf '%s\n' "$tree" | grep -qE "${bound}([^0-9]|\$)"; then
+      printf '%s\tbound\n' "$bound"
+      return 0
+    fi
+  fi
+  # This is a real script — awk $0 is safe here.
+  printf '%s\n' "$tree" | awk '
     /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
     /surface:.*\[terminal\]/ {
       if (match($0, /surface:[0-9]+/)) {
@@ -211,9 +276,31 @@ pick_other_surface() {
       }
     }
     END {
-      for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { print surf[i]; exit }
-      for (i=1;i<=n;i++) if (!here[i]) { print surf[i]; exit }
+      for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { printf "%s\tfirst other-pane terminal\n", surf[i]; exit }
+      for (i=1;i<=n;i++) if (!here[i]) { printf "%s\tfirst other terminal\n", surf[i]; exit }
     }'
+}
+
+cmd_bind() {  # bind <claude|codex> [surface:N] — set or show the target's surface binding
+  local target="${1:-}" surface="${2:-}"
+  case "$target" in claude|codex) ;; *) die "bind: target must be claude or codex" ;; esac
+  local f
+  f="$(cache_path "surface-$target")" || die "bind: requires a git repo and CMUX_WORKSPACE_ID"
+  if [ -z "$surface" ]; then
+    if [ -f "$f" ]; then
+      echo "$target bound to $(cat "$f")"
+    else
+      echo "$target not bound (pane-aware picker will choose)"
+    fi
+    return 0
+  fi
+  case "$surface" in
+    surface:[0-9]*) ;;
+    *) die "bind: surface must look like surface:<n> (see 'cmux tree')" ;;
+  esac
+  mkdir -p "$(dirname "$f")"
+  printf '%s' "$surface" > "$f"
+  echo "bound $target -> $surface (ignored automatically if it disappears from the tree)"
 }
 
 cmd_deliver() {
@@ -223,8 +310,10 @@ cmd_deliver() {
     echo "warning: cmux not available; message written for manual pickup"
     return 0
   fi
-  local surface
-  surface="$(pick_other_surface)"
+  local picked surface how
+  picked="$(pick_surface "$target")"
+  surface="${picked%%	*}"
+  how="${picked#*	}"
   if [ -z "$surface" ]; then
     echo "warning: could not find a $target surface; message written for manual pickup"
     return 0
@@ -248,7 +337,12 @@ cmd_deliver() {
       ;;
   esac
   if [ "$seq_ok" = true ]; then
-    echo "delivered to $surface"
+    # Remember the working surface for this target so the next delivery doesn't
+    # have to guess among multiple terminals.
+    local cachef
+    cachef="$(cache_path "surface-$target" || true)"
+    [ -n "$cachef" ] && { mkdir -p "$(dirname "$cachef")" && printf '%s' "$surface" > "$cachef"; } 2>/dev/null || true
+    echo "delivered to $surface ($how)"
   else
     echo "warning: delivery FAILED mid-sequence to $surface — the message is safely on disk; retry with 'comms.sh send --to $target <file>' (refreshes delivery state) or nudge the pane manually"
   fi
@@ -284,10 +378,8 @@ cmd_status() {
 
 state_dir() { echo "$(cmd_root)/state"; }
 
-# Filesystem-safe name: thread/message values become filename components, so
-# anything outside [A-Za-z0-9._-] is mapped to '_' (a '/' would otherwise turn
-# the state path into a non-existent subdirectory and abort send mid-flow).
-safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+# (safe_name is defined above cmd_workspace — thread/message/cache values all
+# become filename components, so anything outside [A-Za-z0-9._-] maps to '_'.)
 
 # Minimal JSON string escaping so embedded quotes/backslashes can't produce
 # invalid state files.
@@ -495,6 +587,15 @@ cmd_send() {
       claude) cmd_archive --as codex "$archive_inbound" ;;
     esac
   fi
+  # Loud outcome — emitted LAST so `tail -1` of send is always the RESULT line
+  # on every path, including --archive-inbound (the main autonomous path).
+  # Calling agents MUST relay anything other than `delivered` to the user — a
+  # manual outcome means the other agent was NOT woken and the loop sits idle.
+  case "$outcome" in
+    delivered) echo "RESULT: delivered" ;;
+    manual)    echo "RESULT: manual — the other agent was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'" ;;
+    failed)    echo "RESULT: failed — nudge errored mid-sequence; retry with 'comms.sh send --to $to <file>'" ;;
+  esac
 }
 
 case "${1:-}" in
@@ -509,6 +610,7 @@ case "${1:-}" in
   send)      shift; cmd_send "$@" ;;
   state)     shift; cmd_state "$@" ;;
   stalled)   shift; cmd_stalled "$@" ;;
+  bind)      shift; cmd_bind "$@" ;;
   clean)     shift; cmd_clean "$@" ;;
   ""|help|-h|--help)
     sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
