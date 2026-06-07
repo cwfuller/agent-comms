@@ -80,23 +80,36 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
 
 5. **Write safely.** Use a heredoc with quoted delimiter (`<<'EOF'`) or write via a tool that does not interpolate shell variables or backticks in the body. Never embed the message body inside an interpolated shell string — Markdown backticks will be evaluated.
 
-6. **Validate, deliver, and archive in one atomic step.** The helper validates your reply (frontmatter delimiters; `type`, `from`, `timestamp`; workflow fields plus `verdict` since the reply is from codex; non-empty body), refuses to deliver or archive if malformed, nudges Claude's pane via cmux (vim-mode-aware), and only then archives the incoming message from your inbox:
+6. **Validate, deliver, and archive in one atomic step.** The helper validates your reply (frontmatter delimiters; `type`, `from`, `timestamp`; workflow fields plus `verdict` since the reply is from codex; non-empty body), refuses to deliver or archive if malformed, nudges Claude's pane via cmux (vim-mode-aware), and only then archives the incoming message from your inbox. **`send` touches the cmux socket — run it through your approved shell wrapper (see "Sandbox & permissions" below). The wrapper resolves the helper inside the child shell, since a parent `$COMMS_SH` is NOT visible there:**
    ```bash
-   "$COMMS_SH" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"
+   /bin/zsh -lc 'C=$(git worktree list --porcelain 2>/dev/null|head -1|sed "s/^worktree //")/.agent-comms/comms.sh; [ -x "$C" ]||C="$HOME/.agent-comms/comms.sh"; "$C" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"'
    ```
-   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual or failed outcome means Claude was NOT woken.
+   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Claude was NOT woken.
    Without cmux the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk). A mid-sequence cmux failure is reported as `delivery FAILED` and recorded in the thread's state file; the reply stays safely on disk — retry with `"$COMMS_SH" send --to claude "<reply file>"` (re-attempts the nudge AND refreshes the recorded delivery state). `send` updates `.comms/state/<workspace>_<thread>.json` automatically for workflow messages.
 
 7. Confirm to the user that the message was verified and delivery attempted.
 
-## Sandbox & permissions
+## Sandbox & permissions (read before step 6)
 
-- **Never proactively escalate the helper.** Run `comms.sh` directly first — it only
-  touches repo files and the cmux socket, which normally needs no elevated permission.
-- If the sandbox blocks it, **retry through the session's already-approved shell wrapper, if one exists**
-  (e.g. `/bin/zsh -lc '"$COMMS_SH" send ...'`) before asking the user for anything.
-- Only request escalation after an actual failure, and scope it to the helper (a
-  persistent prefix on the comms.sh path), not a blanket grant.
+`send` and `deliver` touch the **cmux socket** (`cmux.sock`), which is normally OUTSIDE a
+restricted sandbox's allowed roots. So for these two commands, in Codex:
+
+- **Run them through your approved shell wrapper from the start** — do not call them
+  bare and wait for a failure. **The wrapper must resolve the helper path *inside* the
+  child shell** — a parent-shell `$COMMS_SH` is not exported into `/bin/zsh -lc`, so it
+  expands to empty there:
+  ```bash
+  /bin/zsh -lc 'C=$(git worktree list --porcelain 2>/dev/null|head -1|sed "s/^worktree //")/.agent-comms/comms.sh; [ -x "$C" ]||C="$HOME/.agent-comms/comms.sh"; "$C" send --to claude "<reply file>" --archive-inbound "<inbound>"'
+  ```
+  (Read-only commands — `validate`, `list`, `archive`, file reads — don't touch the
+  socket and are fine to run directly with your resolved `$COMMS_SH`.)
+- **If you see `Operation not permitted` on `cmux.sock` (or the helper prints "cmux
+  socket is outside this sandbox"), do NOT request escalation** — that is exactly what
+  produces the user's permission prompt. Re-run the *same* command through the
+  `/bin/zsh -lc '...'` wrapper. The helper itself prints the exact wrapper line on this
+  failure.
+- Request escalation only if no approved wrapper exists at all, and scope it to the
+  `comms.sh` path — never a blanket grant.
 - A permission prompt during send is an invocation issue, **not** a protocol failure —
   verify the reply file on disk, archive state, and the `RESULT:` line before diagnosing
   a comms regression.

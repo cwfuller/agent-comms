@@ -53,7 +53,10 @@ case "$cmd" in
     [ -n "${CMUX_STUB_TREE_EMPTY:-}" ] && exit 0
     cat "$CMUX_STUB_DIR/tree-${ref//:/_}.txt" 2>/dev/null ;;
   list-workspaces) cat "$CMUX_STUB_DIR/list.txt" 2>/dev/null ;;
-  send) [ -n "${CMUX_STUB_FAIL:-}" ] && exit 1; exit 0 ;;
+  send)
+    [ -n "${CMUX_STUB_SANDBOX:-}" ] && { echo "Operation not permitted (cmux.sock)" >&2; exit 1; }
+    [ -n "${CMUX_STUB_FAIL:-}" ] && exit 1
+    exit 0 ;;
   send-key) exit 0 ;;
 esac
 STUB
@@ -470,6 +473,27 @@ rm -f "$REPO_FIX/.comms/.cache/surface-codex-workspace_10"
 DIAG="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" deliver codex) 2>&1 )"
 echo "$DIAG" | grep -q "manual pickup" && ok "no binding + no tree degrades to manual" || fail "no binding + no tree (got: $DIAG)"
 echo "$DIAG" | grep -q "tree unavailable after retries" && ok "empty-tree manual outcome carries a diagnostic" || fail "empty-tree diagnostic (got: $DIAG)"
+
+echo "== comms.sh v2.1.2: cmux-socket sandbox failure names the wrapper, not escalation =="
+(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:22) >/dev/null
+SBX="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" deliver claude) 2>&1 )"
+echo "$SBX" | grep -q "outside this sandbox" && ok "socket failure is recognized as a sandbox issue" || fail "sandbox recognition (got: $SBX)"
+echo "$SBX" | grep -q "Do NOT request escalation" && ok "sandbox failure tells caller not to escalate" || fail "no-escalation guidance (got: $SBX)"
+echo "$SBX" | grep -q "/bin/zsh -lc" && ok "sandbox failure prints the exact wrapper command" || fail "wrapper command printed (got: $SBX)"
+echo "$SBX" | grep -qF "$COMMS" && ok "wrapper hint uses the helper's LITERAL path, not \$COMMS_SH" || fail "wrapper hint uses literal path (got: $SBX)"
+echo "$SBX" | grep -q "cmux said:" && ok "sandbox failure echoes the cmux error" || fail "cmux error echoed (got: $SBX)"
+# send classifies the sandbox block as its own outcome (not silent 'manual')
+SBX_SEND="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" send --to claude "$OUT_WF") 2>/dev/null | tail -1 )"
+case "$SBX_SEND" in "RESULT: blocked"*) ok "send RESULT is 'blocked' on a sandboxed socket (not 'manual')" ;; *) fail "blocked RESULT (got: $SBX_SEND)" ;; esac
+echo "$SBX_SEND" | grep -q "do NOT escalate" && ok "blocked RESULT says do NOT escalate" || fail "blocked RESULT escalation guidance (got: $SBX_SEND)"
+# The self-resolving wrapper from the skills actually runs in a child zsh with no COMMS_SH
+if command -v zsh >/dev/null 2>&1; then
+  # -c (not -lc) so the login profile can't change cwd in the test; the skill's
+  # real wrapper uses -lc, but the mechanism under test (no inherited COMMS_SH)
+  # is identical either way.
+  WRAP="$( (cd "$REPO_FIX" && env -u COMMS_SH -u CMUX_WORKSPACE_ID zsh -c 'C=$(git worktree list --porcelain 2>/dev/null|head -1|sed "s/^worktree //")/.agent-comms/comms.sh; [ -x "$C" ]||C="'"$REPO"'/helpers/comms.sh"; "$C" workspace') 2>/dev/null )"
+  [ "$WRAP" = "feature-helper-tests" ] && ok "self-resolving wrapper runs with no inherited COMMS_SH" || fail "self-resolving wrapper (got: $WRAP)"
+fi
 
 echo "== comms.sh v2.1.1: status shouts when a loop stalled undelivered =="
 perl -pi -e 's/"last_delivery": "[^"]*"/"last_delivery": "manual"/; s/"status": "[^"]*"/"status": "in-progress"/' "$SF"

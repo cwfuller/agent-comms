@@ -173,6 +173,24 @@ last delivery wasn't a real nudge.
   helper plainly (or via the session's approved shell wrapper) needs no prompt at all.
   Skills now forbid proactive escalation, prescribe wrapper-retry-then-scoped-escalation,
   and state that permission prompts are an invocation issue, never a protocol failure.
+- *2026-06-07, field incident #3c (the wrapper itself was broken):* the wrapper-first
+  fix told Codex to run `/bin/zsh -lc '"$COMMS_SH" send ...'` — but `$COMMS_SH` is a
+  non-exported parent-shell var, empty in the child `zsh -lc`, so the recovery command ran
+  an empty program. Fix: skills' wrapper now resolves the helper path INSIDE the child
+  shell (self-contained one-liner); the helper's emitted hint and the new `RESULT: blocked`
+  line both use the script's own LITERAL absolute path (`$0`), never `$COMMS_SH`. Lesson:
+  a recovery command must be copy-paste-correct with zero hidden shell state — the safe
+  path has to survive being the *only* thing that runs.
+- *2026-06-07, field incident #3b (same loop, precise root cause):* the v1 fix made the
+  wrapper a *fallback*, but Codex's sandbox biases toward escalating on the FIRST failure.
+  Exact cause: `send`/`deliver` touch `cmux.sock`, outside the sandbox roots →
+  `Operation not permitted`. Fix: skills now say run the two cmux-touching commands
+  through the wrapper **from the start** (read-only commands stay direct), with the
+  explicit "`cmux.sock` not permitted → wrapper, do NOT escalate" rule; and the helper
+  itself now detects the socket sandbox signature on a failed deliver and prints the exact
+  wrapper command instead of a generic FAILED. Lesson: a fallback the reviewer must
+  *remember* to take loses to a platform default that fires first — make the safe path the
+  default path.
 - *2026-06-05, field incident #2 (atlas):* send returned `RESULT: manual` despite an
   existing binding to a live surface — pick_surface required a successful tree read
   BEFORE consulting the binding, so a transient tree failure (3 burst retries inside one

@@ -59,7 +59,7 @@ This is an autonomous full cycle (plan phase, round 1 of <N>). After the plan is
    ```bash
    "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
-   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual or failed outcome means Codex was NOT woken and the loop sits idle until someone acts.
+   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Codex was NOT woken and the loop sits idle until someone acts.
 
 5. **Notify user:** "Plan created and sent to Codex for autonomous review (plan phase, round 1 of N). Full cycle: plan→approve→implement→approve." If the loop goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.
 

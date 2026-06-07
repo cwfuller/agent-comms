@@ -85,11 +85,14 @@ Write findings (`### Blocking` / `### Advisory` / `### Process`), copy the loop'
 workflow fields + `thread`, set `in-reply-to`, then atomically validate + deliver +
 archive the inbound via `comms.sh send`.
 
-**Codex sandbox note:** the skills instruct Codex to run the helper *without* requesting
-escalation (it only needs repo files + the cmux socket), to retry via an already-approved
-shell wrapper if sandboxed, and to treat permission prompts as an invocation issue —
-never as evidence the protocol failed. If Codex keeps prompting, that guidance is being
-ignored or the installed skills are stale.
+**Codex sandbox note:** `send`/`deliver` touch the cmux socket (`cmux.sock`), which is
+outside a restricted Codex sandbox. The skills tell Codex to run those two commands
+through its approved shell wrapper (`/bin/zsh -lc '...'`) **from the start** — read-only
+commands (`list`/`validate`/`archive`) run directly. On an `Operation not permitted`
+socket error the rule is: retry via the wrapper, never request escalation (escalation is
+what produces the user's prompt); the helper itself prints the exact wrapper line on that
+failure. A permission prompt is an invocation issue, never a protocol failure. If Codex
+keeps prompting, the guidance is being ignored or the installed skills are stale.
 
 ## Helper CLI
 
@@ -108,8 +111,8 @@ agnostic.
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
 | `verdict <file>` | normalized (trimmed, uppercased) verdict |
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
-| `deliver <claude\|codex>` | cmux pane nudge; prints `delivered to <surface> (<how>)` / manual-pickup / `FAILED` explicitly |
-| `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line |
+| `deliver <claude\|codex>` | cmux pane nudge; prints `delivered to <surface> (<how>)` / manual-pickup / `blocked` (sandboxed socket) / `FAILED` explicitly |
+| `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`delivered`/`manual`/`blocked`/`failed`) |
 | `bind <claude\|codex> [surface:N]` | pin which surface delivery targets (show current with no arg); successful deliveries auto-refresh it; ignored if the surface disappears |
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |

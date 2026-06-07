@@ -89,7 +89,7 @@ Read and act on messages from Codex in `.comms/to-claude/`.
      ```bash
      "$COMMS_SH" send --to codex "<your reply file>" --archive-inbound "<the incoming message file>"
      ```
-     Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual or failed outcome means Codex was NOT woken.
+     Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Codex was NOT woken.
 
 **Review protocol for autonomous loops:**
 - Default to a pass-oriented loop. `REQUEST_CHANGES` means blocking issues only.

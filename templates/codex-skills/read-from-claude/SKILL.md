@@ -126,11 +126,19 @@ If the incoming message carries a `## Meta` section requesting process feedback:
 
 ## Sandbox & permissions
 
-Run the helper directly, without requesting escalation — it only touches repo files and
-the cmux socket. If the sandbox blocks a call, retry through the session's
-already-approved shell wrapper, if one exists (e.g. `/bin/zsh -lc '...'`) before prompting the user;
-request a scoped escalation only after an actual failure. Permission prompts are an
-invocation issue, not a protocol failure.
+Read-only helper commands (`list`, `validate`, `archive`, file reads) touch only repo
+files — run them directly. But **anything that delivers (`$send-to-claude` → `comms.sh
+send`/`deliver`) touches the cmux socket, which is outside a restricted sandbox** — run
+those through your approved shell wrapper from the start, **resolving the helper inside
+the child shell** (a parent `$COMMS_SH` is not visible there):
+```bash
+/bin/zsh -lc 'C=$(git worktree list --porcelain 2>/dev/null|head -1|sed "s/^worktree //")/.agent-comms/comms.sh; [ -x "$C" ]||C="$HOME/.agent-comms/comms.sh"; "$C" send --to claude "<reply>" --archive-inbound "<inbound>"'
+```
+If you hit `Operation not permitted` on `cmux.sock`, do NOT request escalation (that is
+what prompts the user) — re-run through the wrapper; the helper prints the exact line to
+use (with a literal path). Escalate (scoped to `comms.sh`) only if no approved wrapper
+exists. A permission prompt is an invocation issue, never a protocol failure — check the
+reply file, archive state, and `RESULT:` first.
 
 ## Message Format
 
