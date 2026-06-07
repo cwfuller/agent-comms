@@ -89,4 +89,16 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
 
 7. Confirm to the user that the message was verified and delivery attempted.
 
+## Sandbox & permissions
+
+- **Never proactively escalate the helper.** Run `comms.sh` directly first — it only
+  touches repo files and the cmux socket, which normally needs no elevated permission.
+- If the sandbox blocks it, **retry through the session's already-approved shell wrapper, if one exists**
+  (e.g. `/bin/zsh -lc '"$COMMS_SH" send ...'`) before asking the user for anything.
+- Only request escalation after an actual failure, and scope it to the helper (a
+  persistent prefix on the comms.sh path), not a blanket grant.
+- A permission prompt during send is an invocation issue, **not** a protocol failure —
+  verify the reply file on disk, archive state, and the `RESULT:` line before diagnosing
+  a comms regression.
+
 If the user provides specific instructions, incorporate them into the appropriate section.

@@ -168,6 +168,11 @@ last delivery wasn't a real nudge.
 
 ## Friction log (meta-channel feedback + live-loop observations)
 
+- *2026-06-07, field incident #3 (Codex sandbox):* Codex proactively requested escalated
+  permissions for the helper send, prompting the user every loop round — running the
+  helper plainly (or via the session's approved shell wrapper) needs no prompt at all.
+  Skills now forbid proactive escalation, prescribe wrapper-retry-then-scoped-escalation,
+  and state that permission prompts are an invocation issue, never a protocol failure.
 - *2026-06-05, field incident #2 (atlas):* send returned `RESULT: manual` despite an
   existing binding to a live surface — pick_surface required a successful tree read
   BEFORE consulting the binding, so a transient tree failure (3 burst retries inside one

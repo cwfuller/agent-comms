@@ -124,6 +124,14 @@ If the incoming message carries a `## Meta` section requesting process feedback:
 
 ---
 
+## Sandbox & permissions
+
+Run the helper directly, without requesting escalation — it only touches repo files and
+the cmux socket. If the sandbox blocks a call, retry through the session's
+already-approved shell wrapper, if one exists (e.g. `/bin/zsh -lc '...'`) before prompting the user;
+request a scoped escalation only after an actual failure. Permission prompts are an
+invocation issue, not a protocol failure.
+
 ## Message Format
 
 Messages are markdown files with frontmatter:

@@ -85,6 +85,12 @@ Write findings (`### Blocking` / `### Advisory` / `### Process`), copy the loop'
 workflow fields + `thread`, set `in-reply-to`, then atomically validate + deliver +
 archive the inbound via `comms.sh send`.
 
+**Codex sandbox note:** the skills instruct Codex to run the helper *without* requesting
+escalation (it only needs repo files + the cmux socket), to retry via an already-approved
+shell wrapper if sandboxed, and to treat permission prompts as an invocation issue —
+never as evidence the protocol failed. If Codex keeps prompting, that guidance is being
+ignored or the installed skills are stale.
+
 ## Helper CLI
 
 Installed at `~/.agent-comms/` (or `<repo>/.agent-comms/` for pinned local installs).
