@@ -21,7 +21,7 @@ else
 fi
 CLAUDE_COMMANDS_DIR="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
-CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md fleet.md"
+CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md fleet.md read-from-mgr.md"
 CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
