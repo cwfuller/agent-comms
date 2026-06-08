@@ -25,11 +25,14 @@ MSG="<the assignment file>"
 MID="$(basename "$MSG" .md)"
 STATE_DIR="$COMMS_ROOT/dispatch-state"; mkdir -p "$STATE_DIR"
 REC="$STATE_DIR/$MID.json"
-# atomic create: if it already exists, this task is already claimed → STOP (never double-execute)
-if ! ( set -o noclobber; : > "$REC" ) 2>/dev/null; then
+# atomic create + write the record in ONE guarded step: if $REC already exists, this task is already
+# claimed → STOP (never double-execute). Writing the JSON inside the noclobber guard means a crash can
+# never leave an empty, useless claim record.
+if ! ( set -o noclobber
+       printf '{"dispatch_status":"claimed","message_id":"%s","claimed_at":"%s"}\n' \
+         "$MID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$REC" ) 2>/dev/null; then
   echo "task $MID already claimed (see $REC) — not re-executing"; exit 0
 fi
-printf '{"dispatch_status":"claimed","message_id":"%s","claimed_at":"%s"}\n' "$MID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$REC"
 ```
 Then **archive the inbound** so a repeated `/read-from-mgr` finds nothing to run:
 ```bash
@@ -38,6 +41,8 @@ Then **archive the inbound** so a repeated `/read-from-mgr` finds nothing to run
 > `dispatch-state/<message_id>.json` is the audit/recovery record — NOT terminal-of-the-work. A record stuck at `claimed` (process died mid-task) is surfaced for MANUAL recovery; never silently re-run.
 
 ### 4. Triage the execution mode
+**`write_policy` is BINDING.** Before anything else, read the assignment's `write_policy` — the mode you ultimately execute MUST be permitted by it. If the policy is the auto-worktree form ("atlas/* worktree + branch; open a PR…"), you may NOT choose `one-shot` (no main-branch commit) — only `auto-implement`/`auto-full`. Only a `triage` policy (or an explicit `one-shot` assignment) permits the gated one-shot-to-main path. If your triage decision would violate the stated policy, default up to the most careful mode the policy allows.
+
 Read `execution_mode` from the assignment. Honor it, with **escalate-only** authority:
 - `auto-full` / `auto-implement` / `one-shot` — an explicit mode. You MAY escalate to a MORE careful mode; if you would go LESS careful than the hint, do NOT — keep the hint (or escalate).
 - `triage` — YOU decide in-repo, using the rubric. **When unsure, default to `auto-full`.**
