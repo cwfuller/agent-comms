@@ -64,7 +64,7 @@ All loop messages go to the MAIN repo's `.comms/` (the helper resolves it); revi
 1. Create + enter a worktree on a fresh branch off the default branch:
    `git worktree add -b "atlas/<slug>" "../<repo>-<slug>"` (slug from the goal). `cd` into it.
 2. INLINE the auto-full PLAN-phase initiation (do NOT invoke `/auto-full` as a nested command — templates are prompt wrappers, not callable). Create the plan, then write the first `type: review-request`, `workflow: auto-full`, `phase: plan`, `round: 1` message to the MAIN repo `.comms/to-codex/` with `cwd:` = the worktree path, `thread: <slug>-<rand>`, and a body carrying the `goal` + `stop_condition`. Deliver via `"$COMMS_SH" send --to codex`.
-3. The standard `/read-from-codex` loop then drives plan→approve→implement→approve in that worktree.
+3. The standard `/read-from-codex` loop then drives plan→approve→implement→approve in that worktree. **Runtime verification (§5) is the CHILD implement loop's responsibility before its final approval** — it is not applicable at this start step (no code exists yet); the implement phase must RUN the change before approving.
 4. Update the state record to `dispatch_status: started` with `{branch, worktree, child_thread}`, and STOP. **`started` is terminal for THIS receiver command, NOT for the delegated work** — the reviewed `atlas/*` branch is the deliverable; opening the PR + marking the dispatch complete is a separate, reviewed step (a named follow-on; do not auto-open a PR or auto-merge here).
 
 #### 5b. `auto-implement`
