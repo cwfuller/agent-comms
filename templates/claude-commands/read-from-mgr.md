@@ -56,6 +56,8 @@ Record the chosen mode into the state file (`"mode": "<chosen>"`, plus `"escalat
 
 ### 5. Execute
 
+**Verification = "can you RUN the thing?"** Across every mode, the change is not done until you have actually RUN it and observed it work — run the affected flow / feature / endpoint / path end-to-end, not just `lint`/`type-check`/unit tests (those are table stakes, already automated). If the repo has a way to exercise the change (a CLI, a dev server, a script, a simulator, the actual flow the brief names), use it and confirm the real behavior. Surface what you ran + what you observed in the review request and the final report. A change that passes tests but was never run is unverified.
+
 All loop messages go to the MAIN repo's `.comms/` (the helper resolves it); review-request frontmatter `cwd:` must point at the FEATURE WORKTREE so Codex reviews the right files.
 
 #### 5a. `auto-full`
@@ -75,6 +77,7 @@ All loop messages go to the MAIN repo's `.comms/` (the helper resolves it); revi
 Only for genuinely trivial work. Before committing, ALL of these must hold:
 - the worktree is CLEAN to start, on the repo's DEFAULT branch, not diverged unexpectedly;
 - make the change; then run `git diff --check` and any cheap relevant lint/test;
+- **RUN it** (§5 verification) — exercise the changed path and confirm it actually works; a one-shot commits to main, so "passes lint" is not enough;
 - **caps:** ≤ 1 file changed and ≤ 40 changed lines (conservative);
 - **risky-path denylist (refuse → escalate):** migrations, lockfiles, generated files, `.env`/secrets, CI/deploy/infra, auth/security, package manifests, broad shell scripts.
 
@@ -93,7 +96,7 @@ If ANY one-shot gate trips AFTER changes were made:
 A failed one-shot therefore NEVER leaves the default branch dirty and NEVER loses the work.
 
 ### 7. Report
-Tell the user the outcome: the chosen mode, and either the `atlas/*` branch + worktree + child thread (worktree modes — "started; the auto-loop is running; open a PR after it approves"), or the local commit SHA on the default branch (one-shot). Point at `dispatch-state/<message_id>.json`.
+Tell the user the outcome: the chosen mode, **what you RAN to verify it (§5) and what you observed**, and either the `atlas/*` branch + worktree + child thread (worktree modes — "started; the auto-loop is running; open a PR after it approves"), or the local commit SHA on the default branch (one-shot). Point at `dispatch-state/<message_id>.json`.
 
 ## Notes
 - Never silently exceed the brief; surface ambiguity rather than guessing.

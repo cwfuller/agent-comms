@@ -1,5 +1,8 @@
 Full autonomous cycle: plan+review until approved, then implement+review until approved.
 
+## When to use this (NOT the default)
+`/auto-implement` is the default — let the implementation speak for itself. Use `/auto-full`'s gated plan phase ONLY when a wrong *approach* would be expensive to discover after implementing: **novel architecture, high blast radius, safety-critical, or genuinely ambiguous scope.** The plan-review round earns its cost there (it catches design-level issues — wrong direction, missed edge cases, unsafe mechanics — before any code). For well-scoped or mechanical work it is ceremony; prefer auto-implement. (Same spirit as the dispatch `execution_mode` triage: most work = auto-implement; the hard stuff = auto-full.)
+
 ## Instructions
 
 1. **Parse arguments:**

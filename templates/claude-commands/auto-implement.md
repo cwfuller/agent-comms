@@ -1,5 +1,10 @@
 Autonomous implement + review cycle. Implements code, sends to Codex for review, and automatically fixes issues based on feedback until approved or max rounds reached.
 
+## When to use this (the DEFAULT)
+This is the default workflow — **let the implementation speak for itself.** Modern models rarely need a separate, gated plan-approval round; a wrong approach surfaces fast in the implement review and you just fix + re-review. Reach for `/auto-full` (the gated plan phase) ONLY when the work is genuinely high-stakes: novel architecture, high blast radius, safety-critical, or ambiguous scope where a wrong *approach* would be expensive to discover after implementing (mirrors the dispatch `execution_mode` triage: most work = auto-implement; the hard stuff = auto-full).
+
+No separate plan is reviewed here — but the handoff includes a short `## Intent / approach` (see the message body) carrying the goal + how you went about it, as CONTEXT so Codex never reviews cold. That looser, non-gated "plan as context" is the point: Codex knows what you set out to do and how, without a plan-approval loop.
+
 ## Instructions
 
 1. **Parse arguments:**
@@ -43,6 +48,9 @@ round: 1
 max-rounds: <N>
 status: in-progress
 ---
+
+## Intent / approach
+<2-4 lines: the GOAL this change is after + the approach you took to get there. This is the looser, non-gated "plan as context" — it replaces a separate plan-approval round so Codex reviews with intent, not cold. Keep it tight; the diff carries the detail.>
 
 ## What was done
 <Summary of the implementation>
