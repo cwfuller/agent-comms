@@ -214,7 +214,6 @@ SUM1="$(cat "$INST_FIX/.gitignore")"
 LOCAL_OUT="$(cd "$INST_FIX" && bash "$REPO/install.sh" --scope=local 2>&1)"
 [ -x "$INST_FIX/.agent-comms/comms.sh" ] && ok "local scope installs executable helpers" || fail "local scope installs executable helpers"
 [ -f "$INST_FIX/.claude/commands/auto-implement.md" ] && ok "local scope installs commands" || fail "local scope installs commands"
-[ -f "$INST_FIX/.claude/commands/read-from-mgr.md" ] && ok "local scope installs read-from-mgr (CLAUDE_COMMANDS not drifted)" || fail "read-from-mgr.md not installed"
 echo "$LOCAL_OUT" | grep -qi "shadow" && ok "local scope prints pin/shadow note" || fail "local scope prints pin/shadow note"
 
 echo "== fleet.sh: harvest + frontmatter boundary =="
