@@ -56,6 +56,11 @@ reporting `stale`, name the verification step rather than asserting idle.
 - **Fleet-wide preflight:** concurrency cap (`FLEET_MAX`, default 3) plus warnings for staged files
   and `.git/index.lock` in the shared worktree. The cap protects a shared on-disk working tree; if
   each workspace has its own `git worktree add`, bump `FLEET_MAX` or use `--force`.
+  **Per-workspace worktree push safety:** create each with its own branch
+  (`git worktree add -b <branch> <path>`, never checked out on `main`) and set
+  `git config push.default current` so a worktree's `git push` updates a same-named remote
+  branch — which, as long as you never work on `main` in a worktree, keeps a push off
+  `main` (see the "Worktrees & branches" section of the agent-comms docs/PROTOCOL.md).
 - **dispatch-all is two-phase:** without `--yes` it only prints the brief→workspace mapping
   (workspaces with unread mail newer than their archive are excluded and reported). Show the
   mapping to the user and get explicit confirmation before re-running with `--yes`. At fire

@@ -67,7 +67,10 @@ execution workspace = Claude pane (1) + Codex pane (2).
 | `clear <ws>` | `/new` both panes |
 
 Env: `FLEET_PREFIX` (default `ws`), `FLEET_MAX` concurrency cap (default 3 — protects a
-shared working tree; bump it if each workspace has its own `git worktree add`).
+shared working tree; bump it if each workspace has its own `git worktree add`). When you
+do give each workspace its own worktree, create it on a dedicated branch and guard
+against accidental pushes to `main` — see
+[PROTOCOL.md → Worktrees & branches](PROTOCOL.md#worktrees--branches).
 
 ## Codex skills
 

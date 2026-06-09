@@ -20,6 +20,33 @@ agent runs from):
 
 `.comms/` is gitignored — messages are local plumbing, not project history.
 
+## Worktrees & branches
+
+Loops often run in a `git worktree` (one per cmux workspace — see `/fleet`). Two rules
+keep that safe:
+
+**Message routing is worktree-safe.** Every helper resolves `.comms/` to the **main repo
+root** via `git worktree list`, so all worktrees of one repo share a single mailbox. The
+`cwd:` frontmatter field is the per-message "which tree" hint: the sender records its
+`pwd`, and the reader `cd`s there before touching files (the "Check for worktree context"
+step in both read skills).
+
+**Push safety — create worktrees on their own branch, never on `main`.** The common
+footgun: an agent working in a worktree runs `git push` and it lands on `main` instead of
+the feature branch (because the worktree was checked out on `main`, or the branch was set
+to track/push to `main`). When creating a worktree for a loop:
+
+- **Make a dedicated branch, don't check out `main`:** `git worktree add -b <feature-branch> <path>`
+  (`-b` starts a fresh branch with **no upstream** — keep it that way; never set its
+  upstream to `main`).
+- **Keep a bare `git push` from straying to `main`:** `git config push.default current`
+  so `git push` only ever updates a remote branch of the *same name* as the current one
+  (combined with the rule above — never be checked out on `main` in a loop worktree — this
+  means a feature-branch push can't land on `main`).
+- **First push is explicit and self-scoped:** `git push -u origin HEAD` (pushes the current
+  branch to a same-named remote branch and sets its upstream). Never
+  `git push origin <x>:main`, and never push while the worktree is checked out on `main`.
+
 ## Filenames
 
 ```
