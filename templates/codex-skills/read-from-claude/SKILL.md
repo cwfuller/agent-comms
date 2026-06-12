@@ -66,6 +66,10 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
 
 #### Round 1 — Full contextual review
 Use the "Review focus" and context provided by Claude to understand the scope, then review thoroughly:
+- **Consult recorded lessons first**: if the project has `docs/advisories.md` (or a friction log), check
+  it for entries touching the plan/implementation's surface. A plan that repeats a recorded lesson or
+  ignores a relevant advisory is a finding — cite the entry. This is cheap and catches the
+  "system knowledge existed but wasn't consulted" class of issues.
 - `phase: plan` — Focus on: completeness, architecture decisions, missed requirements, risks, scalability concerns. Are all edge cases covered? Is the approach sound?
 - `phase: implement` — Focus on: bugs, logic errors, security issues, edge cases, code quality. Skip style nits — report blocking issues and only high-signal advisory notes.
 

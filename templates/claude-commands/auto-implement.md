@@ -22,9 +22,15 @@ No separate plan is reviewed here — but the handoff includes a short `## Inten
    ```
 
 3. **Implement the code.** Based on the task description or existing plan:
+   - **Consult past lessons FIRST**: read the project's `docs/advisories.md` (if present) and its
+     friction log for entries touching this surface — repeating a recorded lesson wastes a review round.
    - Read any referenced plan files
    - Implement the changes
    - Run any relevant tests or type checks
+   - **Live-validate when the change is model- or runtime-coupled**: green unit tests alone are NOT
+     sufficient evidence for changes whose correctness depends on a live surface (a model call, a
+     network API, a daemon). Run the real surface once before sending the review request — a unit-green
+     fix that fails live burns a full review round on a wrong premise.
 
 4. **Write the review request** to `$COMMS_ROOT/to-codex/`:
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-implement-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions)

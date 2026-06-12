@@ -17,6 +17,10 @@ Autonomous plan + review cycle. Creates a plan, sends to Codex for review, and a
    ```
 
 3. **Create the plan.** Based on the user's task description:
+   - **Consult past lessons FIRST**: read the project's `docs/advisories.md` (if present) and its
+     friction log for entries touching the task's surface, and skim related prior threads in
+     `$COMMS_ROOT/archive/` when the area has history. Apply what's relevant and note it briefly in the
+     plan ("Lessons applied: …") — a plan that repeats a recorded lesson wastes a review round.
    - Analyze the codebase as needed to inform the plan
    - Create a thorough implementation plan covering: approach, files to create/modify, key decisions, risks, and steps
    - Write the plan to a file if appropriate, or include it in the message body
