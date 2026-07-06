@@ -69,7 +69,8 @@ The full message format, loop semantics, and state model: **[docs/PROTOCOL.md](d
 
 | | |
 |---|---|
-| [docs/PROTOCOL.md](docs/PROTOCOL.md) | message format, threading, state files, error lane — the spec both agents follow |
+| [docs/loopspec/SPEC.md](docs/loopspec/SPEC.md) | **the portable review-loop contract** — message/verdict/round semantics, schemas, golden fixtures, conformance checker, prompt fragments |
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | how agent-comms implements it — transport (cmux + headless), state files, delivery, archive discipline |
 | [docs/COMMANDS.md](docs/COMMANDS.md) | every command, skill, and helper subcommand in detail |
 | [docs/INSTALL.md](docs/INSTALL.md) | install scopes, fork installs, local pinning, upgrading |
 | [docs/INTERNALS.md](docs/INTERNALS.md) | architecture, the template/helper split, editing rules, test harness |

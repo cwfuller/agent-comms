@@ -200,11 +200,18 @@ cmd_validate() {
       val="$(frontmatter_field "$file" "$field")"
       [ -n "$val" ] || errors="${errors}  workflow message missing field: $field\n"
     done
-    # Only reviewer->author legs carry a verdict; claude->codex requests do not,
-    # and the error lane (type: error) is verdict-free in both directions.
-    if [ "$from_agent" = "codex" ] && [ "$msg_type" != "error" ]; then
+    # Only the reviewer->author leg carries a verdict. LOOPSPEC binds this by
+    # TYPE (review-feedback), not by sender — either agent can be the reviewer
+    # (reverse-topology loops), and requests/error-lane messages are verdict-free
+    # in both directions.
+    if [ "$msg_type" = "review-feedback" ]; then
       val="$(frontmatter_field "$file" verdict)"
-      [ -n "$val" ] || errors="${errors}  workflow reply from codex missing field: verdict\n"
+      [ -n "$val" ] || errors="${errors}  workflow review-feedback missing field: verdict\n"
+    fi
+    # LOOPSPEC soft rule: COMMENT never appears in autonomous rounds — warn, so
+    # a reviewer sliding into non-verdicts surfaces before it stalls a loop.
+    if [ "$(norm_verdict_value "$(frontmatter_field "$file" verdict)")" = "COMMENT" ]; then
+      echo "warning: verdict COMMENT inside a workflow loop — COMMENT is reserved for manual exchanges; use APPROVE or REQUEST_CHANGES" >&2
     fi
     # Protocol v2 soft requirements — warn, don't reject, so in-flight loops
     # started on older templates survive a mid-loop upgrade.
@@ -212,6 +219,17 @@ cmd_validate() {
       echo "warning: workflow message has no thread field — concurrent loops in this workspace can collide" >&2
     [ -n "$(frontmatter_field "$file" message_id)" ] || \
       echo "warning: workflow message has no message_id field — replies cannot be threaded via in-reply-to" >&2
+  fi
+  # LOOPSPEC soft rule (any message, loop or not): unrecognized verdict values
+  # warn — typos surface early — but never reject; the synonym set may grow
+  # backward-tolerantly.
+  local any_verdict
+  any_verdict="$(frontmatter_field "$file" verdict)"
+  if [ -n "$any_verdict" ]; then
+    case "$(norm_verdict_value "$any_verdict")" in
+      APPROVE|REQUEST_CHANGES|COMMENT) ;;
+      *) echo "warning: unrecognized verdict value '$any_verdict' — expected APPROVE/REQUEST_CHANGES (or the pass/fail synonyms)" >&2 ;;
+    esac
   fi
   if [ -n "$fm_end" ]; then
     local body
@@ -617,10 +635,27 @@ cmd_stalled() {
   fi
 }
 
+# norm_verdict_value <raw> — LOOPSPEC normalization: trim, uppercase, then map
+# the canonical artifact spelling onto the message spelling (permanent synonyms:
+# pass<=>APPROVE, fail<=>REQUEST_CHANGES — see docs/loopspec/SPEC.md).
+norm_verdict_value() {
+  local v
+  v="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+  case "$v" in
+    PASS) v=APPROVE ;;
+    FAIL) v=REQUEST_CHANGES ;;
+  esac
+  printf '%s' "$v"
+}
+
 cmd_verdict() {
   local file="${1:-}"
   [ -n "$file" ] || die "verdict: file argument required"
-  frontmatter_field "$file" verdict | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'
+  # Fail loudly on a stale path (message archived between list and read) — a
+  # silent empty verdict reads as not-approved and spins a phantom round.
+  [ -f "$file" ] || die "verdict: no such file: $file"
+  norm_verdict_value "$(frontmatter_field "$file" verdict)"
+  echo
 }
 
 cmd_clean() {

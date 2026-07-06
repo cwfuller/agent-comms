@@ -30,8 +30,24 @@ Write a structured message to Claude Code via `.comms/to-claude/` and auto-deliv
 4. Use this format. **If the incoming message had `workflow` fields, you MUST copy them into your reply:**
 
    In autonomous review loops:
-   - Default to `verdict: APPROVE`
-   - Use `verdict: REQUEST_CHANGES` only for blocking issues that are not ready to ship
+   <!-- loopspec:fragment verdict-discipline -->
+   Default to `APPROVE`. Each failed review creates another fix+review loop, so only block when the issue is truly ship-stopping.
+
+   Use `REQUEST_CHANGES` only for blocking issues such as:
+   - Broken correctness or logic
+   - Security or permission problems
+   - Data loss or state corruption risk
+   - Broken user flow or incomplete required behavior
+   - Likely regressions in changed paths
+   - Missing validation or tests for risky code where the change cannot be trusted without them
+
+   Keep `APPROVE` and include comments when findings are advisory, such as:
+   - Documentation drift
+   - Minor cleanup or maintainability improvements
+   - Style or preference nits
+   - Nice-to-have tests on otherwise low-risk changes
+   <!-- /loopspec:fragment -->
+   Additionally, in loop replies:
    - Put non-blocking notes under `Advisory` while keeping `APPROVE`
    - Put comms-process friction under a `### Process` heading (meta channel) — it never gates the verdict
    - Do not use `COMMENT` in autonomous review loops; reserve it for manual questions or side-channel notes
@@ -84,7 +100,10 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
    ```bash
    /bin/zsh -lc 'C=$(git worktree list --porcelain 2>/dev/null|head -1|sed "s/^worktree //")/.agent-comms/comms.sh; [ -x "$C" ]||C="$HOME/.agent-comms/comms.sh"; "$C" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"'
    ```
-   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Claude was NOT woken. Exceptions in headless mode (`COMMS_DELIVERY=headless`): `RESULT: manual — headless mode: the reply is on disk...` is EXPECTED when you are the spawned peer (the driving session picks your reply up when your turn ends — do not retry). `RESULT: spawned` means a detached headless Claude turn is now processing your message: await the printed run dir (`.../runphase.sh await "<run dir>"`), then `$read-from-claude` for the reply; a non-zero await means the turn failed or timed out — check its `result.json` and report that instead of waiting.
+   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Claude was NOT woken.
+   <!-- loopspec:fragment result-headless-codex-side -->
+   Exceptions in headless mode (`COMMS_DELIVERY=headless`): `RESULT: manual — headless mode: the reply is on disk...` is EXPECTED when you are the spawned peer (the driving session picks your reply up when your turn ends — do not retry). `RESULT: spawned` means a detached headless Claude turn is now processing your message: await the printed run dir (`.../runphase.sh await "<run dir>"`), then `$read-from-claude` for the reply; a non-zero await means the turn failed or timed out — check its `result.json` and report that instead of waiting.
+   <!-- /loopspec:fragment -->
    Without cmux the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk). A mid-sequence cmux failure is reported as `delivery FAILED` and recorded in the thread's state file; the reply stays safely on disk — retry with `"$COMMS_SH" send --to claude "<reply file>"` (re-attempts the nudge AND refreshes the recorded delivery state). `send` updates `.comms/state/<workspace>_<thread>.json` automatically for workflow messages.
 
 7. Confirm to the user that the message was verified and delivery attempted.

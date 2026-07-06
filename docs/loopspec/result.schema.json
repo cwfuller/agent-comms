@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loopspec/v1/result",
+  "title": "Headless peer-turn result",
+  "description": "The durable record of one headless provider turn, written by the runner on EVERY exit path, and written LAST (after state mirroring) because it is the signal awaiters unblock on. exit_code is a string: the reference writer is shell, and non-numeric sentinels are legal ('?' for a runner abort). input_required is reserved for providers that can surface an unanswerable mid-turn prompt.",
+  "type": "object",
+  "properties": {
+    "provider": { "type": "string" },
+    "status": { "enum": ["completed", "failed", "timeout", "input_required"] },
+    "exit_code": { "type": "string" },
+    "session_id": { "type": "string", "description": "provider session/thread id for attach/resume; may be empty when the turn died before init" },
+    "message_file": { "type": "string" },
+    "run_dir": { "type": "string" },
+    "started_at": { "type": "string" },
+    "ended_at": { "type": "string" },
+    "note": { "type": "string", "description": "diagnostic hint on failure/timeout; empty on success" }
+  },
+  "required": ["provider", "status", "exit_code", "run_dir"],
+  "additionalProperties": true
+}

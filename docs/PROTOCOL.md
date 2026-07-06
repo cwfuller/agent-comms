@@ -1,8 +1,13 @@
 # Protocol reference
 
-The message format, loop semantics, and state model both agents follow. This is the
-spec — the command templates and skills implement it, and `helpers/comms.sh` enforces
-the validatable parts.
+How agent-comms implements the review-loop contract: transport, state, delivery, and
+archive mechanics. The **contract itself** — message frontmatter and validation rules,
+message types, verdict semantics (including the `pass`/`fail` synonyms and the
+`gate`/`merge` profiles), loop invariants, threading rules, the compounding entry
+format, and the provider turn contract — lives in **[loopspec](loopspec/SPEC.md)**,
+the portable kernel this repo shares with other consumers. `helpers/comms.sh`
+enforces the validatable parts, and `docs/loopspec/check.sh` proves it against the
+golden fixtures in the test harness.
 
 ## Directories
 
@@ -63,7 +68,7 @@ to track/push to `main`). When creating a worktree for a loop:
 
 ```markdown
 ---
-type: review-request            # see type table below
+type: review-request            # see the type table in loopspec/SPEC.md
 from: claude | codex
 timestamp: 2026-06-04T18:30:14Z
 branch: main
@@ -80,64 +85,29 @@ verdict: APPROVE | REQUEST_CHANGES   # reviewer replies only; read normalized
 ---
 ```
 
-Validation (`comms.sh validate`, enforced by `send` before any delivery):
+**Validation rules, message types, verdict semantics, and the loop invariants are
+normative in [loopspec/SPEC.md](loopspec/SPEC.md)** — enforced here by
+`comms.sh validate` (run by `send` before any delivery). agent-comms specifics on top
+of the contract:
 
-| Rule | Severity |
-|---|---|
-| `---` delimiters intact, body non-empty | error |
-| `type`, `from`, `timestamp` present | error |
-| `workflow` present ⇒ `phase`, `round`, `max-rounds` present | error |
-| workflow reply from codex (type ≠ `error`) ⇒ `verdict` present | error |
-| workflow message without `thread` / `message_id` | warning (stderr) — soft so in-flight pre-v2 loops survive upgrades |
-
-Read verdicts through `comms.sh verdict <file>` — it trims and uppercases, so
-`verdict:  approve ` still terminates a loop.
-
-## Message types
-
-| type | direction | meaning |
-|---|---|---|
-| `review-request` | → reviewer | "review this plan/diff"; carries workflow fields in loops |
-| `review-feedback` | reviewer → | findings + `verdict` |
-| `question` | → reviewer | one-off consult (`/ask-codex`); no workflow, no verdict |
-| `response` | reviewer → | answer to a `question` (no verdict) or manual follow-up |
-| `ping` | either | connectivity test |
-| `request` | either | freeform ask outside a loop |
-| `error` | either | "your last message was malformed — resend." Verdict-free, copies the loop fields, and **never consumes a round**: the sender of the bad message resends corrected at the same `round` |
-
-## Loop semantics
-
-- `round` counts **review passes**. Claude sends round 1; if Codex replies
-  `REQUEST_CHANGES`, Claude fixes and sends round 2; the loop ends on `APPROVE`
-  or when `round` reaches `max-rounds` (then it escalates to the human).
-- **Verdict discipline:** `REQUEST_CHANGES` is for blocking issues only (correctness,
-  security, data loss, broken flows). Advisory notes ride along with `APPROVE` and never
-  force another round.
-- **Stable context, not fix narration:** a round-N reply carries the previous findings as
-  context plus the current plan/diff — never a per-finding "fixed it" checklist, which
-  anchors the reviewer on verification instead of fresh review. Round 2+ reviews are
-  holistic re-reads with a blank checklist.
-- **`auto-full` phase transition:** an `APPROVE` on `phase: plan` archives the approval
-  *first* (prevents a stale re-read double-firing implementation), then starts
-  `phase: implement` at `round: 1` with the same `thread`.
-- **On final `APPROVE`:** un-actioned advisories are appended to `docs/advisories.md`
-  (date, thread, items) and `### Process` feedback to the friction log — then
-  `comms.sh state complete <thread>` closes the loop's state.
-- **Meta channel:** loop messages carry a standing `## Meta` section inviting the
-  reviewer to flag friction with the comms process *itself* under `### Process` in its
-  reply. Process feedback never gates the verdict.
+- Read verdicts through `comms.sh verdict <file>` — it normalizes (trim, uppercase)
+  and maps the canonical synonyms (`pass` → `APPROVE`, `fail` → `REQUEST_CHANGES`),
+  so `verdict:  approve ` or `verdict: fail` still steer a loop correctly.
+- The reviewer-must-carry-a-verdict rule binds by TYPE — every workflow
+  `review-feedback` message needs a `verdict`, whichever agent sent it (reverse-
+  topology loops have Claude as the reviewer).
+- On final `APPROVE`: un-actioned advisories append to `docs/advisories.md` and
+  `### Process` feedback to the friction log; `comms.sh state complete <thread>`
+  closes the loop's state.
 
 ## Threading
 
 `thread` exists because two agents can run loops in the **same workspace**
-simultaneously — without it, "read the newest message" lets one loop consume and archive
-the other's review round (observed in the field). Rules:
-
-- the loop opener mints `thread` (task slug + the filename's random suffix) and every
-  subsequent message copies it verbatim
-- continuing a specific loop, read with `comms.sh list --as <agent> --thread <t>`
-- `message_id` = filename sans `.md`; replies set `in-reply-to` so any message's chain
-  can be reconstructed from the archive
+simultaneously — without it, "read the newest message" lets one loop consume and
+archive the other's review round (observed in the field). The threading rules
+(opener mints the thread; every message copies it; `message_id`/`in-reply-to` chain
+reconstruction) are in [loopspec/SPEC.md](loopspec/SPEC.md); operationally, continue
+a specific loop with `comms.sh list --as <agent> --thread <t>`.
 
 ## State files
 
@@ -158,8 +128,11 @@ workflow message (filename components sanitized to `[A-Za-z0-9._-]`; workspace i
   "awaiting_since": "2026-06-04T18:30:14Z",
   "awaiting_since_epoch": "1780597814",
   "last_sent": "<message_id>",
-  "last_delivery": "delivered"      // delivered | manual | failed
-                                    // headless: spawned → completed | failed | timeout
+  "last_delivery": "delivered"      // delivered | manual | failed | blocked
+                                    // headless adds: spawned → completed | failed
+                                    // | timeout, plus held and pickup (see
+                                    // loopspec/thread-state.schema.json for the
+                                    // full enum)
 }
 ```
 
@@ -212,12 +185,15 @@ It then types the read command into the chosen surface:
 - → Codex: `$read-from-claude` + enter
 - → Claude: `escape, i, /read-from-codex, escape, enter` (assumes vim mode)
 
-Three explicit outcomes, recorded in state by `send`:
+The cmux path's explicit outcomes, recorded in state by `send` (headless delivery
+adds its own — see [Headless delivery](#headless-delivery-experimental); the full
+enum lives in `loopspec/thread-state.schema.json`):
 
 | outcome | meaning | recovery |
 |---|---|---|
 | `delivered` | full keystroke sequence accepted | — |
 | `manual` | no cmux / no surface — message valid on disk | trigger the read command by hand |
+| `blocked` | cmux socket outside the caller's sandbox | re-run via the approved shell wrapper (the helper prints the exact line) |
 | `failed` | cmux error mid-sequence | retry with `comms.sh send` (refreshes state); a bare `deliver` retry works but leaves the stale `failed` marker |
 
 **Atomic send:** `comms.sh send --to <agent> <file> --archive-inbound <inbound>`
@@ -313,4 +289,5 @@ the child can reach for cmux.
 Each agent archives **only its own inbox** (`comms.sh archive --as <self>` enforces
 this), idempotently — an already-archived file is a no-op, never an error. The shared
 `archive/` is the loop's audit trail; `/fleet` reads its newest entry per workspace to
-infer loop completion (`verdict: APPROVE` is the only completion signal).
+infer loop completion (a normalized approving verdict — `APPROVE`, or its canonical
+synonym `pass` — is the only completion signal).

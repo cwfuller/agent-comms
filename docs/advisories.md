@@ -2,27 +2,27 @@
 
 ## 2026-07-06 — thread `headless-claude-leg-13020` (headless step 2, auto-implement)
 
-- **Bash heredoc write hung 2m in a live headless claude child** (observed once,
+- **Bash heredoc write hung 2m in a live headless claude child** (DEFERRED) (observed once,
   first live claude turn): `cat > file <<'EOF'` into `.comms/to-codex/` sat until
   SIGTERM with nothing written; the Write tool succeeded immediately on the same
   path. Root cause unknown (possibly stdin plumbing in the `claude -p < prompt`
   runner). Soak-watch: if it recurs, teach the headless prompt to prefer
   non-heredoc writes.
-- **Per-thread holds don't block thread-less one-shots** (by design — `hold` with
+- **Per-thread holds do not block thread-less one-shots** (DEFERRED) (by design — `hold` with
   no argument covers everything), and **bare `deliver` resolves only the newest
   pending message**, so a held thread's newest message shadows retries for other
   threads — pass an explicit file to retry a specific message.
-- **Reverse-topology terminal APPROVE produces no reply**: a headless claude turn
+- **Reverse-topology terminal APPROVE produces no reply** (DEFERRED): a headless claude turn
   consuming a final APPROVE ends the loop (advisories, state complete) without an
   outbound message, so a Codex driver's await sees `completed` with an empty
   inbox. Interpretation: await-completed + empty inbox + thread state
   `status=complete` = loop finished, not a lost reply.
-- **Implement-turn timeout can strand a half-modified working tree**: headless
+- **Implement-turn timeout can strand a half-modified working tree** (DEFERRED): headless
   write turns run on the real checkout with no dirty-tree guard yet; a timeout
   KILL mid-implementation leaves partial edits that a naive retry builds on top
   of. Mitigations until the guard exists: generous `COMMS_RUNPHASE_TIMEOUT_SECS`
   for implement turns, and inspect `git status` before re-sending after a timeout.
-- **Headless fan-out shares the provider rate window with the driving session**
+- **Headless fan-out shares the provider rate window with the driving session** (DEFERRED)
   (observed live: a 20-agent review workflow exhausted the Claude session limit
   mid-run). Rate-limit preflight/coordination is a roadmap item (the symphony
   surplus_burn interplay from the unification plan).

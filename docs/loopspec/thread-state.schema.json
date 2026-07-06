@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loopspec/v1/thread-state",
+  "title": "Per-thread loop state",
+  "description": "Advisory ground truth for one loop, written by the sender's atomic send and mirrored by headless runners on turn exit. All values are strings (the reference writer is plain shell). last_delivery is the final field by construction: exit-time rewrites replace that line and may insert a session-id field before it, keeping the JSON valid. State writes are non-fatal by contract — a state hiccup must never block message flow.",
+  "type": "object",
+  "properties": {
+    "workspace": { "type": "string" },
+    "thread": { "type": "string" },
+    "workflow": { "type": "string" },
+    "phase": { "type": "string" },
+    "round": { "type": "string" },
+    "max_rounds": { "type": "string" },
+    "status": { "enum": ["in-progress", "complete"] },
+    "awaiting_from": { "type": "string", "description": "who owes the next message; \"none\" when complete" },
+    "awaiting_since": { "type": "string" },
+    "awaiting_since_epoch": { "type": "string" },
+    "last_sent": { "type": "string", "description": "message_id of the newest outbound" },
+    "last_run_dir": { "type": "string", "description": "headless spawns only — the stalled watchdog's pid target; empty otherwise" },
+    "last_delivery": { "enum": ["delivered", "manual", "failed", "blocked", "spawned", "completed", "timeout", "held", "pickup"] },
+    "codex_thread_id": { "type": "string", "description": "headless codex turns — attach/resume id (transient: dropped by the next send)" },
+    "claude_session_id": { "type": "string", "description": "headless claude turns — attach/resume id (transient: dropped by the next send)" }
+  },
+  "required": ["workspace", "thread", "workflow", "status", "awaiting_from", "last_delivery"],
+  "additionalProperties": true
+}

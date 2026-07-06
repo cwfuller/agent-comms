@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loopspec/v1/verdict",
+  "title": "Review verdict (gate profile)",
+  "description": "Canonical artifact form of a review verdict. Message form equivalence: verdict: APPROVE <=> (status=pass AND blocking_findings==0); verdict: REQUEST_CHANGES <=> (status=fail OR blocking_findings>0). Normalization of message values: strip all whitespace, uppercase, PASS->APPROVE, FAIL->REQUEST_CHANGES. Gate profile is lenient: a missing blocking_findings reads as 0 and unknown extra fields are ignored. The strict, fail-closed `merge` profile (SHA-bound, evidence-required) is implementation-private and out of loopspec scope.",
+  "type": "object",
+  "properties": {
+    "status": { "enum": ["pass", "fail"] },
+    "blocking_findings": { "type": "integer", "minimum": 0, "default": 0 },
+    "advisory_findings": { "type": "integer", "minimum": 0 },
+    "summary": { "type": "string" },
+    "round": { "type": ["integer", "string"] },
+    "max_rounds": { "type": ["integer", "string"] },
+    "thread": { "type": "string" }
+  },
+  "required": ["status"],
+  "additionalProperties": true
+}

@@ -111,8 +111,13 @@ MSG
 check "valid claude workflow message (no verdict needed)" run_comms validate "$GOOD"
 
 BAD_NOVERDICT="$WORK/codex-noverdict.md"
-sed 's/from: claude/from: codex/' "$GOOD" > "$BAD_NOVERDICT"
-check_not "codex workflow reply without verdict is rejected" run_comms validate "$BAD_NOVERDICT"
+sed 's/from: claude/from: codex/; s/type: review-request/type: review-feedback/' "$GOOD" > "$BAD_NOVERDICT"
+check_not "workflow review-feedback without verdict is rejected" run_comms validate "$BAD_NOVERDICT"
+# The verdict rule binds by TYPE, not sender: a reverse-topology review-request
+# FROM codex needs no verdict.
+REV_REQ="$WORK/codex-request.md"
+sed 's/from: claude/from: codex/' "$GOOD" > "$REV_REQ"
+check "reverse-topology review-request from codex validates without verdict" run_comms validate "$REV_REQ"
 
 BAD_NOTYPE="$WORK/notype.md"
 grep -v '^type:' "$GOOD" > "$BAD_NOTYPE"
@@ -431,6 +436,16 @@ sed 's/^verdict: APPROVE$/verdict:  approve /' "$APPROVED" > "$SLOPPY"
 DA_NORM="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$FLEET" dispatch-all "$TRICKY") 2>&1 )"
 echo "$DA_NORM" | grep -q -- "-> ws-2" && ok "dispatch-all normalizes verdict (' approve ' is eligible)" || fail "dispatch-all verdict normalization (got: $DA_NORM)"
 rm -f "$SLOPPY"
+
+echo "== fleet.sh: loopspec pass synonym gates like APPROVE (kernel parity) =="
+sleep 1
+PASSV="$REPO_FIX/.comms/archive/ws-2_2026-06-04T12-55-00_review.md"
+sed 's/^verdict: APPROVE$/verdict: pass/' "$APPROVED" > "$PASSV"
+DA_PASS="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$FLEET" dispatch-all "$TRICKY") 2>&1 )"
+echo "$DA_PASS" | grep -q -- "-> ws-2" && ok "dispatch-all treats 'verdict: pass' as completion" || fail "dispatch-all pass synonym (got: $DA_PASS)"
+HV_PASS="$(run_fleet harvest)"
+echo "$HV_PASS" | grep '^ws-2:' | grep -q 'READY' && ok "harvest treats 'verdict: pass' as READY" || fail "harvest pass synonym (got: $(echo "$HV_PASS" | grep '^ws-2:'))"
+rm -f "$PASSV"
 
 echo "== comms.sh v2: state dir blocked as a FILE must not break send/archive =="
 mv "$REPO_FIX/.comms/state" "$REPO_FIX/.comms/state.bak"
@@ -876,6 +891,77 @@ BP_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless C
 BP_DIR="$(rundir_of "$BP_OUT")"
 run_rp await "$BP_DIR" --timeout-secs 30 >/dev/null 2>&1 && fail "bypass-flag turn must not complete" || ok "bypass-flag turn refused (await non-zero)"
 grep -q "bypass/danger permission flags are refused" "$BP_DIR/runner.log" && ok "refusal names the policy in runner.log" || fail "bypass refusal message (log: $(tail -2 "$BP_DIR/runner.log" 2>/dev/null))"
+
+echo "== loopspec: conformance fixtures =="
+if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then
+  ok "loopspec conformance: $(tail -1 "$WORK/loopspec.out")"
+else
+  fail "loopspec conformance failed: $(grep '^FAIL' "$WORK/loopspec.out" | head -5 | tr '\n' ' ')"
+fi
+
+echo "== loopspec: prompt fragments do not drift from docs/loopspec/fragments/ =="
+# Every marked region in a template must match its fragment file byte-for-byte
+# after per-line leading-whitespace normalization (templates embed at varying
+# list indents). Drift is a failing check, not a habit.
+FRAG_SEEN="$WORK/fragments-seen"
+: > "$FRAG_SEEN"
+for tf in "$REPO"/templates/claude-commands/*.md "$REPO"/templates/codex-skills/*/SKILL.md; do
+  for name in $(sed -n 's/.*<!-- loopspec:fragment \([a-z0-9-]*\) -->.*/\1/p' "$tf" | sort -u); do
+    echo "$name" >> "$FRAG_SEEN"
+    frag="$REPO/docs/loopspec/fragments/$name.md"
+    if [ ! -f "$frag" ]; then
+      fail "template $(basename "$tf") references missing fragment: $name"
+      continue
+    fi
+    want="$(sed 's/^[[:space:]]*//' "$frag")"
+    # Compare EVERY marked region — a second embed of the same fragment in one
+    # file must be drift-checked too, not just the first.
+    count="$(grep -c "<!-- loopspec:fragment $name -->" "$tf" || true)"
+    occ=1
+    while [ "$occ" -le "$count" ]; do
+      got="$(awk -v marker="<!-- loopspec:fragment $name -->" -v occ="$occ" '
+        index($0, marker) {n++; if (n==occ) {c=1; next}}
+        c && /<!-- \/loopspec:fragment -->/ {exit}
+        c {sub(/^[[:space:]]+/, ""); print}' "$tf")"
+      if [ "$got" = "$want" ]; then
+        ok "fragment $name matches in $(basename "$tf") (region $occ/$count)"
+      else
+        fail "fragment DRIFT: $name in $(basename "$tf") region $occ — edit docs/loopspec/fragments/$name.md (the normative home) and re-embed"
+      fi
+      occ=$((occ+1))
+    done
+  done
+done
+for frag in "$REPO"/docs/loopspec/fragments/*.md; do
+  n="$(basename "$frag" .md)"
+  grep -q "^$n$" "$FRAG_SEEN" && ok "fragment $n is embedded by at least one template" || fail "orphan fragment (no template embeds it): $n"
+done
+# Tripwire: fragment signature phrases must never appear in a template OUTSIDE
+# a marked region — an unmarked copy of normative discipline text would silently
+# escape the drift check (real-review finding). Signatures are distinctive
+# substrings of each fragment; extend this list when adding fragments.
+sig_outside_markers() {  # <signature> — prints template:line for hits outside markers
+  local sig="$1" tf
+  for tf in "$REPO"/templates/claude-commands/*.md "$REPO"/templates/codex-skills/*/SKILL.md; do
+    awk -v sig="$sig" -v f="$(basename "$tf")" '
+      /<!-- loopspec:fragment / {inm=1}
+      /<!-- \/loopspec:fragment -->/ {inm=0; next}
+      !inm && index($0, sig) {print f ":" NR}' "$tf"
+  done
+}
+while IFS='|' read -r sig label; do
+  [ -n "$sig" ] || continue
+  HITS="$(sig_outside_markers "$sig")"
+  if [ -z "$HITS" ]; then
+    ok "no unmarked copies of $label discipline in templates"
+  else
+    fail "unmarked $label discipline text in templates (wrap in loopspec:fragment markers): $(echo "$HITS" | tr '\n' ' ')"
+  fi
+done <<'SIGS'
+RESULT: spawned|result-spawned
+truly ship-stopping|verdict-discipline
+blank checklist|holistic-rereview
+SIGS
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"

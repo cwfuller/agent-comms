@@ -83,8 +83,19 @@ fm() {
     inFM && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print; exit}' "$1"
 }
 
-# Normalized verdict (trimmed, uppercased) so " approve" still gates correctly.
-norm_verdict() { fm "$1" verdict | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'; }
+# Normalized verdict (trimmed, uppercased, loopspec synonyms mapped) so " approve"
+# and the canonical `pass`/`fail` spellings gate identically to comms.sh — fleet's
+# completion gates must agree with the kernel or a pass-terminated loop wedges
+# dispatch-all/harvest.
+norm_verdict() {
+  local v
+  v="$(fm "$1" verdict | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+  case "$v" in
+    PASS) v=APPROVE ;;
+    FAIL) v=REQUEST_CHANGES ;;
+  esac
+  printf '%s' "$v"
+}
 
 cmd_status() {
   local now name ref tree ctitle xtitle ctype xtype latest latest_mt
@@ -273,7 +284,7 @@ cmd_dispatch_all() {
   # Free = Claude pane idle (no spinner) AND latest archive missing or APPROVE
   # AND no unread message newer than the archive (same pending rule as harvest —
   # firing over unread mail would orphan an in-flight exchange).
-  # verdict=APPROVE is the protocol's only completion signal.
+  # A normalized APPROVE (or its canonical synonym pass) is the protocol's only completion signal.
   local free=() name ref title state latest verdict latest_mt pending f m
   while read -r name ref; do
     [ -z "$name" ] && continue

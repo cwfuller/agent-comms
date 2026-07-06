@@ -74,12 +74,14 @@ Use the "Review focus" and context provided by Claude to understand the scope, t
 - `phase: implement` — Focus on: bugs, logic errors, security issues, edge cases, code quality. Skip style nits — report blocking issues and only high-signal advisory notes.
 
 #### Round 2+ — Holistic re-review with stable context
-**Do NOT just verify whether Claude fixed your previous findings.** That leads to tunnel vision where you miss new issues introduced by the fixes, or issues you overlooked in round 1.
+<!-- loopspec:fragment holistic-rereview -->
+**Do NOT just verify whether the author fixed your previous findings.** That leads to tunnel vision where you miss new issues introduced by the fixes, or issues you overlooked in round 1.
 
 Re-review the current state holistically. Previous findings are stable context, not the scope. Keep scope, constraints, risk areas, and the latest findings bundle in view, but do not narrow yourself to checking items off one by one:
 - Re-read the changed files with a blank checklist
 - Scan for issues you may have missed in earlier rounds — you were likely anchored on specific areas before
 - Check for regressions or new problems introduced by the fixes
+<!-- /loopspec:fragment -->
 - `phase: plan` — Re-read the entire plan holistically. Does it still hold together after revisions?
 - `phase: implement` — Re-read all changed files. Run through the implement review checklist below.
 
@@ -99,6 +101,7 @@ In addition to the checklist above, do an explicit broad quality sweep:
 - Consistency with project conventions
 
 #### Review bar and verdict discipline
+<!-- loopspec:fragment verdict-discipline -->
 Default to `APPROVE`. Each failed review creates another fix+review loop, so only block when the issue is truly ship-stopping.
 
 Use `REQUEST_CHANGES` only for blocking issues such as:
@@ -114,6 +117,9 @@ Keep `APPROVE` and include comments when findings are advisory, such as:
 - Minor cleanup or maintainability improvements
 - Style or preference nits
 - Nice-to-have tests on otherwise low-risk changes
+<!-- /loopspec:fragment -->
+
+Verdict values: `APPROVE` / `REQUEST_CHANGES` (the canonical `pass` / `fail` spellings are accepted synonyms — `comms.sh verdict` normalizes both).
 
 #### Process feedback (meta channel)
 If the incoming message carries a `## Meta` section requesting process feedback: report friction with the comms process itself (delivery, archive sequencing, message shape, round semantics) under a `### Process` heading in your reply's Findings. Process feedback never gates the verdict — do not REQUEST_CHANGES over it.

@@ -41,8 +41,8 @@ becomes review-focus instructions.
 ### `/read-from-codex [filter]`
 
 List and act on pending messages. Manual flow (no `workflow` field): summarize, archive,
-ask how to proceed. Autonomous flow: enforce verdict/round semantics (see
-[PROTOCOL.md](PROTOCOL.md#loop-semantics)), reply, atomically archive. An empty inbox
+ask how to proceed. Autonomous flow: enforce verdict/round semantics (normative in
+[loopspec/SPEC.md](loopspec/SPEC.md)), reply, atomically archive. An empty inbox
 reports the latest archived message — a late delivery nudge for an already-processed
 reply is common and harmless. Filter argument: "only the latest", "all messages", a
 filename, or a thread.
@@ -112,7 +112,7 @@ agnostic.
 | `list --as <claude\|codex> [--thread <t>]` | pending inbox messages, newest first; non-zero + "latest archived" hint when empty |
 | `status` | one-screen loop summary: workspace, latest archived message + its loop fields, pending counts per inbox |
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
-| `verdict <file>` | normalized (trimmed, uppercased) verdict |
+| `verdict <file>` | normalized verdict: whitespace-stripped, uppercased, loopspec synonyms mapped (`pass` → `APPROVE`, `fail` → `REQUEST_CHANGES`) |
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
 | `deliver <claude\|codex> [file]` | cmux pane nudge; prints `delivered to <surface> (<how>)` / manual-pickup / `blocked` (sandboxed socket) / `FAILED` explicitly. `COMMS_DELIVERY=headless` routes to `runphase.sh` instead (detached `codex exec` / `claude -p` turn for the target provider; replies to the driving session are a pickup no-op) |
 | `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`delivered`/`spawned`/`manual`/`blocked`/`failed`) |
@@ -125,6 +125,14 @@ agnostic.
 
 Same subcommands as `/fleet` above — the command template is a thin wrapper over this
 script. `fleet.sh help` prints usage.
+
+### `docs/loopspec/check.sh`
+
+Conformance checker for the [loopspec](loopspec/SPEC.md) kernel:
+`check.sh --comms <path-to-comms.sh>` runs the implementation against the golden
+fixtures (valid/invalid messages, verdict-normalization table, schema smoke). The test
+harness runs it on every `bash tests/run.sh`; consumers that vendor `docs/loopspec/`
+re-run it (or their own reader) against the same fixtures in their CI.
 
 ### `runphase.sh` (experimental)
 

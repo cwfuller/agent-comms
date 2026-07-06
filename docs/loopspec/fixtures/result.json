@@ -1,0 +1,11 @@
+{
+  "provider": "codex",
+  "status": "completed",
+  "exit_code": "0",
+  "session_id": "00000000-0000-0000-0000-000000000002",
+  "message_file": "/tmp/fixture/.comms/to-codex/fixture-ws_2026-06-04T12-10-00_round-2.md",
+  "run_dir": "/tmp/fixture/.comms/logs/fixture-run.1780597800.1234",
+  "started_at": "2026-06-04T12:10:01Z",
+  "ended_at": "2026-06-04T12:14:30Z",
+  "note": ""
+}

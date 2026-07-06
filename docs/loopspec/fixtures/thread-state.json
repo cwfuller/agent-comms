@@ -1,0 +1,17 @@
+{
+  "workspace": "fixture-ws",
+  "thread": "loop-fixture",
+  "workflow": "auto-implement",
+  "phase": "implement",
+  "round": "2",
+  "max_rounds": "10",
+  "status": "in-progress",
+  "awaiting_from": "codex",
+  "awaiting_since": "2026-06-04T12:10:00Z",
+  "awaiting_since_epoch": "1780597800",
+  "last_sent": "fixture-ws_2026-06-04T12-10-00_round-2",
+  "last_run_dir": "/tmp/fixture/.comms/logs/fixture-run.1780597800.1234",
+  "claude_session_id": "00000000-0000-0000-0000-000000000001",
+  "codex_thread_id": "00000000-0000-0000-0000-000000000002",
+  "last_delivery": "completed"
+}
