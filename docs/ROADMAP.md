@@ -279,10 +279,16 @@ validation, atomic reply→deliver→archive, message ids, stale-inbound reconci
 Shipped: runphase v0 codex leg (dbc5a50), claude leg + direction-aware pickup + hold/
 watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
 
-- [ ] **Symphony Level-1 adoption (step 4)**: ReviewCheck verdict synonyms, vendored
-  loopspec fixtures in its gate at a pin, Advisories module (close the pass-round
-  advisory-death gap), fragments consumed via `.symphony/workflows` override slots
-  with a pinned sync script.
+- [x] **Symphony Level-1 adoption (step 4)** — shipped 2026-07-06, symphony commit
+  84996ae (local main): vendored kernel at a PIN via `scripts/sync-loopspec.sh` +
+  an ExUnit conformance reader; ReviewCheck verdict synonyms (strip-all
+  normalization, gate-only); `Workflow.Advisories` closes the pass-round
+  advisory-death gap (machine-local, LESSONS-style — the repo-commit path is the
+  named Level-2 follow-up); holistic-rereview fragment embedded verbatim with a
+  containment test; lessons in the compounding format. Fragments are consumed via
+  the builtin templates rather than `.symphony/workflows` override slots (overrides
+  replace whole prompts; verbatim containment beats file generation). Reviewed by
+  the first cross-repo headless loop: APPROVE round 1.
 - [ ] **Make non-cmux (headless) delivery the DEFAULT** — decided 2026-07-06, gated on
   the soak threshold: 10 successful headless loops including ≥3 claude-resume/attach
   exercises and ≥3 reverse-direction handoffs. Prerequisites: per-repo persistence for
