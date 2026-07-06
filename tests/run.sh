@@ -534,6 +534,198 @@ JSON
 run_fleet status | grep '^ws-2 ' | grep -q 'owes=codex' && ok "fleet status surfaces state ground truth (owes=)" || fail "fleet status owes note (got: $(run_fleet status | grep '^ws-2 '))"
 rm -f "$REPO_FIX/.comms/state/ws-2_loop-x.json"
 
+echo "== runphase v0: headless delivery via stubbed codex =="
+RUNPHASE="$REPO/helpers/runphase.sh"
+# codex stub: logs argv + the child's COMMS_DELIVERY, consumes the stdin prompt,
+# emits canned JSONL, honors -o. Behavior toggles: CODEX_STUB_FAIL, CODEX_STUB_HANG.
+# HERMETIC: without this stub on PATH, a headless test would spawn a REAL codex
+# turn and burn real tokens (see ROADMAP: a non-hermetic test once fired a live agent).
+export CODEX_STUB_LOG="$WORK/codex.log"
+export COMMS_FOR_STUB="$COMMS"
+cat > "$STUB_BIN/codex" <<'STUB'
+#!/bin/bash
+{ echo "argv: $*"; echo "env: COMMS_DELIVERY=${COMMS_DELIVERY:-}"; } >> "$CODEX_STUB_LOG"
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+cat > /dev/null   # consume the prompt from stdin
+[ -n "${CODEX_STUB_HANG:-}" ] && sleep "$CODEX_STUB_HANG"
+echo '{"type":"thread.started","thread_id":"stub-thread-42"}'
+if [ -n "${CODEX_STUB_FAIL:-}" ]; then
+  echo '{"type":"turn.failed","error":"stub failure"}'
+  exit 1
+fi
+if [ -n "${CODEX_STUB_REPLY:-}" ]; then
+  # Behave like the REAL peer: write a reply and atomically send it with
+  # --archive-inbound, which MOVES the incoming message out of to-codex/.
+  # (Regression: the runner's exit path must not re-read the archived file.)
+  ROOT="$(git rev-parse --show-toplevel)/.comms"
+  MSG="$(ls -t "$ROOT/to-codex/"*.md 2>/dev/null | head -1)"
+  WS="$(basename "$MSG" | sed 's/_.*//')"
+  REPLY="$ROOT/to-claude/${WS}_2026-06-04T14-30-00_stubreply-$$.md"
+  {
+    echo '---'
+    echo 'type: review-feedback'
+    echo 'from: codex'
+    echo 'timestamp: 2026-06-04T14:30:00Z'
+    echo "workspace: $WS"
+    awk 'NR==1&&$0=="---"{f=1;next} f&&$0=="---"{exit} f' "$MSG" \
+      | grep -E '^(thread|workflow|phase|round|max-rounds):'
+    echo 'verdict: APPROVE'
+    echo '---'
+    echo ''
+    echo '## Summary'
+    echo 'Stub review.'
+  } > "$REPLY"
+  "$COMMS_FOR_STUB" send --to claude "$REPLY" --archive-inbound "$MSG" >/dev/null 2>&1 || exit 1
+fi
+echo '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":10}}'
+[ -n "$out" ] && echo "stub last message" > "$out"
+exit 0
+STUB
+chmod +x "$STUB_BIN/codex"
+
+run_headless() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
+run_rp() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$RUNPHASE" "$@"); }
+rundir_of() { echo "$1" | sed -n 's/^ *run dir: //p' | head -1; }
+
+# -- workflow message: spawn -> await -> completed, state mirrored --
+HL_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T14-00-00_headless-1.md"
+sed 's/thread: loop-alpha/thread: loop-headless/; s/round: 2/round: 1/' "$OUT_WF" > "$HL_WF"
+: > "$CMUX_STUB_LOG"
+HL_OUT="$(run_headless send --to codex "$HL_WF" 2>/dev/null)"
+HL_TAIL="$(echo "$HL_OUT" | tail -1)"
+case "$HL_TAIL" in "RESULT: spawned"*) ok "headless send ends with RESULT: spawned" ;; *) fail "headless RESULT line (got: $HL_TAIL)" ;; esac
+[ ! -s "$CMUX_STUB_LOG" ] && ok "headless delivery never touches cmux" || fail "headless delivery touched cmux: $(cat "$CMUX_STUB_LOG")"
+HL_DIR="$(rundir_of "$HL_OUT")"
+[ -n "$HL_DIR" ] && [ -d "$HL_DIR" ] && ok "spawn printed a real run dir" || fail "spawn run dir (got: $HL_DIR)"
+HL_SF="$REPO_FIX/.comms/state/feature-helper-tests_loop-headless.json"
+grep -q '"last_delivery": "spawned"' "$HL_SF" && ok "state records last_delivery=spawned" || fail "state spawned (got: $(cat "$HL_SF" 2>/dev/null))"
+AWAIT_OUT="$(run_rp await "$HL_DIR" --timeout-secs 30)"
+AWAIT_RC=$?
+[ "$AWAIT_RC" -eq 0 ] && ok "await exits 0 on completed turn" || fail "await rc on success (rc=$AWAIT_RC; out: $AWAIT_OUT)"
+echo "$AWAIT_OUT" | grep -q '"status": "completed"' && ok "result.json status=completed" || fail "result status (got: $AWAIT_OUT)"
+echo "$AWAIT_OUT" | grep -q '"session_id": "stub-thread-42"' && ok "session id captured from thread.started" || fail "session id capture (got: $AWAIT_OUT)"
+grep -q '"thread.started"' "$HL_DIR/events.ndjson" && ok "events.ndjson has the JSONL event log" || fail "events.ndjson content"
+grep -q "$(basename "$HL_WF")" "$HL_DIR/prompt.md" && ok "prompt names the target message file" || fail "prompt message path"
+grep -q "RESULT: manual" "$HL_DIR/prompt.md" && ok "prompt pre-briefs the expected manual send result" || fail "prompt manual note"
+grep -q "argv: exec --json -s workspace-write" "$CODEX_STUB_LOG" && ok "codex invoked as exec --json with workspace-write sandbox" || fail "codex argv (got: $(grep argv "$CODEX_STUB_LOG"))"
+grep -q "env: COMMS_DELIVERY=headless" "$CODEX_STUB_LOG" && ok "child codex inherits COMMS_DELIVERY=headless" || fail "child env propagation"
+grep -q '"last_delivery": "completed"' "$HL_SF" && ok "state updated to completed on exit" || fail "state completed (got: $(cat "$HL_SF"))"
+grep -q '"codex_thread_id": "stub-thread-42"' "$HL_SF" && ok "state records codex_thread_id for future resume" || fail "state codex_thread_id (got: $(cat "$HL_SF"))"
+ST_HL="$(run_headless status)"
+echo "$ST_HL" | grep -q "ACTION NEEDED" && fail "completed headless turn must not shout ACTION NEEDED" || ok "status does not shout on completed headless turn"
+
+# -- failed turn: recorded as failed, await exits non-zero --
+HL_WF2="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T14-05-00_headless-2.md"
+sed 's/round: 1/round: 2/' "$HL_WF" > "$HL_WF2"
+HL_OUT2="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless CODEX_STUB_FAIL=1 PATH="$STUB_BIN:$PATH" "$COMMS" send --to codex "$HL_WF2") 2>/dev/null )"
+HL_DIR2="$(rundir_of "$HL_OUT2")"
+AWAIT2="$(run_rp await "$HL_DIR2" --timeout-secs 30)"; AWAIT2_RC=$?
+[ "$AWAIT2_RC" -ne 0 ] && ok "await exits non-zero on failed turn" || fail "await rc on failure"
+echo "$AWAIT2" | grep -q '"status": "failed"' && ok "result.json status=failed" || fail "failed result (got: $AWAIT2)"
+grep -q '"last_delivery": "failed"' "$HL_SF" && ok "state records failed headless turn" || fail "state failed (got: $(cat "$HL_SF"))"
+ST_HL2="$(run_headless status)"
+echo "$ST_HL2" | grep -q "ACTION NEEDED" && ok "failed headless turn DOES shout ACTION NEEDED" || fail "failed turn should shout (got: $(echo "$ST_HL2" | tail -2))"
+
+# -- full peer behavior: reply sent + inbound archived; success still recorded --
+# (Regression for the archived-message re-read bug: the runner must record
+# completed even though the child moved the message file out of to-codex/.)
+HL_WFR="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T14-08-00_headless-r.md"
+sed 's/thread: loop-headless/thread: loop-hl-reply/; s/round: 1/round: 1/' "$HL_WF" > "$HL_WFR"
+HL_OUTR="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless CODEX_STUB_REPLY=1 PATH="$STUB_BIN:$PATH" "$COMMS" send --to codex "$HL_WFR") 2>/dev/null )"
+HL_DIRR="$(rundir_of "$HL_OUTR")"
+AWAITR="$(run_rp await "$HL_DIRR" --timeout-secs 30)"; AWAITR_RC=$?
+[ "$AWAITR_RC" -eq 0 ] && ok "turn that archives its inbound still completes (await rc=0)" || fail "reply-turn await rc (rc=$AWAITR_RC; out: $AWAITR; log: $(cat "$HL_DIRR/runner.log" 2>/dev/null | tail -3))"
+echo "$AWAITR" | grep -q '"status": "completed"' && ok "reply-turn result.json status=completed" || fail "reply-turn result (got: $AWAITR)"
+[ ! -f "$HL_WFR" ] && ok "inbound was archived by the peer's atomic send" || fail "inbound archived by peer"
+ls "$REPO_FIX/.comms/to-claude/" | grep -q stubreply && ok "peer reply landed in to-claude" || fail "peer reply in to-claude"
+HL_SFR="$REPO_FIX/.comms/state/feature-helper-tests_loop-hl-reply.json"
+grep -q '"last_delivery": "completed"' "$HL_SFR" && ok "state mirrors completed despite archived message" || fail "reply-turn state completed (got: $(cat "$HL_SFR" 2>/dev/null))"
+grep -q '"codex_thread_id": "stub-thread-42"' "$HL_SFR" && ok "codex_thread_id survives the reply flow" || fail "reply-turn codex_thread_id"
+grep -q '"awaiting_from": "claude"' "$HL_SFR" && ok "peer reply flipped awaiting_from to claude" || fail "reply-turn awaiting_from"
+
+# -- timeout: hung turn killed, recorded as timeout; live turn guards re-delivery --
+HL_WF3="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T14-10-00_headless-3.md"
+sed 's/round: 1/round: 3/' "$HL_WF" > "$HL_WF3"
+HL_OUT3="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless CODEX_STUB_HANG=30 COMMS_RUNPHASE_TIMEOUT_SECS=6 PATH="$STUB_BIN:$PATH" "$COMMS" send --to codex "$HL_WF3") 2>/dev/null )"
+HL_DIR3="$(rundir_of "$HL_OUT3")"
+sleep 2
+DUP_OUT="$(run_headless deliver codex)"
+echo "$DUP_OUT" | grep -q "already running" && ok "re-delivery of an in-flight turn is guarded (no double-spawn)" || fail "double-spawn guard (got: $DUP_OUT)"
+AWAIT3="$(run_rp await "$HL_DIR3" --timeout-secs 60)"; AWAIT3_RC=$?
+[ "$AWAIT3_RC" -ne 0 ] && ok "await exits non-zero on timed-out turn" || fail "await rc on timeout"
+echo "$AWAIT3" | grep -q '"status": "timeout"' && ok "result.json status=timeout (hung turn killed)" || fail "timeout result (got: $AWAIT3)"
+grep -q '"last_delivery": "timeout"' "$HL_SF" && ok "state records timeout" || fail "state timeout (got: $(cat "$HL_SF"))"
+
+# -- paths with spaces survive spawn -> prompt -> codex argv --
+HL_SP="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T14-16-00_space test-1.md"
+sed 's/thread: loop-headless/thread: loop-space/' "$HL_WF" > "$HL_SP"
+SP_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --message "$HL_SP") )"
+SP_DIR="$(rundir_of "$SP_OUT")"
+run_rp await "$SP_DIR" --timeout-secs 30 >/dev/null && ok "message path with a space runs end-to-end" || fail "space-path turn (log: $(tail -3 "$SP_DIR/runner.log" 2>/dev/null))"
+grep -q 'space\\ test' "$SP_DIR/prompt.md" && ok "prompt shell-quotes the message path" || fail "prompt quoting (got: $(grep 'space' "$SP_DIR/prompt.md" | head -2))"
+rm -f "$HL_SP"
+
+# -- one-shot message (no thread): runs fine, creates no state --
+HL_Q="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T14-15-00_ask-q-1.md"
+cat > "$HL_Q" <<'MSG'
+---
+type: question
+from: claude
+timestamp: 2026-06-04T14:15:00Z
+workspace: feature-helper-tests
+message_id: feature-helper-tests_2026-06-04T14-15-00_ask-q-1
+---
+
+## Question
+Is this fine?
+MSG
+PRE_STATE_COUNT="$(find "$REPO_FIX/.comms/state" -type f 2>/dev/null | wc -l | tr -d ' ')"
+HL_OUTQ="$(run_headless send --to codex "$HL_Q" 2>/dev/null)"
+HL_DIRQ="$(rundir_of "$HL_OUTQ")"
+run_rp await "$HL_DIRQ" --timeout-secs 30 >/dev/null && ok "one-shot question runs headless" || fail "one-shot headless run"
+POST_STATE_COUNT="$(find "$REPO_FIX/.comms/state" -type f 2>/dev/null | wc -l | tr -d ' ')"
+[ "$PRE_STATE_COUNT" = "$POST_STATE_COUNT" ] && ok "one-shot message creates no thread state" || fail "one-shot state leak ($PRE_STATE_COUNT -> $POST_STATE_COUNT)"
+
+# -- headless deliver to claude is a documented no-op (driver picks up the reply) --
+HL_CL="$(run_headless deliver claude)"
+echo "$HL_CL" | grep -q "no nudge needed" && ok "headless deliver claude explains the no-nudge design" || fail "headless claude deliver (got: $HL_CL)"
+
+# -- bare deliver codex with an empty inbox: nothing spawned, no crash --
+find "$REPO_FIX/.comms/to-codex" -maxdepth 1 -type f -name 'feature-helper-tests_*' -delete
+HL_EMPTY="$(run_headless deliver codex)"
+echo "$HL_EMPTY" | grep -q "nothing spawned" && ok "headless deliver with empty inbox reports nothing spawned" || fail "empty-inbox headless deliver (got: $HL_EMPTY)"
+# Restore one pending to-codex message — the clean tests below assert that
+# cleaning claude's side leaves the codex inbox untouched.
+cp "$HL_Q" "$REPO_FIX/.comms/to-codex/$(basename "$HL_Q")" 2>/dev/null || cat > "$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T14-20-00_restore-1.md" <<'MSG'
+---
+type: question
+from: claude
+timestamp: 2026-06-04T14:20:00Z
+workspace: feature-helper-tests
+---
+
+## Question
+Restore fixture for the clean tests.
+MSG
+
+# -- missing runphase.sh degrades to manual pickup with a warning --
+LONELY="$WORK/lonely"
+mkdir -p "$LONELY"
+cp "$COMMS" "$LONELY/comms.sh" && chmod +x "$LONELY/comms.sh"
+LONE_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$LONELY/comms.sh" deliver codex) 2>&1 )"
+echo "$LONE_OUT" | grep -q "runphase.sh not found" && ok "missing runphase degrades with an explicit warning" || fail "missing runphase warning (got: $LONE_OUT)"
+
+# -- missing .comms/to-codex dir: bare headless deliver must not die silently --
+NODIR_FIX="$WORK/nodir-repo"
+mkdir -p "$NODIR_FIX"
+git -C "$NODIR_FIX" init -q -b main
+git -C "$NODIR_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+NODIR_OUT="$( (cd "$NODIR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" deliver codex) 2>&1 )"
+NODIR_RC=$?
+[ "$NODIR_RC" -eq 0 ] && ok "headless deliver survives a repo with no .comms (rc=0)" || fail "no-.comms headless deliver rc=$NODIR_RC"
+echo "$NODIR_OUT" | grep -q "nothing spawned" && ok "no-.comms headless deliver says nothing spawned" || fail "no-.comms output (got: $NODIR_OUT)"
+
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
 DRY="$(run_comms clean --as claude workspace)"

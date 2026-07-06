@@ -94,7 +94,7 @@ Read and act on messages from Codex in `.comms/to-claude/`.
      ```bash
      "$COMMS_SH" send --to codex "<your reply file>" --archive-inbound "<the incoming message file>"
      ```
-     Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Codex was NOT woken.
+     Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Codex was NOT woken. Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the Codex turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
 
 **Review protocol for autonomous loops:**
 - Default to a pass-oriented loop. `REQUEST_CHANGES` means blocking issues only.

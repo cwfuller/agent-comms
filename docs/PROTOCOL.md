@@ -159,8 +159,16 @@ workflow message (filename components sanitized to `[A-Za-z0-9._-]`; workspace i
   "awaiting_since_epoch": "1780597814",
   "last_sent": "<message_id>",
   "last_delivery": "delivered"      // delivered | manual | failed
+                                    // headless: spawned → completed | failed | timeout
 }
 ```
+
+Headless turns (see [Headless delivery](#headless-delivery-experimental)) add one more
+field on exit: `codex_thread_id` — the Codex session id captured from the turn's event
+log. Note the state copy is transient in v0: the next round's `send` rewrites the state
+file and drops it. The durable copy lives in the run dir's `result.json`; treat the
+state field as observability, not yet as resume plumbing (session resume across rounds
+is a planned opt-in, not wired).
 
 State is **advisory ground truth**: it survives compaction/restarts, records and
 surfaces the loop's round/max-rounds (enforcement itself happens in the reading agent's
@@ -230,6 +238,42 @@ giving up.
 until its current turn ends — sometimes minutes. If the reply was already consumed by
 then (e.g. by a file watcher), the late `/read-from-codex` finds an empty inbox; readers
 report "latest archived: X — already processed" instead of a confusing "no messages".
+
+## Headless delivery (experimental)
+
+`COMMS_DELIVERY=headless` replaces the keystroke nudge with a detached subprocess:
+`deliver codex` hands the message to `runphase.sh`, which spawns `codex exec --json`
+in the background, records the run under `.comms/logs/<message_id>.<epoch>/`
+(`prompt.md`, `events.ndjson` JSONL event log, `last-message.txt`, `result.json`,
+`pid`, `runner.log`), and mirrors the outcome into thread state on exit. cmux is
+never touched; identity is a process handle, not a pane guess. v0 scope: **Codex
+target only**, opt-in per call, cmux remains the default.
+
+Additional delivery outcomes in headless mode:
+
+| outcome | meaning | recovery |
+|---|---|---|
+| `spawned` | peer turn running detached | `runphase.sh await <run-dir>`; reply appears in the inbox when it exits |
+| `completed` | turn exited 0; reply should be in the inbox | read it (`/read-from-codex`) |
+| `failed` | codex exec exited non-zero, or the runner aborted (its exit trap still records the failure) | inspect `events.ndjson`/`runner.log`; re-send to retry |
+| `timeout` | turn killed after `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800) | raise the limit or investigate, then re-send |
+
+A runner killed with `kill -9` can write nothing, so state stays `spawned` forever; the
+surfaces for that residual are `runphase.sh await` (detects the dead pid and says so)
+and `comms.sh stalled`. Re-delivery is guarded: `deliver codex` for a message whose
+runner is still alive reports "already running" and points at the existing run dir
+instead of double-spawning a concurrent turn; a dead runner without a result is
+retryable as usual.
+
+A headless send **to claude** is deliberately a no-op ("no nudge needed"): the driving
+Claude session is the one that spawned the turn, and it reads the reply itself when the
+turn exits — there is no second terminal to wake. The spawned Codex is pre-briefed that
+its `send --to claude` will report `RESULT: manual` and that this is expected.
+
+Sandbox: the turn runs `codex exec -s workspace-write` from the message's `cwd` (or the
+main repo root). For worktree turns, `.comms/` and the main `.git/` are added as extra
+writable roots so the reply and branch operations succeed. The spawned turn inherits
+`COMMS_DELIVERY=headless` so nothing in the child can reach for cmux.
 
 ## Archive discipline
 

@@ -56,6 +56,7 @@ message_id: <the filename, without .md>
 
 ## Notes
 
+- **Headless delivery (experimental).** With `COMMS_DELIVERY=headless` set, `send` spawns the Codex turn as a detached subprocess instead of nudging a pane, and ends with `RESULT: spawned` plus a run dir. When you see that: run the printed await command (`.../runphase.sh await "<run dir>"`) **as a background task** so you're re-invoked when the turn finishes, then `/read-from-codex` to pick up the answer. `await` exiting non-zero means the turn failed or timed out — check the run dir's `result.json` and `runner.log`, and relay the failure to the user instead of waiting for a reply that isn't coming.
 - **Codex's reply will use `type: response`** with no verdict — that's the consult-shaped answer. `/read-from-codex` already handles non-workflow messages in standard flow (parse, summarize, archive).
 - **Don't stretch this command into review territory.** If you find yourself adding a "Review focus" section or asking Codex for blocking findings, you want `/send-to-codex` instead.
 - **Single round, no loop.** If Codex's answer raises follow-up questions, fire another `/ask-codex` — don't try to chain rounds in one exchange.

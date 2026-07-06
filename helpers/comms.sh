@@ -13,8 +13,10 @@
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
 #   verdict <file>              normalized (trimmed, uppercased) verdict from frontmatter
 #   archive --as <claude|codex> <file...>   idempotent move to archive/; own inbox only
-#   deliver <claude|codex>      nudge the other agent's pane via cmux; reports delivered/
-#                               manual-pickup/FAILED explicitly (never hard-fails)
+#   deliver <claude|codex> [file]   nudge the other agent's pane via cmux; reports delivered/
+#                               manual-pickup/FAILED explicitly (never hard-fails).
+#                               COMMS_DELIVERY=headless routes to runphase.sh instead
+#                               (detached codex exec turn — v0, codex target only)
 #   send --to <claude|codex> <file> [--archive-inbound <file>]
 #                               validate, deliver, update thread state, then archive inbound
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
@@ -331,9 +333,48 @@ cmd_bind() {  # bind <claude|codex> [surface:N] — set or show the target's sur
   echo "bound $target -> $surface (ignored automatically if it disappears from the tree)"
 }
 
+# deliver_headless <target> [message-file] — spawn a detached peer turn via
+# runphase.sh instead of typing into a pane. v0 backs only the codex target;
+# a headless send TO claude is a no-op by design: the driving Claude session
+# picks the reply up itself when the peer turn exits (no wake needed).
+# Same contract as the cmux path: never hard-fails, always says what happened.
+deliver_headless() {
+  local target="$1" msgfile="${2:-}"
+  if [ "$target" = "claude" ]; then
+    echo "headless mode: reply written for pickup — the driving session reads it when the peer turn ends (no nudge needed)"
+    return 0
+  fi
+  local rp="$(dirname "$SELF")/runphase.sh"
+  if [ ! -x "$rp" ]; then
+    echo "warning: COMMS_DELIVERY=headless but runphase.sh not found next to comms.sh — message written for manual pickup (re-run install.sh)"
+    return 0
+  fi
+  if [ -z "$msgfile" ]; then
+    # Bare `deliver codex` retry surface: newest pending message for this
+    # workspace. || true: a missing to-codex dir fails find under pipefail and
+    # would otherwise errexit-kill the helper with zero output.
+    msgfile="$(find "$(cmd_root)/to-codex" -maxdepth 1 -type f -name "$(cmd_workspace)_*" 2>/dev/null | sort | tail -1 || true)"
+  fi
+  if [ -z "$msgfile" ] || [ ! -f "$msgfile" ]; then
+    echo "warning: headless delivery found no pending message for codex — nothing spawned"
+    return 0
+  fi
+  local out
+  if out="$("$rp" spawn --message "$msgfile" 2>&1)"; then
+    printf '%s\n' "$out"
+  else
+    printf '%s\n' "$out"
+    echo "warning: headless spawn FAILED — the message is safely on disk; retry with 'comms.sh send --to $target <file>'"
+  fi
+}
+
 cmd_deliver() {
-  local target="${1:-}"
+  local target="${1:-}" msgfile="${2:-}"
   case "$target" in claude|codex) ;; *) die "deliver: target must be claude or codex" ;; esac
+  if [ "${COMMS_DELIVERY:-cmux}" = "headless" ]; then
+    deliver_headless "$target" "$msgfile"
+    return 0
+  fi
   if ! command -v cmux >/dev/null 2>&1 || [ -z "${CMUX_WORKSPACE_ID:-}" ]; then
     echo "warning: cmux not available; message written for manual pickup"
     return 0
@@ -419,7 +460,11 @@ cmd_status() {
     st="$(json_get "$sf" status)"
     owes="$(json_get "$sf" awaiting_from)"
     deliv="$(json_get "$sf" last_delivery)"
-    if [ "$st" != "complete" ] && [ -n "$deliv" ] && [ "$deliv" != "delivered" ]; then
+    # Live headless outcomes are not operator-action cases: spawned = turn in
+    # flight, completed = reply is (or was) in the inbox for the driver to read.
+    # failed/timeout from a headless turn DO shout, like a failed nudge.
+    if [ "$st" != "complete" ] && [ -n "$deliv" ] \
+       && [ "$deliv" != "delivered" ] && [ "$deliv" != "spawned" ] && [ "$deliv" != "completed" ]; then
       case "$owes" in claude|codex) target="$owes" ;; *) target="<agent>" ;; esac
       echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Run 'comms.sh deliver $target' (or trigger the pane by hand). This notice clears on the thread's next send."
     fi
@@ -620,12 +665,14 @@ cmd_send() {
   # Atomicity guard: never deliver or archive on a malformed outbound message.
   cmd_validate "$file" || die "send: refusing to deliver malformed message (and not archiving inbound)"
   local del_out outcome=manual
-  del_out="$(cmd_deliver "$to")"
+  del_out="$(cmd_deliver "$to" "$file")"
   echo "$del_out"
   case "$del_out" in
-    *"delivered to"*)    outcome=delivered ;;
+    *"delivered to"*)     outcome=delivered ;;
     *"delivery blocked"*) outcome=blocked ;;
-    *FAILED*)            outcome=failed ;;
+    *FAILED*)             outcome=failed ;;
+    *"spawned runphase"*) outcome=spawned ;;
+    *"already running"*)  outcome=spawned ;;   # headless re-send: turn already in flight
   esac
   # Record thread ground truth (workflow messages with a thread only). The
   # ||-context also suppresses errexit inside the function, so NO state failure
@@ -646,8 +693,19 @@ cmd_send() {
   # manual outcome means the other agent was NOT woken and the loop sits idle.
   case "$outcome" in
     delivered) echo "RESULT: delivered" ;;
+    spawned)   echo "RESULT: spawned — headless peer turn running detached; the reply lands in the inbox when it exits. Await it with the runphase.sh command printed above, then read the reply." ;;
     blocked)   echo "RESULT: blocked — cmux socket is sandboxed; the other agent was NOT nudged. Re-run via your approved shell wrapper (do NOT escalate): /bin/zsh -lc '\"$SELF\" send --to $to <file>'" ;;
-    manual)    echo "RESULT: manual — the other agent was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'" ;;
+    manual)
+      if [ "${COMMS_DELIVERY:-cmux}" = "headless" ] && [ "$to" = "claude" ]; then
+        # Only the codex->claude direction is a designed pickup: the driving
+        # session reads the reply itself when the peer turn ends.
+        echo "RESULT: manual — headless mode: the reply is on disk; the driving session picks it up when this turn ends"
+      elif [ "${COMMS_DELIVERY:-cmux}" = "headless" ]; then
+        echo "RESULT: manual — headless mode but codex was NOT spawned (see the warning above; likely runphase.sh missing or empty inbox); fix and retry 'comms.sh send --to $to <file>'"
+      else
+        echo "RESULT: manual — the other agent was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'"
+      fi
+      ;;
     failed)    echo "RESULT: failed — nudge errored mid-sequence; retry with 'comms.sh send --to $to <file>'" ;;
   esac
 }
@@ -667,7 +725,7 @@ case "${1:-}" in
   bind)      shift; cmd_bind "$@" ;;
   clean)     shift; cmd_clean "$@" ;;
   ""|help|-h|--help)
-    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown subcommand '${1}' — run 'comms.sh help'" ;;
 esac

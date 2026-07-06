@@ -81,6 +81,6 @@ This is an autonomous implement+review cycle (round 1 of <N>). Reply with findin
    ```bash
    "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
-   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Codex was NOT woken and the loop sits idle until someone acts.
+   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Codex was NOT woken and the loop sits idle until someone acts. Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the Codex turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
 
 6. **Notify user:** "Implementation complete and sent to Codex for autonomous review (round 1 of N). Watch both panes — I'll auto-fix based on feedback." If the loop goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.
