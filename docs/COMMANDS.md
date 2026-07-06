@@ -114,7 +114,7 @@ agnostic.
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
 | `verdict <file>` | normalized (trimmed, uppercased) verdict |
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
-| `deliver <claude\|codex> [file]` | cmux pane nudge; prints `delivered to <surface> (<how>)` / manual-pickup / `blocked` (sandboxed socket) / `FAILED` explicitly. `COMMS_DELIVERY=headless` routes to `runphase.sh` instead (detached `codex exec` turn — v0, codex target only) |
+| `deliver <claude\|codex> [file]` | cmux pane nudge; prints `delivered to <surface> (<how>)` / manual-pickup / `blocked` (sandboxed socket) / `FAILED` explicitly. `COMMS_DELIVERY=headless` routes to `runphase.sh` instead (detached `codex exec` / `claude -p` turn for the target provider; replies to the driving session are a pickup no-op) |
 | `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`delivered`/`spawned`/`manual`/`blocked`/`failed`) |
 | `bind <claude\|codex> [surface:N]` | pin which surface delivery targets (show current with no arg); successful deliveries auto-refresh it; ignored if the surface disappears |
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure |
@@ -128,23 +128,29 @@ script. `fleet.sh help` prints usage.
 
 ### `runphase.sh` (experimental)
 
-Headless peer-turn runner behind `COMMS_DELIVERY=headless` (v0: Codex only; cmux stays
-the default). `deliver`/`send` call `spawn` for you — `await` and `result` are the
-operator surface:
+Headless peer-turn runner behind `COMMS_DELIVERY=headless` (cmux stays the default).
+`deliver`/`send` call `spawn` for you — `await`, `result`, `hold`, and `release` are
+the operator surface:
 
 | subcommand | effect |
 |---|---|
-| `spawn --message <file> [--sandbox <mode>] [--timeout-secs N]` | detach a peer turn (`codex exec --json`); prints pid + run dir immediately |
+| `spawn --message <file> [--provider codex\|claude] [--sandbox <mode>] [--timeout-secs N]` | detach a peer turn (`codex exec --json` / `claude -p --output-format stream-json`); prints pid + run dir immediately; refuses (`HELD`) while the thread is held; won't double-spawn while a prior runner for the message is alive |
 | `await <run-dir> [--timeout-secs N]` | block until the turn's `result.json` exists (or the runner dies); prints it; exit 0 only for `status=completed` |
 | `result <run-dir>` | print `result.json` if present |
+| `hold [thread]` | pause: block new spawns for the thread (all threads with no arg); prints the attach commands (`claude --resume <sid>` / `codex resume <tid>`) from state |
+| `release [thread]` | lift a hold |
 
-Each turn is recorded under `.comms/logs/<message_id>.<epoch>/`: `prompt.md` (what the
-peer was told), `events.ndjson` (the full JSONL event stream — token usage lives here),
-`last-message.txt`, `result.json` (status, exit code, session id), `pid`, `runner.log`.
-Thread state mirrors the outcome (`spawned` → `completed`/`failed`/`timeout`) and
-records `codex_thread_id` for future session resume. Env knobs:
-`COMMS_RUNPHASE_SANDBOX` (default `workspace-write`), `COMMS_RUNPHASE_TIMEOUT_SECS`
-(default 1800).
+Each turn is recorded under `.comms/logs/<message_id>.<epoch>.<pid>/`: `prompt.md`
+(what the peer was told), `events.ndjson` (the full JSONL event stream — token usage
+lives here), `result.json` (provider, status, exit code, session id), `pid`,
+`runner.log`. Thread state mirrors the outcome (`spawned` →
+`completed`/`failed`/`timeout`), records `last_run_dir` (the `stalled` watchdog's pid
+target), and records the provider session id (`codex_thread_id` /
+`claude_session_id`) for attach/resume. Env knobs: `COMMS_RUNPHASE_SANDBOX` (codex,
+default `workspace-write`), `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800),
+`COMMS_RUNPHASE_CLAUDE_PERMISSION_MODE` (default `acceptEdits`),
+`COMMS_RUNPHASE_CLAUDE_ALLOWED_TOOLS` (default `Bash`), `COMMS_RUNPHASE_CLAUDE_ARGS`
+(extra flags; bypass/danger permission flags are refused).
 
 ## Typical sessions
 

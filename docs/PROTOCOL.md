@@ -163,12 +163,14 @@ workflow message (filename components sanitized to `[A-Za-z0-9._-]`; workspace i
 }
 ```
 
-Headless turns (see [Headless delivery](#headless-delivery-experimental)) add one more
-field on exit: `codex_thread_id` — the Codex session id captured from the turn's event
-log. Note the state copy is transient in v0: the next round's `send` rewrites the state
-file and drops it. The durable copy lives in the run dir's `result.json`; treat the
-state field as observability, not yet as resume plumbing (session resume across rounds
-is a planned opt-in, not wired).
+Headless turns (see [Headless delivery](#headless-delivery-experimental)) add fields:
+`last_run_dir` (written by `send` at spawn time — the watchdog's pid target) and, on
+exit, the provider session id — `codex_thread_id` or `claude_session_id`, captured
+from the turn's event log and printed by `runphase.sh hold` as the attach command.
+Note the state copies are transient: the next round's `send` rewrites the state file
+and drops them. The durable copy lives in the run dir's `result.json`; treat the state
+fields as observability and attach plumbing, not yet as automatic cross-round resume
+(that is a planned opt-in, not wired).
 
 State is **advisory ground truth**: it survives compaction/restarts, records and
 surfaces the loop's round/max-rounds (enforcement itself happens in the reading agent's
@@ -242,38 +244,69 @@ report "latest archived: X — already processed" instead of a confusing "no mes
 ## Headless delivery (experimental)
 
 `COMMS_DELIVERY=headless` replaces the keystroke nudge with a detached subprocess:
-`deliver codex` hands the message to `runphase.sh`, which spawns `codex exec --json`
-in the background, records the run under `.comms/logs/<message_id>.<epoch>/`
-(`prompt.md`, `events.ndjson` JSONL event log, `last-message.txt`, `result.json`,
-`pid`, `runner.log`), and mirrors the outcome into thread state on exit. cmux is
-never touched; identity is a process handle, not a pane guess. v0 scope: **Codex
-target only**, opt-in per call, cmux remains the default.
+`deliver <target>` hands the message to `runphase.sh`, which spawns the target
+provider's CLI in the background — `codex exec --json` for Codex, `claude -p
+--verbose --output-format stream-json` for Claude — records the run under
+`.comms/logs/<message_id>.<epoch>.<pid>/` (`prompt.md`, `events.ndjson` JSONL event
+log, `result.json`, `pid`, `runner.log`), and mirrors the outcome into thread state
+on exit. cmux is never touched; identity is a process handle, not a pane guess.
+Opt-in per call; cmux remains the default.
+
+**Direction awareness.** Replies TO the driving session are a designed no-op: the
+driver reads them when the peer turn exits, so nothing is spawned for that
+direction. runphase marks it by exporting `COMMS_HEADLESS_PICKUP=<driver>` into the
+child's environment; `deliver` no-ops when the target matches. Either agent can
+drive: a Claude session sending to codex spawns a headless Codex turn whose replies
+are picked up, and an interactive Codex sending to claude spawns a headless Claude
+turn symmetrically.
+
+**Claude turns** run with `CLAUDECODE` unset (so the child does not detect itself as
+nested inside the driving session) and a non-bypass permission policy:
+`--permission-mode acceptEdits --allowedTools Bash` by default, overridable via
+`COMMS_RUNPHASE_CLAUDE_PERMISSION_MODE` / `COMMS_RUNPHASE_CLAUDE_ALLOWED_TOOLS` /
+`COMMS_RUNPHASE_CLAUDE_ARGS`. Bypass/danger permission flags
+(`--dangerously-skip-permissions`, `bypassPermissions`) are **refused** in loop
+turns by policy: a novel permission need surfaces as a failed turn and gets a
+scoped policy addition, never a blanket bypass.
 
 Additional delivery outcomes in headless mode:
 
 | outcome | meaning | recovery |
 |---|---|---|
 | `spawned` | peer turn running detached | `runphase.sh await <run-dir>`; reply appears in the inbox when it exits |
-| `completed` | turn exited 0; reply should be in the inbox | read it (`/read-from-codex`) |
-| `failed` | codex exec exited non-zero, or the runner aborted (its exit trap still records the failure) | inspect `events.ndjson`/`runner.log`; re-send to retry |
+| `completed` | turn exited 0; reply should be in the inbox | read it |
+| `failed` | provider CLI exited non-zero, or the runner aborted (its exit trap still records the failure) | inspect `events.ndjson`/`runner.log`; re-send to retry |
 | `timeout` | turn killed after `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800) | raise the limit or investigate, then re-send |
+| `held` | a hold marker paused the thread; nothing spawned | `runphase.sh release <thread>`, then re-send |
+| `pickup` | designed no-op: a peer turn's reply to its driving session (`RESULT:` still reads `manual — …picks it up…` for the peer's expectations) | none — the driver reads the reply when the turn exits |
 
 A runner killed with `kill -9` can write nothing, so state stays `spawned` forever; the
 surfaces for that residual are `runphase.sh await` (detects the dead pid and says so)
-and `comms.sh stalled`. Re-delivery is guarded: `deliver codex` for a message whose
-runner is still alive reports "already running" and points at the existing run dir
-instead of double-spawning a concurrent turn; a dead runner without a result is
-retryable as usual.
+and `comms.sh stalled`, whose **watchdog** uses the `last_run_dir` recorded in state to
+distinguish "runner alive — still working", "turn finished — reply may be unread", and
+"runner DEAD without a result — re-send to retry". Re-delivery is guarded: `deliver`
+for a message whose runner is still alive reports "already running" and points at the
+existing run dir instead of double-spawning a concurrent turn; a dead runner without a
+result is retryable as usual.
 
-A headless send **to claude** is deliberately a no-op ("no nudge needed"): the driving
-Claude session is the one that spawned the turn, and it reads the reply itself when the
-turn exits — there is no second terminal to wake. The spawned Codex is pre-briefed that
-its `send --to claude` will report `RESULT: manual` and that this is expected.
+**Pause/attach (hold).** `runphase.sh hold <thread>` (or `hold` with no argument for
+everything) blocks NEW turns at the next turn boundary — in-flight turns finish — and
+prints the exact attach commands recorded in thread state (`claude --resume
+<claude_session_id>` from the loop's cwd; `codex resume <codex_thread_id>`). Sends on
+a held thread report `RESULT: held`; after `release`, RE-SEND rather than bare-deliver
+so state moves off `held`. Two scoping notes: per-thread holds do not block
+thread-less one-shot messages (use the no-argument hold for a full stop), and bare
+`deliver` resolves only the newest pending message — a held thread's newest message
+shadows retries for other threads, so pass an explicit file to retry a specific one.
 
-Sandbox: the turn runs `codex exec -s workspace-write` from the message's `cwd` (or the
-main repo root). For worktree turns, `.comms/` and the main `.git/` are added as extra
-writable roots so the reply and branch operations succeed. The spawned turn inherits
-`COMMS_DELIVERY=headless` so nothing in the child can reach for cmux.
+The spawned peer is pre-briefed that its reply `send` will report `RESULT: manual` and
+that this is expected — the driving session picks the reply up when the turn ends.
+
+Sandbox: a Codex turn runs `codex exec -s workspace-write` from the message's `cwd` (or
+the main repo root); a Claude turn relies on its permission policy. For worktree turns,
+`.comms/` and the main `.git/` are added via `--add-dir` so the reply and branch
+operations succeed. The spawned turn inherits `COMMS_DELIVERY=headless` so nothing in
+the child can reach for cmux.
 
 ## Archive discipline
 

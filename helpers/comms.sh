@@ -16,7 +16,7 @@
 #   deliver <claude|codex> [file]   nudge the other agent's pane via cmux; reports delivered/
 #                               manual-pickup/FAILED explicitly (never hard-fails).
 #                               COMMS_DELIVERY=headless routes to runphase.sh instead
-#                               (detached codex exec turn — v0, codex target only)
+#                               (detached codex exec / claude -p turn for the target)
 #   send --to <claude|codex> <file> [--archive-inbound <file>]
 #                               validate, deliver, update thread state, then archive inbound
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
@@ -334,14 +334,15 @@ cmd_bind() {  # bind <claude|codex> [surface:N] — set or show the target's sur
 }
 
 # deliver_headless <target> [message-file] — spawn a detached peer turn via
-# runphase.sh instead of typing into a pane. v0 backs only the codex target;
-# a headless send TO claude is a no-op by design: the driving Claude session
-# picks the reply up itself when the peer turn exits (no wake needed).
+# runphase.sh instead of typing into a pane. Direction-aware: replies TO the
+# driving session are a designed no-op (the driver reads them when the peer
+# turn exits) — runphase marks that direction in the child's env via
+# COMMS_HEADLESS_PICKUP. Any other target spawns a turn for that provider.
 # Same contract as the cmux path: never hard-fails, always says what happened.
 deliver_headless() {
   local target="$1" msgfile="${2:-}"
-  if [ "$target" = "claude" ]; then
-    echo "headless mode: reply written for pickup — the driving session reads it when the peer turn ends (no nudge needed)"
+  if [ "$target" = "${COMMS_HEADLESS_PICKUP:-}" ]; then
+    echo "headless mode: reply written for pickup — the driving session reads it when this peer turn ends (no nudge needed)"
     return 0
   fi
   local rp="$(dirname "$SELF")/runphase.sh"
@@ -350,17 +351,17 @@ deliver_headless() {
     return 0
   fi
   if [ -z "$msgfile" ]; then
-    # Bare `deliver codex` retry surface: newest pending message for this
-    # workspace. || true: a missing to-codex dir fails find under pipefail and
+    # Bare `deliver <target>` retry surface: newest pending message for this
+    # workspace. || true: a missing inbox dir fails find under pipefail and
     # would otherwise errexit-kill the helper with zero output.
-    msgfile="$(find "$(cmd_root)/to-codex" -maxdepth 1 -type f -name "$(cmd_workspace)_*" 2>/dev/null | sort | tail -1 || true)"
+    msgfile="$(find "$(cmd_root)/$(inbox_for "$target")" -maxdepth 1 -type f -name "$(cmd_workspace)_*" 2>/dev/null | sort | tail -1 || true)"
   fi
   if [ -z "$msgfile" ] || [ ! -f "$msgfile" ]; then
-    echo "warning: headless delivery found no pending message for codex — nothing spawned"
+    echo "warning: headless delivery found no pending message for $target — nothing spawned"
     return 0
   fi
   local out
-  if out="$("$rp" spawn --message "$msgfile" 2>&1)"; then
+  if out="$("$rp" spawn --provider "$target" --message "$msgfile" 2>&1)"; then
     printf '%s\n' "$out"
   else
     printf '%s\n' "$out"
@@ -461,10 +462,12 @@ cmd_status() {
     owes="$(json_get "$sf" awaiting_from)"
     deliv="$(json_get "$sf" last_delivery)"
     # Live headless outcomes are not operator-action cases: spawned = turn in
-    # flight, completed = reply is (or was) in the inbox for the driver to read.
-    # failed/timeout from a headless turn DO shout, like a failed nudge.
+    # flight, completed = reply is (or was) in the inbox for the driver to read,
+    # held = the operator paused deliberately, pickup = designed reply-to-driver
+    # no-op. failed/timeout from a headless turn DO shout, like a failed nudge.
     if [ "$st" != "complete" ] && [ -n "$deliv" ] \
-       && [ "$deliv" != "delivered" ] && [ "$deliv" != "spawned" ] && [ "$deliv" != "completed" ]; then
+       && [ "$deliv" != "delivered" ] && [ "$deliv" != "spawned" ] \
+       && [ "$deliv" != "completed" ] && [ "$deliv" != "held" ] && [ "$deliv" != "pickup" ]; then
       case "$owes" in claude|codex) target="$owes" ;; *) target="<agent>" ;; esac
       echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Run 'comms.sh deliver $target' (or trigger the pane by hand). This notice clears on the thread's next send."
     fi
@@ -486,11 +489,13 @@ json_get() {  # json_get <file> <key> — one key per line in our writer, so sed
   sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" | head -1
 }
 
-# state_update_from <message-file> <delivery-outcome> — derive thread state from
-# an outbound workflow message's frontmatter. The ONLY writers of state are this
-# (via send) and `state complete`; readers must treat it as advisory ground truth.
+# state_update_from <message-file> <delivery-outcome> [run-dir] — derive thread
+# state from an outbound workflow message's frontmatter. The ONLY writers of
+# state are this (via send), runphase's exit mirror, and `state complete`;
+# readers must treat it as advisory ground truth. run-dir (headless spawns)
+# gives `stalled` a live pid to watchdog.
 state_update_from() {
-  local mf="$1" outcome="${2:-unknown}"
+  local mf="$1" outcome="${2:-unknown}" run_dir="${3:-}"
   local thread wf
   thread="$(frontmatter_field "$mf" thread)"
   wf="$(frontmatter_field "$mf" workflow)"
@@ -523,11 +528,14 @@ state_update_from() {
   fi
   # Non-fatal write: a state hiccup must never abort send between delivery and
   # the inbound archive (that is the half-applied desync state exists to prevent).
-  printf '{\n  "workspace": "%s",\n  "thread": "%s",\n  "workflow": "%s",\n  "phase": "%s",\n  "round": "%s",\n  "max_rounds": "%s",\n  "status": "in-progress",\n  "awaiting_from": "%s",\n  "awaiting_since": "%s",\n  "awaiting_since_epoch": "%s",\n  "last_sent": "%s",\n  "last_delivery": "%s"\n}\n' \
+  # last_run_dir precedes last_delivery so runphase's exit-time rewrite (which
+  # replaces the last_delivery line and may insert a session-id field before
+  # it) keeps the JSON valid with last_delivery as the final field.
+  printf '{\n  "workspace": "%s",\n  "thread": "%s",\n  "workflow": "%s",\n  "phase": "%s",\n  "round": "%s",\n  "max_rounds": "%s",\n  "status": "in-progress",\n  "awaiting_from": "%s",\n  "awaiting_since": "%s",\n  "awaiting_since_epoch": "%s",\n  "last_sent": "%s",\n  "last_run_dir": "%s",\n  "last_delivery": "%s"\n}\n' \
     "$(json_escape "$ws")" "$(json_escape "$thread")" "$(json_escape "$wf")" \
     "$(json_escape "$phase")" "$(json_escape "$round")" "$(json_escape "$maxr")" \
     "$awaiting_from" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date +%s)" \
-    "$(json_escape "$mid")" "$outcome" \
+    "$(json_escape "$mid")" "$(json_escape "$run_dir")" "$outcome" \
     > "$dir/$(safe_name "$ws")_$(safe_name "$thread").json" \
     || echo "warning: could not write thread state for '$thread' — continuing" >&2
 }
@@ -571,7 +579,7 @@ cmd_state() {
 }
 
 cmd_stalled() {
-  local mins="${1:-15}" dir ws now f age_s since
+  local mins="${1:-15}" dir ws now f age_s since deliv rd note pid
   dir="$(state_dir)"; ws="$(cmd_workspace)"; now="$(date +%s)"
   local any=false
   for f in "$dir/${ws}_"*.json; do
@@ -583,10 +591,25 @@ cmd_stalled() {
     age_s=$(( now - since ))
     if [ "$age_s" -gt $(( mins * 60 )) ]; then
       any=true
-      printf 'STALLED %sm: thread=%s %s/%s r%s awaiting=%s last_delivery=%s\n' \
+      # Headless watchdog: a spawned turn has a real pid to check, so "slow
+      # reviewer" and "runner died without a result" are distinguishable.
+      deliv="$(json_get "$f" last_delivery)"
+      rd="$(json_get "$f" last_run_dir)"
+      note=""
+      if [ "$deliv" = "spawned" ] && [ -n "$rd" ] && [ -d "$rd" ]; then
+        pid="$(cat "$rd/pid" 2>/dev/null || true)"
+        if [ -f "$rd/result.json" ]; then
+          note=" [headless turn finished: $(json_get "$rd/result.json" status) — reply may be unread]"
+        elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+          note=" [headless runner alive (pid $pid) — still working]"
+        else
+          note=" [headless runner DEAD without a result — re-send to retry]"
+        fi
+      fi
+      printf 'STALLED %sm: thread=%s %s/%s r%s awaiting=%s last_delivery=%s%s\n' \
         "$(( age_s / 60 ))" "$(json_get "$f" thread)" "$(json_get "$f" workflow)" \
         "$(json_get "$f" phase)" "$(json_get "$f" round)" \
-        "$(json_get "$f" awaiting_from)" "$(json_get "$f" last_delivery)"
+        "$(json_get "$f" awaiting_from)" "$deliv" "$note"
     fi
   done
   if [ "$any" = false ]; then
@@ -664,20 +687,23 @@ cmd_send() {
   [ -n "$file" ] || die "send: outbound file argument required"
   # Atomicity guard: never deliver or archive on a malformed outbound message.
   cmd_validate "$file" || die "send: refusing to deliver malformed message (and not archiving inbound)"
-  local del_out outcome=manual
+  local del_out outcome=manual rundir=""
   del_out="$(cmd_deliver "$to" "$file")"
   echo "$del_out"
+  rundir="$(printf '%s\n' "$del_out" | sed -n 's/^ *run dir: //p' | head -1)"
   case "$del_out" in
     *"delivered to"*)     outcome=delivered ;;
     *"delivery blocked"*) outcome=blocked ;;
     *FAILED*)             outcome=failed ;;
     *"spawned runphase"*) outcome=spawned ;;
     *"already running"*)  outcome=spawned ;;   # headless re-send: turn already in flight
+    *"HELD:"*)            outcome=held ;;      # thread paused by a hold marker
+    *"no nudge needed"*)  outcome=pickup ;;    # designed no-op: reply to the driving session
   esac
   # Record thread ground truth (workflow messages with a thread only). The
   # ||-context also suppresses errexit inside the function, so NO state failure
   # mode — mkdir, redirect, parse — can abort send before the inbound archive.
-  state_update_from "$file" "$outcome" || echo "warning: thread state not recorded" >&2
+  state_update_from "$file" "$outcome" "$rundir" || echo "warning: thread state not recorded" >&2
   if [ -n "$archive_inbound" ]; then
     # Archive the inbound only after the outbound was validated and delivery
     # attempted. A failed nudge still archives — the inbound WAS processed; the
@@ -694,14 +720,16 @@ cmd_send() {
   case "$outcome" in
     delivered) echo "RESULT: delivered" ;;
     spawned)   echo "RESULT: spawned — headless peer turn running detached; the reply lands in the inbox when it exits. Await it with the runphase.sh command printed above, then read the reply." ;;
+    held)      echo "RESULT: held — the thread is paused by a hold marker; nothing was spawned. Release with 'runphase.sh release <thread>', then RE-SEND ('comms.sh send --to $to <file>') — a bare deliver would spawn the turn but leave this thread's state stuck on 'held', blinding status and the stalled watchdog." ;;
     blocked)   echo "RESULT: blocked — cmux socket is sandboxed; the other agent was NOT nudged. Re-run via your approved shell wrapper (do NOT escalate): /bin/zsh -lc '\"$SELF\" send --to $to <file>'" ;;
+    pickup)
+      # Text deliberately starts "manual —" for the peers' expectations: the
+      # spawned peer is pre-briefed that its reply send reports manual.
+      echo "RESULT: manual — headless mode: the reply is on disk; the driving session picks it up when this turn ends"
+      ;;
     manual)
-      if [ "${COMMS_DELIVERY:-cmux}" = "headless" ] && [ "$to" = "claude" ]; then
-        # Only the codex->claude direction is a designed pickup: the driving
-        # session reads the reply itself when the peer turn ends.
-        echo "RESULT: manual — headless mode: the reply is on disk; the driving session picks it up when this turn ends"
-      elif [ "${COMMS_DELIVERY:-cmux}" = "headless" ]; then
-        echo "RESULT: manual — headless mode but codex was NOT spawned (see the warning above; likely runphase.sh missing or empty inbox); fix and retry 'comms.sh send --to $to <file>'"
+      if [ "${COMMS_DELIVERY:-cmux}" = "headless" ]; then
+        echo "RESULT: manual — headless mode but $to was NOT spawned (see the warning above; likely runphase.sh missing or empty inbox); fix and retry 'comms.sh send --to $to <file>'"
       else
         echo "RESULT: manual — the other agent was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'"
       fi

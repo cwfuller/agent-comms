@@ -4,6 +4,12 @@
 # logic is testable headlessly. Run: bash tests/run.sh   (zsh callers covered too)
 set -uo pipefail
 
+# HERMETIC: scrub inherited headless-delivery env — a harness run from INSIDE a
+# headless peer turn (e.g. Codex reviewing this repo) inherits these and would
+# route the baseline cmux tests through headless delivery (observed live: 40
+# failures). The headless-specific sections set them explicitly per invocation.
+unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP 2>/dev/null || true
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMS="$REPO/helpers/comms.sh"
 FLEET="$REPO/helpers/fleet.sh"
@@ -687,9 +693,19 @@ run_rp await "$HL_DIRQ" --timeout-secs 30 >/dev/null && ok "one-shot question ru
 POST_STATE_COUNT="$(find "$REPO_FIX/.comms/state" -type f 2>/dev/null | wc -l | tr -d ' ')"
 [ "$PRE_STATE_COUNT" = "$POST_STATE_COUNT" ] && ok "one-shot message creates no thread state" || fail "one-shot state leak ($PRE_STATE_COUNT -> $POST_STATE_COUNT)"
 
-# -- headless deliver to claude is a documented no-op (driver picks up the reply) --
-HL_CL="$(run_headless deliver claude)"
-echo "$HL_CL" | grep -q "no nudge needed" && ok "headless deliver claude explains the no-nudge design" || fail "headless claude deliver (got: $HL_CL)"
+# -- replies to the driving session are a pickup no-op (both directions) --
+HL_CL="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=claude PATH="$STUB_BIN:$PATH" "$COMMS" deliver claude) )"
+echo "$HL_CL" | grep -q "no nudge needed" && ok "reply to a claude driver is a pickup no-op" || fail "claude pickup no-op (got: $HL_CL)"
+HL_CX="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=codex PATH="$STUB_BIN:$PATH" "$COMMS" deliver codex) )"
+echo "$HL_CX" | grep -q "no nudge needed" && ok "reply to a codex driver is a pickup no-op" || fail "codex pickup no-op (got: $HL_CX)"
+# send-level: the reverse-direction pickup gets the expected-manual RESULT, not
+# a false "NOT spawned" warning (real-review finding, round 1).
+PICKUP_SEND="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=codex PATH="$STUB_BIN:$PATH" "$COMMS" send --to codex "$GOOD") 2>/dev/null | tail -1 )"
+case "$PICKUP_SEND" in
+  "RESULT: manual — headless mode: the reply is on disk"*) ok "pickup send RESULT promises driver pickup (reverse direction)" ;;
+  *) fail "pickup send RESULT (got: $PICKUP_SEND)" ;;
+esac
+echo "$PICKUP_SEND" | grep -q "NOT spawned" && fail "pickup send must not warn NOT spawned" || ok "pickup send does not warn NOT spawned"
 
 # -- bare deliver codex with an empty inbox: nothing spawned, no crash --
 find "$REPO_FIX/.comms/to-codex" -maxdepth 1 -type f -name 'feature-helper-tests_*' -delete
@@ -725,6 +741,141 @@ NODIR_OUT="$( (cd "$NODIR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headle
 NODIR_RC=$?
 [ "$NODIR_RC" -eq 0 ] && ok "headless deliver survives a repo with no .comms (rc=0)" || fail "no-.comms headless deliver rc=$NODIR_RC"
 echo "$NODIR_OUT" | grep -q "nothing spawned" && ok "no-.comms headless deliver says nothing spawned" || fail "no-.comms output (got: $NODIR_OUT)"
+
+echo "== runphase step 2: claude backend, direction pickup, hold, watchdog =="
+# claude stub: mirrors the codex stub — init event carries session_id, result
+# event ends the turn. Toggles: CLAUDE_STUB_FAIL, CLAUDE_STUB_HANG.
+cat > "$STUB_BIN/claude" <<'STUB'
+#!/bin/bash
+{ echo "claude-argv: $*"; echo "claude-env: CLAUDECODE=${CLAUDECODE:-unset}"; } >> "$CODEX_STUB_LOG"
+cat > /dev/null
+# Real claude emits init promptly, then works — hang AFTER init so a timeout
+# still has a session id to capture.
+echo '{"type":"system","subtype":"init","session_id":"stub-claude-session-7"}'
+[ -n "${CLAUDE_STUB_HANG:-}" ] && sleep "$CLAUDE_STUB_HANG"
+if [ -n "${CLAUDE_STUB_FAIL:-}" ]; then
+  echo '{"type":"result","subtype":"error","is_error":true}'
+  exit 1
+fi
+echo '{"type":"result","subtype":"success","is_error":false}'
+exit 0
+STUB
+chmod +x "$STUB_BIN/claude"
+
+# -- reverse direction: codex-authored review request pending in to-claude --
+RV="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T15-00-00_rev-review-1.md"
+cat > "$RV" <<'MSG'
+---
+type: review-request
+from: codex
+timestamp: 2026-06-04T15:00:00Z
+workspace: feature-helper-tests
+message_id: feature-helper-tests_2026-06-04T15-00-00_rev-review-1
+thread: loop-reverse
+workflow: auto-implement
+phase: implement
+round: 1
+max-rounds: 10
+verdict: REQUEST_CHANGES
+---
+
+## Findings
+Reverse-direction fixture.
+MSG
+RV_OUT="$(run_headless send --to claude "$RV" 2>/dev/null)"
+RV_TAIL="$(echo "$RV_OUT" | tail -1)"
+case "$RV_TAIL" in "RESULT: spawned"*) ok "reverse-direction headless send spawns a claude turn" ;; *) fail "reverse RESULT (got: $RV_TAIL)" ;; esac
+RV_DIR="$(rundir_of "$RV_OUT")"
+RV_SF="$REPO_FIX/.comms/state/feature-helper-tests_loop-reverse.json"
+grep -q '"last_run_dir": "/' "$RV_SF" && ok "state records last_run_dir for the watchdog" || fail "state last_run_dir (got: $(cat "$RV_SF" 2>/dev/null))"
+run_rp await "$RV_DIR" --timeout-secs 30 >/dev/null && ok "claude turn completes" || fail "claude turn await (log: $(tail -3 "$RV_DIR/runner.log" 2>/dev/null))"
+grep -q '"provider": "claude"' "$RV_DIR/result.json" && ok "result.json records provider=claude" || fail "result provider (got: $(cat "$RV_DIR/result.json"))"
+grep -q '"session_id": "stub-claude-session-7"' "$RV_DIR/result.json" && ok "claude session id captured from init event" || fail "claude session capture"
+grep -q 'claude-argv: -p --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools Bash' "$CODEX_STUB_LOG" && ok "claude invoked with stream-json + non-bypass policy" || fail "claude argv (got: $(grep claude-argv "$CODEX_STUB_LOG" | tail -1))"
+grep -q 'claude-env: CLAUDECODE=unset' "$CODEX_STUB_LOG" && ok "CLAUDECODE unset for the nested claude child" || fail "CLAUDECODE nesting (got: $(grep claude-env "$CODEX_STUB_LOG" | tail -1))"
+grep -q '"claude_session_id": "stub-claude-session-7"' "$RV_SF" && ok "state records claude_session_id" || fail "state claude_session_id (got: $(cat "$RV_SF"))"
+grep -q '"last_delivery": "completed"' "$RV_SF" && ok "reverse turn mirrored completed into state" || fail "reverse state completed"
+grep -q "$(basename "$RV")" "$RV_DIR/prompt.md" && grep -q "read-from-codex" "$RV_DIR/prompt.md" && ok "claude prompt references the claude-side command files" || fail "claude prompt content"
+grep -q -- '--to codex' "$RV_DIR/prompt.md" && ok "claude prompt routes the reply to codex" || fail "claude prompt reply direction"
+
+# -- claude failed turn: provider-keyed recording (real-review coverage gap) --
+RVF="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T15-02-00_rev-fail-1.md"
+sed 's/rev-review-1/rev-fail-1/' "$RV" > "$RVF"
+RVF_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless CLAUDE_STUB_FAIL=1 PATH="$STUB_BIN:$PATH" "$COMMS" send --to claude "$RVF") 2>/dev/null )"
+RVF_DIR="$(rundir_of "$RVF_OUT")"
+run_rp await "$RVF_DIR" --timeout-secs 30 >/dev/null 2>&1 && fail "failed claude turn must await non-zero" || ok "failed claude turn awaits non-zero"
+grep -q '"provider": "claude"' "$RVF_DIR/result.json" && grep -q '"status": "failed"' "$RVF_DIR/result.json" && ok "failed claude turn records provider+status" || fail "claude failed result (got: $(cat "$RVF_DIR/result.json" 2>/dev/null))"
+grep -q 'claude CLI exited 1' "$RVF_DIR/result.json" && ok "failure note names the claude CLI, not codex" || fail "provider-aware failure note (got: $(grep note "$RVF_DIR/result.json"))"
+grep -q '"claude_session_id": "stub-claude-session-7"' "$RV_SF" && grep -q '"last_delivery": "failed"' "$RV_SF" && ok "failed claude turn mirrors state with claude_session_id" || fail "claude failed state (got: $(cat "$RV_SF"))"
+
+# -- claude timeout: hung turn killed, session captured from pre-hang init --
+RVT="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T15-03-00_rev-hang-1.md"
+sed 's/rev-review-1/rev-hang-1/' "$RV" > "$RVT"
+RVT_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless CLAUDE_STUB_HANG=30 COMMS_RUNPHASE_TIMEOUT_SECS=6 PATH="$STUB_BIN:$PATH" "$COMMS" send --to claude "$RVT") 2>/dev/null )"
+RVT_DIR="$(rundir_of "$RVT_OUT")"
+run_rp await "$RVT_DIR" --timeout-secs 60 >/dev/null 2>&1 && fail "hung claude turn must await non-zero" || ok "hung claude turn awaits non-zero"
+grep -q '"status": "timeout"' "$RVT_DIR/result.json" && ok "claude timeout recorded" || fail "claude timeout result (got: $(cat "$RVT_DIR/result.json" 2>/dev/null))"
+grep -q '"session_id": "stub-claude-session-7"' "$RVT_DIR/result.json" && ok "session id captured even on timeout (init precedes hang)" || fail "timeout session capture"
+grep -q '"last_delivery": "timeout"' "$RV_SF" && ok "claude timeout mirrored into state" || fail "claude timeout state (got: $(cat "$RV_SF"))"
+
+# -- hold: pause at the turn boundary, attach command printed, release resumes --
+HOLD_OUT="$(run_rp hold loop-reverse)"
+echo "$HOLD_OUT" | grep -q "held: loop-reverse" && ok "hold sets a thread marker" || fail "hold output (got: $HOLD_OUT)"
+echo "$HOLD_OUT" | grep -q "claude --resume stub-claude-session-7" && ok "hold prints the exact claude attach command from state" || fail "hold attach print (got: $HOLD_OUT)"
+RV2="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T15-05-00_rev-review-2.md"
+sed 's/round: 1/round: 2/; s/rev-review-1/rev-review-2/' "$RV" > "$RV2"
+HELD_OUT="$(run_headless send --to claude "$RV2" 2>/dev/null)"
+HELD_TAIL="$(echo "$HELD_OUT" | tail -1)"
+case "$HELD_TAIL" in "RESULT: held"*) ok "send on a held thread reports RESULT: held" ;; *) fail "held RESULT (got: $HELD_TAIL)" ;; esac
+echo "$HELD_OUT" | grep -q "spawned runphase" && fail "held send must not spawn" || ok "held send spawns nothing"
+grep -q '"last_delivery": "held"' "$RV_SF" && ok "state records held" || fail "state held (got: $(cat "$RV_SF"))"
+ST_HELD="$(run_headless status)"
+echo "$ST_HELD" | grep -q "ACTION NEEDED" && fail "held thread must not shout ACTION NEEDED" || ok "held thread does not shout"
+run_rp release loop-reverse | grep -q "released" && ok "release lifts the hold" || fail "release output"
+RES_OUT2="$(run_headless send --to claude "$RV2" 2>/dev/null)"
+case "$(echo "$RES_OUT2" | tail -1)" in "RESULT: spawned"*) ok "released thread spawns again" ;; *) fail "post-release send (got: $(echo "$RES_OUT2" | tail -1))" ;; esac
+run_rp await "$(rundir_of "$RES_OUT2")" --timeout-secs 30 >/dev/null || true
+
+# -- global hold blocks everything --
+run_rp hold >/dev/null
+GH_OUT="$(run_headless deliver claude)"
+echo "$GH_OUT" | grep -q "HELD:" && ok "global hold blocks all spawns" || fail "global hold (got: $GH_OUT)"
+run_rp release >/dev/null
+
+# -- stalled watchdog: dead runner vs finished turn vs live runner --
+WD_RUN="$WORK/wd-run"
+mkdir -p "$WD_RUN"
+echo "999999" > "$WD_RUN/pid"
+cat > "$REPO_FIX/.comms/state/feature-helper-tests_loop-watchdog.json" <<JSON
+{
+  "workspace": "feature-helper-tests",
+  "thread": "loop-watchdog",
+  "workflow": "auto-implement",
+  "phase": "implement",
+  "round": "1",
+  "max_rounds": "10",
+  "status": "in-progress",
+  "awaiting_from": "codex",
+  "awaiting_since": "2026-06-04T15:00:00Z",
+  "awaiting_since_epoch": "$(( $(date +%s) - 3600 ))",
+  "last_sent": "x",
+  "last_run_dir": "$WD_RUN",
+  "last_delivery": "spawned"
+}
+JSON
+run_comms stalled 15 | grep -q "runner DEAD without a result" && ok "watchdog flags a dead runner with no result" || fail "watchdog dead (got: $(run_comms stalled 15))"
+echo '{"status": "completed"}' > "$WD_RUN/result.json"
+run_comms stalled 15 | grep -q "turn finished: completed" && ok "watchdog reports a finished-but-unread turn" || fail "watchdog finished (got: $(run_comms stalled 15))"
+rm -f "$WD_RUN/result.json"
+echo "$$" > "$WD_RUN/pid"
+run_comms stalled 15 | grep -q "runner alive" && ok "watchdog reports a live runner still working" || fail "watchdog alive (got: $(run_comms stalled 15))"
+rm -f "$REPO_FIX/.comms/state/feature-helper-tests_loop-watchdog.json"
+
+# -- bypass/danger permission flags are refused for claude loop turns --
+BP_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_RUNPHASE_CLAUDE_ARGS="--dangerously-skip-permissions" PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider claude --message "$RV") )"
+BP_DIR="$(rundir_of "$BP_OUT")"
+run_rp await "$BP_DIR" --timeout-secs 30 >/dev/null 2>&1 && fail "bypass-flag turn must not complete" || ok "bypass-flag turn refused (await non-zero)"
+grep -q "bypass/danger permission flags are refused" "$BP_DIR/runner.log" && ok "refusal names the policy in runner.log" || fail "bypass refusal message (log: $(tail -2 "$BP_DIR/runner.log" 2>/dev/null))"
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
