@@ -273,3 +273,26 @@ PR 3 items originate from in-the-field reflections by the agents running these l
 (thread scoping, reply wake-up, state.json, advisory evaporation, picker fragility,
 reviewer-failure lane) and two Codex reviewers (comms CLI, delivery acks, schema
 validation, atomic reply→deliver→archive, message ids, stale-inbound reconciliation).
+
+## Headless / loopspec track (2026-07 — the unification roadmap)
+
+Shipped: runphase v0 codex leg (dbc5a50), claude leg + direction-aware pickup + hold/
+watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
+
+- [ ] **Symphony Level-1 adoption (step 4)**: ReviewCheck verdict synonyms, vendored
+  loopspec fixtures in its gate at a pin, Advisories module (close the pass-round
+  advisory-death gap), fragments consumed via `.symphony/workflows` override slots
+  with a pinned sync script.
+- [ ] **Make non-cmux (headless) delivery the DEFAULT** — decided 2026-07-06, gated on
+  the soak threshold: 10 successful headless loops including ≥3 claude-resume/attach
+  exercises and ≥3 reverse-direction handoffs. Prerequisites: per-repo persistence for
+  the delivery mode (`.comms/config`, not env-var-only) with staged per-repo opt-in
+  (hobby repos first, client repos last); cmux stays selectable as fallback for one
+  release after the flip.
+- [ ] **Retire fleet.sh into symphony (step 5)** — HARD-GATED on a trackerless
+  `symphony run` local mode covering status/dispatch/dispatch-all/harvest/concurrency
+  caps/dirty-tree+push safety/stalled recovery. fleet.sh is live orchestration until
+  then (frozen, but kept correct — see the pass-synonym fix).
+- [ ] **Delete cmux delivery (step 6)** — one release after the default flip with no
+  fallback invocations; deletion audit must include cmux-mgr dispatch (live consumer);
+  keep optional log/tail viewing only if useful. Interop drill before declaring done.
