@@ -291,7 +291,12 @@ watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
   the first cross-repo headless loop: APPROVE round 1.
 - [ ] **Make non-cmux (headless) delivery the DEFAULT** — decided 2026-07-06, gated on
   the soak threshold: 10 successful headless loops including ≥3 claude-resume/attach
-  exercises and ≥3 reverse-direction handoffs. Prerequisites: per-repo persistence for
+  exercises and ≥3 reverse-direction handoffs. Soak progress 2026-07-07: +7 turns / 4
+  full loops from symphony's audit-fix arc (incl. one 3-round thread and one
+  timeout-kill → re-delivery recovery — state stayed coherent); still needed:
+  resume/attach and reverse-direction exercises. Field findings (runner wall-clock
+  timeout, cmux false-`delivered`, RESULT naming) recorded in docs/advisories.md
+  2026-07-07 — the timeout idle/salvage fix should land before the flip. Prerequisites: per-repo persistence for
   the delivery mode (`.comms/config`, not env-var-only) with staged per-repo opt-in
   (hobby repos first, client repos last); cmux stays selectable as fallback for one
   release after the flip.

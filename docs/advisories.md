@@ -1,5 +1,39 @@
 # Advisory carry-over
 
+## 2026-07-07 — symphony audit-fix arc field report (7 headless turns, 4 threads, driving-session feedback)
+
+Dogfooded headless delivery end-to-end on symphony's maintenance-audit arc (threads
+`audit-batch1-governor-safety-17474` … `audit-batch4-signal-shaping-hygiene-7873`; 4 loops, one
+3-round). Zero message/state-layer failures; two protocol-visible findings and several polish items.
+
+- **[P1] Wall-clock runner timeout killed an ACTIVE reviewer mid-verdict** (batch-3 thread): the
+  cross-stack review legitimately ran past the 1800s default; runphase killed it (exit 124) while
+  events.ndjson shows it executing the reply-filename `date` commands — the full review completed and
+  the verdict died unwritten. ~30 min of Codex work lost; re-delivery re-ran the whole review.
+  Diagnosability was GOOD (exit 124 + the result.json hint + `stalled` showing `last_delivery=timeout`).
+  Fix candidates, in value order: (a) idle-timeout on events.ndjson silence instead of (or alongside)
+  wall-clock — wall-clock alone guarantees the longest/most-thorough reviews die at their most
+  expensive moment; (b) salvage on timeout — result.json already records the codex session_id; when a
+  killed turn produced no message file, print (or auto-run once) the `codex resume` continuation;
+  (c) raise the default to 3600s — observed normal implement-review turns run 15–60 min.
+- **[P1] cmux `send` false-positive `RESULT: delivered`**: with no Codex pane open, delivery fell back
+  to "first other-pane terminal" and still reported plain `delivered`; the loop idled silently until
+  `stalled` was run by hand (17 min). Downgrade the fallback RESULT line (e.g.
+  `delivered-unverified (unbound terminal fallback)`) and hint `COMMS_DELIVERY=headless`.
+- **[P2] Headless peer-reply `RESULT: manual` is misleading** — the reviewer itself had to explain in a
+  Process note that manual ≠ failure in this mode. Rename to e.g. `written-for-pickup (headless)`.
+- **[P2] Reviewer-sandbox environment notes are sender tribal knowledge** — `MIX_NO_SYNC=1` had to be
+  hand-embedded in every review request. A per-repo `reviewer-notes` block in `.comms/config` (or
+  runphase template injection) would make it durable. (Reinforces the `.comms/config` prerequisite.)
+- **[P3] Spawn output could advertise recovery affordances** (`stalled`, `runphase.sh hold`) so a run
+  dir is self-documenting if the driving session dies; an `await` heartbeat option would distinguish
+  "long review" from "hung runner" for humans; `send` validates an already-validated file (noise).
+- **Positive signals worth keeping**: headless reviewers ran their own probes/validation suites every
+  round and caught two real bugs (a phase-filtered ledger lookup, a marker-lifecycle leak) — review
+  depth went UP vs cmux; re-delivery after a timeout kill (same message file, new spawn) left
+  thread/round state perfectly coherent; `--archive-inbound` composes with headless; multi-round
+  threads and cmux/headless interleaving were non-events.
+
 ## 2026-07-06 — thread `headless-claude-leg-13020` (headless step 2, auto-implement)
 
 - **Bash heredoc write hung 2m in a live headless claude child** (DEFERRED) (observed once,
