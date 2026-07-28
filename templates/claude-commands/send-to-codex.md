@@ -31,6 +31,7 @@ type: review-request
 from: claude
 timestamp: <ISO 8601>
 branch: <current branch>
+head_sha: <git rev-parse HEAD>
 workspace: <workspace name from step 2>
 cwd: <current working directory from pwd — always include>
 message_id: <the filename, without .md>
@@ -56,7 +57,9 @@ message_id: <the filename, without .md>
    ```bash
    "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
-   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Codex was NOT woken.
+   On `RESULT: blocked`, execute the exact `RECOVER:` line once; it uses direct cmux
+   commands and reconciles state after success. Relay only the final non-`delivered`
+   result.
    <!-- loopspec:fragment result-spawned-exception -->
    Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the Codex turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
    <!-- /loopspec:fragment -->

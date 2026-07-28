@@ -25,7 +25,11 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
    ```
    On an empty inbox the helper exits non-zero and reports the latest archived message on stderr. If the latest archived message is recent, tell the user: "No pending messages — [filename] was already processed (likely a late delivery nudge; harmless)." Otherwise say there are no messages from Claude for this workspace.
 
-3. Read the most recent matching message (or all if user asks).
+3. Read the newest pending message for **each thread**, not only the globally newest
+   file. This prevents a busy thread from starving an older actionable review. When a
+   thread has multiple pending rounds, compare `round` and `timestamp`, process the
+   newest valid round, then archive superseded rounds after confirming they belong to
+   that same thread.
 
 4. **Validate the message:**
    ```bash
@@ -35,7 +39,7 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
 
    **If the incoming message is `type: error`** (Claude reporting YOUR last reply was malformed): fix and resend your previous reply with the same `round` — an error exchange never consumes a round.
 
-5. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or reviewing any files. This ensures you're looking at the correct worktree branch.
+5. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` there before reviewing. Compare optional `head_sha:` with `git rev-parse HEAD`; if the path was repurposed, locate that commit/worktree instead of reviewing unrelated current contents.
 
 6. **Check for autonomous workflow mode.** Parse the `workflow` field from frontmatter. If it exists, follow the autonomous rules below. If not, follow the standard flow.
 
@@ -136,19 +140,11 @@ If the incoming message carries a `## Meta` section requesting process feedback:
 
 ## Sandbox & permissions
 
-Read-only helper commands (`list`, `validate`, `archive`, file reads) touch only repo
-files — run them directly. But **anything that delivers (`$send-to-claude` → `comms.sh
-send`/`deliver`) touches the cmux socket, which is outside a restricted sandbox** — run
-those through your approved shell wrapper from the start, **resolving the helper inside
-the child shell** (a parent `$COMMS_SH` is not visible there):
-```bash
-/bin/zsh -lc 'C=$(git worktree list --porcelain 2>/dev/null|head -1|sed "s/^worktree //")/.agent-comms/comms.sh; [ -x "$C" ]||C="$HOME/.agent-comms/comms.sh"; "$C" send --to claude "<reply>" --archive-inbound "<inbound>"'
-```
-If you hit `Operation not permitted` on `cmux.sock`, do NOT request escalation (that is
-what prompts the user) — re-run through the wrapper; the helper prints the exact line to
-use (with a literal path). Escalate (scoped to `comms.sh`) only if no approved wrapper
-exists. A permission prompt is an invocation issue, never a protocol failure — check the
-reply file, archive state, and `RESULT:` first.
+Read-only helper commands run directly. For `send`/`deliver`, some Codex sandboxes
+block helper-side `cmux.sock` access even through `/bin/zsh -lc` while allowing direct
+approved `cmux` commands. Run the helper normally. On `RESULT: blocked`, execute its
+exact `RECOVER:` line once; it reconciles state only after the direct nudge succeeds.
+Do not request escalation, retry the wrapper, or resend after successful recovery.
 
 ## Message Format
 
@@ -160,6 +156,7 @@ type: review-request | response | question | ping | error
 from: claude
 timestamp: ISO 8601
 branch: branch-name
+head_sha: commit SHA at send time                         # optional but strongly recommended
 workspace: workspace-name
 cwd: /path/to/working/directory                     # if in a worktree, cd here before reviewing
 message_id: <filename sans .md>                      # protocol v2

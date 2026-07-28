@@ -86,6 +86,19 @@ echo "== comms.sh: root/workspace =="
 [ "$(run_comms workspace)" = "feature-helper-tests" ] && ok "workspace falls back to branch (no cmux)" || fail "workspace falls back to branch (got $(run_comms workspace))"
 WS_CMUX="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" workspace)"
 [ "$WS_CMUX" = "test-project" ] && ok "workspace prefers cmux title (lowercased, hyphenated)" || fail "workspace prefers cmux title (got $WS_CMUX)"
+# Current cmux text includes selection/active markers and callers commonly carry
+# a UUID in CMUX_WORKSPACE_ID even though the tree prints a workspace:N ref.
+MODERN_WS_ID="9F42CB3D-80E6-4189-8705-C3BB065237C7"
+cat > "$CMUX_STUB_DIR/tree-$MODERN_WS_ID.txt" <<'TREE'
+window window:1 [current] ◀ active
+└── workspace workspace:14 "Modern Project" [selected] ◀ active
+    ├── pane pane:26
+    │   └── surface surface:41 [terminal] "Codex" [selected] ◀ here tty=ttys025
+    └── pane pane:27 [focused] ◀ active
+        └── surface surface:42 [terminal] "Claude" [selected] ◀ active tty=ttys046
+TREE
+WS_MODERN="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$MODERN_WS_ID" "$COMMS" workspace)"
+[ "$WS_MODERN" = "modern-project" ] && ok "workspace parses current cmux tree shape with UUID env id" || fail "current cmux tree parse (got $WS_MODERN)"
 if command -v zsh >/dev/null 2>&1; then
   WS_ZSH="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID zsh -c "\"$COMMS\" workspace")"
   [ "$WS_ZSH" = "feature-helper-tests" ] && ok "helper is caller-shell agnostic (zsh)" || fail "helper under zsh (got $WS_ZSH)"
@@ -140,6 +153,57 @@ echo "== comms.sh: list =="
 check_not "list exits non-zero on empty inbox" run_comms list --as claude
 LIST_ERR="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as claude) 2>&1 1>/dev/null || true)"
 echo "$LIST_ERR" | grep -q "latest archived" && ok "empty inbox reports latest archived (late-nudge UX)" || fail "empty inbox reports latest archived (got: $LIST_ERR)"
+
+echo "== comms.sh: latest archive is direction/thread/time aware =="
+ARCH_OLD="$REPO_FIX/.comms/archive/feature-helper-tests_z-round-6.md"
+ARCH_NEW="$REPO_FIX/.comms/archive/feature-helper-tests_a-round-7.md"
+ARCH_WRONG_DIRECTION="$REPO_FIX/.comms/archive/feature-helper-tests_zz-wrong-direction.md"
+cat > "$ARCH_OLD" <<'MSG'
+---
+type: review-request
+from: claude
+timestamp: 2026-07-28T10:00:00Z
+workspace: feature-helper-tests
+thread: archive-order
+workflow: auto-implement
+phase: implement
+round: 6
+max-rounds: 10
+---
+old
+MSG
+cat > "$ARCH_NEW" <<'MSG'
+---
+type: review-request
+from: claude
+timestamp: 2026-07-28T11:00:00Z
+workspace: feature-helper-tests
+thread: archive-order
+workflow: auto-implement
+phase: implement
+round: 7
+max-rounds: 10
+---
+new
+MSG
+cat > "$ARCH_WRONG_DIRECTION" <<'MSG'
+---
+type: review-feedback
+from: codex
+timestamp: 2026-07-28T12:00:00Z
+workspace: feature-helper-tests
+thread: archive-order
+workflow: auto-implement
+phase: implement
+round: 8
+max-rounds: 10
+verdict: APPROVE
+---
+wrong direction
+MSG
+ARCH_HINT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as codex --thread archive-order) 2>&1 1>/dev/null || true)"
+echo "$ARCH_HINT" | grep -q "$(basename "$ARCH_NEW")" && ok "latest archive uses protocol time, not filename order" || fail "protocol-time archive order (got: $ARCH_HINT)"
+echo "$ARCH_HINT" | grep -q "$(basename "$ARCH_WRONG_DIRECTION")" && fail "latest archive crossed reader direction" || ok "latest archive is reader-direction aware"
 
 echo "== comms.sh: deliver via stubbed cmux =="
 : > "$CMUX_STUB_LOG"
@@ -399,6 +463,7 @@ run_comms state list | grep -q 'loop-alpha.*r2/10' && ok "state list summarizes 
 # stalled: backdate the awaiting epoch by an hour
 perl -pi -e 's/"awaiting_since_epoch": "\d+"/"awaiting_since_epoch": "'"$(( $(date +%s) - 3600 ))"'"/' "$SF"
 run_comms stalled 15 | grep -q 'STALLED.*loop-alpha' && ok "stalled flags threads awaiting too long" || fail "stalled detection (got: $(run_comms stalled 15))"
+run_comms stalled 15 | grep -q 'inbox=unread' && ok "stalled distinguishes an unread persisted message" || fail "stalled unread evidence (got: $(run_comms stalled 15))"
 check "state complete marks thread done" run_comms state complete loop-alpha
 grep -q '"status": "complete"' "$SF" && ok "state complete persists" || fail "state complete persists"
 run_comms stalled 15 | grep -q 'no stalled' && ok "completed thread is not stalled" || fail "completed thread is not stalled"
@@ -495,26 +560,25 @@ DIAG="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:1
 echo "$DIAG" | grep -q "manual pickup" && ok "no binding + no tree degrades to manual" || fail "no binding + no tree (got: $DIAG)"
 echo "$DIAG" | grep -q "tree unavailable after retries" && ok "empty-tree manual outcome carries a diagnostic" || fail "empty-tree diagnostic (got: $DIAG)"
 
-echo "== comms.sh v2.1.2: cmux-socket sandbox failure names the wrapper, not escalation =="
+echo "== comms.sh v2.2: sandbox block emits direct recovery + state reconciliation =="
 (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:22) >/dev/null
 SBX="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" deliver claude) 2>&1 )"
-echo "$SBX" | grep -q "outside this sandbox" && ok "socket failure is recognized as a sandbox issue" || fail "sandbox recognition (got: $SBX)"
-echo "$SBX" | grep -q "Do NOT request escalation" && ok "sandbox failure tells caller not to escalate" || fail "no-escalation guidance (got: $SBX)"
-echo "$SBX" | grep -q "/bin/zsh -lc" && ok "sandbox failure prints the exact wrapper command" || fail "wrapper command printed (got: $SBX)"
-echo "$SBX" | grep -qF "$COMMS" && ok "wrapper hint uses the helper's LITERAL path, not \$COMMS_SH" || fail "wrapper hint uses literal path (got: $SBX)"
+echo "$SBX" | grep -q "nested helper cannot access cmux" && ok "socket failure is classified as nested-helper sandboxing" || fail "sandbox recognition (got: $SBX)"
+echo "$SBX" | grep -q "^RECOVER: cmux send-key" && ok "sandbox failure prints one direct-cmux recovery command" || fail "direct recovery command (got: $SBX)"
+echo "$SBX" | grep -q "/bin/zsh -lc" && fail "obsolete wrapper retry still printed" || ok "sandbox recovery no longer promises wrapper escape"
 echo "$SBX" | grep -q "cmux said:" && ok "sandbox failure echoes the cmux error" || fail "cmux error echoed (got: $SBX)"
 # send classifies the sandbox block as its own outcome (not silent 'manual')
-SBX_SEND="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" send --to claude "$OUT_WF") 2>/dev/null | tail -1 )"
+SBX_SEND_ALL="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" send --to claude "$OUT_WF") 2>/dev/null )"
+SBX_SEND="$(echo "$SBX_SEND_ALL" | tail -1)"
 case "$SBX_SEND" in "RESULT: blocked"*) ok "send RESULT is 'blocked' on a sandboxed socket (not 'manual')" ;; *) fail "blocked RESULT (got: $SBX_SEND)" ;; esac
-echo "$SBX_SEND" | grep -q "do NOT escalate" && ok "blocked RESULT says do NOT escalate" || fail "blocked RESULT escalation guidance (got: $SBX_SEND)"
-# The self-resolving wrapper from the skills actually runs in a child zsh with no COMMS_SH
-if command -v zsh >/dev/null 2>&1; then
-  # -c (not -lc) so the login profile can't change cwd in the test; the skill's
-  # real wrapper uses -lc, but the mechanism under test (no inherited COMMS_SH)
-  # is identical either way.
-  WRAP="$( (cd "$REPO_FIX" && env -u COMMS_SH -u CMUX_WORKSPACE_ID zsh -c 'C=$(git worktree list --porcelain 2>/dev/null|head -1|sed "s/^worktree //")/.agent-comms/comms.sh; [ -x "$C" ]||C="'"$REPO"'/helpers/comms.sh"; "$C" workspace') 2>/dev/null )"
-  [ "$WRAP" = "feature-helper-tests" ] && ok "self-resolving wrapper runs with no inherited COMMS_SH" || fail "self-resolving wrapper (got: $WRAP)"
-fi
+echo "$SBX_SEND_ALL" | grep -qF "$COMMS' reconcile '$OUT_WF" && ok "RECOVER chain ends with literal helper+message reconciliation" || fail "RECOVER reconciliation tail (got: $SBX_SEND_ALL)"
+grep -q '"last_delivery": "blocked"' "$SF_CMUX" && ok "blocked send is recorded before recovery" || fail "blocked state before recovery"
+REC_CMD="$(printf '%s\n' "$SBX_SEND_ALL" | sed -n 's/^RECOVER: //p' | head -1)"
+: > "$CMUX_STUB_LOG"
+REC_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 bash -c "$REC_CMD")"
+echo "$REC_OUT" | grep -q "^RESULT: delivered" && ok "exact RECOVER command nudges and reconciles" || fail "RECOVER execution (got: $REC_OUT)"
+grep -q 'send --surface surface:22' "$CMUX_STUB_LOG" && grep -q 'send-key --surface surface:22' "$CMUX_STUB_LOG" && ok "RECOVER uses direct cmux commands" || fail "RECOVER direct cmux log (got: $(cat "$CMUX_STUB_LOG"))"
+grep -q '"last_delivery": "delivered"' "$SF_CMUX" && grep -q '"last_notified_at":' "$SF_CMUX" && ok "reconcile repairs delivery state with timestamp" || fail "reconciled state (got: $(cat "$SF_CMUX"))"
 
 echo "== comms.sh v2.1.1: status shouts when a loop stalled undelivered =="
 perl -pi -e 's/"last_delivery": "[^"]*"/"last_delivery": "manual"/; s/"status": "[^"]*"/"status": "in-progress"/' "$SF"

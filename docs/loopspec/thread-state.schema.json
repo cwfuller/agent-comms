@@ -17,6 +17,7 @@
     "awaiting_since_epoch": { "type": "string" },
     "last_sent": { "type": "string", "description": "message_id of the newest outbound" },
     "last_run_dir": { "type": "string", "description": "headless spawns only — the stalled watchdog's pid target; empty otherwise" },
+    "last_notified_at": { "type": "string", "description": "timestamp of successful external/direct cmux recovery; transient and optional" },
     "last_delivery": { "enum": ["delivered", "manual", "failed", "blocked", "spawned", "completed", "timeout", "held", "pickup"] },
     "codex_thread_id": { "type": "string", "description": "headless codex turns — attach/resume id (transient: dropped by the next send)" },
     "claude_session_id": { "type": "string", "description": "headless claude turns — attach/resume id (transient: dropped by the next send)" }

@@ -88,14 +88,10 @@ Write findings (`### Blocking` / `### Advisory` / `### Process`), copy the loop'
 workflow fields + `thread`, set `in-reply-to`, then atomically validate + deliver +
 archive the inbound via `comms.sh send`.
 
-**Codex sandbox note:** `send`/`deliver` touch the cmux socket (`cmux.sock`), which is
-outside a restricted Codex sandbox. The skills tell Codex to run those two commands
-through its approved shell wrapper (`/bin/zsh -lc '...'`) **from the start** — read-only
-commands (`list`/`validate`/`archive`) run directly. On an `Operation not permitted`
-socket error the rule is: retry via the wrapper, never request escalation (escalation is
-what produces the user's prompt); the helper itself prints the exact wrapper line on that
-failure. A permission prompt is an invocation issue, never a protocol failure. If Codex
-keeps prompting, the guidance is being ignored or the installed skills are stale.
+**Codex sandbox note:** some restricted sessions block helper-side `cmux.sock` access
+even through `/bin/zsh -lc`, while direct approved `cmux` commands work. Run `send`
+normally. On `RESULT: blocked`, execute its exact `RECOVER:` line once; the line nudges
+directly and reconciles state after success. Do not escalate or retry the wrapper.
 
 ## Helper CLI
 
@@ -116,6 +112,7 @@ agnostic.
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
 | `deliver <claude\|codex> [file]` | cmux pane nudge; prints `delivered to <surface> (<how>)` / manual-pickup / `blocked` (sandboxed socket) / `FAILED` explicitly. `COMMS_DELIVERY=headless` routes to `runphase.sh` instead (detached `codex exec` / `claude -p` turn for the target provider; replies to the driving session are a pickup no-op) |
 | `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`delivered`/`spawned`/`manual`/`blocked`/`failed`) |
+| `reconcile <message-file\|message-id>` | record a successful external/direct nudge; used as the final guarded segment of `RECOVER:` |
 | `bind <claude\|codex> [surface:N]` | pin which surface delivery targets (show current with no arg); successful deliveries auto-refresh it; ignored if the surface disappears |
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |

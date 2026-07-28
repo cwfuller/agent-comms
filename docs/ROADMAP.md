@@ -168,6 +168,12 @@ last delivery wasn't a real nudge.
 
 ## Friction log (meta-channel feedback + live-loop observations)
 
+- *2026-07-28, asymmetric Codex sandbox incident:* nested `comms.sh` and the documented
+  `/bin/zsh -lc` wrapper both remained socket-blocked, while direct approved
+  `cmux send`/`send-key` succeeded. Fix: blocked delivery now emits one direct `RECOVER:`
+  chain ending in guarded state reconciliation; current skills execute it once and only
+  surface a final failure. Also fixed direction/thread/time-aware archive hints, current
+  cmux-tree parsing coverage, aged-unread observability, and delayed-worktree `head_sha`.
 - *2026-06-07, field incident #3 (Codex sandbox):* Codex proactively requested escalated
   permissions for the helper send, prompting the user every loop round — running the
   helper plainly (or via the session's approved shell wrapper) needs no prompt at all.

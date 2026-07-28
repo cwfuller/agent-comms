@@ -1,5 +1,20 @@
 # Advisory carry-over
 
+## 2026-07-28 — asymmetric Codex sandbox delivery incidents
+
+- **Resolved:** `/bin/zsh -lc` is no longer presented as a universal sandbox escape.
+  A blocked nested helper emits one direct-cmux `RECOVER:` chain whose final guarded
+  segment reconciles `last_delivery` after success.
+- **Resolved:** `status`/`stalled` now expose an aged message still present in the target
+  inbox even when a prior nudge reported `delivered`; accepted keystrokes are explicitly
+  not treated as peer pickup.
+- **Resolved:** empty-inbox archive hints filter by workspace, reader direction, and
+  optional thread, then order by protocol timestamp with mtime fallback.
+- **Resolved:** current `cmux tree` markers and UUID-valued `CMUX_WORKSPACE_ID` have a
+  regression fixture; cache warnings distinguish unavailable output from parse drift.
+- **Resolved:** senders include optional `head_sha`, and readers verify it when a delayed
+  message's `cwd` was repurposed.
+
 ## 2026-07-07 — symphony audit-fix arc field report (7 headless turns, 4 threads, driving-session feedback)
 
 Dogfooded headless delivery end-to-end on symphony's maintenance-audit arc (threads
@@ -63,11 +78,9 @@ Dogfooded headless delivery end-to-end on symphony's maintenance-audit arc (thre
 
 ## 2026-06-05 — thread `optimistic-binding-28566` (v2.1.1, auto-implement, approved r1)
 
-- **Bare `deliver` doesn't refresh `last_delivery`** (v2.2 candidate): after a successful
+- **Resolved 2026-07-28 via emitted direct recovery + `reconcile`:** after a successful
   manual `comms.sh deliver` retry, state still shows the old `manual`/`failed` outcome
-  until the thread's next `send`. `status`'s ACTION line now says so explicitly; the
-  proper fix is `deliver` taking an optional thread/message argument so it can update
-  state on success.
+  until the thread's next `send`.
 - **Surface-id reuse during optimistic delivery** — documented as accepted residual risk
   in PROTOCOL.md (identity is unverifiable without a tree read).
 

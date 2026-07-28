@@ -17,7 +17,9 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    When continuing a specific loop, scope the read to that loop's thread so concurrent loops in this workspace can't consume each other's replies: `"$COMMS_SH" list --as claude --thread <thread>`.
    On an empty inbox the helper exits non-zero and reports the latest archived message on stderr — a late delivery nudge for an already-processed reply is common (the injected `/read-from-codex` queues in Claude's input box while a turn is running and submits minutes later). If that's the case, tell the user: "No pending messages — [filename] was already processed (likely a late delivery nudge for it; harmless)." Otherwise tell the user there are no messages from Codex for this workspace.
 
-3. Read the most recent matching message (or all if user asks).
+3. Read the newest pending message for each thread, not only the globally newest
+   file. For multiple rounds in one thread, process the newest valid round and archive
+   confirmed superseded rounds afterward.
 
 4. **Validate the message:**
    ```bash
@@ -27,7 +29,9 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 
    **If the incoming message is `type: error`** (Codex reporting YOUR last message was malformed): fix and resend your previous message with the same `round` — an error exchange never consumes a round.
 
-5. **Check for worktree context.** If the message has a `cwd:` field that differs from your current directory, `cd` to that path before reading or modifying any files. This ensures you're working in the correct worktree.
+5. **Check for worktree context.** If `cwd:` differs, `cd` there before acting.
+   Compare optional `head_sha:` with `git rev-parse HEAD`; if the path was repurposed,
+   locate that commit/worktree instead of using unrelated current contents.
 
 6. **Check for autonomous workflow mode.** Parse the `workflow` field from frontmatter. If it exists, follow the autonomous rules below. If not, follow the standard (manual) flow.
 
@@ -94,7 +98,8 @@ Read and act on messages from Codex in `.comms/to-claude/`.
      ```bash
      "$COMMS_SH" send --to codex "<your reply file>" --archive-inbound "<the incoming message file>"
      ```
-     Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Codex was NOT woken.
+     On `RESULT: blocked`, execute the exact `RECOVER:` line once; relay only the final
+     non-`delivered` result.
      <!-- loopspec:fragment result-spawned-exception -->
      Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the Codex turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
      <!-- /loopspec:fragment -->

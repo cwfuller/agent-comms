@@ -32,9 +32,10 @@ keep that safe:
 
 **Message routing is worktree-safe.** Every helper resolves `.comms/` to the **main repo
 root** via `git worktree list`, so all worktrees of one repo share a single mailbox. The
-`cwd:` frontmatter field is the per-message "which tree" hint: the sender records its
-`pwd`, and the reader `cd`s there before touching files (the "Check for worktree context"
-step in both read skills).
+`cwd:` is the per-message "which tree" hint; `head_sha:` is the immutable fallback when
+that path or branch was repurposed before a delayed delivery. Readers enter `cwd`, compare
+the current HEAD when `head_sha` is present, and locate the recorded commit/worktree
+instead of silently reviewing unrelated contents.
 
 **Push safety — create worktrees on their own branch, never on `main`.** The common
 footgun: an agent working in a worktree runs `git push` and it lands on `main` instead of
@@ -72,6 +73,7 @@ type: review-request            # see the type table in loopspec/SPEC.md
 from: claude | codex
 timestamp: 2026-06-04T18:30:14Z
 branch: main
+head_sha: <git rev-parse HEAD>  # immutable context for delayed delivery
 workspace: agent-comms
 cwd: /path/to/working/dir       # worktree hint — reader cds here before touching files
 message_id: <filename sans .md>
@@ -128,6 +130,7 @@ workflow message (filename components sanitized to `[A-Za-z0-9._-]`; workspace i
   "awaiting_since": "2026-06-04T18:30:14Z",
   "awaiting_since_epoch": "1780597814",
   "last_sent": "<message_id>",
+  "last_notified_at": "2026-06-04T18:30:16Z", // external recovery only
   "last_delivery": "delivered"      // delivered | manual | failed | blocked
                                     // headless adds: spawned → completed | failed
                                     // | timeout, plus held and pickup (see
@@ -153,7 +156,8 @@ non-fatal by construction).
 
 Inspection: `comms.sh state list | get <thread> | complete <thread>`, and
 `comms.sh stalled [minutes]` lists threads awaiting a reply longer than the threshold
-(default 15m) — the recovery surface for dropped nudges.
+(default 15m) and marks a matching file still in the target inbox as `inbox=unread`.
+That persisted-file evidence outranks a prior notification result.
 
 ## Delivery
 
@@ -191,9 +195,9 @@ enum lives in `loopspec/thread-state.schema.json`):
 
 | outcome | meaning | recovery |
 |---|---|---|
-| `delivered` | full keystroke sequence accepted | — |
+| `delivered` | full keystroke sequence accepted; peer pickup remains asynchronous | `stalled`/`status` expose aged unread files |
 | `manual` | no cmux / no surface — message valid on disk | trigger the read command by hand |
-| `blocked` | cmux socket outside the caller's sandbox | re-run via the approved shell wrapper (the helper prints the exact line) |
+| `blocked` | nested helper cannot access `cmux.sock` | execute the emitted `RECOVER:` line once; direct cmux steps run first, then `reconcile` repairs state |
 | `failed` | cmux error mid-sequence | retry with `comms.sh send` (refreshes state); a bare `deliver` retry works but leaves the stale `failed` marker |
 
 **Atomic send:** `comms.sh send --to <agent> <file> --archive-inbound <inbound>`
@@ -201,21 +205,25 @@ validates the outbound (refusing to deliver or archive if malformed), attempts d
 records state, and only then archives the inbound. A failed nudge still archives — the
 inbound *was* processed; the retry surface is delivery, tracked in state.
 
-`send` always ends with a `RESULT:` line (`delivered` / `manual — the other agent was
-NOT nudged…` / `failed — …`). Agents must relay any non-`delivered` result to the user
-verbatim: a quietly-manual outcome is indistinguishable from "the reviewer is slow" and
-stalls the loop.
+`send` always ends with a `RESULT:` line. On `blocked`, it also emits one copy/paste
+`RECOVER:` command composed of direct `cmux` calls plus
+`comms.sh reconcile <message>`. The reconciliation segment runs only after every cmux
+step succeeds, so external fallback cannot leave `last_delivery=blocked`. Agents execute
+that line once and relay only a final non-`delivered` result.
 
 **Identity resilience:** workspace resolution caches one good cmux-derived name per
-cmux workspace (`.comms/.cache/`); if a later `cmux tree` read flakes, the cached
-identity is reused instead of flapping to a branch-name fallback (which would split
-message prefixes and state files mid-loop). The tree fetch itself retries 3× before
-giving up.
+cmux workspace (`.comms/.cache/`); if a later `cmux tree` read is unavailable or its
+shape is unparseable, the cached identity is reused instead of flapping to a branch-name
+fallback. The parser accepts the current selection/active markers and UUID-valued
+`CMUX_WORKSPACE_ID`; the tree fetch itself retries before giving up.
 
 **Late nudges are normal.** The injected read command sits in the target's input box
 until its current turn ends — sometimes minutes. If the reply was already consumed by
 then (e.g. by a file watcher), the late `/read-from-codex` finds an empty inbox; readers
 report "latest archived: X — already processed" instead of a confusing "no messages".
+That archive hint is filtered by workspace, reader direction, and optional thread, then
+ordered by protocol timestamp with mtime fallback; an unrelated older round cannot win
+because of filename order.
 
 ## Headless delivery (experimental)
 

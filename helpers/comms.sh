@@ -19,6 +19,7 @@
 #                               (detached codex exec / claude -p turn for the target)
 #   send --to <claude|codex> <file> [--archive-inbound <file>]
 #                               validate, deliver, update thread state, then archive inbound
+#   reconcile <message-file|message-id>   record a successful external/direct nudge
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
 #   bind <claude|codex> [surface:N]   pin which surface delivery targets (show with no arg)
@@ -48,6 +49,13 @@ cmd_root() {
 
 # Filesystem-safe name (defined early — cache paths below need it).
 safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+
+# Single-quote one shell argument for copy/paste recovery commands.
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
 
 # Retried cmux tree fetch. A single un-retried call was the root cause of a
 # field incident: under load it intermittently returns empty, which broke
@@ -81,9 +89,8 @@ cmd_workspace() {
     # Failure-tolerant parse: an empty or unmatched tree must fall through —
     # without the || true, pipefail+set -e silently kills the whole helper.
     ws="$(cmux_tree \
-      | grep -E 'workspace workspace:[0-9]+ "' \
+      | sed -nE 's/.*workspace workspace:[^[:space:]]+[[:space:]]+"([^"]*)".*/\1/p' \
       | head -1 \
-      | sed 's/.*"\([^"]*\)".*/\1/' \
       | tr ' ' '-' | tr '[:upper:]' '[:lower:]' || true)"
     cachef="$(cache_path ws || true)"
     if [ -n "$ws" ]; then
@@ -98,7 +105,7 @@ cmd_workspace() {
     if [ -n "$cachef" ] && [ -f "$cachef" ]; then
       ws="$(cat "$cachef" 2>/dev/null || true)"
       if [ -n "$ws" ]; then
-        echo "warning: cmux tree parse failed — using cached workspace '$ws'" >&2
+        echo "warning: cmux tree unavailable or unparseable — using cached workspace '$ws'" >&2
         echo "$ws"
         return 0
       fi
@@ -110,7 +117,7 @@ cmd_workspace() {
   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
     case "$ws" in
       main|master|trunk|develop)
-        echo "warning: cmux is active but workspace resolved to '$ws' — the cmux tree parse may have drifted" >&2
+        echo "warning: cmux is active but workspace resolved to '$ws' — cmux tree was unavailable or unparseable" >&2
         ;;
     esac
   fi
@@ -139,23 +146,16 @@ cmd_list() {
   local root ws inbox
   root="$(cmd_root)"; ws="$(cmd_workspace)"; inbox="$(inbox_for "$as")"
   local files
-  files="$(find "$root/$inbox" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null | sort -r)"
-  if [ -n "$thread" ] && [ -n "$files" ]; then
-    # Thread-scoped read: only messages whose frontmatter thread matches.
-    # Prevents one loop from consuming another loop's replies in a shared workspace.
-    local f matched=""
-    while IFS= read -r f; do
-      [ "$(frontmatter_field "$f" thread)" = "$thread" ] && matched="${matched}${matched:+
-}$f"
-    done <<< "$files"
-    files="$matched"
-  fi
+  files="$(sorted_message_files "$root/$inbox" "$ws" "" "$thread" newest)"
   if [ -n "$files" ]; then
     echo "$files"
   else
-    # Late delivery nudges for already-processed replies are common — surface that.
-    local latest
-    latest="$(find "$root/archive" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null | sort | tail -1)"
+    # Late delivery nudges for already-processed replies are common. Scope the
+    # hint to messages that actually came TO this reader and, when supplied, to
+    # this thread; otherwise an unrelated archive can masquerade as the reply.
+    local latest sender
+    case "$as" in claude) sender=codex ;; codex) sender=claude ;; esac
+    latest="$(sorted_message_files "$root/archive" "$ws" "$sender" "$thread" newest | head -1 || true)"
     if [ -n "$latest" ]; then
       echo "no pending messages; latest archived: $(basename "$latest")" >&2
     else
@@ -171,6 +171,44 @@ frontmatter_field() {
     NR==1 && $0=="---" {inFM=1; next}
     inFM && $0=="---" {exit}
     inFM && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print; exit}' "$1"
+}
+
+file_mtime() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+}
+
+mtime_iso() {
+  local epoch="$1" out=""
+  out="$(date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  [ -n "$out" ] || out="$(date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  printf '%s' "${out:-0000-00-00T00:00:00Z}"
+}
+
+# sorted_message_files <dir> <workspace> [from] [thread] [newest|oldest]
+# Protocol timestamp is authoritative; mtime breaks ties and is the fallback
+# for legacy/malformed files. Physical inbox direction remains authoritative,
+# so `from` filtering is used only where a shared archive needs disambiguation.
+sorted_message_files() {
+  local dir="$1" ws="$2" sender="${3:-}" thread="${4:-}" order="${5:-oldest}"
+  local f ts mt rows
+  rows="$(
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      [ -z "$sender" ] || [ "$(frontmatter_field "$f" from)" = "$sender" ] || continue
+      [ -z "$thread" ] || [ "$(frontmatter_field "$f" thread)" = "$thread" ] || continue
+      ts="$(frontmatter_field "$f" timestamp)"
+      mt="$(file_mtime "$f")"
+      printf '%s' "$ts" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' \
+        || ts="$(mtime_iso "$mt")"
+      printf '%s\t%020d\t%s\n' "$ts" "$mt" "$f"
+    done < <(find "$dir" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null)
+  )"
+  [ -n "$rows" ] || return 0
+  if [ "$order" = "newest" ]; then
+    printf '%s\n' "$rows" | sort -r | cut -f3-
+  else
+    printf '%s\n' "$rows" | sort | cut -f3-
+  fi
 }
 
 cmd_validate() {
@@ -387,6 +425,30 @@ deliver_headless() {
   fi
 }
 
+print_direct_recovery() {
+  local target="$1" surface="$2" msgfile="${3:-}"
+  local qs qw qself qmsg
+  qs="$(shell_quote "$surface")"
+  qw="$(shell_quote "$CMUX_WORKSPACE_ID")"
+  qself="$(shell_quote "$SELF")"
+  qmsg="$(shell_quote "$msgfile")"
+  printf 'RECOVER: '
+  case "$target" in
+    codex)
+      printf 'cmux send --surface %s --workspace %s %s && sleep 0.5 && cmux send-key --surface %s --workspace %s escape && sleep 0.3 && cmux send-key --surface %s --workspace %s enter' \
+        "$qs" "$qw" "$(shell_quote '$read-from-claude')" "$qs" "$qw" "$qs" "$qw"
+      ;;
+    claude)
+      printf 'cmux send-key --surface %s --workspace %s escape && sleep 0.2 && cmux send --surface %s --workspace %s i && sleep 0.2 && cmux send --surface %s --workspace %s %s && sleep 0.5 && cmux send-key --surface %s --workspace %s escape && sleep 0.3 && cmux send-key --surface %s --workspace %s enter' \
+        "$qs" "$qw" "$qs" "$qw" "$qs" "$qw" "$(shell_quote '/read-from-codex')" "$qs" "$qw" "$qs" "$qw"
+      ;;
+  esac
+  # The final segment runs only if every direct cmux step succeeded. It repairs
+  # advisory state without re-sending or re-archiving the message.
+  [ -n "$msgfile" ] && printf ' && %s reconcile %s' "$qself" "$qmsg"
+  printf '\n'
+}
+
 cmd_deliver() {
   local target="${1:-}" msgfile="${2:-}"
   case "$target" in claude|codex) ;; *) die "deliver: target must be claude or codex" ;; esac
@@ -434,11 +496,12 @@ cmd_deliver() {
     [ -n "$cachef" ] && { mkdir -p "$(dirname "$cachef")" && printf '%s' "$surface" > "$cachef"; } 2>/dev/null || true
     echo "delivered to $surface ($how)"
   else
-    # Sandbox signature on the cmux socket? Name the exact fix so the caller
-    # does NOT escalate (escalation is the thing producing the user's prompt).
+    # A nested helper can be sandboxed even when direct cmux commands are
+    # allowlisted by the host. Emit one executable recovery line; its final
+    # segment reconciles state only after every direct nudge step succeeds.
     if grep -qiE 'operation not permitted|not permitted|permission denied|sandbox|\.sock' "$errf" 2>/dev/null; then
-      echo "warning: delivery blocked — cmux socket is outside this sandbox. Do NOT request escalation; re-run this command through your approved shell wrapper (literal path, not \$COMMS_SH):"
-      echo "  /bin/zsh -lc '\"$SELF\" deliver $target'   (or: send --to $target <file>)"
+      echo "warning: delivery blocked — nested helper cannot access cmux; message is safely on disk"
+      print_direct_recovery "$target" "$surface" "$msgfile"
     else
       echo "warning: delivery FAILED mid-sequence to $surface — the message is safely on disk; retry with 'comms.sh send --to $target <file>' (refreshes delivery state) or nudge the pane manually"
     fi
@@ -453,7 +516,7 @@ cmd_status() {
   echo "workspace: $ws"
   echo "comms root: $root"
   local latest
-  latest="$(find "$root/archive" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null | sort | tail -1)"
+  latest="$(sorted_message_files "$root/archive" "$ws" "" "" newest | head -1 || true)"
   if [ -n "$latest" ]; then
     echo "latest archived: $(basename "$latest")"
     local f
@@ -467,27 +530,41 @@ cmd_status() {
   fi
   local dir label
   for dir in to-claude to-codex; do
-    label="$(find "$root/$dir" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null | sort -r | head -3 | sed 's/^/    /')"
+    label="$(sorted_message_files "$root/$dir" "$ws" "" "" newest | head -3 | sed 's/^/    /' || true)"
     echo "pending in $dir: $(find "$root/$dir" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null | wc -l | tr -d ' ')"
     [ -n "$label" ] && echo "$label"
   done
   # Loud recovery surface: a pending message whose thread never got a real nudge
   # is a stalled loop the operator must act on — make it impossible to miss.
-  local sf owes deliv st target
+  local sf owes deliv st target since now age_s mid pending
   sf="$(ls -t "$root/state/${ws}_"*.json 2>/dev/null | head -1 || true)"
   if [ -n "$sf" ]; then
     st="$(json_get "$sf" status)"
     owes="$(json_get "$sf" awaiting_from)"
     deliv="$(json_get "$sf" last_delivery)"
+    case "$owes" in claude|codex) target="$owes" ;; *) target="<agent>" ;; esac
+    since="$(json_get "$sf" awaiting_since_epoch)"
+    case "$since" in ''|*[!0-9]*) since="$(date +%s)" ;; esac
+    now="$(date +%s)"
+    age_s=$(( now - since ))
+    mid="$(json_get "$sf" last_sent)"
+    pending=""
+    case "$owes" in
+      claude|codex) [ -f "$root/$(inbox_for "$owes")/$mid.md" ] && pending="$root/$(inbox_for "$owes")/$mid.md" ;;
+    esac
+    # "delivered" means the keystroke sequence was accepted, not that the peer
+    # consumed the file. An aged file still in the target inbox is stronger
+    # evidence than the notification outcome and must remain visible.
+    if [ "$st" != "complete" ] && [ -n "$pending" ] && [ "$age_s" -gt 900 ]; then
+      echo "ACTION NEEDED: $(basename "$pending") is still unread after $(( age_s / 60 ))m (last_delivery=$deliv). Re-run its RECOVER path or nudge $target directly."
     # Live headless outcomes are not operator-action cases: spawned = turn in
     # flight, completed = reply is (or was) in the inbox for the driver to read,
     # held = the operator paused deliberately, pickup = designed reply-to-driver
     # no-op. failed/timeout from a headless turn DO shout, like a failed nudge.
-    if [ "$st" != "complete" ] && [ -n "$deliv" ] \
-       && [ "$deliv" != "delivered" ] && [ "$deliv" != "spawned" ] \
-       && [ "$deliv" != "completed" ] && [ "$deliv" != "held" ] && [ "$deliv" != "pickup" ]; then
-      case "$owes" in claude|codex) target="$owes" ;; *) target="<agent>" ;; esac
-      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Run 'comms.sh deliver $target' (or trigger the pane by hand). This notice clears on the thread's next send."
+    elif [ "$st" != "complete" ] && [ -n "$deliv" ] \
+         && [ "$deliv" != "delivered" ] && [ "$deliv" != "spawned" ] \
+         && [ "$deliv" != "completed" ] && [ "$deliv" != "held" ] && [ "$deliv" != "pickup" ]; then
+      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Re-run the message send and execute its RECOVER line; a successful recovery reconciles this state."
     fi
   fi
 }
@@ -558,6 +635,46 @@ state_update_from() {
     || echo "warning: could not write thread state for '$thread' — continuing" >&2
 }
 
+cmd_reconcile() {
+  local ref="${1:-}" mid root dir f tmp now found=false
+  [ -n "$ref" ] || die "reconcile: message file or message_id required"
+  if [ -f "$ref" ]; then
+    mid="$(frontmatter_field "$ref" message_id)"
+    [ -n "$mid" ] || mid="$(basename "$ref" .md)"
+  else
+    mid="$(basename "$ref" .md)"
+  fi
+  root="$(cmd_root)"
+  dir="$root/state"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for f in "$dir/"*.json; do
+    [ -f "$f" ] || continue
+    [ "$(json_get "$f" last_sent)" = "$mid" ] || continue
+    found=true
+    tmp="$f.reconcile.$$"
+    awk -v now="$now" '
+      /"last_notified_at":/ {
+        printf "  \"last_notified_at\": \"%s\",\n", now
+        seen=1
+        next
+      }
+      /"last_delivery":/ {
+        if (!seen) printf "  \"last_notified_at\": \"%s\",\n", now
+        sub(/"last_delivery": "[^"]*"/, "\"last_delivery\": \"delivered\"")
+      }
+      { print }
+    ' "$f" > "$tmp" && mv "$tmp" "$f" \
+      || { rm -f "$tmp" 2>/dev/null || true; die "reconcile: could not update $f"; }
+  done
+  if [ "$found" = true ]; then
+    echo "RESULT: delivered — external nudge recorded; peer pickup is still asynchronous"
+  else
+    # One-shot messages intentionally have no thread state. The RECOVER chain
+    # still proves every direct cmux command before this segment succeeded.
+    echo "RESULT: delivered — external nudge completed; no workflow state matched '$mid'"
+  fi
+}
+
 cmd_state() {
   local sub="${1:-list}"; shift || true
   local dir ws
@@ -597,8 +714,8 @@ cmd_state() {
 }
 
 cmd_stalled() {
-  local mins="${1:-15}" dir ws now f age_s since deliv rd note pid
-  dir="$(state_dir)"; ws="$(cmd_workspace)"; now="$(date +%s)"
+  local mins="${1:-15}" dir ws now f age_s since deliv rd note pid owes mid root
+  root="$(cmd_root)"; dir="$root/state"; ws="$(cmd_workspace)"; now="$(date +%s)"
   local any=false
   for f in "$dir/${ws}_"*.json; do
     [ -f "$f" ] || continue
@@ -614,14 +731,21 @@ cmd_stalled() {
       deliv="$(json_get "$f" last_delivery)"
       rd="$(json_get "$f" last_run_dir)"
       note=""
+      owes="$(json_get "$f" awaiting_from)"
+      mid="$(json_get "$f" last_sent)"
+      case "$owes" in
+        claude|codex)
+          [ -f "$root/$(inbox_for "$owes")/$mid.md" ] && note=" [inbox=unread]"
+          ;;
+      esac
       if [ "$deliv" = "spawned" ] && [ -n "$rd" ] && [ -d "$rd" ]; then
         pid="$(cat "$rd/pid" 2>/dev/null || true)"
         if [ -f "$rd/result.json" ]; then
-          note=" [headless turn finished: $(json_get "$rd/result.json" status) — reply may be unread]"
+          note="$note [headless turn finished: $(json_get "$rd/result.json" status) — reply may be unread]"
         elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-          note=" [headless runner alive (pid $pid) — still working]"
+          note="$note [headless runner alive (pid $pid) — still working]"
         else
-          note=" [headless runner DEAD without a result — re-send to retry]"
+          note="$note [headless runner DEAD without a result — re-send to retry]"
         fi
       fi
       printf 'STALLED %sm: thread=%s %s/%s r%s awaiting=%s last_delivery=%s%s\n' \
@@ -750,13 +874,13 @@ cmd_send() {
   fi
   # Loud outcome — emitted LAST so `tail -1` of send is always the RESULT line
   # on every path, including --archive-inbound (the main autonomous path).
-  # Calling agents MUST relay anything other than `delivered` to the user — a
-  # manual outcome means the other agent was NOT woken and the loop sits idle.
+  # On `blocked`, callers execute the emitted RECOVER line once; only a final
+  # non-delivered result needs user attention.
   case "$outcome" in
     delivered) echo "RESULT: delivered" ;;
     spawned)   echo "RESULT: spawned — headless peer turn running detached; the reply lands in the inbox when it exits. Await it with the runphase.sh command printed above, then read the reply." ;;
     held)      echo "RESULT: held — the thread is paused by a hold marker; nothing was spawned. Release with 'runphase.sh release <thread>', then RE-SEND ('comms.sh send --to $to <file>') — a bare deliver would spawn the turn but leave this thread's state stuck on 'held', blinding status and the stalled watchdog." ;;
-    blocked)   echo "RESULT: blocked — cmux socket is sandboxed; the other agent was NOT nudged. Re-run via your approved shell wrapper (do NOT escalate): /bin/zsh -lc '\"$SELF\" send --to $to <file>'" ;;
+    blocked)   echo "RESULT: blocked — message saved, peer not nudged; execute RECOVER above once" ;;
     pickup)
       # Text deliberately starts "manual —" for the peers' expectations: the
       # spawned peer is pre-briefed that its reply send reports manual.
@@ -783,6 +907,7 @@ case "${1:-}" in
   archive)   shift; cmd_archive "$@" ;;
   deliver)   shift; cmd_deliver "$@" ;;
   send)      shift; cmd_send "$@" ;;
+  reconcile) shift; cmd_reconcile "$@" ;;
   state)     shift; cmd_state "$@" ;;
   stalled)   shift; cmd_stalled "$@" ;;
   bind)      shift; cmd_bind "$@" ;;

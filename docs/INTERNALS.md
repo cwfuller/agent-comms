@@ -63,11 +63,12 @@ Why it's this way (each reason independently sufficient):
 
 ## Workspace resolution
 
-One algorithm, one implementation (`comms.sh workspace`): cmux workspace title (strict
-`workspace workspace:<n> "title"` parse) → git branch → repo directory name; lowercased,
-spaces/slashes hyphenated. A sanity warning fires when cmux is active but resolution
-fell through to a generic branch name (`main`/`master`/...), which usually means the
-cmux output format changed.
+One algorithm, one implementation (`comms.sh workspace`): cmux workspace title
+(`workspace workspace:<ref> "title"` plus current selection/active suffixes) → git
+branch → repo directory name; lowercased, spaces/slashes hyphenated. A UUID-valued
+`CMUX_WORKSPACE_ID` is valid. Cached fallback warnings say unavailable *or*
+unparseable because a nested helper can be socket-blocked even when direct
+`cmux tree` succeeds.
 
 ## Delivery mechanics
 
@@ -77,6 +78,10 @@ the Codex-bound nudge types `$read-from-claude` directly. The whole sequence is 
 so a mid-sequence failure reports `FAILED` explicitly instead of dying tersely. Injected
 commands queue in the target's input box until its current turn ends — that's why "late
 nudges" against an already-emptied inbox are normal and handled.
+
+When the socket blocks only inside the helper, delivery emits a single `RECOVER:` shell
+chain. Direct `cmux` segments run first; `reconcile` is last behind `&&`, so state changes
+to delivered only after the entire external nudge succeeds.
 
 ## Test harness
 

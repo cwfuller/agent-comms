@@ -63,6 +63,7 @@ type: review-feedback | response | question | request | error
 from: codex
 timestamp: <ISO 8601>
 branch: <current branch>
+head_sha: <git rev-parse HEAD>
 workspace: <workspace name from step 2>
 cwd: <current working directory>
 message_id: <this file's name, without .md>
@@ -96,41 +97,25 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
 
 5. **Write safely.** Use a heredoc with quoted delimiter (`<<'EOF'`) or write via a tool that does not interpolate shell variables or backticks in the body. Never embed the message body inside an interpolated shell string — Markdown backticks will be evaluated.
 
-6. **Validate, deliver, and archive in one atomic step.** The helper validates your reply (frontmatter delimiters; `type`, `from`, `timestamp`; workflow fields plus `verdict` since the reply is from codex; non-empty body), refuses to deliver or archive if malformed, nudges Claude's pane via cmux (vim-mode-aware), and only then archives the incoming message from your inbox. **`send` touches the cmux socket — run it through your approved shell wrapper (see "Sandbox & permissions" below). The wrapper resolves the helper inside the child shell, since a parent `$COMMS_SH` is NOT visible there:**
+6. **Validate, deliver, and archive in one atomic step.** The helper validates your reply (frontmatter delimiters; `type`, `from`, `timestamp`; workflow fields plus `verdict` since the reply is from codex; non-empty body), refuses to deliver or archive if malformed, attempts the cmux nudge, records state, and then archives the processed inbound:
    ```bash
-   /bin/zsh -lc 'C=$(git worktree list --porcelain 2>/dev/null|head -1|sed "s/^worktree //")/.agent-comms/comms.sh; [ -x "$C" ]||C="$HOME/.agent-comms/comms.sh"; "$C" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"'
+   "$COMMS_SH" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"
    ```
-   Relay the final `RESULT:` line to the user verbatim whenever it is not `delivered` — a manual, blocked, or failed outcome means Claude was NOT woken.
+   If it returns `RESULT: blocked`, execute the exact `RECOVER:` line printed immediately above it once. That line uses direct approved `cmux` commands and reconciles thread state after they succeed. Relay only the final non-`delivered` result; do not retry through a shell wrapper or reconstruct the nudge yourself.
    <!-- loopspec:fragment result-headless-codex-side -->
    Exceptions in headless mode (`COMMS_DELIVERY=headless`): `RESULT: manual — headless mode: the reply is on disk...` is EXPECTED when you are the spawned peer (the driving session picks your reply up when your turn ends — do not retry). `RESULT: spawned` means a detached headless Claude turn is now processing your message: await the printed run dir (`.../runphase.sh await "<run dir>"`), then `$read-from-claude` for the reply; a non-zero await means the turn failed or timed out — check its `result.json` and report that instead of waiting.
    <!-- /loopspec:fragment -->
-   Without cmux the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk). A mid-sequence cmux failure is reported as `delivery FAILED` and recorded in the thread's state file; the reply stays safely on disk — retry with `"$COMMS_SH" send --to claude "<reply file>"` (re-attempts the nudge AND refreshes the recorded delivery state). `send` updates `.comms/state/<workspace>_<thread>.json` automatically for workflow messages.
+   Without cmux the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk). A non-sandbox mid-sequence cmux failure is reported as `delivery FAILED`; retry the send once. `send` updates `.comms/state/<workspace>_<thread>.json` automatically for workflow messages.
 
 7. Confirm to the user that the message was verified and delivery attempted.
 
 ## Sandbox & permissions (read before step 6)
 
-`send` and `deliver` touch the **cmux socket** (`cmux.sock`), which is normally OUTSIDE a
-restricted sandbox's allowed roots. So for these two commands, in Codex:
-
-- **Run them through your approved shell wrapper from the start** — do not call them
-  bare and wait for a failure. **The wrapper must resolve the helper path *inside* the
-  child shell** — a parent-shell `$COMMS_SH` is not exported into `/bin/zsh -lc`, so it
-  expands to empty there:
-  ```bash
-  /bin/zsh -lc 'C=$(git worktree list --porcelain 2>/dev/null|head -1|sed "s/^worktree //")/.agent-comms/comms.sh; [ -x "$C" ]||C="$HOME/.agent-comms/comms.sh"; "$C" send --to claude "<reply file>" --archive-inbound "<inbound>"'
-  ```
-  (Read-only commands — `validate`, `list`, `archive`, file reads — don't touch the
-  socket and are fine to run directly with your resolved `$COMMS_SH`.)
-- **If you see `Operation not permitted` on `cmux.sock` (or the helper prints "cmux
-  socket is outside this sandbox"), do NOT request escalation** — that is exactly what
-  produces the user's permission prompt. Re-run the *same* command through the
-  `/bin/zsh -lc '...'` wrapper. The helper itself prints the exact wrapper line on this
-  failure.
-- Request escalation only if no approved wrapper exists at all, and scope it to the
-  `comms.sh` path — never a blanket grant.
-- A permission prompt during send is an invocation issue, **not** a protocol failure —
-  verify the reply file on disk, archive state, and the `RESULT:` line before diagnosing
-  a comms regression.
+`send` and `deliver` touch `cmux.sock`. Some Codex sandboxes block that access even
+inside `/bin/zsh -lc`, while allowing direct approved `cmux send`/`send-key` commands.
+Run the helper normally. On `RESULT: blocked`, execute its exact `RECOVER:` line once;
+the final `reconcile` segment runs only after every direct cmux step succeeds. Do not
+request escalation, retry the wrapper, or resend after successful recovery. Read-only
+commands (`validate`, `list`, `archive`, file reads) remain direct.
 
 If the user provides specific instructions, incorporate them into the appropriate section.
