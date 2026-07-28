@@ -1027,6 +1027,348 @@ truly ship-stopping|verdict-discipline
 blank checklist|holistic-rereview
 SIGS
 
+echo "== comms.sh: bounded reads (lessons) =="
+# The whole point of these subcommands is a cap that holds no matter how large
+# the log grows OR how hostile the arguments are, so the invariant is asserted
+# as a byte measurement of stdout AND stderr together — tools return both.
+LES="$WORK/lessons"; mkdir -p "$LES"
+DIAG_MAX=256
+cat > "$LES/adv.md" <<'ADV'
+# Advisory carry-over
+
+## 2026-01-01 — oldest dated
+old body line
+
+## 2026-05-05 — middle dated
+mid body line
+
+## No date in this heading
+undated body line
+
+## 2026-09-09 — appended at the BOTTOM, and newest
+newest body line
+ADV
+les() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" lessons "$@" >"$WORK/l.out" 2>"$WORK/l.err"); }
+les_total() { echo $(( $(wc -c <"$WORK/l.out") + $(wc -c <"$WORK/l.err") )); }
+
+les --file "$LES/adv.md" --bytes 4000; LES_RC=$?
+[ "$LES_RC" = 0 ] && ok "lessons exits 0 when everything fits" || fail "lessons exit 0 when it fits (got $LES_RC)"
+ORDER="$(grep '^## ' "$WORK/l.out" | head -4 | tr '\n' '|')"
+case "$ORDER" in
+  "## 2026-09-09"*"## 2026-05-05"*"## 2026-01-01"*"## No date"*)
+    ok "lessons sorts newest-first by heading date; a BOTTOM-appended entry still comes first" ;;
+  *) fail "lessons ordering (got: $ORDER)" ;;
+esac
+grep -q "^## No date in this heading" "$WORK/l.out" \
+  && ok "lessons sorts an undated heading LAST but never drops it" || fail "lessons keeps undated sections"
+grep -q "without a date sort last" "$WORK/l.err" \
+  && ok "lessons warns about undated sections" || fail "lessons warns about undated sections"
+
+# A tight budget must truncate by whole sections and still report what it left.
+# Sections are padded past the budget so this exercises real truncation rather
+# than a fixture that happens to fit.
+{
+  for d in 2026-01-01 2026-05-05 2026-09-09; do
+    echo "## $d — padded section"
+    for i in 1 2 3 4 5 6; do echo "- padded body line $i for $d, long enough to matter"; done
+    echo
+  done
+} > "$LES/big.md"
+les --file "$LES/big.md" --bytes 512; LES_RC=$?
+[ "$LES_RC" = 3 ] && ok "lessons exits 3 when truncated" || fail "lessons exit 3 on truncation (got $LES_RC)"
+[ "$(wc -c <"$WORK/l.out")" -le 512 ] && ok "lessons stdout respects --bytes exactly" || fail "lessons stdout <= --bytes"
+[ "$(les_total)" -le $((512 + DIAG_MAX)) ] \
+  && ok "lessons combined stdout+stderr <= --bytes + DIAGNOSTIC_MAX" || fail "lessons combined output bound"
+grep -q "omitted" "$WORK/l.out" && ok "lessons names what it omitted in stdout" || fail "lessons names omissions"
+# Truncation must never hand back half a bullet that reads like a whole instruction:
+# the oldest section is dropped or named, never partially emitted.
+check_not "lessons never emits a partial section body" grep -q "padded body line 6 for 2026-01-01" "$WORK/l.out"
+
+# The bound is only a constant if caller-controlled values are clipped first —
+# this is the exact hole a plan review caught: --file and --surface are inputs.
+LONG_PATH="/tmp/$(printf 'z%.0s' $(seq 1 5000))"
+LONG_PAT="$(printf 'q%.0s' $(seq 1 5000))"
+les --file "$LONG_PATH"
+[ "$(les_total)" -le $((4000 + DIAG_MAX)) ] \
+  && ok "lessons clips a pathological --file so the diagnostic stays constant" || fail "lessons clips --file"
+les --file "$LES/adv.md" --surface "$LONG_PAT"
+[ "$(les_total)" -le $((4000 + DIAG_MAX)) ] \
+  && ok "lessons clips a pathological --surface so the diagnostic stays constant" || fail "lessons clips --surface"
+
+les --file "$LES/adv.md" --bytes 511;   [ $? = 2 ] && ok "lessons rejects --bytes below the floor" || fail "lessons --bytes floor"
+les --file "$LES/adv.md" --bytes abc;   [ $? = 2 ] && ok "lessons rejects a non-numeric --bytes" || fail "lessons --bytes numeric"
+les --file "$LES/adv.md" --surface "";  [ $? = 2 ] && ok "lessons rejects an empty --surface" || fail "lessons empty --surface"
+les --badflag;                          [ $? = 2 ] && ok "lessons rejects an unknown flag" || fail "lessons unknown flag"
+les --file "$LES/nope.md";              [ $? = 0 ] && ok "lessons is a no-op when the log is absent" || fail "lessons missing file"
+les --file "$LES/adv.md" --surface middle
+grep -q "2026-05-05" "$WORK/l.out" && ! grep -q "2026-09-09" "$WORK/l.out" \
+  && ok "lessons --surface filters to matching sections" || fail "lessons --surface filters"
+les --file "$LES/adv.md" --surface ZZnotpresent
+[ ! -s "$WORK/l.out" ] && ok "lessons emits nothing when --surface matches nothing" || fail "lessons no-match is empty"
+
+# Project docs belong to the tree under review; .comms stays main-anchored. A
+# review running in a linked worktree must not silently read main's lessons.
+WT_MAIN="$WORK/wt-main"; mkdir -p "$WT_MAIN"; WT_MAIN="$(cd "$WT_MAIN" && pwd -P)"
+git -C "$WT_MAIN" init -q -b main
+mkdir -p "$WT_MAIN/docs"; echo '## 2026-01-01 — MAIN tree lesson' > "$WT_MAIN/docs/advisories.md"
+git -C "$WT_MAIN" add -A >/dev/null 2>&1
+git -C "$WT_MAIN" -c user.email=t@t -c user.name=t commit -q -m init
+git -C "$WT_MAIN" worktree add -q -b feat "$WORK/wt-linked" 2>/dev/null
+mkdir -p "$WORK/wt-linked/docs"; echo '## 2026-02-02 — WORKTREE lesson' > "$WORK/wt-linked/docs/advisories.md"
+WT_OUT="$(cd "$WORK/wt-linked" && env -u CMUX_WORKSPACE_ID "$COMMS" lessons 2>/dev/null | head -1)"
+[ "$WT_OUT" = "## 2026-02-02 — WORKTREE lesson" ] \
+  && ok "lessons reads the CURRENT worktree's advisories, not the main tree's" || fail "lessons worktree resolution (got: $WT_OUT)"
+WT_ROOT="$(cd "$WORK/wt-linked" && env -u CMUX_WORKSPACE_ID "$COMMS" root)"
+[ "$WT_ROOT" = "$WT_MAIN/.comms" ] \
+  && ok "comms root stays anchored to the MAIN repo from a linked worktree" || fail "root stays main-anchored (got: $WT_ROOT)"
+
+echo "== comms.sh: bounded reads (archive-search) =="
+# Ordering across workspaces is the trap: filenames are <workspace>_<ISO>_<slug>,
+# so any lexical shortcut sorts by WORKSPACE first and returns the wrong "newest"
+# exactly in the multi-workspace case fleet.sh ships.
+AS_ARCH="$REPO_FIX/.comms/archive"
+mk_arch() { # mk_arch <file> <ts> <thread> <body>
+  cat > "$AS_ARCH/$1" <<MSG
+---
+type: review-feedback
+from: codex
+timestamp: $2
+thread: $3
+round: 1
+verdict: APPROVE
+---
+
+$4
+MSG
+}
+mk_arch "zzz-workspace_2026-01-01T00-00-00_old.md"  "2026-01-01T00:00:00Z" "old-thread"  "widget handling notes"
+mk_arch "aaa-workspace_2026-12-31T00-00-00_new.md"  "2026-12-31T00:00:00Z" "new-thread"  "widget handling notes"
+ars() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" archive-search "$@" >"$WORK/a.out" 2>"$WORK/a.err"); }
+ars widget
+FIRST_HIT="$(head -1 "$WORK/a.out")"
+case "$FIRST_HIT" in
+  new-thread*) ok "archive-search returns the globally newest match across workspaces" ;;
+  *) fail "archive-search cross-workspace ordering (got: $FIRST_HIT)" ;;
+esac
+grep -q '\.comms/archive/' "$WORK/a.out" \
+  && ok "archive-search prints a repo-relative path so the follow-up read is actionable" || fail "archive-search path"
+ars widget --limit 1
+[ "$(grep -c 'thread' "$WORK/a.out")" -ge 1 ] && ok "archive-search honours --limit" || fail "archive-search --limit"
+head -1 "$WORK/a.out" | grep -q '^new-thread' \
+  && ok "archive-search applies --limit AFTER the global sort, not before" || fail "archive-search limit-after-sort"
+ars widget --bytes 600
+[ "$(( $(wc -c <"$WORK/a.out") + $(wc -c <"$WORK/a.err") ))" -le $((600 + DIAG_MAX)) ] \
+  && ok "archive-search combined output <= --bytes + DIAGNOSTIC_MAX" || fail "archive-search combined bound"
+ars ZZnotpresent; [ $? = 0 ] && ok "archive-search is a no-op when nothing matches" || fail "archive-search no-match"
+# Flags and shell options are among the most useful things to search this archive
+# for, so a literal pattern starting with '-' must be reachable.
+mk_arch "aaa-workspace_2026-12-30T00-00-00_flag.md" "2026-12-30T00:00:00Z" "flag-thread" "used --archive-inbound here"
+ars -- --archive-inbound
+if [ $? = 0 ] && grep -q 'flag-thread' "$WORK/a.out"; then
+  ok "archive-search finds a literal pattern starting with '-' after a -- terminator"
+else
+  fail "archive-search -- <dash-pattern>"
+fi
+ars --archive-inbound; [ $? = 2 ] \
+  && ok "archive-search still rejects an unknown option without --" || fail "archive-search unknown option"
+rm -f "$AS_ARCH/aaa-workspace_2026-12-30T00-00-00_flag.md"
+ars; [ $? = 2 ] && ok "archive-search requires a pattern" || fail "archive-search requires pattern"
+ars widget --limit 0; [ $? = 2 ] && ok "archive-search rejects --limit 0" || fail "archive-search --limit 0"
+rm -f "$AS_ARCH/zzz-workspace_2026-01-01T00-00-00_old.md" "$AS_ARCH/aaa-workspace_2026-12-31T00-00-00_new.md"
+
+echo "== comms.sh: help prints its whole header =="
+HELP_OUT="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" help)"
+echo "$HELP_OUT" | grep -q 'archive-search' \
+  && ok "help lists the last subcommand (no fixed-range truncation)" || fail "help truncates its own header"
+
+echo "== install.sh: .codex/AGENTS.md managed block =="
+# Rewriting a file the user may have hand-edited is the risk, so ownership is
+# proven rather than assumed. The load-bearing case is the hand-edited one.
+AG="$WORK/agents"; mkdir -p "$AG"
+AG_B='<!-- agent-comms:begin -->'
+AG_E='<!-- agent-comms:end -->'
+ag_install() { (cd "$1" && bash "$REPO/install.sh" --scope=project >"$WORK/ag.out" 2>&1); }
+ag_repo() { mkdir -p "$AG/$1" && git -C "$AG/$1" init -q -b main && mkdir -p "$AG/$1/.codex"; }
+
+ag_repo fresh; ag_install "$AG/fresh"
+grep -q 'agent-comms:begin' "$AG/fresh/.codex/AGENTS.md" \
+  && ok "AGENTS.md is created with a marked managed block" || fail "AGENTS.md created marked"
+AG_SUM="$(cat "$AG/fresh/.codex/AGENTS.md")"
+ag_install "$AG/fresh"
+[ "$AG_SUM" = "$(cat "$AG/fresh/.codex/AGENTS.md")" ] \
+  && ok "a repeat install leaves AGENTS.md byte-identical (no-op diff)" || fail "AGENTS.md repeat install no-op"
+
+# Legacy text an older installer wrote — safe to migrate because it is provably ours.
+AG_LEGACY='## Agent Communication Protocol
+
+This project uses a local file-based message queue for communication between Claude Code and Codex, with optional cmux auto-delivery.
+
+- **Your inbox:** `.comms/to-codex/` — Claude writes review requests and responses here
+- **Your outbox:** `.comms/to-claude/` — Write your findings and feedback here
+
+**Skills:**
+- `$read-from-claude` — Read the latest message from Claude Code and act on it
+- `$send-to-claude` — Write your findings back to Claude Code and auto-deliver via cmux when available
+
+**Auto-delivery:** When `cmux` is available, `$send-to-claude` automatically types `/read-from-codex` into Claude'"'"'s pane. Without `cmux`, messages are still written to `.comms/` for manual pickup.
+
+When the user asks you to "check for messages from Claude" or "review what Claude did", use `$read-from-claude`. After completing a review, use `$send-to-claude` to send your findings back.'
+
+ag_repo legacy; printf '%s\n' "$AG_LEGACY" > "$AG/legacy/.codex/AGENTS.md"
+AG_BEFORE="$(wc -c <"$AG/legacy/.codex/AGENTS.md")"
+ag_install "$AG/legacy"
+grep -q 'agent-comms:begin' "$AG/legacy/.codex/AGENTS.md" \
+  && ok "an exact legacy block is migrated to a managed block" || fail "legacy migration"
+[ "$(wc -c <"$AG/legacy/.codex/AGENTS.md")" -lt "$AG_BEFORE" ] \
+  && ok "the migrated AGENTS.md block is smaller than the legacy one" || fail "AGENTS.md shrinks"
+
+# THE one that must never regress: a hand-edited section carries the user's own
+# rules, so it is left completely alone rather than rewritten from under them.
+ag_repo handedited
+{ printf '%s\n' "$AG_LEGACY"; echo; echo '- MY OWN RULE: always run the full suite before replying'; } \
+  > "$AG/handedited/.codex/AGENTS.md"
+cp "$AG/handedited/.codex/AGENTS.md" "$WORK/handedited.bak"
+ag_install "$AG/handedited"
+cmp -s "$AG/handedited/.codex/AGENTS.md" "$WORK/handedited.bak" \
+  && ok "a HAND-EDITED protocol section is left byte-identical (no data loss)" || fail "hand-edited AGENTS.md was rewritten"
+grep -qi 'hand-edited' "$WORK/ag.out" \
+  && ok "install explains why it skipped the hand-edited block" || fail "install explains the skip"
+
+# Every marker shape that is NOT exactly one begin above one end must leave the
+# file byte-identical. Nested and duplicated pairs, and marker text quoted inside
+# a user's Markdown, both destroyed user content before these fixtures existed.
+ag_marker_safe() { # ag_marker_safe <name> <must-survive-string>
+  local name="$1" keep="$2"
+  cp "$AG/$name/.codex/AGENTS.md" "$WORK/$name.bak"
+  ag_install "$AG/$name"
+  if cmp -s "$AG/$name/.codex/AGENTS.md" "$WORK/$name.bak"; then
+    ok "AGENTS.md $name marker shape is fail-safe (byte-identical)"
+  else
+    fail "AGENTS.md $name marker shape rewrote the file"
+  fi
+  grep -qF "$keep" "$AG/$name/.codex/AGENTS.md" \
+    && ok "AGENTS.md $name keeps user content" || fail "AGENTS.md $name LOST user content"
+}
+
+ag_repo onesided
+{ echo '<!-- agent-comms:begin -->'; echo '## Agent Communication Protocol'; echo 'USER KEEP onesided'; } \
+  > "$AG/onesided/.codex/AGENTS.md"
+ag_marker_safe onesided 'USER KEEP onesided'
+
+ag_repo nested
+{ echo '<!-- agent-comms:begin -->'; echo '- USER KEEP nested A'
+  echo '<!-- agent-comms:begin -->'; echo '- rule B'
+  echo '<!-- agent-comms:end -->';   echo '- rule C'
+  echo '<!-- agent-comms:end -->'; } > "$AG/nested/.codex/AGENTS.md"
+ag_marker_safe nested 'USER KEEP nested A'
+
+ag_repo dupends
+{ echo '<!-- agent-comms:begin -->'; echo '- USER KEEP dupends'
+  echo '<!-- agent-comms:end -->';   echo '<!-- agent-comms:end -->'; } > "$AG/dupends/.codex/AGENTS.md"
+ag_marker_safe dupends 'USER KEEP dupends'
+
+ag_repo outoforder
+{ echo '<!-- agent-comms:end -->'; echo '- USER KEEP outoforder'
+  echo '<!-- agent-comms:begin -->'; } > "$AG/outoforder/.codex/AGENTS.md"
+ag_marker_safe outoforder 'USER KEEP outoforder'
+
+# Marker text quoted inside prose is documentation, not ownership: recognizing it
+# as a block replaced the user's example AND the private rule between the quotes.
+ag_repo inline
+{ echo '# My AGENTS'
+  echo 'Example: `<!-- agent-comms:begin -->` opens the block.'
+  echo '- USER KEEP inline private rule'
+  echo 'Example: `<!-- agent-comms:end -->` closes it.'; } > "$AG/inline/.codex/AGENTS.md"
+ag_install "$AG/inline"
+grep -qF 'USER KEEP inline private rule' "$AG/inline/.codex/AGENTS.md" \
+  && ok "AGENTS.md inline marker EXAMPLES never count as ownership" || fail "AGENTS.md inline example destroyed user content"
+grep -qF 'Example: `<!-- agent-comms:begin -->` opens the block.' "$AG/inline/.codex/AGENTS.md" \
+  && ok "AGENTS.md inline marker example text is preserved verbatim" || fail "AGENTS.md inline example text lost"
+
+# Markers on their own lines INSIDE a fenced code block are documentation about
+# the block, not the block itself. Treating them as owned rewrote the fence's
+# contents in place (reproduced). Every original line must survive verbatim —
+# asserted as a prefix check, not just a sentinel grep.
+ag_fenced() { # ag_fenced <name> <sentinel>
+  local name="$1" keep="$2" orig
+  orig="$(wc -l <"$AG/$name/.codex/AGENTS.md")"
+  cp "$AG/$name/.codex/AGENTS.md" "$WORK/$name.bak"
+  ag_install "$AG/$name"
+  if head -n "$orig" "$AG/$name/.codex/AGENTS.md" | cmp -s - "$WORK/$name.bak"; then
+    ok "AGENTS.md $name fence: every original line survives verbatim"
+  else
+    fail "AGENTS.md $name fence: original content was modified"
+  fi
+  grep -qF "$keep" "$AG/$name/.codex/AGENTS.md" \
+    && ok "AGENTS.md $name fence keeps the user sentinel" || fail "AGENTS.md $name fence LOST the sentinel"
+}
+
+ag_repo fencedbt
+{ echo '# Documentation'; echo '```markdown'; echo "$AG_B"; echo 'USER KEEP fenced backtick'
+  echo "$AG_E"; echo '```'; echo '- private rule after example'; } > "$AG/fencedbt/.codex/AGENTS.md"
+ag_fenced fencedbt 'USER KEEP fenced backtick'
+
+ag_repo fencedtilde
+{ echo '# Documentation'; echo '~~~markdown'; echo "$AG_B"; echo 'USER KEEP fenced tilde'
+  echo "$AG_E"; echo '~~~'; } > "$AG/fencedtilde/.codex/AGENTS.md"
+ag_fenced fencedtilde 'USER KEEP fenced tilde'
+
+# A longer outer fence wrapping a shorter inner one must nest, not close early.
+ag_repo fencednested
+{ echo '# Documentation'; echo '````text'; echo '```markdown'; echo "$AG_B"
+  echo 'USER KEEP nested fence'; echo "$AG_E"; echo '```'; echo '````'; } > "$AG/fencednested/.codex/AGENTS.md"
+ag_fenced fencednested 'USER KEEP nested fence'
+
+# A legacy heading quoted in a fence is an example too.
+ag_repo fencedlegacy
+{ echo '# Documentation'; echo '```markdown'; echo '## Agent Communication Protocol'
+  echo 'USER KEEP fenced legacy'; echo '```'; } > "$AG/fencedlegacy/.codex/AGENTS.md"
+ag_fenced fencedlegacy 'USER KEEP fenced legacy'
+
+# An unclosed fence makes inside/outside undecidable — fail safe, write nothing.
+ag_repo fenceunclosed
+{ echo '# Documentation'; echo '```markdown'; echo "$AG_B"; echo 'USER KEEP unclosed fence'; } \
+  > "$AG/fenceunclosed/.codex/AGENTS.md"
+cp "$AG/fenceunclosed/.codex/AGENTS.md" "$WORK/fenceunclosed.bak"
+ag_install "$AG/fenceunclosed"
+cmp -s "$AG/fenceunclosed/.codex/AGENTS.md" "$WORK/fenceunclosed.bak" \
+  && ok "AGENTS.md an unclosed fence is fail-safe (byte-identical)" || fail "AGENTS.md unclosed fence rewrote the file"
+grep -qi 'unclosed' "$WORK/ag.out" \
+  && ok "install explains the unclosed-fence skip" || fail "install explains unclosed fence"
+
+# After appending alongside a fenced example the file holds TWO begin markers —
+# one documentation, one live. A second install must resolve to the live one and
+# be a no-op, or fence awareness has merely moved the ambiguity.
+cp "$AG/fencedbt/.codex/AGENTS.md" "$WORK/fencedbt.after1"
+ag_install "$AG/fencedbt"
+cmp -s "$AG/fencedbt/.codex/AGENTS.md" "$WORK/fencedbt.after1" \
+  && ok "AGENTS.md stays idempotent when a fenced marker example sits beside the live block" \
+  || fail "AGENTS.md second install changed the file next to a fenced example"
+grep -qF 'USER KEEP fenced backtick' "$AG/fencedbt/.codex/AGENTS.md" \
+  && ok "AGENTS.md fenced example survives the second install too" || fail "AGENTS.md fenced example lost on second pass"
+
+# Fence awareness must not break the real thing.
+ag_repo realblock
+{ echo "$AG_B"; echo 'stale generated text'; echo "$AG_E"; } > "$AG/realblock/.codex/AGENTS.md"
+ag_install "$AG/realblock"
+grep -q 'Local file-based message queue' "$AG/realblock/.codex/AGENTS.md" \
+  && ok "a genuine marked block is still refreshed after the fence fix" || fail "fence fix broke real block management"
+
+ag_repo mixed
+{ echo '# Project AGENTS'; echo; echo '## House rules'; echo '- run mix format'; echo;
+  printf '%s\n' "$AG_LEGACY"; echo; echo '## Deploy'; echo '- fly deploy'; } \
+  > "$AG/mixed/.codex/AGENTS.md"
+ag_install "$AG/mixed"
+if grep -q 'House rules' "$AG/mixed/.codex/AGENTS.md" \
+   && grep -q 'run mix format' "$AG/mixed/.codex/AGENTS.md" \
+   && grep -q 'Deploy' "$AG/mixed/.codex/AGENTS.md" \
+   && grep -q 'fly deploy' "$AG/mixed/.codex/AGENTS.md" \
+   && grep -q 'agent-comms:begin' "$AG/mixed/.codex/AGENTS.md"; then
+  ok "migration preserves unrelated content on both sides of the legacy block"
+else
+  fail "migration lost unrelated AGENTS.md content"
+fi
+
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
 DRY="$(run_comms clean --as claude workspace)"
