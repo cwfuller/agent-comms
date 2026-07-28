@@ -142,11 +142,14 @@ If the incoming message carries a `## Meta` section requesting process feedback:
 
 ## Sandbox & permissions
 
-Read-only helper commands run directly. For `send`/`deliver`, some Codex sandboxes
-block helper-side `cmux.sock` access even through `/bin/zsh -lc` while allowing direct
-approved `cmux` commands. Run the helper normally. On `RESULT: blocked`, execute its
-exact `RECOVER:` line once; it reconciles state only after the direct nudge succeeds.
-Do not request escalation, retry the wrapper, or resend after successful recovery.
+Read-only helper commands run directly. The persistent, no-flag delivery fix is a global
+Codex permission profile that extends `:workspace` and allowlists only `cmux.sock`;
+`"$COMMS_SH" codex-permissions` prints the exact config. Apply it once and restart Codex.
+
+If an older or managed session returns `RESULT: blocked`, the reply is persisted but
+Claude was **not** notified. Do not claim passive polling, resend, or repeat the same
+sandboxed helper. Execute `RECOVER:` only from a host or separately approved context
+that can reach cmux; otherwise request one manual `/read-from-codex`.
 
 ## Message Format
 

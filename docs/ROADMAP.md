@@ -193,6 +193,13 @@ last delivery wasn't a real nudge.
   chain ending in guarded state reconciliation; current skills execute it once and only
   surface a final failure. Also fixed direction/thread/time-aware archive hints, current
   cmux-tree parsing coverage, aged-unread observability, and delayed-worktree `head_sha`.
+- *2026-07-28, follow-up on current Codex 0.145:* direct recovery also remained inside
+  the sandbox in several live sessions, so persistence was reliable but Codex → Claude
+  notification was still broken. Durable fix: make a `workspace-cmux` permission profile
+  the global Codex default, extending `:workspace` and allowlisting only the cmux Unix
+  socket. `comms.sh doctor` now tests the real boundary and `codex-permissions` prints the
+  no-launch-flag setup. Blocked-session guidance no longer promises passive polling or
+  tells agents to retry the unchanged sandbox.
 - *2026-06-07, field incident #3 (Codex sandbox):* Codex proactively requested escalated
   permissions for the helper send, prompting the user every loop round — running the
   helper plainly (or via the session's approved shell wrapper) needs no prompt at all.

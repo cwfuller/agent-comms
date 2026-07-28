@@ -29,6 +29,19 @@ Claude implements, sends the diff to Codex for review, fixes the blocking findin
 
 Works without cmux too: messages are still written and validated, you just trigger each side manually.
 
+### Codex → Claude delivery on macOS
+
+Codex must be allowed to reach cmux's Unix socket. Configure this once as the global
+default—no launch flag or per-project setup:
+
+```bash
+~/.agent-comms/comms.sh codex-permissions
+```
+
+Apply the printed `workspace-cmux` profile to `~/.codex/config.toml`, then restart
+Codex. The profile inherits the normal workspace sandbox and allowlists only the cmux
+socket. See [Codex socket permissions](docs/INSTALL.md#codex-socket-permissions).
+
 ## Commands
 
 | Claude Code | What it does |

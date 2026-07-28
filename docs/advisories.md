@@ -52,6 +52,15 @@ loop produced that are NOT actioned by it, so they survive its end:
 
 ## 2026-07-28 — asymmetric Codex sandbox delivery incidents
 
+- **Resolved:** Codex now has a least-privilege persistent path instead of a per-message
+  escape attempt. The global `workspace-cmux` permission profile extends `:workspace`
+  and allowlists only `~/.local/state/cmux/cmux.sock`; a fresh Codex 0.145 sandbox
+  reached `cmux list-workspaces` with no launch flag. `comms.sh doctor` verifies the
+  effective session and `codex-permissions` prints the exact setup.
+- **Resolved:** Codex skills no longer imply passive `.comms` polling or blindly repeat
+  recovery from the unchanged sandbox. `blocked` means persisted but not notified;
+  host-capable recovery or one manual pickup is required for an already-running legacy
+  session.
 - **Resolved:** `/bin/zsh -lc` is no longer presented as a universal sandbox escape.
   A blocked nested helper emits one direct-cmux `RECOVER:` chain whose final guarded
   segment reconciles `last_delivery` after success.

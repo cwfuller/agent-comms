@@ -98,9 +98,12 @@ so a mid-sequence failure reports `FAILED` explicitly instead of dying tersely. 
 commands queue in the target's input box until its current turn ends — that's why "late
 nudges" against an already-emptied inbox are normal and handled.
 
-When the socket blocks only inside the helper, delivery emits a single `RECOVER:` shell
-chain. Direct `cmux` segments run first; `reconcile` is last behind `&&`, so state changes
-to delivered only after the entire external nudge succeeds.
+When a session cannot access the socket, delivery emits a single `RECOVER:` shell chain.
+Direct `cmux` segments run first; `reconcile` is last behind `&&`, so state changes to
+delivered only after the entire external nudge succeeds. Recovery is for a host-capable
+context, not repeated execution inside the unchanged sandbox. The durable Codex path is
+the global `workspace-cmux` permission profile printed by `comms.sh codex-permissions`;
+`comms.sh doctor` verifies the effective session before a loop depends on it.
 
 ## Test harness
 

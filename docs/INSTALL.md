@@ -21,12 +21,55 @@ Run interactively (no `--scope`) and the installer shows a menu:
 
 | scope | installs | where |
 |---|---|---|
-| `global` | 8 Claude commands, 2 Codex skills, 2 helper scripts | `~/.claude/commands/`, `~/.codex/skills/`, `~/.agent-comms/` |
+| `global` | 8 Claude commands, 2 Codex skills, 3 helper scripts | `~/.claude/commands/`, `~/.codex/skills/`, `~/.agent-comms/` |
 | `project` | per-repo state only | `.comms/{to-codex,to-claude,archive}/`, `.gitignore` entries, `.codex/AGENTS.md` protocol note |
 | `both` | global + project | the recommended pair |
 | `local` | pinned copies of everything into the repo | `.claude/commands/`, `.agents/skills/`, `.agent-comms/` + project state |
 
 All scopes are idempotent — re-run freely.
+
+## Codex socket permissions
+
+Codex → Claude auto-delivery uses cmux's local Unix socket. A default
+`sandbox_mode = "workspace-write"` session cannot connect to that socket, and wrappers
+or retries launched by the same session remain inside the same boundary. Message files
+still persist, but Claude is not notified and does not passively poll `.comms/`.
+
+Configure the least-privilege permission profile once in `~/.codex/config.toml`:
+
+```toml
+# Remove any sandbox_mode line and [sandbox_workspace_write] table first.
+default_permissions = "workspace-cmux"
+
+[permissions.workspace-cmux]
+description = "Workspace editing plus agent-comms cmux delivery"
+extends = ":workspace"
+
+[permissions.workspace-cmux.network]
+enabled = true
+
+[permissions.workspace-cmux.network.unix_sockets]
+"/Users/YOU/.local/state/cmux/cmux.sock" = "allow"
+```
+
+The installed helper prints a copy with the current user's resolved path:
+
+```bash
+~/.agent-comms/comms.sh codex-permissions
+```
+
+Restart Codex after changing the global config. No launch parameter is required:
+`default_permissions` applies the profile to every new session. Do not launch Codex
+with `--sandbox`, because that selects the legacy sandbox model and overrides the
+profile. Verify a session with:
+
+```bash
+~/.agent-comms/comms.sh doctor
+```
+
+`cmux socket: reachable` is the required result. A `blocked` result means the message
+queue remains reliable but active peer notification is unavailable in that session.
+Permission profiles are supported by Codex 0.138.0 and later and are currently beta.
 
 ### Global vs local pinning
 

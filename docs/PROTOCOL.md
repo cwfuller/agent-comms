@@ -197,7 +197,7 @@ enum lives in `loopspec/thread-state.schema.json`):
 |---|---|---|
 | `delivered` | full keystroke sequence accepted; peer pickup remains asynchronous | `stalled`/`status` expose aged unread files |
 | `manual` | no cmux / no surface — message valid on disk | trigger the read command by hand |
-| `blocked` | nested helper cannot access `cmux.sock` | execute the emitted `RECOVER:` line once; direct cmux steps run first, then `reconcile` repairs state |
+| `blocked` | this session cannot access `cmux.sock`; peer was not notified | configure the global `workspace-cmux` profile for new sessions; use `RECOVER:` only from a host-capable context, otherwise trigger one manual pickup |
 | `failed` | cmux error mid-sequence | retry with `comms.sh send` (refreshes state); a bare `deliver` retry works but leaves the stale `failed` marker |
 
 **Atomic send:** `comms.sh send --to <agent> <file> --archive-inbound <inbound>`
@@ -208,8 +208,10 @@ inbound *was* processed; the retry surface is delivery, tracked in state.
 `send` always ends with a `RESULT:` line. On `blocked`, it also emits one copy/paste
 `RECOVER:` command composed of direct `cmux` calls plus
 `comms.sh reconcile <message>`. The reconciliation segment runs only after every cmux
-step succeeds, so external fallback cannot leave `last_delivery=blocked`. Agents execute
-that line once and relay only a final non-`delivered` result.
+step succeeds, so a host-side fallback cannot leave `last_delivery=blocked`. A blocked
+Codex session must not run the same path repeatedly or claim the peer passively polls:
+configure the global profile printed by `comms.sh codex-permissions`, restart Codex, or
+use one manual pickup for the already-persisted message.
 
 **Identity resilience:** workspace resolution caches one good cmux-derived name per
 cmux workspace (`.comms/.cache/`); if a later `cmux tree` read is unavailable or its

@@ -8,6 +8,8 @@
 # Subcommands:
 #   root                        print the main repo's .comms path (worktree-safe)
 #   workspace                   print the workspace name (cmux > branch > repo dir)
+#   doctor                      verify this session can reach the cmux socket
+#   codex-permissions [socket]  print least-privilege Codex config for cmux delivery
 #   list --as <claude|codex> [--thread <t>]   pending inbox messages, newest first
 #   status                      one-screen loop state: latest archive, verdict, pending counts
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
@@ -44,6 +46,78 @@ esac
 
 main_repo_root() {
   git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //'
+}
+
+cmux_default_socket_path() {
+  local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  printf '%s/cmux/cmux.sock\n' "$state_home"
+}
+
+cmux_socket_path() {
+  if [ -n "${CMUX_SOCKET_PATH:-}" ]; then
+    printf '%s\n' "$CMUX_SOCKET_PATH"
+  else
+    local fallback last_file remembered
+    fallback="$(cmux_default_socket_path)"
+    last_file="$(dirname "$fallback")/last-socket-path"
+    remembered="$(head -1 "$last_file" 2>/dev/null || true)"
+    case "$remembered" in /*) printf '%s\n' "$remembered" ;; *) printf '%s\n' "$fallback" ;; esac
+  fi
+}
+
+cmd_codex_permissions() {
+  local socket="${1:-$(cmux_socket_path)}" fallback
+  fallback="$(cmux_default_socket_path)"
+  case "$socket" in /*) ;; *) die "codex-permissions: socket path must be absolute" ;; esac
+  cat <<EOF
+Codex cmux permission profile (applies to new sessions):
+
+1. In ~/.codex/config.toml, remove any sandbox_mode line and
+   [sandbox_workspace_write] table. Permission profiles do not compose with them.
+2. Add:
+
+default_permissions = "workspace-cmux"
+
+[permissions.workspace-cmux]
+description = "Workspace editing plus agent-comms cmux delivery"
+extends = ":workspace"
+
+[permissions.workspace-cmux.network]
+enabled = true
+
+[permissions.workspace-cmux.network.unix_sockets]
+"$socket" = "allow"
+EOF
+  if [ "$socket" != "$fallback" ]; then
+    printf '"%s" = "allow"\n' "$fallback"
+  fi
+  cat <<'EOF'
+
+3. Restart Codex. Do not launch it with --sandbox, which overrides the profile.
+EOF
+}
+
+cmd_doctor() {
+  command -v cmux >/dev/null 2>&1 || {
+    echo "cmux socket: unavailable (cmux is not installed or not on PATH)"
+    return 1
+  }
+  local errf first
+  errf="$(mktemp 2>/dev/null || echo /tmp/comms-doctor.$$)"
+  if cmux list-workspaces >/dev/null 2>"$errf"; then
+    rm -f "$errf" 2>/dev/null || true
+    echo "cmux socket: reachable"
+    return 0
+  fi
+  first="$(head -1 "$errf" 2>/dev/null || true)"
+  rm -f "$errf" 2>/dev/null || true
+  if printf '%s' "$first" | grep -qiE 'operation not permitted|not permitted|permission denied|sandbox|\.sock'; then
+    echo "cmux socket: blocked ($(cmux_socket_path))"
+    echo "fix: run '$SELF codex-permissions', apply the profile, then restart Codex"
+    return 3
+  fi
+  echo "cmux socket: failed${first:+ — $first}"
+  return 1
 }
 
 cmd_root() {
@@ -745,6 +819,7 @@ cmd_deliver() {
     # segment reconciles state only after every direct nudge step succeeds.
     if grep -qiE 'operation not permitted|not permitted|permission denied|sandbox|\.sock' "$errf" 2>/dev/null; then
       echo "warning: delivery blocked — nested helper cannot access cmux; message is safely on disk"
+      echo "  setup: run '$SELF codex-permissions' and restart Codex; retries from this unchanged sandbox will also block"
       print_direct_recovery "$target" "$surface" "$msgfile"
     else
       echo "warning: delivery FAILED mid-sequence to $surface — the message is safely on disk; retry with 'comms.sh send --to $target <file>' (refreshes delivery state) or nudge the pane manually"
@@ -800,7 +875,7 @@ cmd_status() {
     # consumed the file. An aged file still in the target inbox is stronger
     # evidence than the notification outcome and must remain visible.
     if [ "$st" != "complete" ] && [ -n "$pending" ] && [ "$age_s" -gt 900 ]; then
-      echo "ACTION NEEDED: $(basename "$pending") is still unread after $(( age_s / 60 ))m (last_delivery=$deliv). Re-run its RECOVER path or nudge $target directly."
+      echo "ACTION NEEDED: $(basename "$pending") is still unread after $(( age_s / 60 ))m (last_delivery=$deliv). Nudge $target directly; if socket-blocked, configure 'comms.sh codex-permissions' for a new Codex session."
     # Live headless outcomes are not operator-action cases: spawned = turn in
     # flight, completed = reply is (or was) in the inbox for the driver to read,
     # held = the operator paused deliberately, pickup = designed reply-to-driver
@@ -808,7 +883,7 @@ cmd_status() {
     elif [ "$st" != "complete" ] && [ -n "$deliv" ] \
          && [ "$deliv" != "delivered" ] && [ "$deliv" != "spawned" ] \
          && [ "$deliv" != "completed" ] && [ "$deliv" != "held" ] && [ "$deliv" != "pickup" ]; then
-      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Re-run the message send and execute its RECOVER line; a successful recovery reconciles this state."
+      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Do not retry from an unchanged sandbox; use manual pickup or configure 'comms.sh codex-permissions' and restart Codex."
     fi
   fi
 }
@@ -1124,7 +1199,7 @@ cmd_send() {
     delivered) echo "RESULT: delivered" ;;
     spawned)   echo "RESULT: spawned — headless peer turn running detached; the reply lands in the inbox when it exits. Await it with the runphase.sh command printed above, then read the reply." ;;
     held)      echo "RESULT: held — the thread is paused by a hold marker; nothing was spawned. Release with 'runphase.sh release <thread>', then RE-SEND ('comms.sh send --to $to <file>') — a bare deliver would spawn the turn but leave this thread's state stuck on 'held', blinding status and the stalled watchdog." ;;
-    blocked)   echo "RESULT: blocked — message saved, peer not nudged; execute RECOVER above once" ;;
+    blocked)   echo "RESULT: blocked — message saved, peer not nudged; use host/manual pickup or restart with cmux socket permission" ;;
     pickup)
       # Text deliberately starts "manual —" for the peers' expectations: the
       # spawned peer is pre-briefed that its reply send reports manual.
@@ -1144,6 +1219,8 @@ cmd_send() {
 case "${1:-}" in
   root)      shift; cmd_root "$@" ;;
   workspace) shift; cmd_workspace "$@" ;;
+  doctor)    shift; cmd_doctor "$@" ;;
+  codex-permissions) shift; cmd_codex_permissions "$@" ;;
   list)      shift; cmd_list "$@" ;;
   status)    shift; cmd_status "$@" ;;
   validate)  shift; cmd_validate "$@" ;;

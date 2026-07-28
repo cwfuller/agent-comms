@@ -111,11 +111,15 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
 
 ## Sandbox & permissions (read before step 6)
 
-`send` and `deliver` touch `cmux.sock`. Some Codex sandboxes block that access even
-inside `/bin/zsh -lc`, while allowing direct approved `cmux send`/`send-key` commands.
-Run the helper normally. On `RESULT: blocked`, execute its exact `RECOVER:` line once;
-the final `reconcile` segment runs only after every direct cmux step succeeds. Do not
-request escalation, retry the wrapper, or resend after successful recovery. Read-only
-commands (`validate`, `list`, `archive`, file reads) remain direct.
+`send` and `deliver` touch `cmux.sock`. The persistent, no-flag fix is a global Codex
+permission profile that extends `:workspace` and allowlists only that socket; print the
+exact current config with `"$COMMS_SH" codex-permissions`, apply it once, and restart
+Codex. New sessions then deliver normally by default.
+
+If an older or managed session returns `RESULT: blocked`, the message is on disk but
+Claude was **not** notified; do not claim passive `.comms` polling will pick it up.
+Do not resend or repeat the same sandboxed helper. Execute `RECOVER:` only from a host
+or separately approved context that can actually reach cmux; otherwise ask for one
+manual `/read-from-codex`. Read-only helper commands remain safe to run directly.
 
 If the user provides specific instructions, incorporate them into the appropriate section.

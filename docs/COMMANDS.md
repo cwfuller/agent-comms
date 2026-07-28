@@ -88,10 +88,12 @@ Write findings (`### Blocking` / `### Advisory` / `### Process`), copy the loop'
 workflow fields + `thread`, set `in-reply-to`, then atomically validate + deliver +
 archive the inbound via `comms.sh send`.
 
-**Codex sandbox note:** some restricted sessions block helper-side `cmux.sock` access
-even through `/bin/zsh -lc`, while direct approved `cmux` commands work. Run `send`
-normally. On `RESULT: blocked`, execute its exact `RECOVER:` line once; the line nudges
-directly and reconciles state after success. Do not escalate or retry the wrapper.
+**Codex sandbox note:** set the global `workspace-cmux` permission profile once so every
+new Codex session inherits normal workspace access plus the one cmux Unix socket
+allowance; `comms.sh codex-permissions` prints the exact config and `comms.sh doctor`
+verifies it. No launch flag is required. If an old or managed session reports
+`RESULT: blocked`, Claude was not notified and passive polling is not assumed. Do not
+resend from the unchanged sandbox; use a host-capable `RECOVER:` or one manual pickup.
 
 ## Helper CLI
 
@@ -105,6 +107,8 @@ agnostic.
 |---|---|
 | `root` | print the main repo's `.comms` path (worktree-safe) |
 | `workspace` | print the resolved workspace name (cmux → branch → repo dir) |
+| `doctor` | verify this session can reach cmux; exit 3 plus the persistent setup command when the socket is sandbox-blocked |
+| `codex-permissions [socket]` | print the least-privilege global Codex permission profile for default cmux delivery |
 | `list --as <claude\|codex> [--thread <t>]` | pending inbox messages, newest first; non-zero + "latest archived" hint when empty |
 | `status` | one-screen loop summary: workspace, latest archived message + its loop fields, pending counts per inbox |
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |

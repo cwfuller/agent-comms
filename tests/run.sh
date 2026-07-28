@@ -58,7 +58,9 @@ case "$cmd" in
   tree)
     [ -n "${CMUX_STUB_TREE_EMPTY:-}" ] && exit 0
     cat "$CMUX_STUB_DIR/tree-${ref//:/_}.txt" 2>/dev/null ;;
-  list-workspaces) cat "$CMUX_STUB_DIR/list.txt" 2>/dev/null ;;
+  list-workspaces)
+    [ -n "${CMUX_STUB_SANDBOX:-}" ] && { echo "Operation not permitted (cmux.sock)" >&2; exit 1; }
+    cat "$CMUX_STUB_DIR/list.txt" 2>/dev/null ;;
   send)
     [ -n "${CMUX_STUB_SANDBOX:-}" ] && { echo "Operation not permitted (cmux.sock)" >&2; exit 1; }
     [ -n "${CMUX_STUB_FAIL:-}" ] && exit 1
@@ -103,6 +105,29 @@ if command -v zsh >/dev/null 2>&1; then
   WS_ZSH="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID zsh -c "\"$COMMS\" workspace")"
   [ "$WS_ZSH" = "feature-helper-tests" ] && ok "helper is caller-shell agnostic (zsh)" || fail "helper under zsh (got $WS_ZSH)"
 fi
+
+echo "== comms.sh: Codex cmux permission preflight =="
+printf '%s\n' 'workspace:10 Test Project' > "$CMUX_STUB_DIR/list.txt"
+DOC_OK="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" "$COMMS" doctor)"
+[ "$DOC_OK" = "cmux socket: reachable" ] \
+  && ok "doctor confirms a reachable cmux socket" || fail "doctor reachable result (got: $DOC_OK)"
+if DOC_BLOCKED="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_STUB_SANDBOX=1 "$COMMS" doctor 2>&1)"; then
+  DOC_RC=0
+else
+  DOC_RC=$?
+fi
+[ "$DOC_RC" = 3 ] && ok "doctor distinguishes a sandbox-blocked socket" || fail "doctor blocked rc (got: $DOC_RC)"
+echo "$DOC_BLOCKED" | grep -q "codex-permissions" \
+  && ok "doctor points to the persistent Codex fix" || fail "doctor permission-profile hint"
+PERM_OUT="$(env -u CMUX_SOCKET -u CMUX_SOCKET_PATH -u XDG_STATE_HOME HOME=/Users/example "$COMMS" codex-permissions)"
+echo "$PERM_OUT" | grep -q 'default_permissions = "workspace-cmux"' \
+  && ok "codex-permissions selects the profile globally by default" || fail "codex-permissions default profile"
+echo "$PERM_OUT" | grep -q 'extends = ":workspace"' \
+  && ok "codex-permissions preserves the workspace sandbox baseline" || fail "codex-permissions workspace baseline"
+echo "$PERM_OUT" | grep -q '"/Users/example/.local/state/cmux/cmux.sock" = "allow"' \
+  && ok "codex-permissions allowlists only the resolved cmux socket" || fail "codex-permissions socket allowlist"
+echo "$PERM_OUT" | grep -q 'Do not launch it with --sandbox' \
+  && ok "codex-permissions warns that launch overrides defeat the global default" || fail "codex-permissions launch override warning"
 
 echo "== comms.sh: validate =="
 GOOD="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T12-00-00_test-1.md"
@@ -397,10 +422,12 @@ echo "$ST" | grep -q "pending in to-claude:" && ok "status prints pending counts
 echo "== install.sh: local pin gitignored + global scope (overridden HOME dirs) =="
 grep -qxF '.agent-comms/' "$INST_FIX/.gitignore" && ok "local install gitignores .agent-comms/" || fail "local install gitignores .agent-comms/"
 GHOME="$WORK/ghome"
-(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
+GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global 2>&1)"
 [ -x "$GHOME/agent-comms/comms.sh" ] && ok "global scope installs executable helpers (env-overridden)" || fail "global scope installs executable helpers"
 [ -f "$GHOME/commands/fleet.md" ] && ok "global scope installs commands (env-overridden)" || fail "global scope installs commands"
 [ -f "$GHOME/skills/read-from-claude/SKILL.md" ] && ok "global scope installs skills (env-overridden)" || fail "global scope installs skills"
+echo "$GH_OUT" | grep -q "codex-permissions" \
+  && ok "global install names the one-time default Codex socket setup" || fail "global install Codex socket setup hint"
 
 echo "== comms.sh v2: thread filter + verdict normalization + error lane =="
 TA="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-00_alpha-1.md"
@@ -567,10 +594,14 @@ echo "$SBX" | grep -q "nested helper cannot access cmux" && ok "socket failure i
 echo "$SBX" | grep -q "^RECOVER: cmux send-key" && ok "sandbox failure prints one direct-cmux recovery command" || fail "direct recovery command (got: $SBX)"
 echo "$SBX" | grep -q "/bin/zsh -lc" && fail "obsolete wrapper retry still printed" || ok "sandbox recovery no longer promises wrapper escape"
 echo "$SBX" | grep -q "cmux said:" && ok "sandbox failure echoes the cmux error" || fail "cmux error echoed (got: $SBX)"
+echo "$SBX" | grep -q "retries from this unchanged sandbox will also block" \
+  && ok "sandbox failure stops blind in-session retries" || fail "sandbox retry guidance (got: $SBX)"
 # send classifies the sandbox block as its own outcome (not silent 'manual')
 SBX_SEND_ALL="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" send --to claude "$OUT_WF") 2>/dev/null )"
 SBX_SEND="$(echo "$SBX_SEND_ALL" | tail -1)"
 case "$SBX_SEND" in "RESULT: blocked"*) ok "send RESULT is 'blocked' on a sandboxed socket (not 'manual')" ;; *) fail "blocked RESULT (got: $SBX_SEND)" ;; esac
+echo "$SBX_SEND" | grep -q "restart with cmux socket permission" \
+  && ok "blocked RESULT names the persistent fix" || fail "blocked RESULT permission hint (got: $SBX_SEND)"
 echo "$SBX_SEND_ALL" | grep -qF "$COMMS' reconcile '$OUT_WF" && ok "RECOVER chain ends with literal helper+message reconciliation" || fail "RECOVER reconciliation tail (got: $SBX_SEND_ALL)"
 grep -q '"last_delivery": "blocked"' "$SF_CMUX" && ok "blocked send is recorded before recovery" || fail "blocked state before recovery"
 REC_CMD="$(printf '%s\n' "$SBX_SEND_ALL" | sed -n 's/^RECOVER: //p' | head -1)"
