@@ -117,6 +117,39 @@ agnostic.
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |
 | `clean --as <claude\|codex> [mode] [--yes]` | guarded delete; dry-run without `--yes` |
+| `lessons [--bytes N] [--surface P] [--file F]` | bounded newest-first tail of the current worktree's `docs/advisories.md` |
+| `archive-search <pattern> [--bytes N] [--limit K]` | bounded newest-first search of `archive/` across workspaces |
+
+#### The bounded readers
+
+`lessons` and `archive-search` exist because the two "consult past lessons" reads were
+the only unbounded ones in the protocol — `docs/advisories.md` is append-only and
+`archive/` grows with every loop, so both cost more tokens every week. Both now
+guarantee one invariant:
+
+```
+combined(stdout + stderr) <= --bytes + 256      # 256 = DIAGNOSTIC_MAX, a constant
+```
+
+That constant only holds because every echoed caller-controlled value (path, pattern,
+heading) is clipped to a fixed width first — otherwise a long `--file` argument would
+inflate the "constant" and defeat the cap.
+
+- **Whole units, never byte slices.** `lessons` emits whole `## ` sections; a byte
+  slice can hand an agent a truncated bullet that reads like a complete instruction.
+- **Nothing vanishes silently.** A section that does not fit is named in place
+  (`## <heading> — OMITTED (N B) — read <path>`), and whatever could not even be named
+  is counted in a trailing summary line.
+- **Exit `3` means truncated, not failed** — "you have the newest; the rest are named
+  by path". Exit `2` is a usage error; `0` is complete.
+- **Ordering is by the date in each `## ` heading**, so the writer may append or
+  prepend. Undated sections sort last and are never dropped.
+- **`lessons` resolves `docs/advisories.md` from the CURRENT worktree**
+  (`git rev-parse --show-toplevel`), not from `comms.sh root` — see the resolver note
+  in [INTERNALS.md](INTERNALS.md#workspace-resolution).
+- **`archive-search` filters by match first, then sorts the matches globally, then
+  applies `--limit`** — so the limit can never discard a newer match, and the per-file
+  frontmatter parse runs only on hits.
 
 ### `fleet.sh`
 

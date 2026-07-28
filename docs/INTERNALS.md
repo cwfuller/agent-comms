@@ -9,7 +9,11 @@ written for human contributors and AI agents alike.
 install.sh                     installer (all scopes, local or curl-piped)
 helpers/
   comms.sh                     message engine: workspace/list/validate/archive/deliver/send/state/clean
+                               + bounded reads: lessons/archive-search
   fleet.sh                     /fleet engine: status/dispatch/dispatch-all/harvest/clear
+  runphase.sh                  headless turn runner (COMMS_DELIVERY=headless): spawn → observe → record
+docs/loopspec/                 the portable review-loop kernel (spec, schemas, fixtures,
+                               check.sh, prompt fragments) — vendored by other consumers
 templates/
   claude-commands/*.md         Claude Code slash commands (thin prompt wrappers)
   codex-skills/*/SKILL.md      Codex skills (thin prompt wrappers)
@@ -69,6 +73,21 @@ branch → repo directory name; lowercased, spaces/slashes hyphenated. A UUID-va
 `CMUX_WORKSPACE_ID` is valid. Cached fallback warnings say unavailable *or*
 unparseable because a nested helper can be socket-blocked even when direct
 `cmux tree` succeeds.
+
+### Two root resolvers — deliberately not unified
+
+They answer different questions, and collapsing them breaks one of the two:
+
+| resolver | returns | used for |
+|---|---|---|
+| `main_repo_root()` — `git worktree list --porcelain \| head -1` | the **main** repo root | `.comms/` — one shared mailbox across every linked worktree, and the helper pin |
+| `git rev-parse --show-toplevel` | the **current** worktree root | project docs (`comms.sh lessons` → `docs/advisories.md`) |
+
+A review running in a feature worktree must read *that tree's* advisories, not main's —
+so `lessons` uses `--show-toplevel`. But the helper pin and the mailbox must be shared
+across worktrees — so those use `main_repo_root()`. Swapping either one is a silent
+bug: `--show-toplevel` for the pin misses `<main>/.agent-comms/` and falls through to
+`$HOME`; `main_repo_root()` for lessons reads the wrong tree's docs.
 
 ## Delivery mechanics
 

@@ -25,6 +25,12 @@
 #   bind <claude|codex> [surface:N]   pin which surface delivery targets (show with no arg)
 #   clean --as <claude|codex> [workspace|all|archive|<file>] [--yes]
 #                               guarded delete; dry-run without --yes; own-inbox default
+#   lessons [--bytes N] [--surface P] [--file F]
+#                               bounded newest-first tail of docs/advisories.md (whole
+#                               "## " sections, never a byte slice). Exit 3 = truncated.
+#   archive-search <pattern> [--bytes N] [--limit K]
+#                               bounded newest-first search of archive/ across workspaces;
+#                               metadata + clipped context, not whole messages. Exit 3 = truncated.
 set -euo pipefail
 
 die() { echo "comms.sh: $*" >&2; exit 1; }
@@ -184,12 +190,15 @@ mtime_iso() {
   printf '%s' "${out:-0000-00-00T00:00:00Z}"
 }
 
-# sorted_message_files <dir> <workspace> [from] [thread] [newest|oldest]
+# sort_paths_by_timestamp <newest|oldest> [from] [thread] — reads paths on stdin
 # Protocol timestamp is authoritative; mtime breaks ties and is the fallback
 # for legacy/malformed files. Physical inbox direction remains authoritative,
 # so `from` filtering is used only where a shared archive needs disambiguation.
-sorted_message_files() {
-  local dir="$1" ws="$2" sender="${3:-}" thread="${4:-}" order="${5:-oldest}"
+# Split out from sorted_message_files so a caller that has already narrowed the
+# candidate set (archive-search's match filter) pays the per-file frontmatter
+# parse only for the files it kept, not for the whole directory.
+sort_paths_by_timestamp() {
+  local order="${1:-oldest}" sender="${2:-}" thread="${3:-}"
   local f ts mt rows
   rows="$(
     while IFS= read -r f; do
@@ -201,13 +210,248 @@ sorted_message_files() {
       printf '%s' "$ts" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' \
         || ts="$(mtime_iso "$mt")"
       printf '%s\t%020d\t%s\n' "$ts" "$mt" "$f"
-    done < <(find "$dir" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null)
+    done
   )"
   [ -n "$rows" ] || return 0
   if [ "$order" = "newest" ]; then
     printf '%s\n' "$rows" | sort -r | cut -f3-
   else
     printf '%s\n' "$rows" | sort | cut -f3-
+  fi
+}
+
+# sorted_message_files <dir> <workspace> [from] [thread] [newest|oldest] [name-pattern]
+# name-pattern defaults to "<workspace>_*" — the workspace-scoped behavior every
+# existing caller relies on. archive-search passes "*" because the archive is one
+# repo's shared history and a sibling workspace's thread is a legitimate hit.
+sorted_message_files() {
+  local dir="$1" ws="$2" sender="${3:-}" thread="${4:-}" order="${5:-oldest}" pat="${6:-}"
+  [ -n "$pat" ] || pat="${ws}_*"
+  find "$dir" -maxdepth 1 -type f -name "$pat" 2>/dev/null \
+    | sort_paths_by_timestamp "$order" "$sender" "$thread"
+}
+
+# ---------------------------------------------------------------------------
+# Bounded reads — `lessons` and `archive-search`
+#
+# Both promise ONE invariant, asserted as a byte measurement by the harness:
+#
+#     combined(stdout + stderr) <= --bytes + DIAGNOSTIC_MAX
+#
+# DIAGNOSTIC_MAX is a constant, never a function of any input. That only holds
+# because every echoed caller-controlled value (path, pattern, heading) is
+# clipped first and stderr is capped to a single clipped line — without that, a
+# pathological --file or --surface argument inflates the "constant" and the cap
+# these subcommands exist to enforce leaks.
+#
+# Byte counting is locale-independent (LC_ALL=C) and the truncation marker is
+# ASCII, so the arithmetic is exact rather than approximately right in UTF-8.
+# ---------------------------------------------------------------------------
+DIAGNOSTIC_MAX=256      # hard cap on the single stderr line, marker included
+CLIP_WIDTH=64           # fixed width for any echoed caller-controlled value
+LESSONS_MIN_BYTES=512   # below this a bounded summary cannot be guaranteed
+
+usage_err() { echo "comms.sh: $*" >&2; exit 2; }
+
+clip() {  # clip <string> [max-total-bytes] — fixed width, visibly marked
+  local LC_ALL=C s="$1" w="${2:-$CLIP_WIDTH}"
+  if [ "${#s}" -le "$w" ]; then printf '%s' "$s"; else printf '%s...' "${s:0:$((w - 3))}"; fi
+}
+
+byte_len() { local LC_ALL=C; printf '%s' "$1" | wc -c | tr -d ' '; }
+
+emit_diagnostic() {  # at most one line, never wider than DIAGNOSTIC_MAX
+  # The trailing newline counts against the cap, so the payload gets one byte
+  # less — otherwise the primitive's own guarantee is off by one for a caller
+  # that ever builds a diagnostic right at the limit.
+  [ -n "${1:-}" ] || return 0
+  printf '%s\n' "$(clip "$1" $((DIAGNOSTIC_MAX - 1)))" >&2
+}
+
+require_budget() {  # shared --bytes validation for both bounded readers
+  case "$1" in ''|*[!0-9]*) usage_err "$2: --bytes must be a positive integer" ;; esac
+  [ "$1" -ge "$LESSONS_MIN_BYTES" ] \
+    || usage_err "$2: --bytes below the $LESSONS_MIN_BYTES floor leaves no room for the omission summary"
+}
+
+# Index a markdown file's "## " sections as: <date> <seq> <start> <end> <heading>
+# Sections whose heading carries no YYYY-MM-DD get 0000-00-00, which sorts LAST
+# under a descending date sort — undated entries are never silently dropped,
+# they just follow the dated ones in their original file order.
+section_index() {
+  awk '
+    /^## / {
+      if (n) end[n] = NR - 1
+      n++; start[n] = NR; head[n] = $0; date[n] = "0000-00-00"
+      if (match($0, /[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/))
+        date[n] = substr($0, RSTART, RLENGTH)
+    }
+    END {
+      if (n) { end[n] = NR
+        for (i = 1; i <= n; i++)
+          printf "%s\t%06d\t%d\t%d\t%s\n", date[i], i, start[i], end[i], head[i] }
+    }' "$1" | sort -k1,1r -k2,2n
+}
+
+cmd_lessons() {
+  local bytes=4000 surface="" surface_set=false file="" top=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bytes)   shift; bytes="${1:-}" ;;
+      --surface) shift; surface="${1:-}"; surface_set=true ;;
+      --file)    shift; file="${1:-}" ;;
+      *) usage_err "lessons: unknown argument '$(clip "$1")'" ;;
+    esac
+    shift || true
+  done
+  require_budget "$bytes" lessons
+  if [ "$surface_set" = true ] && [ -z "$surface" ]; then
+    usage_err "lessons: --surface needs a pattern (an empty one is not 'match everything')"
+  fi
+
+  # Project docs belong to the tree under review — NOT to `comms.sh root`, which
+  # deliberately resolves the MAIN repo root so linked worktrees share one
+  # mailbox. Reusing that resolver here would make a review in a feature
+  # worktree silently read main's advisories.
+  if [ -z "$file" ]; then
+    top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    [ -n "$top" ] || { emit_diagnostic "lessons: not inside a git repository"; return 0; }
+    file="$top/docs/advisories.md"
+  fi
+  [ -f "$file" ] || { emit_diagnostic "lessons: no lessons file at $(clip "$file")"; return 0; }
+
+  local idx undated=0 kept=() date seq start end head text
+  idx="$(section_index "$file")"
+  [ -n "$idx" ] || { emit_diagnostic "lessons: no '## ' sections in $(clip "$file")"; return 0; }
+
+  while IFS=$'\t' read -r date seq start end head; do
+    [ -n "$start" ] || continue
+    [ "$date" != "0000-00-00" ] || undated=$((undated + 1))
+    if [ -n "$surface" ]; then
+      text="$(sed -n "${start},${end}p" "$file")"
+      printf '%s' "$text" | grep -qiF -- "$surface" || continue
+    fi
+    kept+=("$start	$end	$head")
+  done <<< "$idx"
+
+  if [ "${#kept[@]}" -eq 0 ]; then
+    emit_diagnostic "lessons: no section matches '$(clip "$surface")' in $(clip "$file")"
+    return 0
+  fi
+
+  # Reserve room for the summary BEFORE emitting anything, so a nearly-full
+  # budget can never consume the line that reports what was left out.
+  local clipped_file summary_max reserve emitted=0 omitted=0 unnamed=0 out sz ph
+  clipped_file="$(clip "$file")"
+  summary_max="$(byte_len "## ... +${#kept[@]} further section(s) omitted - read $clipped_file")"
+  reserve=$((bytes - summary_max - 1))
+  [ "$reserve" -gt 0 ] || reserve=0
+
+  for row in "${kept[@]}"; do
+    IFS=$'\t' read -r start end head <<< "$row"
+    out="$(sed -n "${start},${end}p" "$file")"
+    sz="$(byte_len "$out")"
+    if [ $((emitted + sz + 1)) -le "$reserve" ]; then
+      printf '%s\n' "$out"
+      emitted=$((emitted + sz + 1))
+      continue
+    fi
+    omitted=$((omitted + 1))
+    # Whole section does not fit: name it in place so nothing vanishes silently.
+    # A named section is NOT counted again by the trailing summary — the summary
+    # covers only what could not even be named.
+    ph="$(clip "$head" 72) - OMITTED (${sz} B) - read $clipped_file"
+    sz="$(byte_len "$ph")"
+    if [ $((emitted + sz + 1)) -le "$reserve" ]; then
+      printf '%s\n' "$ph"
+      emitted=$((emitted + sz + 1))
+    else
+      unnamed=$((unnamed + 1))
+    fi
+  done
+
+  local diag=""
+  if [ "$unnamed" -gt 0 ]; then
+    printf '## ... +%d further section(s) omitted - read %s\n' "$unnamed" "$clipped_file"
+  fi
+  if [ "$omitted" -gt 0 ]; then
+    # Count against the sections that MATCHED, not every section in the file —
+    # "1 of 40" is misleading when --surface narrowed the set to two.
+    diag="lessons: $omitted of ${#kept[@]} section(s) omitted; raise --bytes or read $clipped_file"
+  fi
+  [ "$undated" -eq 0 ] || diag="${diag:+$diag; }lessons: $undated section(s) without a date sort last"
+  emit_diagnostic "$diag"
+  [ "$omitted" -eq 0 ] || return 3
+}
+
+cmd_archive_search() {
+  local pattern="" bytes=4000 limit=3 opts=true
+  # `--` ends option parsing so a literal pattern can start with a dash. Flags
+  # and shell options are among the most useful things to search this archive
+  # for, and without a terminator `archive-search --archive-inbound` is simply
+  # unrunnable.
+  while [ $# -gt 0 ]; do
+    if [ "$opts" = true ]; then
+      case "$1" in
+        --)      opts=false; shift; continue ;;
+        --bytes) shift; bytes="${1:-}"; shift; continue ;;
+        --limit) shift; limit="${1:-}"; shift; continue ;;
+        -?*)     usage_err "archive-search: unknown option '$(clip "$1")' (use -- before a literal pattern starting with '-')" ;;
+      esac
+    fi
+    [ -z "$pattern" ] || usage_err "archive-search: one pattern only"
+    pattern="$1"; shift
+  done
+  [ -n "$pattern" ] || usage_err "archive-search: a search pattern is required"
+  require_budget "$bytes" archive-search
+  case "$limit" in ''|*[!0-9]*) usage_err "archive-search: --limit must be a positive integer" ;; esac
+  [ "$limit" -gt 0 ] || usage_err "archive-search: --limit must be greater than zero"
+
+  local root arch matches sorted
+  root="$(main_repo_root)"; [ -n "$root" ] || usage_err "archive-search: not inside a git repository"
+  arch="$root/.comms/archive"
+  [ -d "$arch" ] || { emit_diagnostic "archive-search: no archive at $(clip "$arch")"; return 0; }
+
+  # Match-filter FIRST, then globally sort only the matches, then --limit. There
+  # is no arbitrary pre-cap: the sole pre-filter is "does this file match", which
+  # by construction cannot discard a newer *match*. The expensive per-file
+  # frontmatter parse therefore runs on the match set, not the whole archive.
+  matches="$(grep -rilF --include='*.md' -- "$pattern" "$arch" 2>/dev/null || true)"
+  [ -n "$matches" ] || { emit_diagnostic "archive-search: no archived message matches '$(clip "$pattern")'"; return 0; }
+  sorted="$(printf '%s\n' "$matches" | sort_paths_by_timestamp newest)"
+
+  local total considered=0 emitted=0 omitted=0 reserve summary_max f rel body hit sz
+  total="$(printf '%s\n' "$sorted" | grep -c . || true)"
+  summary_max="$(byte_len "... +${total} older match(es) omitted - refine the pattern or raise --bytes")"
+  reserve=$((bytes - summary_max - 1))
+  [ "$reserve" -gt 0 ] || reserve=0
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    considered=$((considered + 1))
+    if [ "$considered" -gt "$limit" ]; then omitted=$((omitted + 1)); continue; fi
+    rel="${f#"$root"/}"
+    # Repo-relative path, and it is placed BEFORE any clipping so the follow-up
+    # read stays directly actionable rather than pointing at a truncated path.
+    hit="$(printf '%s r%s %s %s %s' \
+      "$(frontmatter_field "$f" thread)" "$(frontmatter_field "$f" round)" \
+      "$(frontmatter_field "$f" verdict)" "$(frontmatter_field "$f" timestamp)" "$rel")"
+    body="$(grep -iF -m2 -A1 -- "$pattern" "$f" 2>/dev/null | sed 's/^/    /' || true)"
+    body="$(clip "$body" 400)"
+    sz="$(byte_len "$hit$body")"
+    if [ $((emitted + sz + 2)) -le "$reserve" ]; then
+      printf '%s\n' "$hit"
+      [ -z "$body" ] || printf '%s\n' "$body"
+      emitted=$((emitted + sz + 2))
+    else
+      omitted=$((omitted + 1))
+    fi
+  done <<< "$sorted"
+
+  if [ "$omitted" -gt 0 ]; then
+    printf '... +%d older match(es) omitted - refine the pattern or raise --bytes\n' "$omitted"
+    emit_diagnostic "archive-search: $omitted of $total match(es) omitted"
+    return 3
   fi
 }
 
@@ -912,8 +1156,12 @@ case "${1:-}" in
   stalled)   shift; cmd_stalled "$@" ;;
   bind)      shift; cmd_bind "$@" ;;
   clean)     shift; cmd_clean "$@" ;;
+  lessons)        shift; cmd_lessons "$@" ;;
+  archive-search) shift; cmd_archive_search "$@" ;;
   ""|help|-h|--help)
-    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    # Print the whole header comment block rather than a hardcoded line range —
+    # a fixed range silently truncates its own last entry as the block grows.
+    awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
     ;;
   *) die "unknown subcommand '${1}' — run 'comms.sh help'" ;;
 esac
