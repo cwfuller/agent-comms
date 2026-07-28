@@ -23,6 +23,7 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
    ```bash
    "$COMMS_SH" list --as codex
    ```
+   When continuing a specific loop, scope the read to that loop's thread so concurrent loops in this workspace can't consume each other's replies: `"$COMMS_SH" list --as codex --thread <thread>`.
    On an empty inbox the helper exits non-zero and reports the latest archived message on stderr. If the latest archived message is recent, tell the user: "No pending messages — [filename] was already processed (likely a late delivery nudge; harmless)." Otherwise say there are no messages from Claude for this workspace.
 
 3. Read the newest pending message for **each thread**, not only the globally newest
@@ -70,8 +71,9 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
 
 #### Round 1 — Full contextual review
 Use the "Review focus" and context provided by Claude to understand the scope, then review thoroughly:
-- **Consult recorded lessons first**: if the project has `docs/advisories.md` (or a friction log), check
-  it for entries touching the plan/implementation's surface. A plan that repeats a recorded lesson or
+- **Consult recorded lessons first** (bounded — a known token cost however large the log grows):
+  `"$COMMS_SH" lessons --surface "<keyword for this change's surface>"`. Exit 3 means "you have the
+  newest; older ones are named by path", not an error. A plan that repeats a recorded lesson or
   ignores a relevant advisory is a finding — cite the entry. This is cheap and catches the
   "system knowledge existed but wasn't consulted" class of issues.
 - `phase: plan` — Focus on: completeness, architecture decisions, missed requirements, risks, scalability concerns. Are all edge cases covered? Is the approach sound?
@@ -148,25 +150,7 @@ Do not request escalation, retry the wrapper, or resend after successful recover
 
 ## Message Format
 
-Messages are markdown files with frontmatter:
-
-```markdown
----
-type: review-request | response | question | ping | error
-from: claude
-timestamp: ISO 8601
-branch: branch-name
-head_sha: commit SHA at send time                         # optional but strongly recommended
-workspace: workspace-name
-cwd: /path/to/working/directory                     # if in a worktree, cd here before reviewing
-message_id: <filename sans .md>                      # protocol v2
-thread: <loop-slug>                                  # protocol v2 — constant across a loop; copy into replies
-in-reply-to: <message_id being answered>             # protocol v2 — when replying
-workflow: auto-plan | auto-implement | auto-full    # optional, triggers autonomous mode
-phase: plan | implement                              # optional
-round: 1                                             # optional
-max-rounds: 10                                       # optional
----
-```
-
-When several loops share one workspace, scope reads to your loop: `"$COMMS_SH" list --as codex --thread <thread>`.
+You are reading the frontmatter, not authoring it — `comms.sh validate` is authoritative and
+the reply schema you DO author lives in `$send-to-claude`. The full field reference is
+`docs/PROTOCOL.md` (and normatively `docs/loopspec/SPEC.md`); read it only if a field is
+unclear.

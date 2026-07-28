@@ -101,7 +101,7 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
    ```bash
    "$COMMS_SH" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"
    ```
-   If it returns `RESULT: blocked`, execute the exact `RECOVER:` line printed immediately above it once. That line uses direct approved `cmux` commands and reconciles thread state after they succeed. Relay only the final non-`delivered` result; do not retry through a shell wrapper or reconstruct the nudge yourself.
+   If it returns `RESULT: blocked`, follow **Sandbox & permissions** below — the single home for that path.
    <!-- loopspec:fragment result-headless-codex-side -->
    Exceptions in headless mode (`COMMS_DELIVERY=headless`): `RESULT: manual — headless mode: the reply is on disk...` is EXPECTED when you are the spawned peer (the driving session picks your reply up when your turn ends — do not retry). `RESULT: spawned` means a detached headless Claude turn is now processing your message: await the printed run dir (`.../runphase.sh await "<run dir>"`), then `$read-from-claude` for the reply; a non-zero await means the turn failed or timed out — check its `result.json` and report that instead of waiting.
    <!-- /loopspec:fragment -->

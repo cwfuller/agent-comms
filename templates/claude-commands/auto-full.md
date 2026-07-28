@@ -20,12 +20,17 @@ Full autonomous cycle: plan+review until approved, then implement+review until a
    ```
 
 3. **Start with the plan phase.** This works exactly like `/auto-plan` but with `workflow: auto-full`:
-   - **Consult past lessons FIRST** (the step that makes loops compound): read the project's
-     `docs/advisories.md` (if present) and its friction log for entries touching the task's surface, and
-     skim related prior threads in `$COMMS_ROOT/archive/` when the area has history. Apply what's
-     relevant and note it briefly in the plan (a one-line "Lessons applied: …"). Lessons are written at
-     approve-time precisely so they can be READ at plan-time — a plan that repeats a recorded lesson
-     wastes a review round.
+   - **Consult past lessons FIRST** (the step that makes loops compound) — both reads are
+     bounded, so this costs a known number of tokens no matter how large the log and archive grow:
+     ```bash
+     "$COMMS_SH" lessons --surface "<keyword for this task's surface>"   # newest advisories, ≤4k
+     "$COMMS_SH" archive-search "<keyword>"                             # newest prior threads, ≤4k
+     ```
+     Exit 3 means "you have the newest; older ones are named by path" — not an error. Drop
+     `--surface` to see the newest lessons regardless of surface. Apply what's relevant and note it
+     briefly in the plan (a one-line "Lessons applied: …"). Lessons are written at approve-time
+     precisely so they can be READ at plan-time — a plan that repeats a recorded lesson wastes a
+     review round.
    - Create the plan
    - Write the message to `$COMMS_ROOT/to-codex/` with filename `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-full-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions); use a quoted heredoc (`<<'EOF'`) or a non-interpolating tool
    - `thread` names this loop and stays constant across every message in the cycle; replies copy it. `message_id` is the filename sans `.md`
@@ -46,7 +51,6 @@ workflow: auto-full
 phase: plan
 round: 1
 max-rounds: <N>
-status: in-progress
 ---
 
 ## What was done

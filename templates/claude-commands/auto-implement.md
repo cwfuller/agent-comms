@@ -22,8 +22,10 @@ No separate plan is reviewed here — but the handoff includes a short `## Inten
    ```
 
 3. **Implement the code.** Based on the task description or existing plan:
-   - **Consult past lessons FIRST**: read the project's `docs/advisories.md` (if present) and its
-     friction log for entries touching this surface — repeating a recorded lesson wastes a review round.
+   - **Consult past lessons FIRST** (bounded — a known token cost however large the log grows):
+     `"$COMMS_SH" lessons --surface "<keyword for this surface>"`. Exit 3 means "you have the
+     newest; older ones are named by path", not an error. Repeating a recorded lesson wastes a
+     review round.
    - Read any referenced plan files
    - Implement the changes
    - Run any relevant tests or type checks
@@ -53,7 +55,6 @@ workflow: auto-implement
 phase: implement
 round: 1
 max-rounds: <N>
-status: in-progress
 ---
 
 ## Intent / approach

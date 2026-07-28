@@ -64,8 +64,8 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    - If `workflow: auto-full` and `phase: plan` → **Transition to implement phase:**
      - **Archive the approval message first** (`"$COMMS_SH" archive --as claude "<file>"`) — this prevents a re-triggered `/read-from-codex` from re-reading the stale approval and double-firing the implement phase
      - Notify user: "Plan approved after N rounds. Starting implementation..."
-     - Consult `docs/advisories.md` (if present) for lessons touching the implementation area — the plan
-       was lesson-checked at draft time, but implementation surfaces new specifics
+     - `"$COMMS_SH" lessons --surface "<implementation area>"` (bounded) — the plan was
+       lesson-checked at draft time, but implementation surfaces new specifics
      - Implement the approved plan
      - **Live-validate when the change is model- or runtime-coupled** (a model call, network API,
        daemon): run the real surface once before handing off — green unit tests alone have shipped
@@ -104,11 +104,6 @@ Read and act on messages from Codex in `.comms/to-claude/`.
      Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the Codex turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
      <!-- /loopspec:fragment -->
 
-**Review protocol for autonomous loops:**
-- Default to a pass-oriented loop. `REQUEST_CHANGES` means blocking issues only.
-- Advisory notes can appear with `APPROVE`; they should not force another round by themselves.
-- Stable review context is useful. Fix narration is not.
-
 ---
 
 ## Known failure modes (compounding section — when a loop teaches a new one, add it HERE)
@@ -118,9 +113,6 @@ friction log. The update rule: when process friction recurs or a new failure mod
 TEMPLATE in the agent-comms repo (`templates/claude-commands/read-from-codex.md`) and re-copy to the
 installed location(s) — an installed-only edit is lost on the next install.
 
-- **Late delivery nudge** (also in step 2): the injected `/read-from-codex` queues while a turn is
-  running and submits minutes later — an empty inbox whose latest archive matches the thread is a
-  harmless replay, not a lost message.
 - **Truncate-before-read when post-processing a written message file.** Substituting placeholders with a
   one-liner that opens the WRITE handle before reading the same file (e.g.
   `open(p,"w").write(open(p).read().replace(...))` evaluated left-to-right) TRUNCATES the file first →
@@ -130,8 +122,6 @@ installed location(s) — an installed-only edit is lost on the next install.
   surface (model latency/behavior, network API shape, daemon lifecycle) can pass every unit test and
   still fail live — observed: an item-count cap passed all suites while the real model call still
   stalled (the premise was size, not count). Live-validate once before the implement handoff.
-- **Same-second filename collisions** (also in the reply spec): two messages written in the same second
-  need the `$RANDOM` suffix or the second silently shadows the first.
 
 ---
 
