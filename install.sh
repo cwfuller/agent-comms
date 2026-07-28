@@ -284,12 +284,38 @@ init_project_state() {
     echo "  created .gitignore with .comms/, .codex/AGENTS.md, .agent-comms/"
   fi
 
-  # Add protocol section to .codex/AGENTS.md if not already present
-  AGENTS_MD="$PROJECT_ROOT/.codex/AGENTS.md"
-  if [ -f "$AGENTS_MD" ]; then
-    if ! grep -qF 'Agent Communication Protocol' "$AGENTS_MD"; then
-      cat >> "$AGENTS_MD" << 'PROTOCOL'
+  install_agents_block "$PROJECT_ROOT/.codex/AGENTS.md"
+}
 
+# --- .codex/AGENTS.md managed block -----------------------------------------
+# This file is loaded by Codex on every turn, so it pays for itself in tokens
+# every round. It only needs to NAME the entry points — the skills themselves
+# carry the protocol. The old block restated them (and drifted from them).
+#
+# Rewriting a file the user may have hand-edited is the risk here, so ownership
+# is proven, never assumed: a marked block is ours, an unmarked block is ours
+# only if it still matches byte-for-byte what an installer wrote, and anything
+# else is left alone with a note.
+AGENTS_BEGIN='<!-- agent-comms:begin -->'
+AGENTS_END='<!-- agent-comms:end -->'
+
+agents_block_body() {
+  cat << 'PROTOCOL'
+## Agent Communication Protocol
+
+Local file-based message queue between Claude Code and Codex.
+
+- **Your inbox:** `.comms/to-codex/` — read it with `$read-from-claude`
+- **Your outbox:** `.comms/to-claude/` — write your findings with `$send-to-claude`
+
+Those two skills carry the protocol itself (message format, verdicts, delivery,
+recovery). This block only names the entry points.
+PROTOCOL
+}
+
+# The exact text previous installers wrote. Ownership evidence — do not edit.
+legacy_block_body() {
+  cat << 'PROTOCOL'
 ## Agent Communication Protocol
 
 This project uses a local file-based message queue for communication between Claude Code and Codex, with optional cmux auto-delivery.
@@ -305,28 +331,134 @@ This project uses a local file-based message queue for communication between Cla
 
 When the user asks you to "check for messages from Claude" or "review what Claude did", use `$read-from-claude`. After completing a review, use `$send-to-claude` to send your findings back.
 PROTOCOL
-      echo "  added protocol section to .codex/AGENTS.md"
+}
+
+# Emit "B<line>" / "E<line>" for marker lines that are REAL — exact full lines
+# outside any fenced code block — plus "UNCLOSED" if a fence never closes.
+#
+# Fence awareness is not pedantry: a marker line inside a ```markdown example is
+# documentation ABOUT the block, not the block itself, and treating it as owned
+# deletes the user's example (reproduced). Fences follow the CommonMark rule —
+# a closing fence uses the same character, is at least as long as the opener,
+# and carries no info string — so a longer outer fence wrapping a shorter inner
+# one nests correctly instead of closing early.
+marker_scan() {
+  awk -v b="$1" -v e="$2" '
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      if (match(line, /^[ \t]*(```+|~~~+)/)) {
+        m = line; sub(/^[ \t]*/, "", m)
+        match(m, /^(`+|~+)/); tok = substr(m, 1, RLENGTH)
+        ch = substr(tok, 1, 1); len = length(tok)
+        rest = substr(m, RLENGTH + 1)
+        if (!infence) { infence = 1; fch = ch; flen = len }
+        else if (ch == fch && len >= flen && rest ~ /^[ \t]*$/) { infence = 0 }
+        next
+      }
+      if (infence) next
+      if (line == b) print "B" NR
+      else if (line == e) print "E" NR
+    }
+    END { if (infence) print "UNCLOSED" }
+  ' "$3"
+}
+
+# Trailing whitespace and surrounding blank lines only — never content.
+norm_block() {
+  sed -e 's/[[:space:]]*$//' \
+    | awk '{ l[NR] = $0 }
+      END { s = 1; while (s <= NR && l[s] == "") s++
+            e = NR; while (e >= 1 && l[e] == "") e--
+            for (i = s; i <= e; i++) print l[i] }'
+}
+
+install_agents_block() {
+  local f="$1" tmp begin_n end_n start_n next_n
+  mkdir -p "$(dirname "$f")"
+
+  if [ ! -f "$f" ]; then
+    { echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"; } > "$f"
+    echo "  created .codex/AGENTS.md with the managed agent-comms block"
+    return 0
+  fi
+
+  # Markers are recognized as EXACT FULL LINES and counted, because neither a
+  # substring match nor a first-occurrence match is evidence of ownership:
+  #   - `grep -F` matches marker text quoted inside a user's Markdown example,
+  #     so an unrelated file reads as owned and its content gets replaced;
+  #   - taking only the first begin/end of several spans a nested or duplicated
+  #     pair, deleting everything between them and orphaning the extra marker.
+  # Both were reproduced as real user-content loss. Ownership therefore requires
+  # exactly one begin, exactly one end, in that order; anything else is
+  # ambiguous and the file is left byte-identical.
+  local scan begin_ct end_ct
+  scan="$(marker_scan "$AGENTS_BEGIN" "$AGENTS_END" "$f")"
+
+  # An unclosed fence makes "inside or outside a code block" undecidable, so
+  # every marker below it is ambiguous. Fail safe rather than guess.
+  if printf '%s\n' "$scan" | grep -qx 'UNCLOSED'; then
+    echo "  WARNING: .codex/AGENTS.md has an unclosed fenced code block — left untouched."
+    echo "           Close the fence, then re-run install."
+    return 0
+  fi
+
+  begin_ct="$(printf '%s\n' "$scan" | grep -c '^B' || true)"; begin_ct="${begin_ct:-0}"
+  end_ct="$(printf '%s\n' "$scan" | grep -c '^E' || true)"; end_ct="${end_ct:-0}"
+  begin_n="$(printf '%s\n' "$scan" | grep '^B' | head -1 | tr -d 'B' || true)"
+  end_n="$(printf '%s\n' "$scan" | grep '^E' | head -1 | tr -d 'E' || true)"
+
+  # Ours by marker → idempotent replace. A repeat install is a no-op diff.
+  if [ "$begin_ct" -eq 1 ] && [ "$end_ct" -eq 1 ] && [ "$begin_n" -lt "$end_n" ]; then
+    tmp="$(mktemp)"
+    {
+      [ "$begin_n" -gt 1 ] && sed -n "1,$((begin_n - 1))p" "$f"
+      echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"
+      sed -n "$((end_n + 1)),\$p" "$f"
+    } > "$tmp"
+    if cmp -s "$tmp" "$f"; then
+      rm -f "$tmp"; echo "  .codex/AGENTS.md block already current (no-op)"
     else
-      echo "  .codex/AGENTS.md already has protocol section"
+      mv "$tmp" "$f"; echo "  refreshed the managed block in .codex/AGENTS.md"
     fi
+    return 0
+  fi
+
+  # Any other marker shape — one-sided, duplicated, nested, or out of order —
+  # is ambiguous. Guessing eats user content, so nothing is written.
+  if [ "$begin_ct" -gt 0 ] || [ "$end_ct" -gt 0 ]; then
+    echo "  WARNING: .codex/AGENTS.md has an ambiguous agent-comms marker shape" \
+         "(begin=$begin_ct end=$end_ct) — left untouched."
+    echo "           Leave exactly one begin marker above exactly one end marker,"
+    echo "           each on its own line, then re-run install."
+    return 0
+  fi
+
+  # Fence-aware for the same reason as the markers: a legacy block quoted in a
+  # documentation fence is an example, not the project's live instructions.
+  start_n="$(marker_scan '## Agent Communication Protocol' "$(printf '\001')" "$f" | grep '^B' | head -1 | tr -d 'B' || true)"
+  if [ -z "$start_n" ]; then
+    { echo ""; echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"; } >> "$f"
+    echo "  added the managed agent-comms block to .codex/AGENTS.md"
+    return 0
+  fi
+
+  next_n="$(awk -v s="$start_n" 'NR > s && /^## / { print NR; exit }' "$f")"
+  [ -n "$next_n" ] || next_n=$(( $(wc -l < "$f") + 1 ))
+
+  if [ "$(sed -n "${start_n},$((next_n - 1))p" "$f" | norm_block)" = "$(legacy_block_body | norm_block)" ]; then
+    tmp="$(mktemp)"
+    {
+      [ "$start_n" -gt 1 ] && sed -n "1,$((start_n - 1))p" "$f"
+      echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"
+      sed -n "${next_n},\$p" "$f"
+    } > "$tmp"
+    mv "$tmp" "$f"
+    echo "  migrated the legacy .codex/AGENTS.md section to a managed block"
   else
-    cat > "$AGENTS_MD" << 'PROTOCOL'
-## Agent Communication Protocol
-
-This project uses a local file-based message queue for communication between Claude Code and Codex, with optional cmux auto-delivery.
-
-- **Your inbox:** `.comms/to-codex/` — Claude writes review requests and responses here
-- **Your outbox:** `.comms/to-claude/` — Write your findings and feedback here
-
-**Skills:**
-- `$read-from-claude` — Read the latest message from Claude Code and act on it
-- `$send-to-claude` — Write your findings back to Claude Code and auto-deliver via cmux when available
-
-**Auto-delivery:** When `cmux` is available, `$send-to-claude` automatically types `/read-from-codex` into Claude's pane. Without `cmux`, messages are still written to `.comms/` for manual pickup.
-
-When the user asks you to "check for messages from Claude" or "review what Claude did", use `$read-from-claude`. After completing a review, use `$send-to-claude` to send your findings back.
-PROTOCOL
-    echo "  created .codex/AGENTS.md with protocol section"
+    echo "  NOTE: .codex/AGENTS.md's protocol section has been hand-edited — left untouched."
+    echo "        To adopt the smaller managed block, wrap or replace that section with:"
+    echo "          $AGENTS_BEGIN ... $AGENTS_END"
   fi
 }
 
@@ -370,6 +502,11 @@ case "$SCOPE" in
   global)
     install_global_assets
     warn_local_shadowing
+    # Global scope installs reusable assets only — it never touches a project's
+    # files, so an existing .codex/AGENTS.md keeps whatever block it has.
+    echo ""
+    echo "  note: .codex/AGENTS.md is per-project and was not touched."
+    echo "        Re-run with --scope=project (or both) inside a repo to migrate it."
     ;;
   project)
     init_project_state

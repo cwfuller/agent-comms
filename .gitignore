@@ -1,5 +1,4 @@
 # Local agent communication
 .comms/
-
-# Local agent communication
 .codex/AGENTS.md
+.agent-comms/
