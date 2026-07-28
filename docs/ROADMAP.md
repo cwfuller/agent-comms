@@ -168,6 +168,25 @@ last delivery wasn't a real nudge.
 
 ## Friction log (meta-channel feedback + live-loop observations)
 
+- *2026-07-28, thread `token-efficiency-23269` (auto-full, 4 plan + 3 implement rounds,
+  approved):* the loop's own transport was the loudest source of friction, twice observed
+  from the Codex side: **4 then 6 identical `/read-from-codex` commands queued in Claude's
+  input box** while a long turn ran. Each handoff reported `delivered` because cmux accepted
+  the keystrokes; none was pickup. This generalizes the known single "phantom
+  /read-from-codex" entry from *benign replay* to *unbounded accumulation*, and it shares a
+  root cause with two other open items (`delivered` on an unverified pane fallback; no
+  `RECOVER:` chain on the `manual` lane). Fix shape: coalesce/debounce when a reader command
+  for the same target is already queued, or detect a busy target and defer. Recorded in
+  docs/advisories.md with the rest of the loop's carry-over.
+- *2026-07-28, same loop (process win):* the review caught three data-loss paths in an
+  installer rewrite that the implementation's own test suite passed cleanly — nested/duplicate
+  markers, marker text quoted inline, and marker lines inside a **fenced code block**. All
+  three were user-content destruction, and each was found by the reviewer *constructing a file
+  the author had not imagined* rather than by reading the diff. Lesson: when a change rewrites
+  a file the user may have edited, ownership must be **proven** (exact full lines, counted,
+  fence-aware) rather than **pattern-matched** — and the fixtures must assert byte-identity of
+  the whole file, not the survival of a sentinel string.
+
 - *2026-07-28, asymmetric Codex sandbox incident:* nested `comms.sh` and the documented
   `/bin/zsh -lc` wrapper both remained socket-blocked, while direct approved
   `cmux send`/`send-key` succeeded. Fix: blocked delivery now emits one direct `RECOVER:`

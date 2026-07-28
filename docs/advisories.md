@@ -1,5 +1,55 @@
 # Advisory carry-over
 
+Un-actioned advisory findings from APPROVE-terminated review loops, so they survive
+the loop's end (protocol v2 convention — see read-from-codex's APPROVE branch).
+
+Reader output is newest-first. Agents read this file through `comms.sh lessons`, which
+emits whole `## ` sections up to a byte budget, ordered by the date in each heading — so
+physical order here may be mixed and writers may append or prepend freely. A section
+whose heading carries no `YYYY-MM-DD` sorts last (but is never dropped).
+
+## 2026-07-28 — thread `token-efficiency-23269` (auto-full, plan r4 + implement r3, approved)
+
+Bounded the two unbounded runtime reads and trimmed hot-path instruction text. Findings the
+loop produced that are NOT actioned by it, so they survive its end:
+
+- **Queued-nudge accumulation** (DEFERRED, observed live, twice — 4 then 6 identical
+  `/read-from-codex` in one input box): the cmux nudge is keystroke injection, so every
+  round handoff while Claude is mid-turn enqueues *another* copy. Each reported `delivered`
+  because cmux accepted the keys; none represented pickup. Worse than the known single
+  late-nudge case because it accumulates without bound. Fix shape: detect a busy target or
+  an already-queued reader command and coalesce/debounce instead of enqueueing.
+- **`RESULT: manual` emits no `RECOVER:` chain** (DEFERRED): "active cmux + unreadable tree +
+  no cached binding" makes `pick_surface` return empty and `cmd_deliver` bail *before* the
+  RECOVER emit, so the 2026-07-28 recovery work never fires on a cold `.comms/.cache`. The
+  harness is blind to it: the cmux stub's `tree` arm always succeeds and the sandbox
+  assertions run right after a `bind`. Fix shape: classify the tree-read failure and emit
+  direct `cmux tree` → `bind <target> surface:N` → `deliver`, which primes the cache
+  permanently.
+- **`RESULT: delivered` on an unverified pane fallback** (DEFERRED): the first-other-pane
+  guess collapses into plain `delivered`. Caching the guess makes rounds 2+ report `bound`,
+  so provenance must be recorded in the cache before the RESULT mapping can change.
+- **Read-only workspace resolution costs ~2.6 s per call under the Codex sandbox**
+  (DEFERRED, reported every round of this loop): full `cmux tree` retry/backoff runs before
+  the cached fallback. Consider cache-first resolution, keeping backoff only for genuinely
+  transient empty output.
+- **`send-to-codex.md` has no workflow-carry-over guard** (DEFERRED): `send-to-claude/SKILL.md:29`
+  has one; `send-to-codex.md` does not, and its frontmatter block carries no
+  workflow/phase/round/thread. Such a reply validates clean and drops out of the loop. Live
+  on the interactive path and the headless claude leg.
+- **A verdict-less workflow reply falls through every termination branch** (DEFERRED):
+  `comms.sh` binds the verdict requirement to `type: review-feedback` (correct per SPEC), but
+  both prompts state the superseded *sender* rule. Fix the Claude-side empty-verdict branch
+  first — it closes the hole regardless of what the Codex prompt says.
+- **`runphase` timeout is wall-clock-only with no salvage** (DEFERRED): gates the cmux-default
+  flip. Idle-detection on `events.ndjson` plus printing the recorded session id for
+  `codex resume` / `claude --resume`.
+- **`status` fires ACTION NEEDED on healthy `spawned`/`held` threads** (DEFERRED): the gate
+  ignores `last_delivery` and hardcodes 900 s against 15–60 min turns.
+- **`sorted_message_files` made `status`/`list` O(archive)** (DEFERRED): ~10 ms per archived
+  file; ~0.9 s at 49 files, ~17 s at 1200. Not urgent; fix by stopping at the first match for
+  the single-file archive hint rather than capping the window.
+
 ## 2026-07-28 — asymmetric Codex sandbox delivery incidents
 
 - **Resolved:** `/bin/zsh -lc` is no longer presented as a universal sandbox escape.
@@ -83,9 +133,6 @@ Dogfooded headless delivery end-to-end on symphony's maintenance-audit arc (thre
   until the thread's next `send`.
 - **Surface-id reuse during optimistic delivery** — documented as accepted residual risk
   in PROTOCOL.md (identity is unverifiable without a tree read).
-
-Un-actioned advisory findings from APPROVE-terminated review loops, so they survive
-the loop's end (protocol v2 convention — see read-from-codex APPROVE branch).
 
 ## 2026-06-04 — thread `protocol-v2-9331` (PR 3, auto-implement, approved r3)
 
