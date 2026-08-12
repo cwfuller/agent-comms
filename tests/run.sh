@@ -101,6 +101,18 @@ window window:1 [current] ◀ active
 TREE
 WS_MODERN="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$MODERN_WS_ID" "$COMMS" workspace)"
 [ "$WS_MODERN" = "modern-project" ] && ok "workspace parses current cmux tree shape with UUID env id" || fail "current cmux tree parse (got $WS_MODERN)"
+# A successful but decorated parse must not overwrite an established identity.
+cat > "$CMUX_STUB_DIR/tree-$MODERN_WS_ID.txt" <<'TREE'
+workspace workspace:14 "⠐ Review Modern Project PRD"
+TREE
+WS_DECORATED="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$MODERN_WS_ID" "$COMMS" workspace)"
+[ "$WS_DECORATED" = "modern-project" ] && ok "cmux spinner title cannot overwrite cached workspace identity" || fail "decorated title changed identity (got $WS_DECORATED)"
+[ "$(cat "$REPO_FIX/.comms/.cache/ws-$MODERN_WS_ID")" = "modern-project" ] && ok "decorated title leaves authoritative cache unchanged" || fail "decorated title poisoned cache"
+SPINNER_MSG="$REPO_FIX/.comms/to-claude/modern-project_spinner-regression.md"
+printf '%s\n' pending > "$SPINNER_MSG"
+SPINNER_LIST="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$MODERN_WS_ID" "$COMMS" list --as claude)"
+[ "$SPINNER_LIST" = "$SPINNER_MSG" ] && ok "spinner title cannot hide a scoped pending message" || fail "spinner title hid pending message (got $SPINNER_LIST)"
+rm -f "$SPINNER_MSG"
 if command -v zsh >/dev/null 2>&1; then
   WS_ZSH="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID zsh -c "\"$COMMS\" workspace")"
   [ "$WS_ZSH" = "feature-helper-tests" ] && ok "helper is caller-shell agnostic (zsh)" || fail "helper under zsh (got $WS_ZSH)"
@@ -178,6 +190,11 @@ echo "== comms.sh: list =="
 check_not "list exits non-zero on empty inbox" run_comms list --as claude
 LIST_ERR="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as claude) 2>&1 1>/dev/null || true)"
 echo "$LIST_ERR" | grep -q "latest archived" && ok "empty inbox reports latest archived (late-nudge UX)" || fail "empty inbox reports latest archived (got: $LIST_ERR)"
+UNMATCHED="$REPO_FIX/.comms/to-claude/other-workspace_pending.md"
+printf '%s\n' pending > "$UNMATCHED"
+LIST_MISMATCH="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as claude) 2>&1 1>/dev/null || true)"
+echo "$LIST_MISMATCH" | grep -q "possible workspace identity mismatch" && ok "empty scoped list warns when unmatched inbox files exist" || fail "unmatched inbox warning (got: $LIST_MISMATCH)"
+rm -f "$UNMATCHED"
 
 echo "== comms.sh: latest archive is direction/thread/time aware =="
 ARCH_OLD="$REPO_FIX/.comms/archive/feature-helper-tests_z-round-6.md"
@@ -564,6 +581,13 @@ WS_EMPTY_RC=$?
 (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" workspace) >/dev/null
 WS_STICKY="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" workspace) 2>/dev/null )"
 [ "$WS_STICKY" = "test-project" ] && ok "cached identity survives a flaky tree (no atlas/master flap)" || fail "cached identity sticks (got: $WS_STICKY)"
+# Recover a cache already poisoned by an auto-title spinner. On the fixture's
+# feature branch, the stable repo-derived fallback is feature-helper-tests.
+POISON_WS_ID="workspace:spinner-poison"
+printf '%s' '⠐-review-helper-tests' > "$REPO_FIX/.comms/.cache/ws-workspace_spinner-poison"
+WS_REPAIRED="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$POISON_WS_ID" CMUX_STUB_TREE_EMPTY=1 "$COMMS" workspace) 2>/dev/null )"
+[ "$WS_REPAIRED" = "feature-helper-tests" ] && ok "decorated cache is rejected and repaired from repo identity" || fail "decorated cache repair (got: $WS_REPAIRED)"
+[ "$(cat "$REPO_FIX/.comms/.cache/ws-workspace_spinner-poison")" = "feature-helper-tests" ] && ok "repaired identity replaces poisoned cache" || fail "poisoned cache not replaced"
 
 echo "== comms.sh v2.1: surface binding =="
 check "bind sets an explicit surface" env -u X bash -c "cd '$REPO_FIX' && PATH='$STUB_BIN:$PATH' CMUX_WORKSPACE_ID=workspace:10 '$COMMS' bind claude surface:11"

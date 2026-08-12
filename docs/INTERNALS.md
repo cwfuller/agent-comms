@@ -67,12 +67,13 @@ Why it's this way (each reason independently sufficient):
 
 ## Workspace resolution
 
-One algorithm, one implementation (`comms.sh workspace`): cmux workspace title
-(`workspace workspace:<ref> "title"` plus current selection/active suffixes) → git
-branch → repo directory name; lowercased, spaces/slashes hyphenated. A UUID-valued
-`CMUX_WORKSPACE_ID` is valid. Cached fallback warnings say unavailable *or*
-unparseable because a nested helper can be socket-blocked even when direct
-`cmux tree` succeeds.
+One algorithm, one implementation (`comms.sh workspace`): an undecorated cmux title
+is cached under stable `CMUX_WORKSPACE_ID`; that mapping is authoritative for the
+workspace lifetime. Empty or unparseable titles fall back without poisoning the cache;
+status-decorated titles use the git branch (or repository name on a generic default
+branch) to seed or repair it.
+This prevents auto-title spinner frames from changing message and state prefixes.
+An empty scoped listing warns when unmatched files still exist in the physical inbox.
 
 ### Two root resolvers — deliberately not unified
 

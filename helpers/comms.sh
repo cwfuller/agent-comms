@@ -163,43 +163,65 @@ cache_path() {  # cache_path <kind> — per-cmux-workspace cache file; fails out
   echo "$root/.comms/.cache/${1}-$(safe_name "$CMUX_WORKSPACE_ID")"
 }
 
+stable_workspace_name() {
+  # cmux auto-titles busy workspaces from the active surface, including a
+  # rotating leading status glyph. Only undecorated names may seed identity.
+  case "$1" in [[:alnum:]]*) return 0 ;; *) return 1 ;; esac
+}
+
+repo_workspace_name() {
+  local ws root_name
+  ws="$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')"
+  root_name="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')"
+  # An auto-titled cmux workspace on a generic default branch should inherit
+  # the stable repository name, not the UI title currently shown by cmux.
+  if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+    case "$ws" in main|master|trunk|develop|"") ws="$root_name" ;; esac
+  fi
+  printf '%s\n' "${ws:-$root_name}"
+}
+
 cmd_workspace() {
-  local ws="" cachef=""
+  local ws="" cached="" cachef="" repair_cache=false
   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
+    cachef="$(cache_path ws || true)"
+    if [ -n "$cachef" ] && [ -f "$cachef" ]; then
+      cached="$(cat "$cachef" 2>/dev/null || true)"
+      if stable_workspace_name "$cached"; then
+        # CMUX_WORKSPACE_ID is the stable identity; its first valid name is an
+        # authoritative mapping. A changing display title must never overwrite it.
+        echo "$cached"
+        return 0
+      fi
+      if [ -n "$cached" ]; then
+        echo "warning: ignoring decorated cached workspace '$cached'" >&2
+        repair_cache=true
+      fi
+    fi
     # Failure-tolerant parse: an empty or unmatched tree must fall through —
     # without the || true, pipefail+set -e silently kills the whole helper.
     ws="$(cmux_tree \
       | sed -nE 's/.*workspace workspace:[^[:space:]]+[[:space:]]+"([^"]*)".*/\1/p' \
       | head -1 \
       | tr ' ' '-' | tr '[:upper:]' '[:lower:]' || true)"
-    cachef="$(cache_path ws || true)"
-    if [ -n "$ws" ]; then
-      # Cache the identity per cmux workspace: one good resolution sticks, so a
-      # later flaky tree read can't flap the name mid-loop (and split state files).
+    if stable_workspace_name "$ws"; then
       if [ -n "$cachef" ]; then
         { mkdir -p "$(dirname "$cachef")" && printf '%s' "$ws" > "$cachef"; } 2>/dev/null || true
       fi
       echo "$ws"
       return 0
     fi
-    if [ -n "$cachef" ] && [ -f "$cachef" ]; then
-      ws="$(cat "$cachef" 2>/dev/null || true)"
-      if [ -n "$ws" ]; then
-        echo "warning: cmux tree unavailable or unparseable — using cached workspace '$ws'" >&2
-        echo "$ws"
-        return 0
-      fi
+    if [ -n "$ws" ]; then
+      echo "warning: ignoring decorated cmux workspace title '$ws'" >&2
+      repair_cache=true
     fi
   fi
-  ws=$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-  [ -n "$ws" ] || ws=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')
-  # Sanity check: under cmux the workspace should not be a generic branch name.
+  ws="$(repo_workspace_name)"
   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
-    case "$ws" in
-      main|master|trunk|develop)
-        echo "warning: cmux is active but workspace resolved to '$ws' — cmux tree was unavailable or unparseable" >&2
-        ;;
-    esac
+    echo "warning: cmux title unavailable, unparseable, or decorated — using repo-derived workspace '$ws'" >&2
+    if [ "$repair_cache" = true ] && [ -n "$cachef" ]; then
+      { mkdir -p "$(dirname "$cachef")" && printf '%s' "$ws" > "$cachef"; } 2>/dev/null || true
+    fi
   fi
   echo "$ws"
 }
@@ -230,6 +252,11 @@ cmd_list() {
   if [ -n "$files" ]; then
     echo "$files"
   else
+    local unmatched_count
+    unmatched_count="$(find "$root/$inbox" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ' || true)"
+    if [ "${unmatched_count:-0}" -gt 0 ]; then
+      echo "warning: inbox contains $unmatched_count pending message(s) that do not match resolved workspace '$ws' — possible workspace identity mismatch" >&2
+    fi
     # Late delivery nudges for already-processed replies are common. Scope the
     # hint to messages that actually came TO this reader and, when supplied, to
     # this thread; otherwise an unrelated archive can masquerade as the reply.
