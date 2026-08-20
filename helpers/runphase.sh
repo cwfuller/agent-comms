@@ -179,7 +179,7 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
 update_thread_state() {
   local thread="$1" status="$2" sid="$3" field="${4:-codex_thread_id}"
   local ws sf root
-  [ -n "$thread" ] || return 0   # one-shot message (e.g. /ask-codex): no state
+  [ -n "$thread" ] || return 0   # one-shot message (e.g. /ask, or the legacy /ask-codex alias): no state
   ws="$("$COMMS" workspace 2>/dev/null)" || return 0
   root="$("$COMMS" root 2>/dev/null)" || return 0
   sf="$root/state/$(safe_name "$ws")_$(safe_name "$thread").json"

@@ -21,7 +21,7 @@ else
 fi
 CLAUDE_COMMANDS_DIR="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
-CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md fleet.md"
+CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask.md ask-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md fleet.md"
 CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
@@ -525,11 +525,11 @@ echo ""
 echo "  done! installed:"
 case "$SCOPE" in
   local)
-    echo "    Project Claude: /send-to-codex, /read-from-codex, /ask-codex, /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
+    echo "    Project Claude: /send-to-codex, /read-from-codex, /ask, /ask-codex (deprecated), /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
     echo "    Project Codex:  \$read-from-claude, \$send-to-claude"
     ;;
   global)
-    echo "    Global Claude: /send-to-codex, /read-from-codex, /ask-codex, /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
+    echo "    Global Claude: /send-to-codex, /read-from-codex, /ask, /ask-codex (deprecated), /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
     echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh,runphase.sh}"
     ;;
@@ -537,7 +537,7 @@ case "$SCOPE" in
     echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
     ;;
   both)
-    echo "    Global Claude: /send-to-codex, /read-from-codex, /ask-codex, /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
+    echo "    Global Claude: /send-to-codex, /read-from-codex, /ask, /ask-codex (deprecated), /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
     echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh,runphase.sh}"
     echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"

@@ -49,7 +49,7 @@ socket. See [Codex socket permissions](docs/INSTALL.md#codex-socket-permissions)
 | `/auto-implement <task>` | implement → review → fix, until approved |
 | `/auto-plan <task>` | plan → review → refine, until approved |
 | `/auto-full <task>` | plan loop, then implement loop |
-| `/ask-codex <question>` | one-off question — judgment call, no review framing |
+| `/ask [agent] <question>` | one-off question — judgment call, no review framing; bare `/ask` sends an informal "thoughts?" consult on the current discussion (`/ask-codex` is a deprecated alias) |
 | `/send-to-codex` | one-shot review request for work you just did |
 | `/read-from-codex` | read + act on Codex's reply |
 | `/fleet <subcommand>` | orchestrate loops across many cmux workspaces |

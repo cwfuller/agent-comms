@@ -390,7 +390,8 @@ track below (single multi-agent `/ask`); the payload/behavior spec here still st
 - [ ] **Bare `/ask-codex` = informal consult**: replace the current no-arg prompt-back
   with: package the current discussion and ask for Codex's take. Template-only edit to
   `ask-codex.md` step 1.
-- [ ] **Payload is a verbatim excerpt, not a summary** (user-confirmed): at MINIMUM the
+- [x] **Payload is a verbatim excerpt, not a summary** (user-confirmed; shipped
+  2026-08-20 in ask.md): at MINIMUM the
   user's last question and the assistant message answering it — the question is what
   Codex is opining on, the answer alone reads as a statement with no ask. Going further
   back is Claude's judgment when the topic spans turns. Pasted verbatim under
@@ -400,13 +401,14 @@ track below (single multi-agent `/ask`); the payload/behavior spec here still st
   report — Codex reacts to the actual material, not Claude's re-framing of it. Claude's
   own take is already IN the excerpt, so skip `## Current Thinking` unless there's
   something genuinely new to add.
-- [ ] **`## Question` body**: literally informal — "Thoughts? Informal take requested on
+- [x] **`## Question` body** (shipped 2026-08-20): literally informal — "Thoughts? Informal take requested on
   the discussion below." No review framing, no findings structure asked for; Codex's
   existing `type: question` → `type: response` path (send-to-claude SKILL step 4)
   already handles it with no verdict.
-- [ ] **Keep the existing guardrails**: same frontmatter (no workflow fields), same
-  single-shot rule, same "don't stretch into review territory" note — an informal
-  consult that starts asking for blocking findings should redirect to `/send-to-codex`.
+- [x] **Keep the existing guardrails** (shipped 2026-08-20 in ask.md): same frontmatter
+  (no workflow fields), same single-shot rule, same "don't stretch into review
+  territory" note — an informal consult that starts asking for blocking findings
+  should redirect to `/send-to-codex`.
 
 ## Multi-agent track (2026-08-20)
 
@@ -458,11 +460,16 @@ command shape evolves:
 
 - [ ] `/ask <agent> <question>` — first word validated against the agent registry names
   the target; not an agent name → the whole text is a question to the DEFAULT agent
-  (codex, set in `.comms/config`)
-- [ ] bare `/ask` (or `/ask <agent>` alone) → thoughts mode per the informal-consult spec
-  (verbatim excerpt, floor = user's last question + the answering message)
-- [ ] `/ask-codex` becomes a thin deprecated alias for one transition release, then drops
+  (codex, set in `.comms/config`) — *partially delivered 2026-08-20 (hard-coded
+  known-agents seam in ask.md); registry semantics land with the multi-agent core*
+- [x] bare `/ask` (or `/ask <agent>` alone) → thoughts mode per the informal-consult spec
+  (verbatim excerpt, floor = user's last question + the answering message) — shipped
+  2026-08-20 (thread ask-unification-10480)
+- [x] `/ask-codex` becomes a thin deprecated alias for one transition release, then drops
+  — alias shipped 2026-08-20; the drop happens next release
 - [ ] adding an agent touches ONLY the registry — the template reads names from it (DRY)
+  — *partially delivered 2026-08-20 (single prose-defined list in ask.md is the interim
+  one-place set); registry semantics land with the multi-agent core*
 
 ## Priorities (2026-08-20, user-confirmed order)
 

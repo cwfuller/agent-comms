@@ -51,7 +51,7 @@ Read and act on messages from Claude Code via the local `.comms/to-codex/` direc
 1. Parse the frontmatter and content:
    - **type: review-request** — Review the listed files, focusing on the "Review focus" section.
    - **type: response** — Claude addressed your previous feedback. Check the fixes, then do a fresh scoped re-review.
-   - **type: question** — Claude is asking for input (sent via `/ask-codex`). Answer based on codebase analysis and the `## Current Thinking` section. Reply with `type: response` and no `verdict`. Body: `## Summary` + `## Codex Take`. Skip review framing — this is a one-off consult, not a review.
+   - **type: question** — Claude is asking for input (sent via `/ask`, formerly `/ask-codex`). Answer based on codebase analysis and the `## Current Thinking` section. Reply with `type: response` and no `verdict`. Body: `## Summary` + `## Codex Take`. Skip review framing — this is a one-off consult, not a review.
    - **type: ping** — Simple connectivity test. Respond with an acknowledgment.
 2. **Auto-archive — your inbox only** (the helper refuses files outside `to-codex/` and is idempotent):
    ```bash

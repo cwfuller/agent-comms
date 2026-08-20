@@ -331,6 +331,8 @@ SUM1="$(cat "$INST_FIX/.gitignore")"
 LOCAL_OUT="$(cd "$INST_FIX" && bash "$REPO/install.sh" --scope=local 2>&1)"
 [ -x "$INST_FIX/.agent-comms/comms.sh" ] && ok "local scope installs executable helpers" || fail "local scope installs executable helpers"
 [ -f "$INST_FIX/.claude/commands/auto-implement.md" ] && ok "local scope installs commands" || fail "local scope installs commands"
+[ -f "$INST_FIX/.claude/commands/ask.md" ] && [ -f "$INST_FIX/.claude/commands/ask-codex.md" ] \
+  && ok "local scope installs /ask and the deprecated alias" || fail "local scope installs ask.md + ask-codex.md"
 echo "$LOCAL_OUT" | grep -qi "shadow" && ok "local scope prints pin/shadow note" || fail "local scope prints pin/shadow note"
 
 echo "== fleet.sh: harvest + frontmatter boundary =="
@@ -442,6 +444,8 @@ GHOME="$WORK/ghome"
 GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global 2>&1)"
 [ -x "$GHOME/agent-comms/comms.sh" ] && ok "global scope installs executable helpers (env-overridden)" || fail "global scope installs executable helpers"
 [ -f "$GHOME/commands/fleet.md" ] && ok "global scope installs commands (env-overridden)" || fail "global scope installs commands"
+[ -f "$GHOME/commands/ask.md" ] && [ -f "$GHOME/commands/ask-codex.md" ] \
+  && ok "global scope installs /ask and the deprecated alias" || fail "global scope installs ask.md + ask-codex.md"
 [ -f "$GHOME/skills/read-from-claude/SKILL.md" ] && ok "global scope installs skills (env-overridden)" || fail "global scope installs skills"
 echo "$GH_OUT" | grep -q "codex-permissions" \
   && ok "global install names the one-time default Codex socket setup" || fail "global install Codex socket setup hint"
@@ -1017,6 +1021,47 @@ if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2
 else
   fail "loopspec conformance failed: $(grep '^FAIL' "$WORK/loopspec.out" | head -5 | tr '\n' ' ')"
 fi
+
+echo "== templates: bare dollar-digit/dollar-star hygiene =="
+# INTERNALS editing rule made mechanical: Claude Code substitutes bare dollar-digit
+# tokens (and dollar-star) into command markdown at render time with no escape syntax.
+# dollar-paren, dollar-brace, and named variables are fine and must pass.
+HYG_HITS="$(grep -rnE '\$[0-9]|\$\*' "$REPO/templates" || true)"
+if [ -z "$HYG_HITS" ]; then
+  ok "no bare dollar-digit/dollar-star tokens under templates/"
+else
+  fail "bare dollar token(s) under templates/: $(echo "$HYG_HITS" | head -3 | tr '\n' ' ')"
+fi
+
+echo "== /ask canonical template source contract =="
+# Prompt templates ARE the executable surface — these pin the load-bearing rules.
+ASKF="$REPO/templates/claude-commands/ask.md"
+[ -f "$ASKF" ] && ok "ask.md exists" || fail "ask.md exists"
+grep -q 'type: question' "$ASKF" && ok "ask.md message skeleton is type: question" || fail "ask.md type: question"
+grep -q 'Eligible pair' "$ASKF" && grep -q 'overrides the cap' "$ASKF" \
+  && ok "ask.md pins the eligible-pair floor over the soft cap" || fail "ask.md floor-over-cap contract"
+grep -q 'question OR request' "$ASKF" && ok "ask.md pair selector covers imperative asks" || fail "ask.md request-or-question wording"
+grep -q 'FAIL CLOSED' "$ASKF" && grep -q 'send nothing' "$ASKF" \
+  && ok "ask.md fails closed with no eligible pair" || fail "ask.md fail-closed branch"
+grep -q 'ENTIRE ORIGINAL argument' "$ASKF" && ok "ask.md preserves full argument on unknown first word" || fail "ask.md unknown-agent fallback"
+grep -q 'non-interpolating file-write tool' "$ASKF" && grep -q 'PROVEN absent' "$ASKF" \
+  && ok "ask.md requires collision-safe writer" || fail "ask.md write-safety contract"
+# Delimiter-agnostic: ANY heredoc operator in ask.md reintroduces the early-close
+# risk regardless of the delimiter word chosen, so reject the operator itself.
+grep -qE '<<' "$ASKF" && fail "ask.md contains a heredoc operator — the write contract requires a non-interpolating writer" \
+  || ok "ask.md carries no heredoc operator at all (delimiter-agnostic guard)"
+grep -qF 'send --to "$TARGET"' "$ASKF" && ok "ask.md sends to a variable target" || fail "ask.md variable-target send"
+grep -q 'loopspec:fragment result-spawned-exception' "$ASKF" \
+  && ok "ask.md embeds the result-spawned-exception fragment" || fail "ask.md fragment embed present"
+
+echo "== /ask-codex deprecated alias contract =="
+ALIASF="$REPO/templates/claude-commands/ask-codex.md"
+grep -qi 'deprecated' "$ALIASF" && ok "alias declares deprecation" || fail "alias declares deprecation"
+grep -qF '`/ask' "$ALIASF" && ok "alias points at /ask" || fail "alias points at /ask"
+grep -q 're-run install.sh' "$ALIASF" && ok "alias fails closed on stale install" || fail "alias stale-install fail-closed"
+grep -q 'target pinned to codex' "$ALIASF" && ok "alias pins its target to codex" || fail "alias codex-pin instruction"
+grep -q 'loopspec:fragment' "$ALIASF" && fail "alias regrew a fragment embed" || ok "alias carries no fragment embed"
+grep -q 'type: question' "$ALIASF" && fail "alias regrew a frontmatter skeleton" || ok "alias carries no frontmatter skeleton"
 
 echo "== loopspec: prompt fragments do not drift from docs/loopspec/fragments/ =="
 # Every marked region in a template must match its fragment file byte-for-byte

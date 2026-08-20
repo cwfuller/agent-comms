@@ -24,13 +24,34 @@ full updated plan so the reviewer re-reads fresh.
 implementation starts automatically at `round: 1` (same `thread`, `phase: implement`).
 `N` caps each phase separately.
 
-### `/ask-codex <question> [--with-diff] [--with-files a,b]`
+### `/ask [agent] [question] [--with-diff] [--with-files a,b]`
 
-One-off judgment call — no review framing, no loop, no verdict. Body carries
-`## Question` (verbatim), optional `## Context` / `## Current Thinking` (your draft take
-so Codex refines rather than starts blank), and `## Grounding` when `--with-diff`
-(attaches `git diff <default-branch> --stat`) or `--with-files` is set. Codex answers
-with `type: response`: `## Summary` + `## Codex Take`. Follow-ups are a new `/ask-codex`.
+One-off judgment call — no review framing, no loop, no verdict.
+
+**Target parse (pre-registry transition behavior):** if the first word of the argument
+is a known agent name (today only `codex`), it names the target and the rest is the
+question; otherwise the whole argument — unrecognized first word included, unmodified —
+is a question to the default agent (`codex`). So `/ask grok is X sound?` currently
+sends the literal text "grok is X sound?" to codex. When the `.comms/config` agent
+registry lands (multi-agent track), the known set and the default come from it.
+
+**Explicit question:** body carries `## Question` (verbatim), optional `## Context` /
+`## Current Thinking` (your draft take so the agent refines rather than starts blank),
+and `## Grounding` when `--with-diff` (attaches `git diff <default-branch> --stat`) or
+`--with-files` is set. The reply is `type: response`: `## Summary` + `## Codex Take`.
+Follow-ups are a new `/ask`.
+
+**Thoughts mode:** bare `/ask` (or `/ask codex` alone) sends an informal consult on
+the current discussion instead of prompting you for a question. The payload is a
+VERBATIM excerpt, not a summary: at minimum the most recent completed user-message
+(question or request) → assistant-answer pair — that pair overrides the ~4 KB soft
+cap and is never truncated mid-message; older complete turns are included only while
+they fit. With no completed prior exchange the command fails closed and asks what to
+send. The message is written with a non-interpolating writer (verbatim excerpts can
+contain any heredoc delimiter).
+
+`/ask-codex` remains as a deprecated alias for `/ask codex` for one transition
+release, then drops.
 
 ### `/send-to-codex [instructions]`
 
@@ -201,7 +222,7 @@ default `workspace-write`), `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800),
 /auto-full 5 add CSV export to the reports page
 
 # quick design consult while implementing
-/ask-codex --with-diff is the retry/backoff approach here sound?
+/ask --with-diff is the retry/backoff approach here sound?
 
 # fan five briefs across a fleet
 /fleet status

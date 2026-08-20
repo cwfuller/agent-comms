@@ -52,7 +52,7 @@ Write a structured message to Claude Code via `.comms/to-claude/` and auto-deliv
    - Put comms-process friction under a `### Process` heading (meta channel) — it never gates the verdict
    - Do not use `COMMENT` in autonomous review loops; reserve it for manual questions or side-channel notes
 
-   When answering a `type: question` from `/ask-codex`:
+   When answering a `type: question` from `/ask` (formerly `/ask-codex`):
    - Use `type: response`
    - Omit `verdict` entirely — questions are not reviews
    - Body shape: `## Summary` (one line) + `## Codex Take` (your answer, with reasoning and tradeoffs). No `## Findings`, no blocking/advisory split.
