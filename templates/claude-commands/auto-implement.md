@@ -63,6 +63,12 @@ max-rounds: <N>
 ## What was done
 <Summary of the implementation>
 
+## Acceptance criteria
+<3-7 testable statements: what would make this change approvable. PINNED at round 1 —
+later rounds are judged against these; the bar does not move with each holistic pass.
+If a review finding genuinely changes the bar, amend the criteria explicitly in the
+next round's message and say so — never silently re-derive them.>
+
 ## Files changed
 <git diff --stat output>
 

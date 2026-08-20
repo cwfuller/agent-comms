@@ -71,6 +71,11 @@ Read and act on messages from Codex in `.comms/to-claude/`.
        daemon): run the real surface once before handing off — green unit tests alone have shipped
        wrong premises into review rounds before
      - Write the implement-phase message with updated frontmatter: `phase: implement`, `round: 1`, same `workflow`, `max-rounds`, and `thread`
+     - Include a pinned `## Acceptance criteria` section (3-7 testable statements — carry
+       the approved plan's criteria forward if the plan pinned them, else derive them now).
+       Later rounds are judged against these; the bar does not move with each holistic pass,
+       and later rounds copy the section forward verbatim, changing it only through a clearly
+       identified explicit amendment ("(amended round N: reason)")
      - Deliver: `"$COMMS_SH" send --to codex "<file>"`
    - Otherwise → **Stop. Notify user:** "Approved after N rounds." Archive: `"$COMMS_SH" archive --as claude "<file>"`, then close the thread's state: `"$COMMS_SH" state complete "<thread>"`
 
@@ -92,6 +97,16 @@ Read and act on messages from Codex in `.comms/to-claude/`.
        - For plan: the full updated plan content (so Codex can re-read it fresh)
        - For implement: `git diff --stat` showing changed files
        - **Stable metadata** (always include): what validation ran (typecheck, tests, lint), whether they passed, and any non-obvious constraints or gotchas
+       - For implement rounds: the current `## Acceptance criteria`, copied forward VERBATIM
+         from the previous round's message — this is the canonical bar once the round-1 inbound
+         is archived. Change it only through a clearly identified explicit amendment (annotate
+         the changed criterion with "(amended round N: reason)"). An amendment proposal alone
+         is non-blocking — it gates nothing unless the underlying issue independently satisfies
+         verdict discipline
+       - A `### Scope additions` running ledger: one line per review-driven addition beyond
+         the original task (what + rough cost). Copy the ledger forward verbatim each round and
+         append — scope growth stays visible at every checkpoint instead of emergent. Omit the
+         section only while it is empty
        - Brief one-line note: "Addressed N findings from round X. Please re-review holistically."
        - The standing `## Meta — process feedback requested` section (process friction under `### Process`, never verdict-gating)
    - **Validate, deliver, and archive the inbound in one atomic step** — the helper refuses to archive if the outbound is malformed:

@@ -354,17 +354,19 @@ watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
 From the 18-round writer-side retrospective (carry-over: docs/advisories.md 2026-08-19).
 Ordered by cost/value; the first three are template-only edits.
 
-- [ ] **Verdict-discipline fragment**: add "pre-existing defects in code the change didn't
-  touch are Advisory by default" to `docs/loopspec/fragments/verdict-discipline.md` and
-  its embedded copies (send-to-claude, send-to-codex). Prose fragment addition —
-  backward-tolerant, no schema change. (`APPROVE_WITH_CONDITIONS` as a verdict value:
+- [x] **Verdict-discipline fragment** (shipped 2026-08-20): "pre-existing defects in code
+  the change did not touch are Advisory by default" added to
+  `docs/loopspec/fragments/verdict-discipline.md` and both embedded copies
+  (send-to-claude, read-from-claude — tripwire-enforced). Prose fragment addition —
+  backward-tolerant, no schema change; symphony picks it up at its next pin sync. (`APPROVE_WITH_CONDITIONS` as a verdict value:
   rejected — duplicates APPROVE + advisory carry-over, forces a loopspec major on symphony.)
-- [ ] **Acceptance criteria pinned at implement round 1**: auto-implement/auto-full
-  templates add an `## Acceptance criteria` section to the round-1 implement message;
-  reviewer prompts judge later rounds against it instead of re-deriving the bar each
-  holistic pass.
-- [ ] **Scope ledger**: a `### Scope additions` running list (review-driven additions +
-  rough cost) carried forward each round alongside prior-review context.
+- [x] **Acceptance criteria pinned at implement round 1** (shipped 2026-08-20):
+  auto-implement's round-1 body and auto-full's implement handoff (read-from-codex
+  transition) carry a pinned `## Acceptance criteria` section; the reviewer skill
+  judges later rounds against it instead of re-deriving the bar each holistic pass.
+- [x] **Scope ledger** (shipped 2026-08-20): a `### Scope additions` running list
+  (review-driven additions + rough cost) copied forward verbatim each round in the
+  reply spec, omitted only while empty.
 - [ ] **Writer dispute/escalate lane**: a sanctioned reply that contests a blocking
   classification and pauses the loop for a user scope decision instead of complying or
   burning a round. Touches termination conditions in both read skills — design first.

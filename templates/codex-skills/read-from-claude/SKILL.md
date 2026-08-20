@@ -91,6 +91,14 @@ Re-review the current state holistically. Previous findings are stable context, 
 - `phase: plan` — Re-read the entire plan holistically. Does it still hold together after revisions?
 - `phase: implement` — Re-read all changed files. Run through the implement review checklist below.
 
+**Judge against the pinned `## Acceptance criteria` when the round-1 implement message carries
+them: the approval bar is those criteria and the verdict discipline — it does not move with each
+holistic pass.** Later rounds copy the section forward verbatim; treat the copy in the newest
+message as canonical. A genuinely new mandatory ask beyond the pinned criteria is an explicit
+criteria amendment to propose (or an Advisory note), never a silent widening of REQUEST_CHANGES
+scope — and an amendment proposal alone is non-blocking: it gates the verdict only if the
+underlying issue independently satisfies the verdict discipline above.
+
 #### Implement review checklist (every round)
 Run through this checklist every round, not just the final one:
 - Auth/scopes: are permissions correct for any new API calls or resources?
@@ -117,6 +125,8 @@ Use `REQUEST_CHANGES` only for blocking issues such as:
 - Broken user flow or incomplete required behavior
 - Likely regressions in changed paths
 - Missing validation or tests for risky code where the change cannot be trusted without them
+
+Pre-existing defects in code the change did not touch are Advisory by default — real and worth recording, but not this loop's scope unless the change makes them worse or depends on them.
 
 Keep `APPROVE` and include comments when findings are advisory, such as:
 - Documentation drift

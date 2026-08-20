@@ -1022,6 +1022,29 @@ else
   fail "loopspec conformance failed: $(grep '^FAIL' "$WORK/loopspec.out" | head -5 | tr '\n' ' ')"
 fi
 
+echo "== scope-dial template source contract =="
+# Field-report trio (2026-08-19): the load-bearing new prose, pinned mechanically.
+FRAGVD="$REPO/docs/loopspec/fragments/verdict-discipline.md"
+grep -q 'Pre-existing defects in code the change did not touch are Advisory by default' "$FRAGVD" \
+  && ok "verdict-discipline fragment carries the pre-existing-defects rule" || fail "fragment pre-existing-defects rule"
+AIF="$REPO/templates/claude-commands/auto-implement.md"
+grep -q '## Acceptance criteria' "$AIF" && grep -q 'PINNED at round 1' "$AIF" \
+  && ok "auto-implement pins acceptance criteria at round 1" || fail "auto-implement acceptance criteria"
+RFC="$REPO/templates/claude-commands/read-from-codex.md"
+grep -q 'pinned `## Acceptance criteria`' "$RFC" \
+  && ok "auto-full implement handoff pins acceptance criteria" || fail "read-from-codex criteria handoff"
+grep -q '### Scope additions' "$RFC" && grep -q 'Copy the ledger forward verbatim' "$RFC" \
+  && ok "reply spec carries the scope-additions ledger forward" || fail "read-from-codex scope ledger"
+grep -q 'copied forward VERBATIM' "$RFC" && grep -q 'amended round N' "$RFC" \
+  && ok "reply spec copies acceptance criteria forward with explicit amendments" || fail "read-from-codex criteria lifecycle"
+grep -q 'amendment proposal alone' "$RFC" && grep -c 'amended round N' "$RFC" | grep -q '2' \
+  && ok "amendment rule present in reply spec AND auto-full handoff" || fail "amendment rule in both handoff paths"
+RFCL="$REPO/templates/codex-skills/read-from-claude/SKILL.md"
+grep -q 'Judge against the pinned' "$RFCL" && grep -q 'does not move with each' "$RFCL" \
+  && ok "reviewer judges against pinned criteria" || fail "read-from-claude pinned-criteria judging"
+grep -q 'amendment proposal alone is non-blocking' "$RFCL" \
+  && ok "reviewer treats amendment proposals as non-blocking" || fail "read-from-claude amendment non-blocking"
+
 echo "== templates: bare dollar-digit/dollar-star hygiene =="
 # INTERNALS editing rule made mechanical: Claude Code substitutes bare dollar-digit
 # tokens (and dollar-star) into command markdown at render time with no escape syntax.

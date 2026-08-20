@@ -8,6 +8,8 @@ Use `REQUEST_CHANGES` only for blocking issues such as:
 - Likely regressions in changed paths
 - Missing validation or tests for risky code where the change cannot be trusted without them
 
+Pre-existing defects in code the change did not touch are Advisory by default — real and worth recording, but not this loop's scope unless the change makes them worse or depends on them.
+
 Keep `APPROVE` and include comments when findings are advisory, such as:
 - Documentation drift
 - Minor cleanup or maintainability improvements
