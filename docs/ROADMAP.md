@@ -168,6 +168,15 @@ last delivery wasn't a real nudge.
 
 ## Friction log (meta-channel feedback + live-loop observations)
 
+- *2026-08-19, external 18-round loop (writer-side retrospective, relayed by user):* the
+  loop's costs were structural, not incidental — the reviewer controls scope (binary
+  verdict → rounds 6–8 hardened a prototype nobody asked to harden), one reviewer
+  serializes everything (an outage froze the loop), and the writer felt themself
+  optimizing messages to pass review. Full carry-over in docs/advisories.md 2026-08-19;
+  actionable asks tracked in the scope-dial track below. Validations: atomic
+  send+archive perfect across 18+ rounds, full-plan restatement credited for plan
+  convergence, process channel delivered the report itself.
+
 - *2026-07-28, thread `token-efficiency-23269` (auto-full, 4 plan + 3 implement rounds,
   approved):* the loop's own transport was the loudest source of friction, twice observed
   from the Codex side: **4 then 6 identical `/read-from-codex` commands queued in Claude's
@@ -339,3 +348,130 @@ watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
 - [ ] **Delete cmux delivery (step 6)** — one release after the default flip with no
   fallback invocations; deletion audit must include cmux-mgr dispatch (live consumer);
   keep optional log/tail viewing only if useful. Interop drill before declaring done.
+
+## Scope-dial track (2026-08-19 external field report)
+
+From the 18-round writer-side retrospective (carry-over: docs/advisories.md 2026-08-19).
+Ordered by cost/value; the first three are template-only edits.
+
+- [ ] **Verdict-discipline fragment**: add "pre-existing defects in code the change didn't
+  touch are Advisory by default" to `docs/loopspec/fragments/verdict-discipline.md` and
+  its embedded copies (send-to-claude, send-to-codex). Prose fragment addition —
+  backward-tolerant, no schema change. (`APPROVE_WITH_CONDITIONS` as a verdict value:
+  rejected — duplicates APPROVE + advisory carry-over, forces a loopspec major on symphony.)
+- [ ] **Acceptance criteria pinned at implement round 1**: auto-implement/auto-full
+  templates add an `## Acceptance criteria` section to the round-1 implement message;
+  reviewer prompts judge later rounds against it instead of re-deriving the bar each
+  holistic pass.
+- [ ] **Scope ledger**: a `### Scope additions` running list (review-driven additions +
+  rough cost) carried forward each round alongside prior-review context.
+- [ ] **Writer dispute/escalate lane**: a sanctioned reply that contests a blocking
+  classification and pauses the loop for a user scope decision instead of complying or
+  burning a round. Touches termination conditions in both read skills — design first.
+- [ ] **Shared test-evidence contract in plan phase**: plan template states which layers
+  get what kind of proof at which checkpoint, so evidence boundaries aren't litigated
+  mid-loop.
+- [ ] **Usage/budget frontmatter signal** (optional field, soft rollout): lets a loop
+  anticipate provider outages/limits instead of discovering them mid-round. Pairs with
+  the ACP warm-session resumability spike.
+- [ ] **Docs: stakes-tiering guidance**: prototype work → auto-implement or
+  `max-rounds: 2-3`; pipelines/data-integrity/provenance work → full auto-full loop.
+  ("Rounds 1–5 delivered the loop's value; 6–9 delivered thoroughness whose price was
+  never negotiated.")
+
+## Informal consult: bare `/ask-codex` "thoughts?" mode (2026-08-20, user request)
+
+The user's most frequent manual pattern — pasting the last message(s) into Codex and
+typing "thoughts?" — has no shortcut. Decided (user-confirmed): repurpose bare
+`/ask-codex` rather than adding a command; with an argument it stays an explicit
+question. **2026-08-20 update: the command shape is superseded by the `/ask` unification
+track below (single multi-agent `/ask`); the payload/behavior spec here still stands.**
+
+- [ ] **Bare `/ask-codex` = informal consult**: replace the current no-arg prompt-back
+  with: package the current discussion and ask for Codex's take. Template-only edit to
+  `ask-codex.md` step 1.
+- [ ] **Payload is a verbatim excerpt, not a summary** (user-confirmed): at MINIMUM the
+  user's last question and the assistant message answering it — the question is what
+  Codex is opining on, the answer alone reads as a statement with no ask. Going further
+  back is Claude's judgment when the topic spans turns. Pasted verbatim under
+  `## Context`, size-capped (~4 KB, consistent with the bounded-read philosophy; prefer
+  dropping older turns over truncating mid-message — but never drop the last question).
+  Rationale: preserves the "second set of priors" value from the 2026-08-19 field
+  report — Codex reacts to the actual material, not Claude's re-framing of it. Claude's
+  own take is already IN the excerpt, so skip `## Current Thinking` unless there's
+  something genuinely new to add.
+- [ ] **`## Question` body**: literally informal — "Thoughts? Informal take requested on
+  the discussion below." No review framing, no findings structure asked for; Codex's
+  existing `type: question` → `type: response` path (send-to-claude SKILL step 4)
+  already handles it with no verdict.
+- [ ] **Keep the existing guardrails**: same frontmatter (no workflow fields), same
+  single-shot rule, same "don't stretch into review territory" note — an informal
+  consult that starts asking for blocking findings should redirect to `/send-to-codex`.
+
+## Multi-agent track (2026-08-20)
+
+Support agents beyond Claude Code + Codex; Grok Build first (xAI coding CLI, open-sourced
+2026-07-15: interactive TUI, headless `grok -p --output-format streaming-json`, ACP via
+`grok agent stdio`; loads CLAUDE.md/AGENTS.md automatically and claims Claude/Codex-compatible
+config surfaces — the cheapest possible third agent, pending live verification of those
+claims). Strategy decided: **consult/reviewer-first** — new agents join headless-only in the
+two roles that need no watchable pane (`/ask` consults, loop reviewer); interactive cmux
+integration is NOT ported per agent (keystroke idioms are the loudest friction source with
+just two agents). Per-agent cost model: inbox (trivial once generalized) → instructions
+(Grok: possibly free) → cmux nudge (skipped by strategy) → headless runphase arm (small) →
+ACP (~zero once the acpx backend exists).
+
+- [ ] **Generalize the two-party core** (prerequisite for everything):
+  - agent registry in `.comms/config` (name → inbox, headless command, instruction surface);
+    origins defined once
+  - `inbox_for()` and every `claude|codex` case arm in comms.sh (~15 sites), clean/status
+    loops over `to-*/` from the registry
+  - `peer_of()` in runphase.sh breaks at 3 agents: derive the peer from the inbound
+    message's `from:` field, never compute a complement
+  - state session-field naming generalizes to `<agent>_session_id` (loopspec thread-state
+    schema already allows it via additionalProperties; keep the two legacy names readable)
+  - already N-agent-safe (no change): verdict binds by TYPE not sender; loopspec threads
+    stay 2-party per thread — more agents = more pairs, never N-party threads
+- [ ] **Grok Build headless integration**: runphase provider arm (shape ≈ the claude leg:
+  `-p` + streaming-json + session id from events), `/ask grok` via the registry, reviewer
+  role via `--reviewer grok` on auto-* commands. Verify live: does it read our AGENTS.md
+  managed block and Claude-format commands as claimed?
+- [ ] **Reviewer parameterization**: auto-plan/auto-implement/auto-full accept
+  `--reviewer <agent>` (default codex); templates stop naming codex in prose where the
+  reviewer is meant. Also answers the field report's "serialization on one reviewer" —
+  a third reviewer with different priors is outage resilience AND diversity.
+- [ ] **ACP delivery backend (Tier 1 spike, scoped 2026-08-19)**: `COMMS_DELIVERY=acp` via
+  acpx (headless CLI ACP client; pin — pre-1.0). Decision gate: Node ≥22.13 dependency
+  acceptable as an OPTIONAL backend. The spike's deliverable is ONE measurement: round-2+
+  token cost warm ACP session vs cold `runphase` spawn (runphase re-pays full instruction
+  payload every round — session ids are recorded but never resumed). Mapping is clean:
+  thread → named session, exit codes → RESULT lanes, loopspec result/thread-state schemas
+  unchanged (delivery-agnostic, no symphony impact). Second justification: makes agents
+  4+ (gemini, copilot, cursor — all ship ACP adapters) near-zero marginal cost. cmux and
+  runphase stay; ACP is a third backend, not a replacement.
+
+## `/ask` unification (2026-08-20, supersedes the bare-`/ask-codex` decision above)
+
+Decided (user-confirmed): ONE `/ask` template scaling across agents, not `/ask-<agent>`
+copies. The informal-consult ("thoughts?") design above carries over unchanged — only the
+command shape evolves:
+
+- [ ] `/ask <agent> <question>` — first word validated against the agent registry names
+  the target; not an agent name → the whole text is a question to the DEFAULT agent
+  (codex, set in `.comms/config`)
+- [ ] bare `/ask` (or `/ask <agent>` alone) → thoughts mode per the informal-consult spec
+  (verbatim excerpt, floor = user's last question + the answering message)
+- [ ] `/ask-codex` becomes a thin deprecated alias for one transition release, then drops
+- [ ] adding an agent touches ONLY the registry — the template reads names from it (DRY)
+
+## Priorities (2026-08-20, user-confirmed order)
+
+1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing
+   the informal-consult edit on the new shape avoids reworking `/ask-codex` twice
+2. **Scope-dial template trio** — verdict-discipline sentence, pinned acceptance criteria,
+   scope ledger (the three template-only field-report fixes)
+3. **Multi-agent core + Grok Build headless** — registry/generalization, then Grok as
+   consult + reviewer
+4. **ACP Tier-1 spike** — warm-vs-cold measurement; gated on the Node-dependency decision
+5. Remaining scope-dial items (dispute lane needs design; test-evidence contract; budget
+   signaling; stakes-tiering docs) and the standing DEFERRED backlog in docs/advisories.md

@@ -8,6 +8,51 @@ emits whole `## ` sections up to a byte budget, ordered by the date in each head
 physical order here may be mixed and writers may append or prepend freely. A section
 whose heading carries no `YYYY-MM-DD` sorts last (but is never dropped).
 
+## 2026-08-19 — external 18-round field report (writer-side retrospective, relayed by user)
+
+The Claude-side agent of an 18-round auto-full loop on an external media/transcode-pipeline
+project sent a full retrospective. The most detailed external evaluation of the loop so far.
+Verdict: "decisively worth it" for high-stakes code (a data-corruption catch its own 69 tests
+missed, plus a pre-existing production bug found only by holistic re-review); for low-stakes
+work it recommends capping at 2–3 rounds. Items not yet actioned:
+
+- **Binary verdict lets the reviewer set the scope dial** (DEFERRED — top ask): rounds 6–8
+  hardened an explicitly-prototype codebase because `REQUEST_CHANGES` makes every finding
+  mandatory and the writer has no lane to contest a blocking classification short of burning
+  a round. The advisory-under-APPROVE mechanism already covers "real but not blocking" — the
+  actual gaps are (a) reviewer calibration on pre-existing defects and (b) a writer-side
+  dispute move. Fix shape: one sentence in the verdict-discipline fragment ("pre-existing
+  defects in code the change didn't touch are Advisory by default") + a sanctioned dispute
+  reply that pauses and escalates the scope decision to the user instead of complying.
+  (`APPROVE_WITH_CONDITIONS` as a verdict value was considered and rejected: it duplicates
+  APPROVE + advisory carry-over and would force a loopspec change on symphony.)
+- **Acceptance criteria drift across holistic passes** (DEFERRED): holistic re-review is the
+  loop's best idea (their words and ours) but its bar moves every round. Ask: pin an
+  `## Acceptance criteria` section in the implement round-1 message — "what would make you
+  approve," stated once — and have the reviewer judge later rounds against it.
+- **Scope growth is invisible until already paid for** (DEFERRED): a running
+  `### Scope additions` ledger (review-driven additions + rough cost), carried forward each
+  round like prior-review context, so growth is a visible user decision at checkpoints
+  rather than an emergent property of thoroughness.
+- **No usage/budget signaling** (DEFERRED): a provider outage froze the loop mid-round with
+  zero anticipation. Optional frontmatter field, soft rollout per the protocol-v2 precedent.
+  Resumability half is already covered by the ACP warm-session track.
+- **Test-boundary attrition** (DEFERRED): real round-fractions were spent litigating what
+  counts as evidence (regex "source contract" tests pin text, not behavior). Fix shape: a
+  shared test-evidence contract stated up front in the plan phase — which layers get what
+  kind of proof at which checkpoint.
+- **Writer incentive distortion** (named, no fix proposed): the writer caught themself
+  optimizing messages to *pass review* — pre-empting objections, framing deviations
+  defensively. The meta channel counteracts it, but the pull is real; watch for it.
+- **Positive signals worth keeping**: atomic send+archive flawless across 18+ rounds (zero
+  lost/double-processed messages); full-plan restatement each round credited for plan
+  *convergence* instead of drift; the standing process channel produced this report; the
+  candor norm measurably sped the reviewer ("risky paths faster to find"); max-rounds
+  escalation valued as the non-convergence backstop; second agent framed as "a second set
+  of priors, not a second pair of eyes" — the reviewer read the contract, not the writer's
+  implementation of it; mechanical thread capture endorsed, and its one recurrence matches
+  the 2026-08-18 note already in read-from-codex.md.
+
 ## 2026-07-28 — thread `token-efficiency-23269` (auto-full, plan r4 + implement r3, approved)
 
 Bounded the two unbounded runtime reads and trimmed hot-path instruction text. Findings the
