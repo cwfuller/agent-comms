@@ -118,6 +118,17 @@ installed location(s) — an installed-only edit is lost on the next install.
   `open(p,"w").write(open(p).read().replace(...))` evaluated left-to-right) TRUNCATES the file first →
   a malformed/empty message; `send` refuses it and correctly does NOT archive the inbound. Always read
   into a variable FIRST, then write — and `head -3` the file before `send` as a cheap sanity check.
+- **Never re-derive `thread` — copy it verbatim from the inbound message.** Observed: a reply's
+  thread was rebuilt from the REVIEW FILE's random suffix (`...-policy-48271`) instead of the
+  original (`...-policy-32664`), because both look like "the loop's id". The outbound still
+  delivered, so nothing failed loudly — but the thread-scoped inbox lookup
+  (`list --as claude --thread <thread>`) then reported NO pending message for the real thread and
+  emitted a workspace-mismatch warning, while the reply sat there unread. Thread is an identity
+  copied forward, not a value computed per round; only `message_id` changes each round.
+  RECURRED 2026-08-18 despite this note (thread typed from a remembered suffix while
+  composing the reply heredoc). The guard must be MECHANICAL, not a review step: capture
+  `THREAD=$(grep -m1 '^thread:' "<inbound>" | sed 's/^thread: //')` and interpolate
+  `$THREAD` into the reply — never type a thread value by hand, and still diff before `send`.
 - **Unit-green ≠ live-correct for model/runtime-coupled changes.** A fix whose premise concerns a live
   surface (model latency/behavior, network API shape, daemon lifecycle) can pass every unit test and
   still fail live — observed: an item-count cap passed all suites while the real model call still
