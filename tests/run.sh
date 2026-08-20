@@ -584,7 +584,7 @@ WS_EMPTY_RC=$?
 # Prime the cache with a good resolution, then break the tree: identity must stick.
 (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" workspace) >/dev/null
 WS_STICKY="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" workspace) 2>/dev/null )"
-[ "$WS_STICKY" = "test-project" ] && ok "cached identity survives a flaky tree (no atlas/master flap)" || fail "cached identity sticks (got: $WS_STICKY)"
+[ "$WS_STICKY" = "test-project" ] && ok "cached identity survives a flaky tree (no cached-name/default-branch flap)" || fail "cached identity sticks (got: $WS_STICKY)"
 # Recover a cache already poisoned by an auto-title spinner. On the fixture's
 # feature branch, the stable repo-derived fallback is feature-helper-tests.
 POISON_WS_ID="workspace:spinner-poison"
@@ -1454,7 +1454,7 @@ grep -q 'Parse BOTH transport modifiers out' "$REPO/templates/claude-commands/as
 grep -q 'acp.sh' "$REPO/install.sh" && ok "installer ships acp.sh" || fail "installer acp.sh"
 
 echo "== scope-dial template source contract =="
-# Field-report trio (2026-08-19): the load-bearing new prose, pinned mechanically.
+# Scope-dial trio: the load-bearing new prose, pinned mechanically.
 FRAGVD="$REPO/docs/loopspec/fragments/verdict-discipline.md"
 grep -q 'Pre-existing defects in code the change did not touch are Advisory by default' "$FRAGVD" \
   && ok "verdict-discipline fragment carries the pre-existing-defects rule" || fail "fragment pre-existing-defects rule"

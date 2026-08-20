@@ -9,11 +9,10 @@ Consumers implement the contract independently and validate against the same fix
 
 - **agent-comms** (this repo): bash helpers + skills; `check.sh --comms <comms.sh>`
   runs in the test harness.
-- **symphony** (planned, Level-1 adoption): vendors this directory at a pin and runs
-  its own reader against the fixtures. A consumer's CI validates only its **vendored
-  pinned copy** — never upstream HEAD — so unrelated upstream commits can't redden a
-  consumer's build; drift is caught by a deliberate pin bump (or a scheduled check),
-  not by coupling.
+- **downstream consumers**: vendor this directory at a pin and run their own readers
+  against the fixtures. A consumer's CI validates only its **vendored pinned copy** —
+  never upstream HEAD — so unrelated upstream commits cannot break a consumer's build;
+  drift is caught by a deliberate pin bump (or a scheduled check), not by coupling.
 
 Out of scope, permanently: transport/wake (cmux, headless runners, relays), state
 storage, scheduling/orchestration, tracker integration, and **merge authorization**
@@ -126,8 +125,8 @@ it draws a warning). `verdict.schema.json` is the canonical artifact shape;
 
 ## Compounding entry format
 
-One entry shape unifies advisory carry-over (agent-comms `docs/advisories.md`) and
-rework lessons (symphony `LESSONS.md`), so loops compound across systems:
+One entry shape lets agent-comms advisory carry-over (`docs/advisories.md`) and
+downstream rework logs share the same compounding format:
 
 ```markdown
 ## <YYYY-MM-DD> — thread `<thread-or-issue>` (<context: workflow, round, outcome>)
@@ -139,9 +138,9 @@ rework lessons (symphony `LESSONS.md`), so loops compound across systems:
 New entries SHOULD carry the status tag; entries written before loopspec v1 predate
 it and are read as `DEFERRED`. Injection guidance for consumers: feed a **bounded
 tail** of the newest entries (≈4k chars) into planning/review turns — lessons-first
-consultation is part of the review discipline, not an afterthought. (agent-comms
-currently consults the file via its skills' lessons-first step; symphony's `lessons`
-prompt variable is the same primitive.)
+consultation is part of the review discipline, not an afterthought. agent-comms
+currently consults the file via its skills' lessons-first step; consumers can expose
+the same primitive through their own prompt inputs.
 
 ## Provider turn contract
 

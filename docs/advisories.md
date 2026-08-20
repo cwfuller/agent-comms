@@ -36,51 +36,6 @@ loop itself produced, recorded so they survive its end:
   diff. Whatever review harness this project uses next must preserve the reviewer's
   ability to run things.
 
-## 2026-08-19 — external 18-round field report (writer-side retrospective, relayed by user)
-
-The Claude-side agent of an 18-round auto-full loop on an external media/transcode-pipeline
-project sent a full retrospective. The most detailed external evaluation of the loop so far.
-Verdict: "decisively worth it" for high-stakes code (a data-corruption catch its own 69 tests
-missed, plus a pre-existing production bug found only by holistic re-review); for low-stakes
-work it recommends capping at 2–3 rounds. Items not yet actioned:
-
-- **Binary verdict lets the reviewer set the scope dial** (DEFERRED — top ask): rounds 6–8
-  hardened an explicitly-prototype codebase because `REQUEST_CHANGES` makes every finding
-  mandatory and the writer has no lane to contest a blocking classification short of burning
-  a round. The advisory-under-APPROVE mechanism already covers "real but not blocking" — the
-  actual gaps are (a) reviewer calibration on pre-existing defects and (b) a writer-side
-  dispute move. Fix shape: one sentence in the verdict-discipline fragment ("pre-existing
-  defects in code the change didn't touch are Advisory by default") + a sanctioned dispute
-  reply that pauses and escalates the scope decision to the user instead of complying.
-  (`APPROVE_WITH_CONDITIONS` as a verdict value was considered and rejected: it duplicates
-  APPROVE + advisory carry-over and would force a loopspec change on symphony.)
-- **Acceptance criteria drift across holistic passes** (DEFERRED): holistic re-review is the
-  loop's best idea (their words and ours) but its bar moves every round. Ask: pin an
-  `## Acceptance criteria` section in the implement round-1 message — "what would make you
-  approve," stated once — and have the reviewer judge later rounds against it.
-- **Scope growth is invisible until already paid for** (DEFERRED): a running
-  `### Scope additions` ledger (review-driven additions + rough cost), carried forward each
-  round like prior-review context, so growth is a visible user decision at checkpoints
-  rather than an emergent property of thoroughness.
-- **No usage/budget signaling** (DEFERRED): a provider outage froze the loop mid-round with
-  zero anticipation. Optional frontmatter field, soft rollout per the protocol-v2 precedent.
-  Resumability half is already covered by the ACP warm-session track.
-- **Test-boundary attrition** (DEFERRED): real round-fractions were spent litigating what
-  counts as evidence (regex "source contract" tests pin text, not behavior). Fix shape: a
-  shared test-evidence contract stated up front in the plan phase — which layers get what
-  kind of proof at which checkpoint.
-- **Writer incentive distortion** (named, no fix proposed): the writer caught themself
-  optimizing messages to *pass review* — pre-empting objections, framing deviations
-  defensively. The meta channel counteracts it, but the pull is real; watch for it.
-- **Positive signals worth keeping**: atomic send+archive flawless across 18+ rounds (zero
-  lost/double-processed messages); full-plan restatement each round credited for plan
-  *convergence* instead of drift; the standing process channel produced this report; the
-  candor norm measurably sped the reviewer ("risky paths faster to find"); max-rounds
-  escalation valued as the non-convergence backstop; second agent framed as "a second set
-  of priors, not a second pair of eyes" — the reviewer read the contract, not the writer's
-  implementation of it; mechanical thread capture endorsed, and its one recurrence matches
-  the 2026-08-18 note already in read-from-codex.md.
-
 ## 2026-07-28 — thread `token-efficiency-23269` (auto-full, plan r4 + implement r3, approved)
 
 Bounded the two unbounded runtime reads and trimmed hot-path instruction text. Findings the
@@ -147,40 +102,6 @@ loop produced that are NOT actioned by it, so they survive its end:
 - **Resolved:** senders include optional `head_sha`, and readers verify it when a delayed
   message's `cwd` was repurposed.
 
-## 2026-07-07 — symphony audit-fix arc field report (7 headless turns, 4 threads, driving-session feedback)
-
-Dogfooded headless delivery end-to-end on symphony's maintenance-audit arc (threads
-`audit-batch1-governor-safety-17474` … `audit-batch4-signal-shaping-hygiene-7873`; 4 loops, one
-3-round). Zero message/state-layer failures; two protocol-visible findings and several polish items.
-
-- **[P1] Wall-clock runner timeout killed an ACTIVE reviewer mid-verdict** (batch-3 thread): the
-  cross-stack review legitimately ran past the 1800s default; runphase killed it (exit 124) while
-  events.ndjson shows it executing the reply-filename `date` commands — the full review completed and
-  the verdict died unwritten. ~30 min of Codex work lost; re-delivery re-ran the whole review.
-  Diagnosability was GOOD (exit 124 + the result.json hint + `stalled` showing `last_delivery=timeout`).
-  Fix candidates, in value order: (a) idle-timeout on events.ndjson silence instead of (or alongside)
-  wall-clock — wall-clock alone guarantees the longest/most-thorough reviews die at their most
-  expensive moment; (b) salvage on timeout — result.json already records the codex session_id; when a
-  killed turn produced no message file, print (or auto-run once) the `codex resume` continuation;
-  (c) raise the default to 3600s — observed normal implement-review turns run 15–60 min.
-- **[P1] cmux `send` false-positive `RESULT: delivered`**: with no Codex pane open, delivery fell back
-  to "first other-pane terminal" and still reported plain `delivered`; the loop idled silently until
-  `stalled` was run by hand (17 min). Downgrade the fallback RESULT line (e.g.
-  `delivered-unverified (unbound terminal fallback)`) and hint `COMMS_DELIVERY=headless`.
-- **[P2] Headless peer-reply `RESULT: manual` is misleading** — the reviewer itself had to explain in a
-  Process note that manual ≠ failure in this mode. Rename to e.g. `written-for-pickup (headless)`.
-- **[P2] Reviewer-sandbox environment notes are sender tribal knowledge** — `MIX_NO_SYNC=1` had to be
-  hand-embedded in every review request. A per-repo `reviewer-notes` block in `.comms/config` (or
-  runphase template injection) would make it durable. (Reinforces the `.comms/config` prerequisite.)
-- **[P3] Spawn output could advertise recovery affordances** (`stalled`, `runphase.sh hold`) so a run
-  dir is self-documenting if the driving session dies; an `await` heartbeat option would distinguish
-  "long review" from "hung runner" for humans; `send` validates an already-validated file (noise).
-- **Positive signals worth keeping**: headless reviewers ran their own probes/validation suites every
-  round and caught two real bugs (a phase-filtered ledger lookup, a marker-lifecycle leak) — review
-  depth went UP vs cmux; re-delivery after a timeout kill (same message file, new spawn) left
-  thread/round state perfectly coherent; `--archive-inbound` composes with headless; multi-round
-  threads and cmux/headless interleaving were non-events.
-
 ## 2026-07-06 — thread `headless-claude-leg-13020` (headless step 2, auto-implement)
 
 - **Bash heredoc write hung 2m in a live headless claude child** (DEFERRED) (observed once,
@@ -203,10 +124,9 @@ Dogfooded headless delivery end-to-end on symphony's maintenance-audit arc (thre
   KILL mid-implementation leaves partial edits that a naive retry builds on top
   of. Mitigations until the guard exists: generous `COMMS_RUNPHASE_TIMEOUT_SECS`
   for implement turns, and inspect `git status` before re-sending after a timeout.
-- **Headless fan-out shares the provider rate window with the driving session** (DEFERRED)
-  (observed live: a 20-agent review workflow exhausted the Claude session limit
-  mid-run). Rate-limit preflight/coordination is a roadmap item (the symphony
-  surplus_burn interplay from the unification plan).
+- **Headless fan-out shares the provider rate window with the driving session**
+  (DEFERRED): concurrent turns can exhaust that shared limit mid-run.
+  Rate-limit preflight/coordination remains a roadmap item.
 
 ## 2026-06-05 — thread `optimistic-binding-28566` (v2.1.1, auto-implement, approved r1)
 

@@ -168,15 +168,6 @@ last delivery wasn't a real nudge.
 
 ## Friction log (meta-channel feedback + live-loop observations)
 
-- *2026-08-19, external 18-round loop (writer-side retrospective, relayed by user):* the
-  loop's costs were structural, not incidental — the reviewer controls scope (binary
-  verdict → rounds 6–8 hardened a prototype nobody asked to harden), one reviewer
-  serializes everything (an outage froze the loop), and the writer felt themself
-  optimizing messages to pass review. Full carry-over in docs/advisories.md 2026-08-19;
-  actionable asks tracked in the scope-dial track below. Validations: atomic
-  send+archive perfect across 18+ rounds, full-plan restatement credited for plan
-  convergence, process channel delivered the report itself.
-
 - *2026-07-28, thread `token-efficiency-23269` (auto-full, 4 plan + 3 implement rounds,
   approved):* the loop's own transport was the loudest source of friction, twice observed
   from the Codex side: **4 then 6 identical `/read-from-codex` commands queued in Claude's
@@ -232,7 +223,7 @@ last delivery wasn't a real nudge.
   wrapper command instead of a generic FAILED. Lesson: a fallback the reviewer must
   *remember* to take loses to a platform default that fires first — make the safe path the
   default path.
-- *2026-06-05, field incident #2 (atlas):* send returned `RESULT: manual` despite an
+- *2026-06-05, field incident #2:* send returned `RESULT: manual` despite an
   existing binding to a live surface — pick_surface required a successful tree read
   BEFORE consulting the binding, so a transient tree failure (3 burst retries inside one
   contention window, likely while a background terminal attached) discarded a known
@@ -320,46 +311,36 @@ validation, atomic reply→deliver→archive, message ids, stale-inbound reconci
 Shipped: runphase v0 codex leg (dbc5a50), claude leg + direction-aware pickup + hold/
 watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
 
-- [x] **Symphony Level-1 adoption (step 4)** — shipped 2026-07-06, symphony commit
-  84996ae (local main): vendored kernel at a PIN via `scripts/sync-loopspec.sh` +
-  an ExUnit conformance reader; ReviewCheck verdict synonyms (strip-all
-  normalization, gate-only); `Workflow.Advisories` closes the pass-round
-  advisory-death gap (machine-local, LESSONS-style — the repo-commit path is the
-  named Level-2 follow-up); holistic-rereview fragment embedded verbatim with a
-  containment test; lessons in the compounding format. Fragments are consumed via
-  the builtin templates rather than `.symphony/workflows` override slots (overrides
-  replace whole prompts; verbatim containment beats file generation). Reviewed by
-  the first cross-repo headless loop: APPROVE round 1.
+- [x] **Downstream Level-1 adoption (step 4)** — a separate consumer validated a
+  vendored, pinned kernel with its own conformance reader. This confirmed the
+  fixtures and prompt fragments work across implementations without coupling a
+  consumer's build to upstream HEAD.
 - [ ] **Make non-cmux (headless) delivery the DEFAULT** — decided 2026-07-06, gated on
   the soak threshold: 10 successful headless loops including ≥3 claude-resume/attach
-  exercises and ≥3 reverse-direction handoffs. Soak progress 2026-07-07: +7 turns / 4
-  full loops from symphony's audit-fix arc (incl. one 3-round thread and one
-  timeout-kill → re-delivery recovery — state stayed coherent); still needed:
-  resume/attach and reverse-direction exercises. Field findings (runner wall-clock
-  timeout, cmux false-`delivered`, RESULT naming) recorded in docs/advisories.md
-  2026-07-07 — the timeout idle/salvage fix should land before the flip. Prerequisites: per-repo persistence for
+  exercises and ≥3 reverse-direction handoffs. The timeout idle/salvage fix should
+  land before the flip. Prerequisites: per-repo persistence for
   the delivery mode (`.comms/config`, not env-var-only) with staged per-repo opt-in
-  (hobby repos first, client repos last); cmux stays selectable as fallback for one
+  (low-risk repos first, higher-risk repos last); cmux stays selectable as fallback for one
   release after the flip.
-- [ ] **Retire fleet.sh into symphony (step 5)** — HARD-GATED on a trackerless
-  `symphony run` local mode covering status/dispatch/dispatch-all/harvest/concurrency
-  caps/dirty-tree+push safety/stalled recovery. fleet.sh is live orchestration until
-  then (frozen, but kept correct — see the pass-synonym fix).
+- [ ] **Retire fleet.sh after replacement orchestration is ready (step 5)** —
+  HARD-GATED on a trackerless local mode covering status/dispatch/dispatch-all/
+  harvest/concurrency caps/dirty-tree+push safety/stalled recovery. fleet.sh is live
+  orchestration until then (frozen, but kept correct — see the pass-synonym fix).
 - [ ] **Delete cmux delivery (step 6)** — one release after the default flip with no
-  fallback invocations; deletion audit must include cmux-mgr dispatch (live consumer);
+  fallback invocations; deletion audit must include every known dispatch consumer;
   keep optional log/tail viewing only if useful. Interop drill before declaring done.
 
-## Scope-dial track (2026-08-19 external field report)
+## Scope-dial track
 
-From the 18-round writer-side retrospective (carry-over: docs/advisories.md 2026-08-19).
 Ordered by cost/value; the first three are template-only edits.
 
 - [x] **Verdict-discipline fragment** (shipped 2026-08-20): "pre-existing defects in code
   the change did not touch are Advisory by default" added to
   `docs/loopspec/fragments/verdict-discipline.md` and both embedded copies
   (send-to-claude, read-from-claude — tripwire-enforced). Prose fragment addition —
-  backward-tolerant, no schema change; symphony picks it up at its next pin sync. (`APPROVE_WITH_CONDITIONS` as a verdict value:
-  rejected — duplicates APPROVE + advisory carry-over, forces a loopspec major on symphony.)
+  backward-tolerant, no schema change; downstream consumers pick it up on their next
+  pin sync. (`APPROVE_WITH_CONDITIONS` as a verdict value was rejected — it duplicates
+  APPROVE + advisory carry-over and would force a loopspec major.)
 - [x] **Acceptance criteria pinned at implement round 1** (shipped 2026-08-20):
   auto-implement's round-1 body and auto-full's implement handoff (read-from-codex
   transition) carry a pinned `## Acceptance criteria` section; the reviewer skill
@@ -446,8 +427,8 @@ ACP (~zero once the acpx backend exists).
 - [x] **Reviewer parameterization** (shipped 2026-08-20): auto-plan/auto-implement/
   auto-full accept `--reviewer <agent>` (default = registry default); the reader
   derives the reviewer mechanically from the inbound `from:` for every continuation
-  (replies, error lane, plan→implement handoff). Answers the field report's
-  "serialization on one reviewer".
+  (replies, error lane, plan→implement handoff). Addresses the single-reviewer
+  serialization problem.
 - [x] **ACP Tier-1 spike — landed on `/ask` first** (user-reshaped 2026-08-20; shipped
   same day as `helpers/acp.sh` + `/ask --via acp`): pinned acpx 0.13.1 via npx, Node
   ≥22.13 gated, warm named-session default, mailbox fallback on every failure class.
@@ -456,7 +437,7 @@ ACP (~zero once the acpx backend exists).
   natively). Decision gate resolved: Node accepted as an OPTIONAL, opt-in surface.
   REMAINING (not this spike): `COMMS_DELIVERY=acp` for review loops — thread → named
   session, exit codes → RESULT lanes, schemas unchanged; gate it on consult-path
-  soak + the field-report requirement that reviewers can EXECUTE things (acpx
+  soak + the requirement that reviewers can EXECUTE things (acpx
   permission policy design). cmux and runphase stay; ACP is a third backend.
 
 ## `/ask` unification (2026-08-20, supersedes the bare-`/ask-codex` decision above)
@@ -481,7 +462,7 @@ command shape evolves:
 1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing
    the informal-consult edit on the new shape avoids reworking `/ask-codex` twice
 2. **Scope-dial template trio** — verdict-discipline sentence, pinned acceptance criteria,
-   scope ledger (the three template-only field-report fixes)
+   scope ledger (the three template-only scope-dial fixes)
 3. **Multi-agent core + Grok Build headless** — registry/generalization, then Grok as
    consult + reviewer
 4. **ACP Tier-1 spike** — DONE 2026-08-20 (/ask --via acp; warm r2 146 vs cold 18,562 tokens, ~127x)
