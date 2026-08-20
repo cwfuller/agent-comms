@@ -25,7 +25,7 @@ CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask.md ask-codex.md auto-pl
 CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
-HELPERS="comms.sh fleet.sh runphase.sh"
+HELPERS="comms.sh fleet.sh runphase.sh acp.sh"
 SCOPE=""
 
 usage() {
@@ -531,7 +531,7 @@ case "$SCOPE" in
   global)
     echo "    Global Claude: /send-to-codex, /read-from-codex, /ask, /ask-codex (deprecated), /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
     echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
-    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh,runphase.sh}"
+    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh,runphase.sh,acp.sh}"
     ;;
   project)
     echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
@@ -539,7 +539,7 @@ case "$SCOPE" in
   both)
     echo "    Global Claude: /send-to-codex, /read-from-codex, /ask, /ask-codex (deprecated), /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
     echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
-    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh,runphase.sh}"
+    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh,runphase.sh,acp.sh}"
     echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
     ;;
 esac

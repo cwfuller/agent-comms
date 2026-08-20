@@ -1,0 +1,139 @@
+#!/bin/bash
+# agent-comms ACP consult helper — synchronous /ask transport over acpx.
+#
+# A consult is synchronous by nature: the whole mailbox apparatus (write file,
+# nudge, wait, read command) exists because pane delivery is asynchronous. This
+# helper collapses `/ask --via acp` to one blocking call whose answer lands on
+# stdout — no message file, no nudge, no late-nudge class. The mailbox path
+# remains the default and the fallback; this transport is OPT-IN per call.
+#
+# Subcommands:
+#   consult <agent> [--oneshot] [--file <path>] [question words...]
+#       run the consult; prints the answer followed by acpx's token-usage
+#       line. Warm by default: a named per-repo session (agent-comms-ask) so
+#       follow-ups pay only the delta (measured 2026-08-20: cold one-shot
+#       18,562 fresh input tokens vs warm round-2 146 — ~127x). --oneshot uses
+#       a stateless exec.
+#   doctor
+#       report node/acpx availability and the supported agent map; exit 0 iff
+#       consults can run here.
+#
+# Pinned: acpx is pre-1.0 with an evolving CLI — every invocation goes through
+# npx -y acpx@$ACPX_VERSION (cached by npm after first use; no global install).
+# Requires Node >= 22.13 (acpx's floor). Enabled agents: codex, claude. acpx
+# 0.13.1 also ships a grok-build builtin — INTENTIONALLY not enabled in this
+# spike (grok's mailbox leg already works headless; wiring its ACP profile is
+# scoped future work). Unsupported agents fail closed naming the fallback.
+set -euo pipefail
+
+ACPX_VERSION="0.13.1"
+ACP_SESSION_NAME="agent-comms-ask"
+NODE_MIN_MAJOR=22
+NODE_MIN_MINOR=13
+
+die() { echo "acp.sh: $*" >&2; exit 1; }
+# Every failure names the fallback, uniformly — the template's contract is
+# "do NOT retry the ACP path on the same failure; the mailbox always works".
+FALLBACK="The mailbox path (/ask without --via acp) always works — switch to it; do not re-run the ACP call."
+die_fb() { echo "acp.sh: $*" >&2; echo "acp.sh: $FALLBACK" >&2; exit 1; }
+
+node_ok() {
+  command -v node >/dev/null 2>&1 || return 1
+  local v major minor
+  v="$(node --version 2>/dev/null)"; v="${v#v}"
+  major="${v%%.*}"
+  minor="${v#*.}"; minor="${minor%%.*}"
+  case "$major$minor" in *[!0-9]*) return 1 ;; esac
+  [ "$major" -gt "$NODE_MIN_MAJOR" ] && return 0
+  [ "$major" -eq "$NODE_MIN_MAJOR" ] && [ "$minor" -ge "$NODE_MIN_MINOR" ]
+}
+
+require_node() {
+  node_ok || die_fb "ACP consults need Node >= ${NODE_MIN_MAJOR}.${NODE_MIN_MINOR} (found: $(node --version 2>/dev/null || echo none))."
+}
+
+profile_for() {  # acpx built-in launch profile per agent; empty = unsupported
+  case "$1" in
+    codex)  echo codex ;;
+    claude) echo claude ;;
+    *)      echo "" ;;
+  esac
+}
+
+cmd_doctor() {
+  local a p
+  if node_ok; then
+    echo "node: $(node --version) (>= ${NODE_MIN_MAJOR}.${NODE_MIN_MINOR})"
+  else
+    echo "node: MISSING or too old ($(node --version 2>/dev/null || echo none)) — consults unavailable"
+    exit 3
+  fi
+  echo "acpx: pinned @$ACPX_VERSION via npx (cached after first use)"
+  echo "agents: codex claude enabled; grok intentionally not enabled this spike (mailbox path)"
+}
+
+cmd_consult() {
+  local agent="${1:-}"; shift || true
+  [ -n "$agent" ] || die_fb "consult: agent argument required (codex or claude)"
+  local oneshot=false qfile="" words=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --oneshot) oneshot=true ;;
+      --file)
+        # Guard BEFORE shifting: a trailing --file must die with a diagnostic,
+        # not let set -e kill the parse silently on an over-shift.
+        [ "$#" -ge 2 ] || die_fb "consult: --file requires a path"
+        shift; qfile="$1"
+        [ -n "$qfile" ] || die_fb "consult: --file requires a non-empty path"
+        ;;
+      *) words+=("$1") ;;
+    esac
+    shift
+  done
+  local profile
+  profile="$(profile_for "$agent")"
+  [ -n "$profile" ] || die_fb "consult: '$agent' is not enabled for ACP in this spike (codex and claude only)"
+  require_node
+  [ -n "$qfile" ] && [ ! -f "$qfile" ] && die_fb "consult: no such file: $qfile"
+  [ -n "$qfile" ] || [ "${#words[@]}" -gt 0 ] || die_fb "consult: a question is required (words or --file)"
+  # Warm by default: ensure the named per-repo session once, then prompt it.
+  # Session identity is (agent, cwd, name) on acpx's side — nothing to store here.
+  local -a base=(npx -y "acpx@${ACPX_VERSION}" --format quiet "$profile")
+  local rc=0
+  if [ "$oneshot" = true ]; then
+    if [ -n "$qfile" ]; then
+      "${base[@]}" exec --file "$qfile" ${words[@]+"${words[@]}"} || rc=$?
+    else
+      "${base[@]}" exec "${words[@]}" || rc=$?
+    fi
+  else
+    npx -y "acpx@${ACPX_VERSION}" "$profile" sessions ensure --name "$ACP_SESSION_NAME" >/dev/null || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      if [ -n "$qfile" ]; then
+        "${base[@]}" -s "$ACP_SESSION_NAME" --file "$qfile" ${words[@]+"${words[@]}"} || rc=$?
+      else
+        "${base[@]}" -s "$ACP_SESSION_NAME" "${words[@]}" || rc=$?
+      fi
+    fi
+  fi
+  # acpx's exit codes are a stable scripting contract — translate, don't mask.
+  # Every nonzero path carries the same fallback line and NO retry advice.
+  case "$rc" in
+    0)   return 0 ;;
+    2)   die_fb "consult: acpx usage error (exit 2) — likely an acp.sh bug; report it" ;;
+    3)   die_fb "consult: timed out (exit 3)" ;;
+    4)   die_fb "consult: no session (exit 4) despite 'sessions ensure'" ;;
+    5)   die_fb "consult: every permission request was denied (exit 5) — the agent could not read what it needed" ;;
+    130) die_fb "consult: interrupted (exit 130)" ;;
+    *)   die_fb "consult: acpx failed (exit $rc) — see output above" ;;
+  esac
+}
+
+case "${1:-}" in
+  consult) shift; cmd_consult "$@" ;;
+  doctor)  shift; cmd_doctor "$@" ;;
+  ""|help|-h|--help)
+    awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
+    ;;
+  *) die "unknown subcommand '${1}' — run 'acp.sh help'" ;;
+esac

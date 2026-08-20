@@ -1363,6 +1363,96 @@ GOT3="$(eval "${EXTRACT_LINE/\"<message file>\"/\"$DUPFROM\"}"; printf '%s' "$RE
 grep -qF 'send --to "$REVIEWER" "<your reply file>"' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader continuations send to the derived reviewer" || fail "reader continuation target"
 
+echo "== acp.sh: consult transport (stubbed npx) =="
+ACP="$REPO/helpers/acp.sh"
+ACP_STUB="$WORK/acp-bin"; mkdir -p "$ACP_STUB"
+export ACP_STUB_LOG="$WORK/acp.log"
+cat > "$ACP_STUB/npx" <<'NSTUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${ACP_STUB_LOG:-/dev/null}"
+[ -n "${ACP_STUB_EXIT:-}" ] && exit "$ACP_STUB_EXIT"
+case " $* " in
+  *" sessions ensure "*) echo "stub-session-id (created)" ;;
+  *) echo "stub answer"; echo "[acpx] tokens: input=100 output=5 cache_read=25000 total=25105" ;;
+esac
+NSTUB
+chmod +x "$ACP_STUB/npx"
+cat > "$ACP_STUB/node" <<'NODESTUB'
+#!/bin/bash
+echo "${ACP_STUB_NODE_V:-v22.22.3}"
+NODESTUB
+chmod +x "$ACP_STUB/node"
+
+run_acp() { PATH="$ACP_STUB:$PATH" bash "$ACP" "$@"; }
+OUT="$(run_acp consult codex is the retry approach sound 2>&1)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && echo "$OUT" | grep -q 'stub answer' && ok "consult passes the answer through" || fail "consult happy path (rc=$rc)"
+grep -q -- '-y acpx@0.13.1 codex sessions ensure --name agent-comms-ask' "$ACP_STUB_LOG" \
+  && ok "warm consult ensures the pinned named session" || fail "session ensure argv"
+grep -q -- '-y acpx@0.13.1 --format quiet codex -s agent-comms-ask is the retry approach sound' "$ACP_STUB_LOG" \
+  && ok "warm consult prompts the named session with the pinned acpx" || fail "warm prompt argv"
+: > "$ACP_STUB_LOG"
+run_acp consult codex --oneshot quick check >/dev/null 2>&1
+grep -q -- 'codex exec quick check' "$ACP_STUB_LOG" && ! grep -q -- '-s agent-comms-ask' "$ACP_STUB_LOG" \
+  && ok "--oneshot uses stateless exec, no session" || fail "oneshot argv"
+QF="$WORK/acp-q.md"; printf 'excerpted discussion\n' > "$QF"
+: > "$ACP_STUB_LOG"
+run_acp consult codex --file "$QF" >/dev/null 2>&1
+grep -q -- "--file $QF" "$ACP_STUB_LOG" && ok "file-form payload passes through" || fail "file-form argv"
+for code in 2 3 4 5 130 7; do
+  OUT="$(ACP_STUB_EXIT=$code run_acp consult codex hello 2>&1)" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ] && echo "$OUT" | grep -qi 'mailbox' && ! echo "$OUT" | grep -qi 'retry'; then
+    ok "exit-$code maps: nonzero + mailbox fallback + no retry advice"
+  else
+    fail "exit-$code contract (rc=$rc, out: $(echo "$OUT" | head -1))"
+  fi
+done
+OUT="$(run_acp consult codex hello --file 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$OUT" | grep -q -- '--file requires a path' && echo "$OUT" | grep -qi 'mailbox' \
+  && ok "trailing --file dies with diagnostic + fallback" || fail "trailing --file guard (rc=$rc)"
+pf_check() {  # pf_check <desc> <args...> — nonzero + mailbox + no retry advice
+  local desc="$1"; shift
+  local out rc=0
+  out="$(run_acp "$@" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ] && echo "$out" | grep -qi 'mailbox' && ! echo "$out" | grep -qi 'retry'; then
+    ok "preflight failure carries fallback: $desc"
+  else
+    fail "preflight fallback missing: $desc (rc=$rc, out: $(echo "$out" | head -1))"
+  fi
+}
+pf_check "missing agent" consult
+pf_check "missing question" consult codex
+pf_check "empty --file value" consult codex --file "" hello
+pf_check "nonexistent --file path" consult codex --file "$WORK/does-not-exist.md"
+# Measurement consistency: one arithmetic, stated identically on every surface.
+if grep -rn '134x' "$REPO/helpers" "$REPO/docs" "$REPO/templates" >/dev/null 2>&1; then
+  fail "stale 134x ratio still published somewhere"
+else
+  ok "no stale measurement ratio published"
+fi
+for mf in "$REPO/helpers/acp.sh" "$REPO/docs/INTERNALS.md" "$REPO/docs/COMMANDS.md"; do
+  grep -q '18,562' "$mf" && grep -q '127x' "$mf" \
+    && ok "measurement consistent in $(basename "$mf")" || fail "measurement surfaces in $(basename "$mf")"
+done
+OUT="$(ACP_STUB_NODE_V=v18.0.0 run_acp consult codex hello 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'Node >= 22.13' && ok "node version gate fails closed with guidance" || fail "node gate"
+OUT="$(ACP_STUB_NODE_V=v18.0.0 run_acp doctor 2>&1)" && rc=0 || rc=$?
+[ "$rc" -eq 3 ] && ok "doctor exits 3 without a usable node" || fail "doctor node gate (rc=$rc)"
+: > "$ACP_STUB_LOG"
+OUT="$(run_acp consult grok hello 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'mailbox path' && [ ! -s "$ACP_STUB_LOG" ] \
+  && ok "unsupported agent fails closed before any acpx call" || fail "unsupported-agent refusal"
+grep -q 'ACPX_VERSION="0.13.1"' "$ACP" && ok "acpx version is pinned in one place" || fail "acpx pin"
+[ -x "$INST_FIX/.agent-comms/acp.sh" ] && ok "local install ships an executable acp.sh" || fail "local install acp.sh"
+grep -qF '"$ACP_SH" consult' "$REPO/templates/claude-commands/ask.md" \
+  && grep -q -- '--via acp' "$REPO/templates/claude-commands/ask.md" \
+  && grep -q 'Do NOT retry the ACP path' "$REPO/templates/claude-commands/ask.md" \
+  && ok "ask.md carries the ACP transport with fallback discipline" || fail "ask.md ACP source contract"
+grep -q 'Parse BOTH transport modifiers out' "$REPO/templates/claude-commands/ask.md" \
+  && grep -qF 'consult "$TARGET" --oneshot --file' "$REPO/templates/claude-commands/ask.md" \
+  && grep -q 'if and only if the user' "$REPO/templates/claude-commands/ask.md" \
+  && ok "ask.md parses and conditionally forwards --oneshot" || fail "ask.md oneshot forwarding contract"
+grep -q 'acp.sh' "$REPO/install.sh" && ok "installer ships acp.sh" || fail "installer acp.sh"
+
 echo "== scope-dial template source contract =="
 # Field-report trio (2026-08-19): the load-bearing new prose, pinned mechanically.
 FRAGVD="$REPO/docs/loopspec/fragments/verdict-discipline.md"

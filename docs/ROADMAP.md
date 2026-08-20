@@ -448,15 +448,16 @@ ACP (~zero once the acpx backend exists).
   derives the reviewer mechanically from the inbound `from:` for every continuation
   (replies, error lane, plan→implement handoff). Answers the field report's
   "serialization on one reviewer".
-- [ ] **ACP delivery backend (Tier 1 spike, scoped 2026-08-19)**: `COMMS_DELIVERY=acp` via
-  acpx (headless CLI ACP client; pin — pre-1.0). Decision gate: Node ≥22.13 dependency
-  acceptable as an OPTIONAL backend. The spike's deliverable is ONE measurement: round-2+
-  token cost warm ACP session vs cold `runphase` spawn (runphase re-pays full instruction
-  payload every round — session ids are recorded but never resumed). Mapping is clean:
-  thread → named session, exit codes → RESULT lanes, loopspec result/thread-state schemas
-  unchanged (delivery-agnostic, no symphony impact). Second justification: makes agents
-  4+ (gemini, copilot, cursor — all ship ACP adapters) near-zero marginal cost. cmux and
-  runphase stay; ACP is a third backend, not a replacement.
+- [x] **ACP Tier-1 spike — landed on `/ask` first** (user-reshaped 2026-08-20; shipped
+  same day as `helpers/acp.sh` + `/ask --via acp`): pinned acpx 0.13.1 via npx, Node
+  ≥22.13 gated, warm named-session default, mailbox fallback on every failure class.
+  THE MEASUREMENT (the spike's deliverable): cold one-shot = 18,562 fresh input
+  tokens; warm session round 2 = **146** (~127x reduction; acpx prints usage
+  natively). Decision gate resolved: Node accepted as an OPTIONAL, opt-in surface.
+  REMAINING (not this spike): `COMMS_DELIVERY=acp` for review loops — thread → named
+  session, exit codes → RESULT lanes, schemas unchanged; gate it on consult-path
+  soak + the field-report requirement that reviewers can EXECUTE things (acpx
+  permission policy design). cmux and runphase stay; ACP is a third backend.
 
 ## `/ask` unification (2026-08-20, supersedes the bare-`/ask-codex` decision above)
 
@@ -483,6 +484,6 @@ command shape evolves:
    scope ledger (the three template-only field-report fixes)
 3. **Multi-agent core + Grok Build headless** — registry/generalization, then Grok as
    consult + reviewer
-4. **ACP Tier-1 spike** — warm-vs-cold measurement; gated on the Node-dependency decision
+4. **ACP Tier-1 spike** — DONE 2026-08-20 (/ask --via acp; warm r2 146 vs cold 18,562 tokens, ~127x)
 5. Remaining scope-dial items (dispute lane needs design; test-evidence contract; budget
    signaling; stakes-tiering docs) and the standing DEFERRED backlog in docs/advisories.md

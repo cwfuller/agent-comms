@@ -5,7 +5,7 @@ Use this when you want a second opinion — a design choice, an open question, a
 ## Instructions
 
 1. **Parse the argument — target agent, then question.**
-   - Known agents: the registry — `"$COMMS_SH" agents` (resolve the shared helper per step 3 FIRST when the first word could name an agent). The default target is `"$COMMS_SH" agents default`. Adding an agent touches only `.comms/config`; this template never hardcodes the set.
+   - Known agents: the registry — `"$COMMS_SH" agents` (resolve the shared helper per step 4 FIRST when the first word could name an agent). The default target is `"$COMMS_SH" agents default`. Adding an agent touches only `.comms/config`; this template never hardcodes the set.
    - If the FIRST whitespace-delimited word of the argument, lowercased, is a known agent name, it names the target; everything after it is the question.
    - Otherwise the target is the DEFAULT agent and the ENTIRE ORIGINAL argument — including the unrecognized first word, unmodified — is the question. (Consequence: `/ask gemini is this sound?` sends the literal text "gemini is this sound?" to the default agent, because gemini has no registered backend.)
    - Hold the target in a named variable and use it in every later step — never hardcode an agent name below:
@@ -13,9 +13,35 @@ Use this when you want a second opinion — a design choice, an open question, a
      TARGET="$("$COMMS_SH" agents default)"   # or the recognized first word
      ```
 
-2. **Choose the mode.** If the question (after removing the agent word, when present) is EMPTY — bare `/ask`, or `/ask codex` alone — build an informal **thoughts consult** (step 5). Otherwise build an **explicit question** (step 4).
+2. **Detect the transport.** If the argument contains a `--via acp` flag, use the
+   SYNCHRONOUS ACP path instead of the mailbox. Parse BOTH transport modifiers out
+   of the question text — neither may remain in the payload:
+   - `--via acp` — selects this path
+   - `--oneshot` — optional; forwarded to the helper to skip the warm session
+     (stateless exec). Without it the consult is warm.
+   - Resolve the helper next to comms.sh: `ACP_SH="$(dirname "$COMMS_SH")/acp.sh"`
+     (resolve `COMMS_SH` per step 4 first).
+   - Run the consult and present the answer directly — no message file, no
+     delivery, no `/read-from-codex`. Forward `--oneshot` if and only if the user
+     passed it:
+     ```bash
+     "$ACP_SH" consult "$TARGET" --oneshot --file "<question/excerpt file>"   # user passed --oneshot
+     "$ACP_SH" consult "$TARGET" --file "<question/excerpt file>"             # default: warm session
+     ```
+     (Bare words work too for short questions. Thoughts mode writes its excerpt to
+     a temp file first — same payload contract.)
+   - The consult is WARM by default (a named per-repo session), so follow-ups pay
+     only the token delta. The helper prints acpx's token-usage line after the
+     answer.
+   - If the helper fails (Node missing, unsupported agent, timeout), it says why
+     and names the fallback: rerun without `--via acp` — the mailbox path below is
+     always available. Do NOT retry the ACP path on the same failure.
+   - `--via acp` supports codex and claude targets; grok consults always use the
+     mailbox path (its headless leg handles them).
 
-3. **Resolve the shared helper** — handles comms root, workspace name, validation, and delivery. Local pin wins over global:
+3. **Choose the mode.** If the question (after removing the agent word, when present) is EMPTY — bare `/ask`, or `/ask codex` alone — build an informal **thoughts consult** (step 6). Otherwise build an **explicit question** (step 5).
+
+4. **Resolve the shared helper** — handles comms root, workspace name, validation, and delivery. Local pin wins over global:
    ```bash
    COMMS_SH="$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')/.agent-comms/comms.sh"
    [ -x "$COMMS_SH" ] || COMMS_SH="$HOME/.agent-comms/comms.sh"
@@ -25,7 +51,7 @@ Use this when you want a second opinion — a design choice, an open question, a
    echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE"
    ```
 
-4. **Explicit question — build the body.** Detect optional flags first:
+5. **Explicit question — build the body.** Detect optional flags first:
    - `--with-diff` — attach `git diff <default-branch> --stat` (and `--name-only` if non-trivial) under `## Grounding`. Use when the question is grounded in current changes. Default: off.
    - `--with-files <path>[,<path>…]` — attach the listed file paths under `## Grounding` so the agent knows what to look at without reviewing them.
 
@@ -35,7 +61,7 @@ Use this when you want a second opinion — a design choice, an open question, a
    - `## Current Thinking` — your draft answer or working hypothesis so the agent can validate, refine, or push back rather than start blank. Skip if you genuinely have no take.
    - `## Grounding` — only if `--with-diff` or `--with-files` is set, or you're attaching specific evidence (command output, error messages). Inline as fenced blocks; don't paste full file contents — list paths.
 
-5. **Thoughts consult — build the body.** The payload is a verbatim excerpt of the current discussion, assembled under this contract (precedence in this order):
+6. **Thoughts consult — build the body.** The payload is a verbatim excerpt of the current discussion, assembled under this contract (precedence in this order):
    1. **Eligible pair** — the most recent COMPLETED user-message → assistant-answer exchange that occurred BEFORE this `/ask` invocation. "User message" means the user's question OR request — imperative phrasing with no question mark qualifies; select the exchange being discussed, not punctuation. The `/ask` invocation itself is never the eligible user message.
    2. **Floor — overrides the cap.** The eligible pair goes into `## Context` verbatim even when the pair alone exceeds the size cap. Never truncate mid-message; never drop either half of the pair.
    3. **Soft cap ~4 KB.** Add older COMPLETE turns (working from newest toward older) only while the total stays under the cap. Add or omit turns whole.
@@ -48,7 +74,7 @@ Use this when you want a second opinion — a design choice, an open question, a
 
    Filename slug: `thoughts` (the filename component becomes `ask-thoughts`).
 
-6. **Write the message file — non-interpolating writer REQUIRED.**
+7. **Write the message file — non-interpolating writer REQUIRED.**
    - Path: `$COMMS_ROOT/to-$TARGET/` — `mkdir -p` it first (registry agents each own an inbox)
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_ask-<slug>-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions; thoughts mode yields `ask-thoughts`)
    - Frontmatter:
@@ -70,14 +96,14 @@ message_id: <the filename, without .md>
 
    Write the assembled message with a **non-interpolating file-write tool** (the Write tool or equivalent). This is REQUIRED, not preferred: the payload can contain arbitrary verbatim discussion, so any fixed heredoc delimiter can appear inside it on a line of its own — the heredoc closes early and the shell parses the remainder before `validate` can refuse it. (docs/advisories.md 2026-07-06 also records a live headless heredoc hang where the Write tool succeeded immediately.) A shell heredoc is permitted ONLY as a last resort with a delimiter PROVEN absent from the entire rendered message — generate a unique delimiter and check it against the full content first; never use a fixed delimiter blindly. Either way, sanity-check with `head -3` on the file before sending.
 
-7. **Validate and deliver** — `send` refuses malformed messages and degrades to manual pickup without cmux:
+8. **Validate and deliver** — `send` refuses malformed messages and degrades to manual pickup without cmux:
    ```bash
    "$COMMS_SH" send --to "$TARGET" "<path of the message file you wrote>"
    ```
    On `RESULT: blocked`, execute the exact `RECOVER:` line once; relay only the final
    non-`delivered` result.
 
-8. Tell the user the message was sent and where to look for the reply (`.comms/to-claude/` — replies come TO claude regardless of target). When the reply arrives, use `/read-from-codex` to surface the answer (it reads any sender). Headless-only targets (e.g. grok) answer via a detached runphase turn automatically.
+9. Tell the user the message was sent and where to look for the reply (`.comms/to-claude/` — replies come TO claude regardless of target). When the reply arrives, use `/read-from-codex` to surface the answer (it reads any sender). Headless-only targets (e.g. grok) answer via a detached runphase turn automatically.
 
 ## Notes
 

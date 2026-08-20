@@ -125,6 +125,19 @@ survives only as a fallback for messages without one. Live-verified 2026-08-20
 (grok 1.0.5, sentineled linked-worktree probe: both trees byte-identical after a
 completed review turn; an instructed in-repo write attempt was denied mid-turn).
 
+## ACP consult transport (acp.sh)
+
+Consults are synchronous by nature, so `/ask --via acp` bypasses the mailbox: one
+blocking `acpx` call, answer straight to the caller, token line included. acpx is
+pre-1.0 and PINNED (`ACPX_VERSION` in acp.sh, invoked via `npx -y` — cached, no
+global install); Node >= 22.13 is gated at call time and the helper fails closed
+naming the mailbox fallback for every error class (acpx's exit codes are a stable
+contract: 3 timeout, 4 no-session, 5 all-denied). Warm by default via a named
+per-repo session — measured 2026-08-20 on codex: cold one-shot 18,562 fresh input
+tokens; warm round 2 **146** (~127x less). That number is why the ACP track exists;
+review loops stay on runphase until this consult path proves the transport.
+This is the ONLY Node-dependent surface in the repo, and it is opt-in per call.
+
 ## Delivery mechanics
 
 `cmux send`/`send-key` keystroke injection with short settles between steps. The

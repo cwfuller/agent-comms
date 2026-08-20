@@ -53,6 +53,14 @@ contain any heredoc delimiter).
 `/ask-codex` remains as a deprecated alias for `/ask codex` for one transition
 release, then drops.
 
+**`--via acp` (synchronous transport):** skips the mailbox entirely — the consult
+runs as one blocking acpx call (pinned, via npx; Node >= 22.13) and the answer
+lands directly in context, followed by acpx's token-usage line. Warm by default: a
+named per-repo session makes follow-ups pay only the delta (measured 2026-08-20:
+cold one-shot 18,562 fresh input tokens vs warm round-2 146 — ~127x). `--oneshot` forces a stateless
+exec. Supports codex and claude targets; grok consults stay on the mailbox path.
+On any failure the helper names the fallback: rerun without `--via acp`.
+
 ### `/send-to-codex [instructions]`
 
 One-shot review request for work you just did: gathers diff stat, recent commits, and
@@ -189,6 +197,13 @@ Conformance checker for the [loopspec](loopspec/SPEC.md) kernel:
 fixtures (valid/invalid messages, verdict-normalization table, schema smoke). The test
 harness runs it on every `bash tests/run.sh`; consumers that vendor `docs/loopspec/`
 re-run it (or their own reader) against the same fixtures in their CI.
+
+### `acp.sh` (experimental)
+
+Synchronous `/ask --via acp` transport over pinned acpx (`consult <agent>
+[--oneshot] [--file <path>] [words...]`, `doctor`). Warm named-session default;
+acpx exit codes translated to mailbox-fallback guidance; fails closed on missing
+Node, unsupported agents, or acpx errors — the mailbox path is always available.
 
 ### `runphase.sh` (experimental)
 
