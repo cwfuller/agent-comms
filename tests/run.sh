@@ -1022,6 +1022,347 @@ else
   fail "loopspec conformance failed: $(grep '^FAIL' "$WORK/loopspec.out" | head -5 | tr '\n' ' ')"
 fi
 
+echo "== multi-agent: registry contract =="
+MA_FIX="$WORK/ma-repo"; mkdir -p "$MA_FIX"; MA_FIX="$(cd "$MA_FIX" && pwd -P)"
+git -C "$MA_FIX" init -q -b feature/ma-tests
+git -C "$MA_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$MA_FIX/.comms/to-claude" "$MA_FIX/.comms/to-codex" "$MA_FIX/.comms/archive"
+run_ma() { (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+MA_WS="$(run_ma workspace)"
+
+[ "$(run_ma agents)" = "claude codex" ] && ok "zero-config agents default" || fail "zero-config agents (got: $(run_ma agents))"
+[ "$(run_ma agents default)" = "codex" ] && ok "zero-config default target" || fail "zero-config default target"
+run_ma agents --supported | grep -q 'grok' && ok "supported table lists grok" || fail "supported table lists grok"
+
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$MA_FIX/.comms/config"
+[ "$(run_ma agents)" = "claude codex grok" ] && ok "registry registers grok" || fail "registry registers grok (got: $(run_ma agents))"
+printf 'agents = claude Codex\n' > "$MA_FIX/.comms/config"
+check_not "uppercase agent name rejected" run_ma agents
+printf 'agents = claude ../evil\n' > "$MA_FIX/.comms/config"
+check_not "path-traversal agent name rejected" run_ma agents
+printf 'agents = claude co.dex\n' > "$MA_FIX/.comms/config"
+check_not "dotted agent name rejected" run_ma agents
+printf 'agents = claude gemini\n' > "$MA_FIX/.comms/config"
+check_not "unsupported agent (gemini) rejected at parse" run_ma agents
+printf 'agents = claude codex claude\n' > "$MA_FIX/.comms/config"
+check_not "duplicate agent rejected" run_ma agents
+printf 'agents = claude codex\nagents = claude\n' > "$MA_FIX/.comms/config"
+check_not "duplicate agents key rejected" run_ma agents
+printf 'agents = claude codex grok\ndefault-target = grok claude\n' > "$MA_FIX/.comms/config"
+check_not "multi-word default-target rejected" run_ma agents default
+printf 'agents = claude codex\ndefault-target = grok\n' > "$MA_FIX/.comms/config"
+check_not "unregistered default-target rejected" run_ma agents default
+printf 'agents = claude codex\ndefault-target = gemini\n' > "$MA_FIX/.comms/config"
+check_not "malformed default-target propagates through status" run_ma status
+check_not "malformed default-target propagates through list" run_ma list --as claude
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$MA_FIX/.comms/config"
+check_not "unknown agent dies on inbox use" run_ma list --as gemini
+
+echo "== multi-agent: sender enforcement + grok inbox round-trip =="
+MA_TS="2026-08-20T09-00-00"
+MA_MSG="$MA_FIX/.comms/to-grok/${MA_WS}_${MA_TS}_review-req-1.md"
+mkdir -p "$MA_FIX/.comms/to-grok"
+cat > "$MA_MSG" <<MAEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-20T14:00:00Z
+workspace: $MA_WS
+message_id: ${MA_WS}_${MA_TS}_review-req-1
+thread: ma-arc-1
+workflow: auto-full
+phase: plan
+round: 1
+max-rounds: 4
+---
+
+## Plan
+review this plan
+MAEOF
+check "grok inbox lists the message" bash -c "run_ma() { (cd '$MA_FIX' && env -u CMUX_WORKSPACE_ID '$COMMS' \"\$@\"); }; run_ma list --as grok | grep -q review-req-1"
+BAD_FROM="$MA_FIX/.comms/to-claude/${MA_WS}_${MA_TS}_badfrom-1.md"
+sed 's/^from: claude$/from: gemini/' "$MA_MSG" > "$BAD_FROM"
+check_not "validate rejects unregistered from:" run_ma validate "$BAD_FROM"
+rm -f "$BAD_FROM"
+
+echo "== multi-agent: grok stub + full-arc runphase legs =="
+export GROK_STUB_LOG="$WORK/grok.log"
+cat > "$STUB_BIN/grok" <<'GSTUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${GROK_STUB_LOG:-/dev/null}"
+pf=""; prev=""
+for a in "$@"; do [ "$prev" = "--prompt-file" ] && pf="$a"; prev="$a"; done
+[ -n "$pf" ] && [ -f "$pf" ] || { echo "stub: no prompt file" >&2; exit 2; }
+# streaming-messages-json shape (live 1.0.5): init event carries session_id and
+# the final result event carries the COMPLETE reply text. Under the
+# parent-stamped envelope the child emits ONLY a VERDICT line (reviews) + body.
+esc() { printf '%s' "$1" | awk '{printf "%s\\n", $0}'; }
+printf '{"type":"system","subtype":"init","session_id":"stub-grok-session-1"}\n'
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"narration to ignore"}]}}\n'
+if [ -n "${GROK_STUB_NO_VERDICT:-}" ]; then
+  REPLY="$(printf -- '## Summary\nreview without any verdict line')"
+elif [ -n "${GROK_STUB_BAD_VERDICT:-}" ]; then
+  REPLY="$(printf -- 'VERDICT: SHIP_IT\n\n## Summary\nnonstandard verdict value')"
+elif [ -n "${GROK_STUB_EMPTY_BODY:-}" ]; then
+  REPLY="$(printf -- 'VERDICT: APPROVE')"
+else
+  REPLY="$(printf -- 'VERDICT: %s\n\n## Summary\nstub review of the handoff\n\n## Findings\n### Blocking\n- none' "${GROK_STUB_VERDICT:-APPROVE}")"
+fi
+printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$(esc "$REPLY")"
+GSTUB
+chmod +x "$STUB_BIN/grok"
+
+RP="$REPO/helpers/runphase.sh"
+run_grok_leg() {  # <msg-path> <run-dir> [env overrides via caller export]
+  (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" \
+     COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$1" --dir "$2" --provider grok)
+}
+
+# Leg 1: plan round 1 -> REQUEST_CHANGES reply lands for claude, inbound archived
+R1="$WORK/ma-leg1"; mkdir -p "$R1"
+GROK_STUB_VERDICT=REQUEST_CHANGES run_grok_leg "$MA_MSG" "$R1" >/dev/null 2>&1
+[ "$(cd "$MA_FIX" && "$COMMS" root >/dev/null 2>&1; echo done)" = done ] || true
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R1/result.json" | head -1)" = "completed" ] \
+  && ok "grok leg 1 completes" || fail "grok leg 1 result (see $R1/result.json)"
+REPLY1="$(find "$MA_FIX/.comms/to-claude" -name '*grok-reply*' -type f | head -1)"
+[ -n "$REPLY1" ] && ok "grok reply persisted to claude inbox by the PARENT" || fail "grok reply persisted"
+grep -q '^from: grok$' "$REPLY1" && grep -q '^verdict: REQUEST_CHANGES$' "$REPLY1" \
+  && ok "reply carries grok identity and stub verdict" || fail "reply identity/verdict"
+grep -q '^thread: ma-arc-1$' "$REPLY1" && ok "reply copies the thread" || fail "reply thread copy"
+[ ! -f "$MA_MSG" ] && [ -f "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" ] \
+  && ok "inbound archived from to-grok by owner derivation" || fail "inbound archive movement"
+STATE1="$MA_FIX/.comms/state/$(echo "$MA_WS" | tr -c 'A-Za-z0-9._-\n' '_')_ma-arc-1.json"
+grep -q '"awaiting_from": "claude"' "$STATE1" && ok "awaiting_from = explicit send target (claude)" || fail "awaiting_from authority (see $STATE1)"
+grep -q '"grok_session_id": "stub-grok-session-1"' "$STATE1" && ok "generic grok_session_id recorded" || fail "grok session field"
+grep -q -- '--sandbox read-only' "$GROK_STUB_LOG" && grep -q -- '--permission-mode dontAsk' "$GROK_STUB_LOG" \
+  && grep -q -- '--output-format streaming-messages-json' "$GROK_STUB_LOG" \
+  && ok "grok argv pins read-only sandbox + dontAsk + whole-message format" || fail "grok argv sandbox/mode/format"
+grep -q -- "--deny Bash(rm \*) --deny Bash(git push\*)" "$GROK_STUB_LOG" \
+  && ok "grok argv carries both deny rules" || fail "grok argv deny rules"
+grep -qE '(^| )-p( |$)' "$GROK_STUB_LOG" && fail "grok argv must not use -p" || ok "grok argv avoids -p (prompt-file only)"
+
+# Leg 2a: plan round 2 — built the way the READER builds it: reviewer derived
+# from the round-1 reply's from:, round incremented, in-reply-to threaded.
+LEG2_REVIEWER="$(sed -n '2,/^---$/p' "$REPLY1" | grep -m1 '^from:' | sed 's/^from: //')"
+[ "$LEG2_REVIEWER" = "grok" ] && ok "reader-side reviewer derivation from the grok reply" || fail "reviewer derivation (got: $LEG2_REVIEWER)"
+REPLY1_ID="$(sed -n '2,/^---$/p' "$REPLY1" | grep -m1 '^message_id:' | sed 's/^message_id: //')"
+MA_MSG2="$MA_FIX/.comms/to-$LEG2_REVIEWER/${MA_WS}_2026-08-20T09-10-00_plan-r2-1.md"
+sed -e 's/^round: 1$/round: 2/' -e "s/^message_id: .*/message_id: ${MA_WS}_2026-08-20T09-10-00_plan-r2-1/" \
+    -e "s/^in-reply-to: .*/in-reply-to: $REPLY1_ID/" \
+  "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG2"
+grep -q '^in-reply-to:' "$MA_MSG2" || sed -i.bak "s/^thread: ma-arc-1\$/thread: ma-arc-1\nin-reply-to: $REPLY1_ID/" "$MA_MSG2"
+R2A="$WORK/ma-leg2a"; mkdir -p "$R2A"
+GROK_STUB_VERDICT=APPROVE run_grok_leg "$MA_MSG2" "$R2A" >/dev/null 2>&1
+REPLY2="$(find "$MA_FIX/.comms/to-claude" -name '*grok-reply*' -type f ! -path "$REPLY1" | sort | tail -1)"
+[ -n "$REPLY2" ] && [ "$REPLY2" != "$REPLY1" ] && grep -q '^verdict: APPROVE$' "$REPLY2" \
+  && grep -q '^round: 2$' "$REPLY2" \
+  && ok "plan round 2 approved by the same reviewer" || fail "plan round-2 leg"
+[ -f "$MA_FIX/.comms/archive/$(basename "$MA_MSG2")" ] && ok "round-2 inbound archived exactly" || fail "round-2 archive movement"
+
+# Leg 2b: the plan→implement CONTINUATION — implement round 1 to the reviewer
+# derived from the APPROVAL (the transition the reader performs), same thread.
+LEG2B_REVIEWER="$(sed -n '2,/^---$/p' "$REPLY2" | grep -m1 '^from:' | sed 's/^from: //')"
+REPLY2_ID="$(sed -n '2,/^---$/p' "$REPLY2" | grep -m1 '^message_id:' | sed 's/^message_id: //')"
+MA_MSG2B="$MA_FIX/.comms/to-$LEG2B_REVIEWER/${MA_WS}_2026-08-20T09-15-00_impl-r1-1.md"
+sed -e 's/^phase: plan$/phase: implement/' -e 's/^round: 2$/round: 1/' \
+    -e "s/^message_id: .*/message_id: ${MA_WS}_2026-08-20T09-15-00_impl-r1-1/" \
+    -e "s/^in-reply-to: .*/in-reply-to: $REPLY2_ID/" \
+  "$MA_FIX/.comms/archive/$(basename "$MA_MSG2")" > "$MA_MSG2B"
+grep -q "^in-reply-to: $REPLY2_ID$" "$MA_MSG2B" \
+  && ok "implement continuation threads to the round-2 APPROVAL" || fail "continuation in-reply-to"
+R2B="$WORK/ma-leg2b"; mkdir -p "$R2B"
+GROK_STUB_VERDICT=APPROVE run_grok_leg "$MA_MSG2B" "$R2B" >/dev/null 2>&1
+REPLY2B="$(find "$MA_FIX/.comms/to-claude" -name '*grok-reply*' -type f | sort | tail -1)"
+grep -q '^phase: implement$' "$REPLY2B" && grep -q '^from: grok$' "$REPLY2B" \
+  && ok "plan→implement continuation reviewed by the SAME reviewer (full arc)" || fail "implement continuation leg"
+STATUS_OUT="$(run_ma status 2>/dev/null)"
+echo "$STATUS_OUT" | grep -q 'pending in to-grok' && ok "status iterates the grok inbox" || fail "status grok inbox line"
+# Backdate the awaiting epoch so the age is deterministically > threshold —
+# a same-second run otherwise races age_s > 0 and sees nothing stalled.
+STATE_ARC="$MA_FIX/.comms/state/$(echo "$MA_WS" | tr -c 'A-Za-z0-9._-\n' '_')_ma-arc-1.json"
+BACKDATE=$(( $(date +%s) - 120 ))
+sed -i.bak "s/\"awaiting_since_epoch\": \"[0-9]*\"/\"awaiting_since_epoch\": \"$BACKDATE\"/" "$STATE_ARC" && rm -f "$STATE_ARC.bak"
+STALLED_OUT="$(run_ma stalled 1 2>/dev/null)"
+echo "$STALLED_OUT" | grep -q 'thread=ma-arc-1' && echo "$STALLED_OUT" | grep -q 'awaiting=claude' \
+  && ok "stalled resolves the arc thread with the explicit-target awaiting" || fail "stalled arc lookup (got: $STALLED_OUT)"
+MA_MSG2="$MA_MSG2B"
+
+# Leg 3: peer-from-from — inbound from codex routes the reply to to-codex/
+MA_MSG3="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-20-00_from-codex-1.md"
+# leg 2 archived MA_MSG2 — build leg 3's inbound from the archived copy directly
+sed -e 's/^from: claude$/from: codex/' -e 's/^thread: ma-arc-1$/thread: ma-arc-2/' \
+    -e 's/_impl-r1-1$/_from-codex-1/' \
+    "$MA_FIX/.comms/archive/$(basename "$MA_MSG2")" > "$MA_MSG3"
+[ -s "$MA_MSG3" ] || fail "leg-3 fixture construction produced an empty file"
+R3="$WORK/ma-leg3"; mkdir -p "$R3"
+GROK_STUB_VERDICT=APPROVE run_grok_leg "$MA_MSG3" "$R3" >/dev/null 2>&1
+find "$MA_FIX/.comms/to-codex" -name '*grok-reply*' -type f | grep -q . \
+  && ok "pickup peer derives from inbound from: (reply to to-codex/)" || fail "peer-from-from derivation"
+
+# Broker failures under the parent-stamped envelope: the model cannot author
+# ANY frontmatter, so the adversarial surface is the verdict-line contract and
+# body validity — each must fail with nothing persisted and nothing archived.
+MA_MSG4="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-30-00_noverdict-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-3/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG4"
+R4="$WORK/ma-leg4"; mkdir -p "$R4"
+PRE_CLAUDE_CT="$(find "$MA_FIX/.comms/to-claude" -type f | wc -l | tr -d ' ')"
+GROK_STUB_NO_VERDICT=1 run_grok_leg "$MA_MSG4" "$R4" >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R4/result.json" | head -1)" = "failed" ] \
+  && grep -q 'no leading' "$R4/result.json" && [ -f "$MA_MSG4" ] \
+  && ok "review reply without a VERDICT line fails closed" || fail "missing-verdict broker path"
+MA_MSG5="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-35-00_badverdict-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-4/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG5"
+R6="$WORK/ma-leg6"; mkdir -p "$R6"
+GROK_STUB_BAD_VERDICT=1 run_grok_leg "$MA_MSG5" "$R6" >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R6/result.json" | head -1)" = "failed" ] && [ -f "$MA_MSG5" ] \
+  && ok "nonstandard verdict value fails closed" || fail "bad-verdict broker path"
+MA_MSG7="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-37-00_emptybody-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-5/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG7"
+R7="$WORK/ma-leg7"; mkdir -p "$R7"
+GROK_STUB_EMPTY_BODY=1 run_grok_leg "$MA_MSG7" "$R7" >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R7/result.json" | head -1)" = "failed" ] \
+  && grep -q 'failed validation' "$R7/result.json" && [ -f "$MA_MSG7" ] \
+  && ok "verdict-only empty body refused by validate" || fail "empty-body broker path"
+[ "$(find "$MA_FIX/.comms/to-claude" -type f | wc -l | tr -d ' ')" = "$PRE_CLAUDE_CT" ] \
+  && ok "all broker failures persisted nothing to the claude inbox" || fail "broker-failure persistence atomicity"
+# Path-shaped / unregistered inbound from: — refused BEFORE any routing
+MA_MSG8="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-39-00_evilfrom-1.md"
+sed -e 's|^from: claude$|from: ../evil|' -e 's/^thread: ma-arc-1$/thread: ma-arc-6/' \
+  "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG8"
+R8="$WORK/ma-leg8"; mkdir -p "$R8"
+run_grok_leg "$MA_MSG8" "$R8" >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R8/result.json" | head -1)" = "failed" ] \
+  && grep -q 'not a registered agent' "$R8/result.json" && [ -f "$MA_MSG8" ] \
+  && [ ! -d "$MA_FIX/.comms/to-../evil" ] \
+  && ok "path-shaped inbound from: refused before routing" || fail "unregistered-peer refusal"
+# Question leg (/ask grok path): the stub STILL emits a leading canonical
+# VERDICT line — for a consult that line must become body text, never metadata.
+MA_MSGQ="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-41-00_ask-q-1.md"
+cat > "$MA_MSGQ" <<QEOF
+---
+type: question
+from: claude
+timestamp: 2026-08-20T14:41:00Z
+workspace: $MA_WS
+message_id: ${MA_WS}_2026-08-20T09-41-00_ask-q-1
+---
+
+## Question
+Is the retry approach sound?
+QEOF
+RQ="$WORK/ma-legq"; mkdir -p "$RQ"
+run_grok_leg "$MA_MSGQ" "$RQ" >/dev/null 2>&1
+QREPLY="$(find "$MA_FIX/.comms/to-claude" -name '*grok-reply*' -type f | sort | tail -1)"
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RQ/result.json" | head -1)" = "completed" ] \
+  && ok "question leg completes" || fail "question leg status"
+sed -n '2,/^---$/p' "$QREPLY" | grep -q '^type: response$' \
+  && ok "question reply stamped type: response" || fail "question reply type"
+[ "$(sed -n '2,/^---$/p' "$QREPLY" | grep -c '^verdict:')" = "0" ] \
+  && ok "question reply carries NO verdict field" || fail "question verdict leak"
+grep -q '^VERDICT: APPROVE$' "$QREPLY" \
+  && ok "stray verdict line preserved as consult body text" || fail "consult body preservation"
+[ ! -f "$MA_MSGQ" ] && [ -f "$MA_FIX/.comms/archive/$(basename "$MA_MSGQ")" ] \
+  && ok "question inbound archived to the sender-derived owner" || fail "question archive movement"
+
+# Parent-stamped envelope: the successful legs prove the authority — re-assert
+# the stamped fields on the leg-1 reply match the INBOUND turn exactly.
+grep -q '^in-reply-to: '"${MA_WS}"'_2026-08-20T09-00-00_review-req-1$' "$REPLY1" \
+  && grep -q '^workflow: auto-full$' "$REPLY1" && grep -q '^round: 1$' "$REPLY1" \
+  && ok "stamped envelope binds the reply to the inbound turn" || fail "envelope-binding assertion"
+
+echo "== multi-agent: grok arg refusals =="
+R5="$WORK/ma-leg5"; mkdir -p "$R5"
+for bad in "COMMS_RUNPHASE_GROK_ARGS=--sandbox workspace" "COMMS_RUNPHASE_GROK_ARGS=--sandbox off" \
+           "COMMS_RUNPHASE_GROK_ARGS=--sandbox devbox" "COMMS_RUNPHASE_GROK_ARGS=--sandbox=off" \
+           "COMMS_RUNPHASE_GROK_ARGS=--sandbox=workspace" "COMMS_RUNPHASE_GROK_ARGS=--sandbox=devbox" \
+           "COMMS_RUNPHASE_GROK_ARGS=--sandbox=read-only" "COMMS_RUNPHASE_GROK_ARGS=--always-approve" \
+           "COMMS_RUNPHASE_GROK_ARGS=$(printf -- '--sandbox\toff')" \
+           "COMMS_RUNPHASE_GROK_ARGS=$(printf -- '--sandbox\nworkspace')" \
+           "COMMS_RUNPHASE_GROK_ARGS=--permission-mode=bypassPermissions" \
+           "COMMS_RUNPHASE_GROK_PERMISSION_MODE=bypassPermissions"; do
+  OUT="$( (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+      "$bad" "$RP" run --message "$MA_MSG4" --dir "$R5" --provider grok) 2>&1 )" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ] && echo "$OUT" | grep -qi 'refused'; then
+    ok "refused: $bad"
+  else
+    fail "refusal missing for: $bad (rc=$rc)"
+  fi
+done
+
+echo "== multi-agent: archive-owner authority (comms.sh send) =="
+# Retry idempotency: inbound already archived -> no-op success
+OUTB="$MA_FIX/.comms/to-codex/${MA_WS}_2026-08-20T09-40-00_r2-1.md"
+cat > "$OUTB" <<MAEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-20T14:40:00Z
+workspace: $MA_WS
+message_id: ${MA_WS}_2026-08-20T09-40-00_r2-1
+thread: ma-arc-1
+workflow: auto-full
+phase: implement
+round: 2
+max-rounds: 4
+---
+
+body
+MAEOF
+IDEMP_OUT="$(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUTB" --archive-inbound "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" 2>&1)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && echo "$IDEMP_OUT" | grep -q 'no-op' && ok "already-archived inbound is a no-op success (retry idempotent)" || fail "archive retry idempotency (rc=$rc)"
+# Cross-inbox mismatch: outbound from: claude but inbound sits in to-codex/
+STRAY="$MA_FIX/.comms/to-codex/${MA_WS}_2026-08-20T09-50-00_stray-1.md"
+cp "$OUTB" "$STRAY"
+STATE_ARC1="$MA_FIX/.comms/state/$(echo "$MA_WS" | tr -c 'A-Za-z0-9._-\n' '_')_ma-arc-1.json"
+STATE_BEFORE="$(cat "$STATE_ARC1" 2>/dev/null || true)"
+CMUX_LOG_BEFORE="$(wc -l < "$CMUX_STUB_LOG" 2>/dev/null | tr -d ' ' || echo 0)"
+MISMATCH_OUT="$(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUTB" --archive-inbound "$STRAY" 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$MISMATCH_OUT" | grep -q 'cross-inbox mismatch' \
+  && ok "cross-inbox archive mismatch refused" || fail "cross-inbox mismatch refusal (rc=$rc)"
+echo "$MISMATCH_OUT" | grep -q 'delivered to' && fail "mismatch must refuse BEFORE delivery" || ok "mismatch refusal precedes delivery (nothing nudged)"
+[ "$(wc -l < "$CMUX_STUB_LOG" 2>/dev/null | tr -d ' ' || echo 0)" = "$CMUX_LOG_BEFORE" ] \
+  && ok "mismatch refusal makes zero cmux calls" || fail "mismatch cmux-call atomicity"
+[ "$(cat "$STATE_ARC1" 2>/dev/null || true)" = "$STATE_BEFORE" ] \
+  && ok "mismatch refusal mutates no thread state" || fail "mismatch state atomicity"
+rm -f "$STRAY" "$OUTB"
+
+echo "== multi-agent: template source contracts =="
+grep -qF '"$COMMS_SH" agents' "$REPO/templates/claude-commands/ask.md" \
+  && ok "ask.md reads known agents from the registry helper" || fail "ask.md registry hookup"
+for tf in auto-plan auto-implement auto-full; do
+  grep -q -- '--reviewer <agent>' "$REPO/templates/claude-commands/$tf.md" \
+    && grep -qF 'send --to "$REVIEWER"' "$REPO/templates/claude-commands/$tf.md" \
+    && ok "$tf.md carries --reviewer with variable target" || fail "$tf.md reviewer flag"
+done
+grep -qF 'REVIEWER=$(awk' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && grep -q 'ok) print v' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "reader extractor is close-delimiter-gated" || fail "reader REVIEWER capture (bounded)"
+RFC_SRC="$REPO/templates/claude-commands/read-from-codex.md"
+DERIVE_LN="$(grep -n 'Derive the reviewer BEFORE acting on validation results' "$RFC_SRC" | cut -d: -f1 | head -1)"
+ERRLANE_LN="$(grep -n 'send --to "\$REVIEWER" "<error file>"' "$RFC_SRC" | cut -d: -f1 | head -1)"
+[ -n "$DERIVE_LN" ] && [ -n "$ERRLANE_LN" ] && [ "$DERIVE_LN" -lt "$ERRLANE_LN" ] \
+  && ok "reviewer derivation precedes the error lane" || fail "error-lane REVIEWER ordering"
+grep -q 'FAIL CLOSED: report the malformed message' "$RFC_SRC" \
+  && ok "unregistered-sender error lane fails closed" || fail "error-lane fail-closed rule"
+# Execute the template's ACTUAL extractor line against adversarial fixtures.
+EXTRACT_LINE="$(grep -m1 'REVIEWER=\$(awk' "$RFC_SRC" | sed 's/^ *//')"
+NOCLOSE="$WORK/noclose.md"
+printf -- '---\ntype: review-feedback\n\nbody text\nfrom: grok\nmore body\n' > "$NOCLOSE"
+GOT="$(eval "${EXTRACT_LINE/\"<message file>\"/\"$NOCLOSE\"}"; printf '%s' "$REVIEWER")"
+[ -z "$GOT" ] && ok "template extractor yields empty on missing close delimiter" || fail "extractor missing-close (got: $GOT)"
+CRLF="$WORK/crlf.md"
+printf -- '---\r\ntype: review-feedback\r\nfrom: codex\r\n---\r\n\r\nbody\r\n' > "$CRLF"
+GOT2="$(eval "${EXTRACT_LINE/\"<message file>\"/\"$CRLF\"}"; printf '%s' "$REVIEWER")"
+[ "$GOT2" = "codex" ] && ok "template extractor handles CRLF frontmatter" || fail "extractor CRLF (got: $GOT2)"
+# Duplicate authoritative fields: extraction must AGREE with the helper's
+# first-field parse — validation and routing must select the same sender.
+DUPFROM="$WORK/dupfrom.md"
+printf -- '---\ntype: review-feedback\nfrom: codex\nfrom: grok\ntimestamp: 2026-08-20T14:00:00Z\nverdict: APPROVE\n---\n\nbody\n' > "$DUPFROM"
+GOT3="$(eval "${EXTRACT_LINE/\"<message file>\"/\"$DUPFROM\"}"; printf '%s' "$REVIEWER")"
+[ "$GOT3" = "codex" ] && ok "duplicate from: routes to the FIRST (validated) sender" || fail "duplicate-from agreement (got: $GOT3)"
+grep -qF 'send --to "$REVIEWER" "<your reply file>"' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "reader continuations send to the derived reviewer" || fail "reader continuation target"
+
 echo "== scope-dial template source contract =="
 # Field-report trio (2026-08-19): the load-bearing new prose, pinned mechanically.
 FRAGVD="$REPO/docs/loopspec/fragments/verdict-discipline.md"

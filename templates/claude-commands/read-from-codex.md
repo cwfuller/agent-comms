@@ -25,7 +25,16 @@ Read and act on messages from Codex in `.comms/to-claude/`.
    ```bash
    "$COMMS_SH" validate "<message file>"
    ```
-   This checks frontmatter delimiters, required fields (`type`, `from`, `timestamp`), workflow fields (`phase`, `round`, `max-rounds`, plus `verdict` on replies from Codex), and a non-empty body. If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Codex: [reasons from the helper]. File: [filename]". In autonomous mode, use the **error lane**: write a `type: error` reply (copy `workspace`/`workflow`/`phase`/`round`/`max-rounds`/`thread`, set `in-reply-to` to the malformed message's `message_id`, NO `verdict`, do NOT increment `round`) whose body states what is malformed and requests a clean resend, then `"$COMMS_SH" send --to codex "<error file>"`.
+   This checks frontmatter delimiters, required fields (`type`, `from`, `timestamp`), workflow fields (`phase`, `round`, `max-rounds`, plus `verdict` on replies from Codex), and a non-empty body.
+
+   **Derive the reviewer BEFORE acting on validation results** — the extractor emits the FIRST `from:` field (matching the helper's first-field parse, so validation and routing always select the same sender) and ONLY after seeing BOTH frontmatter delimiters (a missing close must yield empty, never fall through into body text; CRLF tolerated); the value is registry-checked:
+   ```bash
+   REVIEWER=$(awk '{sub(/\r$/,"")} NR==1 && $(0)!="---" {exit} NR>1 && $(0)=="---" {ok=1; exit} NR>1 && !seen && index($(0),"from:")==1 {v=$(0); sub(/^from:[[:space:]]*/,"",v); seen=1} END {if (ok) print v}' "<message file>")
+   "$COMMS_SH" agents | tr ' ' '\n' | grep -qx "$REVIEWER" || REVIEWER=""
+   ```
+   If `REVIEWER` comes back empty (missing/unclosed frontmatter, or a missing or unregistered `from:`), FAIL CLOSED: report the malformed message to the user and do NOT route an error reply anywhere.
+
+   If validation fails, **do not archive** the message. Tell the user: "Received a malformed message from Codex: [reasons from the helper]. File: [filename]". In autonomous mode, use the **error lane**: write a `type: error` reply (copy `workspace`/`workflow`/`phase`/`round`/`max-rounds`/`thread`, set `in-reply-to` to the malformed message's `message_id`, NO `verdict`, do NOT increment `round`) whose body states what is malformed and requests a clean resend, then `"$COMMS_SH" send --to "$REVIEWER" "<error file>"` — using the reviewer derived above; with an empty `REVIEWER` there is nowhere trustworthy to route, so stop at the user report.
 
    **If the incoming message is `type: error`** (Codex reporting YOUR last message was malformed): fix and resend your previous message with the same `round` — an error exchange never consumes a round.
 
@@ -54,10 +63,17 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 
 ### Autonomous flow — `workflow` field present
 
+**The reviewer is the `REVIEWER` derived mechanically in step 4** (frontmatter-bounded,
+registry-checked — same rule as the thread capture: never type it by hand).
+Every continuation in this flow — round-2+ replies, the error lane, and the auto-full
+plan→implement handoff — writes to `$COMMS_ROOT/to-$REVIEWER/` and sends
+`--to "$REVIEWER"`. Never assume codex: an initial `--reviewer grok` loop must keep the
+SAME reviewer for its entire lifecycle.
+
 **Check termination conditions first:**
 
 1. **If verdict is `APPROVE`** (read it normalized: `"$COMMS_SH" verdict "<file>"`):
-   - Treat `APPROVE` as ship-ready. Codex may still include advisory notes; those do not reopen the loop.
+   - Treat `APPROVE` as ship-ready. The reviewer may still include advisory notes; those do not reopen the loop.
    - **Carry over what would otherwise evaporate:**
      - Un-actioned `### Advisory` items → append to `docs/advisories.md` (date, thread, items) so they survive the loop's end
      - `### Process` items (meta-channel feedback) → append to the project's friction log / roadmap so they drive protocol changes
@@ -76,25 +92,25 @@ Read and act on messages from Codex in `.comms/to-claude/`.
        Later rounds are judged against these; the bar does not move with each holistic pass,
        and later rounds copy the section forward verbatim, changing it only through a clearly
        identified explicit amendment ("(amended round N: reason)")
-     - Deliver: `"$COMMS_SH" send --to codex "<file>"`
+     - Write it into `$COMMS_ROOT/to-$REVIEWER/` and deliver: `"$COMMS_SH" send --to "$REVIEWER" "<file>"` — the implement phase goes to the SAME reviewer that approved the plan
    - Otherwise → **Stop. Notify user:** "Approved after N rounds." Archive: `"$COMMS_SH" archive --as claude "<file>"`, then close the thread's state: `"$COMMS_SH" state complete "<thread>"`
 
 2. **If `round >= max-rounds`:**
-   - **Stop. Escalate to user:** "Max rounds (N) reached. Remaining blocking issues from Codex:" then list the unresolved blocking findings.
+   - **Stop. Escalate to user:** "Max rounds (N) reached. Remaining blocking issues from the reviewer:" then list the unresolved blocking findings.
    - Archive the message via the helper.
 
 3. **If verdict is `REQUEST_CHANGES` and round < max-rounds:**
-   - **Auto-address all blocking findings** from Codex's message
+   - **Auto-address all blocking findings** from the reviewer's message
    - Advisory findings are optional. Fix them when they are cheap, clearly correct, or naturally part of the same change, but do not extend the loop just to polish non-blocking issues.
    - For plan workflows: refine the plan based on findings
    - For implement workflows: fix the code based on findings
-   - **Write the reply** to `$COMMS_ROOT/to-codex/`:
+   - **Write the reply** to `$COMMS_ROOT/to-$REVIEWER/`:
      - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_round-N-$RANDOM.md` (N is the incremented round number; the `$RANDOM` suffix prevents same-second filename collisions)
      - Increment `round` by 1; keep same `workflow`, `phase`, `max-rounds`, and `thread`
      - Set `message_id` (filename sans `.md`) and `in-reply-to` (the incoming message's `message_id`)
      - **Keep the message body focused on stable context, not fix narration.** Do NOT narrate what you fixed per finding — that anchors the reviewer on verification instead of re-review. Instead include:
-       - The latest Codex findings bundle from the prior round under a clear heading like `## Prior review context`, framed as stable context rather than an exhaustive checklist
-       - For plan: the full updated plan content (so Codex can re-read it fresh)
+       - The latest reviewer findings bundle from the prior round under a clear heading like `## Prior review context`, framed as stable context rather than an exhaustive checklist
+       - For plan: the full updated plan content (so the reviewer can re-read it fresh)
        - For implement: `git diff --stat` showing changed files
        - **Stable metadata** (always include): what validation ran (typecheck, tests, lint), whether they passed, and any non-obvious constraints or gotchas
        - For implement rounds: the current `## Acceptance criteria`, copied forward VERBATIM
@@ -111,12 +127,12 @@ Read and act on messages from Codex in `.comms/to-claude/`.
        - The standing `## Meta — process feedback requested` section (process friction under `### Process`, never verdict-gating)
    - **Validate, deliver, and archive the inbound in one atomic step** — the helper refuses to archive if the outbound is malformed:
      ```bash
-     "$COMMS_SH" send --to codex "<your reply file>" --archive-inbound "<the incoming message file>"
+     "$COMMS_SH" send --to "$REVIEWER" "<your reply file>" --archive-inbound "<the incoming message file>"
      ```
      On `RESULT: blocked`, execute the exact `RECOVER:` line once; relay only the final
      non-`delivered` result.
      <!-- loopspec:fragment result-spawned-exception -->
-     Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the Codex turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
+     Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
      <!-- /loopspec:fragment -->
 
 ---

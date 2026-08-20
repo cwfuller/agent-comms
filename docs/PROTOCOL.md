@@ -17,11 +17,27 @@ agent runs from):
 
 ```
 .comms/
-  to-codex/    Claude writes → Codex reads   (Codex's inbox)
-  to-claude/   Codex writes → Claude reads   (Claude's inbox)
-  archive/     processed messages (both sides move their own inbox here)
+  config       agent registry (optional — see below; absent = claude + codex)
+  to-<agent>/  each registered agent's inbox (to-claude/, to-codex/, to-grok/, …)
+  archive/     processed messages (every agent moves its own inbox here)
   state/       per-thread loop state, JSON (written by comms.sh send)
 ```
+
+The **agent registry** (`.comms/config`, line-oriented) declares who participates:
+
+```
+agents = claude codex grok
+default-target = codex
+```
+
+Names are `[a-z][a-z0-9-]{1,15}` and must have a supported backend
+(`comms.sh agents --supported`); duplicates, multi-word defaults, and unsupported
+names are hard parse errors — an unrunnable agent must never accept mail. A missing
+file means `agents = claude codex`, `default-target = codex` (zero-config
+back-compat). Two authorities replaced the old two-party complements: a thread's
+`awaiting_from` is the explicit `send --to` target, and `--archive-inbound` derives
+the inbound's owner from the OUTBOUND message's `from:` (validated against the
+directory the inbound actually occupies; already-archived is an idempotent no-op).
 
 `.comms/` is gitignored — messages are local plumbing, not project history.
 
@@ -63,14 +79,14 @@ to track/push to `main`). When creating a worktree for a loop:
   name → git branch → repo dir, lowercased/hyphenated — both sides resolve it via the
   same `comms.sh workspace` so they can never disagree)
 - the `<random>` suffix prevents same-second collisions
-- readers list with `comms.sh list --as <claude|codex>`, newest first
+- readers list with `comms.sh list --as <agent>`, newest first
 
 ## Frontmatter
 
 ```markdown
 ---
 type: review-request            # see the type table in loopspec/SPEC.md
-from: claude | codex
+from: claude                    # any REGISTERED agent — validate rejects others
 timestamp: 2026-06-04T18:30:14Z
 branch: main
 head_sha: <git rev-parse HEAD>  # immutable context for delayed delivery

@@ -6,19 +6,19 @@ prompt-wrappers; the shell logic lives in the installed helpers (see
 
 ## Claude Code commands
 
-### `/auto-implement [N] <task>`
+### `/auto-implement [N] [--reviewer <agent>] <task>`
 
 Implement → send to Codex → fix blocking findings → repeat until `APPROVE` or `N`
 rounds (default 10). The task text can describe work or reference an existing plan file.
 Round messages keep stable context (latest findings bundle + `git diff --stat` +
 validation results), never per-finding fix narration.
 
-### `/auto-plan [N] <task>`
+### `/auto-plan [N] [--reviewer <agent>] <task>`
 
 Same loop for a plan: draft → review → refine until approved. Each round re-sends the
 full updated plan so the reviewer re-reads fresh.
 
-### `/auto-full [N] <task>`
+### `/auto-full [N] [--reviewer <agent>] <task>`
 
 `/auto-plan` then `/auto-implement`, chained: when the plan phase gets `APPROVE`,
 implementation starts automatically at `round: 1` (same `thread`, `phase: implement`).
@@ -28,12 +28,12 @@ implementation starts automatically at `round: 1` (same `thread`, `phase: implem
 
 One-off judgment call — no review framing, no loop, no verdict.
 
-**Target parse (pre-registry transition behavior):** if the first word of the argument
-is a known agent name (today only `codex`), it names the target and the rest is the
-question; otherwise the whole argument — unrecognized first word included, unmodified —
-is a question to the default agent (`codex`). So `/ask grok is X sound?` currently
-sends the literal text "grok is X sound?" to codex. When the `.comms/config` agent
-registry lands (multi-agent track), the known set and the default come from it.
+**Target parse:** if the first word of the argument is a registered agent name
+(`comms.sh agents` — the `.comms/config` registry; zero-config default `claude codex`),
+it names the target and the rest is the question; otherwise the whole argument —
+unrecognized first word included, unmodified — is a question to the default agent
+(`comms.sh agents default`). `/ask grok is X sound?` targets grok when grok is
+registered; an unregistered word (e.g. `gemini`) stays part of the question text.
 
 **Explicit question:** body carries `## Question` (verbatim), optional `## Context` /
 `## Current Thinking` (your draft take so the agent refines rather than starts blank),
@@ -130,7 +130,8 @@ agnostic.
 | `workspace` | print the resolved workspace name (cmux → branch → repo dir) |
 | `doctor` | verify this session can reach cmux; exit 3 plus the persistent setup command when the socket is sandbox-blocked |
 | `codex-permissions [socket]` | print the least-privilege global Codex permission profile for default cmux delivery |
-| `list --as <claude\|codex> [--thread <t>]` | pending inbox messages, newest first; non-zero + "latest archived" hint when empty |
+| `agents [default\|--supported]` | registered agents from `.comms/config` (zero-config: `claude codex`), the default target, or the supported-backend table |
+| `list --as <agent> [--thread <t>]` | pending inbox messages, newest first; non-zero + "latest archived" hint when empty |
 | `status` | one-screen loop summary: workspace, latest archived message + its loop fields, pending counts per inbox |
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
 | `verdict <file>` | normalized verdict: whitespace-stripped, uppercased, loopspec synonyms mapped (`pass` → `APPROVE`, `fail` → `REQUEST_CHANGES`) |

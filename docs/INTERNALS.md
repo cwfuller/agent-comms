@@ -90,6 +90,41 @@ across worktrees — so those use `main_repo_root()`. Swapping either one is a s
 bug: `--show-toplevel` for the pin misses `<main>/.agent-comms/` and falls through to
 `$HOME`; `main_repo_root()` for lessons reads the wrong tree's docs.
 
+## Agent registry & the grok execution boundary
+
+`.comms/config` is parsed by `comms.sh` alone (`agents [default|--supported]` is the
+one read API — templates and runphase both consume it). The supported-backend set is
+compiled into the helpers: claude/codex are interactive+headless; **grok is
+reviewer/consult-only and headless-only** — there is no cmux idiom for it, and
+`deliver` routes any non-cmux agent through runphase unconditionally.
+
+The grok leg is a **read-only child with a trusted parent broker**: the child runs
+`grok --prompt-file … --output-format streaming-messages-json --sandbox read-only
+--permission-mode dontAsk --deny 'Bash(rm *)' --deny 'Bash(git push*)'` and cannot
+write the repo or the mailbox (kernel Seatbelt/Landlock); its ONLY job is to emit the
+complete reply message as its final output. The runphase parent then extracts the
+reply from the final `result` event (the only chunking-proof anchor — plain
+streaming-json emits nondeterministic token deltas), verifies the parent-generated
+message_id, validates, persists to the pickup peer's inbox, sends, and archives the
+inbound. The parent stamps the ENTIRE
+reply envelope itself (type/from/workspace/message_id/thread/in-reply-to/workflow/
+phase/round/max-rounds/verdict) from captured inbound values — the child's output is
+body only — reviews additionally lead with a `VERDICT:` line, which is parsed ONLY
+for review-feedback turns (on a consult, a stray verdict line is preserved as body
+text, never a verdict field) — so no model-authored frontmatter is ever persisted
+and a prompt-injected reply cannot re-thread, impersonate, or archive another turn's
+inbound. Bypass modes (`always-approve`/`--yolo`/`bypassPermissions`) and writable
+sandboxes (`off`/`devbox`/`workspace`) are refused outright in loop turns, in both
+token forms, after shell-splitting the extra args. **Known carve-out:** the
+`read-only` profile keeps OS temp directories writable (`/tmp`, `/var/tmp`, macOS
+`/var/folders/...`) — a repo checked out UNDER a temp path is not kernel-protected
+there (permission rules still apply); real checkouts under `$HOME` etc. are covered,
+live-verified both ways on grok 1.0.5. The pickup
+peer derives from the inbound message's `from:`; the old claude↔codex complement
+survives only as a fallback for messages without one. Live-verified 2026-08-20
+(grok 1.0.5, sentineled linked-worktree probe: both trees byte-identical after a
+completed review turn; an instructed in-repo write attempt was denied mid-turn).
+
 ## Delivery mechanics
 
 `cmux send`/`send-key` keystroke injection with short settles between steps. The

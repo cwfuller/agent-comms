@@ -8,6 +8,34 @@ emits whole `## ` sections up to a byte budget, ordered by the date in each head
 physical order here may be mixed and writers may append or prepend freely. A section
 whose heading carries no `YYYY-MM-DD` sorts last (but is never dropped).
 
+## 2026-08-20 — thread multi-agent-17600 (+continuation, auto-full, approved)
+
+Multi-agent core + Grok Build reviewer shipped (registry, explicit routing
+authorities, read-only grok leg with parent-stamped envelope). Field lessons the
+loop itself produced, recorded so they survive its end:
+
+- **Verdict-less reply happened live, from the reviewer** (field evidence for the
+  standing DEFERRED item): round 3 arrived as `type: review-response` with the
+  verdict only in a body heading — `comms.sh verdict` returned empty and validation
+  passed. The meta channel corrected it within one round (the reviewer acknowledged
+  and switched back to `review-feedback` + frontmatter verdict). The Claude-side
+  empty-verdict termination branch remains the right fix and rises in priority.
+- **Max-rounds escalation → user-authorized continuation thread worked first try**:
+  the parent thread's history stayed intact, the continuation carried the criteria
+  forward with an explicit amendment, and the scoped blocker closed in one bounded
+  cycle. Pattern worth templating if it recurs.
+- **The read-only sandbox's temp-dir carve-out** (documented in INTERNALS): grok's
+  `read-only` profile keeps OS temp dirs writable, so a repo under `/tmp` or
+  `/var/folders` is NOT kernel-protected — discovered because the live probe's
+  mktemp fixture sat inside the carve-out and the "denial" the first probe reported
+  had come from the permission layer instead. Probe fixtures for sandbox claims
+  must live on a representative (non-temp) path.
+- **Reviewer-probed findings dominated again**: 11 of 12 implement-phase blocking
+  findings across both threads came from Codex EXECUTING candidate argv, reading
+  installed vendor docs, or constructing adversarial inputs — not from reading the
+  diff. Whatever review harness this project uses next must preserve the reviewer's
+  ability to run things.
+
 ## 2026-08-19 — external 18-round field report (writer-side retrospective, relayed by user)
 
 The Claude-side agent of an 18-round auto-full loop on an external media/transcode-pipeline

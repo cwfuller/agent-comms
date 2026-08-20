@@ -10,22 +10,24 @@
 #   workspace                   print the workspace name (cmux > branch > repo dir)
 #   doctor                      verify this session can reach the cmux socket
 #   codex-permissions [socket]  print least-privilege Codex config for cmux delivery
-#   list --as <claude|codex> [--thread <t>]   pending inbox messages, newest first
+#   agents [default|--supported]   registered agents from .comms/config (zero-config
+#                                  default: claude codex / target codex)
+#   list --as <agent> [--thread <t>]   pending inbox messages, newest first
 #   status                      one-screen loop state: latest archive, verdict, pending counts
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
 #   verdict <file>              normalized (trimmed, uppercased) verdict from frontmatter
-#   archive --as <claude|codex> <file...>   idempotent move to archive/; own inbox only
-#   deliver <claude|codex> [file]   nudge the other agent's pane via cmux; reports delivered/
+#   archive --as <agent> <file...>   idempotent move to archive/; own inbox only
+#   deliver <agent> [file]   nudge the target (cmux pane for claude/codex; headless-only agents route via runphase); reports delivered/
 #                               manual-pickup/FAILED explicitly (never hard-fails).
 #                               COMMS_DELIVERY=headless routes to runphase.sh instead
 #                               (detached codex exec / claude -p turn for the target)
-#   send --to <claude|codex> <file> [--archive-inbound <file>]
+#   send --to <agent> <file> [--archive-inbound <file>]
 #                               validate, deliver, update thread state, then archive inbound
 #   reconcile <message-file|message-id>   record a successful external/direct nudge
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
 #   bind <claude|codex> [surface:N]   pin which surface delivery targets (show with no arg)
-#   clean --as <claude|codex> [workspace|all|archive|<file>] [--yes]
+#   clean --as <agent> [workspace|all|archive|<file>] [--yes]
 #                               guarded delete; dry-run without --yes; own-inbox default
 #   lessons [--bytes N] [--surface P] [--file F]
 #                               bounded newest-first tail of docs/advisories.md (whole
@@ -226,12 +228,108 @@ cmd_workspace() {
   echo "$ws"
 }
 
-inbox_for() {
-  case "$1" in
-    claude) echo "to-claude" ;;
-    codex)  echo "to-codex" ;;
-    *) die "unknown agent '$1' (expected claude or codex)" ;;
+# ---------- agent registry (.comms/config) ----------
+# Line-oriented, bash-3.2-parseable. Missing file => built-in defaults (zero-config
+# back-compat). Names become directory suffixes and state-field prefixes, so the
+# grammar is enforced hard. A name may be registered only when a supported backend
+# exists for it — otherwise /ask etc. would accept mail that can never be served.
+SUPPORTED_AGENTS="claude codex grok"   # claude/codex: interactive+headless; grok: headless reviewer/consult
+REGISTRY_DEFAULT_AGENTS="claude codex"
+REGISTRY_DEFAULT_TARGET="codex"
+
+registry_file() { echo "$(cmd_root)/config"; }
+
+validate_agent_name() {  # <name> [source] — grammar: ^[a-z][a-z0-9-]{1,15}$
+  printf '%s' "$1" | grep -qE '^[a-z][a-z0-9-]{1,15}$' \
+    || die "config: invalid agent name '$1'${2:+ in $2} — must match [a-z][a-z0-9-]{1,15} (it becomes a directory suffix)"
+}
+
+# registry_parse — ONE full-config validation path, run by EVERY accessor. A
+# config that criterion-level rules call malformed (duplicate keys, bad names,
+# unsupported/duplicate agents, empty values, invalid default) is a hard error
+# no matter which command touched it first; unknown keys warn everywhere.
+# Prints two lines: the agent list, then the default target.
+registry_parse() {
+  local f agents_ct default_ct line a agents="" dflt
+  f="$(registry_file)"
+  if [ ! -f "$f" ]; then
+    printf '%s\n%s\n' "$REGISTRY_DEFAULT_AGENTS" "$REGISTRY_DEFAULT_TARGET"
+    return 0
+  fi
+  agents_ct="$(grep -c '^[[:space:]]*agents[[:space:]]*=' "$f" 2>/dev/null || true)"
+  default_ct="$(grep -c '^[[:space:]]*default-target[[:space:]]*=' "$f" 2>/dev/null || true)"
+  [ "${agents_ct:-0}" -le 1 ] || die "config: duplicate 'agents' key in $f"
+  [ "${default_ct:-0}" -le 1 ] || die "config: duplicate 'default-target' key in $f"
+  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=)' "$f" \
+    | head -3 | sed 's/^/warning: config: unknown line: /' >&2 || true
+  if [ "${agents_ct:-0}" -eq 1 ]; then
+    line="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
+    [ -n "$line" ] || die "config: 'agents' key present but empty in $f (delete the line for zero-config defaults)"
+    for a in $line; do
+      validate_agent_name "$a" "$f"
+      case " $SUPPORTED_AGENTS " in
+        *" $a "*) ;;
+        *) die "config: unsupported agent '$a' in $f — supported: $SUPPORTED_AGENTS" ;;
+      esac
+      case " $agents " in
+        *" $a "*) die "config: duplicate agent '$a' in $f" ;;
+      esac
+      agents="$agents $a"
+    done
+    agents="${agents# }"
+  else
+    agents="$REGISTRY_DEFAULT_AGENTS"
+  fi
+  if [ "${default_ct:-0}" -eq 1 ]; then
+    line="$(sed -n 's/^[[:space:]]*default-target[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
+    [ -n "$line" ] || die "config: 'default-target' key present but empty in $f"
+    set -- $line
+    [ "$#" -eq 1 ] || die "config: default-target must be exactly one agent (got: $line)"
+    dflt="$1"
+  else
+    dflt="$REGISTRY_DEFAULT_TARGET"
+  fi
+  case " $agents " in
+    *" $dflt "*) ;;
+    *) die "config: default-target '$dflt' is not a registered agent (registered: $agents)" ;;
   esac
+  printf '%s\n%s\n' "$agents" "$dflt"
+}
+
+registry_agents() { registry_parse | sed -n 1p; }
+
+registry_default() { registry_parse | sed -n 2p; }
+
+registry_has() {  # <name> — 0 iff registered; a MALFORMED config exits hard
+  # Capture-with-check: `for a in $(...)` swallows a failing substitution, which
+  # would collapse "config is broken" into ordinary "not registered".
+  local a reg
+  reg="$(registry_agents)" || exit 2
+  for a in $reg; do [ "$a" = "$1" ] && return 0; done
+  return 1
+}
+
+require_agent() {  # <name> [context] — die unless registered
+  [ -n "${1:-}" ] || die "${2:-agent}: agent name required (registered: $(registry_agents))"
+  registry_has "$1" || die "${2:-agent}: unknown agent '$1' (registered: $(registry_agents))"
+}
+
+cmd_agents() {
+  case "${1:-}" in
+    "")          registry_agents ;;
+    default)     registry_default ;;
+    --supported)
+      printf '%s\tinteractive,headless\n' claude
+      printf '%s\tinteractive,headless\n' codex
+      printf '%s\theadless,reviewer-consult-only\n' grok
+      ;;
+    *) die "agents: unknown argument '$1' (expected: default | --supported)" ;;
+  esac
+}
+
+inbox_for() {
+  require_agent "$1" "inbox"
+  echo "to-$1"
 }
 
 cmd_list() {
@@ -244,9 +342,10 @@ cmd_list() {
     esac
     shift
   done
-  [ -n "$as" ] || die "list: --as <claude|codex> is required"
+  [ -n "$as" ] || die "list: --as <agent> is required (registered: $(registry_agents))"
   local root ws inbox
   root="$(cmd_root)"; ws="$(cmd_workspace)"; inbox="$(inbox_for "$as")"
+  mkdir -p "$root/$inbox" 2>/dev/null || true
   local files
   files="$(sorted_message_files "$root/$inbox" "$ws" "" "$thread" newest)"
   if [ -n "$files" ]; then
@@ -260,8 +359,14 @@ cmd_list() {
     # Late delivery nudges for already-processed replies are common. Scope the
     # hint to messages that actually came TO this reader and, when supplied, to
     # this thread; otherwise an unrelated archive can masquerade as the reply.
-    local latest sender
-    case "$as" in claude) sender=codex ;; codex) sender=claude ;; esac
+    # With exactly two registered agents the sender is the complement; with more
+    # the hint is unfiltered (any sender) — it is advisory text, not routing.
+    local latest sender="" reg_hint
+    reg_hint="$(registry_agents)" || exit 2
+    set -- $reg_hint
+    if [ "$#" -eq 2 ]; then
+      if [ "$1" = "$as" ]; then sender="$2"; elif [ "$2" = "$as" ]; then sender="$1"; fi
+    fi
     latest="$(sorted_message_files "$root/archive" "$ws" "$sender" "$thread" newest | head -1 || true)"
     if [ -n "$latest" ]; then
       echo "no pending messages; latest archived: $(basename "$latest")" >&2
@@ -578,6 +683,11 @@ cmd_validate() {
   workflow="$(frontmatter_field "$file" workflow)"
   from_agent="$(frontmatter_field "$file" from)"
   msg_type="$(frontmatter_field "$file" type)"
+  # from: is an open set validated against the registry — an unregistered sender
+  # could otherwise inject mail no reader/state path can attribute.
+  if [ -n "$from_agent" ] && ! registry_has "$from_agent"; then
+    errors="${errors}  from '$from_agent' is not a registered agent (registered: $(registry_agents))\n"
+  fi
   if [ -n "$workflow" ]; then
     for field in phase round max-rounds; do
       val="$(frontmatter_field "$file" "$field")"
@@ -636,7 +746,7 @@ cmd_archive() {
     esac
     shift
   done
-  [ -n "$as" ] || die "archive: --as <claude|codex> is required"
+  [ -n "$as" ] || die "archive: --as <agent> is required (registered: $(registry_agents))"
   [ "${#files[@]}" -gt 0 ] || die "archive: at least one file required"
   local root inbox
   root="$(cmd_root)"; inbox="$(inbox_for "$as")"
@@ -714,7 +824,7 @@ pick_surface() {  # pick_surface <target> — prints "<surface>\t<how>"
 
 cmd_bind() {  # bind <claude|codex> [surface:N] — set or show the target's surface binding
   local target="${1:-}" surface="${2:-}"
-  case "$target" in claude|codex) ;; *) die "bind: target must be claude or codex" ;; esac
+  case "$target" in claude|codex) ;; *) die "bind: target must be a cmux-pane agent (claude or codex) — headless-only agents have no surface" ;; esac
   local f
   f="$(cache_path "surface-$target")" || die "bind: requires a git repo and CMUX_WORKSPACE_ID"
   if [ -z "$surface" ]; then
@@ -796,7 +906,18 @@ print_direct_recovery() {
 
 cmd_deliver() {
   local target="${1:-}" msgfile="${2:-}"
-  case "$target" in claude|codex) ;; *) die "deliver: target must be claude or codex" ;; esac
+  require_agent "$target" "deliver"
+  # cmux nudge idioms exist only for claude/codex. Every other registered agent
+  # is headless-only BY DESIGN — headless IS its delivery, regardless of
+  # COMMS_DELIVERY (there is no pane to fall back to).
+  case "$target" in
+    claude|codex) ;;
+    *)
+      echo "note: '$target' is a headless-only agent — routing delivery via runphase"
+      deliver_headless "$target" "$msgfile"
+      return 0
+      ;;
+  esac
   if [ "${COMMS_DELIVERY:-cmux}" = "headless" ]; then
     deliver_headless "$target" "$msgfile"
     return 0
@@ -874,8 +995,10 @@ cmd_status() {
   else
     echo "latest archived: (none)"
   fi
-  local dir label
-  for dir in to-claude to-codex; do
+  local dir label a reg_status
+  reg_status="$(registry_agents)" || exit 2
+  for a in $reg_status; do
+    dir="to-$a"
     label="$(sorted_message_files "$root/$dir" "$ws" "" "" newest | head -3 | sed 's/^/    /' || true)"
     echo "pending in $dir: $(find "$root/$dir" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null | wc -l | tr -d ' ')"
     [ -n "$label" ] && echo "$label"
@@ -888,16 +1011,16 @@ cmd_status() {
     st="$(json_get "$sf" status)"
     owes="$(json_get "$sf" awaiting_from)"
     deliv="$(json_get "$sf" last_delivery)"
-    case "$owes" in claude|codex) target="$owes" ;; *) target="<agent>" ;; esac
+    if registry_has "$owes"; then target="$owes"; else target="<agent>"; fi
     since="$(json_get "$sf" awaiting_since_epoch)"
     case "$since" in ''|*[!0-9]*) since="$(date +%s)" ;; esac
     now="$(date +%s)"
     age_s=$(( now - since ))
     mid="$(json_get "$sf" last_sent)"
     pending=""
-    case "$owes" in
-      claude|codex) [ -f "$root/$(inbox_for "$owes")/$mid.md" ] && pending="$root/$(inbox_for "$owes")/$mid.md" ;;
-    esac
+    if registry_has "$owes"; then
+      [ -f "$root/$(inbox_for "$owes")/$mid.md" ] && pending="$root/$(inbox_for "$owes")/$mid.md"
+    fi
     # "delivered" means the keystroke sequence was accepted, not that the peer
     # consumed the file. An aged file still in the target inbox is stronger
     # evidence than the notification outcome and must remain visible.
@@ -936,7 +1059,7 @@ json_get() {  # json_get <file> <key> — one key per line in our writer, so sed
 # readers must treat it as advisory ground truth. run-dir (headless spawns)
 # gives `stalled` a live pid to watchdog.
 state_update_from() {
-  local mf="$1" outcome="${2:-unknown}" run_dir="${3:-}"
+  local mf="$1" outcome="${2:-unknown}" run_dir="${3:-}" awaiting_override="${4:-}"
   local thread wf
   thread="$(frontmatter_field "$mf" thread)"
   wf="$(frontmatter_field "$mf" workflow)"
@@ -952,11 +1075,19 @@ state_update_from() {
   round="$(frontmatter_field "$mf" round)"
   maxr="$(frontmatter_field "$mf" max-rounds)"
   from="$(frontmatter_field "$mf" from)"
-  case "$from" in
-    claude) awaiting_from=codex ;;
-    codex)  awaiting_from=claude ;;
-    *)      awaiting_from=unknown ;;
-  esac
+  # The EXPLICIT send --to target is authoritative for who owes the next message
+  # — a complement of the sender is only a two-party assumption and breaks at
+  # three agents. The complement remains solely as a fallback for callers that
+  # cannot supply a target.
+  if [ -n "$awaiting_override" ]; then
+    awaiting_from="$awaiting_override"
+  else
+    case "$from" in
+      claude) awaiting_from=codex ;;
+      codex)  awaiting_from=claude ;;
+      *)      awaiting_from=unknown ;;
+    esac
+  fi
   mid="$(frontmatter_field "$mf" message_id)"
   [ -n "$mid" ] || mid="$(basename "$mf" .md)"
   dir="$(state_dir)"
@@ -1079,11 +1210,9 @@ cmd_stalled() {
       note=""
       owes="$(json_get "$f" awaiting_from)"
       mid="$(json_get "$f" last_sent)"
-      case "$owes" in
-        claude|codex)
-          [ -f "$root/$(inbox_for "$owes")/$mid.md" ] && note=" [inbox=unread]"
-          ;;
-      esac
+      if registry_has "$owes"; then
+        [ -f "$root/$(inbox_for "$owes")/$mid.md" ] && note=" [inbox=unread]"
+      fi
       if [ "$deliv" = "spawned" ] && [ -n "$rd" ] && [ -d "$rd" ]; then
         pid="$(cat "$rd/pid" 2>/dev/null || true)"
         if [ -f "$rd/result.json" ]; then
@@ -1138,7 +1267,7 @@ cmd_clean() {
     esac
     shift
   done
-  [ -n "$as" ] || die "clean: --as <claude|codex> is required"
+  [ -n "$as" ] || die "clean: --as <agent> is required (registered: $(registry_agents))"
   [ -n "$mode" ] || mode="workspace"
   local root ws inbox
   root="$(cmd_root)"; ws="$(cmd_workspace)"; inbox="$(inbox_for "$as")"
@@ -1149,8 +1278,11 @@ cmd_clean() {
         < <(find "$root/$inbox" "$root/archive" -maxdepth 1 -type f -name "${ws}_*" 2>/dev/null)
       ;;
     all)
+      local reg_dirs=() ra reg_all
+      reg_all="$(registry_agents)" || exit 2
+      for ra in $reg_all; do reg_dirs+=("$root/to-$ra"); done
       while IFS= read -r f; do [ -n "$f" ] && targets+=("$f"); done \
-        < <(find "$root/to-claude" "$root/to-codex" "$root/archive" -maxdepth 1 -type f 2>/dev/null)
+        < <(find "${reg_dirs[@]}" "$root/archive" -maxdepth 1 -type f 2>/dev/null)
       ;;
     archive)
       while IFS= read -r f; do [ -n "$f" ] && targets+=("$f"); done \
@@ -1158,11 +1290,14 @@ cmd_clean() {
       ;;
     *)
       # Specific filename — locate by basename within the three message dirs.
-      local d
-      for d in to-claude to-codex archive; do
-        [ -f "$root/$d/$(basename "$mode")" ] && targets+=("$root/$d/$(basename "$mode")")
+      local d ra2 reg_named
+      reg_named="$(registry_agents)" || exit 2
+      for ra2 in $reg_named; do
+        [ -f "$root/to-$ra2/$(basename "$mode")" ] && targets+=("$root/to-$ra2/$(basename "$mode")")
       done
-      [ "${#targets[@]}" -gt 0 ] || die "clean: '$mode' not found in to-claude/, to-codex/, or archive/"
+      d="$root/archive/$(basename "$mode")"
+      [ -f "$d" ] && targets+=("$d")
+      [ "${#targets[@]}" -gt 0 ] || die "clean: '$mode' not found in any registered inbox or archive/"
       ;;
   esac
   if [ "${#targets[@]}" -eq 0 ]; then
@@ -1188,10 +1323,40 @@ cmd_send() {
     esac
     shift
   done
-  [ -n "$to" ] || die "send: --to <claude|codex> is required"
+  [ -n "$to" ] || die "send: --to <agent> is required (registered: $(registry_agents))"
+  require_agent "$to" "send"
   [ -n "$file" ] || die "send: outbound file argument required"
   # Atomicity guard: never deliver or archive on a malformed outbound message.
   cmd_validate "$file" || die "send: refusing to deliver malformed message (and not archiving inbound)"
+  local root_send
+  root_send="$(cmd_root)"
+  mkdir -p "$root_send/$(inbox_for "$to")" 2>/dev/null || true
+  # PRE-FLIGHT the inbound-archive ownership BEFORE any delivery or state write:
+  # a cross-inbox mismatch must abort with nothing half-applied — refusing after
+  # the nudge would leave a spawned/nudged peer plus mutated state behind a
+  # non-zero exit, and a retry would duplicate the peer turn.
+  local arch_action="" arch_owner=""
+  if [ -n "$archive_inbound" ]; then
+    local ib_base found_dir="" d
+    arch_owner="$(frontmatter_field "$file" from)"
+    ib_base="$(basename "$archive_inbound")"
+    if [ -z "$arch_owner" ] || ! registry_has "$arch_owner"; then
+      arch_action="warn-no-owner"
+    elif [ -f "$root_send/$(inbox_for "$arch_owner")/$ib_base" ]; then
+      arch_action="archive"
+    elif [ -f "$root_send/archive/$ib_base" ]; then
+      arch_action="noop"
+    else
+      local reg_pf
+      reg_pf="$(registry_agents)" || exit 2
+      for d in $reg_pf; do
+        [ "$d" = "$arch_owner" ] && continue
+        [ -f "$root_send/to-$d/$ib_base" ] && found_dir="to-$d"
+      done
+      [ -z "$found_dir" ] || die "send: refusing --archive-inbound — $ib_base sits in $found_dir but the outbound 'from:' is '$arch_owner' (cross-inbox mismatch); nothing was delivered"
+      arch_action="noop"
+    fi
+  fi
   local del_out outcome=manual rundir=""
   del_out="$(cmd_deliver "$to" "$file")"
   echo "$del_out"
@@ -1208,14 +1373,18 @@ cmd_send() {
   # Record thread ground truth (workflow messages with a thread only). The
   # ||-context also suppresses errexit inside the function, so NO state failure
   # mode — mkdir, redirect, parse — can abort send before the inbound archive.
-  state_update_from "$file" "$outcome" "$rundir" || echo "warning: thread state not recorded" >&2
+  state_update_from "$file" "$outcome" "$rundir" "$to" || echo "warning: thread state not recorded" >&2
   if [ -n "$archive_inbound" ]; then
     # Archive the inbound only after the outbound was validated and delivery
     # attempted. A failed nudge still archives — the inbound WAS processed; the
     # retry surface is delivery (state last_delivery=failed + the warning above).
-    case "$to" in
-      codex) cmd_archive --as claude "$archive_inbound" ;;
-      claude) cmd_archive --as codex "$archive_inbound" ;;
+    # Ownership was preflighted above (owner = the OUTBOUND's sender — the agent
+    # whose inbox held the inbound — never the complement of the target). Only
+    # the pre-computed disposition executes here, after delivery.
+    case "$arch_action" in
+      archive) cmd_archive --as "$arch_owner" "$archive_inbound" ;;
+      noop)    echo "already archived or absent (no-op): $(basename "$archive_inbound")" ;;
+      warn-no-owner) echo "warning: outbound has no registered 'from:' — inbound NOT archived; archive it manually" >&2 ;;
     esac
   fi
   # Loud outcome — emitted LAST so `tail -1` of send is always the RESULT line
@@ -1246,6 +1415,7 @@ cmd_send() {
 case "${1:-}" in
   root)      shift; cmd_root "$@" ;;
   workspace) shift; cmd_workspace "$@" ;;
+  agents)    shift; cmd_agents "$@" ;;
   doctor)    shift; cmd_doctor "$@" ;;
   codex-permissions) shift; cmd_codex_permissions "$@" ;;
   list)      shift; cmd_list "$@" ;;

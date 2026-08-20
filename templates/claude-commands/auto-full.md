@@ -8,6 +8,7 @@ Full autonomous cycle: plan+review until approved, then implement+review until a
 1. **Parse arguments:**
    - The argument text is the task/feature description
    - Default max rounds: 10 per phase. User can specify like "/auto-full 3 build feature X" for 3 rounds per phase.
+   - Optional `--reviewer <agent>` flag selects the reviewing agent. Default: `"$COMMS_SH" agents default`. Validate the name against `"$COMMS_SH" agents`; hold it in a named variable (REVIEWER) and use it for every write path and send below — headless-only agents (e.g. grok) work identically; delivery routes itself.
 
 2. **Resolve the shared helper** — the single source of truth for comms root, workspace name, validation, delivery, and archiving. Local pin wins over global:
    ```bash
@@ -32,7 +33,7 @@ Full autonomous cycle: plan+review until approved, then implement+review until a
      precisely so they can be READ at plan-time — a plan that repeats a recorded lesson wastes a
      review round.
    - Create the plan
-   - Write the message to `$COMMS_ROOT/to-codex/` with filename `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-full-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions); use a quoted heredoc (`<<'EOF'`) or a non-interpolating tool
+   - Write the message to `$COMMS_ROOT/to-$REVIEWER/` (`mkdir -p` it first) with filename `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-full-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions); use a quoted heredoc (`<<'EOF'`) or a non-interpolating tool
    - `thread` names this loop and stays constant across every message in the cycle; replies copy it. `message_id` is the filename sans `.md`
    - Use this frontmatter and body:
 
@@ -71,14 +72,14 @@ This is an autonomous full cycle (plan phase, round 1 of <N>). After the plan is
 
 4. **Validate and deliver** — `send` refuses malformed messages and degrades to manual pickup without cmux:
    ```bash
-   "$COMMS_SH" send --to codex "<path of the message file you wrote>"
+   "$COMMS_SH" send --to "$REVIEWER" "<path of the message file you wrote>"
    ```
    On `RESULT: blocked`, execute the exact `RECOVER:` line once; relay only the final
    non-`delivered` result.
    <!-- loopspec:fragment result-spawned-exception -->
-   Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the Codex turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
+   Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
    <!-- /loopspec:fragment -->
 
-5. **Notify user:** "Plan created and sent to Codex for autonomous review (plan phase, round 1 of N). Full cycle: plan→approve→implement→approve." If the loop goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.
+5. **Notify user:** "Plan created and sent to $REVIEWER for autonomous review (plan phase, round 1 of N). Full cycle: plan→approve→implement→approve." If the loop goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.
 
 **Note:** The phase transition (plan→implement) happens automatically in `/read-from-codex` when it receives an APPROVE verdict during the plan phase of an `auto-full` workflow.

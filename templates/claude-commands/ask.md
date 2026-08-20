@@ -5,12 +5,12 @@ Use this when you want a second opinion — a design choice, an open question, a
 ## Instructions
 
 1. **Parse the argument — target agent, then question.**
-   - Known agents: `codex`. (Pre-registry transition behavior: when the `.comms/config` agent registry from the multi-agent roadmap track lands, this list is read from it — until then, this line is the ONE place the set is defined.)
+   - Known agents: the registry — `"$COMMS_SH" agents` (resolve the shared helper per step 3 FIRST when the first word could name an agent). The default target is `"$COMMS_SH" agents default`. Adding an agent touches only `.comms/config`; this template never hardcodes the set.
    - If the FIRST whitespace-delimited word of the argument, lowercased, is a known agent name, it names the target; everything after it is the question.
-   - Otherwise the target is the default agent (`codex`) and the ENTIRE ORIGINAL argument — including the unrecognized first word, unmodified — is the question. Transition consequence, worth knowing: `/ask grok is this sound?` sends the literal text "grok is this sound?" to codex, because grok is not yet a known agent.
+   - Otherwise the target is the DEFAULT agent and the ENTIRE ORIGINAL argument — including the unrecognized first word, unmodified — is the question. (Consequence: `/ask gemini is this sound?` sends the literal text "gemini is this sound?" to the default agent, because gemini has no registered backend.)
    - Hold the target in a named variable and use it in every later step — never hardcode an agent name below:
      ```bash
-     TARGET=codex
+     TARGET="$("$COMMS_SH" agents default)"   # or the recognized first word
      ```
 
 2. **Choose the mode.** If the question (after removing the agent word, when present) is EMPTY — bare `/ask`, or `/ask codex` alone — build an informal **thoughts consult** (step 5). Otherwise build an **explicit question** (step 4).
@@ -49,7 +49,7 @@ Use this when you want a second opinion — a design choice, an open question, a
    Filename slug: `thoughts` (the filename component becomes `ask-thoughts`).
 
 6. **Write the message file — non-interpolating writer REQUIRED.**
-   - Path: `$COMMS_ROOT/to-codex/` (today's only target; the inbox will follow the target once the registry lands)
+   - Path: `$COMMS_ROOT/to-$TARGET/` — `mkdir -p` it first (registry agents each own an inbox)
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_ask-<slug>-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions; thoughts mode yields `ask-thoughts`)
    - Frontmatter:
 
@@ -77,13 +77,13 @@ message_id: <the filename, without .md>
    On `RESULT: blocked`, execute the exact `RECOVER:` line once; relay only the final
    non-`delivered` result.
 
-8. Tell the user the message was sent and where to look for the reply (`.comms/to-claude/`). When the reply arrives, use `/read-from-codex` to surface the answer.
+8. Tell the user the message was sent and where to look for the reply (`.comms/to-claude/` — replies come TO claude regardless of target). When the reply arrives, use `/read-from-codex` to surface the answer (it reads any sender). Headless-only targets (e.g. grok) answer via a detached runphase turn automatically.
 
 ## Notes
 
-- **Headless delivery (experimental).** With `COMMS_DELIVERY=headless` set, `send` spawns the Codex turn as a detached subprocess instead of nudging a pane.
+- **Headless delivery (experimental).** With `COMMS_DELIVERY=headless` set, `send` spawns the target agent's turn as a detached subprocess instead of nudging a pane.
   <!-- loopspec:fragment result-spawned-exception -->
-  Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the Codex turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
+  Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
   <!-- /loopspec:fragment -->
 - **The reply will use `type: response`** with no verdict — that's the consult-shaped answer. `/read-from-codex` already handles non-workflow messages in standard flow (parse, summarize, archive).
 - **Don't stretch this command into review territory.** If you find yourself adding a "Review focus" section or asking for blocking findings, you want `/send-to-codex` instead.

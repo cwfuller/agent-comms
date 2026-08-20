@@ -425,7 +425,7 @@ just two agents). Per-agent cost model: inbox (trivial once generalized) → ins
 (Grok: possibly free) → cmux nudge (skipped by strategy) → headless runphase arm (small) →
 ACP (~zero once the acpx backend exists).
 
-- [ ] **Generalize the two-party core** (prerequisite for everything):
+- [x] **Generalize the two-party core** (shipped 2026-08-20, thread multi-agent-17600):
   - agent registry in `.comms/config` (name → inbox, headless command, instruction surface);
     origins defined once
   - `inbox_for()` and every `claude|codex` case arm in comms.sh (~15 sites), clean/status
@@ -436,14 +436,18 @@ ACP (~zero once the acpx backend exists).
     schema already allows it via additionalProperties; keep the two legacy names readable)
   - already N-agent-safe (no change): verdict binds by TYPE not sender; loopspec threads
     stay 2-party per thread — more agents = more pairs, never N-party threads
-- [ ] **Grok Build headless integration**: runphase provider arm (shape ≈ the claude leg:
-  `-p` + streaming-json + session id from events), `/ask grok` via the registry, reviewer
-  role via `--reviewer grok` on auto-* commands. Verify live: does it read our AGENTS.md
-  managed block and Claude-format commands as claimed?
-- [ ] **Reviewer parameterization**: auto-plan/auto-implement/auto-full accept
-  `--reviewer <agent>` (default codex); templates stop naming codex in prose where the
-  reviewer is meant. Also answers the field report's "serialization on one reviewer" —
-  a third reviewer with different priors is outage resilience AND diversity.
+- [x] **Grok Build headless integration** (shipped 2026-08-20): read-only child +
+  trusted-parent-broker leg in runphase (final shape: `--prompt-file` +
+  streaming-messages-json result anchor — NOT `-p`/streaming-json, both live-refuted),
+  `/ask grok` via the registry, `--reviewer grok` on auto-* commands. Live compat
+  evidence: grok 1.0.5 loads installed Claude commands (observed in
+  available_commands) and follows prompt-file instructions; managed AGENTS.md-block
+  ingestion not separately verified — that sliver stays open.
+- [x] **Reviewer parameterization** (shipped 2026-08-20): auto-plan/auto-implement/
+  auto-full accept `--reviewer <agent>` (default = registry default); the reader
+  derives the reviewer mechanically from the inbound `from:` for every continuation
+  (replies, error lane, plan→implement handoff). Answers the field report's
+  "serialization on one reviewer".
 - [ ] **ACP delivery backend (Tier 1 spike, scoped 2026-08-19)**: `COMMS_DELIVERY=acp` via
   acpx (headless CLI ACP client; pin — pre-1.0). Decision gate: Node ≥22.13 dependency
   acceptable as an OPTIONAL backend. The spike's deliverable is ONE measurement: round-2+
@@ -460,18 +464,16 @@ Decided (user-confirmed): ONE `/ask` template scaling across agents, not `/ask-<
 copies. The informal-consult ("thoughts?") design above carries over unchanged — only the
 command shape evolves:
 
-- [ ] `/ask <agent> <question>` — first word validated against the agent registry names
-  the target; not an agent name → the whole text is a question to the DEFAULT agent
-  (codex, set in `.comms/config`) — *partially delivered 2026-08-20 (hard-coded
-  known-agents seam in ask.md); registry semantics land with the multi-agent core*
+- [x] `/ask <agent> <question>` — first word validated against the agent registry names
+  the target; not an agent name → the whole text is a question to the DEFAULT agent —
+  *fully delivered 2026-08-20: ask.md reads `comms.sh agents` / `agents default`*
 - [x] bare `/ask` (or `/ask <agent>` alone) → thoughts mode per the informal-consult spec
   (verbatim excerpt, floor = user's last question + the answering message) — shipped
   2026-08-20 (thread ask-unification-10480)
 - [x] `/ask-codex` becomes a thin deprecated alias for one transition release, then drops
   — alias shipped 2026-08-20; the drop happens next release
-- [ ] adding an agent touches ONLY the registry — the template reads names from it (DRY)
-  — *partially delivered 2026-08-20 (single prose-defined list in ask.md is the interim
-  one-place set); registry semantics land with the multi-agent core*
+- [x] adding an agent touches ONLY the registry — the template reads names from it (DRY)
+  — *fully delivered 2026-08-20 (`.comms/config` + `comms.sh agents`)*
 
 ## Priorities (2026-08-20, user-confirmed order)
 

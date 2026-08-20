@@ -1,10 +1,11 @@
-Autonomous plan + review cycle. Creates a plan, sends to Codex for review, and automatically refines based on feedback until approved or max rounds reached.
+Autonomous plan + review cycle. Creates a plan, sends to the selected reviewer (default codex) for review, and automatically refines based on feedback until approved or max rounds reached.
 
 ## Instructions
 
 1. **Parse arguments:**
    - The argument text is the task/feature description to plan for
    - Default max rounds: 10. If the user specifies a number (e.g., "/auto-plan 3 build feature X"), use that as max rounds.
+   - Optional `--reviewer <agent>` flag selects the reviewing agent. Default: `"$COMMS_SH" agents default`. Validate the name against `"$COMMS_SH" agents`; hold it in a named variable (REVIEWER) and use it for every write path and send below — headless-only agents (e.g. grok) work identically; delivery routes itself.
 
 2. **Resolve the shared helper** — the single source of truth for comms root, workspace name, validation, delivery, and archiving. Local pin wins over global:
    ```bash
@@ -31,7 +32,7 @@ Autonomous plan + review cycle. Creates a plan, sends to Codex for review, and a
    - Create a thorough implementation plan covering: approach, files to create/modify, key decisions, risks, and steps
    - Write the plan to a file if appropriate, or include it in the message body
 
-4. **Write the review request** to `$COMMS_ROOT/to-codex/`:
+4. **Write the review request** to `$COMMS_ROOT/to-$REVIEWER/` (`mkdir -p` it first):
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-plan-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions)
    - Write with a quoted heredoc (`<<'EOF'`) or a non-interpolating tool so backticks and dollar signs in the body are never evaluated
    - `thread` names this loop and stays constant across every message in the cycle; replies copy it. `message_id` is the filename sans `.md`. These let concurrent loops in one workspace coexist and let replies be threaded
@@ -72,12 +73,12 @@ This is an autonomous plan+review cycle (round 1 of <N>). Reply with findings us
 
 5. **Validate and deliver** — `send` refuses malformed messages and degrades to manual pickup without cmux:
    ```bash
-   "$COMMS_SH" send --to codex "<path of the message file you wrote>"
+   "$COMMS_SH" send --to "$REVIEWER" "<path of the message file you wrote>"
    ```
    On `RESULT: blocked`, execute the exact `RECOVER:` line once; relay only the final
    non-`delivered` result.
    <!-- loopspec:fragment result-spawned-exception -->
-   Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the Codex turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
+   Exception — `RESULT: spawned` (headless mode, `COMMS_DELIVERY=headless`): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply.
    <!-- /loopspec:fragment -->
 
-6. **Notify user:** "Plan created and sent to Codex for autonomous review (round 1 of N). I'll refine it based on feedback until approved." If the loop goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.
+6. **Notify user:** "Plan created and sent to $REVIEWER for autonomous review (round 1 of N). I'll refine it based on feedback until approved." If the loop goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.

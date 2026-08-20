@@ -1,5 +1,7 @@
 #!/bin/bash
-# agent-comms headless peer-turn runner (codex and claude backends).
+# agent-comms headless peer-turn runner (codex, claude, and grok backends).
+# grok is reviewer/consult-only: a read-only sandboxed child produces the reply
+# as output and THIS trusted parent persists/validates/sends/archives it.
 #
 # Replaces the cmux keystroke nudge with a detached subprocess (`codex exec` or
 # `claude -p`): the peer turn is spawned, observed (JSONL event log),
@@ -9,7 +11,7 @@
 # default delivery path.
 #
 # Subcommands:
-#   spawn --message <file> [--provider codex|claude] [--sandbox <mode>] [--timeout-secs N]
+#   spawn --message <file> [--provider codex|claude|grok] [--sandbox <mode>] [--timeout-secs N]
 #         detach a `run` and return immediately; prints pid + run dir.
 #         Refuses (HELD) while the thread — or everything — is held; see hold.
 #   run --message <file> --dir <run-dir> [--provider ...] [--sandbox <mode>] [--timeout-secs N]
@@ -67,8 +69,13 @@ abs_path() {
   esac
 }
 
+# peer_of is the two-party COMPLEMENT — retained ONLY as a fallback for messages
+# with no from: field. The authoritative pickup peer is the inbound message's
+# from: (derived in cmd_run); a complement is meaningless at three agents.
 peer_of() { case "$1" in claude) echo codex ;; codex) echo claude ;; esac; }
-session_field_of() { case "$1" in claude) echo claude_session_id ;; codex) echo codex_thread_id ;; esac; }
+# Legacy field names are preserved verbatim for claude/codex (existing state
+# files + print_attach); every other agent gets the generic <name>_session_id.
+session_field_of() { case "$1" in claude) echo claude_session_id ;; codex) echo codex_thread_id ;; *) echo "${1}_session_id" ;; esac; }
 
 # skill_file <name> — resolve the Codex skill text the headless peer should
 # follow. Project-local pin wins (matches the install-shadowing convention),
@@ -118,6 +125,9 @@ print_attach() {  # print_attach <thread> — exact resume commands from thread 
   [ -f "$sf" ] || return 0
   sid="$(json_get "$sf" claude_session_id)"
   tid="$(json_get "$sf" codex_thread_id)"
+  local gid
+  gid="$(json_get "$sf" grok_session_id)"
+  [ -n "$gid" ] && echo "  attach grok:   grok --resume $gid"
   # --resume by id searches the current project dir — run from the loop's tree.
   # Plain ifs, not `[ ] && echo`: an empty id must not leak a non-zero status
   # into set -e callers (spawn would misreport HELD as a failed spawn).
@@ -211,6 +221,152 @@ update_thread_state() {
 
 # ---------- spawn ----------
 
+# ---------- grok leg: read-only child, trusted parent broker ----------
+# The grok child NEVER touches the repo or the mailbox: it runs under the kernel
+# --sandbox read-only profile and its ONLY job is to produce the complete reply
+# message as its final assistant output. The PARENT (this process, full FS
+# access) then persists -> validates -> sends -> archives — the same
+# validation-before-persistence and atomic-archive semantics as every other leg.
+
+verdict_discipline_text() {  # runtime read of the shared fragment (single-home)
+  local sk
+  sk="$(skill_file send-to-claude "$1" 2>/dev/null || true)"
+  [ -n "$sk" ] && [ -f "$sk" ] || return 0
+  awk '/<!-- loopspec:fragment verdict-discipline -->/{c=1;next} /<!-- \/loopspec:fragment -->/{if(c)exit} c{sub(/^[[:space:]]+/,"");print}' "$sk"
+}
+
+build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> — sets the GROK_* envelope globals
+  local msg="$1" run_dir="$2" peer="$3" main_root="$4"
+  local ts vtext vnote
+  GROK_WS="$("$COMMS" workspace)"
+  ts="$(date +%Y-%m-%dT%H-%M-%S)"
+  GROK_REPLY_ID="$(safe_name "${GROK_WS}")_${ts}_grok-reply-$$"
+  GROK_THREAD="$(frontmatter_field "$msg" thread)"
+  GROK_WF="$(frontmatter_field "$msg" workflow)"
+  GROK_PHASE="$(frontmatter_field "$msg" phase)"
+  GROK_ROUND="$(frontmatter_field "$msg" round)"
+  GROK_MAXR="$(frontmatter_field "$msg" max-rounds)"
+  GROK_INID="$(frontmatter_field "$msg" message_id)"
+  if [ "$(frontmatter_field "$msg" type)" = "question" ]; then
+    GROK_RTYPE="response"
+    vnote="Do NOT output a VERDICT line — questions are not reviews. Body: ## Summary + ## Grok Take."
+  else
+    GROK_RTYPE="review-feedback"
+    vnote="Your FIRST line must be exactly 'VERDICT: APPROVE' or 'VERDICT: REQUEST_CHANGES', followed by a blank line, then the body: ## Summary, then ## Findings with ### Blocking / ### Advisory / ### Process subsections."
+  fi
+  vtext="$(verdict_discipline_text "$main_root")"
+  cat > "$run_dir/prompt.md" <<PROMPT
+You are agent 'grok', a READ-ONLY reviewer in an agent-comms exchange. You cannot and
+must not write any file in the repository or the mailbox — a trusted parent process
+authors the message envelope and delivers your reply. Do not attempt file writes and
+do not run comms.sh; the kernel sandbox will deny both.
+
+Read the message at:
+  $msg
+
+If its frontmatter has a cwd: field, review THAT tree (read-only). Review per the
+discipline below, then OUTPUT ONLY your review content as your final message — no
+frontmatter, no metadata, no code fences around it. The parent stamps every
+identity and lifecycle field itself; nothing you output can or should set them.
+
+$vnote
+
+Review discipline:
+$vtext
+PROMPT
+}
+
+grok_broker() {  # <msg> <run-dir> <peer> — stamp envelope, persist, validate, send, archive
+  local msg="$1" run_dir="$2" peer="$3"
+  GROK_BROKER_NOTE=""
+  if ! command -v python3 >/dev/null 2>&1; then
+    GROK_BROKER_NOTE="python3 is required to extract the grok reply from events.ndjson"
+    return 1
+  fi
+  if ! python3 - "$run_dir/events.ndjson" > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" <<'PYX'
+import json, sys
+# streaming-messages-json (observed live on 1.0.5): the final {"type":"result"}
+# event carries the COMPLETE final assistant text in its `result` field — the
+# only chunking-proof anchor (plain streaming-json emits token deltas whose
+# coalescing is nondeterministic; message-splicing heuristics broke both ways).
+final = None
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        e = json.loads(line)
+    except ValueError:
+        continue
+    if e.get('type') == 'result' and not e.get('is_error') and isinstance(e.get('result'), str):
+        final = e['result']
+text = (final or '').strip()
+lines = text.splitlines()
+if len(lines) >= 2 and lines[0].startswith('```') and lines[-1].startswith('```'):
+    text = '\n'.join(lines[1:-1])
+sys.stdout.write(text + '\n')
+PYX
+  then
+    GROK_BROKER_NOTE="reply extraction failed — see events.ndjson / runner.log"
+    return 1
+  fi
+  [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="grok produced no reply text"; return 1; }
+  # The child's output is VERDICT (reviews only) + body. The PARENT authors the
+  # complete envelope from the captured inbound values — no model-authored
+  # frontmatter is ever persisted, so type/from/thread/round/in-reply-to cannot
+  # be spoofed or drift from the turn being answered.
+  # Verdict recognition is gated on the REPLY TYPE the parent computed from the
+  # inbound: only review-feedback turns parse and stamp a verdict. For a
+  # question (type: response) the ENTIRE raw output — including any stray
+  # leading VERDICT line — is preserved as body text; review-only metadata can
+  # never attach to a consult.
+  local first verdict="" body_start=1
+  if [ "$GROK_RTYPE" = "review-feedback" ]; then
+    first="$(head -1 "$run_dir/reply-raw.md")"
+    case "$first" in
+      "VERDICT: APPROVE"|"VERDICT: REQUEST_CHANGES")
+        verdict="${first#VERDICT: }"; body_start=2 ;;
+    esac
+    if [ -z "$verdict" ]; then
+      GROK_BROKER_NOTE="review reply carries no leading 'VERDICT: APPROVE|REQUEST_CHANGES' line — refusing to stamp an envelope (first line was: $(printf '%.60s' "$first"))"
+      return 1
+    fi
+  fi
+  {
+    printf -- '---\n'
+    printf 'type: %s\n' "$GROK_RTYPE"
+    printf 'from: grok\n'
+    printf 'timestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'workspace: %s\n' "$GROK_WS"
+    printf 'message_id: %s\n' "$GROK_REPLY_ID"
+    [ -n "$GROK_THREAD" ] && printf 'thread: %s\n' "$GROK_THREAD"
+    [ -n "$GROK_INID" ] && printf 'in-reply-to: %s\n' "$GROK_INID"
+    [ -n "$GROK_WF" ] && printf 'workflow: %s\n' "$GROK_WF"
+    [ -n "$GROK_PHASE" ] && printf 'phase: %s\n' "$GROK_PHASE"
+    [ -n "$GROK_ROUND" ] && printf 'round: %s\n' "$GROK_ROUND"
+    [ -n "$GROK_MAXR" ] && printf 'max-rounds: %s\n' "$GROK_MAXR"
+    [ -n "$verdict" ] && printf 'verdict: %s\n' "$verdict"
+    printf -- '---\n\n'
+    tail -n +"$body_start" "$run_dir/reply-raw.md"
+  } > "$run_dir/reply.md"
+  # Validate BEFORE persistence — an empty/degenerate body never reaches the
+  # inbox and the inbound stays unarchived (error-lane semantics for the driver).
+  if ! "$COMMS" validate "$run_dir/reply.md" >>"$run_dir/runner.log" 2>&1; then
+    GROK_BROKER_NOTE="stamped grok reply failed validation (degenerate body?) — see runner.log; inbound NOT archived"
+    return 1
+  fi
+  local root dest
+  root="$("$COMMS" root)"
+  mkdir -p "$root/to-$peer" 2>/dev/null || true
+  dest="$root/to-$peer/${GROK_REPLY_ID}.md"
+  cp "$run_dir/reply.md" "$dest" || { GROK_BROKER_NOTE="could not persist reply to $dest"; return 1; }
+  if ! "$COMMS" send --to "$peer" "$dest" --archive-inbound "$msg" >>"$run_dir/runner.log" 2>&1; then
+    GROK_BROKER_NOTE="send failed after persistence — reply is at $dest; see runner.log"
+    return 1
+  fi
+  return 0
+}
+
 cmd_spawn() {
   local msg="" sandbox="" timeout="" provider="codex"
   while [ "$#" -gt 0 ]; do
@@ -223,7 +379,7 @@ cmd_spawn() {
     esac
     shift
   done
-  case "$provider" in claude|codex) ;; *) die "spawn: provider must be claude or codex" ;; esac
+  case "$provider" in claude|codex|grok) ;; *) die "spawn: provider must be claude, codex, or grok" ;; esac
   [ -n "$msg" ] || die "spawn: --message <file> is required"
   [ -f "$msg" ] || die "spawn: no such message file: $msg"
   msg="$(abs_path "$msg")"
@@ -285,7 +441,7 @@ cmd_run() {
     esac
     shift
   done
-  case "$provider" in claude|codex) ;; *) die "run: provider must be claude or codex" ;; esac
+  case "$provider" in claude|codex|grok) ;; *) die "run: provider must be claude, codex, or grok" ;; esac
   [ -n "$msg" ] && [ -f "$msg" ] || die "run: --message <file> required and must exist"
   [ -n "$run_dir" ] && [ -d "$run_dir" ] || die "run: --dir <run-dir> required and must exist"
   msg="$(abs_path "$msg")"
@@ -327,7 +483,22 @@ cmd_run() {
   # ----- prompt -----
   # Which discipline text the peer follows and where its reply goes, per provider.
   local peer instr_a instr_b instr_note self_desc peer_desc
-  peer="$(peer_of "$provider")"
+  # Pickup peer := the inbound message's sender — that is who reads the reply
+  # when this turn exits. Complement fallback only when from: is absent. The
+  # value becomes a path component (to-$peer) and a send target, and spawn/run
+  # are reachable WITHOUT cmd_send having validated the message — so an
+  # unregistered or path-shaped from: must fail the run here, before use.
+  peer="$(frontmatter_field "$msg" from || true)"
+  [ -n "$peer" ] || peer="$(peer_of "$provider")"
+  if ! "$COMMS" agents | tr ' ' '\n' | grep -qx "$peer"; then
+    update_thread_state "$msg_thread" failed "" "$sfield" || true
+    write_result "$run_dir" failed 1 "" "$msg" "inbound from: '${peer:-<absent>}' is not a registered agent — refusing to route a reply"
+    trap - EXIT
+    exit 1
+  fi
+  if [ "$provider" = "grok" ]; then
+    build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root"
+  else
   if [ "$provider" = "codex" ]; then
     self_desc="Codex"; peer_desc="Claude Code"
     instr_a="$(skill_file read-from-claude "$main_root" || true)"
@@ -389,6 +560,7 @@ panes, surfaces, or shell wrappers):
   be left in the peer's inbox when you stop.
 - Do not ask the user anything. Complete the task, send the reply, then stop.
 PROMPT
+  fi
 
   # ----- provider invocation -----
   local -a extra_dirs=()
@@ -404,6 +576,42 @@ PROMPT
 
   local -a cmd=() child_env=()
   case "$provider" in
+    grok)
+      # Fail-closed boundary: kernel read-only sandbox + enforced deny rules.
+      # dontAsk is defense-in-depth (enforced on 1.0.5), never the boundary.
+      case " ${COMMS_RUNPHASE_GROK_PERMISSION_MODE:-} " in
+        *always-approve*|*bypassPermissions*|*yolo*)
+          die "run: bypass/always-approve modes are refused in grok loop turns" ;;
+      esac
+      # Split the extra args EXACTLY as the invocation will (all shell
+      # whitespace — space, tab, newline), THEN inspect each resulting token.
+      # Literal-string scans were bypassable with tab-separated overrides;
+      # grok's last-flag-wins parsing would let any appended sandbox or
+      # permission flag defeat the pinned boundary.
+      local -a grok_extra=()
+      if [ -n "${COMMS_RUNPHASE_GROK_ARGS:-}" ]; then
+        set -f
+        # shellcheck disable=SC2206
+        grok_extra=(${COMMS_RUNPHASE_GROK_ARGS})
+        set +f
+        local gtok
+        for gtok in ${grok_extra[@]+"${grok_extra[@]}"}; do
+          case "$gtok" in
+            --sandbox|--sandbox=*)
+              die "run: grok loop turns pin --sandbox read-only; caller-supplied sandbox options are refused" ;;
+            --permission-mode|--permission-mode=*)
+              die "run: set the grok permission mode via COMMS_RUNPHASE_GROK_PERMISSION_MODE, not extra args (bypass modes are refused there)" ;;
+            --always-approve|--yolo)
+              die "run: bypass/always-approve modes are refused in grok loop turns" ;;
+          esac
+        done
+      fi
+      cmd=(grok --prompt-file "$run_dir/prompt.md" --output-format streaming-messages-json
+           --sandbox read-only
+           --permission-mode "${COMMS_RUNPHASE_GROK_PERMISSION_MODE:-dontAsk}"
+           --deny 'Bash(rm *)' --deny 'Bash(git push*)')
+      cmd+=(${grok_extra[@]+"${grok_extra[@]}"})
+      ;;
     codex)
       cmd=(codex exec --json -s "$sandbox" -C "$workdir"
            ${extra_dirs[@]+"${extra_dirs[@]}"}
@@ -463,7 +671,16 @@ PROMPT
 
   local sid status note=""
   sid="$(session_id_from_events "$run_dir" "$provider")"
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -eq 0 ] && [ "$provider" = "grok" ]; then
+    # Trusted-parent broker: the read-only child produced the reply as OUTPUT;
+    # persist -> validate -> send -> archive happens here, in this process.
+    if grok_broker "$msg" "$run_dir" "$peer"; then
+      status=completed
+    else
+      status=failed
+      note="${GROK_BROKER_NOTE:-grok broker failed}"
+    fi
+  elif [ "$rc" -eq 0 ]; then
     status=completed
   else
     status=failed
@@ -493,7 +710,7 @@ session_id_from_events() {  # session_id_from_events <run-dir> <provider>
   # that must yield an empty id, not a set -e abort that records a successful
   # turn as failed.
   local key
-  case "${2:-codex}" in claude) key=session_id ;; *) key=thread_id ;; esac
+  case "${2:-codex}" in claude|grok) key=session_id ;; *) key=thread_id ;; esac
   { sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
       "$1/events.ndjson" | head -1; } 2>/dev/null || true
 }

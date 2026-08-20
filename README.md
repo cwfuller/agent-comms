@@ -46,7 +46,7 @@ socket. See [Codex socket permissions](docs/INSTALL.md#codex-socket-permissions)
 
 | Claude Code | What it does |
 |---|---|
-| `/auto-implement <task>` | implement → review → fix, until approved |
+| `/auto-implement [--reviewer <agent>] <task>` | implement → review → fix, until approved (reviewer defaults to codex; `grok` reviews headless) |
 | `/auto-plan <task>` | plan → review → refine, until approved |
 | `/auto-full <task>` | plan loop, then implement loop |
 | `/ask [agent] <question>` | one-off question — judgment call, no review framing; bare `/ask` sends an informal "thoughts?" consult on the current discussion (`/ask-codex` is a deprecated alias) |
