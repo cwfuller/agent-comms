@@ -106,7 +106,52 @@ complete reply message as its final output. The runphase parent then extracts th
 reply from the final `result` event (the only chunking-proof anchor — plain
 streaming-json emits nondeterministic token deltas), verifies the parent-generated
 message_id, validates, persists to the pickup peer's inbox, sends, and archives the
-inbound. The parent stamps the ENTIRE
+inbound. **The parent assembles the whole prompt**, and the prompt SCAFFOLDING names no
+mailbox path and no comms helper: the inbound message is inlined verbatim, and
+prior rounds of THIS thread are precomputed by the parent (scoped by construction —
+the search term is the thread id). This matters because `read-only` restricts WRITES
+only: the mailbox — every thread, every workspace, including content later scrubbed
+from the tracked tree — stays readable to a prompt-injectable child. Removing the reason to look is a mitigation, not a boundary — and it has a hard
+limit worth stating plainly: the inbound message and prior rounds are inlined
+VERBATIM, and reviews of this project discuss `.comms` paths and helper names by
+nature. Those strings therefore appear in the prompt inside quoted material, and
+sanitizing them would degrade the review rather than secure it. **Path secrecy is
+not the control.** Two things are: the prompt tells the child not to act on helper
+mentions in quoted text, and — for untrusted-reviewer use — the operator-applied
+kernel deny-profile below. An inherited env var is NOT a boundary either (a child
+with shell access can unset it); that approach was tried and reverted.
+
+`--sandbox strict` (kernel read-limit to CWD + system paths) was tried and rejected
+with evidence: in a linked worktree `.git` is a file pointing at the MAIN root, so
+strict kernel-denies git itself and the review turn dies in seconds. `.git` and
+`.comms` are siblings, so no built-in profile isolates the mailbox without breaking
+the reviewer in the primary topology. **Operators who want a kernel boundary** add a grok
+custom profile to `~/.grok/sandbox.toml` and select it by name with
+`COMMS_RUNPHASE_GROK_SANDBOX` (the runner honors that knob and refuses the
+writable built-ins `off`/`devbox`/`workspace`, so it can only harden):
+
+```toml
+# ~/.grok/sandbox.toml
+[profiles.agent-comms-review]
+extends = "read-only"
+deny = ["**/.comms/**"]
+```
+
+```bash
+COMMS_RUNPHASE_GROK_SANDBOX=agent-comms-review   # then run the loop as usual
+```
+
+Running without it is supported but warns at turn start: under the default
+`read-only` the mailbox stays readable to the child. The runner refuses the
+writable built-ins (`off`/`devbox`/`workspace`), but it cannot introspect a
+custom profile — that the named profile actually extends `read-only` and denies
+`**/.comms/**` is a trust assumption about operator-controlled config.
+
+`deny` globs are kernel-enforced for reads and writes. This is the same
+print-it-don't-write-it posture as `comms.sh codex-permissions`: the recipe is
+documented, the operator applies it, and the runner honors the selection.
+
+The parent stamps the ENTIRE
 reply envelope itself (type/from/workspace/message_id/thread/in-reply-to/workflow/
 phase/round/max-rounds/verdict) from captured inbound values — the child's output is
 body only — reviews additionally lead with a `VERDICT:` line, which is parsed ONLY

@@ -8,6 +8,57 @@ emits whole `## ` sections up to a byte budget, ordered by the date in each head
 physical order here may be mixed and writers may append or prepend freely. A section
 whose heading carries no `YYYY-MM-DD` sorts last (but is never dropped).
 
+## 2026-08-20 — thread grok-prompt-quality-18172 (auto-implement, MAX ROUNDS → user decision)
+
+The grok reviewer-prompt loop hit max-rounds (4) with a blocking finding and was
+resolved by user decision rather than another round. Lessons worth keeping:
+
+- **A claim the architecture cannot keep is a defect, not wording.** "The child is
+  given no mailbox path" was pinned as a criterion while the design inlines review
+  prose verbatim — and reviews of THIS project name `.comms` paths and helpers by
+  nature. Three rounds of fixes chased a guarantee that could not hold. Resolution
+  (user-decided): path secrecy is NOT the control; the operator-applied kernel
+  deny-profile is, with a runtime warning when it is not selected.
+- **Test the contract you can actually check.** Assertions now target the prompt
+  SCAFFOLDING (parent-written regions, quoted blocks excluded) plus a control that
+  proves the fixture's quoted prose really does carry helper names. Earlier
+  fixtures passed only because their synthetic prose happened to be path-free.
+- **A fixture whose target thread has no history tests nothing.** The round-3
+  isolation fixture passed vacuously because the prior-context path never ran.
+- **Env vars are not boundaries.** `COMMS_ARCHIVE_SCOPE_THREAD` was proposed,
+  implemented, reviewed, and reverted within two rounds: a child with shell access
+  can `env -u` it or read the archive directly.
+- **`--sandbox strict` is unusable for worktree reviews** (kernel-denies reads
+  outside CWD, and a linked worktree's `.git` points at the MAIN root, so git
+  itself dies). Recorded in-code so it is not re-attempted.
+- Un-actioned at loop end: nothing blocking. The two round-4 advisories (character
+  vs byte bound; the "never weakens" overclaim) were fixed in the same change.
+
+## 2026-08-20 — first live /ask grok + /ask codex --via acp consults (cross-agent triage)
+
+The first live run of each new consult path produced real findings about the grok
+reviewer leg, triaged by codex over the ACP transport in the same sitting:
+
+- **[BLOCKING-latent] `verdict_discipline_text` fails OPEN to empty** when the skill
+  file it extracts from is missing — a review loop could run with NO review bar.
+  Codex severity ruling: blocking-latent, fix fail-closed (abort review turns before
+  the child runs; never load it for questions).
+- **Consult/review instruction conflict in one prompt**: build_grok_prompt always says
+  "you are a reviewer / review per the discipline below" and appends the verdict bar
+  even on type: question turns whose vnote says "this is not a review". Fix: split
+  the prompt on GROK_RTYPE the way the broker already splits envelope stamping.
+- **The grok prompt withholds the loop-review playbook** the codex-side skill carries
+  (holistic re-review on round 2+, phase-specific focus, implement checklist,
+  judge-against-pinned-criteria) — later-round grok reviews would drift into
+  fix-verification tunnel vision.
+- **"Do not write" is loud; "inspect thoroughly" is absent**: no cwd/head_sha check,
+  no lessons/archive guidance, no acceptance-criteria pointer — a cautious turn reads
+  the message, skims named files, and stops.
+- Positive signals: parent-stamped envelope, kernel read-only boundary, and
+  fail-closed missing-VERDICT were all endorsed by the reviewer they constrain.
+  Both consult transports worked first try (mailbox-headless ~90s; ACP warm session
+  answered with repo-file citations at 6,302 fresh input tokens).
+
 ## 2026-08-20 — thread multi-agent-17600 (+continuation, auto-full, approved)
 
 Multi-agent core + Grok Build reviewer shipped (registry, explicit routing

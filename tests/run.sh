@@ -1264,6 +1264,181 @@ grep -q '^VERDICT: APPROVE$' "$QREPLY" \
 [ ! -f "$MA_MSGQ" ] && [ -f "$MA_FIX/.comms/archive/$(basename "$MA_MSGQ")" ] \
   && ok "question inbound archived to the sender-derived owner" || fail "question archive movement"
 
+# Prompt-shape contracts (first-live-consult findings, codex-triaged):
+grep -q 'NOT a review' "$RQ/prompt.md" && ! grep -q 'Review discipline:' "$RQ/prompt.md" \
+  && ! grep -q "VERDICT: APPROVE' or" "$RQ/prompt.md" && grep -q 'Grok Take' "$RQ/prompt.md" \
+  && ok "consult prompt carries no reviewer framing or verdict bar" || fail "consult prompt split"
+grep -q 'Review discipline:' "$R1/prompt.md" && grep -q 'completeness, architecture' "$R1/prompt.md" \
+  && grep -q 'Acceptance criteria' "$R1/prompt.md" && ! grep -q 'NOT a review' "$R1/prompt.md" \
+  && ok "review prompt carries the bar + plan focus + criteria pointer" || fail "review prompt round 1"
+grep -q 'round 2' "$R2A/prompt.md" && grep -q 'blank checklist' "$R2A/prompt.md" \
+  && grep -q 'bar does not move' "$R2A/prompt.md" \
+  && ok "round-2 prompt carries holistic re-review + pinned-criteria rule" || fail "review prompt round 2 playbook"
+grep -q 'entry points' "$R2B/prompt.md" && grep -q 'Phase focus (implement)' "$R2B/prompt.md" \
+  && ok "implement prompt carries the checklist" || fail "implement prompt checklist"
+grep -q 'rev-parse HEAD' "$R1/prompt.md" && grep -q 'THE REVIEW IS THE WORK' "$R1/prompt.md" \
+  && ok "review prompt carries the inspection contract" || fail "inspection contract"
+
+# FAIL-CLOSED: a review turn with no obtainable verdict discipline must refuse
+# BEFORE the child runs; a question turn under identical conditions completes.
+BARE="$WORK/bare-helpers"; mkdir -p "$BARE"
+cp "$REPO/helpers/comms.sh" "$REPO/helpers/runphase.sh" "$BARE/"
+chmod +x "$BARE"/*.sh
+MA_MSGFC="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-45-00_failclosed-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-7/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFC"
+RFC1="$WORK/ma-legfc"; mkdir -p "$RFC1"
+(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$WORK/no-skills" \
+   COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFC" --dir "$RFC1" --provider grok) >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFC1/result.json" | head -1)" = "failed" ] \
+  && grep -q 'no review bar' "$RFC1/result.json" && [ -f "$MA_MSGFC" ] && [ ! -s "$RFC1/events.ndjson" ] \
+  && ok "review turn with no discipline fails closed BEFORE the child runs" || fail "discipline fail-closed"
+MA_MSGFQ="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-46-00_fcq-1.md"
+sed -e 's/^type: review-request$/type: question/' -e 's/^thread: ma-arc-1$/thread: ma-arc-8/' \
+    -e '/^workflow:/d' -e '/^phase:/d' -e '/^round:/d' -e '/^max-rounds:/d' \
+  "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFQ"
+RFC2="$WORK/ma-legfq"; mkdir -p "$RFC2"
+(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$WORK/no-skills" \
+   COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFQ" --dir "$RFC2" --provider grok) >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFC2/result.json" | head -1)" = "completed" ] \
+  && ok "question turn completes without the review bar (never loads it)" || fail "question turn under bare install"
+
+# Mailbox isolation: the parent assembles the prompt; the child is given NO
+# mailbox path, NO helper invocation, and no way to reach another thread. An
+# inherited env var was NOT a boundary (a child with shell access can unset it),
+# so the guarantee is: nothing to query + kernel read-limit to CWD (strict).
+SENS="$MA_FIX/.comms/archive/${MA_WS}_2026-08-19T01-00-00_other-thread-1.md"
+cat > "$SENS" <<SEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-19T01:00:00Z
+workspace: $MA_WS
+message_id: ${MA_WS}_2026-08-19T01-00-00_other-thread-1
+thread: unrelated-arc-99
+verdict: APPROVE
+---
+
+## Summary
+SENSITIVE-UNRELATED-CONTENT lives here
+SEOF
+# The target thread MUST have prior history, or the context path never runs and
+# the isolation assertions pass vacuously (round-3 review caught exactly that).
+PRIOR="$MA_FIX/.comms/archive/${MA_WS}_2026-08-19T05-00-00_prior-round-1.md"
+cat > "$PRIOR" <<PEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-19T05:00:00Z
+workspace: $MA_WS
+message_id: ${MA_WS}_2026-08-19T05-00-00_prior-round-1
+thread: ma-arc-10
+workflow: auto-implement
+phase: implement
+round: 1
+verdict: REQUEST_CHANGES
+---
+
+## Summary
+LEGITIMATE-PRIOR-ROUND-CONTEXT for this very thread
+
+### Blocking
+- .comms/archive/agent-comms_2026-08-19T00-00-00_x.md — realistic review prose
+  naming comms.sh and archive-search, exactly as this project's reviews do.
+PEOF
+# Adversarial: an UNRELATED thread whose BODY quotes the target thread id — a
+# literal grep would pull it in along with its adjacent secret.
+QUOTER="$MA_FIX/.comms/archive/${MA_WS}_2026-08-19T06-00-00_quoter-1.md"
+cat > "$QUOTER" <<QEOF2
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-19T06:00:00Z
+workspace: $MA_WS
+message_id: ${MA_WS}_2026-08-19T06-00-00_quoter-1
+thread: unrelated-arc-98
+verdict: APPROVE
+---
+
+## Summary
+Cross-reference to ma-arc-10 appears here, and so does SENSITIVE-QUOTER-SECRET
+QEOF2
+MA_MSGISO="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-48-00_isolation-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-10/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGISO"
+RISO="$WORK/ma-legiso"; mkdir -p "$RISO"
+GROK_STUB_VERDICT=APPROVE run_grok_leg "$MA_MSGISO" "$RISO" >/dev/null 2>&1
+grep -q 'LEGITIMATE-PRIOR-ROUND-CONTEXT' "$RISO/prompt.md" \
+  && ok "parent context path actually ran (prior round present)" || fail "prior-context path did not run"
+grep -q 'SENSITIVE-UNRELATED-CONTENT' "$RISO/prompt.md" \
+  && fail "LEAK: unrelated archived thread reached the generated prompt" \
+  || ok "unrelated archived threads never reach the generated prompt"
+grep -q 'SENSITIVE-QUOTER-SECRET' "$RISO/prompt.md" \
+  && fail "LEAK: an unrelated thread QUOTING the target id reached the prompt" \
+  || ok "thread match is exact frontmatter, not a body-quote grep"
+# Honest contract (round-4 escalation, user-decided): paths CAN appear inside
+# quoted review prose — this project's reviews discuss .comms by nature, and
+# redacting them would degrade the review. What must hold: the renderer adds no
+# paths of its own, and the prompt tells the child not to act on quoted ones.
+grep -q 'do not run comms helpers even' "$RISO/prompt.md" \
+  && ok "prompt instructs the child not to act on quoted helper mentions" || fail "quoted-mention instruction"
+grep -q 'no mailbox access' "$RISO/prompt.md" \
+  && fail "prompt still makes the unattainable no-mailbox-access claim" \
+  || ok "prompt makes no claim it cannot keep"
+# The checkable contract: the prompt SCAFFOLDING (everything the parent writes
+# itself, excluding quoted message/prior-context blocks) advertises no helper and
+# no mailbox path. Quoted review prose may contain both — this project's reviews
+# discuss .comms by nature — which is why the kernel deny-profile, not path
+# secrecy, is the boundary.
+SCAFFOLD="$WORK/prompt-scaffold.txt"
+awk '/----- BEGIN (MESSAGE|PRIOR CONTEXT) -----/{skip=1} /----- END (MESSAGE|PRIOR CONTEXT) -----/{skip=0; next} !skip' \
+  "$RISO/prompt.md" > "$SCAFFOLD"
+grep -q 'archive-search' "$SCAFFOLD" && fail "prompt scaffolding still advertises archive-search" \
+  || ok "prompt scaffolding advertises no mailbox query helper"
+grep -qE '"\$COMMS"|comms\.sh ' "$SCAFFOLD" && fail "prompt scaffolding still invokes a comms helper" \
+  || ok "prompt scaffolding invokes no comms helper"
+grep -qE '\.comms/(archive|to-)' "$SCAFFOLD" && fail "prompt scaffolding still emits a mailbox path" \
+  || ok "prompt scaffolding emits no mailbox path"
+grep -q 'archive-search' "$RISO/prompt.md" \
+  && ok "control: quoted review prose DOES carry helper names (the honest case)" \
+  || fail "fixture is not realistic — quoted prose lacks helper names"
+grep -q "$MA_FIX/.comms" "$RISO/prompt.md" && fail "prompt leaks a mailbox path" \
+  || ok "no mailbox path outside quoted material"
+grep -q 'BEGIN MESSAGE' "$RISO/prompt.md" && grep -q 'inlined here by the' "$RISO/prompt.md" \
+  && ok "parent inlines the message the child must review" || fail "message inlining"
+grep -q -- '--sandbox read-only' "$GROK_STUB_LOG" \
+  && ok "grok argv defaults to the read-only sandbox" || fail "sandbox argv"
+: > "$GROK_STUB_LOG"
+# Fresh inbound: the isolation leg archived its own message.
+MA_MSGSBX="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-49-00_sandbox-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-11/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGSBX"
+mkdir -p "$WORK/ma-legsbx" "$WORK/ma-legsbx2"
+(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   COMMS_RUNPHASE_GROK_SANDBOX=agent-comms-review "$RP" run --message "$MA_MSGSBX" --dir "$WORK/ma-legsbx" --provider grok) >/dev/null 2>&1 || true
+grep -q -- '--sandbox agent-comms-review' "$GROK_STUB_LOG" \
+  && ok "operator custom sandbox profile is honored by the runner" || fail "custom sandbox selection"
+MA_MSGSBX2="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-50-00_sandbox-2.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-12/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGSBX2"
+for badsbx in off devbox workspace "not a name"; do
+  cp "$MA_MSGSBX2" "$MA_MSGSBX2.keep" 2>/dev/null || true
+  OUTSBX="$( (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+      COMMS_RUNPHASE_GROK_SANDBOX="$badsbx" "$RP" run --message "$MA_MSGSBX2" --dir "$WORK/ma-legsbx2" --provider grok) 2>&1 )" && rcs=0 || rcs=$?
+  [ "$rcs" -ne 0 ] && echo "$OUTSBX" | grep -qi 'refuse\|must be a bare profile' \
+    && ok "sandbox knob refuses '$badsbx'" || fail "sandbox knob refusal for '$badsbx' (rc=$rcs)"
+  mv -f "$MA_MSGSBX2.keep" "$MA_MSGSBX2" 2>/dev/null || true
+done
+rm -f "$SENS" "$PRIOR" "$QUOTER"
+
+# Fail-closed also when the skill EXISTS but carries no fragment markers.
+MARKERLESS="$WORK/markerless-skills"; mkdir -p "$MARKERLESS/send-to-claude"
+printf '# Send To Claude\nno fragments here\n' > "$MARKERLESS/send-to-claude/SKILL.md"
+MA_MSGFM="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-47-00_markerless-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-9/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFM"
+RFM="$WORK/ma-legfm"; mkdir -p "$RFM"
+(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$MARKERLESS" \
+   COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFM" --dir "$RFM" --provider grok) >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFM/result.json" | head -1)" = "failed" ] \
+  && grep -q 'fragment markers absent' "$RFM/result.json" \
+  && ok "markerless skill also fails closed with the precise cause" || fail "markerless fail-closed"
+
 # Parent-stamped envelope: the successful legs prove the authority — re-assert
 # the stamped fields on the leg-1 reply match the INBOUND turn exactly.
 grep -q '^in-reply-to: '"${MA_WS}"'_2026-08-20T09-00-00_review-req-1$' "$REPLY1" \
@@ -1275,7 +1450,7 @@ R5="$WORK/ma-leg5"; mkdir -p "$R5"
 for bad in "COMMS_RUNPHASE_GROK_ARGS=--sandbox workspace" "COMMS_RUNPHASE_GROK_ARGS=--sandbox off" \
            "COMMS_RUNPHASE_GROK_ARGS=--sandbox devbox" "COMMS_RUNPHASE_GROK_ARGS=--sandbox=off" \
            "COMMS_RUNPHASE_GROK_ARGS=--sandbox=workspace" "COMMS_RUNPHASE_GROK_ARGS=--sandbox=devbox" \
-           "COMMS_RUNPHASE_GROK_ARGS=--sandbox=read-only" "COMMS_RUNPHASE_GROK_ARGS=--always-approve" \
+           "COMMS_RUNPHASE_GROK_ARGS=--sandbox=read-only" "COMMS_RUNPHASE_GROK_ARGS=--sandbox strict" "COMMS_RUNPHASE_GROK_ARGS=--always-approve" \
            "COMMS_RUNPHASE_GROK_ARGS=$(printf -- '--sandbox\toff')" \
            "COMMS_RUNPHASE_GROK_ARGS=$(printf -- '--sandbox\nworkspace')" \
            "COMMS_RUNPHASE_GROK_ARGS=--permission-mode=bypassPermissions" \
