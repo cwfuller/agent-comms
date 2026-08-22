@@ -153,6 +153,88 @@ agnostic.
 | `clean --as <claude\|codex> [mode] [--yes]` | guarded delete; dry-run without `--yes` |
 | `lessons [--bytes N] [--surface P] [--file F]` | bounded newest-first tail of the current worktree's `docs/advisories.md` |
 | `archive-search <pattern> [--bytes N] [--limit K]` | bounded newest-first search of `archive/` across workspaces |
+| `findings [--out F] [--role gating\|shadow] [--review-set ID] [--artifact ID] [--reviewer-version V] [--prompt-version V] [--header] [<message>...]` | extract review findings to TSV (default: the whole archive, oldest first); `--out` appends and is idempotent by `finding_id` |
+| `shadow --to <agent> <review-request> [--review-set ID] [--out F] [--timeout-secs N]` | run a SECOND reviewer on the same artifact; the reply is stored but never delivered and never written to thread state |
+| `snapshot [create\|list]` | retain the tree under review as a durable git object under `refs/agent-comms/artifacts/` |
+| `prompt-version [--list]` | content hash of the reviewer instruction surface |
+
+#### The grading pilot — `findings`, `shadow`, `snapshot`, `prompt-version`
+
+These four exist to answer one question: **which reviewer is good at what.** They are
+deliberately not a grading system — the pilot's job is to find out whether that
+comparison is measurable at all before anything richer is justified. See the
+"Reviewer grading & panel track" section of [ROADMAP.md](ROADMAP.md).
+
+- **The archive is already the baseline.** Every `review-feedback` message carries
+  template-mandated `### Blocking` / `### Advisory` sections, so `findings` reads 112
+  real findings out of this repo's own history with no protocol change and no prompt
+  change. `### Process` is never extracted — it never gates a verdict, so it is not a
+  graded observation either.
+- **Unknown fields stay empty, never guessed.** A retro-extracted row honestly has no
+  `artifact_id`, no `reviewer_version`, and no `prompt_version`; inventing them is the
+  exact failure this track exists to avoid.
+- **`snapshot` retains CONTENT, not a hash.** A hash proves two inputs were identical
+  but cannot resurrect either, so unchanged-since analysis needs the tree itself. The
+  working tree (tracked edits *and* untracked files, mailbox mechanically excluded) is
+  written as a real commit without touching the worktree, the index, or the stash, then
+  anchored under `refs/agent-comms/` — **the anchor is the retention**; an unreferenced
+  object is garbage-collection bait. A clean tree returns `HEAD` rather than minting a
+  synonym for identical content. (`git stash create` is the obvious tool and is wrong:
+  it silently drops untracked files even with `--include-untracked`.)
+- **`shadow` cannot gate, mechanically.** The second reviewer's reply is produced and
+  validated but never delivered to an inbox and never written to thread state, so it
+  cannot steer a loop it was never delivered into and cannot archive the primary's
+  request out from under it. A crashed shadow turn is recorded as an operational
+  failure, never as a reviewer that reviewed and found nothing. `runphase.sh run
+  --no-deliver` refuses any provider that authors and sends its own reply, because for
+  those the flag would silence the state write while the delivery still happened.
+- **The artifact is MOUNTED, and shaped like the worktree it came from.** Retaining a
+  commit while the reviewer reads the live tree would let `artifact_id` name content
+  nobody inspected — one edit during a nine-minute review is enough. But checking the
+  synthetic artifact commit out directly is also wrong, and wrong in a way no content
+  check can see: `HEAD` becomes that synthetic commit rather than the request's
+  `head_sha`, and `git diff` comes back **empty** because every reviewed change is
+  already committed inside it — so the reviewer fails its own head check and finds no
+  patch. `shadow` therefore creates the worktree at the **base**, materializes the
+  artifact into it, and resets the index back to base: `HEAD` matches `head_sha`, the
+  reviewed changes read as uncommitted, and files that were untracked are untracked
+  again. Only `cwd:` is rewritten (inserted when absent), byte-preservingly, into a
+  deliberately neutral mount path.
+- **Pairs are CANDIDATES, and `drift_status` is a tri-state.** `same_endpoint` means only
+  that no drift was detected during the shadow window — never that the gating reviewer
+  read this artifact, which nothing currently binds. `changed` names the new artifact;
+  `unknown` means the post-run snapshot could not be taken. An empty field must never be
+  read as confirmed-identical, which is why the status is explicit rather than inferred
+  from a blank column.
+- **One pairing per thread+PHASE+round, enforced at write time.** A second shadow after
+  the tree or prompt moved would silently stamp later gating findings with the older
+  artifact, and "take the first row" is an arbitrary answer to a question with no right
+  answer. `shadow` refuses it and names the existing set. Phase is part of the key
+  because `/auto-full` keeps one thread across the plan→implement transition and
+  restarts at round 1 — plan r1 and implement r1 are different artifacts under the same
+  thread and round.
+- **The claim is stored whole.** Rows are immutable and idempotent by `finding_id`, so a
+  display-length clip is permanent — v1 lost the tail of 40 of its first 112 claims.
+  Truncation is the reader's job. A schema change is refused rather than mixed into an
+  existing ledger; `findings --out F --rebuild` regenerates from the archive plus the
+  shadow store.
+- **`prompt-version` hashes what the reviewer actually RUNS** — the installed surface,
+  not your working copy. Editing `helpers/runphase.sh` in this repo does not move the
+  hash until `install.sh` copies it out. Collect a baseline against the installed
+  surface, or the version column will understate the churn.
+- **The set index does the join.** The gating reviewer replies later through the normal
+  loop, knowing nothing about any of this; `.comms/grades/sets.tsv` maps thread+phase+round to
+  the shared `review_set_id` and `artifact_id` so the pair reconciles without re-running
+  anything.
+- **`prompt-version` partitions, it does not pool.** Grades do not carry across an edit
+  to a reviewer instruction, and in this repo every active review day has also been a
+  day that text changed.
+
+What is deliberately absent: dispositions (no cheap honest producer — a terminal
+`APPROVE` does not confirm each preceding finding), escape attribution (textual lineage
+is not semantic attribution), and any score. Disjoint findings show diversity, not
+quality; converting that into a routing claim needs a human verdict on a sample of the
+findings one reviewer raised and the other did not.
 
 #### The bounded readers
 
@@ -213,6 +295,7 @@ the operator surface:
 
 | subcommand | effect |
 |---|---|
+| `run --message <file> --dir <run-dir> [--provider ...] [--no-deliver]` | foreground runner. `--no-deliver` produces and validates the reply in the run dir but touches **neither the mailbox nor thread state** — the measurement mode behind `comms.sh shadow` |
 | `spawn --message <file> [--provider codex\|claude] [--sandbox <mode>] [--timeout-secs N]` | detach a peer turn (`codex exec --json` / `claude -p --output-format stream-json`); prints pid + run dir immediately; refuses (`HELD`) while the thread is held; won't double-spawn while a prior runner for the message is alive |
 | `await <run-dir> [--timeout-secs N]` | block until the turn's `result.json` exists (or the runner dies); prints it; exit 0 only for `status=completed` |
 | `result <run-dir>` | print `result.json` if present |

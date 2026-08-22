@@ -170,6 +170,43 @@ survives only as a fallback for messages without one. Live-verified 2026-08-20
 (grok 1.0.5, sentineled linked-worktree probe: both trees byte-identical after a
 completed review turn; an instructed in-repo write attempt was denied mid-turn).
 
+## Grading pilot storage (`.comms/grades/`)
+
+Local, gitignored, per-install — resolved as **per-install only**, not synced. Cross-machine
+export was considered and rejected: single-user tool, no compounding benefit, and finding
+prose can carry paths and proprietary code, which would reopen the disclosure surface the
+archive-scope fix closed.
+
+```
+.comms/grades/
+  findings.tsv          append-only observations; idempotent by finding_id
+  sets.tsv              review_set_id -> thread+phase+round, artifact_id, prompt_version
+  shadow/<set>/<agent>.md          the shadow reply, stored but NEVER delivered
+  shadow/<set>/<agent>.result.json the turn's own outcome record
+```
+
+Three boundaries hold this together, and each is mechanical rather than a convention
+someone has to remember:
+
+- **A shadow reply never enters a mailbox and never writes thread state.**
+  `runphase.sh run --no-deliver` stops the grok broker after validation and turns
+  `update_thread_state` into a no-op — including its EXIT trap, which would otherwise
+  clobber `awaiting_from` while the primary reviewer is still working. So a shadow verdict
+  cannot gate a loop it was never delivered into, and the primary's request is never
+  archived out from under it.
+- **The artifact excludes the mailbox mechanically.** `snapshot` stages the working tree in
+  a throwaway index and then removes `.comms` and `.agent-comms` from it, rather than
+  trusting `.gitignore` — a grades artifact must never carry message bodies into a git
+  object that could later be pushed.
+- **Grades never enter reviewer context.** The ledger lives outside anything
+  `comms.sh lessons` reads. That rules out `docs/advisories.md`, whose read is a *mandatory
+  first step in the reviewer's own turn* — the obvious "just track grades like advisories"
+  answer would hand every reviewer its own scorecard.
+
+`refs/agent-comms/artifacts/<id>` is the retention. A `commit-tree` object is unreferenced
+and would be garbage-collected; the ref is what keeps the reviewed tree resolvable weeks
+later. Deleting that ref namespace discards the artifacts, not just the pointers.
+
 ## ACP consult transport (acp.sh)
 
 Consults are synchronous by nature, so `/ask --via acp` bypasses the mailbox: one

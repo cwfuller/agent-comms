@@ -14,7 +14,11 @@
 #   spawn --message <file> [--provider codex|claude|grok] [--sandbox <mode>] [--timeout-secs N]
 #         detach a `run` and return immediately; prints pid + run dir.
 #         Refuses (HELD) while the thread — or everything — is held; see hold.
-#   run --message <file> --dir <run-dir> [--provider ...] [--sandbox <mode>] [--timeout-secs N]
+#   run --message <file> --dir <run-dir> [--provider ...] [--sandbox <mode>]
+#       [--timeout-secs N] [--no-deliver]
+#         --no-deliver: produce and validate the reply in the run dir but touch
+#         NEITHER the mailbox NOR thread state — the measurement mode behind
+#         `comms.sh shadow`, where a second reviewer must not be able to gate
 #         foreground runner (spawn's child): build the prompt, drive the
 #         provider CLI, tee events, write result.json on every exit path,
 #         update thread state
@@ -187,6 +191,10 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
 # re-reading it here would fail exactly on the success path. Advisory like all
 # state writes: never fatal.
 update_thread_state() {
+  # A shadow run is a MEASUREMENT of an in-flight thread, not a turn in it.
+  # Every state write here — including the EXIT trap's — would clobber the real
+  # loop's awaiting_from/status while the primary reviewer is still working.
+  if [ "${RUNPHASE_NO_DELIVER:-}" = 1 ]; then return 0; fi
   local thread="$1" status="$2" sid="$3" field="${4:-codex_thread_id}"
   local ws sf root
   [ -n "$thread" ] || return 0   # one-shot message (e.g. /ask, or the legacy /ask-codex alias): no state
@@ -377,8 +385,9 @@ $(cat "$msg")
 ----- END MESSAGE -----
 $prior_block
 If the message carries a head_sha: field, compare it with "git rev-parse HEAD" in your
-working directory and note any mismatch in your reply — a repurposed checkout
-invalidates the review premise.
+working directory — a repurposed checkout invalidates the review premise. Report the
+result INSIDE your reply body, in the ## Summary section. It must NOT appear before the
+VERDICT line below: nothing whatsoever may precede that line.
 
 THE REVIEW IS THE WORK — use your read tools thoroughly: read the changed files, use
 read-only git commands (diff, log, show), grep for the patterns the change touches.
@@ -389,7 +398,8 @@ $phase_focus
 
 $round_note
 
-Then OUTPUT the reply as your final message: your FIRST line must be exactly
+Then OUTPUT the reply as your final message. The VERY FIRST line — before any
+preamble, acknowledgement, or head_sha note — must be exactly
 'VERDICT: APPROVE' or 'VERDICT: REQUEST_CHANGES', then a blank line, then the body —
 ## Summary, then ## Findings with ### Blocking / ### Advisory / ### Process
 subsections. No frontmatter, no code fences around it.
@@ -478,6 +488,12 @@ PYX
     GROK_BROKER_NOTE="stamped grok reply failed validation (degenerate body?) — see runner.log; inbound NOT archived"
     return 1
   fi
+  # Measurement runs stop HERE, with a validated reply in the run dir and
+  # nothing in any inbox. This is what makes "the shadow verdict never gates"
+  # a mechanical property rather than a promise: the reply cannot steer a loop
+  # it was never delivered into, and the inbound is never archived out from
+  # under the primary reviewer.
+  if [ "${RUNPHASE_NO_DELIVER:-}" = 1 ]; then return 0; fi
   local root dest
   root="$("$COMMS" root)"
   mkdir -p "$root/to-$peer" 2>/dev/null || true
@@ -560,10 +576,21 @@ cmd_run() {
       --provider) shift; provider="${1:-}" ;;
       --sandbox) shift; sandbox="${1:-}" ;;
       --timeout-secs) shift; timeout="${1:-}" ;;
+      --no-deliver) RUNPHASE_NO_DELIVER=1; export RUNPHASE_NO_DELIVER ;;
       *) die "run: unknown argument '$1'" ;;
     esac
     shift
   done
+  # --no-deliver suppresses the TRUSTED-PARENT broker and thread-state writes. It
+  # cannot suppress a child that is told to run `comms.sh send --archive-inbound`
+  # itself — so for a self-sending provider the flag would deliver and archive while
+  # only the state write was silenced, which is worse than not offering it. Refuse.
+  if [ "${RUNPHASE_NO_DELIVER:-}" = 1 ]; then
+    case "$("$COMMS" agents --supported 2>/dev/null | awk -v a="$provider" -F'\t' '$1==a {print $2}')" in
+      *reviewer-consult-only*) ;;
+      *) die "run: --no-deliver is not available for '$provider' — that provider authors and sends its own reply, so delivery cannot be suppressed (only parent-brokered reviewers support it)" ;;
+    esac
+  fi
   case "$provider" in claude|codex|grok) ;; *) die "run: provider must be claude, codex, or grok" ;; esac
   [ -n "$msg" ] && [ -f "$msg" ] || die "run: --message <file> required and must exist"
   [ -n "$run_dir" ] && [ -d "$run_dir" ] || die "run: --dir <run-dir> required and must exist"
