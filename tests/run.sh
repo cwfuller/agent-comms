@@ -2500,6 +2500,28 @@ tail -n +2 "$SH_LED" | grep -q 'must not be thrown away' \
   && fail "an unstamped reply was scored into the ledger" \
   || ok "a reply that failed the contract is preserved but NOT scored"
 
+# A contract-break writes no set row, so the pairing guard does not catch a retry. Without
+# an EARLY store check the retry re-ran the reviewer for the full review and only then
+# refused — paying for work it threw away. (grok, first passing shadow run.)
+SH_RETRY_MARK="$WORK/retry-invoked"
+rm -f "$SH_RETRY_MARK"
+cat > "$SH_BIN/grok" <<'SHSTUB4'
+#!/bin/bash
+case "$1" in --version) echo "grok 9.9.9-stub"; exit 0 ;; esac
+: > "${SHADOW_RETRY_MARK:-/dev/null}"
+printf '{"type":"system","subtype":"init","session_id":"stub-retry"}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: APPROVE\\n\\n## Summary\\nretry\\n"}\n'
+SHSTUB4
+chmod +x "$SH_BIN/grok"
+SH_RETRY_OUT="$( (cd "$SH_FIX" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" \
+  SHADOW_RETRY_MARK="$SH_RETRY_MARK" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+  "$COMMS" shadow --to grok --review-set noverdict-set "$(sh_req_for noverdict2)") 2>&1 )" && SH_RRC=0 || SH_RRC=$?
+[ "$SH_RRC" != "0" ] && ok "retrying into a set that already holds a result is refused" || fail "retry accepted"
+[ ! -e "$SH_RETRY_MARK" ] \
+  && ok "the refusal happens BEFORE the reviewer runs (nothing was spent)" || fail "retry re-ran the reviewer before refusing"
+printf '%s\n' "$SH_RETRY_OUT" | grep -q 'nothing was run' \
+  && ok "the refusal says nothing was run" || fail "retry refusal message"
+
 echo "== grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims) =="
 GR2="$WORK/shadow-repo2"
 mkdir -p "$GR2"; GR2="$(cd "$GR2" && pwd -P)"

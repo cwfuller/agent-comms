@@ -525,22 +525,20 @@ of what the design and the critique both assumed:
 
 ### Prerequisites — nothing downstream is computable without these
 
-- [x] **RETAIN the artifact, not just a hash of it** *(shipped 2026-08-22 — `comms.sh
-  snapshot`; `git stash create` was the obvious tool and the harness caught that it silently
-  drops untracked files even with `--include-untracked`, so the tree is built in a throwaway
-  index instead)* *(corrected r2 — a hash proves two
-  canonical inputs were identical; it cannot resurrect the input, so it does not enable
-  unchanged-since analysis once the worktree moves).* Store a durable object:
-  the working tree written as a real commit object (tracked edits AND untracked files, the
-  mailbox removed mechanically) and anchored under `refs/agent-comms/artifacts/` so gc cannot
-  eat it; a clean tree returns HEAD rather than minting a synonym. The shadow reviewer runs
-  against a MOUNT of that artifact — worktree at the base, artifact materialized into it,
-  index reset to base — so `HEAD` matches the request's `head_sha` and the reviewed change
-  reads as an ordinary uncommitted diff. The GATING reviewer still reads the live tree,
-  which is why a pair is a CANDIDATE pair and `drift_status` is recorded explicitly.
-  agent-comms-private; no
-  SPEC edit, no fixture change, no pin bump. Every test-evidence and lineage idea below
-  consumes this and today it does not exist.
+- [x] **RETAIN the artifact, not just a hash of it** *(shipped 2026-08-22, `comms.sh
+  snapshot`)*. A hash proves two canonical inputs were identical but cannot resurrect
+  either, so it does not enable unchanged-since analysis once the worktree moves. The
+  working tree is written as a real commit object (tracked edits AND untracked files, the
+  mailbox removed mechanically) and anchored under `refs/agent-comms/artifacts/` so gc
+  cannot eat it; a clean tree returns HEAD rather than minting a synonym. `git stash
+  create` was the obvious tool and is wrong — it silently drops untracked files even with
+  `--include-untracked` (caught by the harness), so the tree is built in a throwaway index.
+  The shadow reviewer runs against a MOUNT of that artifact — worktree at the base,
+  artifact materialized into it, index reset to base — so `HEAD` matches the request's
+  `head_sha` and the reviewed change reads as an ordinary uncommitted diff. The GATING
+  reviewer still reads the live tree, which is why a pair is a CANDIDATE pair and
+  `drift_status` is recorded explicitly. agent-comms-private: no SPEC edit, no fixture
+  change, no pin bump.
 - [x] **Do NOT change the finding format before the baseline runs** *(held 2026-08-22 —
   no template edit shipped; extraction reports the anchored subset as a column instead)* *(corrected r2)*.
   Extract every finding bullet and report the anchored subset as a separate column —

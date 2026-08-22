@@ -1042,6 +1042,16 @@ cmd_shadow() {
     fi
   fi
 
+  # Never overwrite a stored observation: it is the evidence, and a silent clobber is
+  # indistinguishable from never having run. (codex, round 2.) Checked BEFORE anything is
+  # spent: a contract-break leaves <agent>.raw.md but writes no set row, so a retry cleared
+  # the pairing guard, ran the reviewer for ten minutes, and only then hit this check —
+  # throwing away the work it had just paid for. (grok, first passing shadow run.)
+  local store="$root/.comms/grades/shadow/$rsid"
+  if [ -e "$store/$to.md" ] || [ -e "$store/$to.raw.md" ]; then
+    die "shadow: $to already has a recorded result in ${store#"$root"/} — refusing to overwrite it (nothing was run)"
+  fi
+
   local tmpdir
   # Neutral on purpose: the reviewer can see its own working directory, and a path
   # containing "shadow" or "grade" would announce the measurement role the design keeps
@@ -1119,13 +1129,6 @@ cmd_shadow() {
     drift_status="changed"; drift="$aid_after"
   fi
 
-  local store="$root/.comms/grades/shadow/$rsid"
-  # Never overwrite a stored observation: it is the evidence, and a silent clobber is
-  # indistinguishable from never having run. (codex, round 2.)
-  if [ -e "$store/$to.md" ] || [ -e "$store/$to.raw.md" ]; then
-    rm -rf "$tmpdir"
-    die "shadow: $to already has a recorded result in ${store#"$root"/} — refusing to overwrite it"
-  fi
   mkdir -p "$store" 2>/dev/null || { rm -rf "$tmpdir"; die "shadow: cannot create $(clip "$store")"; }
   # Success is the RUNNER's verdict, not the presence of a file: grok_broker
   # writes reply.md and validates it afterwards, so a stamped-but-degenerate
