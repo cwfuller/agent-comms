@@ -246,6 +246,16 @@ MSG
 ARCH_HINT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as codex --thread archive-order) 2>&1 1>/dev/null || true)"
 echo "$ARCH_HINT" | grep -q "$(basename "$ARCH_NEW")" && ok "latest archive uses protocol time, not filename order" || fail "protocol-time archive order (got: $ARCH_HINT)"
 echo "$ARCH_HINT" | grep -q "$(basename "$ARCH_WRONG_DIRECTION")" && fail "latest archive crossed reader direction" || ok "latest archive is reader-direction aware"
+# Direction awareness must survive a THIRD agent: the old rule derived the sender
+# as "the other one of exactly two", so registering grok silently turned the hint
+# unfiltered and it started reporting the reader's own message back at it.
+printf 'agents = claude codex grok\n' > "$REPO_FIX/.comms/config"
+ARCH_HINT3="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as codex --thread archive-order) 2>&1 1>/dev/null || true)"
+rm -f "$REPO_FIX/.comms/config"
+echo "$ARCH_HINT3" | grep -q "$(basename "$ARCH_NEW")" \
+  && ok "archive hint stays direction-aware with three agents registered" || fail "3-agent archive hint (got: $ARCH_HINT3)"
+echo "$ARCH_HINT3" | grep -q "$(basename "$ARCH_WRONG_DIRECTION")" \
+  && fail "3-agent hint crossed reader direction" || ok "3-agent hint excludes the reader's own messages"
 
 echo "== comms.sh: deliver via stubbed cmux =="
 : > "$CMUX_STUB_LOG"
@@ -1030,7 +1040,7 @@ mkdir -p "$MA_FIX/.comms/to-claude" "$MA_FIX/.comms/to-codex" "$MA_FIX/.comms/ar
 run_ma() { (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
 MA_WS="$(run_ma workspace)"
 
-[ "$(run_ma agents)" = "claude codex" ] && ok "zero-config agents default" || fail "zero-config agents (got: $(run_ma agents))"
+[ "$(run_ma agents)" = "claude codex grok" ] && ok "zero-config agents default includes grok" || fail "zero-config agents (got: $(run_ma agents))"
 [ "$(run_ma agents default)" = "codex" ] && ok "zero-config default target" || fail "zero-config default target"
 run_ma agents --supported | grep -q 'grok' && ok "supported table lists grok" || fail "supported table lists grok"
 

@@ -29,7 +29,7 @@ implementation starts automatically at `round: 1` (same `thread`, `phase: implem
 One-off judgment call — no review framing, no loop, no verdict.
 
 **Target parse:** if the first word of the argument is a registered agent name
-(`comms.sh agents` — the `.comms/config` registry; zero-config default `claude codex`),
+(`comms.sh agents` — the `.comms/config` registry; zero-config default `claude codex grok`),
 it names the target and the rest is the question; otherwise the whole argument —
 unrecognized first word included, unmodified — is a question to the default agent
 (`comms.sh agents default`). `/ask grok is X sound?` targets grok when grok is
@@ -138,7 +138,7 @@ agnostic.
 | `workspace` | print the resolved workspace name (cmux → branch → repo dir) |
 | `doctor` | verify this session can reach cmux; exit 3 plus the persistent setup command when the socket is sandbox-blocked |
 | `codex-permissions [socket]` | print the least-privilege global Codex permission profile for default cmux delivery |
-| `agents [default\|--supported]` | registered agents from `.comms/config` (zero-config: `claude codex`), the default target, or the supported-backend table |
+| `agents [default\|--supported]` | registered agents from `.comms/config` (zero-config: `claude codex grok`), the default target, or the supported-backend table |
 | `list --as <agent> [--thread <t>]` | pending inbox messages, newest first; non-zero + "latest archived" hint when empty |
 | `status` | one-screen loop summary: workspace, latest archived message + its loop fields, pending counts per inbox |
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |

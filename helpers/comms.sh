@@ -247,7 +247,7 @@ cmd_workspace() {
 # grammar is enforced hard. A name may be registered only when a supported backend
 # exists for it — otherwise /ask etc. would accept mail that can never be served.
 SUPPORTED_AGENTS="claude codex grok"   # claude/codex: interactive+headless; grok: headless reviewer/consult
-REGISTRY_DEFAULT_AGENTS="claude codex"
+REGISTRY_DEFAULT_AGENTS="claude codex grok"
 REGISTRY_DEFAULT_TARGET="codex"
 
 registry_file() { echo "$(cmd_root)/config"; }
@@ -372,15 +372,9 @@ cmd_list() {
     # Late delivery nudges for already-processed replies are common. Scope the
     # hint to messages that actually came TO this reader and, when supplied, to
     # this thread; otherwise an unrelated archive can masquerade as the reply.
-    # With exactly two registered agents the sender is the complement; with more
-    # the hint is unfiltered (any sender) — it is advisory text, not routing.
-    local latest sender="" reg_hint
-    reg_hint="$(registry_agents)" || exit 2
-    set -- $reg_hint
-    if [ "$#" -eq 2 ]; then
-      if [ "$1" = "$as" ]; then sender="$2"; elif [ "$2" = "$as" ]; then sender="$1"; fi
-    fi
-    latest="$(sorted_message_files "$root/archive" "$ws" "$sender" "$thread" newest | head -1 || true)"
+    # Direction is "not written by me" — correct for two agents and for twenty.
+    local latest
+    latest="$(sorted_message_files "$root/archive" "$ws" "!$as" "$thread" newest | head -1 || true)"
     if [ -n "$latest" ]; then
       echo "no pending messages; latest archived: $(basename "$latest")" >&2
     else
@@ -417,12 +411,18 @@ mtime_iso() {
 # candidate set (archive-search's match filter) pays the per-file frontmatter
 # parse only for the files it kept, not for the whole directory.
 sort_paths_by_timestamp() {
+  # <sender> matches an exact `from:`; a leading '!' EXCLUDES that sender instead.
+  # "Addressed to me" is "not written by me", which is true for any number of
+  # agents — the two-agent complement trick it replaces silently stopped working
+  # the moment a third agent was registered.
   local order="${1:-oldest}" sender="${2:-}" thread="${3:-}"
-  local f ts mt rows
+  local f ts mt rows exclude=""
+  case "$sender" in !?*) exclude="${sender#!}"; sender="" ;; esac
   rows="$(
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       [ -z "$sender" ] || [ "$(frontmatter_field "$f" from)" = "$sender" ] || continue
+      [ -z "$exclude" ] || [ "$(frontmatter_field "$f" from)" != "$exclude" ] || continue
       [ -z "$thread" ] || [ "$(frontmatter_field "$f" thread)" = "$thread" ] || continue
       ts="$(frontmatter_field "$f" timestamp)"
       mt="$(file_mtime "$f")"

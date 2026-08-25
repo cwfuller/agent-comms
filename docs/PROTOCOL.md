@@ -33,7 +33,7 @@ default-target = codex
 Names are `[a-z][a-z0-9-]{1,15}` and must have a supported backend
 (`comms.sh agents --supported`); duplicates, multi-word defaults, and unsupported
 names are hard parse errors — an unrunnable agent must never accept mail. A missing
-file means `agents = claude codex`, `default-target = codex` (zero-config
+file means `agents = claude codex grok`, `default-target = codex` (zero-config
 back-compat). Two authorities replaced the old two-party complements: a thread's
 `awaiting_from` is the explicit `send --to` target, and `--archive-inbound` derives
 the inbound's owner from the OUTBOUND message's `from:` (validated against the
