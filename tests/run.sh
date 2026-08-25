@@ -2939,6 +2939,20 @@ TR_LOOP_OUT="$(run_tr_deliver deliver codex "$TR_LOOPMSG" 2>&1 || true)"
 printf '%s\n' "$TR_LOOP_OUT" | grep -q 'delivered to surface' \
   && fail "a workflow message took the pane instead of the headless runner" \
   || ok "a LOOP message goes headless even with a live pane"
+# "did not reach a surface" is also true of manual pickup and of a spawn failure, so
+# assert the POSITIVE signal. (codex, transport-flip round 2.)
+printf '%s\n' "$TR_LOOP_OUT" | grep -q 'spawned runphase' \
+  && ok "the loop actually spawned a headless runner (criterion 1, pinned directly)" \
+  || fail "loop did not spawn (got: $TR_LOOP_OUT)"
+
+# The regression codex asked for: cmux explicitly requested with NO workspace identity
+# must still surface the picker's specific reason, and must not trip `set -u`.
+TR_NOWS="$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=cmux "$COMMS" deliver codex "$TR_CONSULT") 2>&1 || true)"
+printf '%s\n' "$TR_NOWS" | grep -q 'unbound variable' \
+  && fail "unset CMUX_WORKSPACE_ID trips set -u" || ok "unset cmux identity does not trip set -u"
+printf '%s\n' "$TR_NOWS" | grep -q 'tree unavailable' \
+  && ok "the picker's specific reason still surfaces with no cmux identity" \
+  || fail "specific reason lost (got: $TR_NOWS)"
 # The mode comes from the MESSAGE, so `transport` agrees with what deliver did.
 [ "$(run_tr_deliver transport codex)" = "cmux" ] && ok "consult mode resolves to the live pane" || fail "consult transport"
 [ "$(run_tr_deliver transport codex --loop)" = "headless" ] && ok "loop mode resolves to headless" || fail "loop transport"

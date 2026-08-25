@@ -167,8 +167,14 @@ cmux_tree() {
   # window (observed in the field while a background terminal was attaching);
   # spreading attempts over ~2.5s survives it.
   local out delay
+  # No identity means there is nothing to query — return immediately instead of
+  # dereferencing an unset var under `set -u`, which printed "unbound variable"
+  # twice and swallowed the caller's specific diagnostic. Fixed here rather than at
+  # the call site so every caller is covered. (codex, transport-flip round 2.)
+  [ -n "${CMUX_WORKSPACE_ID:-}" ] || return 1
+  command -v cmux >/dev/null 2>&1 || return 1
   for delay in 0.3 0.7 1.2 0; do
-    out="$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null)" || out=""
+    out="$(cmux tree --workspace "${CMUX_WORKSPACE_ID}" 2>/dev/null)" || out=""
     if [ -n "$out" ]; then
       printf '%s\n' "$out"
       return 0
@@ -1578,6 +1584,7 @@ deliver_headless() {
     return 0
   fi
   local rp="$(dirname "$SELF")/runphase.sh"
+  export COMMS_RUNPHASE_VIA="${COMMS_RUNPHASE_VIA:-}"
   if [ ! -x "$rp" ]; then
     echo "warning: headless is the default for loops but runphase.sh was not found next to comms.sh — message written for manual pickup (re-run install.sh, or use --via cmux / COMMS_DELIVERY=cmux)"
     return 0
@@ -1654,23 +1661,25 @@ cmd_transport() {
   local caps picked
   caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
 
+  # An EXPLICIT request binds in EVERY mode. Honouring it only for loops meant a
+  # consult silently ignored COMMS_DELIVERY=cmux and went to ACP instead — the
+  # caller asked for one transport and quietly got another.
+  if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
+    case "$caps" in
+      *interactive*)
+        picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
+        [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
+        ;;
+    esac
+    # cmux was asked for and there is none — say mailbox rather than silently
+    # substituting a transport the caller explicitly did not choose.
+    printf 'mailbox\n'; return 0
+  fi
+
   # LOOPS ARE HEADLESS-FIRST. A loop is unattended work by definition: making it
   # depend on a terminal pane being open is what stranded messages in inboxes
-  # nobody was watching. cmux stays available but is now opt-in — set
-  # COMMS_DELIVERY=cmux (or pass --via cmux to an auto-* command) when you want
-  # the watchable pane.
+  # nobody was watching. cmux stays available but is opt-in, handled above.
   if [ "$mode" = "loop" ]; then
-    if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
-      case "$caps" in
-        *interactive*)
-          picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
-          [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
-          ;;
-      esac
-      # cmux was asked for and there is none — say mailbox rather than silently
-      # substituting a transport the caller explicitly did not choose.
-      printf 'mailbox\n'; return 0
-    fi
     # Fall back to a pane only when the headless runner is genuinely missing:
     # flipping the default must not strand every loop on an install where
     # runphase.sh never landed.
@@ -1733,6 +1742,13 @@ cmd_deliver() {
         *) echo "note: '$target' is a headless-only agent — routing delivery via runphase" ;;
       esac
       deliver_headless "$target" "$msgfile"
+      return 0
+      ;;
+    acp)
+      # The acp route was reachable from `transport` but fell through this case to
+      # manual pickup, so the docs described behaviour deliver did not have.
+      # (codex, transport-flip round 2.)
+      COMMS_RUNPHASE_VIA=acp deliver_headless "$target" "$msgfile"
       return 0
       ;;
     cmux) ;;

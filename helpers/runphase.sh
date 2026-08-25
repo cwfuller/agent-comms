@@ -533,13 +533,14 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
 }
 
 cmd_spawn() {
-  local msg="" sandbox="" timeout="" provider="codex"
+  local msg="" sandbox="" timeout="" provider="codex" via="${COMMS_RUNPHASE_VIA:-}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --message) shift; msg="${1:-}" ;;
       --provider) shift; provider="${1:-}" ;;
       --sandbox) shift; sandbox="${1:-}" ;;
       --timeout-secs) shift; timeout="${1:-}" ;;
+      --via) shift; via="${1:-}" ;;
       *) die "spawn: unknown argument '$1'" ;;
     esac
     shift
@@ -581,6 +582,7 @@ cmd_spawn() {
   mkdir -p "$run_dir" || die "spawn: cannot create run dir $run_dir"
   nohup "$SELF" run --message "$msg" --dir "$run_dir" --provider "$provider" \
     ${sandbox:+--sandbox "$sandbox"} ${timeout:+--timeout-secs "$timeout"} \
+    ${via:+--via "$via"} \
     </dev/null >>"$run_dir/runner.log" 2>&1 &
   local pid=$!
   printf '%s' "$pid" > "$run_dir/pid"
