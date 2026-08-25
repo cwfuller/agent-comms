@@ -7,8 +7,9 @@
 # `claude -p`): the peer turn is spawned, observed (JSONL event log),
 # resumed-or-failed (session id recorded), and recorded (result.json + thread
 # state) — without typing into another terminal. Opt-in per call via
-# COMMS_DELIVERY=headless (comms.sh deliver/send route here); cmux stays the
-# default delivery path.
+# COMMS_DELIVERY=headless. Since 2026-08-25 this is the DEFAULT for loops (a loop
+# is unattended work and should not require an open pane); cmux is opt-in via
+# --via cmux / COMMS_DELIVERY=cmux. `comms.sh transport` owns the decision.
 #
 # Subcommands:
 #   spawn --message <file> [--provider codex|claude|grok] [--sandbox <mode>] [--timeout-secs N]

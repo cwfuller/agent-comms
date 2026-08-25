@@ -252,7 +252,7 @@ provider's CLI in the background — `codex exec --json` for Codex, `claude -p
 `.comms/logs/<message_id>.<epoch>.<pid>/` (`prompt.md`, `events.ndjson` JSONL event
 log, `result.json`, `pid`, `runner.log`), and mirrors the outcome into thread state
 on exit. cmux is never touched; identity is a process handle, not a pane guess.
-Opt-in per call; cmux remains the default.
+**The default for loops** since 2026-08-25 — a loop is unattended work and should not require an open pane. cmux is opt-in (`--via cmux`, or `COMMS_DELIVERY=cmux`); consults still prefer a live pane and fall back to ACP.
 
 **Direction awareness.** Replies TO the driving session are a designed no-op: the
 driver reads them when the peer turn exits, so nothing is spawned for that

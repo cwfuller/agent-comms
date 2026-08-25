@@ -1576,6 +1576,8 @@ print_direct_recovery() {
   printf '\n'
 }
 
+runphase_available() { [ -x "$(dirname "$SELF")/runphase.sh" ]; }
+
 cmd_transport() {
   # transport <agent> [--loop] — print the transport that would actually be used:
   # headless | cmux | acp | mailbox.
@@ -1602,6 +1604,36 @@ cmd_transport() {
 
   local caps picked
   caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
+
+  # LOOPS ARE HEADLESS-FIRST. A loop is unattended work by definition: making it
+  # depend on a terminal pane being open is what stranded messages in inboxes
+  # nobody was watching. cmux stays available but is now opt-in — set
+  # COMMS_DELIVERY=cmux (or pass --via cmux to an auto-* command) when you want
+  # the watchable pane.
+  if [ "$mode" = "loop" ]; then
+    if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
+      case "$caps" in
+        *interactive*)
+          picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
+          [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
+          ;;
+      esac
+      # cmux was asked for and there is none — say mailbox rather than silently
+      # substituting a transport the caller explicitly did not choose.
+      printf 'mailbox\n'; return 0
+    fi
+    # Fall back to a pane only when the headless runner is genuinely missing:
+    # flipping the default must not strand every loop on an install where
+    # runphase.sh never landed.
+    if runphase_available; then printf 'headless\n'; return 0; fi
+    case "$caps" in
+      *interactive*)
+        picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
+        [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
+        ;;
+    esac
+    printf 'mailbox\n'; return 0
+  fi
   # A live pane still wins: it is the watchable surface, and switching a visible
   # workflow out from under someone is not a fallback, it is a surprise.
   case "$caps" in
@@ -1631,21 +1663,34 @@ cmd_transport() {
 cmd_deliver() {
   local target="${1:-}" msgfile="${2:-}"
   require_agent "$target" "deliver"
-  # cmux nudge idioms exist only for claude/codex. Every other registered agent
-  # is headless-only BY DESIGN — headless IS its delivery, regardless of
-  # COMMS_DELIVERY (there is no pane to fall back to).
-  case "$target" in
-    claude|codex) ;;
-    *)
-      echo "note: '$target' is a headless-only agent — routing delivery via runphase"
+  # ONE decision point: `transport` owns the routing rules so deliver, the
+  # templates, and the docs cannot drift apart. Loops are headless-first.
+  local route
+  route="$(cmd_transport "$target" --loop)"
+  case "$route" in
+    headless)
+      case "$target" in
+        claude|codex) ;;
+        *) echo "note: '$target' is a headless-only agent — routing delivery via runphase" ;;
+      esac
       deliver_headless "$target" "$msgfile"
       return 0
       ;;
+    cmux) ;;
+    *)
+      if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
+        # Re-run the picker purely for its stderr: it distinguishes "tree
+        # unavailable" from "no matching surface", and routing on the summary
+        # alone would throw that away.
+        pick_surface "$target" >/dev/null 2>&1 || true
+        pick_surface "$target" 2>&1 >/dev/null | head -2 >&2 || true
+        echo "warning: COMMS_DELIVERY=cmux but no $target surface is live; message written for manual pickup"
+      else
+        echo "warning: no headless runner and no $target surface; message written for manual pickup (re-run install.sh)"
+      fi
+      return 0
+      ;;
   esac
-  if [ "${COMMS_DELIVERY:-cmux}" = "headless" ]; then
-    deliver_headless "$target" "$msgfile"
-    return 0
-  fi
   if ! command -v cmux >/dev/null 2>&1 || [ -z "${CMUX_WORKSPACE_ID:-}" ]; then
     echo "warning: cmux not available; message written for manual pickup"
     return 0

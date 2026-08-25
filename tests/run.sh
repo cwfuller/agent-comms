@@ -10,6 +10,12 @@ set -uo pipefail
 # failures). The headless-specific sections set them explicitly per invocation.
 unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP 2>/dev/null || true
 
+# Loops became headless-first on 2026-08-25, so the pane path is now OPT-IN. The cmux
+# sections below exercise pane mechanics that still exist and still matter, so they ask
+# for cmux explicitly instead of relying on a default that no longer points at them.
+# Sections that test the DEFAULT routing clear this with `env -u COMMS_DELIVERY`.
+export COMMS_DELIVERY=cmux
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMS="$REPO/helpers/comms.sh"
 FLEET="$REPO/helpers/fleet.sh"
@@ -2830,8 +2836,9 @@ TR_FIX="$WORK/transport-repo"; mkdir -p "$TR_FIX"; TR_FIX="$(cd "$TR_FIX" && pwd
 git -C "$TR_FIX" init -q -b main
 git -C "$TR_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
 mkdir -p "$TR_FIX/.comms"
-run_tr() { (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
-run_tr_cmux() { (cd "$TR_FIX" && env PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
+run_tr() { (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID -u COMMS_DELIVERY "$COMMS" "$@"); }
+run_tr_cmux() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
+run_tr_want_cmux() { (cd "$TR_FIX" && env COMMS_DELIVERY=cmux PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
 
 # No cmux surface anywhere: an interactive agent must NOT fall to the mailbox while a
 # synchronous transport is available — that is the case that stranded a real consult.
@@ -2857,13 +2864,24 @@ fi
 [ "$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$COMMS" transport codex) 2>/dev/null)" = "headless" ] \
   && ok "COMMS_DELIVERY=headless overrides transport selection" || fail "headless override"
 
-# A live pane still wins: switching a watchable workflow out from under someone is a
-# surprise, not a fallback.
 cat > "$CMUX_STUB_DIR/tree-workspace_7.txt" <<'TRTREE'
 workspace:7
   pane:1
     surface:23 [terminal] codex
 TRTREE
+# A LOOP is unattended work: it must not require a pane to be open.
+[ "$(run_tr transport codex --loop 2>/dev/null)" = "headless" ] \
+  && ok "a loop defaults to headless, with no pane anywhere" || fail "loop default (got: $(run_tr transport codex --loop 2>/dev/null))"
+[ "$(run_tr_cmux transport codex --loop 2>/dev/null)" = "headless" ] \
+  && ok "a loop stays headless even when a pane IS live — cmux is opt-in now" || fail "loop ignored headless-first"
+[ "$(run_tr_want_cmux transport codex --loop 2>/dev/null)" = "cmux" ] \
+  && ok "COMMS_DELIVERY=cmux opts a loop back into the watchable pane" || fail "cmux opt-in"
+# Asking for cmux when none is live must not silently substitute another transport.
+[ "$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=cmux "$COMMS" transport codex --loop) 2>/dev/null)" = "mailbox" ] \
+  && ok "cmux requested but none live reports mailbox, never a substitute" || fail "cmux-requested fallback"
+
+# A live pane still wins: switching a watchable workflow out from under someone is a
+# surprise, not a fallback.
 [ "$(run_tr_cmux transport codex 2>/dev/null)" = "cmux" ] \
   && ok "a live pane still wins over acp" || fail "pane preference (got: $(run_tr_cmux transport codex 2>/dev/null))"
 

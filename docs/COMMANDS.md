@@ -289,13 +289,31 @@ Node, unsupported agents, or acpx errors — the mailbox path is always availabl
 
 ### `runphase.sh` (experimental)
 
-Headless peer-turn runner behind `COMMS_DELIVERY=headless` (cmux stays the default).
+Headless peer-turn runner. **It is the default for loops** since 2026-08-25; cmux is opt-in via `--via cmux` / `COMMS_DELIVERY=cmux`.
 `deliver`/`send` call `spawn` for you — `await`, `result`, `hold`, and `release` are
 the operator surface:
 
 | subcommand | effect |
 |---|---|
 | `run --message <file> --dir <run-dir> [--provider ...] [--no-deliver]` | foreground runner. `--no-deliver` produces and validates the reply in the run dir but touches **neither the mailbox nor thread state** — the measurement mode behind `comms.sh shadow` |
+
+#### Transport selection — loops are headless-first
+
+`comms.sh transport <agent> [--loop]` is the single decision point; `deliver`, the
+templates, and these docs all read from it rather than each re-deciding.
+
+| context | default | why |
+|---|---|---|
+| **loop** (`auto-*`) | `headless` | a loop is unattended work — requiring an open pane is what left messages in inboxes nobody was watching |
+| **consult** (`/ask`) | pane if one is live, else `acp` | a consult is synchronous by nature; ACP needs no pane and warm sessions cost ~1/127 the input tokens |
+
+Opting back into the watchable pane: `--via cmux` on an `auto-*` command, or
+`COMMS_DELIVERY=cmux`. `--via headless` / `COMMS_DELIVERY=headless` force the detached
+runner. If cmux is explicitly requested and no surface is live, delivery reports
+`mailbox` rather than silently substituting a transport you did not choose.
+
+Headless-first falls back to a pane **only** when `runphase.sh` is genuinely missing —
+flipping the default must not strand every loop on an install where it never landed.
 | `spawn --message <file> [--provider codex\|claude] [--sandbox <mode>] [--timeout-secs N]` | detach a peer turn (`codex exec --json` / `claude -p --output-format stream-json`); prints pid + run dir immediately; refuses (`HELD`) while the thread is held; won't double-spawn while a prior runner for the message is alive |
 | `await <run-dir> [--timeout-secs N]` | block until the turn's `result.json` exists (or the runner dies); prints it; exit 0 only for `status=completed` |
 | `result <run-dir>` | print `result.json` if present |
