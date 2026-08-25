@@ -20,6 +20,9 @@
 #   supports <agent>
 #       exit 0 iff a consult can run here for that agent (machine-readable —
 #       never parse doctor's prose).
+#   profile <agent> | version
+#       the acpx launch profile for an agent, and the pinned acpx version. Other
+#       helpers ask for these instead of keeping a second copy of the map.
 #
 # Pinned: acpx is pre-1.0 with an evolving CLI — every invocation goes through
 # npx -y acpx@$ACPX_VERSION (cached by npm after first use; no global install).
@@ -135,6 +138,14 @@ cmd_consult() {
 case "${1:-}" in
   consult) shift; cmd_consult "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
+  profile)
+    # profile <agent> — the acpx launch profile, or empty. Single source of truth:
+    # runphase asks rather than keeping a second copy of the map.
+    shift
+    [ -n "${1:-}" ] || die "profile: an agent name is required"
+    printf '%s\n' "$(profile_for "$1")"
+    ;;
+  version) printf '%s\n' "$ACPX_VERSION" ;;
   supports)
     # supports <agent> — exit 0 iff a consult can actually run here for that
     # agent. Machine-readable on purpose: callers must never parse doctor's prose.
