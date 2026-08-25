@@ -61,6 +61,33 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 
 ---
 
+### Reviewer performance note — EVERY round, no exceptions
+
+Before reporting a round's outcome to the user, record how the reviewer performed:
+
+```bash
+"$COMMS_SH" round-note "<the reviewer's reply file>" --note "<one or two lines>"
+```
+
+Counts (blocking/advisory) are derived from the reply — never typed. The prose is YOUR
+assessment, and it is the part worth reading a month from now:
+
+- what it caught that actually mattered;
+- anything it got wrong, or filed as blocking that was not;
+- anything it missed that another reviewer or a later round found;
+- for a panel round, who caught what the other did not.
+
+Then surface the same one-liner to the user alongside the verdict. Two rules:
+
+- **A reviewer never sees its own note.** It goes to `.comms/grades/rounds.tsv` and to
+  the human. A reviewer that can read its scorecard optimises the scorecard.
+- **Write it even when the round was clean.** "Approved, no findings, nothing missed" is
+  a data point; a gap in the log reads as a round nobody assessed.
+
+Over time `rounds.tsv` is how you see which reviewer is carrying which kind of work —
+the observation that one model was vastly superior in a given phase should be visible in
+the log, not only in memory.
+
 ### Autonomous flow — `workflow` field present
 
 **The reviewer is the `REVIEWER` derived mechanically in step 4** (frontmatter-bounded,
@@ -93,13 +120,17 @@ SAME reviewer for its entire lifecycle.
        and later rounds copy the section forward verbatim, changing it only through a clearly
        identified explicit amendment ("(amended round N: reason)")
      - Write it into `$COMMS_ROOT/to-$REVIEWER/` and deliver: `"$COMMS_SH" send --to "$REVIEWER" "<file>"` — the implement phase goes to the SAME reviewer that approved the plan
-   - Otherwise → **Stop. Notify user:** "Approved after N rounds." Archive: `"$COMMS_SH" archive --as claude "<file>"`, then close the thread's state: `"$COMMS_SH" state complete "<thread>"`
+   - Otherwise → **Stop. Notify user:** "Approved after N rounds." Record the reviewer
+     performance note (see above), archive: `"$COMMS_SH" archive --as claude "<file>"`,
+     then close the thread's state: `"$COMMS_SH" state complete "<thread>"`
 
 2. **If `round >= max-rounds`:**
    - **Stop. Escalate to user:** "Max rounds (N) reached. Remaining blocking issues from the reviewer:" then list the unresolved blocking findings.
    - Archive the message via the helper.
 
 3. **If verdict is `REQUEST_CHANGES` and round < max-rounds:**
+   - **Record the reviewer performance note first** (see above) — before fixing anything,
+     while the review's quality is still fresh and unmixed with your own work.
    - **Auto-address all blocking findings** from the reviewer's message
    - Advisory findings are optional. Fix them when they are cheap, clearly correct, or naturally part of the same change, but do not extend the loop just to polish non-blocking issues.
    - For plan workflows: refine the plan based on findings

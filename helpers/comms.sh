@@ -47,6 +47,10 @@
 #                               have a SECOND reviewer read the same artifact. The reply is
 #                               produced and stored but NEVER delivered and never written to
 #                               thread state — a shadow verdict cannot gate the loop.
+#   round-note <reply> --note "<text>"
+#                               record how a reviewer performed on ONE round: counts are
+#                               derived from the reply, the prose is your assessment.
+#                               Appends .comms/grades/rounds.tsv. Never shown to reviewers.
 #   snapshot [create|list]      retain the tree under review as a durable git object
 #                               (stash-create commit anchored under refs/agent-comms/)
 #   prompt-version [--list]     content hash of the reviewer instruction surface; grades
@@ -964,6 +968,51 @@ findings_set_lookup() {  # <root> <thread> <round> <phase> -> set\tartifact\tpro
     return 0
   fi
   awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph {print $1 "\t" $6 "\t" $7; exit}' "$idx"
+}
+
+cmd_round_note() {
+  # round-note <reply-file> --note "<one or two lines>" — record how a reviewer
+  # performed on ONE round.
+  #
+  # The counts are derived from the reply, never typed: a hand-entered number is a
+  # number nobody can trust later. The prose is the reader's assessment — what the
+  # review caught that mattered, what it got wrong, what it missed that another
+  # reviewer found.
+  #
+  # This is written FOR THE HUMAN and never enters a reviewer's context. A reviewer
+  # that can see its own scorecard optimises the scorecard.
+  local f="" note=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --note) shift; note="${1:-}" ;;
+      -?*)    usage_err "round-note: unknown option '$(clip "$1")'" ;;
+      *)      [ -z "$f" ] || usage_err "round-note: one reply file only"; f="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$f" ] || usage_err "round-note: a reviewer reply file is required"
+  [ -f "$f" ] || usage_err "round-note: no such file '$(clip "$f")'"
+  [ -n "$note" ] || usage_err "round-note: --note is required (a round with no assessment records nothing worth reading later)"
+
+  local root; root="$(main_repo_root)"; [ -n "$root" ] || usage_err "round-note: not inside a git repository"
+  local rows blocking advisory
+  rows="$(findings_extract "$f" gating "" "" "" "" 2>/dev/null || true)"
+  blocking="$(printf '%s\n' "$rows" | awk -F'\t' '$13=="blocking"' | grep -c . || true)"
+  advisory="$(printf '%s\n' "$rows" | awk -F'\t' '$13=="advisory"' | grep -c . || true)"
+
+  local out="$root/.comms/grades/rounds.tsv"
+  mkdir -p "$(dirname "$out")" 2>/dev/null || die "round-note: cannot create $(clip "$(dirname "$out")")"
+  [ -s "$out" ] || printf 'timestamp\tthread\tphase\tround\treviewer\tverdict\tblocking\tadvisory\tprompt_version\tnote\n' > "$out"
+  local clean_note; clean_note="$(printf '%s' "$note" | tr '\t\n' '  ')"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(frontmatter_field "$f" thread)" "$(frontmatter_field "$f" phase)" \
+    "$(frontmatter_field "$f" round)" "$(frontmatter_field "$f" from)" \
+    "$(cmd_verdict "$f" 2>/dev/null || true)" "${blocking:-0}" "${advisory:-0}" \
+    "$(cmd_prompt_version 2>/dev/null || true)" "$clean_note" >> "$out"
+  printf 'round-note: %s r%s %s — %s blocking, %s advisory -> %s\n' \
+    "$(frontmatter_field "$f" from)" "$(frontmatter_field "$f" round)" \
+    "$(cmd_verdict "$f" 2>/dev/null || true)" "${blocking:-0}" "${advisory:-0}" "${out#"$root"/}"
 }
 
 cmd_shadow() {
@@ -2216,6 +2265,7 @@ case "${1:-}" in
   lessons)        shift; cmd_lessons "$@" ;;
   archive-search) shift; cmd_archive_search "$@" ;;
   findings)       shift; cmd_findings "$@" ;;
+  round-note)     shift; cmd_round_note "$@" ;;
   shadow)         shift; cmd_shadow "$@" ;;
   snapshot)       shift; cmd_snapshot "$@" ;;
   prompt-version) shift; cmd_prompt_version "$@" ;;

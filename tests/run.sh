@@ -2957,6 +2957,47 @@ TR_BARE_NOPANE="$( (cd "$TR_FIX" && env -u COMMS_DELIVERY -u CMUX_WORKSPACE_ID "
 [ "$TR_BARE_NOPANE" = "mailbox" ] \
   && ok "no runner and no pane reports mailbox honestly" || fail "bare no-pane (got: $TR_BARE_NOPANE)"
 
+# round-note: counts are DERIVED so a later reader can trust them; the prose is required
+# so a round is never recorded without an assessment.
+TR_RN="$TR_FIX/.comms/archive/rn-1.md"
+mkdir -p "$TR_FIX/.comms/archive"
+cat > "$TR_RN" <<'RNEOF'
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-25T12:00:00Z
+workspace: tr
+thread: rn-thread
+phase: implement
+round: 3
+verdict: REQUEST_CHANGES
+---
+
+## Findings
+
+### Blocking
+- `a.sh:1` — one blocking thing.
+- `b.sh:2` — another blocking thing.
+
+### Advisory
+- `c.sh:3` — one advisory thing.
+
+### Process
+- process noise that must not be counted
+RNEOF
+run_tr round-note "$TR_RN" --note "caught the real one, missed nothing" >/dev/null 2>&1
+RN_TSV="$TR_FIX/.comms/grades/rounds.tsv"
+[ -s "$RN_TSV" ] && ok "round-note writes a rounds ledger" || fail "rounds.tsv"
+awk -F'\t' 'NR>1 && $7=="2" && $8=="1"' "$RN_TSV" | grep -q . \
+  && ok "round-note DERIVES the counts (2 blocking, 1 advisory) rather than trusting input" || fail "derived counts"
+awk -F'\t' 'NR>1 && $5=="codex" && $6=="REQUEST_CHANGES" && $4=="3"' "$RN_TSV" | grep -q . \
+  && ok "round-note carries reviewer, verdict and round from the reply" || fail "round-note provenance"
+grep -q 'process noise' "$RN_TSV" && fail "### Process leaked into the round ledger" || ok "### Process is not counted as a finding"
+awk -F'\t' 'NR>1 && $9!=""' "$RN_TSV" | grep -q . \
+  && ok "round-note stamps prompt_version so rounds are comparable only within one" || fail "prompt_version missing"
+check_not "round-note requires an assessment" run_tr round-note "$TR_RN"
+check_not "round-note rejects a missing file" run_tr round-note "$TR_FIX/nope.md" --note x
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 
