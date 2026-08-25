@@ -315,8 +315,11 @@ watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
   vendored, pinned kernel with its own conformance reader. This confirmed the
   fixtures and prompt fragments work across implementations without coupling a
   consumer's build to upstream HEAD.
-- [ ] **Make non-cmux (headless) delivery the DEFAULT** — decided 2026-07-06, gated on
-  the soak threshold: 10 successful headless loops including ≥3 claude-resume/attach
+- [x] **Make non-cmux (headless) delivery the DEFAULT** — *shipped 2026-08-25, ahead of
+  the original soak gate, on user decision.* Loops are headless-first; cmux is opt-in via
+  `--via cmux` / `COMMS_DELIVERY=cmux`; `comms.sh transport` owns the routing and
+  classifies from the message (`workflow:` present ⇒ loop). The soak threshold below was
+  the original gate: 10 successful headless loops including ≥3 claude-resume/attach
   exercises and ≥3 reverse-direction handoffs. The timeout idle/salvage fix should
   land before the flip. Prerequisites: per-repo persistence for
   the delivery mode (`.comms/config`, not env-var-only) with staged per-repo opt-in

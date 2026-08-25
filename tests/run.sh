@@ -884,7 +884,10 @@ LONELY="$WORK/lonely"
 mkdir -p "$LONELY"
 cp "$COMMS" "$LONELY/comms.sh" && chmod +x "$LONELY/comms.sh"
 LONE_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$LONELY/comms.sh" deliver codex) 2>&1 )"
-echo "$LONE_OUT" | grep -q "runphase.sh not found" && ok "missing runphase degrades with an explicit warning" || fail "missing runphase warning (got: $LONE_OUT)"
+echo "$LONE_OUT" | grep -q "runphase.sh was not found" && ok "missing runphase degrades with an explicit warning" || fail "missing runphase warning (got: $LONE_OUT)"
+# The warning must not claim an env var the operator did not set — headless is the
+# default now, so naming COMMS_DELIVERY=headless as the cause is simply wrong.
+echo "$LONE_OUT" | grep -q "COMMS_DELIVERY=headless but" && fail "warning still blames an unset env var" || ok "missing-runner warning states the default, not a phantom env var"
 
 # -- missing .comms/to-codex dir: bare headless deliver must not die silently --
 NODIR_FIX="$WORK/nodir-repo"
@@ -2884,6 +2887,75 @@ TRTREE
 # surprise, not a fallback.
 [ "$(run_tr_cmux transport codex 2>/dev/null)" = "cmux" ] \
   && ok "a live pane still wins over acp" || fail "pane preference (got: $(run_tr_cmux transport codex 2>/dev/null))"
+
+# END-TO-END, not just the selector. `deliver` used to hardcode --loop, so every send
+# was reclassified as a loop and a live-pane CONSULT spawned headless instead of nudging
+# the pane. The suite-wide COMMS_DELIVERY=cmux masked it, so these run with it cleared.
+# (codex, transport-flip round 1.)
+mkdir -p "$TR_FIX/.comms/to-codex"
+TR_CONSULT="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-25T10-00-00_q-1.md"
+cat > "$TR_CONSULT" <<TRQ
+---
+type: question
+from: claude
+timestamp: 2026-08-25T10:00:00Z
+workspace: $(basename "$TR_FIX")
+message_id: $(basename "$TR_FIX")_2026-08-25T10-00-00_q-1
+---
+
+## Question
+does a consult still reach a live pane?
+TRQ
+TR_LOOPMSG="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-25T10-01-00_wf-1.md"
+cat > "$TR_LOOPMSG" <<TRW
+---
+type: review-request
+from: claude
+timestamp: 2026-08-25T10:01:00Z
+workspace: $(basename "$TR_FIX")
+message_id: $(basename "$TR_FIX")_2026-08-25T10-01-00_wf-1
+thread: tr-loop-1
+workflow: auto-implement
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## What was done
+loop message
+TRW
+TR_WS="$(basename "$TR_FIX")"
+run_tr_deliver() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
+cat > "$CMUX_STUB_DIR/tree-workspace_7.txt" <<'TRTREE2'
+workspace:7
+  pane:1
+    surface:23 [terminal] codex
+TRTREE2
+TR_CONSULT_OUT="$(run_tr_deliver deliver codex "$TR_CONSULT" 2>&1 || true)"
+printf '%s\n' "$TR_CONSULT_OUT" | grep -q 'delivered to surface' \
+  && ok "a CONSULT with a live pane is nudged, not spawned headless" \
+  || fail "consult reclassified as a loop (got: $TR_CONSULT_OUT)"
+TR_LOOP_OUT="$(run_tr_deliver deliver codex "$TR_LOOPMSG" 2>&1 || true)"
+printf '%s\n' "$TR_LOOP_OUT" | grep -q 'delivered to surface' \
+  && fail "a workflow message took the pane instead of the headless runner" \
+  || ok "a LOOP message goes headless even with a live pane"
+# The mode comes from the MESSAGE, so `transport` agrees with what deliver did.
+[ "$(run_tr_deliver transport codex)" = "cmux" ] && ok "consult mode resolves to the live pane" || fail "consult transport"
+[ "$(run_tr_deliver transport codex --loop)" = "headless" ] && ok "loop mode resolves to headless" || fail "loop transport"
+
+# Criterion 3: with runphase.sh genuinely absent, a loop must fall back to the pane
+# rather than strand. Untested until grok pointed it out. A bare copy of the helper (no
+# runphase.sh beside it) is the honest way to simulate a partial install.
+TR_BARE="$WORK/bare-install"; mkdir -p "$TR_BARE"
+cp "$COMMS" "$TR_BARE/comms.sh"; chmod +x "$TR_BARE/comms.sh"
+[ ! -e "$TR_BARE/runphase.sh" ] && ok "fixture: a helper install with no runphase.sh" || fail "bare fixture"
+TR_BARE_LOOP="$( (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$TR_BARE/comms.sh" transport codex --loop) 2>/dev/null)"
+[ "$TR_BARE_LOOP" = "cmux" ] \
+  && ok "no headless runner + a live pane falls back to cmux, never stranding the loop" \
+  || fail "missing-runner fallback (got: $TR_BARE_LOOP)"
+TR_BARE_NOPANE="$( (cd "$TR_FIX" && env -u COMMS_DELIVERY -u CMUX_WORKSPACE_ID "$TR_BARE/comms.sh" transport codex --loop) 2>/dev/null)"
+[ "$TR_BARE_NOPANE" = "mailbox" ] \
+  && ok "no runner and no pane reports mailbox honestly" || fail "bare no-pane (got: $TR_BARE_NOPANE)"
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus

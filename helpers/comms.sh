@@ -1530,7 +1530,7 @@ deliver_headless() {
   fi
   local rp="$(dirname "$SELF")/runphase.sh"
   if [ ! -x "$rp" ]; then
-    echo "warning: COMMS_DELIVERY=headless but runphase.sh not found next to comms.sh — message written for manual pickup (re-run install.sh)"
+    echo "warning: headless is the default for loops but runphase.sh was not found next to comms.sh — message written for manual pickup (re-run install.sh, or use --via cmux / COMMS_DELIVERY=cmux)"
     return 0
   fi
   if [ -z "$msgfile" ]; then
@@ -1663,10 +1663,20 @@ cmd_transport() {
 cmd_deliver() {
   local target="${1:-}" msgfile="${2:-}"
   require_agent "$target" "deliver"
-  # ONE decision point: `transport` owns the routing rules so deliver, the
-  # templates, and the docs cannot drift apart. Loops are headless-first.
-  local route
-  route="$(cmd_transport "$target" --loop)"
+  # ONE decision point: `transport` owns the routing rules so deliver, the templates,
+  # and the docs cannot drift apart. But the MODE is a property of the message, not of
+  # the caller: hardcoding --loop here silently reclassified consults and one-shot
+  # sends as loops, so a live-pane consult spawned headless instead of nudging the
+  # pane. `workflow:` already means "autonomous loop" in the protocol, so it is the
+  # authoritative signal. (codex, transport-flip round 1.)
+  local route mode_flag="" classify="$msgfile"
+  if [ -z "$classify" ]; then
+    classify="$(find "$(cmd_root)/$(inbox_for "$target")" -maxdepth 1 -type f -name "$(cmd_workspace)_*" 2>/dev/null | sort | tail -1 || true)"
+  fi
+  if [ -n "$classify" ] && [ -f "$classify" ] && [ -n "$(frontmatter_field "$classify" workflow)" ]; then
+    mode_flag="--loop"
+  fi
+  route="$(cmd_transport "$target" $mode_flag)"
   case "$route" in
     headless)
       case "$target" in
@@ -1681,8 +1691,8 @@ cmd_deliver() {
       if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
         # Re-run the picker purely for its stderr: it distinguishes "tree
         # unavailable" from "no matching surface", and routing on the summary
-        # alone would throw that away.
-        pick_surface "$target" >/dev/null 2>&1 || true
+        # alone would throw that away. ONE call — an earlier version ran it twice
+        # and discarded the first. (grok, transport-flip round 1.)
         pick_surface "$target" 2>&1 >/dev/null | head -2 >&2 || true
         echo "warning: COMMS_DELIVERY=cmux but no $target surface is live; message written for manual pickup"
       else
@@ -2171,10 +2181,13 @@ cmd_send() {
       echo "RESULT: manual — headless mode: the reply is on disk; the driving session picks it up when this turn ends"
       ;;
     manual)
-      if [ "${COMMS_DELIVERY:-cmux}" = "headless" ]; then
-        echo "RESULT: manual — headless mode but $to was NOT spawned (see the warning above; likely runphase.sh missing or empty inbox); fix and retry 'comms.sh send --to $to <file>'"
+      # Recovery guidance follows the route that was actually attempted. Deriving it
+      # from COMMS_DELIVERY alone told operators to "fix cmux" right after a headless
+      # runner warning, on a default that no longer prefers cmux. (codex, advisory.)
+      if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
+        echo "RESULT: manual — cmux was requested but $to was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'"
       else
-        echo "RESULT: manual — the other agent was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'"
+        echo "RESULT: manual — $to was NOT spawned (see the warning above; likely runphase.sh missing or an empty inbox); fix and retry 'comms.sh send --to $to <file>'"
       fi
       ;;
     failed)    echo "RESULT: failed — nudge errored mid-sequence; retry with 'comms.sh send --to $to <file>'" ;;
