@@ -21,6 +21,9 @@
 #                               manual-pickup/FAILED explicitly (never hard-fails).
 #                               COMMS_DELIVERY=headless routes to runphase.sh instead
 #                               (detached codex exec / claude -p turn for the target)
+#   transport <agent> [--loop]  which transport would actually be used right now:
+#                               headless | cmux | acp | mailbox. One decision point, so
+#                               templates never re-implement surface detection.
 #   send --to <agent> <file> [--archive-inbound <file>]
 #                               validate, deliver, update thread state, then archive inbound
 #   reconcile <message-file|message-id>   record a successful external/direct nudge
@@ -1573,6 +1576,58 @@ print_direct_recovery() {
   printf '\n'
 }
 
+cmd_transport() {
+  # transport <agent> [--loop] — print the transport that would actually be used:
+  # headless | cmux | acp | mailbox.
+  #
+  # ONE place decides, so the templates never re-implement surface detection and
+  # the eventual "ACP by default, cmux optional" flip is a reordering here rather
+  # than an edit in every command. `mailbox` is the honest last resort: the file
+  # is written and nobody is nudged, which is what stranded a real consult when no
+  # Codex pane was running.
+  local agent="" mode=consult
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --loop)    mode=loop ;;
+      --consult) mode=consult ;;
+      -?*)       usage_err "transport: unknown option '$(clip "$1")'" ;;
+      *)         [ -z "$agent" ] || usage_err "transport: one agent only"; agent="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$agent" ] || usage_err "transport: an agent name is required (registered: $(registry_agents))"
+  require_agent "$agent" "transport"
+
+  if [ "${COMMS_DELIVERY:-}" = "headless" ]; then printf 'headless\n'; return 0; fi
+
+  local caps picked
+  caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
+  # A live pane still wins: it is the watchable surface, and switching a visible
+  # workflow out from under someone is not a fallback, it is a surprise.
+  case "$caps" in
+    *interactive*)
+      picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
+      [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
+      ;;
+  esac
+  # No pane. ACP is synchronous and needs none, which beats queueing into an inbox
+  # nobody is watching — the exact case that stranded a real consult. Checked BEFORE
+  # the headless fallback because a headless-only agent (grok) has no pane by
+  # definition and would otherwise never reach here.
+  #
+  # Consults only: a loop turn must be able to EXECUTE (read files, run git) and that
+  # permission policy is unbuilt, so silently re-routing a loop would change its
+  # semantics rather than just its transport.
+  if [ "$mode" = "consult" ]; then
+    local acp_sh; acp_sh="$(dirname "$SELF")/acp.sh"
+    if [ -x "$acp_sh" ] && "$acp_sh" supports "$agent" >/dev/null 2>&1; then
+      printf 'acp\n'; return 0
+    fi
+  fi
+  case "$caps" in *interactive*) ;; *) printf 'headless\n'; return 0 ;; esac
+  printf 'mailbox\n'
+}
+
 cmd_deliver() {
   local target="${1:-}" msgfile="${2:-}"
   require_agent "$target" "deliver"
@@ -2093,6 +2148,7 @@ case "${1:-}" in
   verdict)   shift; cmd_verdict "$@" ;;
   archive)   shift; cmd_archive "$@" ;;
   deliver)   shift; cmd_deliver "$@" ;;
+  transport) shift; cmd_transport "$@" ;;
   send)      shift; cmd_send "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
   state)     shift; cmd_state "$@" ;;

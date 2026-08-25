@@ -13,12 +13,26 @@ Use this when you want a second opinion — a design choice, an open question, a
      TARGET="$("$COMMS_SH" agents default)"   # or the recognized first word
      ```
 
-2. **Detect the transport.** If the argument contains a `--via acp` flag, use the
-   SYNCHRONOUS ACP path instead of the mailbox. Parse BOTH transport modifiers out
-   of the question text — neither may remain in the payload:
-   - `--via acp` — selects this path
+2. **Detect the transport.** Parse BOTH transport modifiers out of the question text —
+   neither may remain in the payload:
+   - `--via acp` / `--via mailbox` — an EXPLICIT override; honour it as given.
    - `--oneshot` — optional; forwarded to the helper to skip the warm session
      (stateless exec). Without it the consult is warm.
+
+   **With no explicit `--via`, ASK the helper rather than guessing** (resolve
+   `COMMS_SH` per step 4 first):
+   ```bash
+   TRANSPORT="$("$COMMS_SH" transport "$TARGET")"   # cmux | acp | headless | mailbox
+   ```
+   - `cmux` / `headless` / `mailbox` → the mailbox path below (steps 4-8).
+   - `acp` → the synchronous ACP path in this step.
+
+   The helper prefers a live pane when there is one, and falls back to ACP when there
+   is not — because the alternative is writing a message into an inbox nobody is
+   watching. That is not hypothetical: a real consult was stranded exactly that way
+   (`RESULT: manual`, no Codex surface running). Say which transport was used when it
+   is not the pane, so an inline answer is never mistaken for a delivered message.
+   Never re-implement surface detection here; one decision point lives in the helper.
    - Resolve the helper next to comms.sh: `ACP_SH="$(dirname "$COMMS_SH")/acp.sh"`
      (resolve `COMMS_SH` per step 4 first).
    - Run the consult and present the answer directly — no message file, no
@@ -36,8 +50,8 @@ Use this when you want a second opinion — a design choice, an open question, a
    - If the helper fails (Node missing, unsupported agent, timeout), it says why
      and names the fallback: rerun without `--via acp` — the mailbox path below is
      always available. Do NOT retry the ACP path on the same failure.
-   - `--via acp` supports codex and claude targets; grok consults always use the
-     mailbox path (its headless leg handles them).
+   - All three registered agents have ACP profiles (codex, claude, grok →
+     `grok-build`). An agent without one fails closed and names the mailbox fallback.
 
 3. **Choose the mode.** If the question (after removing the agent word, when present) is EMPTY — bare `/ask`, or `/ask codex` alone — build an informal **thoughts consult** (step 6). Otherwise build an **explicit question** (step 5).
 

@@ -17,13 +17,15 @@
 #   doctor
 #       report node/acpx availability and the supported agent map; exit 0 iff
 #       consults can run here.
+#   supports <agent>
+#       exit 0 iff a consult can run here for that agent (machine-readable —
+#       never parse doctor's prose).
 #
 # Pinned: acpx is pre-1.0 with an evolving CLI — every invocation goes through
 # npx -y acpx@$ACPX_VERSION (cached by npm after first use; no global install).
 # Requires Node >= 22.13 (acpx's floor). Enabled agents: codex, claude. acpx
-# 0.13.1 also ships a grok-build builtin — INTENTIONALLY not enabled in this
-# spike (grok's mailbox leg already works headless; wiring its ACP profile is
-# scoped future work). Unsupported agents fail closed naming the fallback.
+# 0.13.1 ships builtins for all three registered agents; grok maps to the
+# `grok-build` profile (verified against `acpx --help`, 2026-08-25). Unsupported agents fail closed naming the fallback.
 set -euo pipefail
 
 ACPX_VERSION="0.13.1"
@@ -56,6 +58,7 @@ profile_for() {  # acpx built-in launch profile per agent; empty = unsupported
   case "$1" in
     codex)  echo codex ;;
     claude) echo claude ;;
+    grok)   echo grok-build ;;
     *)      echo "" ;;
   esac
 }
@@ -69,7 +72,7 @@ cmd_doctor() {
     exit 3
   fi
   echo "acpx: pinned @$ACPX_VERSION via npx (cached after first use)"
-  echo "agents: codex claude enabled; grok intentionally not enabled this spike (mailbox path)"
+  echo "agents: codex claude grok enabled ($(for a in codex claude grok; do printf '%s=%s ' "$a" "$(profile_for "$a")"; done))"
 }
 
 cmd_consult() {
@@ -92,7 +95,7 @@ cmd_consult() {
   done
   local profile
   profile="$(profile_for "$agent")"
-  [ -n "$profile" ] || die_fb "consult: '$agent' is not enabled for ACP in this spike (codex and claude only)"
+  [ -n "$profile" ] || die_fb "consult: '$agent' has no ACP profile — use the mailbox path"
   require_node
   [ -n "$qfile" ] && [ ! -f "$qfile" ] && die_fb "consult: no such file: $qfile"
   [ -n "$qfile" ] || [ "${#words[@]}" -gt 0 ] || die_fb "consult: a question is required (words or --file)"
@@ -132,6 +135,14 @@ cmd_consult() {
 case "${1:-}" in
   consult) shift; cmd_consult "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
+  supports)
+    # supports <agent> — exit 0 iff a consult can actually run here for that
+    # agent. Machine-readable on purpose: callers must never parse doctor's prose.
+    shift
+    [ -n "${1:-}" ] || die "supports: an agent name is required"
+    [ -n "$(profile_for "$1")" ] || exit 1
+    node_ok || exit 1
+    ;;
   ""|help|-h|--help)
     awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
     ;;

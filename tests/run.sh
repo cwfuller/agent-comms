@@ -1623,9 +1623,17 @@ OUT="$(ACP_STUB_NODE_V=v18.0.0 run_acp consult codex hello 2>&1)" && rc=0 || rc=
 OUT="$(ACP_STUB_NODE_V=v18.0.0 run_acp doctor 2>&1)" && rc=0 || rc=$?
 [ "$rc" -eq 3 ] && ok "doctor exits 3 without a usable node" || fail "doctor node gate (rc=$rc)"
 : > "$ACP_STUB_LOG"
-OUT="$(run_acp consult grok hello 2>&1)" && rc=0 || rc=$?
+# gemini has no ACP profile here; grok DOES since 2026-08-25 (acpx `grok-build`,
+# verified against `acpx --help` and one live consult).
+OUT="$(run_acp consult gemini hello 2>&1)" && rc=0 || rc=$?
 [ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'mailbox path' && [ ! -s "$ACP_STUB_LOG" ] \
-  && ok "unsupported agent fails closed before any acpx call" || fail "unsupported-agent refusal"
+  && ok "an agent with no ACP profile fails closed before any acpx call" || fail "unsupported-agent refusal"
+for acp_a in codex claude grok; do
+  bash "$REPO/helpers/acp.sh" supports "$acp_a" >/dev/null 2>&1 \
+    && ok "acp supports $acp_a" || fail "acp supports $acp_a"
+done
+bash "$REPO/helpers/acp.sh" supports gemini >/dev/null 2>&1 \
+  && fail "acp claims to support an unprofiled agent" || ok "acp supports probe is machine-readable and refuses gemini"
 grep -q 'ACPX_VERSION="0.13.1"' "$ACP" && ok "acpx version is pinned in one place" || fail "acpx pin"
 [ -x "$INST_FIX/.agent-comms/acp.sh" ] && ok "local install ships an executable acp.sh" || fail "local install acp.sh"
 grep -qF '"$ACP_SH" consult' "$REPO/templates/claude-commands/ask.md" \
@@ -2816,6 +2824,51 @@ G2_RP="$( (cd "$GR2" && env -u CMUX_WORKSPACE_ID "$REPO/helpers/runphase.sh" run
 [ "$G2_RPRC" != "0" ] && ok "runphase refuses --no-deliver for a self-sending provider" || fail "runphase --no-deliver accepted for codex"
 printf '%s\n' "$G2_RP" | grep -q 'authors and sends its own reply' \
   && ok "the runphase refusal explains why" || fail "runphase refusal message"
+
+echo "== comms.sh: transport selection (no pane must not strand a consult) =="
+TR_FIX="$WORK/transport-repo"; mkdir -p "$TR_FIX"; TR_FIX="$(cd "$TR_FIX" && pwd -P)"
+git -C "$TR_FIX" init -q -b main
+git -C "$TR_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
+mkdir -p "$TR_FIX/.comms"
+run_tr() { (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_tr_cmux() { (cd "$TR_FIX" && env PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
+
+# No cmux surface anywhere: an interactive agent must NOT fall to the mailbox while a
+# synchronous transport is available — that is the case that stranded a real consult.
+TR_CODEX="$(run_tr transport codex 2>/dev/null)"
+[ "$TR_CODEX" = "acp" ] || [ "$TR_CODEX" = "mailbox" ] && ok "transport resolves for codex with no pane (got: $TR_CODEX)" || fail "transport codex (got: $TR_CODEX)"
+if bash "$REPO/helpers/acp.sh" supports codex >/dev/null 2>&1; then
+  [ "$TR_CODEX" = "acp" ] && ok "with ACP available, no pane routes to acp, never mailbox" || fail "no-pane consult fell to $TR_CODEX despite ACP"
+else
+  [ "$TR_CODEX" = "mailbox" ] && ok "without ACP, no pane honestly reports mailbox" || fail "no-ACP fallback"
+fi
+
+# grok has no interactive surface by definition, so it can never reach a pane.
+TR_GROK="$(run_tr transport grok 2>/dev/null)"
+if bash "$REPO/helpers/acp.sh" supports grok >/dev/null 2>&1; then
+  [ "$TR_GROK" = "acp" ] && ok "a headless-only agent prefers acp for a consult" || fail "grok consult (got: $TR_GROK)"
+else
+  [ "$TR_GROK" = "headless" ] && ok "a headless-only agent reports headless" || fail "grok consult (got: $TR_GROK)"
+fi
+[ "$(run_tr transport grok --loop 2>/dev/null)" = "headless" ] \
+  && ok "a LOOP never routes to acp — its permission policy is unbuilt" || fail "grok loop transport"
+
+# An explicit COMMS_DELIVERY=headless override beats everything.
+[ "$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$COMMS" transport codex) 2>/dev/null)" = "headless" ] \
+  && ok "COMMS_DELIVERY=headless overrides transport selection" || fail "headless override"
+
+# A live pane still wins: switching a watchable workflow out from under someone is a
+# surprise, not a fallback.
+cat > "$CMUX_STUB_DIR/tree-workspace_7.txt" <<'TRTREE'
+workspace:7
+  pane:1
+    surface:23 [terminal] codex
+TRTREE
+[ "$(run_tr_cmux transport codex 2>/dev/null)" = "cmux" ] \
+  && ok "a live pane still wins over acp" || fail "pane preference (got: $(run_tr_cmux transport codex 2>/dev/null))"
+
+check_not "transport rejects an unregistered agent" run_tr transport gemini
+check_not "transport rejects an unknown option" run_tr transport codex --bogus
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
