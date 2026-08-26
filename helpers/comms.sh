@@ -1134,15 +1134,25 @@ cmd_compose() {
   [ -f "$idx" ] || usage_err "compose: no review sets recorded"
 
   local ws; ws="$(cmd_workspace)"
-  local legs; legs="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3}' "$idx")"
+  # The ROUND is part of a leg's identity. Finding replies by reviewer+thread alone
+  # makes round 2 compose round 1's replies and report "all answered" — the panel would
+  # gate on findings about an artifact it is no longer reviewing. (grok, panel r1.)
+  local legs; legs="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4}' "$idx")"
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
-  local rows="" ag th reply n_legs=0 n_answered=0 pending=""
-  while IFS=$'\t' read -r ag th; do
+  local rows="" ag th rnd reply cand n_legs=0 n_answered=0 pending=""
+  while IFS=$'\t' read -r ag th rnd; do
     [ -n "$ag" ] || continue
     n_legs=$((n_legs + 1))
-    reply="$(sorted_message_files "$root/.comms/archive" "$ws" "$ag" "$th" newest | head -1 || true)"
-    [ -n "$reply" ] || reply="$(sorted_message_files "$root/.comms/to-claude" "$ws" "$ag" "$th" newest | head -1 || true)"
+    reply=""
+    for cand in $(sorted_message_files "$root/.comms/archive" "$ws" "$ag" "$th" newest) \
+                $(sorted_message_files "$root/.comms/to-claude" "$ws" "$ag" "$th" newest); do
+      [ -f "$cand" ] || continue
+      # Same round, or nothing. A reply from an earlier round answers an earlier
+      # question.
+      [ -z "$rnd" ] || [ "$(frontmatter_field "$cand" round)" = "$rnd" ] || continue
+      reply="$cand"; break
+    done
     # A leg is answered only by a VALID review-feedback. Counting any message in the
     # thread lets a stray note complete a panel and unblock the gate. (codex, panel r1.)
     if [ -n "$reply" ] && { [ "$(frontmatter_field "$reply" type)" != "review-feedback" ] \

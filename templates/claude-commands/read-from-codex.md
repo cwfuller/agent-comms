@@ -88,6 +88,32 @@ Over time `rounds.tsv` is how you see which reviewer is carrying which kind of w
 the observation that one model was vastly superior in a given phase should be visible in
 the log, not only in memory.
 
+### Panel rounds — when the message carries `review_set`
+
+A panel leg is an ordinary 2-party `review-feedback`; what changes is that **one leg is
+not the round**. If the inbound carries `review_set:`, do NOT act on it alone:
+
+```bash
+SET="$(grep -m1 '^review_set:' "<inbound>" | sed 's/^review_set: *//')"
+"$COMMS_SH" panel status  --set "$SET"     # which legs have answered
+"$COMMS_SH" compose --set "$SET"           # exits non-zero while any leg is missing
+```
+
+- **`compose` refuses a partial panel.** An unanswered leg is not an approval. Archive the
+  leg you just read, say which reviewers are still out, and stop — the loop resumes when
+  the set completes.
+- **When it composes, work the composition, not the union.** Fix the **corroborated**
+  findings, the gating reviewer's blockers, and any uncorroborated blocker that
+  independently meets verdict discipline. **Do NOT auto-address every blocking bullet from
+  every reviewer** — that is `any-blocks` through the back door, and it is how one noisy
+  reviewer holds the loop hostage.
+- **Still split after one confirmation round → escalate to the user**, same lane as
+  max-rounds. The human is the only adjudicator this protocol admits.
+- **Round N+1 re-dispatches the whole panel** with `panel dispatch`, at the new round.
+  Never reply to one leg and leave the others on the old artifact: `compose` is
+  round-scoped, so a half-advanced set reports incomplete forever.
+- Record a `round-note` per leg, not one for the panel — performance is per reviewer.
+
 ### Autonomous flow — `workflow` field present
 
 **The reviewer is the `REVIEWER` derived mechanically in step 4** (frontmatter-bounded,

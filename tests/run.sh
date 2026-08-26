@@ -1423,6 +1423,15 @@ grep -q 'loop-rounds' "$REPO/templates/claude-commands/auto.md" \
   && ok "the plan message records the loop's real round budget" || fail "auto.md loop-rounds"
 grep -q "grep -m1 '\^loop-rounds:'" "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "the handoff restores the budget mechanically, not from memory" || fail "read-from-codex loop-rounds"
+
+# The panel must be wired into the REPLY lifecycle, not just dispatch+compose.
+RFCP="$REPO/templates/claude-commands/read-from-codex.md"
+grep -q 'review_set' "$RFCP" && ok "the reader recognises a panel leg" || fail "reader panel awareness"
+grep -q 'compose --set' "$RFCP" && ok "the reader composes instead of acting on one leg" || fail "reader compose wiring"
+grep -qi 'not auto-address every blocking' "$RFCP" \
+  && ok "the reader refuses any-blocks through the back door" || fail "reader hostage guard"
+grep -qi 're-dispatches the whole panel' "$RFCP" \
+  && ok "round N+1 re-dispatches the whole panel, not one leg" || fail "reader round-advance rule"
 grep -qF 'REVIEWER=$(awk' "$REPO/templates/claude-commands/read-from-codex.md" \
   && grep -q 'ok) print v' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader extractor is close-delimiter-gated" || fail "reader REVIEWER capture (bounded)"
@@ -3076,6 +3085,24 @@ run_pn panel dispatch --to codex,grok --set "$PN_SET2" "$PN_REQ" >/dev/null 2>&1
 PN_PART="$(run_pn compose --set "$(run_pn panel status --set "$PN_SET2" >/dev/null 2>&1; echo "$PN_SET2")" 2>&1)" && PN_PRC=0 || PN_PRC=$?
 printf '%s\n' "$PN_PART" | grep -qi 'incomplete\|no review sets\|no legs' \
   && ok "an unanswered leg blocks composition instead of counting as approval" || fail "partial panel composed anyway"
+
+# ROUND STALENESS: a panel round 2 must not compose round 1's replies. The set index
+# keys on thread+phase+round but compose found replies by reviewer+thread alone, so it
+# would report "all answered" using findings about an artifact it is no longer reviewing.
+# (grok, panel r1 — the bug it found in the feature reviewing it.)
+PN_R2REQ="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T13-00-00_req2.md"
+sed -e 's|^message_id: .*|message_id: pn-req-2|' -e 's|^round: 1|round: 2|' "$PN_REQ" > "$PN_R2REQ"
+# safe_set_id appends a hash of the raw value, so read the real id back from dispatch.
+PN_R2OUT="$(run_pn panel dispatch --to codex,grok --set pn-round2 "$PN_R2REQ" 2>&1 || true)"
+PN_R2SET="$(printf '%s\n' "$PN_R2OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ -n "$PN_R2SET" ] && ok "dispatch reports the set id it actually used" || fail "could not read back the set id"
+PN_R2="$(run_pn compose --set "$PN_R2SET" 2>&1)" && PN_R2RC=0 || PN_R2RC=$?
+printf '%s\n' "$PN_R2" | grep -qi 'INCOMPLETE' \
+  && ok "round 2 does NOT compose round 1's replies — it reports incomplete" \
+  || fail "round 2 composed stale replies (got: $(printf '%s' "$PN_R2" | head -1))"
+printf '%s\n' "$PN_R2" | grep -q 'all answered' \
+  && fail "round 2 claimed all legs answered using round-1 replies" \
+  || ok "a stale round is never counted as an answer"
 
 PN_STATUS="$(run_pn panel status --set "$PN_SC" 2>&1)"
 printf '%s\n' "$PN_STATUS" | grep -q 'codex' && printf '%s\n' "$PN_STATUS" | grep -q 'grok' \

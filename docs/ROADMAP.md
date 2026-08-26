@@ -806,6 +806,27 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
    **Reciprocal adjudication itself is NOT wired in** — the dry-run validated the mechanism
    on a real pair, but `compose` deliberately ships the no-model version first.
 
+**The arc closed 2026-08-26**, and its last two bugs were found by the panel reviewing
+itself — dispatched through `panel dispatch` to codex and grok on one pinned artifact,
+composed by `compose`:
+
+- **Round staleness** *(grok)* — `compose` found replies by reviewer+thread alone, so a
+  panel round 2 composed round 1's replies and reported "all answered", gating on findings
+  about an artifact it was no longer reviewing. Leg identity now includes the round.
+- **The panel was not in the reply lifecycle** *(codex)* — dispatch and compose existed;
+  the round between them did not. The reader now recognises `review_set`, composes instead
+  of acting on one leg, refuses any-blocks through the back door, and re-dispatches the
+  whole panel at round N+1.
+
+**What the first real composition showed:** 2 legs, 7 findings, 6 blocking, and **zero
+corroborated**. Both reviewers found real bugs; they found different ones. Under
+`any-blocks` all six would have gated a round. The corroboration rule labelled them
+"cross-check first" instead and manufactured no agreement that did not exist — which is
+the token discipline the whole design is for. The two agents did converge on one defect
+from opposite directions (codex: `compose` counts an answer before validating the message;
+grok: a `type: error` on the leg counts as answered and then yields nothing), which is the
+clearest evidence so far that a panel of two is not redundant.
+
 ### Found in the field, not yet fixed
 
 - [ ] **Dispatch should refuse an already-answered `(thread, phase, round)`.** A second
