@@ -1526,6 +1526,23 @@ grep -q 'friction' "$REPO/helpers/comms.sh" && ! grep -q 'friction.tsv' "$REPO/t
   && ok "reviewers are never pointed at the friction log" || fail "friction leaked into reviewer context"
 grep -q 'friction --thread' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "the loop tells the driver to record friction as it happens" || fail "friction not wired into the loop"
+# Friction must ESCAPE the project. `.comms/` is gitignored, so a note recorded in a client
+# repo is invisible to whoever maintains this tool unless a human pastes it — which is
+# exactly how a false all-clear survived a whole loop.
+FRH="$WORK/friction-home"; mkdir -p "$FRH"
+run_fr_h() { (cd "$FR" && env -u CMUX_WORKSPACE_ID AGENT_COMMS_HOME="$FRH" "$COMMS" "$@"); }
+run_fr_h friction --severity 4 "a note from a client repo" >/dev/null 2>&1
+[ -s "$FRH/friction.tsv" ] && ok "friction rolls up outside the project" || fail "no global rollup"
+grep -q 'a note from a client repo' "$FRH/friction.tsv" && ok "the rollup carries the note" || fail "rollup note"
+awk -F'\t' 'NR>1 && $2!=""' "$FRH/friction.tsv" | grep -q . \
+  && ok "the rollup records WHICH project it came from" || fail "rollup project column"
+FRL="$(run_fr_h friction --list 2>&1)"
+printf '%s\n' "$FRL" | grep -q 'a note from a client repo' && ok "--list reads the rollup" || fail "friction --list"
+run_fr_h friction --severity 1 "cosmetic thing" >/dev/null 2>&1
+[ "$(run_fr_h friction --list | sed -n '2p' | cut -f5)" = "4" ] \
+  && ok "--list sorts worst-first, so a wrong-result note is never buried" || fail "friction --list ordering"
+# the rollup must not be committable by accident: it spans projects and names private paths
+case "$FRH" in *"$REPO"*) fail "the rollup lives inside a repo" ;; *) ok "the rollup lives beside the helpers, not in a repo" ;; esac
 # A named-but-unresolvable artifact is a failure, not a reason to review the live tree.
 grep -q 'does not resolve to a commit' "$REPO/helpers/runphase.sh" \
   && ok "an unresolvable artifact_id refuses the turn" || fail "unresolvable artifact fail-closed"

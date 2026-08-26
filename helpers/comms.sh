@@ -64,7 +64,9 @@
 #                               cluster every leg's findings and label them by SUPPORT:
 #                               corroborated (gates), uncorroborated (cross-check first),
 #                               unanchored, advisory. Drops nothing; no model arbitrates.
-#   friction [--thread T] [--severity 1-5] "<note>"
+#   friction [--thread T] [--severity 1-5] "<note>"  |  friction --list
+#                               --list reads the GLOBAL rollup across every project: the
+#                               maintainer's inbox for what actually broke in the field.
 #                               record harness friction the moment you hit it. Appends
 #                               .comms/friction.tsv. Never shown to reviewers.
 #   round-note <reply> --note "<text>"
@@ -1300,6 +1302,7 @@ cmd_friction() {
     case "$1" in
       --thread)   shift; thread="${1:-}" ;;
       --severity) shift; sev="${1:-}" ;;
+      --list)     cmd_friction_list; return 0 ;;
       -?*)        usage_err "friction: unknown option '$(clip "$1")'" ;;
       *)          note="${note:+$note }$1" ;;
     esac
@@ -1308,14 +1311,39 @@ cmd_friction() {
   [ -n "$note" ] || usage_err "friction: a note is required — what went wrong, in one or two lines"
   case "${sev:-3}" in [1-5]) ;; *) usage_err "friction: --severity must be 1-5 (1 = cosmetic, 5 = wrong results)" ;; esac
   local root; root="$(main_repo_root)"; [ -n "$root" ] || usage_err "friction: not inside a git repository"
+  # Written TWICE, on purpose. The project log keeps it next to the work; the GLOBAL
+  # rollup is the only path back to whoever maintains this tool — `.comms/` is gitignored,
+  # so a note recorded in a client repo is invisible everywhere else and reaches the
+  # maintainer only if a human happens to paste it. That is exactly how a false all-clear
+  # survived a whole loop.
+  local hdr row
+  hdr="$(printf 'timestamp\tproject\tworkspace\tthread\tseverity\thead_sha\tnote')"
+  row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(basename "$root")" "$(cmd_workspace)" "${thread:-}" \
+    "${sev:-3}" "$(git -C "$root" rev-parse --short HEAD 2>/dev/null || true)" \
+    "$(printf '%s' "$note" | tr '\t\n' '  ')")"
   local out="$root/.comms/friction.tsv"
   mkdir -p "$(dirname "$out")" 2>/dev/null || die "friction: cannot create $(dirname "$out")"
-  [ -s "$out" ] || printf 'timestamp\tworkspace\tthread\tseverity\thead_sha\tnote\n' > "$out"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cmd_workspace)" "${thread:-}" "${sev:-3}" \
-    "$(git -C "$root" rev-parse --short HEAD 2>/dev/null || true)" \
-    "$(printf '%s' "$note" | tr '\t\n' '  ')" >> "$out"
-  printf 'friction: recorded (severity %s) -> %s\n' "${sev:-3}" "${out#"$root"/}"
+  [ -s "$out" ] || printf '%s\n' "$hdr" > "$out"
+  printf '%s\n' "$row" >> "$out"
+  # The rollup lives beside the installed helpers, never in a repo — it spans projects and
+  # its notes can name private paths, so it must not be committable by accident.
+  local roll="${AGENT_COMMS_HOME:-$HOME/.agent-comms}/friction.tsv"
+  if mkdir -p "$(dirname "$roll")" 2>/dev/null; then
+    [ -s "$roll" ] || printf '%s\n' "$hdr" > "$roll"
+    printf '%s\n' "$row" >> "$roll"
+  fi
+  printf 'friction: recorded (severity %s) -> %s + the global rollup\n' "${sev:-3}" "${out#"$root"/}"
+}
+
+cmd_friction_list() {
+  # friction --list — every project's friction in one place. This is the maintainer's
+  # inbox: read it at the start of a session on this tool and you see what actually broke
+  # in the field, instead of what someone remembered to mention.
+  local roll="${AGENT_COMMS_HOME:-$HOME/.agent-comms}/friction.tsv"
+  [ -s "$roll" ] || { echo "friction: nothing recorded yet ($roll)"; return 0; }
+  # Worst first: severity 5 means the harness produced a wrong result.
+  { head -1 "$roll"; tail -n +2 "$roll" | sort -t"$(printf '\t')" -k5,5r -k1,1r; }
 }
 
 cmd_round_note() {
