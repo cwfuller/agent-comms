@@ -73,6 +73,9 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
   approval.
 - **Advisories survive.** Un-actioned advisory findings are carried into
   `docs/advisories.md` when a loop ends, so lessons compound instead of evaporating.
+- **A panel costs less than it sounds.** Each reviewer keeps a warm session, so round 2
+  pays for what changed rather than re-reading everything: ~1k new tokens per review turn,
+  against ~115k for a cold start. Adding a reviewer costs a delta, not another full read.
 
 Message format, loop semantics, and the state model: **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
 
