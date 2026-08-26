@@ -54,7 +54,7 @@ cap, is what keeps a plan phase from becoming a document-nit loop.
    - Write the approach: the goal, the mechanism, the invariants it must not break, and
      what you deliberately are NOT doing. A real approach doc, not a 2-line intent.
    - Frontmatter: `workflow: auto`, `phase: plan`, `round: 1`, `max-rounds: 2`, and
-     **`loop-rounds: <N>`** — the loop's real budget from `--rounds` (default 4).
+     **`loop-rounds: <N>`** — the loop's real budget from `--rounds` (default 5).
      **The 2 is the PLAN cap only**, and `loop-rounds` is where the real budget survives:
      the plan message is the ONLY artifact the handoff can read, so without that field
      there is nothing to restore N from and implementation silently inherits the wrong one.

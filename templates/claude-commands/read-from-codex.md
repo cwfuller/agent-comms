@@ -133,10 +133,25 @@ SET="$(grep -m1 '^review_set:' "<inbound>" | sed 's/^review_set: *//')"
 
 **The reviewer is the `REVIEWER` derived mechanically in step 4** (frontmatter-bounded,
 registry-checked — same rule as the thread capture: never type it by hand).
-Every continuation in this flow — round-2+ replies, the error lane, and the
-plan→implement handoff — writes to `$COMMS_ROOT/to-$REVIEWER/` and sends
-`--to "$REVIEWER"`. Never assume codex: an initial `--reviewer grok` loop must keep the
-SAME reviewer for its entire lifecycle.
+In a SINGLE-REVIEWER loop, every continuation in this flow — round-2+ replies, the
+error lane, and the plan→implement handoff — writes to `$COMMS_ROOT/to-$REVIEWER/` and
+sends `--to "$REVIEWER"`. Never assume codex: an initial `--reviewer grok` loop must
+keep the SAME reviewer for its entire lifecycle.
+
+**In a PANEL loop (the inbound carries `review_set:`), the panel IS the reviewer** and
+the Panel rounds section above overrides every `--to "$REVIEWER"` below: continuations
+are authored ONCE as a `review-request` on the BASE thread and fanned with
+`panel dispatch --to <roster>` — round 2+, and the plan→implement handoff alike. A
+panel-approved plan implemented under one leg silently sheds the rest of the panel;
+the roster is captured mechanically from the set index, never from memory:
+```bash
+REQ_MID="$(grep -m1 '^in-reply-to:' "<the inbound reply>" | sed 's/^in-reply-to: *//')"
+SETS="$COMMS_ROOT/grades/sets.tsv"
+SET="$(awk -F'\t' -v m="$REQ_MID" 'NR>1 && $(2)==m {print $(1); exit}' "$SETS")"
+ROSTER="$(awk -F'\t' -v s="$SET" 'NR>1 && $(1)==s {print $(10)}' "$SETS" | paste -sd, -)"
+```
+(Only the error lane stays per-leg: a malformed reply is one leg's problem and its
+error reply routes to that leg's reviewer alone.)
 
 **Check termination conditions first:**
 
@@ -164,18 +179,30 @@ SAME reviewer for its entire lifecycle.
        message's `loop-rounds:` field; if that field is absent (a pre-2026-08-26 loop),
        fall back to 5 and say so in the handoff. The implement phase gets its OWN full
        budget — the phases do not share one. Capture it mechanically, never by
-       memory:
+       memory. The APPROVAL REPLY YOU ARE HOLDING is the source — reviewers preserve
+       `loop-rounds` onto their replies and the broker stamps it mechanically, so the
+       field is in hand at the handoff; the thread's state file (`loop_rounds`) and the
+       archived plan message are the fallbacks, in that order:
        ```bash
-       LOOP_ROUNDS="$(grep -m1 '^loop-rounds:' "<the approved plan message>" | sed 's/^loop-rounds: *//')"
+       LOOP_ROUNDS="$(grep -m1 '^loop-rounds:' "<the approval reply you just read>" | sed 's/^loop-rounds: *//')"
+       [ -n "$LOOP_ROUNDS" ] || LOOP_ROUNDS="$(sed -n 's/.*"loop_rounds": "\([^"]*\)".*/\1/p' "$COMMS_ROOT/state/${WORKSPACE}_${THREAD}.json" 2>/dev/null | head -1)"
        [ -n "$LOOP_ROUNDS" ] || LOOP_ROUNDS=5
        ```
-       *(grok found the starvation; codex found the fix had no durable source.)*
+       *(grok found the starvation; codex found the fix had no durable source — the
+       field now rides reply frontmatter and thread state, not memory.)*
      - Include a pinned `## Acceptance criteria` section (3-7 testable statements — carry
        the approved plan's criteria forward if the plan pinned them, else derive them now).
        Later rounds are judged against these; the bar does not move with each holistic pass,
        and later rounds copy the section forward verbatim, changing it only through a clearly
        identified explicit amendment ("(amended round N: reason)")
-     - Write it into `$COMMS_ROOT/to-$REVIEWER/` and deliver: `"$COMMS_SH" send --to "$REVIEWER" "<file>"` — the implement phase goes to the SAME reviewer that approved the plan
+     - Deliver to the SAME review surface that approved the plan:
+       - Single-reviewer loop: write it into `$COMMS_ROOT/to-$REVIEWER/` and
+         `"$COMMS_SH" send --to "$REVIEWER" "<file>"`.
+       - Panel loop: author it as `type: review-request` on the BASE thread and
+         `"$COMMS_SH" panel dispatch --to "$ROSTER" "<file>"` — the WHOLE roster that
+         reviewed the plan (captured mechanically above) reviews the implementation;
+         handing it to one approving leg sheds the rest of the panel at the exact
+         moment the change grows a diff. (codex + grok, panel r1.)
    - Otherwise → **Stop. Notify user:** "Approved after N rounds." Record the reviewer
      performance note (see above), archive: `"$COMMS_SH" archive --as claude "<file>"`,
      then close the thread's state: `"$COMMS_SH" state complete "<thread>"`
@@ -185,6 +212,10 @@ SAME reviewer for its entire lifecycle.
    - Archive the message via the helper.
 
 3. **If verdict is `REQUEST_CHANGES` and round < max-rounds:**
+   - **Panel loop: this branch fires on the COMPOSITION, not on one leg** — gate on
+     `compose` per the Panel rounds section, work the composed findings, then author the
+     next round ONCE as a `review-request` on the base thread and re-dispatch with
+     `panel dispatch --to "$ROSTER"` instead of the single-reviewer `send` below.
    - **Record the reviewer performance note first** (see above) — before fixing anything,
      while the review's quality is still fresh and unmixed with your own work.
    - **Auto-address all blocking findings** from the reviewer's message

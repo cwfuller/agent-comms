@@ -1092,12 +1092,25 @@ cmd_panel() {
     [ -n "$set_id" ] || usage_err "panel status: --set <id> is required"
     local idx; idx="$(findings_set_index "$root")"
     [ -f "$idx" ] || { emit_diagnostic "panel: no review sets recorded yet"; return 0; }
+    # Resolve the workspace ONCE — per-candidate calls also re-emit the resolver's
+    # stderr warning per leg, which interleaves into 2>&1 captures of this table.
+    local status_ws; status_ws="$(cmd_workspace)"
     printf 'reviewer\tthread\tanswered\tverdict\n'
-    awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3}' "$idx" | while IFS=$'\t' read -r ag th; do
+    # Same binding as compose: a leg is answered by the reply to THIS set's request,
+    # never by whatever the newest same-agent same-thread message happens to be. A
+    # status that says "answered / APPROVE" off a stale or type:error message is the
+    # false all-clear compose exists to refuse. (grok, panel r1.)
+    awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4 "\t" $2}' "$idx" | while IFS=$'\t' read -r ag th rnd req_mid; do
       [ -n "$ag" ] || continue
-      local reply verdict="" answered=no
-      reply="$(sorted_message_files "$root/.comms/archive" "$(cmd_workspace)" "$ag" "$th" newest | head -1 || true)"
-      [ -n "$reply" ] || reply="$(sorted_message_files "$root/.comms/to-claude" "$(cmd_workspace)" "$ag" "$th" newest | head -1 || true)"
+      local reply="" verdict="" answered=no cand
+      for cand in $(sorted_message_files "$root/.comms/archive" "$status_ws" "$ag" "$th" newest) \
+                  $(sorted_message_files "$root/.comms/to-claude" "$status_ws" "$ag" "$th" newest); do
+        [ -f "$cand" ] || continue
+        [ -z "$rnd" ] || [ "$(frontmatter_field "$cand" round)" = "$rnd" ] || continue
+        [ -z "$req_mid" ] || [ "$(frontmatter_field "$cand" in-reply-to)" = "$req_mid" ] || continue
+        [ "$(frontmatter_field "$cand" type)" = "review-feedback" ] || continue
+        reply="$cand"; break
+      done
       if [ -n "$reply" ]; then answered=yes; verdict="$(cmd_verdict "$reply" 2>/dev/null || true)"; fi
       printf '%s\t%s\t%s\t%s\n' "$ag" "$th" "$answered" "$verdict"
     done
@@ -1218,11 +1231,11 @@ cmd_compose() {
   # The ROUND is part of a leg's identity. Finding replies by reviewer+thread alone
   # makes round 2 compose round 1's replies and report "all answered" — the panel would
   # gate on findings about an artifact it is no longer reviewing. (grok, panel r1.)
-  local legs; legs="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4}' "$idx")"
+  local legs; legs="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4 "\t" $2}' "$idx")"
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
-  local rows="" ag th rnd reply cand n_legs=0 n_answered=0 pending=""
-  while IFS=$'\t' read -r ag th rnd; do
+  local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending=""
+  while IFS=$'\t' read -r ag th rnd req_mid; do
     [ -n "$ag" ] || continue
     n_legs=$((n_legs + 1))
     reply=""
@@ -1232,6 +1245,13 @@ cmd_compose() {
       # Same round, or nothing. A reply from an earlier round answers an earlier
       # question.
       [ -z "$rnd" ] || [ "$(frontmatter_field "$cand" round)" = "$rnd" ] || continue
+      # BOUND to this set's request, or nothing. Round+thread alone is not identity:
+      # dispatch reuses <base>-<agent> leg threads, and plan r1 / implement r1 collide
+      # on thread+round — archived plan approvals composed as a clean implement panel
+      # in a live repro. The request_message_id is already in sets.tsv and every
+      # conformant reply stamps it as in-reply-to; an unbound reply is not an answer.
+      # (codex + grok, panel r1.)
+      [ -z "$req_mid" ] || [ "$(frontmatter_field "$cand" in-reply-to)" = "$req_mid" ] || continue
       reply="$cand"; break
     done
     # A leg is answered only by a VALID review-feedback. Counting any message in the
@@ -2305,7 +2325,7 @@ state_update_from() {
   thread="$(frontmatter_field "$mf" thread)"
   wf="$(frontmatter_field "$mf" workflow)"
   [ -n "$thread" ] && [ -n "$wf" ] || return 0   # one-shot or pre-v2 message: no state
-  local ws fm_ws phase round maxr from awaiting_from mid dir
+  local ws fm_ws phase round maxr loopr from awaiting_from mid dir
   # Key on the RESOLVED workspace — the same resolver every reader uses — so a
   # divergent frontmatter workspace value can't make the state file invisible.
   ws="$(cmd_workspace)"
@@ -2315,6 +2335,10 @@ state_update_from() {
   phase="$(frontmatter_field "$mf" phase)"
   round="$(frontmatter_field "$mf" round)"
   maxr="$(frontmatter_field "$mf" max-rounds)"
+  # The loop's real budget rides through the capped plan phase in loop-rounds;
+  # state keeps it too so a restart/compaction can restore N without the archived
+  # plan message. (codex, panel r1.)
+  loopr="$(frontmatter_field "$mf" loop-rounds)"
   from="$(frontmatter_field "$mf" from)"
   # The EXPLICIT send --to target is authoritative for who owes the next message
   # — a complement of the sender is only a two-party assumption and breaks at
@@ -2344,9 +2368,9 @@ state_update_from() {
   # last_run_dir precedes last_delivery so runphase's exit-time rewrite (which
   # replaces the last_delivery line and may insert a session-id field before
   # it) keeps the JSON valid with last_delivery as the final field.
-  printf '{\n  "workspace": "%s",\n  "thread": "%s",\n  "workflow": "%s",\n  "phase": "%s",\n  "round": "%s",\n  "max_rounds": "%s",\n  "status": "in-progress",\n  "awaiting_from": "%s",\n  "awaiting_since": "%s",\n  "awaiting_since_epoch": "%s",\n  "last_sent": "%s",\n  "last_run_dir": "%s",\n  "last_delivery": "%s"\n}\n' \
+  printf '{\n  "workspace": "%s",\n  "thread": "%s",\n  "workflow": "%s",\n  "phase": "%s",\n  "round": "%s",\n  "max_rounds": "%s",\n  "loop_rounds": "%s",\n  "status": "in-progress",\n  "awaiting_from": "%s",\n  "awaiting_since": "%s",\n  "awaiting_since_epoch": "%s",\n  "last_sent": "%s",\n  "last_run_dir": "%s",\n  "last_delivery": "%s"\n}\n' \
     "$(json_escape "$ws")" "$(json_escape "$thread")" "$(json_escape "$wf")" \
-    "$(json_escape "$phase")" "$(json_escape "$round")" "$(json_escape "$maxr")" \
+    "$(json_escape "$phase")" "$(json_escape "$round")" "$(json_escape "$maxr")" "$(json_escape "$loopr")" \
     "$awaiting_from" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date +%s)" \
     "$(json_escape "$mid")" "$(json_escape "$run_dir")" "$outcome" \
     > "$dir/$(safe_name "$ws")_$(safe_name "$thread").json" \

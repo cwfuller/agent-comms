@@ -965,6 +965,16 @@ elif [ -n "${GROK_STUB_BAD_VERDICT:-}" ]; then
   REPLY="$(printf -- 'VERDICT: SHIP_IT\n\n## Summary\nnonstandard verdict value')"
 elif [ -n "${GROK_STUB_EMPTY_BODY:-}" ]; then
   REPLY="$(printf -- 'VERDICT: APPROVE')"
+elif [ -n "${GROK_STUB_DUP_VERDICT:-}" ]; then
+  # line-1 APPROVE + a later REQUEST_CHANGES: ambiguous, derivation must decide
+  REPLY="$(printf -- 'VERDICT: APPROVE\nnarration\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.')"
+elif [ -n "${GROK_STUB_LIE_APPROVE:-}" ]; then
+  # unique explicit APPROVE that contradicts its own findings
+  REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Findings\n### Blocking\n1. a real blocking finding the verdict ignores\n\n### Advisory\n- None.')"
+elif [ -n "${GROK_STUB_PREAMBLE_NUMBERED:-}" ]; then
+  # the field incident, end to end: preamble pushes the (absent) verdict off
+  # line 1, findings are NUMBERED, and one real item ENDS in "None."
+  REPLY="$(printf -- 'Skill descriptions were shortened to fit context.\nReviewing the handoff now.\n\n## Findings\n### Blocking\n1. helper.sh can incorrectly return None.\n\n### Advisory\n- None.')"
 else
   REPLY="$(printf -- 'VERDICT: %s\n\n## Summary\nstub review of the handoff\n\n## Findings\n### Blocking\n- none' "${GROK_STUB_VERDICT:-APPROVE}")"
 fi
@@ -1095,6 +1105,34 @@ run_grok_leg "$MA_MSG8" "$R8" >/dev/null 2>&1
   && grep -q 'not a registered agent' "$R8/result.json" && [ -f "$MA_MSG8" ] \
   && [ ! -d "$MA_FIX/.comms/to-../evil" ] \
   && ok "path-shaped inbound from: refused before routing" || fail "unregistered-peer refusal"
+# Adversarial verdict-line shapes through the REAL broker (codex, field-report
+# round 1: grep-the-source assertions cannot catch a stamp-path regression).
+PRE_STAMP_CT="$(find "$MA_FIX/.comms/to-claude" -type f | wc -l | tr -d ' ')"
+MA_MSG9="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-43-00_dupverdict-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-7/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG9"
+R9="$WORK/ma-leg9"; mkdir -p "$R9"
+GROK_STUB_DUP_VERDICT=1 run_grok_leg "$MA_MSG9" "$R9" >/dev/null 2>&1
+REPLY9="$(find "$MA_FIX/.comms/to-claude" -type f -name '*grok-reply*' -newer "$R9/prompt.md" | head -1)"
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R9/result.json" | head -1)" = "completed" ] \
+  && [ -n "$REPLY9" ] && grep -q '^verdict: REQUEST_CHANGES$' "$REPLY9" \
+  && ok "duplicate VERDICT lines stamp the DERIVED verdict, not line 1" || fail "dup-verdict broker leg"
+MA_MSG10="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-45-00_lieapprove-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-8/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG10"
+R10="$WORK/ma-leg10"; mkdir -p "$R10"
+PRE_LIE_CT="$(find "$MA_FIX/.comms/to-claude" -type f | wc -l | tr -d ' ')"
+GROK_STUB_LIE_APPROVE=1 run_grok_leg "$MA_MSG10" "$R10" >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R10/result.json" | head -1)" = "failed" ] \
+  && grep -q 'contradicts its own body' "$R10/result.json" && [ -f "$MA_MSG10" ] \
+  && [ "$(find "$MA_FIX/.comms/to-claude" -type f | wc -l | tr -d ' ')" = "$PRE_LIE_CT" ] \
+  && ok "explicit APPROVE over blocking findings is REFUSED by the live broker" || fail "lie-approve broker leg"
+MA_MSG11="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-47-00_preamble-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-9/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG11"
+R11="$WORK/ma-leg11"; mkdir -p "$R11"
+GROK_STUB_PREAMBLE_NUMBERED=1 run_grok_leg "$MA_MSG11" "$R11" >/dev/null 2>&1
+REPLY11="$(find "$MA_FIX/.comms/to-claude" -type f -name '*grok-reply*' -newer "$R11/prompt.md" | head -1)"
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R11/result.json" | head -1)" = "completed" ] \
+  && [ -n "$REPLY11" ] && grep -q '^verdict: REQUEST_CHANGES$' "$REPLY11" \
+  && ok "preamble + numbered None.-suffix finding derives REQUEST_CHANGES live (the field incident)" || fail "preamble-numbered broker leg"
 # Question leg (/ask grok path): the stub STILL emits a leading canonical
 # VERDICT line — for a consult that line must become body text, never metadata.
 MA_MSGQ="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-41-00_ask-q-1.md"
@@ -1436,7 +1474,15 @@ DVEOF
 cat > "$DV/no-structure.md" <<'DVEOF'
 I looked at it and it seems fine to me, shipping.
 DVEOF
-dv_count() { awk '/^### Blocking/{f=1;next} /^###/{f=0} f && /^[-*] /{ if ($0 !~ /^[-*] *[Nn]one\.? *$/) n++ } END{print n+0}' "$1"; }
+dv_count() { awk '
+  function isplaceholder(t) {
+    sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/\*/, "", t)
+    return (t == "None" || t == "None.")
+  }
+  /^### Blocking/{f=1;next} /^###/{f=0}
+  f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
+  END{print n+0}' "$1"; }
 [ "$(dv_count "$DV/with-blocking.md")" = "1" ] && ok "derivation counts a real blocking finding" || fail "derive count blocking"
 [ "$(dv_count "$DV/clean.md")" = "0" ] && ok "derivation does not count a 'None.' placeholder" || fail "derive count none"
 grep -q '^### Blocking' "$DV/no-structure.md" && fail "fixture has structure" \
@@ -3327,7 +3373,7 @@ printf '%s\n' "$PN_R2" | grep -q 'all answered' \
 PN_STATUS="$(run_pn panel status --set "$PN_SC" 2>&1)"
 printf '%s\n' "$PN_STATUS" | grep -q 'codex' && printf '%s\n' "$PN_STATUS" | grep -q 'grok' \
   && ok "panel status lists every leg in the set" || fail "panel status (got: $PN_STATUS)"
-printf '%s\n' "$PN_STATUS" | awk -F'\t' 'NR>1 && $3!="yes"' | grep -q . \
+printf '%s\n' "$PN_STATUS" | awk -F'\t' 'NF>=4 && $1!="reviewer" && $3!="yes"' | grep -q . \
   && fail "status missed a genuinely bound answer" || ok "panel status sees bound answers"
 # Status shares compose's binding: the pn-partial legs sit on the SAME threads with
 # valid same-round replies in the archive, and must still read unanswered.

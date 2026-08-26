@@ -227,6 +227,14 @@ install_local_assets() {
     cp "$HELPER_SRC/$h" "$PROJECT_ROOT/.agent-comms/$h"
     chmod +x "$PROJECT_ROOT/.agent-comms/$h"
   done
+  # A local pin outranks the global install, so a retired helper surviving HERE
+  # shadows its own removal everywhere else. The explicit return keeps a missing
+  # retired file (the common case) from becoming the function's exit status under
+  # set -e.
+  for h in $RETIRED_HELPERS; do
+    [ -f "$PROJECT_ROOT/.agent-comms/$h" ] && { rm -f "$PROJECT_ROOT/.agent-comms/$h"; echo "  removed retired helper $h"; }
+  done
+  return 0
 }
 
 warn_local_shadowing() {
