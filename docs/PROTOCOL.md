@@ -43,7 +43,7 @@ directory the inbound actually occupies; already-archived is an idempotent no-op
 
 ## Worktrees & branches
 
-Loops often run in a `git worktree` (one per cmux workspace — see `/fleet`). Two rules
+Loops often run in a `git worktree` (one per cmux workspace). Two rules
 keep that safe:
 
 **Message routing is worktree-safe.** Every helper resolves `.comms/` to the **main repo
@@ -165,10 +165,10 @@ fields as observability and attach plumbing, not yet as automatic cross-round re
 (that is a planned opt-in, not wired).
 
 State is **advisory ground truth**: it survives compaction/restarts, records and
-surfaces the loop's round/max-rounds (enforcement itself happens in the reading agent's
-flow, from message frontmatter), and gives `/fleet` a source of truth beyond pane
-titles — but a state write failure can never block the message flow (writes are
-non-fatal by construction).
+surfaces the loop's round/max-rounds and loop-rounds budget (enforcement itself happens
+in the reading agent's flow, from message frontmatter), and gives any dashboard a
+source of truth beyond pane titles — but a state write failure can never block the
+message flow (writes are non-fatal by construction).
 
 Inspection: `comms.sh state list | get <thread> | complete <thread>`, and
 `comms.sh stalled [minutes]` lists threads awaiting a reply longer than the threshold
@@ -314,6 +314,6 @@ the child can reach for cmux.
 
 Each agent archives **only its own inbox** (`comms.sh archive --as <self>` enforces
 this), idempotently — an already-archived file is a no-op, never an error. The shared
-`archive/` is the loop's audit trail; `/fleet` reads its newest entry per workspace to
-infer loop completion (a normalized approving verdict — `APPROVE`, or its canonical
+`archive/` is the loop's audit trail; its newest entry per workspace is how any reader
+infers loop completion (a normalized approving verdict — `APPROVE`, or its canonical
 synonym `pass` — is the only completion signal).

@@ -919,6 +919,39 @@ rest are open.
 - Token-compression principles (e.g. headroom) — revisit once the panel's real spend is
   measured rather than projected.
 
+## Token-efficiency track (2026-08-26, from the headroom consult — codex + grok)
+
+Consulted both reviewers on stealing from headroomlabs-ai/headroom. Consensus: steal the
+cache-mode INVARIANT (frozen prefix, byte-identical history, only the live zone changes),
+never the product (proxy/ML compressors are the wrong layer for hand-authored markdown,
+and lossy rewriting of inter-agent instructions is the `$N`-corruption class). Ranked:
+
+- [ ] **Warm ACP sessions are silently COLD on panel legs** (grok, consult): runphase
+  mounts `artifact_id` at `$run_dir/tree` and cd's there, but acpx keys session identity
+  on `(agent, cwd, name)` — run_dir is per-message, so every mounted turn is a new cwd
+  and a fresh ~115k context while the session NAME looks stable. Fix: stable mount path
+  per `(thread, agent)`, replace contents per round, keep cwd. This gates everything
+  below — without it the 127x warm number is a single-reviewer footnote.
+- [ ] **Skip re-dispatch of legs that already APPROVEd the artifact** — a driver rule,
+  not compression; reserve full-panel holistic re-dispatch for the final round.
+- [ ] **Live-zone delta prompts on warm legs**: round N+1 over a warm session sends only
+  the round header, diff --stat delta, and amendments — the instructions and prior
+  findings are already IN the session. Cold/headless keeps today's full inline.
+- [ ] **CCR as protocol norm**: terse summary + canonical path/ref instead of mandated
+  copy-forward (prior-findings bundle, full plan text) on warm legs — the filesystem is
+  already the reversible store. Copy-forward was designed for a reader with no session.
+- [ ] **Instrument per-leg spend** (ships WITH the two above, not as a gate): lift
+  acpx's token-usage line + events.ndjson usage into result.json and a rounds.tsv
+  column, so the delta is measured.
+- [ ] Tail-of-prompt verbosity steering, narrowly ("no preamble, findings are
+  path:line + claim" — never "be brief": terseness that punishes reproduction buys
+  cheaper, worse reviews). Error-only validation reporting (failures + counts, never
+  green logs). Warn-only lint of assembled prompt.md prefix stability + ACP identity —
+  NOT of mailbox files (frontmatter must change; all false positives).
+- Skip (re-litigate only with new evidence): SmartCrusher/AST/ML prose compression,
+  proxy + MCP machinery, SharedContext (that is `.comms/`), wrapping agent CLIs
+  (documented unsupported — it fights acpx session identity).
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing

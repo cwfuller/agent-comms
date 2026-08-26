@@ -9,7 +9,7 @@ prompt-wrappers; the shell logic lives in the installed helpers (see
 ### `/auto [--plan] [--reviewers a,b] [--rounds N] [--via cmux] <task>`
 
 Implement → send to Codex → fix blocking findings → repeat until `APPROVE` or `N`
-rounds (default 10). The task text can describe work or reference an existing plan file.
+rounds (default 5). The task text can describe work or reference an existing plan file.
 Round messages keep stable context (latest findings bundle + `git diff --stat` +
 validation results), never per-finding fix narration.
 
@@ -258,11 +258,6 @@ inflate the "constant" and defeat the cap.
   applies `--limit`** — so the limit can never discard a newer match, and the per-file
   frontmatter parse runs only on hits.
 
-### `fleet.sh`
-
-Same subcommands as `/fleet` above — the command template is a thin wrapper over this
-script. `fleet.sh help` prints usage.
-
 ### `docs/loopspec/check.sh`
 
 Conformance checker for the [loopspec](loopspec/SPEC.md) kernel:
@@ -313,11 +308,6 @@ default `workspace-write`), `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800),
 
 # quick design consult while implementing
 /ask --with-diff is the retry/backoff approach here sound?
-
-# fan five briefs across a fleet
-/fleet status
-/fleet dispatch-all briefs/a.md briefs/b.md briefs/c.md briefs/d.md briefs/e.md
-# review the mapping, then confirm: "yes fire all"
 
 # loop seems quiet?
 ~/.agent-comms/comms.sh stalled
