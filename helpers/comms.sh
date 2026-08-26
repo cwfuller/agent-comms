@@ -1634,6 +1634,12 @@ print_direct_recovery() {
 
 runphase_available() { [ -x "$(dirname "$SELF")/runphase.sh" ]; }
 
+acp_supports() {  # <agent> — can an ACP turn actually run here for this agent?
+  local acp_sh; acp_sh="$(dirname "$SELF")/acp.sh"
+  [ -x "$acp_sh" ] || return 1
+  "$acp_sh" supports "$1" >/dev/null 2>&1
+}
+
 cmd_transport() {
   # transport <agent> [--loop] — print the transport that would actually be used:
   # headless | cmux | acp | mailbox.
@@ -1657,6 +1663,7 @@ cmd_transport() {
   require_agent "$agent" "transport"
 
   if [ "${COMMS_DELIVERY:-}" = "headless" ]; then printf 'headless\n'; return 0; fi
+  if [ "${COMMS_DELIVERY:-}" = "acp" ]; then printf 'acp\n'; return 0; fi
 
   local caps picked
   caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
@@ -1676,10 +1683,20 @@ cmd_transport() {
     printf 'mailbox\n'; return 0
   fi
 
-  # LOOPS ARE HEADLESS-FIRST. A loop is unattended work by definition: making it
-  # depend on a terminal pane being open is what stranded messages in inboxes
-  # nobody was watching. cmux stays available but is opt-in, handled above.
+  # LOOPS ARE ACP-FIRST, then headless, then a pane. A loop is unattended work by
+  # definition, so it must not depend on an open pane — but the ordering here is
+  # driven by cost, measured on one real review turn in this repo:
+  #
+  #   cmux (live pane)      ~43,000-85,000 fresh input tokens per turn
+  #   headless (cold spawn) ~115,000
+  #   ACP (warm session)    ~1,061
+  #
+  # A cold spawn rebuilds context from nothing every round; a live pane keeps the
+  # conversation but still re-sends a large uncached prefix per model call. Only a
+  # named ACP session makes round N pay a delta. cmux and headless stay available
+  # and opt-in (COMMS_DELIVERY / --via).
   if [ "$mode" = "loop" ]; then
+    if acp_supports "$agent"; then printf 'acp\n'; return 0; fi
     # Fall back to a pane only when the headless runner is genuinely missing:
     # flipping the default must not strand every loop on an install where
     # runphase.sh never landed.
@@ -1708,12 +1725,7 @@ cmd_transport() {
   # Consults only: a loop turn must be able to EXECUTE (read files, run git) and that
   # permission policy is unbuilt, so silently re-routing a loop would change its
   # semantics rather than just its transport.
-  if [ "$mode" = "consult" ]; then
-    local acp_sh; acp_sh="$(dirname "$SELF")/acp.sh"
-    if [ -x "$acp_sh" ] && "$acp_sh" supports "$agent" >/dev/null 2>&1; then
-      printf 'acp\n'; return 0
-    fi
-  fi
+  if [ "$mode" = "consult" ] && acp_supports "$agent"; then printf 'acp\n'; return 0; fi
   case "$caps" in *interactive*) ;; *) printf 'headless\n'; return 0 ;; esac
   printf 'mailbox\n'
 }

@@ -243,7 +243,7 @@ templates, and these docs all read from it rather than each re-deciding.
 
 | context | default | why |
 |---|---|---|
-| **loop** (`auto-*`) | `headless` | a loop is unattended work — requiring an open pane is what left messages in inboxes nobody was watching |
+| **loop** (`auto-*`) | `acp` → `headless` → `cmux` | cost, measured on one real review turn in this repo: cmux ~43–85k fresh input tokens, cold headless ~115k, warm ACP **~1,061**. A cold spawn rebuilds context from nothing each round; a live pane keeps the conversation but still re-sends a large uncached prefix per model call. Only a named per-thread ACP session makes round N pay a delta |
 | **consult** (`/ask`) | pane if one is live, else `acp` | a consult is synchronous by nature; ACP needs no pane and warm sessions cost ~1/127 the input tokens |
 
 Opting back into the watchable pane: `--via cmux` on an `auto-*` command, or

@@ -2860,8 +2860,12 @@ if bash "$REPO/helpers/acp.sh" supports grok >/dev/null 2>&1; then
 else
   [ "$TR_GROK" = "headless" ] && ok "a headless-only agent reports headless" || fail "grok consult (got: $TR_GROK)"
 fi
-[ "$(run_tr transport grok --loop 2>/dev/null)" = "headless" ] \
-  && ok "a LOOP never routes to acp — its permission policy is unbuilt" || fail "grok loop transport"
+# Loops DO route to acp now (2026-08-26): the reviewer permission profile turned out
+# to exist — --approve-reads plus --non-interactive-permissions deny — and one live
+# loop delivered a stamped reply into the inbox. What a loop must never do is take a
+# pane it was not asked for.
+[ "$(run_tr transport grok --loop 2>/dev/null)" != "cmux" ] \
+  && ok "a headless-only agent's loop never resolves to a pane" || fail "grok loop transport"
 
 # An explicit COMMS_DELIVERY=headless override beats everything.
 [ "$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$COMMS" transport codex) 2>/dev/null)" = "headless" ] \
@@ -2873,10 +2877,14 @@ workspace:7
     surface:23 [terminal] codex
 TRTREE
 # A LOOP is unattended work: it must not require a pane to be open.
-[ "$(run_tr transport codex --loop 2>/dev/null)" = "headless" ] \
-  && ok "a loop defaults to headless, with no pane anywhere" || fail "loop default (got: $(run_tr transport codex --loop 2>/dev/null))"
-[ "$(run_tr_cmux transport codex --loop 2>/dev/null)" = "headless" ] \
-  && ok "a loop stays headless even when a pane IS live — cmux is opt-in now" || fail "loop ignored headless-first"
+TR_LOOP_DEFAULT="$(run_tr transport codex --loop 2>/dev/null)"
+if bash "$REPO/helpers/acp.sh" supports codex >/dev/null 2>&1; then
+  [ "$TR_LOOP_DEFAULT" = "acp" ] && ok "a loop defaults to acp — the cheapest measured transport" || fail "loop default (got: $TR_LOOP_DEFAULT)"
+else
+  [ "$TR_LOOP_DEFAULT" = "headless" ] && ok "with no ACP, a loop falls back to headless" || fail "loop default (got: $TR_LOOP_DEFAULT)"
+fi
+[ "$(run_tr_cmux transport codex --loop 2>/dev/null)" != "cmux" ] \
+  && ok "a loop does not take a live pane — cmux is opt-in now" || fail "loop took the pane by default"
 [ "$(run_tr_want_cmux transport codex --loop 2>/dev/null)" = "cmux" ] \
   && ok "COMMS_DELIVERY=cmux opts a loop back into the watchable pane" || fail "cmux opt-in"
 # Asking for cmux when none is live must not silently substitute another transport.
@@ -2955,7 +2963,7 @@ printf '%s\n' "$TR_NOWS" | grep -q 'tree unavailable' \
   || fail "specific reason lost (got: $TR_NOWS)"
 # The mode comes from the MESSAGE, so `transport` agrees with what deliver did.
 [ "$(run_tr_deliver transport codex)" = "cmux" ] && ok "consult mode resolves to the live pane" || fail "consult transport"
-[ "$(run_tr_deliver transport codex --loop)" = "headless" ] && ok "loop mode resolves to headless" || fail "loop transport"
+[ "$(run_tr_deliver transport codex --loop)" != "cmux" ] && ok "loop mode never resolves to the pane by default" || fail "loop transport"
 
 # Criterion 3: with runphase.sh genuinely absent, a loop must fall back to the pane
 # rather than strand. Untested until grok pointed it out. A bare copy of the helper (no
