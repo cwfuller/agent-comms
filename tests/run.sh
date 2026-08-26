@@ -1582,8 +1582,13 @@ OUT="$(run_acp consult codex is the retry approach sound 2>&1)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && echo "$OUT" | grep -q 'stub answer' && ok "consult passes the answer through" || fail "consult happy path (rc=$rc)"
 grep -q -- '-y acpx@0.13.1 codex sessions ensure --name agent-comms-ask' "$ACP_STUB_LOG" \
   && ok "warm consult ensures the pinned named session" || fail "session ensure argv"
-grep -q -- '-y acpx@0.13.1 --format quiet codex -s agent-comms-ask is the retry approach sound' "$ACP_STUB_LOG" \
+grep -q -- '-y acpx@0.13.1 --format quiet --approve-reads --non-interactive-permissions deny codex -s agent-comms-ask is the retry approach sound' "$ACP_STUB_LOG" \
   && ok "warm consult prompts the named session with the pinned acpx" || fail "warm prompt argv"
+# A consult that cannot read is useless — it would answer from recall instead of the
+# tree. Denied permissions killed a real consult mid-answer before this was added.
+grep -q -- '--approve-reads' "$ACP_STUB_LOG" && ok "consults may READ the tree" || fail "consult read approval"
+grep -q -- '--non-interactive-permissions deny' "$ACP_STUB_LOG" \
+  && ok "consults still refuse writes (prompting is impossible here)" || fail "consult write denial"
 : > "$ACP_STUB_LOG"
 run_acp consult codex --oneshot quick check >/dev/null 2>&1
 grep -q -- 'codex exec quick check' "$ACP_STUB_LOG" && ! grep -q -- '-s agent-comms-ask' "$ACP_STUB_LOG" \
