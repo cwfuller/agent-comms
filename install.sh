@@ -21,11 +21,11 @@ else
 fi
 CLAUDE_COMMANDS_DIR="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
-CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask.md ask-codex.md auto-plan.md auto-implement.md auto-full.md clean-comms.md fleet.md"
+CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask.md auto.md clean-comms.md"
 CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
-HELPERS="comms.sh fleet.sh runphase.sh acp.sh"
+HELPERS="comms.sh runphase.sh acp.sh"
 SCOPE=""
 
 usage() {
@@ -149,8 +149,8 @@ echo "  scope: $SCOPE"
 
 # Check prerequisites
 if ! command -v cmux &>/dev/null; then
-  echo "  warning: cmux not found. Install from https://cmux.com"
-  echo "  (comms files will be installed, but auto-delivery requires cmux)"
+  echo "  note: cmux not found — that is fine. Loops run over ACP by default and need no"
+  echo "  pane. Install cmux (https://cmux.com) only if you want '--via cmux' delivery."
   echo ""
 fi
 
@@ -527,21 +527,21 @@ echo ""
 echo "  done! installed:"
 case "$SCOPE" in
   local)
-    echo "    Project Claude: /send-to-codex, /read-from-codex, /ask, /ask-codex (deprecated), /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
+    echo "    Project Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
     echo "    Project Codex:  \$read-from-claude, \$send-to-claude"
     ;;
   global)
-    echo "    Global Claude: /send-to-codex, /read-from-codex, /ask, /ask-codex (deprecated), /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
+    echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
     echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
-    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh,runphase.sh,acp.sh}"
+    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
     ;;
   project)
     echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
     ;;
   both)
-    echo "    Global Claude: /send-to-codex, /read-from-codex, /ask, /ask-codex (deprecated), /auto-plan, /auto-implement, /auto-full, /clean-comms, /fleet"
+    echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
     echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
-    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,fleet.sh,runphase.sh,acp.sh}"
+    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
     echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
     ;;
 esac
@@ -549,6 +549,6 @@ echo ""
 echo "  usage:"
 echo "    Claude: 'implement X, then /send-to-codex'"
 echo "    Codex:  '\$read-from-claude'"
-echo "    Auto:   '/auto-plan build feature X'"
+echo "    Auto:   '/auto build feature X'   (add --plan for a capped approach round)"
 echo ""
 echo "  optional: cmux (https://cmux.com) for auto-delivery between panes"

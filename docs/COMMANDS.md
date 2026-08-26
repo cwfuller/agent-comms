@@ -6,23 +6,12 @@ prompt-wrappers; the shell logic lives in the installed helpers (see
 
 ## Claude Code commands
 
-### `/auto-implement [N] [--reviewer <agent>] <task>`
+### `/auto [--plan] [--reviewers a,b] [--rounds N] [--via cmux] <task>`
 
 Implement → send to Codex → fix blocking findings → repeat until `APPROVE` or `N`
 rounds (default 10). The task text can describe work or reference an existing plan file.
 Round messages keep stable context (latest findings bundle + `git diff --stat` +
 validation results), never per-finding fix narration.
-
-### `/auto-plan [N] [--reviewer <agent>] <task>`
-
-Same loop for a plan: draft → review → refine until approved. Each round re-sends the
-full updated plan so the reviewer re-reads fresh.
-
-### `/auto-full [N] [--reviewer <agent>] <task>`
-
-`/auto-plan` then `/auto-implement`, chained: when the plan phase gets `APPROVE`,
-implementation starts automatically at `round: 1` (same `thread`, `phase: implement`).
-`N` caps each phase separately.
 
 ### `/ask [agent] [question] [--with-diff] [--with-files a,b]`
 
@@ -61,6 +50,10 @@ cold one-shot 18,562 fresh input tokens vs warm round-2 146 — ~127x). `--onesh
 exec. All three registered agents have ACP profiles (codex, claude, and grok via `grok-build`).
 On any failure the helper names the fallback: rerun without `--via acp`.
 
+> **Internals.** `/send-to-codex` and `/read-from-codex` are the loop's individual steps.
+> The loop drives them; you rarely type them. They are documented here because delivery
+> nudges them by name, not because they are part of the everyday surface.
+
 ### `/send-to-codex [instructions]`
 
 One-shot review request for work you just did: gathers diff stat, recent commits, and
@@ -81,25 +74,6 @@ filename, or a thread.
 Guarded cleanup via `comms.sh clean` — always dry-runs first, deletes only after you
 confirm (`--yes`). Default `workspace` mode touches **your inbox + archive only**; `all`
 is the only mode that deletes the other agent's unread mail.
-
-### `/fleet <subcommand>`
-
-Orchestrate execution workspaces (`ws-1`, `ws-2`, …) from a control workspace. Each
-execution workspace = Claude pane (1) + Codex pane (2).
-
-| subcommand | effect |
-|---|---|
-| `status` | per-workspace table: pane states (braille-spinner detection), latest archive round/verdict, pending counts, `owes=<agent> <N>m` from thread state |
-| `dispatch <ws> <brief> [--plan-first] [--force]` | `/new` both panes, fire `/auto-implement <brief>` (`--plan-first` → `/auto-full`); refuses a busy target unless `--force` |
-| `dispatch-all <brief...> [--plan-first] [--force] [--yes]` | map briefs onto free workspaces (idle + approved-or-never-dispatched + no unread mail); dry-run without `--yes`; re-validates each target at fire time |
-| `harvest` | list workspaces idle + approved — ready for the next brief |
-| `clear <ws>` | `/new` both panes |
-
-Env: `FLEET_PREFIX` (default `ws`), `FLEET_MAX` concurrency cap (default 3 — protects a
-shared working tree; bump it if each workspace has its own `git worktree add`). When you
-do give each workspace its own worktree, create it on a dedicated branch and guard
-against accidental pushes to `main` — see
-[PROTOCOL.md → Worktrees & branches](PROTOCOL.md#worktrees--branches).
 
 ## Codex skills
 
@@ -307,7 +281,7 @@ Node, unsupported agents, or acpx errors — the mailbox path is always availabl
 
 ### `runphase.sh` (experimental)
 
-Headless peer-turn runner. **It is the default for loops** since 2026-08-25; cmux is opt-in via `--via cmux` / `COMMS_DELIVERY=cmux`.
+Headless peer-turn runner, and the host for ACP turns (`run --via acp`). Loops default to **ACP**; headless is the fallback when ACP is unavailable; cmux is opt-in via `--via cmux` / `COMMS_DELIVERY=cmux`.
 `deliver`/`send` call `spawn` for you — `await`, `result`, `hold`, and `release` are
 the operator surface:
 

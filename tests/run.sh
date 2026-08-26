@@ -18,7 +18,6 @@ export COMMS_DELIVERY=cmux
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMS="$REPO/helpers/comms.sh"
-FLEET="$REPO/helpers/fleet.sh"
 PASS=0; FAIL=0
 
 ok()   { PASS=$((PASS+1)); echo "  ok: $1"; }
@@ -285,55 +284,6 @@ check_not "send refuses malformed outbound" run_comms send --to codex "$BADOUT" 
 check "send valid outbound (manual pickup) archives inbound" run_comms send --to codex "$GOOD" --archive-inbound "$IN2"
 [ ! -f "$IN2" ] && ok "inbound archived after successful send" || fail "inbound archived after successful send"
 
-echo "== fleet.sh: list/status/dispatch with stubbed cmux =="
-cat > "$CMUX_STUB_DIR/list.txt" <<'LIST'
-* workspace:88  ws-ctrl  [selected]
-  workspace:81  ws-10
-  workspace:79  ws-1
-  workspace:80  ws-2
-LIST
-cat > "$CMUX_STUB_DIR/tree-workspace_79.txt" <<'TREE'
-workspace workspace:79 "ws-1"
-├── pane pane:1
-│   └── surface surface:31 [terminal] "⠙ implementing feature"
-└── pane pane:2
-    └── surface surface:32 [terminal] "Codex"
-TREE
-cat > "$CMUX_STUB_DIR/tree-workspace_80.txt" <<'TREE'
-workspace workspace:80 "ws-2"
-├── pane pane:1
-│   └── surface surface:41 [terminal] "Claude Code"
-└── pane pane:2
-    └── surface surface:42 [terminal] "Codex"
-TREE
-cp "$CMUX_STUB_DIR/tree-workspace_80.txt" "$CMUX_STUB_DIR/tree-workspace_81.txt"
-
-run_fleet() { (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$FLEET" "$@"); }
-
-STATUS_OUT="$(run_fleet status)"
-echo "$STATUS_OUT" | head -1 | grep -q '^ws-1 ' && ok "status natural sort: ws-1 first" || fail "status natural sort: ws-1 first"
-echo "$STATUS_OUT" | sed -n '2p' | grep -q '^ws-2 ' && ok "status natural sort: ws-2 before ws-10" || fail "status natural sort: ws-2 before ws-10 (got: $(echo "$STATUS_OUT" | sed -n 2p))"
-echo "$STATUS_OUT" | grep '^ws-1 ' | grep -q 'claude=active' && ok "braille title classified active" || fail "braille title classified active"
-echo "$STATUS_OUT" | grep '^ws-2 ' | grep -q 'claude=idle' && ok "bare title classified idle" || fail "bare title classified idle"
-
-mkdir -p "$REPO_FIX/docs"
-TRICKY="docs/foo--plan-first-draft.md"
-echo "brief" > "$REPO_FIX/$TRICKY"
-check_not "dispatch onto busy workspace is rejected" run_fleet dispatch ws-1 "$TRICKY"
-: > "$CMUX_STUB_LOG"
-DISPATCH_OUT="$(run_fleet dispatch ws-2 "$TRICKY" 2>&1)"
-echo "$DISPATCH_OUT" | grep -q 'mode=/auto-implement' && ok "tricky brief name does not flip mode" || fail "tricky brief name does not flip mode (got: $DISPATCH_OUT)"
-grep -q "/auto-implement $TRICKY" "$CMUX_STUB_LOG" && ok "brief path delivered unmutated" || fail "brief path delivered unmutated"
-: > "$CMUX_STUB_LOG"
-run_fleet dispatch ws-2 "$TRICKY" --plan-first >/dev/null 2>&1
-grep -q "/auto-full $TRICKY" "$CMUX_STUB_LOG" && ok "--plan-first flips mode to auto-full" || fail "--plan-first flips mode to auto-full"
-
-# dispatch-all dry-run: ws-2/ws-10 idle, no archive -> free; mapping printed, nothing fired
-: > "$CMUX_STUB_LOG"
-DA_OUT="$(run_fleet dispatch-all "$TRICKY" 2>&1)"
-echo "$DA_OUT" | grep -q -- "-> ws-2" && ok "dispatch-all maps brief to first free ws" || fail "dispatch-all maps brief to first free ws (got: $DA_OUT)"
-grep -q 'send' "$CMUX_STUB_LOG" && fail "dispatch-all dry-run must not fire" || ok "dispatch-all dry-run does not fire"
-
 echo "== install.sh: scopes =="
 INST_FIX="$WORK/install-repo"
 mkdir -p "$INST_FIX"
@@ -346,107 +296,13 @@ SUM1="$(cat "$INST_FIX/.gitignore")"
 [ "$SUM1" = "$(cat "$INST_FIX/.gitignore")" ] && ok "project scope is idempotent" || fail "project scope is idempotent"
 LOCAL_OUT="$(cd "$INST_FIX" && bash "$REPO/install.sh" --scope=local 2>&1)"
 [ -x "$INST_FIX/.agent-comms/comms.sh" ] && ok "local scope installs executable helpers" || fail "local scope installs executable helpers"
-[ -f "$INST_FIX/.claude/commands/auto-implement.md" ] && ok "local scope installs commands" || fail "local scope installs commands"
-[ -f "$INST_FIX/.claude/commands/ask.md" ] && [ -f "$INST_FIX/.claude/commands/ask-codex.md" ] \
-  && ok "local scope installs /ask and the deprecated alias" || fail "local scope installs ask.md + ask-codex.md"
+[ -f "$INST_FIX/.claude/commands/auto.md" ] && ok "local scope installs commands" || fail "local scope installs commands"
+[ -f "$INST_FIX/.claude/commands/ask.md" ] && ok "local scope installs /ask" || fail "local scope installs ask.md"
+# The collapse deleted five commands; installing a removed one would resurrect it.
+for dead in auto-plan.md auto-full.md auto-implement.md fleet.md ask-codex.md; do
+  [ -f "$INST_FIX/.claude/commands/$dead" ] && fail "removed command $dead was installed" || ok "removed command $dead stays removed"
+done
 echo "$LOCAL_OUT" | grep -qi "shadow" && ok "local scope prints pin/shadow note" || fail "local scope prints pin/shadow note"
-
-echo "== fleet.sh: harvest + frontmatter boundary =="
-# Archive whose frontmatter has NO verdict but whose BODY quotes one — must NOT count as approved.
-QUOTED="$REPO_FIX/.comms/archive/ws-2_2026-06-04T11-00-00_auto-implement.md"
-cat > "$QUOTED" <<'MSG'
----
-type: review-request
-from: claude
-timestamp: 2026-06-04T11:00:00Z
-workspace: ws-2
-workflow: auto-implement
-phase: implement
-round: 1
-max-rounds: 10
----
-
-## Body quoting a verdict line
-verdict: APPROVE
-MSG
-HV="$(run_fleet harvest)"
-echo "$HV" | grep '^ws-2:' | grep -q 'not approved' && ok "body-quoted verdict does NOT fake approval (fm boundary)" || fail "body-quoted verdict does NOT fake approval (got: $(echo "$HV" | grep '^ws-2:'))"
-
-# A real APPROVE in frontmatter (newer) -> READY
-sleep 1
-APPROVED="$REPO_FIX/.comms/archive/ws-2_2026-06-04T11-30-00_review.md"
-cat > "$APPROVED" <<'MSG'
----
-type: review-feedback
-from: codex
-timestamp: 2026-06-04T11:30:00Z
-workspace: ws-2
-workflow: auto-implement
-phase: implement
-round: 1
-max-rounds: 10
-verdict: APPROVE
----
-
-## Summary
-Approved.
-MSG
-HV="$(run_fleet harvest)"
-echo "$HV" | grep '^ws-2:' | grep -q 'READY' && ok "frontmatter APPROVE -> READY" || fail "frontmatter APPROVE -> READY (got: $(echo "$HV" | grep '^ws-2:'))"
-
-# A pending to-claude message newer than the archive -> PENDING, not READY
-sleep 1
-PEND="$REPO_FIX/.comms/to-claude/ws-2_2026-06-04T11-45-00_reply.md"
-cp "$APPROVED" "$PEND"
-HV="$(run_fleet harvest)"
-echo "$HV" | grep '^ws-2:' | grep -q 'PENDING' && ok "newer unread message -> PENDING" || fail "newer unread message -> PENDING (got: $(echo "$HV" | grep '^ws-2:'))"
-rm -f "$PEND"
-
-echo "== fleet.sh: dispatch-all --yes skips a dead target without aborting the batch =="
-# ws-10's tree has only ONE pane -> cmd_dispatch dies on pane resolution at fire
-# time; the batch must skip it and still complete (regression: exit-vs-skip).
-cat > "$CMUX_STUB_DIR/tree-workspace_81.txt" <<'TREE'
-workspace workspace:81 "ws-10"
-├── pane pane:1
-│   └── surface surface:51 [terminal] "Claude Code"
-TREE
-BRIEF2="docs/brief-two.md"
-echo "brief two" > "$REPO_FIX/$BRIEF2"
-: > "$CMUX_STUB_LOG"
-DA_FIRE="$(run_fleet dispatch-all "$TRICKY" "$BRIEF2" --yes 2>&1)"
-DA_RC=$?
-[ "$DA_RC" -eq 0 ] && ok "batch completes despite one dead target" || fail "batch completes despite one dead target (rc=$DA_RC)"
-echo "$DA_FIRE" | grep -q "skipped ws-10" && ok "dead target reported as skipped" || fail "dead target reported as skipped (got: $DA_FIRE)"
-[ "$(grep -c '/auto-implement' "$CMUX_STUB_LOG")" = "1" ] && ok "exactly one brief fired (ws-2 only)" || fail "exactly one brief fired (log: $(grep -c '/auto-implement' "$CMUX_STUB_LOG"))"
-
-echo "== fleet.sh: dispatch-all excludes workspaces with unread mail =="
-PEND2="$REPO_FIX/.comms/to-claude/ws-2_2026-06-04T12-30-00_unread.md"
-cp "$APPROVED" "$PEND2"
-DA_EX="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$FLEET" dispatch-all "$TRICKY") 2>&1 )"
-echo "$DA_EX" | grep -q "excluding ws-2" && ok "pending unread mail excludes workspace from free list" || fail "pending exclusion (got: $DA_EX)"
-rm -f "$PEND2"
-
-echo "== fleet.sh: dispatch-all --force propagates to per-target dispatch =="
-: > "$CMUX_STUB_LOG"
-DA_CAP="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 FLEET_MAX=0 "$FLEET" dispatch-all "$TRICKY" --yes) 2>&1 )"
-grep -q '/auto-implement' "$CMUX_STUB_LOG" && fail "capped batch must not fire (FLEET_MAX=0)" || ok "capped batch does not fire (FLEET_MAX=0)"
-echo "$DA_CAP" | grep -q 'skipped' && ok "capped target reported as skipped" || fail "capped target reported as skipped (got: $DA_CAP)"
-: > "$CMUX_STUB_LOG"
-(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 FLEET_MAX=0 "$FLEET" dispatch-all "$TRICKY" --yes --force) >/dev/null 2>&1
-grep -q "/auto-implement $TRICKY" "$CMUX_STUB_LOG" && ok "--force forwarded: batch fires past the cap" || fail "--force forwarded: batch fires past the cap"
-
-echo "== fleet.sh: dispatch-all excludes first-handoff workspace (no archive, unread mail) =="
-PEND10="$REPO_FIX/.comms/to-codex/ws-10_2026-06-04T12-40-00_auto-implement.md"
-cp "$GOOD" "$PEND10"
-DA_FH="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$FLEET" dispatch-all "$TRICKY") 2>&1 )"
-echo "$DA_FH" | grep -q "excluding ws-10" && ok "no-archive + pending message is excluded (first round in flight)" || fail "first-handoff exclusion (got: $DA_FH)"
-rm -f "$PEND10"
-
-echo "== fleet.sh: clear =="
-cp "$CMUX_STUB_DIR/tree-workspace_80.txt" "$CMUX_STUB_DIR/tree-workspace_81.txt"
-: > "$CMUX_STUB_LOG"
-run_fleet clear ws-2 >/dev/null
-[ "$(grep -c 'send --surface surface:4[12] --workspace workspace:80 /new' "$CMUX_STUB_LOG")" = "2" ] && ok "clear /new's both panes" || fail "clear /new's both panes"
 
 echo "== comms.sh: status smoke =="
 ST="$(run_comms status)"
@@ -459,9 +315,8 @@ grep -qxF '.agent-comms/' "$INST_FIX/.gitignore" && ok "local install gitignores
 GHOME="$WORK/ghome"
 GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global 2>&1)"
 [ -x "$GHOME/agent-comms/comms.sh" ] && ok "global scope installs executable helpers (env-overridden)" || fail "global scope installs executable helpers"
-[ -f "$GHOME/commands/fleet.md" ] && ok "global scope installs commands (env-overridden)" || fail "global scope installs commands"
-[ -f "$GHOME/commands/ask.md" ] && [ -f "$GHOME/commands/ask-codex.md" ] \
-  && ok "global scope installs /ask and the deprecated alias" || fail "global scope installs ask.md + ask-codex.md"
+[ -f "$GHOME/commands/auto.md" ] && ok "global scope installs commands (env-overridden)" || fail "global scope installs commands"
+[ -f "$GHOME/commands/ask.md" ] && ok "global scope installs /ask" || fail "global scope installs ask.md"
 [ -f "$GHOME/skills/read-from-claude/SKILL.md" ] && ok "global scope installs skills (env-overridden)" || fail "global scope installs skills"
 echo "$GH_OUT" | grep -q "codex-permissions" \
   && ok "global install names the one-time default Codex socket setup" || fail "global install Codex socket setup hint"
@@ -556,25 +411,6 @@ QUOTE_WF="$WORK/quote-wf.md"
 sed 's/phase: implement/phase: fix "login" bug/' "$OUT_WF" > "$QUOTE_WF"
 (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$QUOTE_WF") >/dev/null 2>&1
 grep -q '\\"login\\"' "$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json" && ok "embedded quotes escaped in state JSON" || fail "embedded quotes escaped (got: $(grep phase "$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json"))"
-
-echo "== fleet.sh: dispatch-all accepts a lowercase/whitespace verdict (normalized) =="
-# Newest ws-2 archive gets a sloppy verdict — dispatch-all must still treat it as APPROVE
-sleep 1
-SLOPPY="$REPO_FIX/.comms/archive/ws-2_2026-06-04T12-50-00_review.md"
-sed 's/^verdict: APPROVE$/verdict:  approve /' "$APPROVED" > "$SLOPPY"
-DA_NORM="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$FLEET" dispatch-all "$TRICKY") 2>&1 )"
-echo "$DA_NORM" | grep -q -- "-> ws-2" && ok "dispatch-all normalizes verdict (' approve ' is eligible)" || fail "dispatch-all verdict normalization (got: $DA_NORM)"
-rm -f "$SLOPPY"
-
-echo "== fleet.sh: loopspec pass synonym gates like APPROVE (kernel parity) =="
-sleep 1
-PASSV="$REPO_FIX/.comms/archive/ws-2_2026-06-04T12-55-00_review.md"
-sed 's/^verdict: APPROVE$/verdict: pass/' "$APPROVED" > "$PASSV"
-DA_PASS="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$FLEET" dispatch-all "$TRICKY") 2>&1 )"
-echo "$DA_PASS" | grep -q -- "-> ws-2" && ok "dispatch-all treats 'verdict: pass' as completion" || fail "dispatch-all pass synonym (got: $DA_PASS)"
-HV_PASS="$(run_fleet harvest)"
-echo "$HV_PASS" | grep '^ws-2:' | grep -q 'READY' && ok "harvest treats 'verdict: pass' as READY" || fail "harvest pass synonym (got: $(echo "$HV_PASS" | grep '^ws-2:'))"
-rm -f "$PASSV"
 
 echo "== comms.sh v2: state dir blocked as a FILE must not break send/archive =="
 mv "$REPO_FIX/.comms/state" "$REPO_FIX/.comms/state.bak"
@@ -672,27 +508,6 @@ cp "$TA" "$RES_IN"
 RES_TAIL="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUT_WF" --archive-inbound "$RES_IN") 2>/dev/null | tail -1 )"
 case "$RES_TAIL" in RESULT:*) ok "tail -1 of send --archive-inbound is the RESULT line" ;; *) fail "final line on archive path (got: $RES_TAIL)" ;; esac
 [ ! -f "$RES_IN" ] && ok "inbound still archived on the RESULT-last path" || fail "inbound archived on RESULT-last path"
-
-echo "== fleet.sh: status shows thread-state owes note =="
-mkdir -p "$REPO_FIX/.comms/state"
-cat > "$REPO_FIX/.comms/state/ws-2_loop-x.json" <<JSON
-{
-  "workspace": "ws-2",
-  "thread": "loop-x",
-  "workflow": "auto-implement",
-  "phase": "implement",
-  "round": "1",
-  "max_rounds": "10",
-  "status": "in-progress",
-  "awaiting_from": "codex",
-  "awaiting_since": "2026-06-04T13:00:00Z",
-  "awaiting_since_epoch": "$(( $(date +%s) - 120 ))",
-  "last_sent": "x",
-  "last_delivery": "delivered"
-}
-JSON
-run_fleet status | grep '^ws-2 ' | grep -q 'owes=codex' && ok "fleet status surfaces state ground truth (owes=)" || fail "fleet status owes note (got: $(run_fleet status | grep '^ws-2 '))"
-rm -f "$REPO_FIX/.comms/state/ws-2_loop-x.json"
 
 echo "== runphase v0: headless delivery via stubbed codex =="
 RUNPHASE="$REPO/helpers/runphase.sh"
@@ -1523,11 +1338,14 @@ rm -f "$STRAY" "$OUTB"
 echo "== multi-agent: template source contracts =="
 grep -qF '"$COMMS_SH" agents' "$REPO/templates/claude-commands/ask.md" \
   && ok "ask.md reads known agents from the registry helper" || fail "ask.md registry hookup"
-for tf in auto-plan auto-implement auto-full; do
-  grep -q -- '--reviewer <agent>' "$REPO/templates/claude-commands/$tf.md" \
-    && grep -qF 'send --to "$REVIEWER"' "$REPO/templates/claude-commands/$tf.md" \
-    && ok "$tf.md carries --reviewer with variable target" || fail "$tf.md reviewer flag"
-done
+# One loop command now. `--reviewers` is PLURAL and held as a list: a singular name
+# stretched into a list is how one REVIEWER scalar ends up copied across every write path.
+AUTOF="$REPO/templates/claude-commands/auto.md"
+grep -q -- '--reviewers a,b' "$AUTOF" && ok "auto.md takes a reviewer LIST" || fail "auto.md reviewers flag"
+grep -qF 'GATING=' "$AUTOF" && ok "auto.md names a gating reviewer distinct from the list" || fail "auto.md gating reviewer"
+grep -q 'Default 4' "$AUTOF" && ok "auto.md defaults max-rounds to 4" || fail "auto.md rounds default"
+grep -q 'DIRECTION' "$AUTOF" && ok "auto.md gives --plan a direction-only bar" || fail "auto.md plan bar"
+grep -q 'capped at 2 rounds' "$AUTOF" && ok "auto.md caps the plan phase" || fail "auto.md plan cap"
 grep -qF 'REVIEWER=$(awk' "$REPO/templates/claude-commands/read-from-codex.md" \
   && grep -q 'ok) print v' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader extractor is close-delimiter-gated" || fail "reader REVIEWER capture (bounded)"
@@ -1665,9 +1483,9 @@ echo "== scope-dial template source contract =="
 FRAGVD="$REPO/docs/loopspec/fragments/verdict-discipline.md"
 grep -q 'Pre-existing defects in code the change did not touch are Advisory by default' "$FRAGVD" \
   && ok "verdict-discipline fragment carries the pre-existing-defects rule" || fail "fragment pre-existing-defects rule"
-AIF="$REPO/templates/claude-commands/auto-implement.md"
+AIF="$REPO/templates/claude-commands/auto.md"
 grep -q '## Acceptance criteria' "$AIF" && grep -q 'PINNED at round 1' "$AIF" \
-  && ok "auto-implement pins acceptance criteria at round 1" || fail "auto-implement acceptance criteria"
+  && ok "auto.md pins acceptance criteria at round 1" || fail "auto acceptance criteria"
 RFC="$REPO/templates/claude-commands/read-from-codex.md"
 grep -q 'pinned `## Acceptance criteria`' "$RFC" \
   && ok "auto-full implement handoff pins acceptance criteria" || fail "read-from-codex criteria handoff"
@@ -1715,14 +1533,6 @@ grep -qF 'send --to "$TARGET"' "$ASKF" && ok "ask.md sends to a variable target"
 grep -q 'loopspec:fragment result-spawned-exception' "$ASKF" \
   && ok "ask.md embeds the result-spawned-exception fragment" || fail "ask.md fragment embed present"
 
-echo "== /ask-codex deprecated alias contract =="
-ALIASF="$REPO/templates/claude-commands/ask-codex.md"
-grep -qi 'deprecated' "$ALIASF" && ok "alias declares deprecation" || fail "alias declares deprecation"
-grep -qF '`/ask' "$ALIASF" && ok "alias points at /ask" || fail "alias points at /ask"
-grep -q 're-run install.sh' "$ALIASF" && ok "alias fails closed on stale install" || fail "alias stale-install fail-closed"
-grep -q 'target pinned to codex' "$ALIASF" && ok "alias pins its target to codex" || fail "alias codex-pin instruction"
-grep -q 'loopspec:fragment' "$ALIASF" && fail "alias regrew a fragment embed" || ok "alias carries no fragment embed"
-grep -q 'type: question' "$ALIASF" && fail "alias regrew a frontmatter skeleton" || ok "alias carries no frontmatter skeleton"
 
 echo "== loopspec: prompt fragments do not drift from docs/loopspec/fragments/ =="
 # Every marked region in a template must match its fragment file byte-for-byte
@@ -3047,6 +2857,29 @@ sed -e 's|^message_id: .*|message_id: q-2|' "$TR_CONSULT" > "$TR_Q2"
 run_tr_deliver send --to codex "$TR_Q2" >/dev/null 2>&1 || true
 grep -q '^artifact_id:' "$TR_Q2" && fail "a consult was stamped with an artifact" || ok "consults are never stamped — they review nothing"
 run_tr_deliver validate "$TR_WF2" >/dev/null 2>&1 && ok "a stamped message still validates" || fail "stamping broke validation"
+
+# Artifact retention FAILS CLOSED: dispatching a loop against an unpinned tree would
+# review whatever the working tree holds while the message implies a pinned artifact —
+# invisible afterwards. (codex, transport-flip round 4.)
+TR_NOGIT="$WORK/not-a-repo"; mkdir -p "$TR_NOGIT/.comms/to-codex"
+cp "$TR_LOOPMSG" "$TR_NOGIT/.comms/to-codex/wf.md" 2>/dev/null || true
+TR_FC="$( (cd "$TR_NOGIT" && env -u COMMS_DELIVERY "$COMMS" send --to codex "$TR_NOGIT/.comms/to-codex/wf.md") 2>&1 )" && TR_FCRC=0 || TR_FCRC=$?
+[ "$TR_FCRC" != "0" ] && ok "a loop outside a git repo is refused, not dispatched unpinned" || fail "unpinned dispatch was allowed"
+
+# CRLF frontmatter must still get stamped, and must stay CRLF.
+TR_CRLF="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-26T11-00-00_crlf.md"
+sed -e 's|^message_id: .*|message_id: crlf-1|' -e 's|^thread: .*|thread: tr-crlf|' "$TR_LOOPMSG" | sed 's/$/\r/' > "$TR_CRLF"
+run_tr_deliver send --to codex "$TR_CRLF" >/dev/null 2>&1 || true
+grep -q '^artifact_id:' "$TR_CRLF" && ok "a CRLF message still gets stamped" || fail "CRLF message not stamped"
+grep -q $'\r' "$TR_CRLF" && ok "stamping leaves CRLF line endings intact" || fail "stamping rewrote line endings"
+
+# The spawn guard must be ATOMIC: scan-then-create lets two concurrent deliveries both
+# spawn, which under panel fan-out is a phantom extra reviewer.
+grep -q 'ATOMIC claim' "$REPO/helpers/runphase.sh" && ok "spawn guard documents its atomicity" || fail "spawn guard comment"
+grep -q 'mkdir "\$claim"' "$REPO/helpers/runphase.sh" \
+  && ok "spawn claims the message with an atomic mkdir, not a scan" || fail "spawn guard is not atomic"
+grep -q 'rm -rf "\$claim"' "$REPO/helpers/runphase.sh" \
+  && ok "a stale claim from a dead holder is reclaimable" || fail "stale claim is not reclaimable"
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus

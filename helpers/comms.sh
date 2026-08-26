@@ -2195,14 +2195,20 @@ cmd_send() {
       local stamped; stamped="$(mktemp "${TMPDIR:-/tmp}/agent-comms-stamp.XXXXXX")"
       # Byte-preserving insert at the close of frontmatter — an awk rewrite of every
       # line normalizes CRLF and is not what "send this message" should mean.
+      # CRLF-tolerant on the DELIMITER test only — the line itself is reprinted
+      # unmodified, so a CRLF file stays CRLF. (codex, transport-flip round 4.)
       LC_ALL=C awk -v aid="$send_aid" '
-        NR == 1 && $0 == "---" { fm = 1; print; next }
-        fm && $0 == "---" { printf "artifact_id: %s\n", aid; fm = 0; print; next }
+        { probe = $0; sub(/\r$/, "", probe) }
+        NR == 1 && probe == "---" { fm = 1; print; next }
+        fm && probe == "---" { printf "artifact_id: %s\n", aid; fm = 0; print; next }
         { print }
       ' "$file" > "$stamped" && mv -f "$stamped" "$file"
       rm -f "$stamped" 2>/dev/null || true
     else
-      echo "warning: could not retain an artifact for this turn — the reviewer will read the live tree" >&2
+      # Fail CLOSED. Proceeding would review the live tree while the message implies a
+      # pinned one — the precise failure the snapshot exists to remove, and invisible
+      # afterwards. (codex, transport-flip round 4.)
+      die "send: could not retain the artifact under review — refusing to dispatch a loop against an unpinned tree (is this a git repo with a commit?)"
     fi
   fi
 

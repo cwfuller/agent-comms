@@ -92,7 +92,7 @@ the log, not only in memory.
 
 **The reviewer is the `REVIEWER` derived mechanically in step 4** (frontmatter-bounded,
 registry-checked — same rule as the thread capture: never type it by hand).
-Every continuation in this flow — round-2+ replies, the error lane, and the auto-full
+Every continuation in this flow — round-2+ replies, the error lane, and the
 plan→implement handoff — writes to `$COMMS_ROOT/to-$REVIEWER/` and sends
 `--to "$REVIEWER"`. Never assume codex: an initial `--reviewer grok` loop must keep the
 SAME reviewer for its entire lifecycle.
@@ -104,7 +104,10 @@ SAME reviewer for its entire lifecycle.
    - **Carry over what would otherwise evaporate:**
      - Un-actioned `### Advisory` items → append to `docs/advisories.md` (date, thread, items) so they survive the loop's end
      - `### Process` items (meta-channel feedback) → append to the project's friction log / roadmap so they drive protocol changes
-   - If `workflow: auto-full` and `phase: plan` → **Transition to implement phase:**
+   - If `phase: plan` → **Transition to implement phase.** Keyed on the PHASE, never on
+     the workflow's value: there is one loop command now (`/auto`), and `--plan` is a flag
+     on it rather than a separate workflow name. Any approved plan phase continues into
+     implementation on the same thread.
      - **Archive the approval message first** (`"$COMMS_SH" archive --as claude "<file>"`) — this prevents a re-triggered `/read-from-codex` from re-reading the stale approval and double-firing the implement phase
      - Notify user: "Plan approved after N rounds. Starting implementation..."
      - `"$COMMS_SH" lessons --surface "<implementation area>"` (bounded) — the plan was

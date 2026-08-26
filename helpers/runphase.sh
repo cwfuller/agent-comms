@@ -565,26 +565,41 @@ cmd_spawn() {
   # Re-delivery guard: a bare `deliver codex` retry must not double-spawn a
   # concurrent turn for a message whose runner is still alive. (A dead runner
   # without a result is fair game — that is exactly what a retry is for.)
-  local prior prior_pid
-  for prior in "$root/logs/$(safe_name "$mid")".*; do
-    [ -d "$prior" ] || continue
-    [ -f "$prior/result.json" ] && continue
-    prior_pid="$(cat "$prior/pid" 2>/dev/null || true)"
-    if [ -n "$prior_pid" ] && kill -0 "$prior_pid" 2>/dev/null; then
-      echo "already running: runphase pid=$prior_pid for this message"
-      echo "  run dir: $prior"
-      echo "  await:   \"$SELF\" await \"$prior\""
+  # ATOMIC claim. Scanning for a live prior and THEN creating a uniquely-named run dir
+  # is a TOCTOU: two concurrent deliveries both scan, both find nothing, and both spawn.
+  # `mkdir` is the atomic primitive — exactly one caller can create the claim. A claim
+  # whose pid is dead is stale and reclaimable, which is what makes a retry after a crash
+  # still work. (codex, transport-flip round 4; it matters more under panel fan-out,
+  # where a duplicate spawn becomes a phantom extra reviewer.)
+  local claim held prior prior_pid
+  claim="$root/logs/.spawn-$(safe_name "$mid")"
+  mkdir -p "$root/logs" 2>/dev/null || true
+  if ! mkdir "$claim" 2>/dev/null; then
+    held="$(cat "$claim/pid" 2>/dev/null || true)"
+    if [ -n "$held" ] && kill -0 "$held" 2>/dev/null; then
+      echo "already running: runphase pid=$held for this message"
+      for prior in "$root/logs/$(safe_name "$mid")".*; do
+        [ -d "$prior" ] || continue
+        [ -f "$prior/result.json" ] && continue
+        echo "  run dir: $prior"
+        echo "  await:   \"$SELF\" await \"$prior\""
+        break
+      done
       return 0
     fi
-  done
+    # Stale claim (holder died without releasing) — reclaim it exactly once.
+    rm -rf "$claim" 2>/dev/null || true
+    mkdir "$claim" 2>/dev/null || { echo "already running: another delivery just claimed this message"; return 0; }
+  fi
   # $$ suffix: same-second re-spawns must not clobber each other's records.
   run_dir="$root/logs/$(safe_name "$mid").$(date +%s).$$"
-  mkdir -p "$run_dir" || die "spawn: cannot create run dir $run_dir"
+  mkdir -p "$run_dir" || { rm -rf "$claim" 2>/dev/null || true; die "spawn: cannot create run dir $run_dir"; }
   nohup "$SELF" run --message "$msg" --dir "$run_dir" --provider "$provider" \
     ${sandbox:+--sandbox "$sandbox"} ${timeout:+--timeout-secs "$timeout"} \
     ${via:+--via "$via"} \
     </dev/null >>"$run_dir/runner.log" 2>&1 &
   local pid=$!
+  printf '%s' "$pid" > "$claim/pid" 2>/dev/null || true
   printf '%s' "$pid" > "$run_dir/pid"
   echo "spawned runphase pid=$pid provider=$provider"
   echo "  run dir: $run_dir"
