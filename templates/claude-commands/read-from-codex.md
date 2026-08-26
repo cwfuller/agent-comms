@@ -106,23 +106,35 @@ the log, not only in memory.
 ### Panel rounds — when the message belongs to a review set
 
 A panel leg is an ordinary 2-party `review-feedback`; what changes is that **one leg is
-not the round**. Detect panel membership BOTH ways — the field when the reply carries
-it, and otherwise the set index looked up by the reply's `in-reply-to` (every dispatch
-records its request id there, and every conformant reply is bound to it). A reply that
-lost its `review_set:` in transit is still a panel leg, and treating it as a
-single-reviewer reply lets the first arriving leg steer the loop — the round-1
-lifecycle defect through a different door. (codex + grok, panel r2.) If EITHER capture
-yields a set, do NOT act on the message alone:
+not the round**. Resolve the set from the INDEX first — `sets.tsv` looked up by the
+reply's `in-reply-to` (every dispatch records its request id there; every conformant
+reply is bound to it). The `review_set:` field is a CROSS-CHECK, not the authority:
+it is model-copied, so a stale or wrong field would compose an unrelated (possibly
+completed) set while re-dispatch fans out a different one. Both greps are bounded to
+the frontmatter block — round-N bodies quote prior requests, and a body-quoted
+`review_set:` line must never win. A field-less but index-bound reply is STILL a
+panel leg. (codex + grok, panel r2 + r3.) If the resolution yields a set, do NOT act
+on the message alone:
 
 ```bash
-SET="$(grep -m1 '^review_set:' "<inbound>" | sed 's/^review_set: *//')"
-if [ -z "$SET" ]; then
-  IRT="$(grep -m1 '^in-reply-to:' "<inbound>" | sed 's/^in-reply-to: *//')"
-  [ -n "$IRT" ] && SET="$(awk -F'\t' -v m="$IRT" 'NR>1 && $(2)==m {print $(1); exit}' "$COMMS_ROOT/grades/sets.tsv" 2>/dev/null)"
+FM="$(sed -n '2,/^---$/p' "<inbound>")"          # frontmatter only — bodies quote requests
+IRT="$(printf '%s\n' "$FM" | grep -m1 '^in-reply-to:' | sed 's/^in-reply-to: *//')"
+SETS="$COMMS_ROOT/grades/sets.tsv"
+SET_IDX=""; [ -n "$IRT" ] && SET_IDX="$(awk -F'\t' -v m="$IRT" 'NR>1 && $(2)==m {print $(1); exit}' "$SETS" 2>/dev/null)"
+SET_FIELD="$(printf '%s\n' "$FM" | grep -m1 '^review_set:' | sed 's/^review_set: *//')"
+if [ -n "$SET_IDX" ] && [ -n "$SET_FIELD" ] && [ "$SET_IDX" != "$SET_FIELD" ]; then
+  echo "review_set mismatch: field '$SET_FIELD' vs index '$SET_IDX' — FAIL CLOSED" >&2
+  # Report to the user and STOP: composing either set on a disagreement gates the
+  # loop on an identity nobody can vouch for. Do not archive the reply.
 fi
+SET="${SET_IDX:-$SET_FIELD}"                      # index wins; field only when no row
 "$COMMS_SH" panel status  --set "$SET"     # which legs have answered
 "$COMMS_SH" compose --set "$SET"           # exits non-zero while any leg is missing
 ```
+
+Reuse `$SET`, `$IRT`, and `$SETS` for every later panel step in this read — the roster
+capture, the round-N+1 re-dispatch, and the handoff all use THIS resolved identity,
+never a re-derived one.
 
 - **`compose` refuses a partial panel.** An unanswered leg is not an approval. Archive the
   leg you just read, say which reviewers are still out, and stop — the loop resumes when
@@ -148,16 +160,14 @@ error lane, and the plan→implement handoff — writes to `$COMMS_ROOT/to-$REVI
 sends `--to "$REVIEWER"`. Never assume codex: an initial `--reviewer grok` loop must
 keep the SAME reviewer for its entire lifecycle.
 
-**In a PANEL loop (the inbound carries `review_set:`), the panel IS the reviewer** and
-the Panel rounds section above overrides every `--to "$REVIEWER"` below: continuations
-are authored ONCE as a `review-request` on the BASE thread and fanned with
-`panel dispatch --to <roster>` — round 2+, and the plan→implement handoff alike. A
-panel-approved plan implemented under one leg silently sheds the rest of the panel;
-the roster is captured mechanically from the set index, never from memory:
+**In a PANEL loop (the inbound resolved to a review set above — by index or field),
+the panel IS the reviewer** and the Panel rounds section above overrides every
+`--to "$REVIEWER"` below: continuations are authored ONCE as a `review-request` on the
+BASE thread and fanned with `panel dispatch --to <roster>` — round 2+, and the
+plan→implement handoff alike. A panel-approved plan implemented under one leg silently
+sheds the rest of the panel; the roster comes from the SAME `$SET`/`$SETS` resolved in
+the Panel rounds section — never re-derived, never from memory:
 ```bash
-REQ_MID="$(grep -m1 '^in-reply-to:' "<the inbound reply>" | sed 's/^in-reply-to: *//')"
-SETS="$COMMS_ROOT/grades/sets.tsv"
-SET="$(awk -F'\t' -v m="$REQ_MID" 'NR>1 && $(2)==m {print $(1); exit}' "$SETS")"
 ROSTER="$(awk -F'\t' -v s="$SET" 'NR>1 && $(1)==s {print $(10)}' "$SETS" | paste -sd, -)"
 ```
 (Only the error lane stays per-leg: a malformed reply is one leg's problem and its
