@@ -103,13 +103,23 @@ Over time `rounds.tsv` is how you see which reviewer is carrying which kind of w
 the observation that one model was vastly superior in a given phase should be visible in
 the log, not only in memory.
 
-### Panel rounds — when the message carries `review_set`
+### Panel rounds — when the message belongs to a review set
 
 A panel leg is an ordinary 2-party `review-feedback`; what changes is that **one leg is
-not the round**. If the inbound carries `review_set:`, do NOT act on it alone:
+not the round**. Detect panel membership BOTH ways — the field when the reply carries
+it, and otherwise the set index looked up by the reply's `in-reply-to` (every dispatch
+records its request id there, and every conformant reply is bound to it). A reply that
+lost its `review_set:` in transit is still a panel leg, and treating it as a
+single-reviewer reply lets the first arriving leg steer the loop — the round-1
+lifecycle defect through a different door. (codex + grok, panel r2.) If EITHER capture
+yields a set, do NOT act on the message alone:
 
 ```bash
 SET="$(grep -m1 '^review_set:' "<inbound>" | sed 's/^review_set: *//')"
+if [ -z "$SET" ]; then
+  IRT="$(grep -m1 '^in-reply-to:' "<inbound>" | sed 's/^in-reply-to: *//')"
+  [ -n "$IRT" ] && SET="$(awk -F'\t' -v m="$IRT" 'NR>1 && $(2)==m {print $(1); exit}' "$COMMS_ROOT/grades/sets.tsv" 2>/dev/null)"
+fi
 "$COMMS_SH" panel status  --set "$SET"     # which legs have answered
 "$COMMS_SH" compose --set "$SET"           # exits non-zero while any leg is missing
 ```

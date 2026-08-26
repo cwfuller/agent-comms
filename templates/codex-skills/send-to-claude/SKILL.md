@@ -74,6 +74,8 @@ workflow: <copy from the incoming message verbatim if present>
 phase: <copy from incoming message if present — plan | implement>
 round: <copy from incoming message if present>
 max-rounds: <copy from incoming message if present>
+loop-rounds: <copy from incoming message if present — the loop's real budget riding through the plan phase>
+review_set: <copy from incoming message if present — your reply's panel identity; without it the driver may treat your leg as a single-reviewer reply>
 verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question or sending type: error>
 ---
 

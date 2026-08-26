@@ -2900,6 +2900,18 @@ SH_LOOPR_DIR="$(find "$SH_FIX/.comms/grades/shadow" -maxdepth 1 -type d -name 'l
   && ok "the broker stamps loop-rounds onto the reply (budget survives the handoff)" \
   || fail "loop-rounds did not survive the broker stamp (got: $(grep -m1 loop-rounds "$SH_LOOPR_DIR/grok.md" 2>/dev/null))"
 
+# review_set must ride the broker stamp the same way: a brokered reply without its
+# panel identity is processed as a single-reviewer reply and the first arriving leg
+# steers the loop — the round-1 lifecycle defect, back through the broker path.
+# (codex + grok, panel r2.)
+SH_REQ_RSET="$(sh_req_for rset)"
+perl -pi -e 's/^(max-rounds: .*)$/$1\nreview_set: rs-broker-77/' "$SH_REQ_RSET"
+run_sh shadow --to grok --review-set rset-set "$SH_REQ_RSET" >/dev/null 2>&1 || true
+SH_RSET_DIR="$(find "$SH_FIX/.comms/grades/shadow" -maxdepth 1 -type d -name 'rset-set-*' | head -1)"
+[ -n "$SH_RSET_DIR" ] && grep -q '^review_set: rs-broker-77' "$SH_RSET_DIR/grok.md" 2>/dev/null \
+  && ok "the broker stamps review_set onto the reply (panel identity survives)" \
+  || fail "review_set did not survive the broker stamp (got: $(grep -m1 review_set "$SH_RSET_DIR/grok.md" 2>/dev/null))"
+
 echo "== grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims) =="
 GR2="$WORK/shadow-repo2"
 mkdir -p "$GR2"; GR2="$(cd "$GR2" && pwd -P)"
@@ -3477,6 +3489,21 @@ PN_LEG_G="$(find "$PN_FIX/.comms/to-grok" -name '*panel-grok*' -type f | head -1
 PN_AC="$(grep -m1 '^artifact_id:' "$PN_LEG_C" | sed 's/^artifact_id: //')"
 PN_AG="$(grep -m1 '^artifact_id:' "$PN_LEG_G" | sed 's/^artifact_id: //')"
 [ -n "$PN_AC" ] && [ "$PN_AC" = "$PN_AG" ] && ok "every leg carries the SAME artifact_id" || fail "legs disagree on the artifact ($PN_AC vs $PN_AG)"
+
+# A request derived from a prior panel inbound already carries review_set. Dispatch
+# must REPLACE it: appending the new one after loses to grep -m1 and every later
+# status/compose would gate on the OLD set. (grok, panel r2.)
+PN_REQ_STALE="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-01-00_req-stale.md"
+sed -e 's/^message_id: .*/message_id: pn-req-stale/' \
+    -e 's/^thread: .*/thread: pn-stale-thread\nreview_set: stale-old-set/' "$PN_REQ" > "$PN_REQ_STALE"
+PN_ST_OUT="$(run_pn panel dispatch --to codex,grok --set pn-fresh "$PN_REQ_STALE" 2>&1 || true)"
+PN_ST_SET="$(printf '%s\n' "$PN_ST_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+PN_ST_LEG="$(find "$PN_FIX/.comms/to-codex" -name '*panel-codex*' -type f | xargs grep -l 'pn-stale-thread' | head -1)"
+[ -n "$PN_ST_LEG" ] && [ "$(grep -c '^review_set:' "$PN_ST_LEG")" = "1" ] \
+  && ok "a leg carries exactly ONE review_set line" || fail "stale review_set survived alongside the new one"
+grep -q "^review_set: $PN_ST_SET$" "$PN_ST_LEG" 2>/dev/null \
+  && ok "dispatch REPLACES an inherited review_set with the set it actually dispatched" \
+  || fail "leg kept the stale set ($(grep -m1 '^review_set:' "$PN_ST_LEG"))"
 
 # 2-party per leg: distinct threads, shared review_set. Never an N-party thread.
 PN_TC="$(grep -m1 '^thread:' "$PN_LEG_C" | sed 's/^thread: //')"

@@ -144,7 +144,7 @@ If the incoming message carries a `## Meta` section requesting process feedback:
 - `APPROVE` — Ship-ready. Advisory comments may still be present.
 - `REQUEST_CHANGES` — Blocking issues must be addressed before approval.
 
-**Send your review immediately via `$send-to-claude`.** The message MUST preserve the workflow metadata (`workflow`, `phase`, `round`, `max-rounds`, and `loop-rounds` when the inbound carries it — that field is the loop's real budget riding through the capped plan phase, and your approval reply is the only file the driver still holds at the handoff) and add your `verdict`. `$send-to-claude`'s atomic send archives the incoming message only after your reply is validated and delivery attempted.
+**Send your review immediately via `$send-to-claude`.** The message MUST preserve the workflow metadata (`workflow`, `phase`, `round`, `max-rounds`, plus `loop-rounds` and `review_set` when the inbound carries them — `loop-rounds` is the loop's real budget riding through the capped plan phase, and `review_set` is your reply's panel identity: without it the driver may process your leg as a single-reviewer reply and advance the loop before the other legs answer) and add your `verdict`. `$send-to-claude`'s atomic send archives the incoming message only after your reply is validated and delivery attempted.
 
 **Important:** In autonomous mode, do NOT ask the user how to proceed. Review and respond immediately. The loop continues until you APPROVE or max rounds are reached.
 
