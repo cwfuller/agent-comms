@@ -1109,11 +1109,15 @@ PROMPT
     else
       acp_perm=(--approve-reads --non-interactive-permissions deny)
     fi
+    local acp_t0 acp_elapsed
+    acp_t0="$(date +%s)"
     ( cd "$workdir" && PATH="${acp_shim:+$acp_shim:}$PATH" "${acp_launch[@]}" \
         "${acp_perm[@]}" \
         --timeout "$timeout" --format quiet \
         "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
       > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" || acp_rc=$?
+    acp_elapsed=$(( $(date +%s) - acp_t0 ))
+    echo "acp turn finished after ${acp_elapsed}s (budget ${timeout}s)" >>"$run_dir/runner.log"
     # acpx hands back the answer as TEXT, so the streaming extractor is skipped
     # entirely and only the stamping half of the broker applies.
     if [ "$acp_rc" -eq 0 ] && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then
@@ -1121,6 +1125,17 @@ PROMPT
     else
       acp_status=failed
       acp_note="${GROK_BROKER_NOTE:-acpx exited $acp_rc — see runner.log}"
+      # A timeout under `--format quiet` is INDISTINGUISHABLE from a real empty reply:
+      # acpx exits 0 having printed nothing, so the broker honestly reports "the child
+      # produced no reply text" and the operator goes hunting for permission or provider
+      # faults. Observed twice on 2026-08-26 — a 31-minute turn against the 1800s default
+      # that was working the whole time. Name the budget instead. (agent-comms-7b.)
+      if [ ! -s "$run_dir/reply-raw.md" ] && [ "$acp_elapsed" -ge "$timeout" ]; then
+        acp_note="turn exceeded its ${timeout}s budget after ${acp_elapsed}s and was killed mid-work — raise COMMS_RUNPHASE_TIMEOUT_SECS or narrow the request; this is NOT an empty or refused reply"
+        acp_rc=124
+      else
+        acp_note="$acp_note (after ${acp_elapsed}s of a ${timeout}s budget)"
+      fi
     fi
     update_thread_state "$msg_thread" "$acp_status" "acp:$acp_session" "$sfield" || true
     write_result "$run_dir" "$acp_status" "$acp_rc" "acp:$acp_session" "$msg" "$acp_note"

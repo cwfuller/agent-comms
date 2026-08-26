@@ -1186,6 +1186,43 @@ REPLY14="$(find "$MA_FIX/.comms/to-claude" -type f -name '*grok-reply*' -newer "
 [ -n "$REPLY14" ] && grep -q '^verdict: APPROVE$' "$REPLY14" \
   && ok "a fenced quote of a whole prior review neither forges a verdict nor a finding" || fail "quoted-verdict broker leg"
 
+# An ACP turn killed by its own timeout budget must NOT be reported as an empty reply.
+# Under `--format quiet` acpx exits 0 having printed nothing, so a killed-mid-work turn
+# and a genuinely empty one are byte-identical; the honest-but-wrong note sent an
+# operator hunting permission flags for half an hour. (agent-comms-7b, 2026-08-26.)
+TO_STUB="$WORK/timeout-bin"; mkdir -p "$TO_STUB"
+cat > "$TO_STUB/npx" <<'TSTUB'
+#!/bin/bash
+case " $* " in
+  *" sessions ensure "*) echo "stub-session (created)"; exit 0 ;;
+esac
+sleep 2   # outlive the 1s budget below, and print NOTHING -- exactly acpx --format quiet
+exit 0
+TSTUB
+chmod +x "$TO_STUB/npx"
+cat > "$TO_STUB/node" <<'TNODE'
+#!/bin/bash
+echo "v22.22.3"
+TNODE
+chmod +x "$TO_STUB/node"
+MA_MSG15="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-55-00_timeout-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-13/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG15"
+R15="$WORK/ma-leg15"; mkdir -p "$R15"
+( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$TO_STUB:$PATH" \
+    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$MA_MSG15" --dir "$R15" \
+    --provider grok --via acp --timeout-secs 1 ) >/dev/null 2>&1
+TO_NOTE="$(sed -n 's/.*"note": "\(.*\)".*/\1/p' "$R15/result.json" 2>/dev/null | head -1)"
+case "$TO_NOTE" in
+  *"budget"*) ok "an ACP turn killed by its timeout names the budget, not an empty reply" ;;
+  *) fail "timeout note (got: ${TO_NOTE:-<none>})" ;;
+esac
+case "$TO_NOTE" in
+  *"produced no reply text"*) fail "a timeout is still reported as an empty reply" ;;
+  *) ok "a killed turn is not mislabelled as a refused or empty reply" ;;
+esac
+grep -q 'budget' "$R15/runner.log" 2>/dev/null \
+  && ok "elapsed and budget are recorded in runner.log either way" || fail "no elapsed/budget line in runner.log"
+
 # Question leg (/ask grok path): the stub STILL emits a leading canonical
 # VERDICT line — for a consult that line must become body text, never metadata.
 MA_MSGQ="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-41-00_ask-q-1.md"
