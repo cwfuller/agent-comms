@@ -203,10 +203,12 @@ error reply routes to that leg's reviewer alone.)
        wrong premises into review rounds before
      - Write the implement-phase message with updated frontmatter: `phase: implement`,
        `round: 1`, same `workflow` and `thread`. **Do NOT copy `max-rounds` from a plan
-       message** — the plan phase is capped at 2, and carrying that forward gives
-       implementation 2 rounds instead of its real budget. Restore it from the plan
-       message's `loop-rounds:` field; if that field is absent (a pre-2026-08-26 loop),
-       fall back to 5 and say so in the handoff. The implement phase gets its OWN full
+       message** — `max-rounds` on a plan message is the PLAN's cap, and copying it
+       forward gives implementation the plan's budget instead of its own. It EQUALS the
+       loop budget by default now, so a wrong copy produces the right number by accident
+       and the starvation only reappears when someone tightens a plan. Restore it from the
+       plan message's `loop-rounds:` field; if that field is absent (a pre-2026-08-26
+       loop), fall back to 10 and say so in the handoff. The implement phase gets its OWN full
        budget — the phases do not share one. Capture it mechanically, never by
        memory. The APPROVAL REPLY YOU ARE HOLDING is the source — reviewers preserve
        `loop-rounds` onto their replies and the broker stamps it mechanically, so the
@@ -215,7 +217,7 @@ error reply routes to that leg's reviewer alone.)
        ```bash
        LOOP_ROUNDS="$(grep -m1 '^loop-rounds:' "<the approval reply you just read>" | sed 's/^loop-rounds: *//')"
        [ -n "$LOOP_ROUNDS" ] || LOOP_ROUNDS="$(sed -n 's/.*"loop_rounds": "\([^"]*\)".*/\1/p' "$COMMS_ROOT/state/${WORKSPACE}_${THREAD}.json" 2>/dev/null | head -1)"
-       [ -n "$LOOP_ROUNDS" ] || LOOP_ROUNDS=5
+       [ -n "$LOOP_ROUNDS" ] || LOOP_ROUNDS=10
        ```
        *(grok found the starvation; codex found the fix had no durable source — the
        field now rides reply frontmatter and thread state, not memory.)*

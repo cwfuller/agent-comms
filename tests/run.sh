@@ -1521,7 +1521,7 @@ grep -qF '"$COMMS_SH" agents' "$REPO/templates/claude-commands/ask.md" \
 AUTOF="$REPO/templates/claude-commands/auto.md"
 grep -q -- '--reviewers a,b' "$AUTOF" && ok "auto.md takes a reviewer LIST" || fail "auto.md reviewers flag"
 grep -qF 'GATING=' "$AUTOF" && ok "auto.md names a gating reviewer distinct from the list" || fail "auto.md gating reviewer"
-grep -q 'Default 5' "$AUTOF" && ok "auto.md defaults max-rounds to 5 per phase" || fail "auto.md rounds default"
+grep -q 'Default 10' "$AUTOF" && ok "auto.md defaults max-rounds to 10 per phase" || fail "auto.md rounds default"
 grep -q 'EACH phase' "$AUTOF" && ok "each phase gets its own round budget" || fail "auto.md per-phase budget"
 grep -q 'DIRECTION' "$AUTOF" && ok "auto.md gives --plan a direction-only bar" || fail "auto.md plan bar"
 # The default is a PANEL, derived from the registry: hardcoding a roster means adding an
@@ -1539,7 +1539,7 @@ grep -qi 'REFUSES a partial panel' "$AUTOF" \
   && ok "auto.md says an unanswered leg is not an approval" || fail "auto.md partial-panel rule"
 # The plan cap is the PLAN's, not the loop's. Copying `max-rounds: 2` into implement
 # halves the real budget and both messages still look well-formed. (grok, collapse r1.)
-grep -qi 'PLAN cap only' "$AUTOF" && ok "auto.md scopes the 2-round cap to the plan phase" || fail "auto.md plan cap scoping"
+grep -qi 'PLAN cap only' "$AUTOF" && ok "auto.md scopes the plan cap to the plan phase" || fail "auto.md plan cap scoping"
 grep -qi 'Do NOT copy .max-rounds. from a plan' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "the handoff refuses to carry the plan cap into implementation" || fail "read-from-codex plan cap carry"
 # An upgrade must REMOVE retired commands; only ceasing to copy them leaves them callable.
