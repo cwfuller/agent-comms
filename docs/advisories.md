@@ -262,3 +262,17 @@ loop produced that are NOT actioned by it, so they survive its end:
   from a cmux-scoped message's filename prefix. Normal cmux-scoped sends key correctly,
   and message/archive paths stay correct either way — the gap is only that state lookups
   may miss. Proper fix: carry one workspace identity in state/frontmatter from loop start.
+
+## 2026-08-26 — panel-arc-7972, round-4 close (max-rounds escalation)
+
+Un-actioned advisories carried out of the loop so they survive its end:
+
+- Retry-rebind orphans an already-answered leg (fail-safe, never false-approves, but
+  an accidental retry after answers landed stalls until the new legs answer; a
+  short-circuit for a still-bound valid reply would make retry cheaper). [codex+grok r4]
+- The reader's field/index mismatch branch prints FAIL CLOSED but the snippet then
+  proceeds with the index identity — comment and test overstate the stop. [grok r4]
+- The broker's APPROVE-contradiction check gates on a case-sensitive
+  `grep '^### Blocking'` next to a case-tolerant probe — leftover dual-scan on the
+  stamp path; compose is unaffected (AC2 holds). Proper fix belongs to the
+  scanner/probe unification: gate on `probe_field blocking` unconditionally. [codex+grok r4]

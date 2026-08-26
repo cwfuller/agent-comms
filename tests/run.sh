@@ -990,6 +990,11 @@ elif [ -n "${GROK_STUB_DUP_VERDICT:-}" ]; then
 elif [ -n "${GROK_STUB_LIE_APPROVE:-}" ]; then
   # unique explicit APPROVE that contradicts its own findings
   REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Findings\n### Blocking\n1. a real blocking finding the verdict ignores\n\n### Advisory\n- None.')"
+elif [ -n "${GROK_STUB_LIE_APPROVE_LOWER:-}" ]; then
+  # The canonical-cased lie-approve stub could not see this: the cross-check gate was a
+  # case-sensitive grep while the parser was case-tolerant, so `### blocking` skipped the
+  # check entirely and stamped APPROVE over a real finding.
+  REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Findings\n### blocking\n- a real blocking finding the verdict ignores\n\n### advisory\n- None.')"
 elif [ -n "${GROK_STUB_LATE_VERDICT:-}" ]; then
   # A SOLE, valid verdict pushed past line 40 by a long preamble. The old scan
   # window stopped at 40, so this reply read as having no verdict at all.
@@ -1168,6 +1173,18 @@ REPLY11="$(find "$MA_FIX/.comms/to-claude" -type f -name '*grok-reply*' -newer "
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R11/result.json" | head -1)" = "completed" ] \
   && [ -n "$REPLY11" ] && grep -q '^verdict: REQUEST_CHANGES$' "$REPLY11" \
   && ok "preamble + numbered None.-suffix finding derives REQUEST_CHANGES live (the field incident)" || fail "preamble-numbered broker leg"
+# A lowercase `### blocking` must not let an explicit APPROVE past the cross-check.
+MA_MSG16="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-57-00_lielower-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-14/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG16"
+R16="$WORK/ma-leg16"; mkdir -p "$R16"
+PRE_LOWER_CT="$(find "$MA_FIX/.comms/to-claude" -type f | wc -l | tr -d ' ')"
+GROK_STUB_LIE_APPROVE_LOWER=1 run_grok_leg "$MA_MSG16" "$R16" >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R16/result.json" | head -1)" = "failed" ] \
+  && grep -q 'contradicts its own body' "$R16/result.json" \
+  && [ "$(find "$MA_FIX/.comms/to-claude" -type f | wc -l | tr -d ' ')" = "$PRE_LOWER_CT" ] \
+  && ok "a lowercase ### blocking heading cannot smuggle an APPROVE past the cross-check" \
+  || fail "lowercase lie-approve broker leg"
+
 # Verdict lines BEYOND the old 40-line scan window (codex, field-report round 2).
 MA_MSG12="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-49-00_lateverdict-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-10/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG12"

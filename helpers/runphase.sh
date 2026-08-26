@@ -460,7 +460,7 @@ broker_extract_stream() {  # <run-dir> — streaming-messages-json -> reply-raw.
     return 1
   fi
   if ! python3 - "$run_dir/events.ndjson" > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" <<'PYX'
-import json, sys
+import json, re, sys
 # streaming-messages-json (observed live on 1.0.5): the final {"type":"result"}
 # event carries the COMPLETE final assistant text in its `result` field — the
 # only chunking-proof anchor (plain streaming-json emits token deltas whose
@@ -478,8 +478,16 @@ for line in open(sys.argv[1]):
         final = e['result']
 text = (final or '').strip()
 lines = text.splitlines()
-if len(lines) >= 2 and lines[0].startswith('```') and lines[-1].startswith('```'):
-    text = '\n'.join(lines[1:-1])
+# Unwrap ONLY a well-formed fence, by the same rule the shared lexer uses: closer is the
+# same character, at least as long as the opener, nothing after it. Matching any line that
+# merely starts with three backticks erased a 4-tick-open/3-tick-close wrapper before the
+# parser could report it unclosed -- so the streaming path accepted structure the ACP path
+# refuses. One delimiter rule, or the two transports disagree. (codex, round 5.)
+if len(lines) >= 2:
+    _o = re.match(r'^(`{3,}|~{3,})', lines[0])
+    _c = re.match(r'^(`{3,}|~{3,})[ \t]*$', lines[-1])
+    if _o and _c and _c.group(1)[0] == _o.group(1)[0] and len(_c.group(1)) >= len(_o.group(1)):
+        text = '\n'.join(lines[1:-1])
 sys.stdout.write(text + '\n')
 PYX
   then
@@ -586,7 +594,13 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     # that contradicts the review it stamps is the failure that started this whole thread:
     # a clean panel reported over real blocking findings. Trusting the line without
     # checking it just moves the contradiction one layer up.
-    if [ "$verdict" = "APPROVE" ] && grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
+    # No grep gate. The COUNT came from the shared parser but whether the check ran did
+    # not, and the parser is case-tolerant while `grep '^### Blocking'` is not -- so a
+    # reply with `### blocking` and a real finding stamped APPROVE while compose recorded
+    # the blocker. The probe count already no-ops at 0 (placeholders, quoted-only
+    # structure, empty section), so the gate bought nothing and cost the invariant.
+    # (codex and grok independently, round 5.)
+    if [ "$verdict" = "APPROVE" ]; then
       local xblock
       # Reads the SAME probe as the derivation above — not a second scan that could
       # disagree with it.
