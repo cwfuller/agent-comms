@@ -975,8 +975,13 @@ PROMPT
     # (`--cwd` after the profile is rejected outright — caught live.) The turn runs
     # IN $workdir because acpx keys session identity on (agent, cwd, name), so the
     # warm session only stays warm if the directory is stable across rounds.
-    local acp_ver; acp_ver="$("$acp_sh" version)"
-    ( cd "$workdir" && npx -y "acpx@$acp_ver" "$acp_profile" sessions ensure --name "$acp_session" ) \
+    # Ask acp.sh HOW to launch — it owns ACPX_BIN and the npm-cache fallback, and a
+    # second copy of that recipe here is a second place to get it wrong.
+    local -a acp_launch
+    # shellcheck disable=SC2206
+    acp_launch=($("$acp_sh" launcher 2>/dev/null))
+    [ "${#acp_launch[@]}" -gt 0 ] || acp_launch=(npx -y "acpx@$("$acp_sh" version)")
+    ( cd "$workdir" && "${acp_launch[@]}" "$acp_profile" sessions ensure --name "$acp_session" ) \
       >>"$run_dir/runner.log" 2>&1 || true
     # Permission profile depends on WHERE the turn runs. A review prompt tells the
     # reviewer to run read-only git commands and compare head_sha — those are terminal
@@ -991,7 +996,7 @@ PROMPT
     else
       acp_perm=(--approve-reads --non-interactive-permissions deny)
     fi
-    ( cd "$workdir" && npx -y "acpx@$acp_ver" \
+    ( cd "$workdir" && "${acp_launch[@]}" \
         "${acp_perm[@]}" \
         --timeout "$timeout" --format quiet \
         "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
@@ -1110,7 +1115,15 @@ cmd_await() {
       if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
         sleep 2   # grace: the EXIT trap may still be writing result.json
         [ -f "$run_dir/result.json" ] && continue
-        echo "await: runner (pid $pid) died without writing result.json — see $run_dir/runner.log" >&2
+        # Write a SYNTHETIC result rather than only reporting to stderr. Without it the
+        # run leaves no machine-readable trace, so `status`, the stalled watchdog and any
+        # later reader see a turn that neither succeeded nor failed — it just is not
+        # there. Observed live: a grok run dir holding only a `pid`. (Field report from a
+        # codex session, 2026-08-26.)
+        write_result "$run_dir" failed 1 "" "$(json_get "$run_dir/result.json" message_file 2>/dev/null || true)" \
+          "runner (pid $pid) died without writing result.json — synthesized by await; see runner.log"
+        echo "await: runner (pid $pid) died without writing result.json — recorded a synthetic failed result; see $run_dir/runner.log" >&2
+        cat "$run_dir/result.json" 2>/dev/null || true
         return 1
       fi
     fi

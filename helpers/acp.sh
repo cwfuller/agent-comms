@@ -20,6 +20,9 @@
 #   supports <agent>
 #       exit 0 iff a consult can run here for that agent (machine-readable —
 #       never parse doctor's prose).
+#   launcher
+#       the argv prefix that runs acpx here (honours ACPX_BIN; falls back to a
+#       workspace npm cache when ~/.npm is unwritable). Other helpers ask, never guess.
 #   profile <agent> | version
 #       the acpx launch profile for an agent, and the pinned acpx version. Other
 #       helpers ask for these instead of keeping a second copy of the map.
@@ -41,6 +44,29 @@ die() { echo "acp.sh: $*" >&2; exit 1; }
 # "do NOT retry the ACP path on the same failure; the mailbox always works".
 FALLBACK="The mailbox path (/ask without --via acp) always works — switch to it; do not re-run the ACP call."
 die_fb() { echo "acp.sh: $*" >&2; echo "acp.sh: $FALLBACK" >&2; exit 1; }
+
+# HOW acpx is launched, in ONE place. Two escapes from `npx -y acpx@PIN`:
+#   ACPX_BIN      — an already-installed binary (no npm at all)
+#   npm_config_cache — npx failed with EPERM under ~/.npm/_cacache in a sandbox that
+#                      denies the home cache, i.e. exactly the agent sandboxes we target.
+#                      Fall back to a gitignored workspace cache instead of dying.
+# (Field report from a codex session, 2026-08-26.)
+acpx_prepare_cache() {
+  [ -n "${npm_config_cache:-}" ] && return 0
+  local home_cache="${HOME:-/nonexistent}/.npm"
+  if [ -d "$home_cache" ] && [ -w "$home_cache" ]; then return 0; fi
+  if [ ! -e "$home_cache" ] && [ -w "${HOME:-/nonexistent}" ]; then return 0; fi
+  local root fallback
+  root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  fallback="$root/.comms/cache/npm"
+  mkdir -p "$fallback" 2>/dev/null || return 0
+  export npm_config_cache="$fallback"
+  echo "note: ~/.npm is not writable — using $fallback for the acpx download cache" >&2
+}
+
+acpx_launcher() {  # prints the argv prefix that runs acpx
+  if [ -n "${ACPX_BIN:-}" ]; then printf '%s' "$ACPX_BIN"; else printf 'npx -y acpx@%s' "$ACPX_VERSION"; fi
+}
 
 node_ok() {
   command -v node >/dev/null 2>&1 || return 1
@@ -108,7 +134,10 @@ cmd_consult() {
   # its answer in the tree instead of recalling. Without these, acpx denies the
   # permission request and the turn dies mid-answer — observed live during a
   # reciprocal-adjudication run. Writes stay denied; prompting is impossible here.
-  local -a base=(npx -y "acpx@${ACPX_VERSION}" --format quiet
+  acpx_prepare_cache
+  # shellcheck disable=SC2206
+  local -a launcher=($(acpx_launcher))
+  local -a base=("${launcher[@]}" --format quiet
                  --approve-reads --non-interactive-permissions deny "$profile")
   local rc=0
   if [ "$oneshot" = true ]; then
@@ -118,7 +147,7 @@ cmd_consult() {
       "${base[@]}" exec "${words[@]}" || rc=$?
     fi
   else
-    npx -y "acpx@${ACPX_VERSION}" "$profile" sessions ensure --name "$ACP_SESSION_NAME" >/dev/null || rc=$?
+    "${launcher[@]}" "$profile" sessions ensure --name "$ACP_SESSION_NAME" >/dev/null || rc=$?
     if [ "$rc" -eq 0 ]; then
       if [ -n "$qfile" ]; then
         "${base[@]}" -s "$ACP_SESSION_NAME" --file "$qfile" ${words[@]+"${words[@]}"} || rc=$?
@@ -151,6 +180,7 @@ case "${1:-}" in
     printf '%s\n' "$(profile_for "$1")"
     ;;
   version) printf '%s\n' "$ACPX_VERSION" ;;
+  launcher) acpx_prepare_cache; acpx_launcher; printf '\n' ;;
   supports)
     # supports <agent> — exit 0 iff a consult can actually run here for that
     # agent. Machine-readable on purpose: callers must never parse doctor's prose.

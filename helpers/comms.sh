@@ -24,7 +24,10 @@
 #   transport <agent> [--loop]  which transport would actually be used right now:
 #                               headless | cmux | acp | mailbox. One decision point, so
 #                               templates never re-implement surface detection.
-#   send --to <agent> <file> [--archive-inbound <file>]
+#   send --to <agent> <file> [--wait] [--archive-inbound <file>]
+#                               --wait runs the peer turn in the FOREGROUND instead of
+#                               detaching — required inside sandboxes that reap the
+#                               children of a finished shell command.
 #                               validate, deliver, update thread state, then archive inbound
 #   reconcile <message-file|message-id>   record a successful external/direct nudge
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
@@ -47,6 +50,9 @@
 #                               have a SECOND reviewer read the same artifact. The reply is
 #                               produced and stored but NEVER delivered and never written to
 #                               thread state — a shadow verdict cannot gate the loop.
+#   ask --from <agent> --to <agent> [--wait] (--file F | words...)
+#                               one-off consult, driver-neutral: composes the question,
+#                               validates it, sends it. Any agent can ask any other.
 #   panel dispatch --to a,b <review-request> [--set ID]
 #                               fan ONE artifact out to N reviewers as N parallel 2-party
 #                               legs sharing a review_set. One snapshot for the whole set.
@@ -984,6 +990,58 @@ findings_set_lookup() {  # <root> <thread> <round> <phase> -> set\tartifact\tpro
   awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph {print $1 "\t" $6 "\t" $7; exit}' "$idx"
 }
 
+cmd_ask() {
+  # ask --from <agent> --to <agent> [--wait] (--file F | words...)
+  #
+  # The synchronous consult verb, and the FIRST driver-neutral one. Claude has /ask;
+  # every other agent had to hand-author frontmatter, send, capture a run dir, await it,
+  # find the reply and archive it — six steps for "ask a question". That asymmetry is why
+  # this tool is Claude-to-drive rather than any-agent-to-drive. (Field report from a
+  # codex session, 2026-08-26.)
+  local from="" to="" qfile="" wait_flag="" words=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from) shift; from="${1:-}" ;;
+      --to)   shift; to="${1:-}" ;;
+      --file) shift; qfile="${1:-}" ;;
+      --wait) wait_flag="--wait" ;;
+      -?*)    usage_err "ask: unknown option '$(clip "$1")'" ;;
+      *)      words="${words:+$words }$1" ;;
+    esac
+    shift
+  done
+  [ -n "$from" ] || usage_err "ask: --from <agent> is required (who is asking)"
+  [ -n "$to" ]   || usage_err "ask: --to <agent> is required"
+  require_agent "$from" "ask"; require_agent "$to" "ask"
+  [ "$from" != "$to" ] || usage_err "ask: '$from' cannot consult itself"
+  [ -n "$qfile" ] || [ -n "$words" ] || usage_err "ask: a question is required (--file F or words)"
+  [ -z "$qfile" ] || [ -f "$qfile" ] || usage_err "ask: no such file '$(clip "$qfile")'"
+
+  local root ws ts mid f
+  root="$(cmd_root)"; ws="$(cmd_workspace)"
+  ts="$(date -u +%Y-%m-%dT%H-%M-%S)"
+  mid="$(safe_name "$ws")_${ts}_ask-${from}-to-${to}-$$"
+  f="$root/$(inbox_for "$to")/${mid}.md"
+  mkdir -p "$(dirname "$f")" 2>/dev/null || die "ask: cannot create $(dirname "$f")"
+  {
+    printf -- '---\n'
+    printf 'type: question\n'
+    printf 'from: %s\n' "$from"
+    printf 'timestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'branch: %s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    printf 'head_sha: %s\n' "$(git rev-parse HEAD 2>/dev/null || true)"
+    printf 'workspace: %s\n' "$ws"
+    printf 'cwd: %s\n' "$(pwd)"
+    printf 'message_id: %s\n' "$mid"
+    printf -- '---\n\n'
+    printf '## Question\n\n'
+    if [ -n "$qfile" ]; then cat "$qfile"; else printf '%s\n' "$words"; fi
+  } > "$f"
+  cmd_validate "$f" >/dev/null || die "ask: composed a malformed question (this is a bug)"
+  echo "ask: $from -> $to  ($mid)"
+  cmd_send --to "$to" $wait_flag "$f"
+}
+
 cmd_panel() {
   # panel dispatch --to a,b <review-request>   — fan one artifact out to N reviewers
   # panel status  --set <id>                   — which legs have answered
@@ -1805,6 +1863,11 @@ cmd_bind() {  # bind <claude|codex> [surface:N] — set or show the target's sur
 # COMMS_HEADLESS_PICKUP. Any other target spawns a turn for that provider.
 # Same contract as the cmux path: never hard-fails, always says what happened.
 deliver_headless() {
+  # <target> [msgfile] — spawn a detached turn, or run it in the FOREGROUND when
+  # COMMS_WAIT=1. A detached child can be reaped the moment the managed shell command
+  # that spawned it ends, which is normal inside an agent sandbox — so an agent driving
+  # this helper needs a synchronous mode or its turns vanish. (Field report from a codex
+  # session, 2026-08-26.)
   local target="$1" msgfile="${2:-}"
   if [ "$target" = "${COMMS_HEADLESS_PICKUP:-}" ]; then
     echo "headless mode: reply written for pickup — the driving session reads it when this peer turn ends (no nudge needed)"
@@ -1824,6 +1887,18 @@ deliver_headless() {
   fi
   if [ -z "$msgfile" ] || [ ! -f "$msgfile" ]; then
     echo "warning: headless delivery found no pending message for $target — nothing spawned"
+    return 0
+  fi
+  if [ "${COMMS_WAIT:-}" = "1" ]; then
+    local fg_dir
+    fg_dir="$(cmd_root)/logs/$(safe_name "$(basename "$msgfile" .md)").$(date +%s).fg$$"
+    mkdir -p "$fg_dir" || die "send --wait: cannot create $fg_dir"
+    echo "running $target in the foreground (no detach) — run dir: $fg_dir"
+    if "$rp" run --message "$msgfile" --dir "$fg_dir" --provider "$target" >>"$fg_dir/runner.log" 2>&1; then
+      echo "completed: $target finished; the reply is in the inbox"
+      return 0
+    fi
+    echo "warning: $target's foreground turn failed — see $fg_dir/result.json"
     return 0
   fi
   local out
@@ -2401,6 +2476,7 @@ cmd_send() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --to) shift; to="${1:-}" ;;
+      --wait) COMMS_WAIT=1; export COMMS_WAIT ;;
       --archive-inbound) shift; archive_inbound="${1:-}" ;;
       *) file="$1" ;;
     esac
@@ -2550,6 +2626,7 @@ case "${1:-}" in
   lessons)        shift; cmd_lessons "$@" ;;
   archive-search) shift; cmd_archive_search "$@" ;;
   findings)       shift; cmd_findings "$@" ;;
+  ask)            shift; cmd_ask "$@" ;;
   panel)          shift; cmd_panel "$@" ;;
   compose)        shift; cmd_compose "$@" ;;
   round-note)     shift; cmd_round_note "$@" ;;

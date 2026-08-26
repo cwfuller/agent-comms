@@ -3108,6 +3108,45 @@ PN_STATUS="$(run_pn panel status --set "$PN_SC" 2>&1)"
 printf '%s\n' "$PN_STATUS" | grep -q 'codex' && printf '%s\n' "$PN_STATUS" | grep -q 'grok' \
   && ok "panel status lists every leg in the set" || fail "panel status (got: $PN_STATUS)"
 
+echo "== ask: the driver-neutral consult verb =="
+AK="$WORK/ask-repo"; mkdir -p "$AK"; AK="$(cd "$AK" && pwd -P)"
+git -C "$AK" init -q -b main
+git -C "$AK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$AK/.comms/to-codex" "$AK/.comms/to-grok" "$AK/.comms/to-claude"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$AK/.comms/config"
+run_ak() { (cd "$AK" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=cmux PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
+# The point of the verb: an agent that is NOT claude can ask, in one call.
+run_ak ask --from codex --to grok "is the retry approach sound?" >/dev/null 2>&1 || true
+AKF="$(find "$AK/.comms/to-grok" -name '*ask-codex-to-grok*' -type f | head -1)"
+[ -n "$AKF" ] && ok "codex can ask grok without hand-authoring a message" || fail "ask did not compose a message"
+grep -q '^from: codex$' "$AKF" && ok "the asker's identity is recorded, not assumed to be claude" || fail "ask from identity"
+grep -q '^type: question$' "$AKF" && ok "ask composes a question, not a review-request" || fail "ask message type"
+grep -q 'is the retry approach sound' "$AKF" && ok "the question body is carried verbatim" || fail "ask body"
+run_ak validate "$AKF" >/dev/null 2>&1 && ok "a composed question validates" || fail "ask message invalid"
+grep -q '^workflow:' "$AKF" && fail "a consult carries workflow fields" || ok "a consult has no workflow — it is not a loop"
+grep -q '^artifact_id:' "$AKF" && fail "a consult was stamped with an artifact" || ok "a consult pins no artifact"
+check_not "ask refuses a self-consult" run_ak ask --from codex --to codex hi
+check_not "ask refuses an unregistered agent" run_ak ask --from codex --to gemini hi
+check_not "ask requires a question" run_ak ask --from codex --to grok
+check_not "ask requires --from" run_ak ask --to grok hi
+# --file carries a longer brief
+printf 'a longer question\nacross lines\n' > "$AK/q.md"
+run_ak ask --from grok --to codex --file "$AK/q.md" >/dev/null 2>&1 || true
+AKF2="$(find "$AK/.comms/to-codex" -name '*ask-grok-to-codex*' -type f | head -1)"
+[ -n "$AKF2" ] && grep -q 'across lines' "$AKF2" && ok "--file carries a multi-line brief" || fail "ask --file"
+
+# send --wait must exist as a flag: a detached child is reaped when the managed shell
+# command that spawned it ends, which is normal inside an agent sandbox.
+grep -q -- '--wait) COMMS_WAIT=1' "$COMMS" && ok "send accepts --wait" || fail "send --wait flag"
+grep -q 'in the foreground (no detach)' "$COMMS" && ok "--wait runs the turn in the foreground" || fail "--wait foreground path"
+# acpx launch is asked for, never guessed twice
+grep -q 'acpx_launcher' "$REPO/helpers/acp.sh" && ok "acp.sh owns how acpx is launched" || fail "acpx launcher"
+grep -q 'ACPX_BIN' "$REPO/helpers/acp.sh" && ok "an installed acpx binary can replace npx entirely" || fail "ACPX_BIN support"
+grep -q 'npm_config_cache' "$REPO/helpers/acp.sh" \
+  && ok "an unwritable ~/.npm falls back to a workspace cache" || fail "npm cache fallback"
+grep -q 'synthesized by await' "$REPO/helpers/runphase.sh" \
+  && ok "a pid that dies without a result gets a synthetic one" || fail "synthetic failed result"
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 
