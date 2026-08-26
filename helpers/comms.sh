@@ -21,6 +21,9 @@
 #                               manual-pickup/FAILED explicitly (never hard-fails).
 #                               COMMS_DELIVERY=headless routes to runphase.sh instead
 #                               (detached codex exec / claude -p turn for the target)
+#   transport <agent> [--loop]  which transport would actually be used right now:
+#                               headless | cmux | acp | mailbox. One decision point, so
+#                               templates never re-implement surface detection.
 #   send --to <agent> <file> [--archive-inbound <file>]
 #                               validate, deliver, update thread state, then archive inbound
 #   reconcile <message-file|message-id>   record a successful external/direct nudge
@@ -35,6 +38,23 @@
 #   archive-search <pattern> [--bytes N] [--limit K]
 #                               bounded newest-first search of archive/ across workspaces;
 #                               metadata + clipped context, not whole messages. Exit 3 = truncated.
+#   findings [--out F] [--role gating|shadow] [--review-set ID] [--artifact ID]
+#            [--reviewer-version V] [--prompt-version V] [--header] [<message>...]
+#                               extract review findings to TSV (default: the whole archive,
+#                               oldest first). --out appends, idempotent by finding_id.
+#                               Observations only — no dispositions, no scores.
+#   shadow --to <agent> <review-request> [--review-set ID] [--out F] [--timeout-secs N]
+#                               have a SECOND reviewer read the same artifact. The reply is
+#                               produced and stored but NEVER delivered and never written to
+#                               thread state — a shadow verdict cannot gate the loop.
+#   round-note <reply> --note "<text>"
+#                               record how a reviewer performed on ONE round: counts are
+#                               derived from the reply, the prose is your assessment.
+#                               Appends .comms/grades/rounds.tsv. Never shown to reviewers.
+#   snapshot [create|list]      retain the tree under review as a durable git object
+#                               (stash-create commit anchored under refs/agent-comms/)
+#   prompt-version [--list]     content hash of the reviewer instruction surface; grades
+#                               are partitioned on it, never pooled across an edit
 set -euo pipefail
 
 die() { echo "comms.sh: $*" >&2; exit 1; }
@@ -147,8 +167,14 @@ cmux_tree() {
   # window (observed in the field while a background terminal was attaching);
   # spreading attempts over ~2.5s survives it.
   local out delay
+  # No identity means there is nothing to query — return immediately instead of
+  # dereferencing an unset var under `set -u`, which printed "unbound variable"
+  # twice and swallowed the caller's specific diagnostic. Fixed here rather than at
+  # the call site so every caller is covered. (codex, transport-flip round 2.)
+  [ -n "${CMUX_WORKSPACE_ID:-}" ] || return 1
+  command -v cmux >/dev/null 2>&1 || return 1
   for delay in 0.3 0.7 1.2 0; do
-    out="$(cmux tree --workspace "$CMUX_WORKSPACE_ID" 2>/dev/null)" || out=""
+    out="$(cmux tree --workspace "${CMUX_WORKSPACE_ID}" 2>/dev/null)" || out=""
     if [ -n "$out" ]; then
       printf '%s\n' "$out"
       return 0
@@ -234,7 +260,7 @@ cmd_workspace() {
 # grammar is enforced hard. A name may be registered only when a supported backend
 # exists for it — otherwise /ask etc. would accept mail that can never be served.
 SUPPORTED_AGENTS="claude codex grok"   # claude/codex: interactive+headless; grok: headless reviewer/consult
-REGISTRY_DEFAULT_AGENTS="claude codex"
+REGISTRY_DEFAULT_AGENTS="claude codex grok"
 REGISTRY_DEFAULT_TARGET="codex"
 
 registry_file() { echo "$(cmd_root)/config"; }
@@ -359,15 +385,9 @@ cmd_list() {
     # Late delivery nudges for already-processed replies are common. Scope the
     # hint to messages that actually came TO this reader and, when supplied, to
     # this thread; otherwise an unrelated archive can masquerade as the reply.
-    # With exactly two registered agents the sender is the complement; with more
-    # the hint is unfiltered (any sender) — it is advisory text, not routing.
-    local latest sender="" reg_hint
-    reg_hint="$(registry_agents)" || exit 2
-    set -- $reg_hint
-    if [ "$#" -eq 2 ]; then
-      if [ "$1" = "$as" ]; then sender="$2"; elif [ "$2" = "$as" ]; then sender="$1"; fi
-    fi
-    latest="$(sorted_message_files "$root/archive" "$ws" "$sender" "$thread" newest | head -1 || true)"
+    # Direction is "not written by me" — correct for two agents and for twenty.
+    local latest
+    latest="$(sorted_message_files "$root/archive" "$ws" "!$as" "$thread" newest | head -1 || true)"
     if [ -n "$latest" ]; then
       echo "no pending messages; latest archived: $(basename "$latest")" >&2
     else
@@ -404,12 +424,18 @@ mtime_iso() {
 # candidate set (archive-search's match filter) pays the per-file frontmatter
 # parse only for the files it kept, not for the whole directory.
 sort_paths_by_timestamp() {
+  # <sender> matches an exact `from:`; a leading '!' EXCLUDES that sender instead.
+  # "Addressed to me" is "not written by me", which is true for any number of
+  # agents — the two-agent complement trick it replaces silently stopped working
+  # the moment a third agent was registered.
   local order="${1:-oldest}" sender="${2:-}" thread="${3:-}"
-  local f ts mt rows
+  local f ts mt rows exclude=""
+  case "$sender" in !?*) exclude="${sender#!}"; sender="" ;; esac
   rows="$(
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       [ -z "$sender" ] || [ "$(frontmatter_field "$f" from)" = "$sender" ] || continue
+      [ -z "$exclude" ] || [ "$(frontmatter_field "$f" from)" != "$exclude" ] || continue
       [ -z "$thread" ] || [ "$(frontmatter_field "$f" thread)" = "$thread" ] || continue
       ts="$(frontmatter_field "$f" timestamp)"
       mt="$(file_mtime "$f")"
@@ -661,6 +687,707 @@ cmd_archive_search() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Grading pilot — `findings`, `snapshot`, `prompt-version`
+#
+# These answer ONE question: which reviewer is good at what. They are
+# deliberately NOT a grading system. The pilot's job is to find out whether the
+# comparison is measurable at all before anything richer is justified — see
+# docs/ROADMAP.md "Reviewer grading & panel track" and consult thread
+# `ask-reviewer-grading-panel-mode-9753`.
+#
+# The schema records what is EPHEMERAL — the reviewed tree, runtime identity,
+# prompt version, gating-vs-shadow role — because none of it can be
+# reconstructed after the run. Anything derivable later is left out, and an
+# unknown field is EMPTY rather than guessed: a retro-extracted row honestly has
+# no artifact_id, and pretending otherwise is the failure mode this whole track
+# exists to avoid.
+#
+# There is no separate observation_id. It could only diverge from finding_id if
+# two rows were mechanically recognizable as the same claim, and claim
+# fingerprinting was explicitly rejected in the consult — so one id is the
+# honest count.
+#
+# What is NOT here, on purpose: dispositions (no cheap honest producer — a
+# terminal APPROVE does not confirm each preceding finding), escape attribution
+# (textual lineage is not semantic attribution), and any score.
+# ---------------------------------------------------------------------------
+# v2 (2026-08-22): the claim is stored WHOLE. v1 clipped it to 600 bytes, and because
+# rows are immutable and idempotent by finding_id, that clip was permanent — 40 of the
+# first 112 rows lost the evidence a later adjudication would need. A display excerpt is
+# the reader's job; the ledger's job is to keep what was said. (codex, round 1.)
+FINDINGS_SCHEMA_VERSION=2
+ARTIFACT_REF_NS="refs/agent-comms/artifacts"
+
+findings_header() {
+  printf 'schema_version\tfinding_id\treview_set_id\tartifact_id\tbase_sha\tthread\tphase\tround\treviewer\treviewer_version\tprompt_version\trole\tlane\tanchor\tclaim\tverdict\tsource_message_id\n'
+}
+
+hash_stdin() {  # short content hash; whichever digest this box actually has
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-12
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-12
+  else cksum | tr -d ' ' | cut -c1-12
+  fi
+}
+
+findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <prompt_version> [base_sha]
+  local f="$1" role="$2" rsid="$3" aid="$4" rver="$5" pver="$6" bsha="${7:-}" mid
+  [ "$(frontmatter_field "$f" type)" = "review-feedback" ] || return 0
+  mid="$(frontmatter_field "$f" message_id)"
+  [ -n "$mid" ] || mid="$(basename "$f" .md)"
+  # The GATING reviewer's reply arrives later through the normal loop and knows
+  # nothing about the shadow run, so its artifact/set identity is joined here
+  # from the set index rather than asked of a message that cannot carry it.
+  # Explicit flags always win; a miss leaves the fields empty, never guessed.
+  if [ -z "$rsid" ] && [ -z "$aid" ]; then
+    local root_j hit
+    root_j="$(main_repo_root)" || root_j=""
+    if [ -n "$root_j" ]; then
+      hit="$(findings_set_lookup "$root_j" "$(frontmatter_field "$f" thread)" "$(frontmatter_field "$f" round)" "$(frontmatter_field "$f" phase)")"
+      if [ -n "$hit" ]; then
+        rsid="$(printf '%s' "$hit" | cut -f1)"
+        aid="$(printf '%s' "$hit" | cut -f2)"
+        [ -n "$pver" ] || pver="$(printf '%s' "$hit" | cut -f3)"
+      fi
+    fi
+  fi
+  awk -v schema="$FINDINGS_SCHEMA_VERSION" \
+      -v mid="$mid" \
+      -v thread="$(frontmatter_field "$f" thread)" \
+      -v phase="$(frontmatter_field "$f" phase)" \
+      -v round="$(frontmatter_field "$f" round)" \
+      -v reviewer="$(frontmatter_field "$f" from)" \
+      -v base="${bsha:-$(frontmatter_field "$f" head_sha)}" \
+      -v verdict="$(frontmatter_field "$f" verdict)" \
+      -v role="$role" -v rsid="$rsid" -v aid="$aid" -v rver="$rver" -v pver="$pver" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    # Emit the buffered bullet. Anchors are best-effort BY DESIGN: 35% of real
+    # findings are prose or cross-file and carry none, and dropping those would
+    # discard exactly the findings a line-anchored schema is worst at seeing.
+    function flush(   claim, anchor, fid) {
+      if (buf == "") return
+      claim = trim(buf); buf = ""
+      if (claim ~ /^[Nn]one\.?$/) return
+      gsub(/\t/, " ", claim)
+      anchor = ""
+      if (match(claim, /`[^`]+`/)) {
+        anchor = substr(claim, RSTART + 1, RLENGTH - 2)
+        if (anchor !~ /\// && anchor !~ /\./ && anchor !~ /:[0-9]/) anchor = ""
+      }
+      # Backtick-free fallback: the pre-2026-07 corpus opened findings with a
+      # bare `path:line -` and would otherwise read as unanchored, understating
+      # anchor coverage for exactly the oldest half of the baseline.
+      if (anchor == "" && match(claim, /^[A-Za-z0-9_.\/-]+\.[A-Za-z0-9]+:[0-9]+([-,][0-9]+)?/))
+        anchor = substr(claim, RSTART, RLENGTH)
+      gsub(/\t/, " ", anchor)
+      seq[blane]++
+      fid = mid "#" substr(blane, 1, 1) seq[blane]
+      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", \
+        schema, fid, rsid, aid, base, thread, phase, round, reviewer, rver, pver, \
+        role, blane, anchor, claim, verdict, mid
+    }
+    { sub(/\r$/, "") }
+    NR == 1 && $0 == "---" { fm = 1; next }
+    fm && $0 == "---" { fm = 0; next }
+    fm { next }
+    /^### Blocking/ { flush(); lane = "blocking"; next }
+    /^### Advisory/ { flush(); lane = "advisory"; next }
+    # Any other heading closes the lane — `### Process` never gates a verdict and
+    # is not a code finding, so it is not a graded observation either.
+    /^#/ { flush(); lane = ""; next }
+    lane == "" { next }
+    /^[-*] / { flush(); blane = lane; buf = substr($0, 3); next }
+    buf != "" && /^[[:space:]]+[^[:space:]]/ { buf = buf " " trim($0); next }
+    buf != "" && /^[[:space:]]*$/ { flush(); next }
+    END { flush() }
+  ' "$f"
+}
+
+findings_rebuild_shadow_rows() {  # <root> — stored shadow replies, re-joined via sets.tsv
+  local root="$1" idx d agent set_id aid pver base rver_hist f
+  idx="$(findings_set_index "$root")"
+  [ -d "$root/.comms/grades/shadow" ] || return 0
+  for d in "$root"/.comms/grades/shadow/*/; do
+    [ -d "$d" ] || continue
+    set_id="$(basename "$d")"
+    aid=""; pver=""; base=""
+    if [ -f "$idx" ]; then
+      aid="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $6; exit}' "$idx")"
+      pver="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $7; exit}' "$idx")"
+      base="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $8; exit}' "$idx")"
+    fi
+    # *.md only, and never the *.raw.md of a turn that failed the reply contract —
+    # rebuilding must not quietly score what the original run refused to score.
+    for f in "$d"*.md; do
+      [ -f "$f" ] || continue
+      case "$(basename "$f")" in *.raw.md) continue ;; esac
+      agent="$(basename "$f" .md)"
+      # The version RECORDED at run time, or empty. Probing the CLI now would rewrite a
+      # historical observation with today's build. (codex, round 2.)
+      rver_hist=""
+      [ -f "$d$agent.version" ] && rver_hist="$(head -1 "$d$agent.version" | tr -d '\r\n')"
+      findings_extract "$f" shadow "$set_id" "$aid" "$rver_hist" "$pver" "$base"
+    done
+  done
+}
+
+cmd_findings() {
+  local out="" role="gating" rsid="" aid="" rver="" pver="" bsha="" files="" header_only=false rebuild=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --out)              shift; out="${1:-}" ;;
+      --role)             shift; role="${1:-}" ;;
+      --review-set)       shift; rsid="${1:-}" ;;
+      --artifact)         shift; aid="${1:-}" ;;
+      --reviewer-version) shift; rver="${1:-}" ;;
+      --prompt-version)   shift; pver="${1:-}" ;;
+      --base-sha)         shift; bsha="${1:-}" ;;
+      --header)           header_only=true ;;
+      --rebuild)          rebuild=true ;;
+      -?*)                usage_err "findings: unknown option '$(clip "$1")'" ;;
+      *)                  files="$files$1
+" ;;
+    esac
+    shift
+  done
+  case "$role" in gating|shadow) ;; *) usage_err "findings: --role must be 'gating' or 'shadow'" ;; esac
+  if [ "$header_only" = true ]; then findings_header; return 0; fi
+
+  local root
+  root="$(main_repo_root)"; [ -n "$root" ] || usage_err "findings: not inside a git repository"
+
+  # The schema guard is about the OUTPUT file, so it runs before any input can
+  # short-circuit: an empty archive was letting a stale-generation ledger through
+  # untouched, which is the one case where silence is worst.
+  if [ -n "$out" ] && [ -s "$out" ] && [ "$rebuild" != true ]; then
+    local have
+    have="$(awk -F'\t' 'NR==2 {print $1; exit}' "$out")"
+    if [ -n "$have" ] && [ "$have" != "$FINDINGS_SCHEMA_VERSION" ]; then
+      die "findings: $(clip "${out##*/}") holds schema v$have rows but this is v$FINDINGS_SCHEMA_VERSION — append would mix generations; re-run with --rebuild to regenerate it from the archive and the shadow store"
+    fi
+  fi
+
+  # No explicit files: the whole archive, oldest first, so the TSV reads as an
+  # append-only history rather than a reverse-chronological listing.
+  if [ -z "$files" ]; then
+    local arch="$root/.comms/archive"
+    if [ -d "$arch" ]; then
+      files="$(find "$arch" -maxdepth 1 -name '*.md' -type f 2>/dev/null | sort_paths_by_timestamp oldest)"
+    else
+      emit_diagnostic "findings: no archive at $(clip "$arch")"
+    fi
+  fi
+  # An empty archive is not a reason to stop: --rebuild still has the shadow store to
+  # recover, and a rebuild that silently no-ops would leave a stale ledger in place.
+  if [ -z "$files" ] && [ "$rebuild" != true ]; then
+    emit_diagnostic "findings: no messages to extract"
+    return 0
+  fi
+
+  local rows f
+  rows="$(
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      [ -f "$f" ] || { emit_diagnostic "findings: no such message $(clip "$f")"; continue; }
+      findings_extract "$f" "$role" "$rsid" "$aid" "$rver" "$pver" "$bsha"
+    done <<< "$files"
+  )"
+
+  if [ -z "$out" ]; then
+    [ -n "$rows" ] || { emit_diagnostic "findings: no findings extracted"; return 0; }
+    findings_header
+    printf '%s\n' "$rows"
+    return 0
+  fi
+
+  # Append-only, and idempotent by finding_id: re-extracting the archive after
+  # new reviews land must add only the new rows, never duplicate the old ones.
+  mkdir -p "$(dirname "$out")" 2>/dev/null || die "findings: cannot create $(clip "$(dirname "$out")")"
+  # A rebuild is written to a TEMP file and moved into place only once it is complete.
+  # The earlier version deleted the ledger first, so an interruption or any later write
+  # failure left a partial ledger and no original — destroying the very rows the rebuild
+  # exists to preserve. (codex, round 2.)
+  local target="$out"
+  if [ "$rebuild" = true ]; then
+    target="$out.rebuild.$$"
+    rm -f "$target"
+    findings_header > "$target" || die "findings: cannot stage a rebuild next to $(clip "${out##*/}")"
+    rows="$rows
+$(findings_rebuild_shadow_rows "$root")"
+  fi
+  [ -s "$target" ] || findings_header > "$target"
+  local added=0 skipped=0 fid
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    fid="$(printf '%s' "$f" | cut -f2)"
+    if cut -f2 "$target" | grep -qxF -- "$fid"; then skipped=$((skipped + 1)); continue; fi
+    printf '%s\n' "$f" >> "$target"
+    added=$((added + 1))
+  done <<< "$rows"
+  if [ "$rebuild" = true ]; then
+    # Validate the replacement before it becomes the ledger: a header-only result would
+    # otherwise silently replace a populated one.
+    if [ "$(head -1 "$target")" != "$(findings_header)" ]; then
+      rm -f "$target"; die "findings: rebuild produced a malformed ledger — the original is untouched"
+    fi
+    mv -f "$target" "$out" || { rm -f "$target"; die "findings: could not install the rebuilt ledger — the original is untouched"; }
+  fi
+  printf 'findings: +%d new, %d already recorded -> %s\n' "$added" "$skipped" "${out#"$root"/}"
+}
+
+# The set index pairs a shadow observation with the gating one. It exists so the
+# PRIMARY reviewer's findings — which arrive later, through the normal loop, and
+# know nothing about any of this — can be joined to the same artifact without
+# re-running anything or touching the loop.
+findings_set_index() { printf '%s/.comms/grades/sets.tsv' "$1"; }
+
+safe_set_id() {  # a review_set_id is used as a DIRECTORY NAME — treat it as hostile
+  # safe_name NORMALIZES, and normalization is not identity: `a/b` and `a_b` both become
+  # `a_b`, so two distinct legal sets would share one directory and the second would
+  # overwrite the first's stored reply. Bind the raw value with a hash so distinct inputs
+  # stay distinct. (codex, round 2.)
+  local raw="$1" out h
+  out="$(safe_name "$raw")"
+  case "$out" in
+    ""|.|..|-*) usage_err "shadow: --review-set '$(clip "$raw")' is not a usable identifier" ;;
+  esac
+  case "$out" in
+    */*|*..*) usage_err "shadow: refusing a review-set id that resolves to a path: $(clip "$raw")" ;;
+  esac
+  h="$(printf '%s' "$raw" | hash_stdin | cut -c1-8)"
+  printf '%s-%s' "$out" "$h"
+}
+
+findings_set_lookup() {  # <root> <thread> <round> <phase> -> set\tartifact\tprompt_version
+  # Keyed on thread+phase+round, never thread+round: `/auto-full` keeps one thread across
+  # the plan->implement transition and restarts at round 1, so plan r1 and implement r1
+  # are different artifacts under the same thread+round. (codex, round 3.)
+  local idx; idx="$(findings_set_index "$1")"
+  [ -f "$idx" ] || return 0
+  # A duplicate here would mean two artifacts claim one thread+phase+round, and there is no
+  # right way to choose between them — `shadow` refuses to create that state, so if it
+  # exists the file was edited by hand and the honest answer is to join nothing.
+  local n
+  n="$(awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph' "$idx" | grep -c . || true)"
+  if [ "${n:-0}" -gt 1 ]; then
+    emit_diagnostic "findings: $n review sets claim thread '$(clip "$2")' ${4:-<no phase>} round $3 — refusing an ambiguous join; fix .comms/grades/sets.tsv"
+    return 0
+  fi
+  awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph {print $1 "\t" $6 "\t" $7; exit}' "$idx"
+}
+
+cmd_round_note() {
+  # round-note <reply-file> --note "<one or two lines>" — record how a reviewer
+  # performed on ONE round.
+  #
+  # The counts are derived from the reply, never typed: a hand-entered number is a
+  # number nobody can trust later. The prose is the reader's assessment — what the
+  # review caught that mattered, what it got wrong, what it missed that another
+  # reviewer found.
+  #
+  # This is written FOR THE HUMAN and never enters a reviewer's context. A reviewer
+  # that can see its own scorecard optimises the scorecard.
+  local f="" note=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --note) shift; note="${1:-}" ;;
+      -?*)    usage_err "round-note: unknown option '$(clip "$1")'" ;;
+      *)      [ -z "$f" ] || usage_err "round-note: one reply file only"; f="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$f" ] || usage_err "round-note: a reviewer reply file is required"
+  [ -f "$f" ] || usage_err "round-note: no such file '$(clip "$f")'"
+  [ -n "$note" ] || usage_err "round-note: --note is required (a round with no assessment records nothing worth reading later)"
+
+  local root; root="$(main_repo_root)"; [ -n "$root" ] || usage_err "round-note: not inside a git repository"
+  local rows blocking advisory
+  rows="$(findings_extract "$f" gating "" "" "" "" 2>/dev/null || true)"
+  blocking="$(printf '%s\n' "$rows" | awk -F'\t' '$13=="blocking"' | grep -c . || true)"
+  advisory="$(printf '%s\n' "$rows" | awk -F'\t' '$13=="advisory"' | grep -c . || true)"
+
+  local out="$root/.comms/grades/rounds.tsv"
+  mkdir -p "$(dirname "$out")" 2>/dev/null || die "round-note: cannot create $(clip "$(dirname "$out")")"
+  [ -s "$out" ] || printf 'timestamp\tthread\tphase\tround\treviewer\tverdict\tblocking\tadvisory\tprompt_version\tnote\n' > "$out"
+  local clean_note; clean_note="$(printf '%s' "$note" | tr '\t\n' '  ')"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(frontmatter_field "$f" thread)" "$(frontmatter_field "$f" phase)" \
+    "$(frontmatter_field "$f" round)" "$(frontmatter_field "$f" from)" \
+    "$(cmd_verdict "$f" 2>/dev/null || true)" "${blocking:-0}" "${advisory:-0}" \
+    "$(cmd_prompt_version 2>/dev/null || true)" "$clean_note" >> "$out"
+  printf 'round-note: %s r%s %s — %s blocking, %s advisory -> %s\n' \
+    "$(frontmatter_field "$f" from)" "$(frontmatter_field "$f" round)" \
+    "$(cmd_verdict "$f" 2>/dev/null || true)" "${blocking:-0}" "${advisory:-0}" "${out#"$root"/}"
+}
+
+cmd_shadow() {
+  # shadow --to <agent> <review-request> — have a SECOND reviewer read the exact
+  # same artifact, and record what it found.
+  #
+  # The reply is produced, validated, and stored, but never delivered and never
+  # written to thread state (runphase --no-deliver). That is deliberate and it is
+  # the whole safety argument: a shadow verdict cannot gate a loop it was never
+  # delivered into, so "the shadow never gates" is mechanical rather than a rule
+  # someone has to remember.
+  local to="" req="" rsid="" out="" timeout=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to)           shift; to="${1:-}" ;;
+      --review-set)   shift; rsid="${1:-}" ;;
+      --out)          shift; out="${1:-}" ;;
+      --timeout-secs) shift; timeout="${1:-}" ;;
+      -?*)            usage_err "shadow: unknown option '$(clip "$1")'" ;;
+      *)              [ -z "$req" ] || usage_err "shadow: one review-request only"; req="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$to" ] || usage_err "shadow: --to <agent> is required (registered: $(registry_agents))"
+  require_agent "$to" "shadow"
+  # --no-deliver suppresses the TRUSTED-PARENT broker. An agent that authors and
+  # sends its own reply (claude, codex) would still write into an inbox and still
+  # record thread state, so for those the "cannot gate" guarantee would be a
+  # convention rather than a mechanism — and this command's whole value is that it
+  # is a mechanism. Refuse rather than silently downgrade. (grok, live 2026-08-22.)
+  case "$(cmd_agents --supported | awk -v a="$to" -F'\t' '$1==a {print $2}')" in
+    *reviewer-consult-only*) ;;
+    *) usage_err "shadow: '$to' authors and sends its own replies, so a shadow run could not be prevented from reaching an inbox — only parent-brokered reviewers (reviewer-consult-only) can be shadowed" ;;
+  esac
+  [ -n "$req" ] || usage_err "shadow: a review-request file is required"
+  [ -f "$req" ] || usage_err "shadow: no such file '$(clip "$req")'"
+
+  local rtype author thread round phase
+  rtype="$(frontmatter_field "$req" type)"
+  [ "$rtype" = "review-request" ] || usage_err "shadow: '$(clip "$req")' is type '$rtype' — only a review-request can be shadowed"
+  author="$(frontmatter_field "$req" from)"
+  # A shadow of the author is not a second opinion.
+  [ "$to" != "$author" ] || usage_err "shadow: '$to' wrote this request — shadow a DIFFERENT agent"
+  thread="$(frontmatter_field "$req" thread)"
+  round="$(frontmatter_field "$req" round)"
+  phase="$(frontmatter_field "$req" phase)"
+  [ -n "$round" ] || round=1
+
+  local rp; rp="$(dirname "$SELF")/runphase.sh"
+  [ -x "$rp" ] || die "shadow: runphase.sh not found next to comms.sh — re-run install.sh"
+
+  local root; root="$(main_repo_root)"; [ -n "$root" ] || usage_err "shadow: not inside a git repository"
+  local aid pver base gating reqid
+  aid="$(cmd_snapshot create)" || die "shadow: could not retain the reviewed artifact"
+  pver="$(cmd_prompt_version)" || die "shadow: could not compute the prompt version"
+  base="$(frontmatter_field "$req" head_sha)"
+  reqid="$(frontmatter_field "$req" message_id)"
+  # The gating reviewer is the inbox this request was dispatched to — derived, never
+  # typed, so the pair records who the shadow is actually being compared against.
+  gating="$(basename "$(dirname "$req")")"; gating="${gating#to-}"
+  registry_has "$gating" || gating=""
+  [ -n "$rsid" ] || rsid="$(printf '%s-%s-r%s-%s' "${thread:-untracked}" "${phase:-nophase}" "$round" "$(printf '%s' "$aid" | cut -c1-7)")"
+  rsid="$(safe_set_id "$rsid")"
+
+  # One mapping per thread+phase+round, enforced at WRITE time. The join reads by
+  # that same key, so a second successful shadow after the tree or prompt moved would
+  # silently stamp later gating findings with the older artifact — and picking "the
+  # first row" is an arbitrary answer to a question that has no right answer.
+  # (codex, round 1.)
+  local idx_pre; idx_pre="$(findings_set_index "$root")"
+  if [ -f "$idx_pre" ]; then
+    local dup
+    dup="$(awk -F'\t' -v t="$thread" -v r="$round" -v ph="$phase" 'NR>1 && $3==t && $4==r && $5==ph {print $1; exit}' "$idx_pre")"
+    # Unconditional: re-running with the SAME id was overwriting the stored reply while
+    # leaving the earlier ledger rows in place, which is the ambiguity this guard exists
+    # to prevent, not an exemption from it. (codex, round 2.)
+    if [ -n "$dup" ]; then
+      usage_err "shadow: thread '$thread' phase '${phase:-<none>}' round $round is already paired as review set '$dup' — this pilot records ONE shadow per thread+phase+round; remove that set to redo it"
+    fi
+  fi
+
+  # Never overwrite a stored observation: it is the evidence, and a silent clobber is
+  # indistinguishable from never having run. (codex, round 2.) Checked BEFORE anything is
+  # spent: a contract-break leaves <agent>.raw.md but writes no set row, so a retry cleared
+  # the pairing guard, ran the reviewer for ten minutes, and only then hit this check —
+  # throwing away the work it had just paid for. (grok, first passing shadow run.)
+  local store="$root/.comms/grades/shadow/$rsid"
+  if [ -e "$store/$to.md" ] || [ -e "$store/$to.raw.md" ]; then
+    die "shadow: $to already has a recorded result in ${store#"$root"/} — refusing to overwrite it (nothing was run)"
+  fi
+
+  local tmpdir
+  # Neutral on purpose: the reviewer can see its own working directory, and a path
+  # containing "shadow" or "grade" would announce the measurement role the design keeps
+  # out of its view. (codex, round 2.)
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/ac-wt.XXXXXX")" || die "shadow: cannot create a work dir"
+  cmd_validate "$req" >/dev/null || { rm -rf "$tmpdir"; die "shadow: the review-request does not validate"; }
+
+  # THE ARTIFACT IS MOUNTED, AND SHAPED LIKE THE WORKTREE IT CAME FROM.
+  #
+  # Checking the synthetic artifact commit out directly was wrong in a way that content
+  # checks could not see: HEAD became the synthetic commit rather than the request's
+  # head_sha, and `git diff` came back EMPTY because every reviewed change was already
+  # committed inside it. The reviewer would fail its own head check and find no patch at
+  # all. So: create the worktree at the BASE, materialize the artifact into it, then put
+  # the index back to base — HEAD == head_sha, the reviewed changes read as uncommitted,
+  # and files that were untracked are untracked again. (codex, round 2.)
+  #
+  # The mount name is deliberately opaque: 'agent-comms-shadow' in a path the reviewer
+  # can see would announce the measurement role the design keeps out of its view.
+  local tree="$tmpdir/w"
+  local mount_base="$base"
+  [ -n "$mount_base" ] || mount_base="$(git -C "$root" rev-parse -q --verify "$aid^" 2>/dev/null || printf '%s' "$aid")"
+  git -C "$root" worktree add --detach --quiet "$tree" "$mount_base" 2>/dev/null \
+    || { rm -rf "$tmpdir"; die "shadow: could not check out base $(clip "$mount_base")"; }
+  shadow_cleanup() { git -C "$root" worktree remove --force "$tree" 2>/dev/null || true; rm -rf "$tmpdir"; }
+  git -C "$tree" read-tree -u --reset "$aid" 2>/dev/null \
+    || { shadow_cleanup; die "shadow: could not materialize artifact $(clip "$aid")"; }
+  git -C "$tree" reset -q --mixed "$mount_base" 2>/dev/null \
+    || { shadow_cleanup; die "shadow: could not restore the base index in the mount"; }
+
+  # The child sees the request unchanged EXCEPT for cwd:, which must name the tree it was
+  # actually given. That single field is routing, not content — it does not tell the
+  # reviewer it is being measured, which is the contamination that matters and the reason
+  # review_set/artifact_id/role stay out of its view. (grok, round 0.)
+  #
+  # Replace-or-INSERT: a request with no cwd: would otherwise leave runphase falling back
+  # to the live main root, silently un-mounting the artifact. And the rewrite is
+  # byte-preserving — the earlier awk normalized CRLF on every line of the message.
+  # (codex, round 2.)
+  local child_msg="$tmpdir/$(basename "$req")"
+  if grep -q '^cwd:' "$req"; then
+    LC_ALL=C sed "s|^cwd:.*|cwd: $tree|" "$req" > "$child_msg"
+  else
+    LC_ALL=C awk -v tree="$tree" '
+      NR == 1 && $0 == "---" { fm = 1; print; next }
+      fm && $0 == "---" { printf "cwd: %s\n", tree; fm = 0; print; next }
+      { print }
+    ' "$req" > "$child_msg"
+  fi
+  grep -q "^cwd: $tree\$" "$child_msg" || { shadow_cleanup; die "shadow: could not point the request at the mounted artifact"; }
+  cmd_validate "$child_msg" >/dev/null || { shadow_cleanup; die "shadow: the mounted-artifact copy did not validate"; }
+
+  local rver_now; rver_now="$(agent_version "$to")"
+  local run_dir="$tmpdir/run"
+  mkdir -p "$run_dir"
+  echo "shadow: $to reviewing artifact ${aid} (set $rsid) in an isolated checkout — not delivered, cannot gate"
+  local rc=0
+  ( cd "$tree" && RUNPHASE_NO_DELIVER=1 "$rp" run --message "$child_msg" --dir "$run_dir" \
+      --provider "$to" --no-deliver ${timeout:+--timeout-secs "$timeout"} ) >/dev/null 2>&1 || rc=$?
+  git -C "$root" worktree remove --force "$tree" 2>/dev/null || true
+
+  # Did the live tree move while the reviewer was reading? The shadow is immune (it read
+  # the mount), but the GATING reviewer reads the live tree, so drift is when the pair is
+  # not on one artifact. Recorded as an explicit TRI-STATE: equal endpoints mean only
+  # "no drift detected during the shadow window", never "confirmed identical", and a
+  # snapshot that could not be taken is `unknown` rather than silently empty — an empty
+  # field must never read as a clean result. (codex, round 2.)
+  local aid_after drift="" drift_status="unknown"
+  aid_after="$(cmd_snapshot create 2>/dev/null || true)"
+  if [ -z "$aid_after" ]; then
+    drift_status="unknown"
+  elif [ "$aid_after" = "$aid" ]; then
+    drift_status="same_endpoint"
+  else
+    drift_status="changed"; drift="$aid_after"
+  fi
+
+  mkdir -p "$store" 2>/dev/null || { rm -rf "$tmpdir"; die "shadow: cannot create $(clip "$store")"; }
+  # Success is the RUNNER's verdict, not the presence of a file: grok_broker
+  # writes reply.md and validates it afterwards, so a stamped-but-degenerate
+  # reply exists on disk after a failed turn. Keying on the file alone would
+  # score exactly the AC5 case this is supposed to catch. (grok, live 2026-08-22.)
+  if [ "$rc" != "0" ] || [ ! -s "$run_dir/reply.md" ]; then
+    # A failed shadow turn is DATA, not an error to swallow: a reviewer that
+    # times out, crashes, or breaks the reply contract is a real operational
+    # result and must stay distinguishable from one that reviewed and found
+    # nothing. Keep the RAW text too — on the very first live run grok produced
+    # a full review and merely omitted the mandated 'VERDICT:' first line, and
+    # throwing that text away would have discarded the entire turn plus the only
+    # evidence of which contract it broke.
+    printf '%s\n' "$rver_now" > "$store/$to.version"
+    cp "$run_dir/reply-raw.md" "$store/$to.raw.md" 2>/dev/null || true
+    cp "$run_dir/result.json" "$store/$to.failed.json" 2>/dev/null || true
+    cp "$run_dir/runner.log" "$store/$to.runner.log" 2>/dev/null || true
+    cp "$run_dir/events.ndjson" "$store/$to.events.ndjson" 2>/dev/null || true
+    rm -rf "$tmpdir"
+    # The raw text is NOT extracted into the ledger: a reply that failed the
+    # contract must not be scored as if it had passed it.
+    echo "shadow: $to produced no usable reply (rc=$rc) — recorded as an OPERATIONAL FAILURE in ${store#"$root"/}, not as a clean review"
+    [ -s "$store/$to.raw.md" ] && echo "shadow: its raw output is preserved at ${store#"$root"/}/$to.raw.md (unscored)"
+    return 1
+  fi
+  cp "$run_dir/reply.md" "$store/$to.md"
+  cp "$run_dir/result.json" "$store/$to.result.json" 2>/dev/null || true
+  # The reviewer's CLI identity is EPHEMERAL — asking again at rebuild time would stamp a
+  # historical observation with today's upgraded version. Persist what was actually
+  # observed, and let rebuild read it or leave the field empty. (codex, round 2.)
+  printf '%s\n' "$rver_now" > "$store/$to.version"
+  rm -rf "$tmpdir"
+
+  local idx; idx="$(findings_set_index "$root")"
+  mkdir -p "$(dirname "$idx")" 2>/dev/null || true
+  [ -s "$idx" ] || printf 'review_set_id\trequest_message_id\tthread\tround\tphase\tartifact_id\tprompt_version\tbase_sha\tgating_agent\tshadow_agent\tdrift_status\tdrift_artifact_id\tcreated\n' > "$idx"
+  if ! cut -f1 "$idx" | grep -qxF -- "$rsid"; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$rsid" "$reqid" "$thread" "$round" "$phase" "$aid" "$pver" "$base" "$gating" "$to" \
+      "$drift_status" "$drift" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$idx"
+  fi
+  case "$drift_status" in
+    changed) echo "shadow: WARNING - the live tree moved during the review ($aid -> $drift). The shadow read the mounted artifact; the gating reviewer may not have." ;;
+    unknown) echo "shadow: NOTE - could not re-snapshot after the run, so drift is UNKNOWN, not absent." ;;
+  esac
+  echo "shadow: this is a CANDIDATE pair - same_endpoint means no drift was detected during the shadow window, never that the gating reviewer read this artifact."
+
+  [ -n "$out" ] || out="$root/.comms/grades/findings.tsv"
+  cmd_findings --out "$out" --role shadow --review-set "$rsid" --artifact "$aid" \
+    --base-sha "$base" \
+    --prompt-version "$pver" --reviewer-version "$rver_now" "$store/$to.md"
+  echo "shadow: reply stored at ${store#"$root"/}/$to.md (never delivered; the loop is untouched)"
+}
+
+agent_version() {  # best-effort CLI identity — empty beats a guess
+  local a="$1" v=""
+  command -v "$a" >/dev/null 2>&1 || { printf ''; return 0; }
+  v="$("$a" --version 2>/dev/null | head -1 | tr -d '\t\r' | cut -c1-60)" || true
+  printf '%s' "${v:-}"
+}
+
+cmd_snapshot() {
+  # snapshot [create|list] — RETAIN the tree under review as a durable git object.
+  #
+  # A hash alone cannot resurrect the input, so this stores CONTENT: the working
+  # tree (tracked edits and untracked files, mailbox excluded) is written as a
+  # real commit object without touching the worktree, the index, or the stash.
+  # That commit starts unreferenced and would be garbage-collected, so it is
+  # anchored under refs/agent-comms/ — the anchor IS the retention, and without
+  # it the artifact this prerequisite exists to keep silently evaporates.
+  local sub="${1:-create}"
+  local root id
+  # The reviewer's working directory IS the tree under review (runphase's review
+  # prompt says so), and in a linked worktree that is NOT the main root — snapshotting
+  # main_repo_root there would retain a tree nobody reviewed. (grok, live 2026-08-22.)
+  root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$root" ] || root="$(main_repo_root)"
+  [ -n "$root" ] || usage_err "snapshot: not inside a git repository"
+  case "$sub" in
+    list)
+      git -C "$root" for-each-ref --format='%(refname:strip=3)' "$ARTIFACT_REF_NS" 2>/dev/null || true
+      return 0 ;;
+    create) ;;
+    *) usage_err "snapshot: unknown argument '$(clip "$sub")' (create|list)" ;;
+  esac
+  # Build the snapshot in a THROWAWAY index, never the user's. `git stash
+  # create` is the obvious tool and is wrong here: it silently drops untracked
+  # files even with --include-untracked (verified on git 2.39), and a file added
+  # this round is exactly what a reviewer reads. Caught by the harness.
+  local idxdir idx tree parent
+  idxdir="$(mktemp -d "${TMPDIR:-/tmp}/agent-comms-snap.XXXXXX")" || die "snapshot: cannot create a temp index"
+  idx="$idxdir/index"
+  parent="$(git -C "$root" rev-parse --verify -q HEAD 2>/dev/null || true)"
+  if [ -n "$parent" ]; then
+    GIT_INDEX_FILE="$idx" git -C "$root" read-tree "$parent" 2>/dev/null \
+      || { rm -rf "$idxdir"; die "snapshot: cannot read HEAD into a temp index"; }
+  fi
+  GIT_INDEX_FILE="$idx" git -C "$root" add -A -- . 2>/dev/null \
+    || { rm -rf "$idxdir"; die "snapshot: cannot stage the working tree"; }
+  # Then drop the mailbox MECHANICALLY rather than trusting .gitignore: a grades
+  # artifact must never carry message bodies into a git object that could later
+  # be pushed. Same boundary rule as the archive-search scope fix. (An exclude
+  # PATHSPEC cannot do this — `git add` reads it as naming an ignored path and
+  # fails the whole command.)
+  GIT_INDEX_FILE="$idx" git -C "$root" rm --cached -r -q --ignore-unmatch -- .comms .agent-comms 2>/dev/null \
+    || { rm -rf "$idxdir"; die "snapshot: cannot exclude the mailbox from the artifact"; }
+  tree="$(GIT_INDEX_FILE="$idx" git -C "$root" write-tree 2>/dev/null || true)"
+  rm -rf "$idxdir"
+  [ -n "$tree" ] || die "snapshot: cannot write the reviewed tree"
+  # A clean tree IS HEAD. Wrapping it in a synthetic commit would mint a second
+  # id for identical content and litter the ledger with synonyms, so return the
+  # commit that already names it.
+  if [ -n "$parent" ] && [ "$tree" = "$(git -C "$root" rev-parse -q --verify "$parent^{tree}" 2>/dev/null)" ]; then
+    git -C "$root" update-ref "$ARTIFACT_REF_NS/$parent" "$parent" \
+      || die "snapshot: could not anchor $(clip "$parent")"
+    printf '%s\n' "$parent"
+    return 0
+  fi
+  # Fixed identity and date make the id a pure content address: snapshotting an
+  # unchanged tree twice returns the SAME artifact_id instead of littering the
+  # ledger with synonyms for one artifact.
+  id="$(
+    export GIT_AUTHOR_NAME=agent-comms GIT_AUTHOR_EMAIL=agent-comms@localhost \
+           GIT_COMMITTER_NAME=agent-comms GIT_COMMITTER_EMAIL=agent-comms@localhost \
+           GIT_AUTHOR_DATE='1970-01-01T00:00:00Z' GIT_COMMITTER_DATE='1970-01-01T00:00:00Z'
+    if [ -n "$parent" ]; then
+      git -C "$root" commit-tree "$tree" -p "$parent" -m 'agent-comms reviewed artifact'
+    else
+      git -C "$root" commit-tree "$tree" -m 'agent-comms reviewed artifact'
+    fi 2>/dev/null || true
+  )"
+  [ -n "$id" ] || die "snapshot: cannot record the reviewed artifact"
+  git -C "$root" update-ref "$ARTIFACT_REF_NS/$id" "$id" \
+    || die "snapshot: could not anchor $(clip "$id") — it would be garbage-collected"
+  printf '%s\n' "$id"
+}
+
+# The reviewer-facing instruction surface, in a fixed order. A grade does not
+# carry across an edit to any of these, so rows are PARTITIONED on this hash,
+# never pooled across it. Local pin wins over global, matching every other
+# resolver in this tool.
+prompt_surface_skill() {  # same precedence as runphase's skill_file — a pin edit
+  # that moved the review bar MUST move this hash, so the search order has to be
+  # identical to the one that actually feeds the reviewer. (grok, live 2026-08-22.)
+  local name="$1" root="$2" p
+  for p in \
+    "$root/.agents/skills/$name/SKILL.md" \
+    "${CODEX_SKILLS_DIR:-$HOME/.codex/skills}/$name/SKILL.md" \
+    "$(dirname "$SELF")/../templates/codex-skills/$name/SKILL.md"; do
+    [ -f "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+
+prompt_surface_files() {
+  local root="$1" p rel glob hit name
+  for p in \
+    ".agent-comms/runphase.sh:$HOME/.agent-comms/runphase.sh" \
+    ".claude/commands/auto-plan.md:$HOME/.claude/commands/auto-plan.md" \
+    ".claude/commands/auto-implement.md:$HOME/.claude/commands/auto-implement.md" \
+    ".claude/commands/auto-full.md:$HOME/.claude/commands/auto-full.md" \
+    ".claude/commands/read-from-codex.md:$HOME/.claude/commands/read-from-codex.md" \
+    ".claude/commands/send-to-codex.md:$HOME/.claude/commands/send-to-codex.md"
+  do
+    rel="${p%%:*}"; glob="${p#*:}"
+    if [ -n "$rel" ] && [ -f "$root/$rel" ]; then printf '%s\n' "$root/$rel"
+    elif [ -f "$glob" ]; then printf '%s\n' "$glob"
+    else printf 'MISSING %s\n' "$rel"
+    fi
+  done
+  # The reviewer skills carry the verdict discipline itself — the actual bar.
+  for name in read-from-claude send-to-claude; do
+    hit="$(prompt_surface_skill "$name" "$root" || true)"
+    if [ -n "$hit" ]; then printf '%s\n' "$hit"; else printf 'MISSING %s/SKILL.md\n' "$name"; fi
+  done
+}
+
+cmd_prompt_version() {
+  local list=false root f
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --list) list=true ;;
+      -?*)    usage_err "prompt-version: unknown option '$(clip "$1")'" ;;
+      *)      usage_err "prompt-version: unexpected argument '$(clip "$1")'" ;;
+    esac
+    shift
+  done
+  root="$(main_repo_root)"; [ -n "$root" ] || usage_err "prompt-version: not inside a git repository"
+  if [ "$list" = true ]; then prompt_surface_files "$root"; return 0; fi
+  # A missing file contributes its marker line, so a surface appearing or
+  # disappearing changes the version — silence there would be a false "unchanged".
+  {
+    while IFS= read -r f; do
+      case "$f" in
+        MISSING\ *) printf '%s\n' "$f" ;;
+        *) printf '%s\n' "${f##*/}"; cat "$f" ;;
+      esac
+    done <<< "$(prompt_surface_files "$root")"
+  } | hash_stdin
+}
+
 cmd_validate() {
   local file="${1:-}"
   [ -n "$file" ] || die "validate: file argument required"
@@ -857,8 +1584,9 @@ deliver_headless() {
     return 0
   fi
   local rp="$(dirname "$SELF")/runphase.sh"
+  export COMMS_RUNPHASE_VIA="${COMMS_RUNPHASE_VIA:-}"
   if [ ! -x "$rp" ]; then
-    echo "warning: COMMS_DELIVERY=headless but runphase.sh not found next to comms.sh — message written for manual pickup (re-run install.sh)"
+    echo "warning: headless is the default for loops but runphase.sh was not found next to comms.sh — message written for manual pickup (re-run install.sh, or use --via cmux / COMMS_DELIVERY=cmux)"
     return 0
   fi
   if [ -z "$msgfile" ]; then
@@ -904,24 +1632,152 @@ print_direct_recovery() {
   printf '\n'
 }
 
+runphase_available() { [ -x "$(dirname "$SELF")/runphase.sh" ]; }
+
+acp_supports() {  # <agent> — can an ACP turn actually run here for this agent?
+  local acp_sh; acp_sh="$(dirname "$SELF")/acp.sh"
+  [ -x "$acp_sh" ] || return 1
+  "$acp_sh" supports "$1" >/dev/null 2>&1
+}
+
+cmd_transport() {
+  # transport <agent> [--loop] — print the transport that would actually be used:
+  # headless | cmux | acp | mailbox.
+  #
+  # ONE place decides, so the templates never re-implement surface detection and
+  # the eventual "ACP by default, cmux optional" flip is a reordering here rather
+  # than an edit in every command. `mailbox` is the honest last resort: the file
+  # is written and nobody is nudged, which is what stranded a real consult when no
+  # Codex pane was running.
+  local agent="" mode=consult
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --loop)    mode=loop ;;
+      --consult) mode=consult ;;
+      -?*)       usage_err "transport: unknown option '$(clip "$1")'" ;;
+      *)         [ -z "$agent" ] || usage_err "transport: one agent only"; agent="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$agent" ] || usage_err "transport: an agent name is required (registered: $(registry_agents))"
+  require_agent "$agent" "transport"
+
+  if [ "${COMMS_DELIVERY:-}" = "headless" ]; then printf 'headless\n'; return 0; fi
+  if [ "${COMMS_DELIVERY:-}" = "acp" ]; then printf 'acp\n'; return 0; fi
+
+  local caps picked
+  caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
+
+  # An EXPLICIT request binds in EVERY mode. Honouring it only for loops meant a
+  # consult silently ignored COMMS_DELIVERY=cmux and went to ACP instead — the
+  # caller asked for one transport and quietly got another.
+  if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
+    case "$caps" in
+      *interactive*)
+        picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
+        [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
+        ;;
+    esac
+    # cmux was asked for and there is none — say mailbox rather than silently
+    # substituting a transport the caller explicitly did not choose.
+    printf 'mailbox\n'; return 0
+  fi
+
+  # LOOPS ARE ACP-FIRST, then headless, then a pane. A loop is unattended work by
+  # definition, so it must not depend on an open pane — but the ordering here is
+  # driven by cost, measured on one real review turn in this repo:
+  #
+  #   cmux (live pane)      ~43,000-85,000 fresh input tokens per turn
+  #   headless (cold spawn) ~115,000
+  #   ACP (warm session)    ~1,061
+  #
+  # A cold spawn rebuilds context from nothing every round; a live pane keeps the
+  # conversation but still re-sends a large uncached prefix per model call. Only a
+  # named ACP session makes round N pay a delta. cmux and headless stay available
+  # and opt-in (COMMS_DELIVERY / --via).
+  if [ "$mode" = "loop" ]; then
+    if acp_supports "$agent"; then printf 'acp\n'; return 0; fi
+    # Fall back to a pane only when the headless runner is genuinely missing:
+    # flipping the default must not strand every loop on an install where
+    # runphase.sh never landed.
+    if runphase_available; then printf 'headless\n'; return 0; fi
+    case "$caps" in
+      *interactive*)
+        picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
+        [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
+        ;;
+    esac
+    printf 'mailbox\n'; return 0
+  fi
+  # A live pane still wins: it is the watchable surface, and switching a visible
+  # workflow out from under someone is not a fallback, it is a surprise.
+  case "$caps" in
+    *interactive*)
+      picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
+      [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
+      ;;
+  esac
+  # No pane. ACP is synchronous and needs none, which beats queueing into an inbox
+  # nobody is watching — the exact case that stranded a real consult. Checked BEFORE
+  # the headless fallback because a headless-only agent (grok) has no pane by
+  # definition and would otherwise never reach here.
+  #
+  # Consults only: a loop turn must be able to EXECUTE (read files, run git) and that
+  # permission policy is unbuilt, so silently re-routing a loop would change its
+  # semantics rather than just its transport.
+  if [ "$mode" = "consult" ] && acp_supports "$agent"; then printf 'acp\n'; return 0; fi
+  case "$caps" in *interactive*) ;; *) printf 'headless\n'; return 0 ;; esac
+  printf 'mailbox\n'
+}
+
 cmd_deliver() {
   local target="${1:-}" msgfile="${2:-}"
   require_agent "$target" "deliver"
-  # cmux nudge idioms exist only for claude/codex. Every other registered agent
-  # is headless-only BY DESIGN — headless IS its delivery, regardless of
-  # COMMS_DELIVERY (there is no pane to fall back to).
-  case "$target" in
-    claude|codex) ;;
-    *)
-      echo "note: '$target' is a headless-only agent — routing delivery via runphase"
+  # ONE decision point: `transport` owns the routing rules so deliver, the templates,
+  # and the docs cannot drift apart. But the MODE is a property of the message, not of
+  # the caller: hardcoding --loop here silently reclassified consults and one-shot
+  # sends as loops, so a live-pane consult spawned headless instead of nudging the
+  # pane. `workflow:` already means "autonomous loop" in the protocol, so it is the
+  # authoritative signal. (codex, transport-flip round 1.)
+  local route mode_flag="" classify="$msgfile"
+  if [ -z "$classify" ]; then
+    classify="$(find "$(cmd_root)/$(inbox_for "$target")" -maxdepth 1 -type f -name "$(cmd_workspace)_*" 2>/dev/null | sort | tail -1 || true)"
+  fi
+  if [ -n "$classify" ] && [ -f "$classify" ] && [ -n "$(frontmatter_field "$classify" workflow)" ]; then
+    mode_flag="--loop"
+  fi
+  route="$(cmd_transport "$target" $mode_flag)"
+  case "$route" in
+    headless)
+      case "$target" in
+        claude|codex) ;;
+        *) echo "note: '$target' is a headless-only agent — routing delivery via runphase" ;;
+      esac
       deliver_headless "$target" "$msgfile"
       return 0
       ;;
+    acp)
+      # The acp route was reachable from `transport` but fell through this case to
+      # manual pickup, so the docs described behaviour deliver did not have.
+      # (codex, transport-flip round 2.)
+      COMMS_RUNPHASE_VIA=acp deliver_headless "$target" "$msgfile"
+      return 0
+      ;;
+    cmux) ;;
+    *)
+      if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
+        # Re-run the picker purely for its stderr: it distinguishes "tree
+        # unavailable" from "no matching surface", and routing on the summary
+        # alone would throw that away. ONE call — an earlier version ran it twice
+        # and discarded the first. (grok, transport-flip round 1.)
+        pick_surface "$target" 2>&1 >/dev/null | head -2 >&2 || true
+        echo "warning: COMMS_DELIVERY=cmux but no $target surface is live; message written for manual pickup"
+      else
+        echo "warning: no headless runner and no $target surface; message written for manual pickup (re-run install.sh)"
+      fi
+      return 0
+      ;;
   esac
-  if [ "${COMMS_DELIVERY:-cmux}" = "headless" ]; then
-    deliver_headless "$target" "$msgfile"
-    return 0
-  fi
   if ! command -v cmux >/dev/null 2>&1 || [ -z "${CMUX_WORKSPACE_ID:-}" ]; then
     echo "warning: cmux not available; message written for manual pickup"
     return 0
@@ -1402,10 +2258,13 @@ cmd_send() {
       echo "RESULT: manual — headless mode: the reply is on disk; the driving session picks it up when this turn ends"
       ;;
     manual)
-      if [ "${COMMS_DELIVERY:-cmux}" = "headless" ]; then
-        echo "RESULT: manual — headless mode but $to was NOT spawned (see the warning above; likely runphase.sh missing or empty inbox); fix and retry 'comms.sh send --to $to <file>'"
+      # Recovery guidance follows the route that was actually attempted. Deriving it
+      # from COMMS_DELIVERY alone told operators to "fix cmux" right after a headless
+      # runner warning, on a default that no longer prefers cmux. (codex, advisory.)
+      if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
+        echo "RESULT: manual — cmux was requested but $to was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'"
       else
-        echo "RESULT: manual — the other agent was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'"
+        echo "RESULT: manual — $to was NOT spawned (see the warning above; likely runphase.sh missing or an empty inbox); fix and retry 'comms.sh send --to $to <file>'"
       fi
       ;;
     failed)    echo "RESULT: failed — nudge errored mid-sequence; retry with 'comms.sh send --to $to <file>'" ;;
@@ -1424,6 +2283,7 @@ case "${1:-}" in
   verdict)   shift; cmd_verdict "$@" ;;
   archive)   shift; cmd_archive "$@" ;;
   deliver)   shift; cmd_deliver "$@" ;;
+  transport) shift; cmd_transport "$@" ;;
   send)      shift; cmd_send "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
   state)     shift; cmd_state "$@" ;;
@@ -1432,6 +2292,11 @@ case "${1:-}" in
   clean)     shift; cmd_clean "$@" ;;
   lessons)        shift; cmd_lessons "$@" ;;
   archive-search) shift; cmd_archive_search "$@" ;;
+  findings)       shift; cmd_findings "$@" ;;
+  round-note)     shift; cmd_round_note "$@" ;;
+  shadow)         shift; cmd_shadow "$@" ;;
+  snapshot)       shift; cmd_snapshot "$@" ;;
+  prompt-version) shift; cmd_prompt_version "$@" ;;
   ""|help|-h|--help)
     # Print the whole header comment block rather than a hardcoded line range —
     # a fixed range silently truncates its own last entry as the block grows.

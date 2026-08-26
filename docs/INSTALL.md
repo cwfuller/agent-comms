@@ -30,7 +30,7 @@ All scopes are idempotent — re-run freely.
 
 ## Codex socket permissions
 
-Codex → Claude auto-delivery uses cmux's local Unix socket. A default
+Codex → Claude auto-delivery uses cmux's local Unix socket **when cmux delivery is selected** — since 2026-08-25 loops default to the headless runner, which needs no socket, and cmux is opt-in via `--via cmux` / `COMMS_DELIVERY=cmux`. This section applies only to the cmux path. A default
 `sandbox_mode = "workspace-write"` session cannot connect to that socket, and wrappers
 or retries launched by the same session remain inside the same boundary. Message files
 still persist, but Claude is not notified and does not passively poll `.comms/`.

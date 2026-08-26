@@ -8,6 +8,74 @@ emits whole `## ` sections up to a byte budget, ordered by the date in each head
 physical order here may be mixed and writers may append or prepend freely. A section
 whose heading carries no `YYYY-MM-DD` sorts last (but is never dropped).
 
+## 2026-08-22 — thread `grading-pilot-14076` (auto-implement, APPROVED round 4)
+
+The grading pilot's first slice, reviewed by codex over four rounds: ten blocking findings,
+every one a real defect in code that was green at every step. Rounds 2 and 3 were mostly
+defects in the round-1 *fixes*. What generalizes:
+
+- **A retained artifact is not a reviewed artifact.** Round 1: `snapshot` kept the tree
+  while the child read the live worktree, so `artifact_id` could name content nobody
+  inspected. Round 2: mounting the synthetic commit *directly* was also wrong, and wrong in
+  a way no content assertion could see — `HEAD` became the synthetic commit and `git diff`
+  came back EMPTY, so the reviewer would fail its own head check and find no patch. The
+  shape is the artifact: worktree at base → materialize → reset index to base.
+  **Assert what the reviewer can SEE (HEAD, diff, untracked), never just file contents.**
+- **Normalization is not identity.** `safe_name` mapped `a/b` and `a_b` to one directory, so
+  a second set silently overwrote the first's stored reply. Any id that becomes a path needs
+  a hash of the raw value, not a sanitized rendering of it.
+- **Pair identity needs `phase`.** `/auto-full` keeps ONE thread across plan→implement and
+  restarts at `round: 1`, so thread+round collides across phases. Anything keyed on a loop's
+  identity must include phase or it will conflate two different artifacts.
+- **Ephemeral provenance must be captured once and reused, not re-probed.** The CLI version
+  was sampled at dispatch, persisted, and then re-probed after the review — so a mid-review
+  upgrade made the live row disagree with its own sidecar and a rebuild rewrote history.
+  Sample once; pass the value; never ask again.
+- **A destructive migration needs a staging file.** `--rebuild` deleted the ledger before
+  the replacement existed. Stage, validate the header, then atomic-rename.
+- **Truncation of evidence is permanent under idempotence.** Claims were clipped to 600
+  bytes and frozen by `finding_id`, losing the tail of 40 of the first 112 rows before
+  anyone noticed. Store whole; excerpt at read time.
+- **An empty field must never read as a clean result.** Drift was a blank column meaning
+  both "no drift" and "could not check". It is now an explicit `same_endpoint` / `changed` /
+  `unknown` tri-state, and pairs are called CANDIDATE pairs because the gating leg is still
+  unbound.
+- **A flag cannot promise what the caller controls.** `run --no-deliver` silenced state
+  writes but codex/claude children are still *instructed* to send their own reply — the
+  guarantee held only for parent-brokered reviewers. It now refuses the others outright.
+- **Test comments rot into false claims.** One comment asserted a live edit between snapshot
+  and read with no mutation behind it; the reviewer caught the dead claim, not a test failure.
+- Un-actioned at loop end: nothing. The round-4 advisory (stale `thread+round` wording in
+  docs and test labels) was fixed in the same change.
+
+## 2026-08-22 — first live `comms.sh shadow` run (grading pilot, grok as second reviewer)
+
+The first live shadow run of the grading pilot. It failed, informatively, and the
+failure is the point — this is exactly the signal the pilot was built to collect.
+
+- **grok reviewed for 9.5 minutes and then broke the reply contract.** The CLI exited 0
+  and produced a full review, but its first line was the head_sha check
+  ("HEAD matches `3c5b790…`. The") instead of the mandated
+  `VERDICT: APPROVE|REQUEST_CHANGES`. The trusted-parent broker refused to stamp an
+  envelope, correctly — but note what this means for grading: **a reviewer can fail the
+  protocol without failing the task.** Verdict-line compliance is now a real, measured
+  reviewer property, not a hypothetical.
+- **A failed turn was discarding the reviewer's actual text.** The first version copied
+  `result.json` and `runner.log` out of the run dir and then deleted it — throwing away
+  `reply-raw.md`, i.e. the entire 9.5-minute review AND the only evidence of which
+  contract broke. Fixed: raw output, events, and the result record are all preserved
+  under `.comms/grades/shadow/<set>/`. **Preserve the artifact before classifying the
+  failure**, always.
+- **Preserved is not the same as scored.** The raw text is kept but never extracted into
+  the ledger: a reply that failed the contract must not be counted as if it had passed
+  it, and "reviewed and found nothing" must stay distinguishable from "never produced a
+  usable review". Both lanes now have regression fixtures.
+- **The prompt asks for two things in first position.** The review prompt tells the
+  reviewer to compare `head_sha` with `git rev-parse HEAD` *and* to make `VERDICT:` the
+  literal first line. grok obeyed the first instruction in the first position. That is a
+  prompt defect as much as a reviewer defect — worth fixing before the 8-loop baseline
+  runs, and if it is fixed it is a NEW `prompt_version` by definition.
+
 ## 2026-08-20 — thread grok-prompt-quality-18172 (auto-implement, MAX ROUNDS → user decision)
 
 The grok reviewer-prompt loop hit max-rounds (4) with a blocking finding and was

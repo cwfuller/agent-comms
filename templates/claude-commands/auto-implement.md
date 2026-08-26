@@ -11,6 +11,15 @@ No separate plan is reviewed here — but the handoff includes a short `## Inten
    - The argument text describes what to implement (or references an existing plan)
    - Default max rounds: 10. If the user specifies a number, use that as max rounds.
    - Optional `--reviewer <agent>` flag selects the reviewing agent. Default: `"$COMMS_SH" agents default`. Validate the name against `"$COMMS_SH" agents`; hold it in a named variable (REVIEWER) and use it for every write path and send below — headless-only agents (e.g. grok) work identically; delivery routes itself.
+   - Optional `--via cmux` forces the watchable pane path for this loop; `--via headless`
+     forces the detached runner. **Default is headless** — a loop is unattended work, so it
+     no longer requires a terminal pane to be open. Export the choice once, before any
+     `send`/`deliver`, and never re-decide per call:
+     ```bash
+     case "$ARGUMENTS" in *"--via cmux"*) export COMMS_DELIVERY=cmux ;; *"--via headless"*) export COMMS_DELIVERY=headless ;; esac
+     "$COMMS_SH" transport "$REVIEWER" --loop   # what will actually be used: headless | cmux | mailbox
+     ```
+     Strip the flag from the task text — it must never reach the message body.
 
 2. **Resolve the shared helper** — the single source of truth for comms root, workspace name, validation, delivery, and archiving. Local pin wins over global:
    ```bash

@@ -315,8 +315,11 @@ watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
   vendored, pinned kernel with its own conformance reader. This confirmed the
   fixtures and prompt fragments work across implementations without coupling a
   consumer's build to upstream HEAD.
-- [ ] **Make non-cmux (headless) delivery the DEFAULT** — decided 2026-07-06, gated on
-  the soak threshold: 10 successful headless loops including ≥3 claude-resume/attach
+- [x] **Make non-cmux (headless) delivery the DEFAULT** — *shipped 2026-08-25, ahead of
+  the original soak gate, on user decision.* Loops are headless-first; cmux is opt-in via
+  `--via cmux` / `COMMS_DELIVERY=cmux`; `comms.sh transport` owns the routing and
+  classifies from the message (`workflow:` present ⇒ loop). The soak threshold below was
+  the original gate: 10 successful headless loops including ≥3 claude-resume/attach
   exercises and ≥3 reverse-direction handoffs. The timeout idle/salvage fix should
   land before the flip. Prerequisites: per-repo persistence for
   the delivery mode (`.comms/config`, not env-var-only) with staged per-repo opt-in
@@ -351,9 +354,15 @@ Ordered by cost/value; the first three are template-only edits.
 - [ ] **Writer dispute/escalate lane**: a sanctioned reply that contests a blocking
   classification and pauses the loop for a user scope decision instead of complying or
   burning a round. Touches termination conditions in both read skills — design first.
+  *(The grading track INFORMS this — it fixes the label semantics: a dispute is a claim that
+  triggers adjudication, never a disposition. The deliverable here — the sanctioned reply and
+  the termination-condition edits in both read skills — remains unbuilt and lives here.)*
 - [ ] **Shared test-evidence contract in plan phase**: plan template states which layers
   get what kind of proof at which checkpoint, so evidence boundaries aren't litigated
   mid-loop.
+  *(The grading track INFORMS this — it fixes the review-time weighting rule and its four
+  proof conditions. The plan-template deliverable remains unbuilt and lives here; the
+  weighting half is additionally blocked on the artifact hash.)*
 - [ ] **Usage/budget frontmatter signal** (optional field, soft rollout): lets a loop
   anticipate provider outages/limits instead of discovering them mid-round. Pairs with
   the ACP warm-session resumability spike.
@@ -457,6 +466,258 @@ command shape evolves:
 - [x] adding an agent touches ONLY the registry — the template reads names from it (DRY)
   — *fully delivered 2026-08-20 (`.comms/config` + `comms.sh agents`)*
 
+## Reviewer grading & panel track (2026-08-21, revised 2026-08-22)
+
+Grade reviewers from what the loops already produce, support a panel of reviewers over one
+artifact, and eventually route work to the agent that is measurably good at that category.
+Designed 2026-08-21, consulted to Codex (thread `ask-reviewer-grading-panel-mode-9753`), then
+measured against the archive on 2026-08-22 and consulted a second round. Round 1: the
+consult's *framing* correction stands, its *instrumentation* prescription did not survive the
+measurement. Round 2: the re-scoping stands, but three claims **in this section** were wrong
+and are corrected inline — matched empty reviews do not expose correlated misses, a hash
+without retained content does not enable unchanged-since analysis, and disjoint findings show
+diversity, not routing quality. All of it is recorded inline so none of it is re-litigated.
+
+**Framing correction (from the consult) — the loop does NOT emit ground truth.** It emits
+*claims* and later *dispositions* for findings somebody discovered; undiscovered defects
+never enter the ledger. Precision is observable, recall is not, and an approve-everything
+reviewer keeps looking perfect until some other process finds a defect. Consequences that
+bind every item below:
+
+- The metric is `observed_escape_rate` / `conditional_recall_proxy` — never "recall".
+- Every label carries provenance, adjudicator, confidence, and a censoring window; exposure
+  is counted in *subsequent review turns touching the same region*, never in elapsed days
+  (the corpus has ~5 active days across 78, with 22–27 day gaps — a wall-clock denominator
+  manufactures a rate from an empty risk set).
+- "No escape observed yet" is **censored data, not a true negative.**
+
+**Measurement (2026-08-22 — `.comms/archive`: 118 messages, 53 `review-feedback`, 16 threads,
+149 Blocking+Advisory bullets, ~5 genuinely active days).** Five facts reshape or kill most
+of what the design and the critique both assumed:
+
+- **`head_sha` does not identify the reviewed artifact.** All 16 threads carry at most ONE
+  distinct `head_sha` (8 carry none) — including every 4-round thread. The loop reviews the
+  *uncommitted working tree* (`runphase.sh:373` "Your working directory IS the tree to
+  review") and the message carries only `git diff --stat`, so round N's reviewed state is
+  destroyed by round N+1's edits and recorded nowhere. Every SHA-bound condition in the
+  consult — "the evidence existed at that reviewed SHA", "the test fails at the exact
+  reviewed SHA", and the whole unchanged-since rule — is **uncomputable under today's
+  protocol**. The same fact undercuts loopspec's `merge` profile, which offers `head_sha` as
+  the example of binding to the exact artifact reviewed.
+- **The escape metric penalizes obedience.** `fragments/holistic-rereview.md` instructs every
+  round-2+ reviewer to "Scan for issues you may have missed in earlier rounds — you were
+  likely anchored on specific areas before". A round-N finding on an unchanged hunk is that
+  instruction's intended output, and none of the consult's four promotion conditions filters
+  it. 32 of 53 reviews are round ≥2 — the entire escape-candidate pool — and all 32 are
+  codex-on-codex.
+- **`false_approve_rate` has no possible numerator.** All 17 threaded APPROVEs are the
+  terminal round of their phase (SPEC: "the loop ends on APPROVE"), so an escape can only
+  ever land on a REQUEST_CHANGES round. Out-of-loop detection over 2.5 months yields 5
+  file-level coincidences, all on the repo's hottest files. Report "N approvals, M
+  re-examined" — never a rate, never an interval.
+- **"There is no per-finding structure" was false** (the design's founding premise, which the
+  consult reinforced rather than corrected). 53/53 review-feedback messages already carry
+  template-mandated `### Blocking` / `### Advisory` / `### Process`; 149 bullets, 65% with a
+  backtick `path:line` anchor. The archive lacks *dispositions*, not *structure* — a ~25-line
+  awk extractor already yields them with thread/round/severity/anchor provenance
+  (149 raw bullets; **112 substantive findings** once `None.` placeholders and `### Process`
+  are dropped — the second number is the one the ledger records).
+- **There is nothing to compare.** 53/53 reviews are `from: codex`; `--reviewer grok` shipped
+  2026-08-20 and has produced zero reviews. The bottleneck is not measurement — it is that
+  the comparison has never been run.
+
+### Prerequisites — nothing downstream is computable without these
+
+- [x] **RETAIN the artifact, not just a hash of it** *(shipped 2026-08-22, `comms.sh
+  snapshot`)*. A hash proves two canonical inputs were identical but cannot resurrect
+  either, so it does not enable unchanged-since analysis once the worktree moves. The
+  working tree is written as a real commit object (tracked edits AND untracked files, the
+  mailbox removed mechanically) and anchored under `refs/agent-comms/artifacts/` so gc
+  cannot eat it; a clean tree returns HEAD rather than minting a synonym. `git stash
+  create` was the obvious tool and is wrong — it silently drops untracked files even with
+  `--include-untracked` (caught by the harness), so the tree is built in a throwaway index.
+  The shadow reviewer runs against a MOUNT of that artifact — worktree at the base,
+  artifact materialized into it, index reset to base — so `HEAD` matches the request's
+  `head_sha` and the reviewed change reads as an ordinary uncommitted diff. The GATING
+  reviewer still reads the live tree, which is why a pair is a CANDIDATE pair and
+  `drift_status` is recorded explicitly. agent-comms-private: no SPEC edit, no fixture
+  change, no pin bump.
+- [x] **Do NOT change the finding format before the baseline runs** *(held 2026-08-22 —
+  no template edit shipped; extraction reports the anchored subset as a column instead)* *(corrected r2)*.
+  Extract every finding bullet and report the anchored subset as a separate column —
+  mandating `path:line` would discard valid prose and cross-file findings AND move the
+  instrument before the experiment. If the template is ever changed, it is a NEW
+  `prompt_version`, never an invisible comparison against history. A WARNING-level
+  `cmd_validate` check stays available, but it ships after the pilot, not before it.
+
+### First slice — the comparison, not the ledger
+
+- [x] **Retro-extract the archive** *(shipped 2026-08-22)* — `comms.sh findings` over `.comms/archive` → an
+  append-only TSV (thread, round, reviewer, verdict, severity, anchor, claim). ~25 lines of
+  awk gets all 112 today, with no protocol change and no prompt change. It is the single-
+  reviewer baseline the shadow pairs are compared against, and it prices anchor coverage,
+  severity mix, and per-round yield from real data instead of assumption. It cannot dry-run
+  unchanged-since — the archive never retained the reviewed artifacts, which is why the
+  prerequisite above exists and why escape attribution is cut rather than deferred.
+- [x] **The second reviewer** *(shipped 2026-08-22)* — `comms.sh shadow --to <agent> <review-request>`: re-stamp
+  run the second reviewer through `runphase.sh run --no-deliver` and append to the same TSV.
+  The shadow verdict never gates, MECHANICALLY: the reply is produced and validated but never
+  delivered to an inbox and never written to thread state, so it cannot steer a loop it was
+  never delivered into. (It deliberately does NOT reuse `cmd_send` — sending is the one thing
+  it must not do — and it refuses any agent that authors and sends its own replies.)
+  ~60–85 lines, one helper, no new dependency. Run it on the next 8 loops against the
+  retained snapshot. Method: isolated fresh sessions, neither output exposed to the other,
+  randomized primary/shadow assignment, and rate-limit/transport failures classified
+  separately from review quality. **Matched pairs on an identical artifact beat 112 unmatched
+  single-reviewer observations** — but what they measure is agreement, unique-finding yield,
+  zero-finding disagreement, severity mix, anchor coverage, latency, and operational failure.
+  *(Corrected r2: two empty reviews do NOT "surface correlated misses" — that is mutual
+  silence with no observation of the missed defect. Eight pairs are a schema/feasibility
+  pilot, not a reviewer grade.)*
+- [ ] **Adjudicate a SAMPLE of the pairwise symmetric difference — the minimum third
+  signal** *(added r2)*. Disjoint findings show diversity and noise, **not** quality: a noisy
+  reviewer wins a raw-yield comparison. Only the findings one reviewer raised and the other
+  did not need a human verdict, and only a sample of those — far cheaper than grading every
+  finding, and the only thing that converts diversity into a routing claim. Until it runs,
+  shadow output supports exploratory diversity-based routing at most, never quality gating.
+- [x] **Dispositions are OMITTED from the pilot** *(held 2026-08-22 — nothing built)* *(r2: there is no cheap reliable producer)*.
+  A terminal APPROVE does not confirm each preceding finding and diff overlap only shows that
+  code moved — never synthesize dispositions from either. The smallest honest producer, if
+  one is ever wanted, is an out-of-band author sidecar (`comms.sh label` after the fix turn)
+  recorded as `author_claim`, never as confirmed truth and never injected into the next
+  reviewer's prompt — which preserves "stable context, not fix narration" but still costs
+  protocol work. The pilot skips it and leans on the adjudicated sample instead.
+- [x] **Capture the EPHEMERAL, defer the derivable** *(shipped 2026-08-22)*. One append-only
+  TSV, nullable disposition with explicit provenance. The emitted header is exactly:
+  `schema_version`, `finding_id`, `review_set_id`, `artifact_id`, `base_sha`, `thread`,
+  `phase`, `round`, `reviewer`, `reviewer_version`, `prompt_version`, `role` (gating|shadow),
+  `lane`, `anchor`, `claim`, `verdict`, `source_message_id`. Two deviations from the consult,
+  both deliberate: **there is no separate `observation_id`** — it could only diverge from
+  `finding_id` if two rows were mechanically recognizable as the same claim, and claim
+  fingerprinting was rejected, so one id is the honest count; and the runtime column is
+  `reviewer_version` (the CLI's self-reported identity) — **grades do NOT partition on model
+  or provider config**, which nothing currently captures, so no such claim is made. Columns
+  can be added later; artifact contents, runtime identity, prompt version, isolation, and
+  role **cannot be reconstructed after the run**.
+  Still ~85 lines against ~1,000 — in a repo where `jq` appears 0 times in `helpers/` and the
+  JSON reader is `json_get()`, sed-based by design.
+
+**Baseline measured 2026-08-22, first run of `comms.sh findings` over this repo's own
+archive:** 112 substantive findings (50 blocking / 62 advisory) across 53 reviews and 17
+threads, 86 of them (77%) carrying a resolvable `path:line` anchor — and **112 of 112 from
+codex**, which is the whole argument for shipping the shadow leg before any ledger.
+
+**The slice landed 2026-08-22, thread `grading-pilot-14076` (auto-implement, codex-approved
+round 4 of 4).** Ten blocking findings across three rounds, every one a real defect in code
+that was green at every step; rounds 2 and 3 were largely defects in the round-1 fixes. The
+generalizable lessons are in `docs/advisories.md`. Its own first live shadow run (grok) also
+found six issues before codex ever saw the code — the comparison this track exists to make
+produced evidence before the ledger held a single scored row.
+
+Remaining in this slice: install the corrected reviewer prompt (a NEW `prompt_version` by
+construction — and note `prompt-version` hashes the INSTALLED surface, so the hash moves on
+`install.sh`, not on the edit), then run `shadow --to grok` on the next 8 loops, then
+adjudicate a sample of the pairwise symmetric difference. Nothing else is buildable until
+those exist.
+
+**Known scoped limitation, accepted by the reviewer:** the GATING reviewer is not bound to
+an artifact at dispatch, so every pair is a CANDIDATE pair and `drift_status` never asserts
+more than "no drift detected during the shadow window". Binding it means `send` taking a
+snapshot on every loop, shadowed or not — the next slice, deliberately not bolted onto this
+one.
+
+### Held as design constraints (free to keep, nothing to build)
+
+- [ ] **Escapes are candidates, never automatic misses** — unchanged-since is necessary, not
+  sufficient: findings are semantic and cross-file, and churn can rewrite a defect and hide
+  its ancestry. Uncertain lineage → `ambiguous_churn` / `new_context`, never counted as
+  either a hit or a clean review. Escapes where reviewer(N) == reviewer(N-1) are `self_escape`
+  and never enter a routing metric — today that is 100% of them.
+- [ ] **Adjudicated severity, not reviewer-self-declared**, wherever a verdict composes;
+  otherwise `any-blocks` lets one noisy reviewer halt a panel by calling a concern "security".
+  Process still never gates; style-by-majority stands. **The adjudicator is the human** — the
+  repo's only precedent (the dispute lane "pauses the loop for a user scope decision"; an
+  advisories entry "resolved by user decision") — so every adjudication-gated item is an
+  unbudgeted human-labor line, and is deferred below on exactly that ground.
+- [ ] **Test-evidence weighting** — a test-backed finding earns higher weight only when the
+  test fails at the reviewed artifact, passes after the fix, targets the claimed behavior, and
+  was not weakened or disabled to obtain green. Blocked on the artifact hash above.
+  Implementer-authored tests are evidence, not independent truth; preserve authorship.
+- [ ] **Goodhart guards.** "Not inlined" is **not** a boundary — this repo already reverted
+  `COMMS_ARCHIVE_SCOPE_THREAD` on exactly that ground (`advisories.md`: "Env vars are not
+  boundaries"). Grades live outside the reviewed worktree or behind the operator deny-profile,
+  and **never** in any file `comms.sh lessons` reads — which rules out `docs/advisories.md`,
+  whose read is a mandatory first step in the reviewer's own turn. No agent adjudicates its
+  own findings.
+- [ ] **Loopspec stays lenient** — grading is an ADDITIVE companion artifact and message
+  `verdict` compatibility is unchanged. Finding IDs stay **implementation-private to
+  agent-comms**, like the `merge` verdict profile. *(Reversed 2026-08-22: the earlier
+  "soft-required exactly as `thread`/`message_id`" framing was wrong — those are a normative
+  row in SPEC's validation table, so the analogy commits to a SPEC edit + fixtures +
+  `check.sh` + a pin bump for every vendoring consumer. The consult never asked for that; it
+  put `finding_id` in the event schema, never in the message contract.)*
+- [x] **`prompt_version` is required on any grade record** *(shipped 2026-08-22 —
+  `comms.sh prompt-version`)* (a fragment-tree content hash —
+  the drift harness already computes one). Every active review day is a day the reviewer's
+  instruction text changed, so grades do not carry across a prompt edit; partition on it,
+  never pool. Absent from the consult's otherwise-exhaustive field list.
+
+### Rejected (measured, not re-litigated)
+
+- **Event-sourced ledger with 7 event types, dual `finding_id` + rename-mapped semantic
+  fingerprint.** Right shape for a data platform, wrong for ~60 findings/month from one
+  reviewer in a bash tool. Two of the seven events have no writer: `outcome_observed` has no
+  producer and no out-of-loop source, and `disposition_claimed`'s natural producer is the
+  author's round-N reply, which SPEC forbids ("never a per-finding 'fixed it' checklist") —
+  so the "no behavior change" claim was false. The fingerprint also specifies a consumer for
+  data no producer emits: 0% of real findings carry symbol/region, invariant, or evidence
+  signature.
+- **Shrinkage / credible intervals per (agent × category).** Degenerate here — one agent
+  holds 100% of the reviews and the finding format has no category field, so the grid is 1×1
+  and shrinkage collapses to the identity. Show raw n plus "1 reviewer, 1 prompt version";
+  that looks uncertain without pretending to a posterior.
+- **Risk-weighted audit sample as specified.** Its `same-model/provider agreement` arm selects
+  *nothing* with one reviewer, while its other arms select the majority of the corpus as
+  unbudgeted human labor. The shadow-pair run above buys the same signal mechanically.
+- **Rotating seeded mutation.** More expensive than the static golden-bug suite the consult
+  itself declined, and actively unsafe here: a caught-but-unfixed seeded defect is appended to
+  the tracked `docs/advisories.md` on APPROVE and re-injected into later reviewer turns via
+  `comms.sh lessons`; the miss case leaves an APPROVE on a deliberately defective tree. The
+  consult offered it as the second branch of a disjunction — keep only the cheap branch (a
+  periodic independent shadow challenger, which item 2 of the first slice already is).
+- **Escape attribution as a reviewer-routing metric** *(cut r2, stronger than the earlier
+  deferral)*. Even a perfect snapshot establishes textual lineage, not semantic attribution:
+  a later cross-file objection may have been valid earlier while touching no identical hunk.
+  Retain "later-pass yield" as a **process observation only**, and never charge a reviewer
+  for its own later discovery. Revisit only if artifact lineage AND adjudication both exist.
+- **Cross-machine redacted export/import.** Ledger portability resolved as **per-install
+  only**: single-user tool, no compounding benefit, and it reopens the disclosure surface
+  3c5b790 just closed.
+- **`cost_per_confirmed` as a reported column, for now.** No review transport meters usage —
+  token accounting lives only in `acp.sh`, reachable only from `/ask`, whose replies carry no
+  verdict and no findings by contract. Any cost figure also needs `transport` and
+  `session_state` (cold|warm) beside it: the one measured number swings ~127x on warmth.
+
+### Deferred (reason recorded, so it is not mistaken for oversight)
+
+- **Panels.** No comparative data exists yet. When they land: N parallel 2-party threads under
+  a `review_set_id` — the MESSAGE CONTRACT holds unchanged, but the driver, state layer, and
+  status surface do not. `comms.sh` `status` evaluates its ACTION NEEDED branch against only
+  the newest state file (`ls -t … | head -1`), so N-1 panel legs go invisible; `auto-implement`
+  binds a single `REVIEWER` variable across every write path; state is keyed
+  `<ws>_<thread>.json` with a singular `awaiting_from` and has no home for a composed verdict.
+  Condensation, when built, auto-collapses only high-confidence exact matches and retains every
+  source finding and reviewer.
+- **The judge.** With one reviewer there are zero conflicts to adjudicate. The consult's
+  correction stands for when there are more than one: conflict-only judging is structurally
+  blind to correlated agreement — including agreement by both finding *nothing*, which no
+  conflict trigger can ever see.
+- **Routing.** Needs a populated (agent × category) grid, which needs a category field, a
+  second reviewer, and a stable prompt version. None exist.
+- **Adjudicated-severity composition and the dispute lane** — the adjudicator is the human
+  and nobody has costed that time. (Escape attribution is no longer here; it is CUT — see
+  Rejected.)
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing
@@ -466,5 +727,17 @@ command shape evolves:
 3. **Multi-agent core + Grok Build headless** — registry/generalization, then Grok as
    consult + reviewer
 4. **ACP Tier-1 spike** — DONE 2026-08-20 (/ask --via acp; warm r2 146 vs cold 18,562 tokens, ~127x)
-5. Remaining scope-dial items (dispute lane needs design; test-evidence contract; budget
-   signaling; stakes-tiering docs) and the standing DEFERRED backlog in docs/advisories.md
+5. **Reviewer grading — the comparison, not the ledger** *(re-scoped 2026-08-22 after
+   measuring the archive, amended the same day by consult round 2)*: retain the reviewed
+   artifact as a durable snapshot (the one prerequisite — the finding format deliberately
+   does NOT change before the baseline), then retro-extract the 112 archived findings, run a
+   shadow second reviewer on the next 8 loops, and adjudicate a sample of the pairwise
+   symmetric difference — the minimum third signal, since diversity alone is not quality.
+   The event-sourced ledger is NOT built until those produce numbers: with 53/53 reviews from
+   one agent there is nothing to compare, and `--reviewer grok` has shipped and never run.
+   Escape attribution as a routing metric is cut, not deferred. Panels, routing, the judge,
+   and adjudication-gated items stay deferred with reasons recorded in the track.
+6. Remaining scope-dial items (dispute lane and test-evidence contract — informed by the
+   grading track, but their deliverables stay tracked in the scope-dial section above;
+   budget signaling; stakes-tiering docs) and the standing DEFERRED backlog in
+   docs/advisories.md

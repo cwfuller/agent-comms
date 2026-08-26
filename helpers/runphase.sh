@@ -7,14 +7,22 @@
 # `claude -p`): the peer turn is spawned, observed (JSONL event log),
 # resumed-or-failed (session id recorded), and recorded (result.json + thread
 # state) — without typing into another terminal. Opt-in per call via
-# COMMS_DELIVERY=headless (comms.sh deliver/send route here); cmux stays the
-# default delivery path.
+# COMMS_DELIVERY=headless. Since 2026-08-25 this is the DEFAULT for loops (a loop
+# is unattended work and should not require an open pane); cmux is opt-in via
+# --via cmux / COMMS_DELIVERY=cmux. `comms.sh transport` owns the decision.
 #
 # Subcommands:
 #   spawn --message <file> [--provider codex|claude|grok] [--sandbox <mode>] [--timeout-secs N]
 #         detach a `run` and return immediately; prints pid + run dir.
 #         Refuses (HELD) while the thread — or everything — is held; see hold.
-#   run --message <file> --dir <run-dir> [--provider ...] [--sandbox <mode>] [--timeout-secs N]
+#   run --message <file> --dir <run-dir> [--provider ...] [--sandbox <mode>]
+#       [--timeout-secs N] [--no-deliver] [--via acp]
+#         --via acp: run the turn through a WARM per-thread ACP session instead of a
+#         cold CLI spawn. Measured on one real loop: 114,688 / 144,975 fresh input
+#         tokens cold, versus 1,405 / 442 warm.
+#         --no-deliver: produce and validate the reply in the run dir but touch
+#         NEITHER the mailbox NOR thread state — the measurement mode behind
+#         `comms.sh shadow`, where a second reviewer must not be able to gate
 #         foreground runner (spawn's child): build the prompt, drive the
 #         provider CLI, tee events, write result.json on every exit path,
 #         update thread state
@@ -187,6 +195,10 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
 # re-reading it here would fail exactly on the success path. Advisory like all
 # state writes: never fatal.
 update_thread_state() {
+  # A shadow run is a MEASUREMENT of an in-flight thread, not a turn in it.
+  # Every state write here — including the EXIT trap's — would clobber the real
+  # loop's awaiting_from/status while the primary reviewer is still working.
+  if [ "${RUNPHASE_NO_DELIVER:-}" = 1 ]; then return 0; fi
   local thread="$1" status="$2" sid="$3" field="${4:-codex_thread_id}"
   local ws sf root
   [ -n "$thread" ] || return 0   # one-shot message (e.g. /ask, or the legacy /ask-codex alias): no state
@@ -284,7 +296,13 @@ parent_thread_context() {
   done < <(find "$arch" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort -r)
 }
 
-build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> — sets the GROK_* envelope globals
+build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> [agent] — sets the GROK_* globals
+  # Parent-brokered prompt. Named for grok because grok was the first such turn, but
+  # ANY provider running under --via acp is parent-brokered too: the parent stamps and
+  # delivers, so the child must be told to emit its reply as TEXT rather than to send
+  # it. Handing a self-sending prompt to a brokered turn makes the child try to run
+  # the mailbox flow itself — observed live on the first ACP review.
+  GROK_AGENT="${5:-grok}"
   # Returns 1 with GROK_PROMPT_NOTE set when a REVIEW turn cannot obtain its
   # review bar — the caller fails the run before the child ever starts.
   local msg="$1" run_dir="$2" peer="$3" main_root="$4"
@@ -292,7 +310,7 @@ build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> — sets the GROK_* 
   GROK_PROMPT_NOTE=""
   GROK_WS="$("$COMMS" workspace)"
   ts="$(date +%Y-%m-%dT%H-%M-%S)"
-  GROK_REPLY_ID="$(safe_name "${GROK_WS}")_${ts}_grok-reply-$$"
+  GROK_REPLY_ID="$(safe_name "${GROK_WS}")_${ts}_${GROK_AGENT}-reply-$$"
   GROK_THREAD="$(frontmatter_field "$msg" thread)"
   GROK_WF="$(frontmatter_field "$msg" workflow)"
   GROK_PHASE="$(frontmatter_field "$msg" phase)"
@@ -305,7 +323,7 @@ build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> — sets the GROK_* 
   if [ "$(frontmatter_field "$msg" type)" = "question" ]; then
     GROK_RTYPE="response"
     cat > "$run_dir/prompt.md" <<PROMPT
-You are agent 'grok', answering a ONE-OFF CONSULT in an agent-comms exchange. This is
+You are agent '$GROK_AGENT', answering a ONE-OFF CONSULT in an agent-comms exchange. This is
 NOT a review: no verdict, no findings structure, no blocking/advisory split. You run
 READ-ONLY — you cannot and must not write any file in the repository or the mailbox;
 a trusted parent process authors your reply's envelope and delivers it. Do not run
@@ -362,7 +380,7 @@ $prior
 "
   fi
   cat > "$run_dir/prompt.md" <<PROMPT
-You are agent 'grok', a READ-ONLY reviewer in an agent-comms exchange. You cannot and
+You are agent '$GROK_AGENT', a READ-ONLY reviewer in an agent-comms exchange. You cannot and
 must not write any file in the repository or the mailbox — a trusted parent process
 authors the message envelope and delivers your reply. Do not attempt file writes; the
 kernel sandbox will deny them.
@@ -377,8 +395,9 @@ $(cat "$msg")
 ----- END MESSAGE -----
 $prior_block
 If the message carries a head_sha: field, compare it with "git rev-parse HEAD" in your
-working directory and note any mismatch in your reply — a repurposed checkout
-invalidates the review premise.
+working directory — a repurposed checkout invalidates the review premise. Report the
+result INSIDE your reply body, in the ## Summary section. It must NOT appear before the
+VERDICT line below: nothing whatsoever may precede that line.
 
 THE REVIEW IS THE WORK — use your read tools thoroughly: read the changed files, use
 read-only git commands (diff, log, show), grep for the patterns the change touches.
@@ -389,7 +408,8 @@ $phase_focus
 
 $round_note
 
-Then OUTPUT the reply as your final message: your FIRST line must be exactly
+Then OUTPUT the reply as your final message. The VERY FIRST line — before any
+preamble, acknowledgement, or head_sha note — must be exactly
 'VERDICT: APPROVE' or 'VERDICT: REQUEST_CHANGES', then a blank line, then the body —
 ## Summary, then ## Findings with ### Blocking / ### Advisory / ### Process
 subsections. No frontmatter, no code fences around it.
@@ -399,11 +419,21 @@ $vtext
 PROMPT
 }
 
-grok_broker() {  # <msg> <run-dir> <peer> — stamp envelope, persist, validate, send, archive
+# The trusted-parent broker, in two halves. EXTRACT turns whatever the child
+# emitted into reply-raw.md; STAMP authors the envelope and delivers it. They are
+# split because an ACP turn already hands us plain text on stdout — it needs the
+# stamping half and must not run the streaming-JSON extractor.
+grok_broker() {  # <msg> <run-dir> <peer> — extract, then stamp/persist/validate/send/archive
   local msg="$1" run_dir="$2" peer="$3"
   GROK_BROKER_NOTE=""
+  if ! broker_extract_stream "$run_dir"; then return 1; fi
+  broker_stamp_and_deliver "$msg" "$run_dir" "$peer"
+}
+
+broker_extract_stream() {  # <run-dir> — streaming-messages-json -> reply-raw.md
+  local run_dir="$1"
   if ! command -v python3 >/dev/null 2>&1; then
-    GROK_BROKER_NOTE="python3 is required to extract the grok reply from events.ndjson"
+    GROK_BROKER_NOTE="python3 is required to extract the reply from events.ndjson"
     return 1
   fi
   if ! python3 - "$run_dir/events.ndjson" > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" <<'PYX'
@@ -433,7 +463,13 @@ PYX
     GROK_BROKER_NOTE="reply extraction failed — see events.ndjson / runner.log"
     return 1
   fi
-  [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="grok produced no reply text"; return 1; }
+  [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="the child produced no reply text"; return 1; }
+  return 0
+}
+
+broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivered
+  local msg="$1" run_dir="$2" peer="$3"
+  [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="the child produced no reply text"; return 1; }
   # The child's output is VERDICT (reviews only) + body. The PARENT authors the
   # complete envelope from the captured inbound values — no model-authored
   # frontmatter is ever persisted, so type/from/thread/round/in-reply-to cannot
@@ -458,7 +494,7 @@ PYX
   {
     printf -- '---\n'
     printf 'type: %s\n' "$GROK_RTYPE"
-    printf 'from: grok\n'
+    printf 'from: %s\n' "${GROK_AGENT:-grok}"
     printf 'timestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'workspace: %s\n' "$GROK_WS"
     printf 'message_id: %s\n' "$GROK_REPLY_ID"
@@ -478,6 +514,12 @@ PYX
     GROK_BROKER_NOTE="stamped grok reply failed validation (degenerate body?) — see runner.log; inbound NOT archived"
     return 1
   fi
+  # Measurement runs stop HERE, with a validated reply in the run dir and
+  # nothing in any inbox. This is what makes "the shadow verdict never gates"
+  # a mechanical property rather than a promise: the reply cannot steer a loop
+  # it was never delivered into, and the inbound is never archived out from
+  # under the primary reviewer.
+  if [ "${RUNPHASE_NO_DELIVER:-}" = 1 ]; then return 0; fi
   local root dest
   root="$("$COMMS" root)"
   mkdir -p "$root/to-$peer" 2>/dev/null || true
@@ -491,13 +533,14 @@ PYX
 }
 
 cmd_spawn() {
-  local msg="" sandbox="" timeout="" provider="codex"
+  local msg="" sandbox="" timeout="" provider="codex" via="${COMMS_RUNPHASE_VIA:-}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --message) shift; msg="${1:-}" ;;
       --provider) shift; provider="${1:-}" ;;
       --sandbox) shift; sandbox="${1:-}" ;;
       --timeout-secs) shift; timeout="${1:-}" ;;
+      --via) shift; via="${1:-}" ;;
       *) die "spawn: unknown argument '$1'" ;;
     esac
     shift
@@ -539,6 +582,7 @@ cmd_spawn() {
   mkdir -p "$run_dir" || die "spawn: cannot create run dir $run_dir"
   nohup "$SELF" run --message "$msg" --dir "$run_dir" --provider "$provider" \
     ${sandbox:+--sandbox "$sandbox"} ${timeout:+--timeout-secs "$timeout"} \
+    ${via:+--via "$via"} \
     </dev/null >>"$run_dir/runner.log" 2>&1 &
   local pid=$!
   printf '%s' "$pid" > "$run_dir/pid"
@@ -553,6 +597,7 @@ cmd_spawn() {
 cmd_run() {
   local msg="" run_dir="" provider="codex" sandbox="${COMMS_RUNPHASE_SANDBOX:-workspace-write}"
   local timeout="${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}"
+  local via="${COMMS_RUNPHASE_VIA:-}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --message) shift; msg="${1:-}" ;;
@@ -560,10 +605,25 @@ cmd_run() {
       --provider) shift; provider="${1:-}" ;;
       --sandbox) shift; sandbox="${1:-}" ;;
       --timeout-secs) shift; timeout="${1:-}" ;;
+      --no-deliver) RUNPHASE_NO_DELIVER=1; export RUNPHASE_NO_DELIVER ;;
+      --via) shift; via="${1:-}" ;;
       *) die "run: unknown argument '$1'" ;;
     esac
     shift
   done
+  # --no-deliver suppresses the TRUSTED-PARENT broker and thread-state writes. It
+  # cannot suppress a child that is told to run `comms.sh send --archive-inbound`
+  # itself — so for a self-sending provider the flag would deliver and archive while
+  # only the state write was silenced, which is worse than not offering it. Refuse.
+  if [ "${RUNPHASE_NO_DELIVER:-}" = 1 ] && [ "$via" != "acp" ]; then
+    # Under ACP the PARENT stamps and delivers, so the child never sends and
+    # suppression is honourable for any provider. Without it, only a provider that
+    # is already parent-brokered can keep the promise.
+    case "$("$COMMS" agents --supported 2>/dev/null | awk -v a="$provider" -F'\t' '$1==a {print $2}')" in
+      *reviewer-consult-only*) ;;
+      *) die "run: --no-deliver is not available for '$provider' without --via acp — that provider authors and sends its own reply, so delivery cannot be suppressed" ;;
+    esac
+  fi
   case "$provider" in claude|codex|grok) ;; *) die "run: provider must be claude, codex, or grok" ;; esac
   [ -n "$msg" ] && [ -f "$msg" ] || die "run: --message <file> required and must exist"
   [ -n "$run_dir" ] && [ -d "$run_dir" ] || die "run: --dir <run-dir> required and must exist"
@@ -619,8 +679,8 @@ cmd_run() {
     trap - EXIT
     exit 1
   fi
-  if [ "$provider" = "grok" ]; then
-    if ! build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root"; then
+  if [ "$provider" = "grok" ] || [ "$via" = "acp" ]; then
+    if ! build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root" "$provider"; then
       update_thread_state "$msg_thread" failed "" "$sfield" || true
       write_result "$run_dir" failed 1 "" "$msg" "${GROK_PROMPT_NOTE:-grok prompt build refused}"
       trap - EXIT
@@ -800,6 +860,48 @@ PROMPT
       fi
       ;;
   esac
+
+  # ACP MODE. A cold `codex exec` rebuilds context from nothing every round —
+  # measured on one real loop at 114,688 then 144,975 FRESH input tokens for rounds
+  # 1 and 2. The same shape of work in a warm ACP session cost 1,405 then 442. The
+  # session is named per THREAD, which is what makes round N pay only the delta.
+  #
+  # Permissions are the REVIEWER profile, not a sandbox flag: reads and searches are
+  # auto-approved so the turn can actually inspect the tree, and anything that would
+  # write is denied outright, because prompting is impossible in a detached turn.
+  if [ "$via" = "acp" ]; then
+    local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note=""
+    acp_sh="$(dirname "$SELF")/acp.sh"
+    [ -x "$acp_sh" ] || die "run: --via acp but acp.sh is not installed next to runphase.sh"
+    acp_profile="$("$acp_sh" profile "$provider" 2>/dev/null || true)"
+    [ -n "$acp_profile" ] || die "run: '$provider' has no ACP profile"
+    acp_session="agent-comms-${msg_thread:-loop}"
+    # acpx GLOBAL options must precede the profile; only subcommand flags follow it.
+    # (`--cwd` after the profile is rejected outright — caught live.) The turn runs
+    # IN $workdir because acpx keys session identity on (agent, cwd, name), so the
+    # warm session only stays warm if the directory is stable across rounds.
+    local acp_ver; acp_ver="$("$acp_sh" version)"
+    ( cd "$workdir" && npx -y "acpx@$acp_ver" "$acp_profile" sessions ensure --name "$acp_session" ) \
+      >>"$run_dir/runner.log" 2>&1 || true
+    ( cd "$workdir" && npx -y "acpx@$acp_ver" \
+        --approve-reads --non-interactive-permissions deny \
+        --timeout "$timeout" --format quiet \
+        "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
+      > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" || acp_rc=$?
+    # acpx hands back the answer as TEXT, so the streaming extractor is skipped
+    # entirely and only the stamping half of the broker applies.
+    if [ "$acp_rc" -eq 0 ] && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then
+      acp_status=completed
+    else
+      acp_status=failed
+      acp_note="${GROK_BROKER_NOTE:-acpx exited $acp_rc — see runner.log}"
+    fi
+    update_thread_state "$msg_thread" "$acp_status" "acp:$acp_session" "$sfield" || true
+    write_result "$run_dir" "$acp_status" "$acp_rc" "acp:$acp_session" "$msg" "$acp_note"
+    trap - EXIT
+    [ "$acp_status" = completed ]
+    return
+  fi
 
   local rc=0 deadline now
   # set -m: give the provider its own process group so a timeout/abort can reap

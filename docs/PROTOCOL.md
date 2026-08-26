@@ -33,7 +33,7 @@ default-target = codex
 Names are `[a-z][a-z0-9-]{1,15}` and must have a supported backend
 (`comms.sh agents --supported`); duplicates, multi-word defaults, and unsupported
 names are hard parse errors — an unrunnable agent must never accept mail. A missing
-file means `agents = claude codex`, `default-target = codex` (zero-config
+file means `agents = claude codex grok`, `default-target = codex` (zero-config
 back-compat). Two authorities replaced the old two-party complements: a thread's
 `awaiting_from` is the explicit `send --to` target, and `--archive-inbound` derives
 the inbound's owner from the OUTBOUND message's `from:` (validated against the
@@ -252,7 +252,7 @@ provider's CLI in the background — `codex exec --json` for Codex, `claude -p
 `.comms/logs/<message_id>.<epoch>.<pid>/` (`prompt.md`, `events.ndjson` JSONL event
 log, `result.json`, `pid`, `runner.log`), and mirrors the outcome into thread state
 on exit. cmux is never touched; identity is a process handle, not a pane guess.
-Opt-in per call; cmux remains the default.
+**The default for loops** since 2026-08-25 — a loop is unattended work and should not require an open pane. cmux is opt-in (`--via cmux`, or `COMMS_DELIVERY=cmux`); consults still prefer a live pane and fall back to ACP.
 
 **Direction awareness.** Replies TO the driving session are a designed no-op: the
 driver reads them when the peer turn exits, so nothing is spawned for that
