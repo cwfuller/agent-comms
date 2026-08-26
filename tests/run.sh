@@ -1477,8 +1477,8 @@ DVEOF
 dv_count() { awk '
   function isplaceholder(t) {
     sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
-    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/\*/, "", t)
-    return (t == "None" || t == "None.")
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/[*`_]/, "", t); t = tolower(t)
+    return (t == "none" || t == "none.")
   }
   /^### Blocking/{f=1;next} /^###/{f=0}
   f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
@@ -1584,8 +1584,8 @@ grep -q 'VERDICT line found at line' "$REPO/helpers/runphase.sh" \
 nb() { awk '
   function isplaceholder(t) {
     sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
-    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/\*/, "", t)
-    return (t == "None" || t == "None.")
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/[*`_]/, "", t); t = tolower(t)
+    return (t == "none" || t == "none.")
   }
   /^### Blocking/{f=1;next} /^###/{f=0}
   f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
@@ -1600,6 +1600,15 @@ printf '### Blocking\n- **None.**\n' > "$NB/bold.md"
 [ "$(nb "$NB/bold.md")" = "0" ] && ok "a bolded placeholder counts as zero" || fail "bold placeholder counted"
 printf '### Blocking\n1. **None**\n' > "$NB/numbered-none.md"
 [ "$(nb "$NB/numbered-none.md")" = "0" ] && ok "a numbered bold placeholder counts as zero" || fail "numbered placeholder counted"
+# CASE matters: the stubs in this very suite write lowercase "- none". A case-sensitive
+# compare read those as real blocking findings, so each stub's own APPROVE looked like a
+# self-contradiction and got refused — cascading through seven downstream tests.
+for lc in 'none' 'NONE' '`none`'; do
+  printf '### Blocking\n- %s\n' "$lc" >| "$NB/case.md"
+  [ "$(nb "$NB/case.md")" = "0" ] && ok "'- $lc' is a placeholder regardless of case or emphasis" || fail "'- $lc' counted as a finding"
+done
+printf '### Blocking\n- a real bug\n- none\n' >| "$NB/mixed.md"
+[ "$(nb "$NB/mixed.md")" = "1" ] && ok "a placeholder beside a real finding does not hide it" || fail "mixed list miscounted"
 # Ambiguity must be caught even when line 1 is a verdict: the old code short-circuited
 # there and never reached the count.
 grep -q 'ambiguous, falling back to derivation' "$REPO/helpers/runphase.sh" \

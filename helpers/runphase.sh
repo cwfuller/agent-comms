@@ -472,6 +472,29 @@ PYX
   return 0
 }
 
+# count_blocking <file> — real (non-placeholder) list items under '### Blocking'.
+# ONE definition, used by both the verdict derivation and the APPROVE cross-check:
+# the two inline copies of this awk were exactly how the placeholder-filter bug
+# was born twice. (grok advisory, field-report round 1.)
+count_blocking() {
+  awk '
+    function isplaceholder(t) {
+      sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/[*`_]/, "", t)
+      # CASE-INSENSITIVE. "- none" is as much a placeholder as "- None." — a
+      # case-sensitive compare made every lowercase stub read as a real blocking
+      # finding, so its own APPROVE looked like a self-contradiction and the turn was
+      # refused, cascading through seven downstream tests. Emphasis marks are stripped
+      # first so "**None**" and "`none`" are placeholders too, while a real finding that
+      # merely ENDS in "None." is not. (agent-comms-7b, 2026-08-26.)
+      t = tolower(t)
+      return (t == "none" || t == "none.")
+    }
+    /^### Blocking/{f=1;next} /^###/{f=0}
+    f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
+    END{print n+0}' "$1"
+}
+
 broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivered
   local msg="$1" run_dir="$2" peer="$3"
   [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="the child produced no reply text"; return 1; }
@@ -510,15 +533,7 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
       # Only the STRUCTURE is trusted; nothing is inferred from prose.
       local nblock
       if grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
-        nblock="$(awk '
-          function isplaceholder(t) {
-            sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/\*/, "", t)
-            return (t == "None" || t == "None.")
-          }
-          /^### Blocking/{f=1;next} /^###/{f=0}
-          f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
-          END{print n+0}' "$run_dir/reply-raw.md")"
+        nblock="$(count_blocking "$run_dir/reply-raw.md")"
         if [ "${nblock:-0}" -gt 0 ]; then verdict="REQUEST_CHANGES"; else verdict="APPROVE"; fi
         body_start=1
         echo "note: reply carried no VERDICT line; DERIVED '$verdict' from ${nblock:-0} blocking finding(s) per the loopspec equivalence" >>"$run_dir/runner.log"
@@ -534,15 +549,7 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     # checking it just moves the contradiction one layer up.
     if [ "$verdict" = "APPROVE" ] && grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
       local xblock
-      xblock="$(awk '
-        function isplaceholder(t) {
-          sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
-          gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/\*/, "", t)
-          return (t == "None" || t == "None.")
-        }
-        /^### Blocking/{f=1;next} /^###/{f=0}
-        f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
-        END{print n+0}' "$run_dir/reply-raw.md")"
+      xblock="$(count_blocking "$run_dir/reply-raw.md")"
       if [ "${xblock:-0}" -gt 0 ]; then
         GROK_BROKER_NOTE="reply says 'VERDICT: APPROVE' but lists ${xblock} blocking finding(s) — refusing to stamp a verdict that contradicts its own body"
         return 1
