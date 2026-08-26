@@ -28,7 +28,7 @@ type: review-request            # see type table
 from: <agent>                   # sender identity (agent-comms: claude | codex)
 timestamp: 2026-06-04T18:30:14Z
 branch: main
-head_sha: <git rev-parse HEAD>  # optional immutable context for delayed delivery
+head_sha: <stamped by the sender helper>  # optional; the artifact base for loops, live HEAD for consults — never hand-typed
 workspace: agent-comms          # scoping name when several loops share a repo
 cwd: /path/to/working/dir       # worktree hint — reader cds here before touching files
 message_id: <filename sans .md>
