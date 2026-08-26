@@ -104,7 +104,12 @@ cmd_consult() {
   [ -n "$qfile" ] || [ "${#words[@]}" -gt 0 ] || die_fb "consult: a question is required (words or --file)"
   # Warm by default: ensure the named per-repo session once, then prompt it.
   # Session identity is (agent, cwd, name) on acpx's side — nothing to store here.
-  local -a base=(npx -y "acpx@${ACPX_VERSION}" --format quiet "$profile")
+  # A consult that cannot READ is useless: the whole value is that the agent grounds
+  # its answer in the tree instead of recalling. Without these, acpx denies the
+  # permission request and the turn dies mid-answer — observed live during a
+  # reciprocal-adjudication run. Writes stay denied; prompting is impossible here.
+  local -a base=(npx -y "acpx@${ACPX_VERSION}" --format quiet
+                 --approve-reads --non-interactive-permissions deny "$profile")
   local rc=0
   if [ "$oneshot" = true ]; then
     if [ -n "$qfile" ]; then
