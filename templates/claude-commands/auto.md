@@ -64,8 +64,8 @@ It is capped at 2 rounds and judged on DIRECTION, never on the prose of the plan
      a network API, a daemon). A unit-green fix that fails live burns a whole round on a
      wrong premise.
 
-5. **Write the review request** to `$COMMS_ROOT/to-<reviewer>/` for EACH reviewer
-   (`mkdir -p` first). One message per reviewer; threads stay 2-party.
+5. **Write the review request** — ONE message, written once. With several reviewers the
+   helper fans it out; you never hand-write per-reviewer copies.
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-$RANDOM.md`
    - Write with a quoted heredoc (`<<'EOF'`) so backticks and dollar signs are never
      evaluated.
@@ -119,13 +119,43 @@ Autonomous implement+review cycle (round 1 of <N>). Reply with findings using th
 verdict format. The cycle continues until APPROVE or max rounds.
 ```
 
-6. **Validate and deliver** — `send` refuses malformed messages, retains the artifact under
-   review, and degrades to manual pickup rather than failing silently:
+6. **Validate and deliver.** `send`/`panel dispatch` refuse malformed messages, retain the
+   artifact under review, and degrade to manual pickup rather than failing silently.
+
+   **One reviewer:**
    ```bash
-   "$COMMS_SH" send --to "<reviewer>" "<path of the message file>"
+   "$COMMS_SH" send --to "$GATING" "<path of the message file>"
    ```
-   `send` stamps `artifact_id:` onto the message and pins the tree, so every reviewer reads
-   the SAME artifact rather than whatever the working tree happens to hold when it starts.
+
+   **Several reviewers — fan out, never hand-roll the copies:**
+   ```bash
+   "$COMMS_SH" panel dispatch --to "$REVIEWERS" "<path of the message file>"
+   ```
+   That writes one 2-party leg per reviewer (`<thread>-<agent>`), all sharing one
+   `review_set` and **one snapshot**, and validates the whole roster before sending any
+   leg — a half-fanned panel silently drops a voice from the composed gate. It prints the
+   `review_set` id; keep it, you need it to compose.
+
+   Either way the message is stamped with `artifact_id:` and the tree is pinned, so every
+   reviewer reads the SAME artifact rather than whatever the working tree happens to hold
+   when each one starts.
+
+   **When the legs answer, compose before fixing anything:**
+   ```bash
+   "$COMMS_SH" compose --set "<review_set id>"
+   ```
+   It clusters the union by SUPPORT and drops nothing:
+   - **Corroborated** (an anchor two reviewers independently flagged) — these gate.
+   - **Uncorroborated** — cross-check before spending a round on it. A lone unsupported
+     blocker is not obeyed automatically; that is what stops one noisy reviewer holding
+     the loop hostage, and it is the token discipline that keeps a panel affordable.
+   - **Unanchored** / **Advisory** — carried, never gating.
+
+   `compose` REFUSES a partial panel. An unanswered leg is not an approval.
+   **Do not auto-address every blocking bullet from every reviewer** — work the
+   corroborated set, the gating reviewer's blockers, and any unique blocker that
+   independently meets verdict discipline. Still split after one confirmation round →
+   escalate to the user, same lane as max-rounds.
    On `RESULT: blocked`, execute the exact `RECOVER:` line once; relay only the final
    non-`delivered` result.
    <!-- loopspec:fragment result-spawned-exception -->

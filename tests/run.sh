@@ -1346,6 +1346,15 @@ grep -qF 'GATING=' "$AUTOF" && ok "auto.md names a gating reviewer distinct from
 grep -q 'Default 4' "$AUTOF" && ok "auto.md defaults max-rounds to 4" || fail "auto.md rounds default"
 grep -q 'DIRECTION' "$AUTOF" && ok "auto.md gives --plan a direction-only bar" || fail "auto.md plan bar"
 grep -q 'capped at 2 rounds' "$AUTOF" && ok "auto.md caps the plan phase" || fail "auto.md plan cap"
+# The template must FAN OUT via the helper, never hand-roll per-reviewer copies — that is
+# how the legs drift apart and stop being comparable.
+grep -q 'panel dispatch --to' "$AUTOF" && ok "auto.md fans out via panel dispatch" || fail "auto.md panel wiring"
+grep -q 'compose --set' "$AUTOF" && ok "auto.md composes before fixing anything" || fail "auto.md compose wiring"
+grep -q 'Corroborated' "$AUTOF" && ok "auto.md states what actually gates" || fail "auto.md gate rule"
+grep -qi 'not auto-address every blocking' "$AUTOF" \
+  && ok "auto.md forbids auto-addressing every reviewer's blockers" || fail "auto.md hostage guard"
+grep -qi 'REFUSES a partial panel' "$AUTOF" \
+  && ok "auto.md says an unanswered leg is not an approval" || fail "auto.md partial-panel rule"
 grep -qF 'REVIEWER=$(awk' "$REPO/templates/claude-commands/read-from-codex.md" \
   && grep -q 'ok) print v' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader extractor is close-delimiter-gated" || fail "reader REVIEWER capture (bounded)"

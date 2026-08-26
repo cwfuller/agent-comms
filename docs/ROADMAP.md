@@ -789,11 +789,22 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
    That is the same split that makes `shadow` refuse self-sending agents, and it promotes
    "parent-broker every panelist" from tidiness to a prerequisite for pinned artifacts on
    every reviewer.
-2. [ ] **Command collapse + the kills.** `/auto`, internals demoted, dead surface removed.
-3. [ ] **`--reviewers a,b` fan-out** — N parallel 2-party legs under one `review_set_id`,
-   composed at the DRIVER. The message contract stays 2-party; the driver, state layer and
-   `status` are what change.
-4. [ ] **Reciprocal adjudication + the corroboration gate.**
+2. [x] **Command collapse + the kills** *(shipped 2026-08-26)*. 9 commands → 5; `/auto` is the
+   one loop verb; `/auto-plan`, `/auto-full`, `/auto-implement`, `/fleet`, `/ask-codex` and
+   `helpers/fleet.sh` are gone. `--rounds` defaults to 4; `--plan` is capped at 2 with a
+   direction-only bar; the plan→implement transition keys on `phase`, not a workflow name.
+3. [x] **`--reviewers a,b` fan-out** *(shipped 2026-08-26)* — `comms.sh panel dispatch`
+   writes N parallel 2-party legs (`<thread>-<agent>`) sharing one `review_set` and **one
+   snapshot**, validating the whole roster before sending any leg. The message contract
+   stayed 2-party, so no reader, state file or existing test had to learn about panels.
+4. [x] **The corroboration gate** *(shipped 2026-08-26)* — `comms.sh compose --set` clusters
+   the union by SUPPORT and drops nothing: corroborated (gates), uncorroborated (cross-check
+   first), unanchored, advisory. Every finding stays attributed. A partial panel refuses to
+   compose — an unanswered leg is not an approval. No model arbitrates: judgment lives in
+   the gate, which is what answers grok's objection that a judged bundle erases unique
+   findings, while the 2026-08-25 dry-run showed reciprocal adjudication preserving them.
+   **Reciprocal adjudication itself is NOT wired in** — the dry-run validated the mechanism
+   on a real pair, but `compose` deliberately ships the no-model version first.
 
 ### Found in the field, not yet fixed
 
