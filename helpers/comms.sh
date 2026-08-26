@@ -7,7 +7,8 @@
 #
 # Subcommands:
 #   root                        print the main repo's .comms path (worktree-safe)
-#   workspace                   print the workspace name (cmux > branch > repo dir)
+#   workspace [set <name>]      print the mailbox identity (pin > cmux > branch > repo
+#                               dir); `set` pins it repo-scoped in .comms/workspace
 #   doctor                      verify this session can reach the cmux socket
 #   codex-permissions [socket]  print least-privilege Codex config for cmux delivery
 #   agents [default|--supported|--others <agent>]
@@ -73,7 +74,8 @@
 #                               record how a reviewer performed on ONE round: counts are
 #                               derived from the reply, the prose is your assessment.
 #                               Appends .comms/grades/rounds.tsv. Never shown to reviewers.
-#   snapshot [create|list]      retain the tree under review as a durable git object
+#   snapshot [create|list] [--with-base]   retain the tree under review as a durable git
+#                               object; --with-base prints "artifact_id<TAB>base_sha"
 #                               (stash-create commit anchored under refs/agent-comms/)
 #   prompt-version [--list]     content hash of the reviewer instruction surface; grades
 #                               are partitioned on it, never pooled across an edit
@@ -443,13 +445,34 @@ cmd_list() {
       # Name the identities, never just count them: "N unmatched" is undiagnosable,
       # and the fwh-backup incident sat invisible behind exactly that. Frontmatter
       # workspace: wins; filename prefix is the fallback for pre-v2 files.
-      local others
-      others="$(find "$root/$inbox" -maxdepth 1 -type f ! -name "${ws}_*" 2>/dev/null | while IFS= read -r uf; do
-          uw="$(frontmatter_field "$uf" workspace)"
-          [ -n "$uw" ] || uw="$(basename "$uf" | sed 's/_.*//')"
-          printf '%s\n' "$uw"
-        done | sort | uniq -c | sort -rn | head -5 | awk '{printf "%s(%s) ", $(2), $(1)}')"
-      echo "warning: inbox holds $unmatched_count pending message(s) for OTHER workspace identities: ${others:-unknown }— resolved identity here is '$ws'. If one of those IS this repo, repair it once: 'comms.sh workspace set <name>'. Stale debris is a 'clean' matter; nothing is deleted." >&2
+      # Bounded inside awk (no head in the pipe: SIGPIPE under pipefail could kill
+      # list before the warning prints — the exact inbox shape this diagnostic
+      # exists for) and split by CAUSE: foreign identities get the repair hint;
+      # same-workspace files that merely miss a --thread filter are not an
+      # identity problem and must not claim to be one. (grok, stamped-authorities
+      # round 1.)
+      local foreign_ct others
+      foreign_ct="$(find "$root/$inbox" -maxdepth 1 -type f ! -name "${ws}_*" 2>/dev/null | wc -l | tr -d ' ' || true)"
+      if [ "${foreign_ct:-0}" -gt 0 ]; then
+        others="$( { find "$root/$inbox" -maxdepth 1 -type f ! -name "${ws}_*" 2>/dev/null | while IFS= read -r uf; do
+            uw="$(frontmatter_field "$uf" workspace)"
+            # Prefix parse for envelope-less legacy files: prefer cutting at the
+            # timestamp (workspace names may contain underscores); a date-less
+            # name loses only its final _component. First-underscore truncation
+            # misreported foo_bar as foo. (codex, stamped-authorities round 1.)
+            # `.md` is stripped by basename, NOT by a sed substitution: `t` branches if
+            # ANY s/// succeeded since the last line was read, so stripping the extension
+            # in the same script fired the branch unconditionally and the final
+            # _component strip never ran -- the warning then named a FILENAME where it
+            # promised an identity ("other-workspace_pending.md" for "other-workspace").
+            [ -n "$uw" ] || uw="$(basename "$uf" .md | sed -e 's/_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T.*$//' -e 't' -e 's/_[^_]*$//')"
+            printf '%s\n' "$uw"
+          done | sort | uniq -c | sort -rn | awk 'NR<=5 {printf "%s(%s) ", $(2), $(1)}'; } || true)"
+        echo "warning: inbox holds $foreign_ct pending message(s) for OTHER workspace identities: ${others:-unknown }— resolved identity here is '$ws'. If one of those IS this repo, repair it once: 'comms.sh workspace set <name>'. Stale debris is a 'clean' matter; nothing is deleted." >&2
+      fi
+      if [ "${unmatched_count:-0}" -gt "${foreign_ct:-0}" ]; then
+        echo "note: $(( unmatched_count - foreign_ct )) pending message(s) for THIS workspace fall outside the current filter" >&2
+      fi
     fi
     # Late delivery nudges for already-processed replies are common. Scope the
     # hint to messages that actually came TO this reader and, when supplied, to
@@ -827,15 +850,30 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
       fi
     fi
   fi
+  # In raw mode EVERY metadata field is empty. Reading them from the file let a child
+  # author its own: `thread: fake<TAB>extra` arrives through `awk -v` as a real tab and
+  # shifts `lane` from TSV column 13 to 14, so a caller filtering on $13 counts zero
+  # blockers and derives APPROVE -- then the parent stamps trusted metadata and normal
+  # extraction sees the blocker. Untrusted input supplies BODY only. (codex, round 4.)
+  local rm_thread="" rm_phase="" rm_round="" rm_from="" rm_base="" rm_verdict=""
+  if [ "${FINDINGS_RAW:-}" != "1" ]; then
+    rm_thread="$(frontmatter_field "$f" thread)"
+    rm_phase="$(frontmatter_field "$f" phase)"
+    rm_round="$(frontmatter_field "$f" round)"
+    rm_from="$(frontmatter_field "$f" from)"
+    rm_base="${bsha:-$(frontmatter_field "$f" head_sha)}"
+    rm_verdict="$(frontmatter_field "$f" verdict)"
+  fi
   awk -v raw="${FINDINGS_RAW:-}" \
+      -v probe="${FINDINGS_PROBE:-}" \
       -v schema="$FINDINGS_SCHEMA_VERSION" \
       -v mid="$mid" \
-      -v thread="$(frontmatter_field "$f" thread)" \
-      -v phase="$(frontmatter_field "$f" phase)" \
-      -v round="$(frontmatter_field "$f" round)" \
-      -v reviewer="$(frontmatter_field "$f" from)" \
-      -v base="${bsha:-$(frontmatter_field "$f" head_sha)}" \
-      -v verdict="$(frontmatter_field "$f" verdict)" \
+      -v thread="$rm_thread" \
+      -v phase="$rm_phase" \
+      -v round="$rm_round" \
+      -v reviewer="$rm_from" \
+      -v base="$rm_base" \
+      -v verdict="$rm_verdict" \
       -v role="$role" -v rsid="$rsid" -v aid="$aid" -v rver="$rver" -v pver="$pver" '
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
     # THE placeholder rule. Not "a" rule: the broker verdict derivation reaches this
@@ -869,46 +907,78 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
       gsub(/\t/, " ", anchor)
       seq[blane]++
       fid = mid "#" substr(blane, 1, 1) seq[blane]
+      if (probe == "1") { nblock[blane]++; return }
       printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", \
         schema, fid, rsid, aid, base, thread, phase, round, reviewer, rver, pver, \
         role, blane, anchor, claim, verdict, mid
     }
     { sub(/\r$/, "") }
-    # Raw mode parses the ENTIRE input as body. A child that wrapped its reply in
-    # horizontal rules could otherwise hide a real blocking item inside what looked
-    # like frontmatter: raw counted zero and derived APPROVE, then the stamped envelope
-    # pushed that same delimiter off line 1 and normal extraction saw the blocker --
-    # the stamped-verdict/body contradiction again, this time built by the child.
-    # Structure is never sourced from delimiters the model authored. (codex, round 3.)
+    # Raw mode parses the ENTIRE input as body -- a child that wrapped its reply in
+    # horizontal rules could otherwise hide a blocking item inside fake frontmatter.
     NR == 1 && $0 == "---" && raw != "1" { fm = 1; next }
     fm && $0 == "---" { fm = 0; next }
     fm { next }
-    # Fenced blocks are QUOTES, not findings. A reply that quotes a prior round --
-    # which every round-N body does -- was having the quoted blockers counted
-    # as its own, so a clean APPROVE failed the body cross-check and the round died.
-    # The verdict scan already skipped fences; this makes the findings parser agree.
+    # THE fence lexer, and the only one. Delimiter-AWARE, the same rule install.sh
+    # already uses: a fence closes only on the same character, at least as long as the
+    # opener, with nothing after it. A length-blind toggle let a 4-backtick wrap around
+    # a 3-backtick block expose the quoted findings inside it. Verdict counting,
+    # structure presence and finding extraction all read this one lexer, because three
+    # copies of "what is a quote" is how rounds 3 and 4 both went wrong.
     {
-      ind = 0
-      while (substr($0, ind + 1, 1) == " ") ind++
-      fl = substr($0, ind + 1)
+      line = $0
+      if (match(line, /^[ \t]*(```+|~~~+)/)) {
+        m = line; sub(/^[ \t]*/, "", m)
+        match(m, /^(`+|~+)/); tok = substr(m, 1, RLENGTH)
+        ch = substr(tok, 1, 1); len = length(tok)
+        rest = substr(m, RLENGTH + 1)
+        if (!fence) { fence = 1; fch = ch; flen = len }
+        else if (ch == fch && len >= flen && rest ~ /^[ \t]*$/) { fence = 0 }
+        next
+      }
     }
-    ind <= 3 && (index(fl, "```") == 1 || index(fl, "~~~") == 1) { fence = !fence; next }
     fence { next }
-    /^### Blocking/ { flush(); lane = "blocking"; next }
-    /^### Advisory/ { flush(); lane = "advisory"; next }
+    # Verdict lines and structure presence are decided HERE, by the same pass that
+    # extracts findings, so the broker can never disagree with its own parser about
+    # whether a quoted prior round counted. (codex + grok, round 4.)
+    /^VERDICT: (APPROVE|REQUEST_CHANGES)$/ {
+      vn++
+      if (vn == 1) { vline = NR; vval = substr($0, 10) }
+      next
+    }
+    # Headings are case-tolerant for the same reason placeholders are: a model that
+    # writes "### blocking" has still written the section, and treating it as absent
+    # skipped the APPROVE cross-check entirely. (grok, round 4.)
+    tolower($0) ~ /^### blocking/ { flush(); lane = "blocking"; hasblocking = 1; next }
+    tolower($0) ~ /^### advisory/ { flush(); lane = "advisory"; next }
     # Any other heading closes the lane — `### Process` never gates a verdict and
     # is not a code finding, so it is not a graded observation either.
     /^#/ { flush(); lane = ""; next }
     lane == "" { next }
-    # A finding is a LIST ITEM, in any markdown list form. Matching only "- " silently
-    # extracted nothing from a numbered list — and because the verdict is derived from
-    # the same count, a review with real blocking findings was stamped APPROVE and
-    # composed as a clean panel. Observed in the field, 2026-08-26.
-    /^[-*+] / { flush(); blane = lane; buf = substr($0, 3); next }
-    /^[0-9]+[.)] / { flush(); blane = lane; sub(/^[0-9]+[.)] +/, ""); buf = $0; next }
+    # A finding is a LIST ITEM, in any markdown list form, indented 0-3 spaces (4+ is a
+    # code block, not a list). Matching only column-0 "- " silently extracted nothing
+    # from a numbered list, and later nothing from a legally indented one -- and because
+    # the verdict is derived from the same count, a review with real blocking findings
+    # was stamped APPROVE and composed as a clean panel. Observed in the field.
+    {
+      li = $0
+      lind = 0
+      while (substr(li, lind + 1, 1) == " ") lind++
+      li = substr(li, lind + 1)
+    }
+    lind <= 3 && li ~ /^[-*+] / { flush(); blane = lane; buf = substr(li, 3); next }
+    lind <= 3 && li ~ /^[0-9]+[.)] / { flush(); blane = lane; sub(/^[0-9]+[.)] +/, "", li); buf = li; next }
     buf != "" && /^[[:space:]]+[^[:space:]]/ { buf = buf " " trim($0); next }
     buf != "" && /^[[:space:]]*$/ { flush(); next }
-    END { flush() }
+    END {
+      flush()
+      if (probe == "1") {
+        # An unclosed fence fails CLOSED: everything after it was skipped, so the
+        # counts below describe a truncated read and must not be trusted as a verdict.
+        printf "verdicts\t%d\nverdict_line\t%d\nverdict\t%s\nblocking_section\t%s\nunclosed_fence\t%s\nblocking\t%d\nadvisory\t%d\n", \
+          vn + 0, vline + 0, vval, (hasblocking ? "yes" : "no"), (fence ? "yes" : "no"), \
+          nblock["blocking"] + 0, nblock["advisory"] + 0
+      }
+    }
   ' "$f"
 }
 
@@ -952,6 +1022,7 @@ cmd_findings() {
       --prompt-version)   shift; pver="${1:-}" ;;
       --base-sha)         shift; bsha="${1:-}" ;;
       --raw)              FINDINGS_RAW=1; export FINDINGS_RAW ;;
+      --probe)            FINDINGS_PROBE=1; export FINDINGS_PROBE ;;
       --header)           header_only=true ;;
       --rebuild)          rebuild=true ;;
       -?*)                usage_err "findings: unknown option '$(clip "$1")'" ;;
@@ -1003,6 +1074,13 @@ cmd_findings() {
     done <<< "$files"
   )"
 
+  # Probe mode answers the broker three questions in one pass -- how many verdict
+  # lines, is there a live `### Blocking` section, how many real blockers -- so the
+  # broker never needs a grep of its own to disagree with. No header, no rows.
+  if [ "${FINDINGS_PROBE:-}" = "1" ]; then
+    printf '%s\n' "$rows"
+    return 0
+  fi
   if [ -z "$out" ]; then
     [ -n "$rows" ] || { emit_diagnostic "findings: no findings extracted"; return 0; }
     findings_header
@@ -1125,7 +1203,6 @@ cmd_ask() {
     printf 'from: %s\n' "$from"
     printf 'timestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'branch: %s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-    printf 'head_sha: %s\n' "$(git rev-parse HEAD 2>/dev/null || true)"
     printf 'workspace: %s\n' "$ws"
     printf 'cwd: %s\n' "$(pwd)"
     printf 'message_id: %s\n' "$mid"
@@ -1268,16 +1345,25 @@ cmd_panel() {
       # appending the new one after it loses to grep -m1 and the round would gate on
       # the OLD set. Replace, exactly like artifact_id. (grok, panel r2.)
       fm && index(probe, "review_set:") == 1 { next }
-      fm && base != "" && index(probe, "head_sha:") == 1 { next }
+      fm && index(probe, "head_sha:") == 1 { next }
       { print }
     ' "$req" > "$leg_file"
     cmd_validate "$leg_file" >/dev/null || die "panel dispatch: leg for '$ag' did not validate"
-    if ! cut -f1 "$idx" | grep -qxF -- "$set_id" || ! awk -F'\t' -v s="$set_id" -v a="$ag" 'NR>1 && $1==s && $10==a' "$idx" | grep -q .; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$set_id" "$leg_mid" "$leg_thread" "$round" "$phase" "$aid" "$pver" \
-        "${dispatch_base:-$(frontmatter_field "$req" head_sha)}" "$gating" "$ag" "dispatched" "" \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$idx"
+    # A RETRY of the same request over the same tree deterministically recreates the
+    # set id, but the fresh legs carry NEW message ids. Keeping the old row binds the
+    # leg to a request nobody was sent: the new replies can never satisfy status or
+    # compose — or, if the old set had completed, its stale replies replay as this
+    # dispatch's answers. Rebind the agent's row to THIS dispatch. (codex, panel r3.)
+    if awk -F'\t' -v s="$set_id" -v a="$ag" 'NR>1 && $1==s && $10==a' "$idx" | grep -q .; then
+      local idx_tmp; idx_tmp="$(mktemp "${TMPDIR:-/tmp}/agent-comms-sets.XXXXXX")"
+      awk -F'\t' -v s="$set_id" -v a="$ag" '!(NR>1 && $1==s && $10==a)' "$idx" > "$idx_tmp" \
+        && command mv -f "$idx_tmp" "$idx" \
+        && emit_diagnostic "panel: retry — rebound $ag's leg of $set_id to this dispatch's request"
     fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$set_id" "$leg_mid" "$leg_thread" "$round" "$phase" "$aid" "$pver" \
+      "${dispatch_base:-$(frontmatter_field "$req" head_sha)}" "$gating" "$ag" "dispatched" "" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$idx"
     echo "  leg: $ag  thread=$leg_thread"
     cmd_send --to "$ag" "$leg_file" || echo "  warning: leg for '$ag' did not deliver — the set is incomplete"
     n=$((n + 1))
@@ -1338,15 +1424,18 @@ cmd_compose() {
       # conformant reply stamps it as in-reply-to; an unbound reply is not an answer.
       # (codex + grok, panel r1.)
       [ -z "$req_mid" ] || [ "$(frontmatter_field "$cand" in-reply-to)" = "$req_mid" ] || continue
+      # A leg is answered only by a VALID review-feedback — checked INSIDE the scan,
+      # skip-and-continue, exactly like panel status. Stopping at the first bound hit
+      # and validating after the break made the two disagree whenever the newest bound
+      # candidate was invalid but an older valid one existed. (codex, panel r1;
+      # codex + grok scan-order asymmetry, panel r3.)
+      if [ "$(frontmatter_field "$cand" type)" != "review-feedback" ] \
+         || ! cmd_validate "$cand" >/dev/null 2>&1; then
+        emit_diagnostic "compose: skipping an invalid or non-review message on $ag's leg"
+        continue
+      fi
       reply="$cand"; break
     done
-    # A leg is answered only by a VALID review-feedback. Counting any message in the
-    # thread lets a stray note complete a panel and unblock the gate. (codex, panel r1.)
-    if [ -n "$reply" ] && { [ "$(frontmatter_field "$reply" type)" != "review-feedback" ] \
-       || ! cmd_validate "$reply" >/dev/null 2>&1; }; then
-      emit_diagnostic "compose: ignoring a non-review message on $ag's leg"
-      reply=""
-    fi
     if [ -z "$reply" ]; then pending="$pending $ag"; continue; fi
     n_answered=$((n_answered + 1))
     rows="$rows
@@ -2691,56 +2780,86 @@ cmd_send() {
   # typing at the time — and with two reviewers on one request they race each other.
   # Stamping the id here makes "these reviewers read the same artifact" a fact about
   # the dispatch rather than a hope. Loops only: a consult reviews nothing.
-  if [ -n "$(frontmatter_field "$file" workflow)" ] && [ -z "$(frontmatter_field "$file" artifact_id)" ]; then
-    local send_pair send_aid send_base
-    send_pair="$(cmd_snapshot create --with-base 2>/dev/null || true)"
-    send_aid="${send_pair%%	*}"
-    send_base="${send_pair#*	}"
-    [ "$send_base" = "$send_pair" ] && send_base=""
-    if [ -n "$send_aid" ]; then
-      # Stamp the WHOLE git identity from the one snapshot operation: artifact_id
-      # names the content, head_sha names the base it applies to — same object,
-      # so they cannot desync, and any hand-typed head_sha (live at WRITE time,
-      # stale by SEND time in a shared checkout) is overwritten rather than
-      # trusted. Never let the driver type a SHA. (field report #6.)
-      local stamped; stamped="$(mktemp "${TMPDIR:-/tmp}/agent-comms-stamp.XXXXXX")"
-      # Byte-preserving insert at the close of frontmatter — an awk rewrite of every
-      # line normalizes CRLF and is not what "send this message" should mean.
-      # CRLF-tolerant on the DELIMITER test only — the line itself is reprinted
-      # unmodified, so a CRLF file stays CRLF. (codex, transport-flip round 4.)
-      LC_ALL=C awk -v aid="$send_aid" -v base="$send_base" '
-        { probe = $0; sub(/\r$/, "", probe) }
-        NR == 1 && probe == "---" { fm = 1; print; next }
-        fm && probe == "---" {
-          printf "artifact_id: %s\n", aid
-          if (base != "") printf "head_sha: %s\n", base
-          fm = 0; print; next
-        }
-        fm && index(probe, "head_sha:") == 1 { next }
-        { print }
-      ' "$file" > "$stamped" && mv -f "$stamped" "$file"
-      rm -f "$stamped" 2>/dev/null || true
+  # stamp_head_sha <file> <aid-or-empty> <base> — drop every head_sha line in the
+  # frontmatter and insert the authoritative pair at its close. CRLF files get
+  # CRLF on the INSERTED lines too (mixed endings were the previous behavior).
+  stamp_head_sha() {
+    local sf="$1" aid="$2" base="$3" stamped
+    stamped="$(mktemp "${TMPDIR:-/tmp}/agent-comms-stamp.XXXXXX")"
+    LC_ALL=C awk -v aid="$aid" -v base="$base" '
+      NR == 1 { nl = ($0 ~ /\r$/) ? "\r\n" : "\n" }
+      { probe = $0; sub(/\r$/, "", probe) }
+      NR == 1 && probe == "---" { fm = 1; print; next }
+      fm && probe == "---" {
+        if (aid != "")  printf "artifact_id: %s%s", aid, nl
+        if (base != "") printf "head_sha: %s%s", base, nl
+        fm = 0; print; next
+      }
+      fm && index(probe, "head_sha:") == 1 { next }
+      fm && aid != "" && index(probe, "artifact_id:") == 1 { next }
+      { print }
+    ' "$sf" > "$stamped" && mv -f "$stamped" "$sf"
+    rm -f "$stamped" 2>/dev/null || true
+  }
+  # artifact_base <aid> — the commit the artifact's diff applies to, derived from
+  # the OBJECT: a synthetic snapshot commit bases on its first parent; anything
+  # else (a clean tree pinned as HEAD) is its own base.
+  artifact_base() {
+    local a="$1" subj
+    subj="$(git -C "$(main_repo_root)" log -1 --format=%s "$a" 2>/dev/null || true)"
+    if [ "$subj" = "agent-comms reviewed artifact" ]; then
+      git -C "$(main_repo_root)" rev-parse -q --verify "${a}^" 2>/dev/null || true
     else
-      # Fail CLOSED. Proceeding would review the live tree while the message implies a
-      # pinned one — the precise failure the snapshot exists to remove, and invisible
-      # afterwards. (codex, transport-flip round 4.)
-      die "send: could not retain the artifact under review — refusing to dispatch a loop against an unpinned tree (is this a git repo with a commit?)"
+      printf '%s' "$a"
     fi
-  elif [ -z "$(frontmatter_field "$file" head_sha)" ]; then
-    # Consults and non-loop messages snapshot nothing, but their context SHA should
-    # still be helper-derived at SEND time, not driver-typed at write time.
-    local live_sha stamped2
+  }
+  if [ -n "$(frontmatter_field "$file" workflow)" ]; then
+    local send_aid send_base existing_aid existing_sha
+    existing_aid="$(frontmatter_field "$file" artifact_id)"
+    if [ -z "$existing_aid" ]; then
+      # Fresh dispatch: retain the tree and stamp the WHOLE git identity from the
+      # one snapshot operation — artifact_id names the content, head_sha the base
+      # it applies to; same object, so they cannot desync, and any hand-typed
+      # head_sha (live at WRITE time, stale by SEND time in a shared checkout) is
+      # overwritten rather than trusted. Never let the driver type a SHA.
+      # (field report #6.)
+      local send_pair
+      send_pair="$(cmd_snapshot create --with-base 2>/dev/null || true)"
+      send_aid="${send_pair%%	*}"
+      send_base="${send_pair#*	}"
+      [ "$send_base" = "$send_pair" ] && send_base=""
+      if [ -n "$send_aid" ]; then
+        stamp_head_sha "$file" "$send_aid" "$send_base"
+      else
+        # Fail CLOSED. Proceeding would review the live tree while the message
+        # implies a pinned one — the precise failure the snapshot exists to
+        # remove, and invisible afterwards. (codex, transport-flip round 4.)
+        die "send: could not retain the artifact under review — refusing to dispatch a loop against an unpinned tree (is this a git repo with a commit?)"
+      fi
+    else
+      # RESEND of an already-pinned message: the artifact is preserved, but its
+      # base is still DERIVED from the object and validated — an artifact-only
+      # message must never fall through to a live-HEAD stamp, and a mismatched
+      # pair is a lie about what the diff applies to. Fail closed either way.
+      # (codex, stamped-authorities round 1.)
+      git -C "$(main_repo_root)" cat-file -e "${existing_aid}^{commit}" 2>/dev/null \
+        || die "send: artifact_id '$(clip "$existing_aid")' does not resolve — refusing to dispatch against a phantom artifact"
+      send_base="$(artifact_base "$existing_aid")"
+      existing_sha="$(frontmatter_field "$file" head_sha)"
+      if [ -z "$existing_sha" ]; then
+        [ -n "$send_base" ] && stamp_head_sha "$file" "" "$send_base"
+      elif [ -n "$send_base" ] && [ "$existing_sha" != "$send_base" ]; then
+        die "send: head_sha '$(clip "$existing_sha")' does not match artifact '$(clip "$existing_aid")' base '$(clip "$send_base")' — refusing to dispatch a mismatched pair"
+      fi
+    fi
+  else
+    # Consults snapshot nothing, but their context SHA is still helper-derived at
+    # SEND time — including OVERWRITING a driver-typed or stale-template value;
+    # "when absent" was a hole for leftover hand-typed consults. (codex + grok,
+    # stamped-authorities round 1.)
+    local live_sha
     live_sha="$(git -C "$(git rev-parse --show-toplevel 2>/dev/null || main_repo_root)" rev-parse -q --verify HEAD 2>/dev/null || true)"
-    if [ -n "$live_sha" ]; then
-      stamped2="$(mktemp "${TMPDIR:-/tmp}/agent-comms-stamp.XXXXXX")"
-      LC_ALL=C awk -v base="$live_sha" '
-        { probe = $0; sub(/\r$/, "", probe) }
-        NR == 1 && probe == "---" { fm = 1; print; next }
-        fm && probe == "---" { printf "head_sha: %s\n", base; fm = 0; print; next }
-        { print }
-      ' "$file" > "$stamped2" && mv -f "$stamped2" "$file"
-      rm -f "$stamped2" 2>/dev/null || true
-    fi
+    [ -n "$live_sha" ] && stamp_head_sha "$file" "" "$live_sha"
   fi
 
   # Atomicity guard: never deliver or archive on a malformed outbound message.

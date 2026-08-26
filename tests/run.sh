@@ -8,7 +8,7 @@ set -uo pipefail
 # headless peer turn (e.g. Codex reviewing this repo) inherits these and would
 # route the baseline cmux tests through headless delivery (observed live: 40
 # failures). The headless-specific sections set them explicitly per invocation.
-unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP 2>/dev/null || true
+unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP COMMS_RUNPHASE_VIA 2>/dev/null || true
 
 # Loops became headless-first on 2026-08-25, so the pane path is now OPT-IN. The cmux
 # sections below exercise pane mechanics that still exist and still matter, so they ask
@@ -1106,7 +1106,7 @@ R4="$WORK/ma-leg4"; mkdir -p "$R4"
 PRE_CLAUDE_CT="$(find "$MA_FIX/.comms/to-claude" -type f | wc -l | tr -d ' ')"
 GROK_STUB_NO_VERDICT=1 run_grok_leg "$MA_MSG4" "$R4" >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R4/result.json" | head -1)" = "failed" ] \
-  && grep -q 'no .### Blocking. section' "$R4/result.json" && [ -f "$MA_MSG4" ] \
+  && grep -q 'no unquoted .### Blocking. section' "$R4/result.json" && [ -f "$MA_MSG4" ] \
   && ok "a reply with neither a VERDICT line nor findings structure fails closed" || fail "missing-verdict broker path"
 MA_MSG5="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-35-00_badverdict-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-4/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG5"
@@ -1574,11 +1574,11 @@ grep -q '^### Blocking' "$DV/no-structure.md" && fail "fixture has structure" \
 grep -q 'DERIVED' "$REPO/helpers/runphase.sh" && ok "the broker records that a verdict was derived, not stated" || fail "derivation not recorded"
 
 echo "== one placeholder rule: broker derivation and findings/compose cannot disagree =="
-# The bug this replaces: findings_extract and count_blocking were separate copies of
+# The bug this replaces: findings_extract and the broker were separate copies of
 # "what is a placeholder". They drifted on list form, were mirrored by hand, then
 # drifted again on CASE and emphasis -- so `NONE`, `` `none` `` and `_None_` were
 # placeholders to the broker and REAL blocking findings to compose, letting a stamped
-# APPROVE carry blocking rows. count_blocking now delegates to `findings --raw`, so
+# APPROVE carry blocking rows. The broker now reads `findings --raw --probe`, so
 # this asserts one parser rather than two that agree today.
 CORP="$WORK/placeholder-corpus"; mkdir -p "$CORP"
 while IFS='|' read -r item want label; do
@@ -1627,12 +1627,33 @@ printf '~~~\n### Blocking\n- tilde-quoted\n~~~\n### Blocking\n\n- a real one\n' 
 printf '   ```\n### Blocking\n- indented-quoted\n   ```\n### Blocking\n\n- a real one\n' > "$CORP/indented.md"
 [ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/indented.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "1" ] \
   && ok "a fence indented up to 3 spaces is still a fence" || fail "indented fence not recognised"
-grep -q 'no .### Blocking. section to derive one from' "$REPO/helpers/runphase.sh" \
-  && ok "a structureless reply is still refused — nothing is inferred from prose" || fail "structureless reply not refused"
+# Structure presence is a BEHAVIOUR of the shared scanner, not a string in runphase.sh.
+# The old assertion grepped the source for the refusal note; it could not see that a
+# plain `grep '^### Blocking'` counted a QUOTED prior round as live structure while the
+# parser ignored it, so a reply that had said REQUEST_CHANGES derived APPROVE.
+probe_of() { "$REPO/helpers/comms.sh" findings --raw --probe "$1" 2>/dev/null \
+  | awk -F'\t' -v k="$2" '$1==k {print $2; exit}'; }
+printf 'just prose, no structure at all\n' > "$CORP/prose.md"
+[ "$(probe_of "$CORP/prose.md" blocking_section)" = "no" ] \
+  && ok "a structureless reply has no section to derive from" || fail "prose read as structure"
+printf 'no verdict of my own\n\n## Prior round\n```\nVERDICT: REQUEST_CHANGES\n### Blocking\n- an OLD blocker\n```\n' > "$CORP/quotedonly.md"
+[ "$(probe_of "$CORP/quotedonly.md" blocking_section)" = "no" ] \
+  && ok "a fenced quote of a prior round is not this reply's structure" || fail "quoted prior counted as live structure"
+[ "$(probe_of "$CORP/quotedonly.md" verdicts)" = "0" ] \
+  && ok "a fenced quote of a prior round forges no verdict either" || fail "quoted verdict counted"
+printf '### Blocking\n\n```\n- swallowed by an unclosed fence\n' > "$CORP/unclosed.md"
+[ "$(probe_of "$CORP/unclosed.md" unclosed_fence)" = "yes" ] \
+  && ok "an unclosed fence is reported so the broker can fail closed" || fail "unclosed fence not reported"
+printf '### blocking\n\n- a lowercase-heading blocker\n' > "$CORP/lowerhead.md"
+[ "$(probe_of "$CORP/lowerhead.md" blocking)" = "1" ] \
+  && ok "a lowercase ### blocking heading is still a section" || fail "lowercase heading dropped the section"
+printf '### Blocking\n\n````\n```\n### Blocking\n- quoted inner\n```\n````\n\n- a real one\n' > "$CORP/fourtick.md"
+[ "$(probe_of "$CORP/fourtick.md" blocking)" = "1" ] \
+  && ok "a 4-tick wrap around a 3-tick block does not leak its contents" || fail "nested fence leaked"
 
 # A leg is answered only by a VALID review-feedback — a stray note must not complete a
 # panel and unblock its gate. (codex, panel r1.)
-grep -q 'ignoring a non-review message' "$COMMS" \
+grep -q 'skipping an invalid or non-review message' "$COMMS" \
   && ok "compose ignores non-review messages on a leg" || fail "compose leg validation"
 
 echo "== findings are LIST ITEMS in any markdown form (field bug, 2026-08-26) =="
@@ -1753,9 +1774,12 @@ printf '### Blocking\n- a real bug\n- none\n' >| "$NB/mixed.md"
 # there and never reached the count.
 grep -q 'ambiguous, falling back to derivation' "$REPO/helpers/runphase.sh" \
   && ok "multiple VERDICT lines fall back to derivation" || fail "ambiguous verdicts not caught"
-# The count must come BEFORE any case-match on line 1, or the ambiguity check is dead code.
-awk '/Count EVERY explicit verdict/{c=NR} /vcount="\$\(awk/{v=NR} END{exit !(c>0 && v>c && v-c<12)}' "$REPO/helpers/runphase.sh" \
-  && ok "verdict lines are counted before any is trusted" || fail "line-1 still short-circuits the count"
+# Asserted by BEHAVIOUR: a line-1 verdict must still be COUNTED, not trusted on sight.
+# The old check grepped runphase.sh for the order of two statements, which said nothing
+# about what the scanner actually does and broke the moment the scanner moved.
+printf 'VERDICT: APPROVE\nnarration\nVERDICT: REQUEST_CHANGES\n\n### Blocking\n\n- a real one\n' > "$CORP/dup1.md"
+[ "$(probe_of "$CORP/dup1.md" verdicts)" = "2" ] \
+  && ok "verdict lines are counted before any is trusted" || fail "a line-1 verdict short-circuits the count"
 # An explicit APPROVE over blocking findings is a contradiction, not a verdict.
 grep -q 'contradicts its own body' "$REPO/helpers/runphase.sh" \
   && ok "an APPROVE that lists blocking findings is refused" || fail "no APPROVE/body cross-check"
@@ -1861,6 +1885,102 @@ run_sa list --as claude 2>/dev/null | grep -q 'fwh-platform_2026-08-26T14-10-00_
 [ -f "$SA_MSG" ] || fail "diagnostics deleted mail (must never delete)"
 rm -f "$SA_FIX/.comms/workspace"
 
+# ---- round 2: resend validation, consult overwrite, CRLF, diagnostics split ----
+# Resend with artifact_id but NO head_sha: base derives from the OBJECT, never live HEAD
+git -C "$SA_FIX" add -A >/dev/null 2>&1
+git -C "$SA_FIX" -c user.email=t@t -c user.name=t commit -qm "moves HEAD past the artifact base"
+SA_NEWHEAD="$(git -C "$SA_FIX" rev-parse HEAD)"
+SA_RS="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-00-00_resend-1.md"
+cat > "$SA_RS" <<SAEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-26T20:00:00Z
+workspace: $SA_WS
+artifact_id: $SA_AID
+message_id: ${SA_WS}_2026-08-26T15-00-00_resend-1
+thread: sa-arc-1
+workflow: auto
+phase: implement
+round: 2
+max-rounds: 5
+---
+
+body
+SAEOF
+run_sa send --to codex "$SA_RS" >/dev/null 2>&1
+SA_RS_SHA="$(sed -n '2,/^---$/p' "$SA_RS" | grep -m1 '^head_sha:' | sed 's/^head_sha: //')"
+[ "$SA_RS_SHA" = "$SA_BASE" ] && [ "$SA_RS_SHA" != "$SA_NEWHEAD" ] \
+  && ok "artifact-only resend stamps the artifact's base, never live HEAD" || fail "resend base (got $SA_RS_SHA want $SA_BASE)"
+# Mismatched pair: fail closed, nothing delivered
+SA_MM="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-05-00_mismatch-1.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T15-05-00_mismatch-1/' \
+    -e '/^artifact_id:/a\
+head_sha: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' "$SA_RS" > "$SA_MM"
+MM_OUT="$(run_sa send --to codex "$SA_MM" 2>&1)" && mm_rc=0 || mm_rc=$?
+[ "$mm_rc" -ne 0 ] && echo "$MM_OUT" | grep -q 'mismatched pair' \
+  && ok "mismatched artifact/head_sha pair is refused" || fail "mismatched pair (rc=$mm_rc)"
+# Phantom artifact: refused
+SA_PH="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-07-00_phantom-1.md"
+sed -e 's/^artifact_id: .*/artifact_id: 1111111111111111111111111111111111111111/' \
+    -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T15-07-00_phantom-1/' \
+    -e '/^head_sha:/d' "$SA_MM" > "$SA_PH"
+check_not "phantom artifact_id is refused at send" run_sa send --to codex "$SA_PH"
+# Consult with a HAND-TYPED head_sha: overwritten with live HEAD at send
+SA_Q2="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-10-00_ask-2.md"
+cat > "$SA_Q2" <<SAEOF
+---
+type: question
+from: claude
+timestamp: 2026-08-26T20:10:00Z
+workspace: $SA_WS
+head_sha: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+message_id: ${SA_WS}_2026-08-26T15-10-00_ask-2
+---
+
+## Question
+still fine?
+SAEOF
+run_sa send --to codex "$SA_Q2" >/dev/null 2>&1
+grep -q "^head_sha: $SA_NEWHEAD$" "$SA_Q2" \
+  && [ "$(grep -c '^head_sha:' "$SA_Q2")" = "1" ] \
+  && ok "consult head_sha is OVERWRITTEN with live HEAD (hand-typed values die)" || fail "consult overwrite"
+# cmd_ask no longer authors head_sha at compose (send is the boundary)
+awk '/^cmd_ask\(\)/,/^}/' "$REPO/helpers/comms.sh" | grep -q 'rev-parse HEAD' \
+  && fail "cmd_ask still hand-derives head_sha at compose" || ok "cmd_ask leaves head_sha to send"
+# CRLF file: INSERTED lines carry CRLF too (no mixed endings)
+SA_CR="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-15-00_crlf-1.md"
+printf -- '---\r\ntype: review-request\r\nfrom: claude\r\ntimestamp: 2026-08-26T20:15:00Z\r\nworkspace: %s\r\nmessage_id: %s_2026-08-26T15-15-00_crlf-1\r\nthread: sa-arc-9\r\nworkflow: auto\r\nphase: implement\r\nround: 1\r\nmax-rounds: 5\r\n---\r\n\r\nbody\r\n' "$SA_WS" "$SA_WS" > "$SA_CR"
+run_sa send --to codex "$SA_CR" >/dev/null 2>&1
+grep -q $'^artifact_id: .*\r$' "$SA_CR" && grep -q $'^head_sha: .*\r$' "$SA_CR" \
+  && ok "CRLF message gets CRLF on the INSERTED stamp lines" || fail "CRLF mixed endings"
+# Diagnostics split: same-workspace files outside a --thread filter are NOT an identity warning
+SA_TH="$SA_FIX/.comms/to-claude/${SA_WS}_2026-08-26T15-20-00_otherthread-1.md"
+cat > "$SA_TH" <<SAEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-26T20:20:00Z
+workspace: $SA_WS
+message_id: ${SA_WS}_2026-08-26T15-20-00_otherthread-1
+thread: sa-arc-elsewhere
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 5
+verdict: APPROVE
+---
+
+## Summary
+different thread
+SAEOF
+rm -f "$SA_FIX/.comms/to-claude/fwh-platform_2026-08-26T14-10-00_reply-1.md"
+SA_TH_OUT="$(run_sa list --as claude --thread sa-arc-nomatch 2>&1)" || true
+echo "$SA_TH_OUT" | grep -q 'outside the current filter' \
+  && ok "thread-filter misses are reported as filter misses" || fail "thread-filter wording (got: $SA_TH_OUT)"
+echo "$SA_TH_OUT" | grep -q 'OTHER workspace identities' \
+  && fail "thread miss mislabeled as identity mismatch" || ok "thread miss is not an identity warning"
+
 # the review prompt's SHA instruction is conditional on mounting
 grep -q 'MOUNTED, pinned artifact' "$REPO/helpers/runphase.sh" \
   && grep -q 'compare it with "git rev-parse HEAD"' "$REPO/helpers/runphase.sh" \
@@ -1915,6 +2035,14 @@ grep -q "grep -m1 '\^loop-rounds:'" "$REPO/templates/claude-commands/read-from-c
 # The panel must be wired into the REPLY lifecycle, not just dispatch+compose.
 RFCP="$REPO/templates/claude-commands/read-from-codex.md"
 grep -q 'review_set' "$RFCP" && ok "the reader recognises a panel leg" || fail "reader panel awareness"
+# Set identity is resolved INDEX-FIRST with the field as a fail-closed cross-check —
+# a bare word-grep let this whole mechanism vanish without a red test. (grok, panel r3.)
+grep -q 'SET_IDX=' "$RFCP" && grep -q 'SET_FIELD=' "$RFCP" \
+  && ok "the reader resolves the set from the index AND captures the field" || fail "reader index-first resolution"
+grep -q 'FAIL CLOSED' "$RFCP" && grep -qE 'SET="\$\{SET_IDX:-\$SET_FIELD\}"' "$RFCP" \
+  && ok "index wins; a field/index disagreement fails closed" || fail "reader mismatch discipline"
+grep -q "sed -n '2,/\^---\$/p'" "$RFCP" \
+  && ok "the reader's set greps are frontmatter-bounded (quoted bodies cannot win)" || fail "reader frontmatter bounding"
 grep -q 'compose --set' "$RFCP" && ok "the reader composes instead of acting on one leg" || fail "reader compose wiring"
 grep -qi 'not auto-address every blocking' "$RFCP" \
   && ok "the reader refuses any-blocks through the back door" || fail "reader hostage guard"
@@ -2974,6 +3102,29 @@ SH_RSET_DIR="$(find "$SH_FIX/.comms/grades/shadow" -maxdepth 1 -type d -name 'rs
   && ok "the broker stamps review_set onto the reply (panel identity survives)" \
   || fail "review_set did not survive the broker stamp (got: $(grep -m1 review_set "$SH_RSET_DIR/grok.md" 2>/dev/null))"
 
+# FINDINGS BEFORE A LATE VERDICT: a reviewer that writes its review first and the
+# verdict line last must lose ONLY that line — cutting the body at the verdict
+# discarded the entire review before composition (AC2). (codex, panel r3.)
+cat > "$SH_BIN/grok" <<'SHSTUB6'
+#!/bin/bash
+case "$1" in --version) echo "grok 9.9.9-stub"; exit 0 ;; esac
+esc() { printf '%s' "$1" | awk '{printf "%s\\n", $0}'; }
+printf '{"type":"system","subtype":"init","session_id":"stub-lateverdict"}\n'
+REPLY="$(printf -- '## Summary\nfindings first, verdict last.\n\n## Findings\n\n### Blocking\n- `s.txt:3` — the finding that must survive.\n\n### Advisory\n- None.\n\nVERDICT: REQUEST_CHANGES')"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$(esc "$REPLY")"
+SHSTUB6
+chmod +x "$SH_BIN/grok"
+run_sh shadow --to grok --review-set latev-set "$(sh_req_for latev)" >/dev/null 2>&1 || true
+SH_LATEV_DIR="$(find "$SH_FIX/.comms/grades/shadow" -maxdepth 1 -type d -name 'latev-set-*' | head -1)"
+grep -q '^verdict: REQUEST_CHANGES' "$SH_LATEV_DIR/grok.md" 2>/dev/null \
+  && ok "a trailing VERDICT line is honoured" || fail "late verdict not honoured"
+grep -q 'the finding that must survive' "$SH_LATEV_DIR/grok.md" 2>/dev/null \
+  && ok "findings ABOVE a late verdict survive into the stamped reply" \
+  || fail "late verdict discarded the findings above it (AC2)"
+grep -q '^VERDICT: REQUEST_CHANGES$' "$SH_LATEV_DIR/grok.md" 2>/dev/null \
+  && fail "the raw VERDICT line leaked into the stamped body" \
+  || ok "only the verdict LINE is excised from the body"
+
 echo "== grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims) =="
 GR2="$WORK/shadow-repo2"
 mkdir -p "$GR2"; GR2="$(cd "$GR2" && pwd -P)"
@@ -3563,6 +3714,56 @@ PN_ST_SET="$(printf '%s\n' "$PN_ST_OUT" | sed -n 's/.*as review set \([^ ]*\) .*
 PN_ST_LEG="$(find "$PN_FIX/.comms/to-codex" -name '*panel-codex*' -type f | xargs grep -l 'pn-stale-thread' | head -1)"
 [ -n "$PN_ST_LEG" ] && [ "$(grep -c '^review_set:' "$PN_ST_LEG")" = "1" ] \
   && ok "a leg carries exactly ONE review_set line" || fail "stale review_set survived alongside the new one"
+# RETRY IDEMPOTENCE: re-dispatching the same request over the same tree recreates the
+# same set id with NEW leg message ids. The old rows must be REBOUND to this dispatch —
+# keeping them strands the fresh legs (their replies can never match the recorded
+# request id) or replays a completed old set's stale replies. (codex, panel r3.)
+PN_RT_OUT="$(run_pn panel dispatch --to codex,grok --set pn-fresh "$PN_REQ_STALE" 2>&1 || true)"
+PN_RT_SET="$(printf '%s\n' "$PN_RT_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ "$PN_RT_SET" = "$PN_ST_SET" ] && ok "a retry recreates the same deterministic set id" || fail "retry set id drifted ($PN_ST_SET vs $PN_RT_SET)"
+PN_RT_LEG="$(find "$PN_FIX/.comms/to-codex" -name '*panel-codex*' -type f | xargs grep -l 'pn-stale-thread' | xargs ls -t 2>/dev/null | head -1)"
+PN_RT_MID="$(grep -m1 '^message_id:' "$PN_RT_LEG" | sed 's/^message_id: //')"
+[ "$(awk -F'\t' -v s="$PN_RT_SET" 'NR>1 && $1==s && $10=="codex"' "$PN_FIX/.comms/grades/sets.tsv" | wc -l | tr -d ' ')" = "1" ] \
+  && ok "a retried leg keeps exactly ONE row in the set index" || fail "retry left duplicate rows"
+awk -F'\t' -v s="$PN_RT_SET" 'NR>1 && $1==s && $10=="codex" {print $2}' "$PN_FIX/.comms/grades/sets.tsv" | grep -qxF "$PN_RT_MID" \
+  && ok "the retried row is REBOUND to the new dispatch's request id" \
+  || fail "retry kept the stale request_message_id — new replies can never answer it"
+
+# STATUS/COMPOSE AGREEMENT: both scan skip-invalid-and-continue, so a newest-but-
+# invalid bound candidate above an older valid reply yields the same answer from
+# both. Divergence here means status says "answered" while compose refuses — an
+# operator chasing a phantom incomplete panel. (codex + grok, panel r3.)
+PN_REQ_AGREE="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-02-00_req-agree.md"
+sed -e 's/^message_id: .*/message_id: pn-req-agree/' -e 's/^thread: .*/thread: pn-agree-thread/' "$PN_REQ" > "$PN_REQ_AGREE"
+PN_AGR_OUT="$(run_pn panel dispatch --to codex,grok --set pn-agree "$PN_REQ_AGREE" 2>&1 || true)"
+PN_AGR_SET="$(printf '%s\n' "$PN_AGR_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+PN_AGR_MC="$(find "$PN_FIX/.comms/to-codex" -type f | xargs grep -l '^thread: pn-agree-thread-codex' 2>/dev/null | head -1)"
+PN_AGR_MG="$(find "$PN_FIX/.comms/to-grok" -type f | xargs grep -l '^thread: pn-agree-thread-grok' 2>/dev/null | head -1)"
+PN_AGR_MIDC="$(grep -m1 '^message_id:' "$PN_AGR_MC" | sed 's/^message_id: //')"
+PN_AGR_MIDG="$(grep -m1 '^message_id:' "$PN_AGR_MG" | sed 's/^message_id: //')"
+mk_agree_reply() { # <agent> <minute> <in-reply-to> <body-or-empty>
+  local f="$PN_FIX/.comms/archive/${PN_WS}_2026-08-26T12-4${2}-00_${1}-agree.md"
+  { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T12:4%s:00Z\nworkspace: %s\nmessage_id: %s-agree-%s\nthread: pn-agree-thread-%s\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n%s' \
+      "$1" "$2" "$PN_WS" "$1" "$2" "$1" "$3" "$4"
+  } > "$f"
+}
+mk_agree_reply codex 0 "$PN_AGR_MIDC" '## Findings
+
+### Blocking
+- None.'
+mk_agree_reply codex 1 "$PN_AGR_MIDC" ''    # newer, bound, INVALID (empty body)
+mk_agree_reply grok  0 "$PN_AGR_MIDG" '## Findings
+
+### Blocking
+- None.'
+PN_AGR_STATUS="$(run_pn panel status --set "$PN_AGR_SET" 2>&1)"
+printf '%s\n' "$PN_AGR_STATUS" | awk -F'\t' '$1=="codex" && $3=="yes"' | grep -q . \
+  && ok "status sees the older VALID reply past a newer invalid one" || fail "status stopped at the invalid candidate"
+PN_AGR_COMP="$(run_pn compose --set "$PN_AGR_SET" 2>&1)" && PN_AGR_RC=0 || PN_AGR_RC=$?
+[ "$PN_AGR_RC" = "0" ] && printf '%s\n' "$PN_AGR_COMP" | grep -q 'all answered' \
+  && ok "compose agrees — the same older valid reply completes the leg" \
+  || fail "status and compose disagree on an invalid-then-valid candidate (rc=$PN_AGR_RC)"
+
 grep -q "^review_set: $PN_ST_SET$" "$PN_ST_LEG" 2>/dev/null \
   && ok "dispatch REPLACES an inherited review_set with the set it actually dispatched" \
   || fail "leg kept the stale set ($(grep -m1 '^review_set:' "$PN_ST_LEG"))"

@@ -391,11 +391,12 @@ $prior
   # The SHA check is an UNMOUNTED-turn safeguard. A mounted artifact's base equals
   # the message's head_sha by construction — both are stamped from the one snapshot
   # object at dispatch — so telling the reviewer to re-derive and report it burns
-  # tokens proving a tautology; both field-report legs did exactly that. mount_dir
-  # is the caller's (cmd_run) local, visible here through dynamic scoping and empty
-  # for unmounted turns. (field report #6.)
+  # tokens proving a tautology; both field-report legs did exactly that. The mount
+  # state arrives as an EXPLICIT argument (arg 6) — dynamic scoping of the caller's
+  # local worked but hid the contract. (grok, stamped-authorities round 1.)
+  local prompt_mounted="${6:-}"
   local sha_note
-  if [ -n "${mount_dir:-}" ]; then
+  if [ -n "$prompt_mounted" ]; then
     sha_note='The tree you are reading is a MOUNTED, pinned artifact: its base equals the message head_sha
 by construction. Do not compare or report SHAs; spend the tokens on the review itself.'
   else
@@ -489,22 +490,23 @@ PYX
   return 0
 }
 
-# count_blocking <file> — real (non-placeholder) list items under '### Blocking'.
-# ONE definition, used by both the verdict derivation and the APPROVE cross-check:
-# the two inline copies of this awk were exactly how the placeholder-filter bug
-# was born twice. (grok advisory, field-report round 1.)
-count_blocking() {  # <raw reply> — blocking findings, per the ONE production parser
-  # Delegates to comms.sh `findings --raw` so the broker derivation and
-  # compose/round-note CANNOT disagree. They did, twice: a private copy of this
-  # rule drifted on list form (numbered findings counted as zero -> a false
-  # all-clear in the field), and again on case. Mirroring the rule by hand was
-  # tried and failed the same week; the only durable fix is one parser.
-  # Prints the count on success. On failure prints nothing and returns non-zero —
-  # callers MUST treat that as "cannot derive", never as zero. A parser that
-  # fails open stamps APPROVE over unread findings, which is the whole bug class.
-  local rows
-  rows="$("$COMMS" findings --raw "$1" 2>/dev/null)" || return 1
-  printf '%s\n' "$rows" | awk -F'\t' '$13=="blocking"{n++} END{print n+0}'
+# reply_probe <file> — every question the broker asks about a reply, answered once.
+# The broker used to ask three separate questions with three separate scanners
+# (a verdict awk, a `grep '^### Blocking'`, and a blocking-count awk). Each pair of
+# them drifted in turn, and every drift produced a stamped verdict that contradicted
+# the reply body. There is now one scanner, in comms.sh, shared with `findings`.
+reply_probe() {  # <raw reply> — the ONE scan: verdicts, structure presence, counts
+  # Every question the broker asks about a reply is answered by a single pass of the
+  # shared parser, so the broker can never disagree with `findings`/`compose` about
+  # what the reply said. It disagreed twice: a private awk copy drifted on list form
+  # and case (round 2), then a plain `grep '^### Blocking'` counted a QUOTED prior
+  # round as live structure while the parser correctly ignored it, deriving APPROVE
+  # from a review that had said REQUEST_CHANGES (rounds 3-4, both reviewers).
+  "$COMMS" findings --raw --probe "$1" 2>/dev/null
+}
+
+probe_field() {  # <probe output> <key>
+  printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k {print $2; exit}'
 }
 
 broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivered
@@ -533,38 +535,50 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     # below a long preamble. Fenced code blocks are skipped so a reply that QUOTES a
     # verdict line — round-N bodies routinely quote round N-1 — cannot forge or
     # duplicate one. (codex, field-report round 2.)
-    local vline vcount
-    vcount="$(awk '{ind=0; while (substr($0,ind+1,1)==" ") ind++; fl=substr($0,ind+1)} ind<=3 && (index(fl,"```")==1 || index(fl,"~~~")==1){fence=!fence; next} !fence && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{n++} END{print n+0}' "$run_dir/reply-raw.md")"
+    local probe vline vcount pstruct punclosed
+    probe="$(reply_probe "$run_dir/reply-raw.md")"
+    if [ -z "$probe" ]; then
+      GROK_BROKER_NOTE="the findings parser could not read the reply — refusing to stamp a verdict derived from an unread body"
+      return 1
+    fi
+    punclosed="$(probe_field "$probe" unclosed_fence)"
+    if [ "$punclosed" = "yes" ]; then
+      # FAIL CLOSED on a fence that never closes: everything after it was skipped, so
+      # every count below describes a truncated read. install.sh has always failed
+      # closed here; the reply parser used to fail OPEN, which made an explicit APPROVE
+      # over an unclosed wrap of the findings look clean. (grok, round 4.)
+      GROK_BROKER_NOTE="the reply opens a code fence it never closes — the rest of the body could not be read, so no verdict can be trusted from it"
+      return 1
+    fi
+    vcount="$(probe_field "$probe" verdicts)"
     if [ "${vcount:-0}" -eq 1 ]; then
-      vline="$(awk '{ind=0; while (substr($0,ind+1,1)==" ") ind++; fl=substr($0,ind+1)} ind<=3 && (index(fl,"```")==1 || index(fl,"~~~")==1){fence=!fence; next} !fence && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{print NR; exit}' "$run_dir/reply-raw.md")"
-      verdict="$(sed -n "${vline}p" "$run_dir/reply-raw.md" | sed 's/^VERDICT: //')"
-      body_start=$((vline + 1))
-      [ "$vline" = "1" ] || echo "note: VERDICT line found at line $vline, not line 1 (preamble above it was skipped)" >>"$run_dir/runner.log"
+      vline="$(probe_field "$probe" verdict_line)"
+      verdict="$(probe_field "$probe" verdict)"
+      # Excise ONLY the verdict line. Cutting the body at the verdict discarded
+      # everything above it — a reviewer that wrote findings first and the verdict
+      # last had its entire review silently dropped before composition (AC2).
+      body_start=1
+      [ "$vline" = "1" ] || echo "note: VERDICT line found at line $vline, not line 1 (content around it is preserved; only that line is excised)" >>"$run_dir/runner.log"
     elif [ "${vcount:-0}" -gt 1 ]; then
       echo "note: $vcount VERDICT lines in the reply — ambiguous, falling back to derivation" >>"$run_dir/runner.log"
     fi
     if [ -z "$verdict" ]; then
       # DERIVE it rather than discard the review. loopspec already defines the
-      # equivalence — `blocking_findings > 0` IS `REQUEST_CHANGES`, and `status: pass`
-      # with none is `APPROVE` — so a reply carrying the mandated `### Blocking` /
-      # `### Advisory` structure states its verdict in substance even when it omits the
-      # line. Observed three times running: a reviewer produced thousands of bytes of
-      # real findings and the whole turn was thrown away over a missing first line.
-      # Only the STRUCTURE is trusted; nothing is inferred from prose.
+      # equivalence — `blocking_findings > 0` IS `REQUEST_CHANGES` — so a reply
+      # carrying the mandated structure states its verdict in substance even when it
+      # omits the line. Only STRUCTURE is trusted; nothing is inferred from prose.
       local nblock
-      if grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
-        # FAIL CLOSED: if the shared parser cannot read the reply, refuse the turn.
-        # Defaulting a failed parse to zero is indistinguishable from a clean review.
-        if ! nblock="$(count_blocking "$run_dir/reply-raw.md")"; then
-          GROK_BROKER_NOTE="the reply has a '### Blocking' section but the findings parser could not read it — refusing to stamp a verdict derived from an unread body"
-          return 1
-        fi
+      pstruct="$(probe_field "$probe" blocking_section)"
+      if [ "$pstruct" = "yes" ]; then
+        nblock="$(probe_field "$probe" blocking)"
         if [ "${nblock:-0}" -gt 0 ]; then verdict="REQUEST_CHANGES"; else verdict="APPROVE"; fi
         body_start=1
         echo "note: reply carried no VERDICT line; DERIVED '$verdict' from ${nblock:-0} blocking finding(s) per the loopspec equivalence" >>"$run_dir/runner.log"
         GROK_BROKER_DERIVED="$verdict"
       else
-        GROK_BROKER_NOTE="review reply carries no 'VERDICT:' line AND no '### Blocking' section to derive one from — refusing to stamp an envelope (first line was: $(printf '%.60s' "$first"))"
+        # A reply whose ONLY `### Blocking` is inside a fenced quote of a prior round
+        # lands here, which is correct: it has said nothing of its own.
+        GROK_BROKER_NOTE="review reply carries no 'VERDICT:' line AND no unquoted '### Blocking' section to derive one from — refusing to stamp an envelope (first line was: $(printf '%.60s' "$first"))"
         return 1
       fi
     fi
@@ -574,13 +588,9 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     # checking it just moves the contradiction one layer up.
     if [ "$verdict" = "APPROVE" ] && grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
       local xblock
-      # Same fail-closed rule as derivation: an unreadable body cannot clear an
-      # explicit APPROVE. Silently treating a parse failure as zero blockers would
-      # restore the exact contradiction this check exists to catch.
-      if ! xblock="$(count_blocking "$run_dir/reply-raw.md")"; then
-        GROK_BROKER_NOTE="reply says 'VERDICT: APPROVE' but the findings parser could not read its body — refusing to stamp an unverified approval"
-        return 1
-      fi
+      # Reads the SAME probe as the derivation above — not a second scan that could
+      # disagree with it.
+      xblock="$(probe_field "$probe" blocking)"
       if [ "${xblock:-0}" -gt 0 ]; then
         GROK_BROKER_NOTE="reply says 'VERDICT: APPROVE' but lists ${xblock} blocking finding(s) — refusing to stamp a verdict that contradicts its own body"
         return 1
@@ -604,7 +614,11 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     [ -n "$GROK_RSET" ] && printf 'review_set: %s\n' "$GROK_RSET"
     [ -n "$verdict" ] && printf 'verdict: %s\n' "$verdict"
     printf -- '---\n\n'
-    tail -n +"$body_start" "$run_dir/reply-raw.md"
+    if [ -n "${vline:-}" ] && [ "${vcount:-0}" -eq 1 ]; then
+      sed "${vline}d" "$run_dir/reply-raw.md"
+    else
+      tail -n +"$body_start" "$run_dir/reply-raw.md"
+    fi
   } > "$run_dir/reply.md"
   # Validate BEFORE persistence — an empty/degenerate body never reaches the
   # inbox and the inbound stays unarchived (error-lane semantics for the driver).
@@ -851,7 +865,7 @@ cmd_run() {
     exit 1
   fi
   if [ "$provider" = "grok" ] || [ "$via" = "acp" ]; then
-    if ! build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root" "$provider"; then
+    if ! build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root" "$provider" "${mount_dir:-}"; then
       update_thread_state "$msg_thread" failed "" "$sfield" || true
       write_result "$run_dir" failed 1 "" "$msg" "${GROK_PROMPT_NOTE:-grok prompt build refused}"
       unmount_artifact
