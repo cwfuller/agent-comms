@@ -597,6 +597,17 @@ sed 's/thread: loop-alpha/thread: loop-headless/; s/round: 2/round: 1/' "$OUT_WF
 HL_OUT="$(run_headless send --to codex "$HL_WF" 2>/dev/null)"
 HL_TAIL="$(echo "$HL_OUT" | tail -1)"
 case "$HL_TAIL" in "RESULT: spawned"*) ok "headless send ends with RESULT: spawned" ;; *) fail "headless RESULT line (got: $HL_TAIL)" ;; esac
+# The RESULT names the ROUTE the turn actually took, read back from the spawn line --
+# not from COMMS_DELIVERY. An ACP dispatch used to announce itself as "headless mode",
+# which sent operators to repair a transport that was working (field report #4).
+case "$HL_TAIL" in
+  *"(headless)"*) ok "the RESULT names the route it actually took" ;;
+  *) fail "RESULT does not name the route (got: $HL_TAIL)" ;;
+esac
+case "$HL_TAIL" in
+  *"headless mode"*) fail "RESULT still asserts a delivery MODE rather than the route" ;;
+  *) ok "RESULT no longer asserts headless mode" ;;
+esac
 [ ! -s "$CMUX_STUB_LOG" ] && ok "headless delivery never touches cmux" || fail "headless delivery touched cmux: $(cat "$CMUX_STUB_LOG")"
 HL_DIR="$(rundir_of "$HL_OUT")"
 [ -n "$HL_DIR" ] && [ -d "$HL_DIR" ] && ok "spawn printed a real run dir" || fail "spawn run dir (got: $HL_DIR)"
@@ -972,6 +983,19 @@ elif [ -n "${GROK_STUB_DUP_VERDICT:-}" ]; then
 elif [ -n "${GROK_STUB_LIE_APPROVE:-}" ]; then
   # unique explicit APPROVE that contradicts its own findings
   REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Findings\n### Blocking\n1. a real blocking finding the verdict ignores\n\n### Advisory\n- None.')"
+elif [ -n "${GROK_STUB_LATE_VERDICT:-}" ]; then
+  # A SOLE, valid verdict pushed past line 40 by a long preamble. The old scan
+  # window stopped at 40, so this reply read as having no verdict at all.
+  REPLY="$(printf -- 'thinking out loud\n%s\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.' "$(i=0; while [ $i -lt 45 ]; do printf 'preamble line %s\n' "$i"; i=$((i+1)); done)")"
+elif [ -n "${GROK_STUB_DUP_FAR:-}" ]; then
+  # line-1 APPROVE with the contradicting REQUEST_CHANGES beyond line 40. Under the
+  # window only the line-1 APPROVE was visible, so vcount==1 and the broker trusted
+  # it -- a false all-clear that a long enough reply could always produce.
+  REPLY="$(printf -- 'VERDICT: APPROVE\n%s\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.' "$(i=0; while [ $i -lt 45 ]; do printf 'narration line %s\n' "$i"; i=$((i+1)); done)")"
+elif [ -n "${GROK_STUB_QUOTED_VERDICT:-}" ]; then
+  # A round-N reply QUOTING round N-1 inside a fenced block. Scanning the whole file
+  # without skipping fences would read the quote as a second verdict and go ambiguous.
+  REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Prior round\n```\nVERDICT: REQUEST_CHANGES\n```\n\n## Findings\n### Blocking\n- None.\n\n### Advisory\n- None.')"
 elif [ -n "${GROK_STUB_PREAMBLE_NUMBERED:-}" ]; then
   # the field incident, end to end: preamble pushes the (absent) verdict off
   # line 1, findings are NUMBERED, and one real item ENDS in "None."
@@ -1134,6 +1158,31 @@ REPLY11="$(find "$MA_FIX/.comms/to-claude" -type f -name '*grok-reply*' -newer "
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R11/result.json" | head -1)" = "completed" ] \
   && [ -n "$REPLY11" ] && grep -q '^verdict: REQUEST_CHANGES$' "$REPLY11" \
   && ok "preamble + numbered None.-suffix finding derives REQUEST_CHANGES live (the field incident)" || fail "preamble-numbered broker leg"
+# Verdict lines BEYOND the old 40-line scan window (codex, field-report round 2).
+MA_MSG12="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-49-00_lateverdict-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-10/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG12"
+R12="$WORK/ma-leg12"; mkdir -p "$R12"
+GROK_STUB_LATE_VERDICT=1 run_grok_leg "$MA_MSG12" "$R12" >/dev/null 2>&1
+REPLY12="$(find "$MA_FIX/.comms/to-claude" -type f -name '*grok-reply*' -newer "$R12/prompt.md" | head -1)"
+[ -n "$REPLY12" ] && grep -q '^verdict: REQUEST_CHANGES$' "$REPLY12" \
+  && ok "a sole VERDICT past line 40 is still honoured" || fail "late-verdict broker leg"
+
+MA_MSG13="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-51-00_dupfar-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-11/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG13"
+R13="$WORK/ma-leg13"; mkdir -p "$R13"
+GROK_STUB_DUP_FAR=1 run_grok_leg "$MA_MSG13" "$R13" >/dev/null 2>&1
+REPLY13="$(find "$MA_FIX/.comms/to-claude" -type f -name '*grok-reply*' -newer "$R13/prompt.md" | head -1)"
+[ -n "$REPLY13" ] && grep -q '^verdict: REQUEST_CHANGES$' "$REPLY13" \
+  && ok "a line-1 APPROVE contradicted past line 40 no longer wins" || fail "dup-far broker leg"
+
+MA_MSG14="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-53-00_quoted-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-12/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG14"
+R14="$WORK/ma-leg14"; mkdir -p "$R14"
+GROK_STUB_QUOTED_VERDICT=1 run_grok_leg "$MA_MSG14" "$R14" >/dev/null 2>&1
+REPLY14="$(find "$MA_FIX/.comms/to-claude" -type f -name '*grok-reply*' -newer "$R14/prompt.md" | head -1)"
+[ -n "$REPLY14" ] && grep -q '^verdict: APPROVE$' "$REPLY14" \
+  && ok "a verdict QUOTED in a fenced block is not counted as a second verdict" || fail "quoted-verdict broker leg"
+
 # Question leg (/ask grok path): the stub STILL emits a leading canonical
 # VERDICT line — for a consult that line must become body text, never metadata.
 MA_MSGQ="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-41-00_ask-q-1.md"
@@ -1475,20 +1524,47 @@ DVEOF
 cat > "$DV/no-structure.md" <<'DVEOF'
 I looked at it and it seems fine to me, shipping.
 DVEOF
-dv_count() { awk '
-  function isplaceholder(t) {
-    sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
-    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/[*`_]/, "", t); t = tolower(t)
-    return (t == "none" || t == "none.")
-  }
-  /^### Blocking/{f=1;next} /^###/{f=0}
-  f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
-  END{print n+0}' "$1"; }
+# Production entry point, not a third copy of the awk — same reason as nb() below.
+dv_count() { "$REPO/helpers/comms.sh" findings --raw "$1" 2>/dev/null \
+  | awk -F'\t' '$13=="blocking"{n++} END{print n+0}'; }
 [ "$(dv_count "$DV/with-blocking.md")" = "1" ] && ok "derivation counts a real blocking finding" || fail "derive count blocking"
 [ "$(dv_count "$DV/clean.md")" = "0" ] && ok "derivation does not count a 'None.' placeholder" || fail "derive count none"
 grep -q '^### Blocking' "$DV/no-structure.md" && fail "fixture has structure" \
   || ok "a reply with NO findings structure has nothing to derive from"
 grep -q 'DERIVED' "$REPO/helpers/runphase.sh" && ok "the broker records that a verdict was derived, not stated" || fail "derivation not recorded"
+
+echo "== one placeholder rule: broker derivation and findings/compose cannot disagree =="
+# The bug this replaces: findings_extract and count_blocking were separate copies of
+# "what is a placeholder". They drifted on list form, were mirrored by hand, then
+# drifted again on CASE and emphasis -- so `NONE`, `` `none` `` and `_None_` were
+# placeholders to the broker and REAL blocking findings to compose, letting a stamped
+# APPROVE carry blocking rows. count_blocking now delegates to `findings --raw`, so
+# this asserts one parser rather than two that agree today.
+CORP="$WORK/placeholder-corpus"; mkdir -p "$CORP"
+while IFS='|' read -r item want label; do
+  [ -n "$item" ] || continue
+  printf '### Blocking\n\n- %s\n' "$item" > "$CORP/item.md"
+  got="$("$REPO/helpers/comms.sh" findings --raw "$CORP/item.md" 2>/dev/null \
+    | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')"
+  [ "$got" = "$want" ] && ok "placeholder corpus: $label" \
+    || fail "placeholder corpus: $label (want $want blocking, got $got)"
+done <<'CORPUS'
+None.|0|a bare None. placeholder
+none|0|lowercase none
+NONE|0|uppercase NONE
+`none`|0|backticked none
+_None_|0|underscore-emphasised None
+**None**|0|bold None
+a real bug|1|an ordinary finding
+`helper.sh` can incorrectly return None.|1|a real finding that merely ENDS in None.
+CORPUS
+
+# The raw entry point exists FOR the broker: a child reply has no envelope yet.
+printf '### Blocking\n\n- a real bug\n' > "$CORP/bare.md"
+[ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/bare.md" | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "1" ] \
+  && ok "findings --raw parses a frontmatter-less body" || fail "raw mode cannot read a bare reply"
+[ -z "$("$REPO/helpers/comms.sh" findings "$CORP/bare.md" 2>/dev/null)" ] \
+  && ok "without --raw an envelope-less file still yields nothing" || fail "raw bypass leaked into normal mode"
 grep -q 'no .### Blocking. section to derive one from' "$REPO/helpers/runphase.sh" \
   && ok "a structureless reply is still refused — nothing is inferred from prose" || fail "structureless reply not refused"
 
@@ -1573,24 +1649,25 @@ LF_MIX="$(run_lf findings "$LF/mixed.md" 2>/dev/null | tail -n +2)"
   && ok "every markdown list marker counts as a finding" || fail "mixed markers yielded $(printf '%s' "$LF_MIX" | grep -c .)"
 printf '%s\n' "$LF_MIX" | grep -q 'None' && fail "a bolded None. placeholder was counted" \
   || ok "a **None.** placeholder is still not a finding"
-# the derivation reads the same shapes, or the verdict contradicts the body again
-grep -q '\[0-9\]+\[.)\]' "$REPO/helpers/runphase.sh" \
-  && ok "verdict derivation counts numbered findings too" || fail "derivation still bullet-only"
+# The derivation reads the same shapes, or the verdict contradicts the body again.
+# Asserted by BEHAVIOUR, not by grepping runphase.sh for a regex: the derivation now
+# delegates to this same parser, so there is no second regex left to grep for -- and a
+# source-grep would have passed happily while the two copies disagreed on case.
+printf '### Blocking\n\n1. a numbered finding\n2) a paren-numbered finding\n- a bulleted finding\n' > "$CORP/markers.md"
+[ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/markers.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "3" ] \
+  && ok "verdict derivation counts numbered findings too" || fail "derivation missed a list marker shape"
 grep -q 'VERDICT line found at line' "$REPO/helpers/runphase.sh" \
   && ok "a VERDICT line below preamble is still honoured" || fail "verdict must be on line 1"
 # A finding that merely ENDS in "None." is not a placeholder. The first filter matched the
 # end of the line, so `1. \`helper.sh\` can incorrectly return None.` derived zero blockers
 # and stamped APPROVE while findings_extract kept it — the same stamped-verdict-contradicts-
 # body failure, one layer down. (codex, field-report round 1.)
-nb() { awk '
-  function isplaceholder(t) {
-    sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
-    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/[*`_]/, "", t); t = tolower(t)
-    return (t == "none" || t == "none.")
-  }
-  /^### Blocking/{f=1;next} /^###/{f=0}
-  f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
-  END{print n+0}' "$1"; }
+# nb() calls the REAL production entry point. It used to be an inline COPY of the
+# broker awk, which is why the case regression passed the suite while production was
+# broken: the test parser and the shipped parser were different code that happened to
+# look alike. A copied parser only ever tests itself. (codex, field-report round 2.)
+nb() { "$REPO/helpers/comms.sh" findings --raw "$1" 2>/dev/null \
+  | awk -F'\t' '$13=="blocking"{n++} END{print n+0}'; }
 NB="$WORK/noneedge"; mkdir -p "$NB"
 printf '### Blocking\n1. `helper.sh` can incorrectly return None.\n' > "$NB/ends-in-none.md"
 [ "$(nb "$NB/ends-in-none.md")" = "1" ] \

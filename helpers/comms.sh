@@ -801,14 +801,21 @@ hash_stdin() {  # short content hash; whichever digest this box actually has
 
 findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <prompt_version> [base_sha]
   local f="$1" role="$2" rsid="$3" aid="$4" rver="$5" pver="$6" bsha="${7:-}" mid
-  [ "$(frontmatter_field "$f" type)" = "review-feedback" ] || return 0
-  mid="$(frontmatter_field "$f" message_id)"
-  [ -n "$mid" ] || mid="$(basename "$f" .md)"
+  # FINDINGS_RAW: parse a frontmatter-less body (the reply-raw.md a broker reads
+  # BEFORE any envelope exists). Without it the broker needed a parser of its own,
+  # which is exactly how the two rules drifted apart.
+  if [ "${FINDINGS_RAW:-}" = "1" ]; then
+    mid="$(basename "$f" .md)"
+  else
+    [ "$(frontmatter_field "$f" type)" = "review-feedback" ] || return 0
+    mid="$(frontmatter_field "$f" message_id)"
+    [ -n "$mid" ] || mid="$(basename "$f" .md)"
+  fi
   # The GATING reviewer's reply arrives later through the normal loop and knows
   # nothing about the shadow run, so its artifact/set identity is joined here
   # from the set index rather than asked of a message that cannot carry it.
   # Explicit flags always win; a miss leaves the fields empty, never guessed.
-  if [ -z "$rsid" ] && [ -z "$aid" ]; then
+  if [ -z "$rsid" ] && [ -z "$aid" ] && [ "${FINDINGS_RAW:-}" != "1" ]; then
     local root_j hit
     root_j="$(main_repo_root)" || root_j=""
     if [ -n "$root_j" ]; then
@@ -830,14 +837,23 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
       -v verdict="$(frontmatter_field "$f" verdict)" \
       -v role="$role" -v rsid="$rsid" -v aid="$aid" -v rver="$rver" -v pver="$pver" '
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    # THE placeholder rule. Not "a" rule: the broker verdict derivation reaches this
+    # same function through `findings --raw`, because two copies drifted twice --
+    # first on list form (numbered findings read as zero), then on CASE (a lowercase
+    # "- none" read as a real finding). Each drift let a stamped verdict contradict
+    # the body it was stamped onto.
+    function isplaceholder(s,   t) {
+      t = s; gsub(/[*`_]/, "", t)
+      t = trim(t); t = tolower(t)
+      return (t == "none" || t == "none.")
+    }
     # Emit the buffered bullet. Anchors are best-effort BY DESIGN: 35% of real
     # findings are prose or cross-file and carry none, and dropping those would
     # discard exactly the findings a line-anchored schema is worst at seeing.
     function flush(   claim, anchor, fid) {
       if (buf == "") return
       claim = trim(buf); buf = ""
-      if (claim ~ /^[Nn]one\.?$/) return
-      if (claim ~ /^\*\*[Nn]one\.?\*\*$/) return
+      if (isplaceholder(claim)) return
       gsub(/\t/, " ", claim)
       anchor = ""
       if (match(claim, /`[^`]+`/)) {
@@ -917,6 +933,7 @@ cmd_findings() {
       --reviewer-version) shift; rver="${1:-}" ;;
       --prompt-version)   shift; pver="${1:-}" ;;
       --base-sha)         shift; bsha="${1:-}" ;;
+      --raw)              FINDINGS_RAW=1; export FINDINGS_RAW ;;
       --header)           header_only=true ;;
       --rebuild)          rebuild=true ;;
       -?*)                usage_err "findings: unknown option '$(clip "$1")'" ;;
@@ -1147,6 +1164,10 @@ cmd_panel() {
         [ -z "$rnd" ] || [ "$(frontmatter_field "$cand" round)" = "$rnd" ] || continue
         [ -z "$req_mid" ] || [ "$(frontmatter_field "$cand" in-reply-to)" = "$req_mid" ] || continue
         [ "$(frontmatter_field "$cand" type)" = "review-feedback" ] || continue
+        # Validate like compose does, or the two disagree: a bound reply with a
+        # missing verdict/body shows "answered" here and INCOMPLETE there.
+        # (codex, panel r2.)
+        cmd_validate "$cand" >/dev/null 2>&1 || continue
         reply="$cand"; break
       done
       if [ -n "$reply" ]; then answered=yes; verdict="$(cmd_verdict "$reply" 2>/dev/null || true)"; fi
@@ -1225,6 +1246,10 @@ cmd_panel() {
       fm && index(probe, "thread:") == 1 { printf "thread: %s\n", th; next }
       fm && index(probe, "message_id:") == 1 { printf "message_id: %s\n", mid; next }
       fm && index(probe, "artifact_id:") == 1 { next }
+      # A request derived from a prior panel inbound can already carry review_set —
+      # appending the new one after it loses to grep -m1 and the round would gate on
+      # the OLD set. Replace, exactly like artifact_id. (grok, panel r2.)
+      fm && index(probe, "review_set:") == 1 { next }
       fm && base != "" && index(probe, "head_sha:") == 1 { next }
       { print }
     ' "$req" > "$leg_file"
@@ -2735,6 +2760,11 @@ cmd_send() {
   del_out="$(cmd_deliver "$to" "$file")"
   echo "$del_out"
   rundir="$(printf '%s\n' "$del_out" | sed -n 's/^ *run dir: //p' | head -1)"
+  # The route the turn actually went out over, read back from the spawn line rather than
+  # from COMMS_DELIVERY — the two disagree (cmd_deliver's acp arm spawns a runphase turn),
+  # and reporting the intent instead of the outcome is the whole of field-report #4.
+  local route=""
+  route="$(printf '%s\n' "$del_out" | sed -n 's/^spawned runphase .*via=\([a-z][a-z]*\).*/\1/p' | head -1)"
   case "$del_out" in
     *"delivered to"*)     outcome=delivered ;;
     *"delivery blocked"*) outcome=blocked ;;
@@ -2767,7 +2797,9 @@ cmd_send() {
   # non-delivered result needs user attention.
   case "$outcome" in
     delivered) echo "RESULT: delivered" ;;
-    spawned)   echo "RESULT: spawned — headless peer turn running detached; the reply lands in the inbox when it exits. Await it with the runphase.sh command printed above, then read the reply." ;;
+    # "already running" also lands here but carries no via= — an unknown route prints no
+    # parenthetical at all. Naming a route we did not observe is the same defect in a new spot.
+    spawned)   echo "RESULT: spawned${route:+ ($route)} — a peer turn is running detached; the reply lands in the inbox when it exits. Await it with the runphase.sh command printed above, then read the reply." ;;
     held)      echo "RESULT: held — the thread is paused by a hold marker; nothing was spawned. Release with 'runphase.sh release <thread>', then RE-SEND ('comms.sh send --to $to <file>') — a bare deliver would spawn the turn but leave this thread's state stuck on 'held', blinding status and the stalled watchdog." ;;
     blocked)   echo "RESULT: blocked — message saved, peer not nudged; use host/manual pickup or restart with cmux socket permission" ;;
     pickup)

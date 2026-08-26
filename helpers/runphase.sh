@@ -321,6 +321,10 @@ build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> [agent] — sets the
   # driver still holds at the plan->implement handoff. (codex, panel r1: the restore
   # instruction existed but its source file did not.)
   GROK_LOOPR="$(frontmatter_field "$msg" loop-rounds)"
+  # review_set is the reply's panel identity: without it the reader processes the
+  # first brokered leg as a single-reviewer reply and the round-1 lifecycle defect
+  # comes back through the broker path. (codex + grok, panel r2.)
+  GROK_RSET="$(frontmatter_field "$msg" review_set)"
   GROK_INID="$(frontmatter_field "$msg" message_id)"
   # The two prompt shapes are fully split on the reply type — a consult never
   # sees reviewer framing or the verdict bar, and a review never hears "this is
@@ -489,23 +493,18 @@ PYX
 # ONE definition, used by both the verdict derivation and the APPROVE cross-check:
 # the two inline copies of this awk were exactly how the placeholder-filter bug
 # was born twice. (grok advisory, field-report round 1.)
-count_blocking() {
-  awk '
-    function isplaceholder(t) {
-      sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/[*`_]/, "", t)
-      # CASE-INSENSITIVE. "- none" is as much a placeholder as "- None." — a
-      # case-sensitive compare made every lowercase stub read as a real blocking
-      # finding, so its own APPROVE looked like a self-contradiction and the turn was
-      # refused, cascading through seven downstream tests. Emphasis marks are stripped
-      # first so "**None**" and "`none`" are placeholders too, while a real finding that
-      # merely ENDS in "None." is not. (agent-comms-7b, 2026-08-26.)
-      t = tolower(t)
-      return (t == "none" || t == "none.")
-    }
-    /^### Blocking/{f=1;next} /^###/{f=0}
-    f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
-    END{print n+0}' "$1"
+count_blocking() {  # <raw reply> — blocking findings, per the ONE production parser
+  # Delegates to comms.sh `findings --raw` so the broker derivation and
+  # compose/round-note CANNOT disagree. They did, twice: a private copy of this
+  # rule drifted on list form (numbered findings counted as zero -> a false
+  # all-clear in the field), and again on case. Mirroring the rule by hand was
+  # tried and failed the same week; the only durable fix is one parser.
+  # Prints the count on success. On failure prints nothing and returns non-zero —
+  # callers MUST treat that as "cannot derive", never as zero. A parser that
+  # fails open stamps APPROVE over unread findings, which is the whole bug class.
+  local rows
+  rows="$("$COMMS" findings --raw "$1" 2>/dev/null)" || return 1
+  printf '%s\n' "$rows" | awk -F'\t' '$13=="blocking"{n++} END{print n+0}'
 }
 
 broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivered
@@ -521,15 +520,23 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
   # leading VERDICT line — is preserved as body text; review-only metadata can
   # never attach to a consult.
   local first verdict="" body_start=1
+  # Assigned, not just declared — the no-structure refusal below quotes it, and an
+  # empty snippet told the driver nothing about why the reply was rejected.
+  first="$(head -1 "$run_dir/reply-raw.md" 2>/dev/null)"
   if [ "$GROK_RTYPE" = "review-feedback" ]; then
     # Count EVERY explicit verdict line first, including one on line 1. The earlier
     # version short-circuited on line 1 and never reached the ambiguity check, so
     # `VERDICT: APPROVE` on line 1 plus `VERDICT: REQUEST_CHANGES` further down was
     # silently accepted as APPROVE. (codex, field-report round 1.)
+    # Scan the WHOLE reply. The old 40-line window let a line-1 APPROVE sit above a
+    # line-41 REQUEST_CHANGES and still count as unambiguous, and hid a sole verdict
+    # below a long preamble. Fenced code blocks are skipped so a reply that QUOTES a
+    # verdict line — round-N bodies routinely quote round N-1 — cannot forge or
+    # duplicate one. (codex, field-report round 2.)
     local vline vcount
-    vcount="$(awk 'NR<=40 && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{n++} END{print n+0}' "$run_dir/reply-raw.md")"
+    vcount="$(awk '/^```/{fence=!fence; next} !fence && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{n++} END{print n+0}' "$run_dir/reply-raw.md")"
     if [ "${vcount:-0}" -eq 1 ]; then
-      vline="$(awk 'NR<=40 && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{print NR; exit}' "$run_dir/reply-raw.md")"
+      vline="$(awk '/^```/{fence=!fence; next} !fence && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{print NR; exit}' "$run_dir/reply-raw.md")"
       verdict="$(sed -n "${vline}p" "$run_dir/reply-raw.md" | sed 's/^VERDICT: //')"
       body_start=$((vline + 1))
       [ "$vline" = "1" ] || echo "note: VERDICT line found at line $vline, not line 1 (preamble above it was skipped)" >>"$run_dir/runner.log"
@@ -546,7 +553,12 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
       # Only the STRUCTURE is trusted; nothing is inferred from prose.
       local nblock
       if grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
-        nblock="$(count_blocking "$run_dir/reply-raw.md")"
+        # FAIL CLOSED: if the shared parser cannot read the reply, refuse the turn.
+        # Defaulting a failed parse to zero is indistinguishable from a clean review.
+        if ! nblock="$(count_blocking "$run_dir/reply-raw.md")"; then
+          GROK_BROKER_NOTE="the reply has a '### Blocking' section but the findings parser could not read it — refusing to stamp a verdict derived from an unread body"
+          return 1
+        fi
         if [ "${nblock:-0}" -gt 0 ]; then verdict="REQUEST_CHANGES"; else verdict="APPROVE"; fi
         body_start=1
         echo "note: reply carried no VERDICT line; DERIVED '$verdict' from ${nblock:-0} blocking finding(s) per the loopspec equivalence" >>"$run_dir/runner.log"
@@ -562,7 +574,13 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     # checking it just moves the contradiction one layer up.
     if [ "$verdict" = "APPROVE" ] && grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
       local xblock
-      xblock="$(count_blocking "$run_dir/reply-raw.md")"
+      # Same fail-closed rule as derivation: an unreadable body cannot clear an
+      # explicit APPROVE. Silently treating a parse failure as zero blockers would
+      # restore the exact contradiction this check exists to catch.
+      if ! xblock="$(count_blocking "$run_dir/reply-raw.md")"; then
+        GROK_BROKER_NOTE="reply says 'VERDICT: APPROVE' but the findings parser could not read its body — refusing to stamp an unverified approval"
+        return 1
+      fi
       if [ "${xblock:-0}" -gt 0 ]; then
         GROK_BROKER_NOTE="reply says 'VERDICT: APPROVE' but lists ${xblock} blocking finding(s) — refusing to stamp a verdict that contradicts its own body"
         return 1
@@ -583,6 +601,7 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     [ -n "$GROK_ROUND" ] && printf 'round: %s\n' "$GROK_ROUND"
     [ -n "$GROK_MAXR" ] && printf 'max-rounds: %s\n' "$GROK_MAXR"
     [ -n "$GROK_LOOPR" ] && printf 'loop-rounds: %s\n' "$GROK_LOOPR"
+    [ -n "$GROK_RSET" ] && printf 'review_set: %s\n' "$GROK_RSET"
     [ -n "$verdict" ] && printf 'verdict: %s\n' "$verdict"
     printf -- '---\n\n'
     tail -n +"$body_start" "$run_dir/reply-raw.md"
@@ -680,7 +699,11 @@ cmd_spawn() {
   local pid=$!
   printf '%s' "$pid" > "$claim/pid" 2>/dev/null || true
   printf '%s' "$pid" > "$run_dir/pid"
-  echo "spawned runphase pid=$pid provider=$provider"
+  # Name the ROUTE, not just the runner. `spawned` is the wait-shape (a detached turn
+  # you await by run dir); acp/headless is the surface it went out over. Collapsing the
+  # two is what made an ACP dispatch announce itself as "headless mode" and sent
+  # operators to fix a transport that was working. Empty --via means direct exec.
+  echo "spawned runphase pid=$pid provider=$provider via=${via:-headless}"
   echo "  run dir: $run_dir"
   echo "  events:  $run_dir/events.ndjson"
   echo "  await:   \"$SELF\" await \"$run_dir\""
