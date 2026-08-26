@@ -185,8 +185,10 @@ install_global_assets() {
     cp "$HELPER_SRC/$h" "$AGENT_COMMS_HOME/$h"
     chmod +x "$AGENT_COMMS_HOME/$h"
   done
-  echo "  Codex cmux default: run '$AGENT_COMMS_HOME/comms.sh codex-permissions'"
-  echo "  once, apply the printed global profile, then restart existing Codex sessions."
+  echo "  Loops run over ACP by default — no cmux pane required."
+  echo "  Only if you opt into cmux delivery (--via cmux): run"
+  echo "  '$AGENT_COMMS_HOME/comms.sh codex-permissions' once, apply the printed global"
+  echo "  profile, then restart existing Codex sessions."
 }
 
 install_local_assets() {

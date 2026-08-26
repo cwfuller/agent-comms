@@ -58,7 +58,7 @@ runs as one blocking acpx call (pinned, via npx; Node >= 22.13) and the answer
 lands directly in context, followed by acpx's token-usage line. Warm by default: a
 named per-repo session makes follow-ups pay only the delta (measured 2026-08-20:
 cold one-shot 18,562 fresh input tokens vs warm round-2 146 — ~127x). `--oneshot` forces a stateless
-exec. Supports codex and claude targets; grok consults stay on the mailbox path.
+exec. All three registered agents have ACP profiles (codex, claude, and grok via `grok-build`).
 On any failure the helper names the fallback: rerun without `--via acp`.
 
 ### `/send-to-codex [instructions]`

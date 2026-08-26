@@ -795,6 +795,16 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
    `status` are what change.
 4. [ ] **Reciprocal adjudication + the corroboration gate.**
 
+### Found in the field, not yet fixed
+
+- [ ] **Dispatch should refuse an already-answered `(thread, phase, round)`.** A second
+  round-1 review arrived 80 minutes after the first, `in-reply-to` the same request and
+  reviewing the same commit, after round 2 had superseded it. Nothing broke — it was
+  archived unactioned — but a superseded or archived inbound was re-dispatched, and with a
+  PANEL that duplicate becomes a phantom extra vote. *(codex, transport-flip round 3.)*
+- [ ] **End-to-end coverage for the `deliver → acp → spawn --via acp` path.** The committed
+  suite asserts the selector; the path itself is proven only by a live run. *(codex.)*
+
 ### Deferred, recorded so it is not lost
 
 - A human seam in the plan phase (interview-until-answered, GSD-style) — wanted, not now.
