@@ -6,22 +6,31 @@ itself. A wrong approach surfaces fast in the implement review and you fix it th
 
 Reach for `--plan` ONLY when a wrong *approach* would be expensive to discover after
 implementing: novel architecture, high blast radius, safety-critical, or ambiguous scope.
-It is capped at 2 rounds and judged on DIRECTION, never on the prose of the plan.
+It is judged on DIRECTION, never on the prose of the plan — that bar, not a tight round
+cap, is what keeps a plan phase from becoming a document-nit loop.
 
 ## Instructions
 
 1. **Parse arguments:**
    - The argument text describes what to implement (or references an existing plan).
-   - `--rounds N` sets max rounds. **Default 4.** Rounds 1–5 have historically delivered
-     the value; 6–9 delivered thoroughness whose price was never negotiated.
-   - `--plan` runs a capped approach review first (step 3). Off by default.
-   - `--reviewers a,b` selects the reviewing agents. Default: `"$COMMS_SH" agents default`
-     (one). Validate EVERY name against `"$COMMS_SH" agents`. Hold them as a LIST, never a
-     single scalar copied across write paths:
+   - `--rounds N` sets max rounds for EACH phase. **Default 5.** Every loop in this
+     repo's history terminated by round 4, and each one that hit the cap escalated to the
+     human — which is the involvement this tool exists to remove. 5 leaves headroom to
+     finish rather than hand back.
+   - `--plan` runs an approach review first (step 3). Off by default. It gets its OWN
+     budget of `--rounds`; the phases do not share one.
+   - `--reviewers a,b` selects the reviewing agents. **The default is a PANEL: every
+     registered agent except the one driving.** Narrow it explicitly when you want one
+     (`--reviewers codex`). Derive the default from the registry — never hardcode a
+     roster, or adding an agent silently leaves it out:
      ```bash
-     REVIEWERS="codex"                     # or the parsed comma list
-     GATING="${REVIEWERS%%,*}"             # first named reviewer gates the loop
+     SELF=claude                                          # whoever is driving this loop
+     REVIEWERS="$("$COMMS_SH" agents --others "$SELF")"    # e.g. codex,grok
+     # ...unless --reviewers was passed, in which case use it verbatim
+     GATING="${REVIEWERS%%,*}"                            # first reviewer gates the loop
      ```
+     Validate EVERY name against `"$COMMS_SH" agents`. Hold them as a LIST, never a single
+     scalar copied across write paths.
    - `--via cmux` forces the watchable pane; `--via headless` forces the detached runner.
      **Default is ACP** — a warm per-thread session, ~1k fresh input tokens per round
      against ~115k for a cold spawn. Export the choice once, before any `send`/`deliver`:
@@ -48,7 +57,7 @@ It is capped at 2 rounds and judged on DIRECTION, never on the prose of the plan
      **`loop-rounds: <N>`** — the loop's real budget from `--rounds` (default 4).
      **The 2 is the PLAN cap only**, and `loop-rounds` is where the real budget survives:
      the plan message is the ONLY artifact the handoff can read, so without that field
-     there is nothing to restore N from and implementation silently inherits 2 rounds.
+     there is nothing to restore N from and implementation silently inherits the wrong one.
      Both messages look well-formed either way, which is what makes it invisible.
      *(grok found the starvation, codex found that the fix had no durable source.)*
    - **The bar is DIRECTION, and the message must say so.** A plan has no ship-stopping
@@ -57,7 +66,7 @@ It is capped at 2 rounds and judged on DIRECTION, never on the prose of the plan
      document itself can NEVER block. Copy this sentence into the plan message's
      `## Review focus` verbatim so the reviewer is not left applying code-review
      discipline to a document.
-   - On APPROVE (or at 2 rounds, whichever first), archive the approval FIRST, then
+   - On APPROVE (or at `max-rounds`, whichever first), archive the approval FIRST, then
      continue to step 4 at `phase: implement`, `round: 1`, **same thread**.
 
 4. **Implement the code.**

@@ -147,11 +147,12 @@ SAME reviewer for its entire lifecycle.
        message** — the plan phase is capped at 2, and carrying that forward gives
        implementation 2 rounds instead of its real budget. Restore it from the plan
        message's `loop-rounds:` field; if that field is absent (a pre-2026-08-26 loop),
-       fall back to 4 and say so in the handoff. Capture it mechanically, never by
+       fall back to 5 and say so in the handoff. The implement phase gets its OWN full
+       budget — the phases do not share one. Capture it mechanically, never by
        memory:
        ```bash
        LOOP_ROUNDS="$(grep -m1 '^loop-rounds:' "<the approved plan message>" | sed 's/^loop-rounds: *//')"
-       [ -n "$LOOP_ROUNDS" ] || LOOP_ROUNDS=4
+       [ -n "$LOOP_ROUNDS" ] || LOOP_ROUNDS=5
        ```
        *(grok found the starvation; codex found the fix had no durable source.)*
      - Include a pinned `## Acceptance criteria` section (3-7 testable statements — carry

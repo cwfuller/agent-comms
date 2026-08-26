@@ -26,8 +26,9 @@ Then, in Claude Code:
 /auto add rate limiting to the API
 ```
 
-That's it. Claude implements, sends the diff to a reviewer, fixes the blocking findings,
-and re-submits — until the reviewer approves or it runs out of rounds (default 4).
+That's it. Claude implements, sends the diff to **every other registered agent** for
+review, fixes what they agree on, and re-submits — until they approve or it runs out of
+rounds (default 5 per phase).
 
 Nothing else is required: no terminal panes, no second window open. Review turns run over
 ACP in a warm background session.
@@ -36,9 +37,10 @@ ACP in a warm background session.
 
 ```bash
 /auto <task>                      # implement → review → fix, until approved
-/auto --reviewers codex,grok      # a panel: both review the same pinned artifact
-/auto --plan <task>               # add a capped approach review first (high-stakes work)
-/auto --rounds 6 <task>           # more rounds than the default 4
+                                  #   reviewed by a PANEL of every other agent by default
+/auto --reviewers codex           # narrow it to one reviewer
+/auto --plan <task>               # add an approach review first (high-stakes work)
+/auto --rounds 8 <task>           # more rounds than the default 5
 
 /ask codex <question>             # one-off consult, no loop, no verdict
 /ask                              # "thoughts?" on the current discussion
@@ -48,9 +50,11 @@ ACP in a warm background session.
 after implementing — novel architecture, high blast radius, safety-critical. Most work
 should let the implementation speak for itself.
 
-**When to reach for a panel:** when you want coverage more than speed. Two reviewers on one
-artifact reliably find different things. A finding both raise gates the loop; a finding only
-one raises is flagged for you to cross-check rather than obeyed automatically.
+**A panel is the default.** Every registered agent except the one driving reviews the same
+pinned artifact — they reliably find different things. A finding two of them raise gates the
+loop; a finding only one raises is flagged for you to cross-check rather than obeyed
+automatically, so one noisy reviewer cannot cost you a round. Narrow with `--reviewers`
+when you want speed over coverage.
 
 Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
 

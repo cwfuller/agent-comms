@@ -1343,9 +1343,13 @@ grep -qF '"$COMMS_SH" agents' "$REPO/templates/claude-commands/ask.md" \
 AUTOF="$REPO/templates/claude-commands/auto.md"
 grep -q -- '--reviewers a,b' "$AUTOF" && ok "auto.md takes a reviewer LIST" || fail "auto.md reviewers flag"
 grep -qF 'GATING=' "$AUTOF" && ok "auto.md names a gating reviewer distinct from the list" || fail "auto.md gating reviewer"
-grep -q 'Default 4' "$AUTOF" && ok "auto.md defaults max-rounds to 4" || fail "auto.md rounds default"
+grep -q 'Default 5' "$AUTOF" && ok "auto.md defaults max-rounds to 5 per phase" || fail "auto.md rounds default"
+grep -q 'EACH phase' "$AUTOF" && ok "each phase gets its own round budget" || fail "auto.md per-phase budget"
 grep -q 'DIRECTION' "$AUTOF" && ok "auto.md gives --plan a direction-only bar" || fail "auto.md plan bar"
-grep -q 'capped at 2 rounds' "$AUTOF" && ok "auto.md caps the plan phase" || fail "auto.md plan cap"
+# The default is a PANEL, derived from the registry: hardcoding a roster means adding an
+# agent silently leaves it out of every future review.
+grep -q 'default is a PANEL' "$AUTOF" && ok "auto.md defaults to a panel" || fail "auto.md panel default"
+grep -q 'agents --others' "$AUTOF" && ok "the panel roster is derived from the registry" || fail "auto.md roster derivation"
 # The template must FAN OUT via the helper, never hand-roll per-reviewer copies — that is
 # how the legs drift apart and stop being comparable.
 grep -q 'panel dispatch --to' "$AUTOF" && ok "auto.md fans out via panel dispatch" || fail "auto.md panel wiring"
@@ -3129,6 +3133,14 @@ check_not "ask refuses a self-consult" run_ak ask --from codex --to codex hi
 check_not "ask refuses an unregistered agent" run_ak ask --from codex --to gemini hi
 check_not "ask requires a question" run_ak ask --from codex --to grok
 check_not "ask requires --from" run_ak ask --to grok hi
+# The default panel is derived, not hardcoded: registering a new agent must change it.
+[ "$(run_ak agents --others claude)" = "codex,grok" ] && ok "agents --others excludes the driver" || fail "agents --others"
+[ "$(run_ak agents --others codex)" = "claude,grok" ] && ok "the roster follows whoever is driving" || fail "agents --others driver"
+printf 'agents = claude codex\ndefault-target = codex\n' > "$AK/.comms/config"
+[ "$(run_ak agents --others claude)" = "codex" ] && ok "a smaller registry yields a smaller panel" || fail "agents --others registry-driven"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$AK/.comms/config"
+check_not "agents --others rejects an unregistered agent" run_ak agents --others gemini
+check_not "agents --others requires a name" run_ak agents --others
 # --file carries a longer brief
 printf 'a longer question\nacross lines\n' > "$AK/q.md"
 run_ak ask --from grok --to codex --file "$AK/q.md" >/dev/null 2>&1 || true

@@ -744,7 +744,10 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
   at 2 rounds**, judged on a DIRECTION-only bar (wrong approach, missed invariant, unsafe
   mechanic). Plan style may never block. Today's plan phase misuses code-review verdict
   discipline, which is why plan loops turn into document-nit loops. Not the default.
-- [ ] **Default ONE reviewer; opt in to more** *(disagreed with "everyone by default")*.
+- [x] **Default is a PANEL** *(owner decision 2026-08-26, reversing the consult)* — every
+  registered agent except the driver, derived from the registry via `agents --others` so a
+  newly registered agent joins automatically. Narrow with `--reviewers`. The consults
+  argued the opposite: *(disagreed with "everyone by default")*.
   Cost is no longer the constraint — ACP made a 3-reviewer 4-round loop ~12k fresh tokens
   instead of ~1.4M. The real constraints: grok is READ-ONLY by design, and 11 of 12
   implement blockers in `multi-agent-17600` came from codex EXECUTING candidate argv, not
@@ -768,8 +771,13 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
 - [ ] **Naming.** `panel` = the collection (user-facing), `reviewer` = one agent (keep —
   the ledger column, `from:`, and round-notes are all per-agent). `review_set_id` stays the
   internal grouping key. Not "board": it implies voting, which the gate deliberately is not.
-- [ ] **`max-rounds` default 4, not 10** — rounds 1-5 delivered the value; 6-9 delivered
-  thoroughness whose price was never negotiated. `--plan` caps at 2.
+- [x] **`max-rounds` default 5 PER PHASE** *(owner decision 2026-08-26, revising the
+  consult)*. Both consults argued for 4 and a 2-round plan cap, citing this repo's own
+  "rounds 6-9 were unpriced" note. The archive says no loop ever reached round 5 — but it
+  also says every loop that hit the cap **escalated to the human**, which is the
+  involvement this tool exists to remove. A cap you always hit is a wall, not a budget.
+  The plan phase keeps its DIRECTION-only bar, which is what actually prevents
+  document-nit loops; the tight cap was never the mechanism.
 - [ ] **Parent-broker every panelist.** Today codex/claude author and send their own
   replies while grok is parent-brokered — which is why `shadow` refuses codex. Under ACP
   the parent stamps for everyone; unify on that and the reviewer-side skills become prompt

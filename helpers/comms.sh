@@ -10,7 +10,10 @@
 #   workspace                   print the workspace name (cmux > branch > repo dir)
 #   doctor                      verify this session can reach the cmux socket
 #   codex-permissions [socket]  print least-privilege Codex config for cmux delivery
-#   agents [default|--supported]   registered agents from .comms/config (zero-config
+#   agents [default|--supported|--others <agent>]
+#                                  registered agents from .comms/config; --others lists
+#                                  everyone EXCEPT one (the default panel for its driver).
+#                                  (zero-config
 #                                  default: claude codex / target codex)
 #   list --as <agent> [--thread <t>]   pending inbox messages, newest first
 #   status                      one-screen loop state: latest archive, verdict, pending counts
@@ -358,6 +361,15 @@ cmd_agents() {
   case "${1:-}" in
     "")          registry_agents ;;
     default)     registry_default ;;
+    --others)
+      # Every registered agent EXCEPT the named one — the default panel for a loop that
+      # agent is driving. Derived from the registry so adding an agent changes the panel
+      # without editing a template, and so nothing has to hardcode "codex,grok".
+      shift
+      [ -n "${1:-}" ] || usage_err "agents --others <agent>: an agent name is required"
+      require_agent "$1" "agents --others"
+      registry_agents | tr ' ' '\n' | grep -vx "$1" | paste -sd, - | sed 's/,$//'
+      ;;
     --supported)
       printf '%s\tinteractive,headless\n' claude
       printf '%s\tinteractive,headless\n' codex
