@@ -2182,6 +2182,30 @@ cmd_send() {
   [ -n "$to" ] || die "send: --to <agent> is required (registered: $(registry_agents))"
   require_agent "$to" "send"
   [ -n "$file" ] || die "send: outbound file argument required"
+
+  # RETAIN THE ARTIFACT THE REVIEWER WILL READ, before anyone reads it. Without this
+  # the reviewer reads the LIVE tree, so what it reviewed is whatever the author was
+  # typing at the time — and with two reviewers on one request they race each other.
+  # Stamping the id here makes "these reviewers read the same artifact" a fact about
+  # the dispatch rather than a hope. Loops only: a consult reviews nothing.
+  if [ -n "$(frontmatter_field "$file" workflow)" ] && [ -z "$(frontmatter_field "$file" artifact_id)" ]; then
+    local send_aid
+    send_aid="$(cmd_snapshot create 2>/dev/null || true)"
+    if [ -n "$send_aid" ]; then
+      local stamped; stamped="$(mktemp "${TMPDIR:-/tmp}/agent-comms-stamp.XXXXXX")"
+      # Byte-preserving insert at the close of frontmatter — an awk rewrite of every
+      # line normalizes CRLF and is not what "send this message" should mean.
+      LC_ALL=C awk -v aid="$send_aid" '
+        NR == 1 && $0 == "---" { fm = 1; print; next }
+        fm && $0 == "---" { printf "artifact_id: %s\n", aid; fm = 0; print; next }
+        { print }
+      ' "$file" > "$stamped" && mv -f "$stamped" "$file"
+      rm -f "$stamped" 2>/dev/null || true
+    else
+      echo "warning: could not retain an artifact for this turn — the reviewer will read the live tree" >&2
+    fi
+  fi
+
   # Atomicity guard: never deliver or archive on a malformed outbound message.
   cmd_validate "$file" || die "send: refusing to deliver malformed message (and not archiving inbound)"
   local root_send

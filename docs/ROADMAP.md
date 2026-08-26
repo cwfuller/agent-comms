@@ -718,6 +718,89 @@ one.
   and nobody has costed that time. (Escape attribution is no longer here; it is CUT — see
   Rejected.)
 
+## Panel & command collapse (2026-08-26)
+
+**North star, stated by the owner:** the highest-quality code output with the least human
+involvement. The tool exists because manually asking Claude, then asking Codex, then
+feeding the critique back produced markedly better results — this is that loop, automated.
+Two standing constraints: token spend must not be obliterated on trivia, unreal bugs, or
+questionable routes; and the human is consulted at the END, or when the agents are
+genuinely split, not per round.
+
+Designed after consulting codex and grok independently on the same brief
+(2026-08-25, both over ACP). They agreed on more than expected and **disagreed with the
+owner on two points, with evidence** — recorded below so neither is re-litigated.
+
+### Decided
+
+- [ ] **One command.** `/auto [--plan] [--reviewers a,b] [--rounds N] [--via cmux] <task>`.
+  `/ask` stays a separate verb — a consult is not a loop.
+- [ ] **Kill `/auto-plan`, `/fleet`, `/ask-codex`.** `send-to-codex` / `read-from-codex`
+  become pure internals: `send --to $REVIEWER` / `read --as $SELF`, no agent in the name.
+- [ ] **KEEP a plan gate as `--plan`, opt-in** *(both consults disagreed with deleting it)*.
+  Evidence: the `token-efficiency-23269` loop spent 4 plan rounds before a line of product
+  code, and what that bought was bouncing a wrong approach before it became 800 lines of
+  locally-correct architecture. Shape it as grok specified: a real approach doc, **capped
+  at 2 rounds**, judged on a DIRECTION-only bar (wrong approach, missed invariant, unsafe
+  mechanic). Plan style may never block. Today's plan phase misuses code-review verdict
+  discipline, which is why plan loops turn into document-nit loops. Not the default.
+- [ ] **Default ONE reviewer; opt in to more** *(disagreed with "everyone by default")*.
+  Cost is no longer the constraint — ACP made a 3-reviewer 4-round loop ~12k fresh tokens
+  instead of ~1.4M. The real constraints: grok is READ-ONLY by design, and 11 of 12
+  implement blockers in `multi-agent-17600` came from codex EXECUTING candidate argv, not
+  reading the diff — so a default-all panel puts a non-executing reviewer on the gate.
+  Plus operational tail (one live grok review took 9.5 min then broke the reply contract)
+  and no comparison data yet.
+- [ ] **Corroboration gating** — neither any-blocks nor primary-only. A finding gates when
+  a second panelist supports it, or when it carries reproducible evidence against the
+  retained artifact. A lone unsupported blocker is cross-checked, not obeyed; still split
+  after one confirmation round → escalate to the human, same lane as max-rounds. This is
+  what stops a noisy reviewer holding the loop hostage, and it is the token-discipline
+  mechanism: unique unsupported nits never cost a round.
+- [ ] **Condense = RECIPROCAL ADJUDICATION, never a separate judge.** Each panelist
+  cross-checks the OTHER's findings in a cheap second ACP pass; no agent judges its own
+  finding, the implementer judges nothing, and no fourth full-context call exists.
+  **Dry-run on a real pair, 2026-08-25** (codex + grok on one artifact, ground truth known):
+  every unique real finding SURVIVED, both agents independently downgraded the same class
+  of cosmetic diagnostic wording, and nothing was dropped. That answers grok's objection
+  that judgment erases unique findings; its second objection (a judged bundle is "nobody's
+  review") does not apply, because every verdict stays attributed to a named agent.
+- [ ] **Naming.** `panel` = the collection (user-facing), `reviewer` = one agent (keep —
+  the ledger column, `from:`, and round-notes are all per-agent). `review_set_id` stays the
+  internal grouping key. Not "board": it implies voting, which the gate deliberately is not.
+- [ ] **`max-rounds` default 4, not 10** — rounds 1-5 delivered the value; 6-9 delivered
+  thoroughness whose price was never negotiated. `--plan` caps at 2.
+- [ ] **Parent-broker every panelist.** Today codex/claude author and send their own
+  replies while grok is parent-brokered — which is why `shadow` refuses codex. Under ACP
+  the parent stamps for everyone; unify on that and the reviewer-side skills become prompt
+  fragments rather than a second product.
+
+### Sequence
+
+1. [x] **Snapshot on send — the prerequisite** *(shipped 2026-08-26)*. `send` retains the
+   tree and stamps `artifact_id:` onto any message carrying `workflow:` (loops only — a
+   consult reviews nothing), and `runphase` mounts that artifact for the turn: worktree at
+   the base, artifact materialized in, index reset to base, so HEAD matches `head_sha` and
+   the change reads as an ordinary uncommitted diff. Pinned at dispatch — a resend never
+   re-stamps. *(grok — neither the owner nor codex had this.)*
+   **Constraint found while building it:** a mount is a linked worktree with NO `.comms`
+   in it, so a reviewer that authors and sends its own reply cannot reach the mailbox from
+   inside one. Mounting is therefore restricted to PARENT-BROKERED turns (ACP, and grok).
+   That is the same split that makes `shadow` refuse self-sending agents, and it promotes
+   "parent-broker every panelist" from tidiness to a prerequisite for pinned artifacts on
+   every reviewer.
+2. [ ] **Command collapse + the kills.** `/auto`, internals demoted, dead surface removed.
+3. [ ] **`--reviewers a,b` fan-out** — N parallel 2-party legs under one `review_set_id`,
+   composed at the DRIVER. The message contract stays 2-party; the driver, state layer and
+   `status` are what change.
+4. [ ] **Reciprocal adjudication + the corroboration gate.**
+
+### Deferred, recorded so it is not lost
+
+- A human seam in the plan phase (interview-until-answered, GSD-style) — wanted, not now.
+- Token-compression principles (e.g. headroom) — revisit once the panel's real spend is
+  measured rather than projected.
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing

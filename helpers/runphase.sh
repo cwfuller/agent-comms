@@ -644,7 +644,7 @@ cmd_run() {
   # State first, result.json last — everywhere. result.json is the signal
   # `await` unblocks on, so every other record must already be in place.
   codex_pid=""
-  trap 'kill_codex; update_thread_state "$msg_thread" failed "" "$sfield" || true; write_result "$run_dir" failed "?" "" "$msg" "runner aborted unexpectedly — see runner.log"' EXIT
+  trap 'kill_codex; unmount_artifact 2>/dev/null || true; update_thread_state "$msg_thread" failed "" "$sfield" || true; write_result "$run_dir" failed "?" "" "$msg" "runner aborted unexpectedly — see runner.log"' EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
 
@@ -653,7 +653,7 @@ cmd_run() {
   # state BEFORE send's write and get clobbered back to "spawned".
   sleep "${COMMS_RUNPHASE_SPAWN_DELAY_SECS:-1}"
 
-  local root main_root workdir msg_cwd
+  local root main_root workdir msg_cwd msg_artifact mount_dir=""
   root="$("$COMMS" root)"
   main_root="${root%/.comms}"
   msg_cwd="$(frontmatter_field "$msg" cwd)"
@@ -662,6 +662,46 @@ cmd_run() {
   else
     workdir="$main_root"
   fi
+
+  # MOUNT THE REVIEWED ARTIFACT when the message names one. Without this a reviewer
+  # reads the LIVE tree, so what it reviewed is whatever the author happened to be
+  # typing — two reviewers on one request race each other and the next keystroke, and
+  # "they reviewed the same artifact" is unprovable. Shaped like the worktree it came
+  # from: worktree at the base, artifact materialized into it, index reset to base, so
+  # HEAD matches head_sha and the change reads as an ordinary uncommitted diff.
+  #
+  # PARENT-BROKERED TURNS ONLY. A mount is a linked worktree with no `.comms` in it, so
+  # a reviewer that must author and send its own reply cannot reach the mailbox from
+  # inside one. Under ACP (and for grok) the PARENT stamps and delivers, so the child
+  # never needs the mailbox and the mount is safe. This is the same split that makes
+  # `shadow` refuse self-sending agents; unifying on parent-brokering is what would let
+  # every reviewer read a pinned artifact.
+  msg_artifact="$(frontmatter_field "$msg" artifact_id)"
+  if [ "$via" != "acp" ] && [ "$provider" != "grok" ]; then
+    msg_artifact=""
+  fi
+  if [ -n "$msg_artifact" ] && git -C "$main_root" cat-file -e "${msg_artifact}^{commit}" 2>/dev/null; then
+    local mount_base
+    mount_base="$(frontmatter_field "$msg" head_sha)"
+    [ -n "$mount_base" ] || mount_base="$(git -C "$main_root" rev-parse -q --verify "${msg_artifact}^" 2>/dev/null || printf '%s' "$msg_artifact")"
+    mount_dir="$run_dir/tree"
+    if git -C "$main_root" worktree add --detach --quiet "$mount_dir" "$mount_base" 2>>"$run_dir/runner.log" \
+       && git -C "$mount_dir" read-tree -u --reset "$msg_artifact" 2>>"$run_dir/runner.log" \
+       && git -C "$mount_dir" reset -q --mixed "$mount_base" 2>>"$run_dir/runner.log"; then
+      workdir="$mount_dir"
+    else
+      # Fail LOUD but do not strand the turn: reviewing the live tree is worse than
+      # nothing only if nobody knows it happened.
+      echo "warning: could not mount artifact $msg_artifact — reviewing the LIVE tree instead" >>"$run_dir/runner.log"
+      git -C "$main_root" worktree remove --force "$mount_dir" 2>/dev/null || true
+      mount_dir=""
+    fi
+  fi
+  unmount_artifact() {
+    [ -n "$mount_dir" ] || return 0
+    git -C "$main_root" worktree remove --force "$mount_dir" 2>/dev/null || true
+    mount_dir=""
+  }
 
   # ----- prompt -----
   # Which discipline text the peer follows and where its reply goes, per provider.
@@ -676,6 +716,7 @@ cmd_run() {
   if ! "$COMMS" agents | tr ' ' '\n' | grep -qx "$peer"; then
     update_thread_state "$msg_thread" failed "" "$sfield" || true
     write_result "$run_dir" failed 1 "" "$msg" "inbound from: '${peer:-<absent>}' is not a registered agent — refusing to route a reply"
+    unmount_artifact
     trap - EXIT
     exit 1
   fi
@@ -683,7 +724,8 @@ cmd_run() {
     if ! build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root" "$provider"; then
       update_thread_state "$msg_thread" failed "" "$sfield" || true
       write_result "$run_dir" failed 1 "" "$msg" "${GROK_PROMPT_NOTE:-grok prompt build refused}"
-      trap - EXIT
+      unmount_artifact
+    trap - EXIT
       exit 1
     fi
   else
@@ -898,6 +940,7 @@ PROMPT
     fi
     update_thread_state "$msg_thread" "$acp_status" "acp:$acp_session" "$sfield" || true
     write_result "$run_dir" "$acp_status" "$acp_rc" "acp:$acp_session" "$msg" "$acp_note"
+    unmount_artifact
     trap - EXIT
     [ "$acp_status" = completed ]
     return
@@ -921,7 +964,8 @@ PROMPT
       sid_t="$(session_id_from_events "$run_dir" "$provider")"
       update_thread_state "$msg_thread" timeout "$sid_t" "$sfield" || true
       write_result "$run_dir" timeout 124 "$sid_t" "$msg" "killed after ${timeout}s — raise COMMS_RUNPHASE_TIMEOUT_SECS or investigate events.ndjson"
-      trap - EXIT
+      unmount_artifact
+    trap - EXIT
       exit 1
     fi
     sleep 1
@@ -947,6 +991,7 @@ PROMPT
   fi
   update_thread_state "$msg_thread" "$status" "$sid" "$sfield" || true
   write_result "$run_dir" "$status" "$rc" "$sid" "$msg" "$note"
+  unmount_artifact
   trap - EXIT
   [ "$status" = completed ]
 }

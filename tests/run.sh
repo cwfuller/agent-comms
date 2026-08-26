@@ -3025,6 +3025,29 @@ awk -F'\t' 'NR>1 && $9!=""' "$RN_TSV" | grep -q . \
 check_not "round-note requires an assessment" run_tr round-note "$TR_RN"
 check_not "round-note rejects a missing file" run_tr round-note "$TR_FIX/nope.md" --note x
 
+# SNAPSHOT ON SEND. Without a pinned artifact the reviewer reads whatever the author
+# happens to be typing, and two reviewers on one request race each other — "they read
+# the same artifact" is unprovable. Loops only; a consult reviews nothing.
+TR_WF2="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-26T10-00-00_wf-2.md"
+sed -e 's|^message_id: .*|message_id: wf-2|' -e 's|^thread: .*|thread: tr-stamp|' "$TR_LOOPMSG" > "$TR_WF2"
+grep -q '^artifact_id:' "$TR_WF2" && fail "fixture already stamped" || ok "fixture: a loop message with no artifact_id"
+run_tr_deliver send --to codex "$TR_WF2" >/dev/null 2>&1 || true
+grep -q '^artifact_id:' "$TR_WF2" && ok "send stamps the retained artifact onto a loop message" || fail "send did not stamp artifact_id"
+TR_AID="$(grep -m1 '^artifact_id:' "$TR_WF2" | sed 's/^artifact_id: //')"
+git -C "$TR_FIX" cat-file -e "${TR_AID}^{commit}" 2>/dev/null \
+  && ok "the stamped artifact is a real, resolvable object" || fail "stamped artifact does not resolve"
+# Re-sending must not re-stamp: the artifact is pinned at dispatch, not at every retry.
+run_tr_deliver send --to codex "$TR_WF2" >/dev/null 2>&1 || true
+[ "$(grep -c '^artifact_id:' "$TR_WF2")" = "1" ] && ok "re-sending does not re-stamp or duplicate the field" || fail "artifact_id duplicated on resend"
+[ "$(grep -m1 '^artifact_id:' "$TR_WF2" | sed 's/^artifact_id: //')" = "$TR_AID" ] \
+  && ok "the pinned artifact does not move on resend" || fail "artifact_id changed on resend"
+# A consult has nothing under review.
+TR_Q2="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-26T10-01-00_q-2.md"
+sed -e 's|^message_id: .*|message_id: q-2|' "$TR_CONSULT" > "$TR_Q2"
+run_tr_deliver send --to codex "$TR_Q2" >/dev/null 2>&1 || true
+grep -q '^artifact_id:' "$TR_Q2" && fail "a consult was stamped with an artifact" || ok "consults are never stamped — they review nothing"
+run_tr_deliver validate "$TR_WF2" >/dev/null 2>&1 && ok "a stamped message still validates" || fail "stamping broke validation"
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 
