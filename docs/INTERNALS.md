@@ -66,9 +66,14 @@ Why it's this way (each reason independently sufficient):
 
 ## Workspace resolution
 
-One algorithm, one implementation (`comms.sh workspace`): an undecorated cmux title
-is cached under stable `CMUX_WORKSPACE_ID`; that mapping is authoritative for the
-workspace lifetime. Empty or unparseable titles fall back without poisoning the cache;
+One algorithm, one implementation (`comms.sh workspace`), with an explicit escape
+hatch at the top: a **repo-scoped pin** (`.comms/workspace`, written by
+`workspace set <name>`) IS the mailbox identity when present and beats every
+inferred source below — identity is a naming decision, cmux ids only route
+surfaces, and a valid-but-wrong inferred title otherwise becomes authoritative
+forever (the fwh-backup incident, field report #3). Below the pin: an undecorated
+cmux title is cached under stable `CMUX_WORKSPACE_ID`; that mapping is
+authoritative for the workspace lifetime. Empty or unparseable titles fall back without poisoning the cache;
 status-decorated titles use the git branch (or repository name on a generic default
 branch) to seed or repair it.
 This prevents auto-title spinner frames from changing message and state prefixes.

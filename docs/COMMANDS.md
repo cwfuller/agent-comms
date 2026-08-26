@@ -128,7 +128,8 @@ agnostic.
 | `archive-search <pattern> [--bytes N] [--limit K]` | bounded newest-first search of `archive/` across workspaces |
 | `findings [--out F] [--role gating\|shadow] [--review-set ID] [--artifact ID] [--reviewer-version V] [--prompt-version V] [--header] [<message>...]` | extract review findings to TSV (default: the whole archive, oldest first); `--out` appends and is idempotent by `finding_id` |
 | `shadow --to <agent> <review-request> [--review-set ID] [--out F] [--timeout-secs N]` | run a SECOND reviewer on the same artifact; the reply is stored but never delivered and never written to thread state |
-| `snapshot [create\|list]` | retain the tree under review as a durable git object under `refs/agent-comms/artifacts/` |
+| `snapshot [create\|list] [--with-base]` | retain the tree under review as a durable git object under `refs/agent-comms/artifacts/`; `--with-base` prints `artifact_id<TAB>base_sha` from the one operation |
+| `workspace set <name>` | pin the repo's mailbox identity explicitly (`.comms/workspace`) — beats every inferred source; cmux ids then only route surfaces |
 | `prompt-version [--list]` | content hash of the reviewer instruction surface |
 
 #### The grading pilot — `findings`, `shadow`, `snapshot`, `prompt-version`

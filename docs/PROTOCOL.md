@@ -48,6 +48,11 @@ keep that safe:
 
 **Message routing is worktree-safe.** Every helper resolves `.comms/` to the **main repo
 root** via `git worktree list`, so all worktrees of one repo share a single mailbox. The
+`head_sha` is STAMPED BY THE HELPER at send time — for loop messages it is the retained
+artifact's base commit (artifact_id and head_sha come out of one snapshot operation, so
+a concurrent commit in a shared checkout cannot desync them); for consults it is live
+HEAD at send. A hand-typed value is overwritten. Drivers never type a SHA.
+
 `cwd:` is the per-message "which tree" hint; `head_sha:` is the immutable fallback when
 that path or branch was repurposed before a delayed delivery. Readers enter `cwd`, compare
 the current HEAD when `head_sha` is present, and locate the recorded commit/worktree
@@ -89,7 +94,7 @@ type: review-request            # see the type table in loopspec/SPEC.md
 from: claude                    # any REGISTERED agent — validate rejects others
 timestamp: 2026-06-04T18:30:14Z
 branch: main
-head_sha: <git rev-parse HEAD>  # immutable context for delayed delivery
+head_sha: <stamped by send>     # the artifact's base commit — helper-stamped, never hand-typed
 workspace: agent-comms
 cwd: /path/to/working/dir       # worktree hint — reader cds here before touching files
 message_id: <filename sans .md>
