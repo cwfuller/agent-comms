@@ -952,6 +952,42 @@ and lossy rewriting of inter-agent instructions is the `$N`-corruption class). R
   proxy + MCP machinery, SharedContext (that is `.comms/`), wrapping agent CLIs
   (documented unsupported — it fights acpx session identity).
 
+## Multi-session concurrency track (2026-08-26, user-requested reflection — PENDING)
+
+Three Claude sessions worked this checkout simultaneously (two review loops + one
+claimed work item). The user asked for a deliberate reflection on graceful multi-agent
+concurrency "and if we need any formal changes"; their observation — each session
+reconstructed the others' intent from durable artifacts (commits, sets.tsv, state,
+friction.tsv, reviewer-credited comments) — held up. Nothing below is decided; this
+records the evidence while it is fresh.
+
+Worked with no formal mechanism: durable artifacts as ambient coordination;
+ListAgents/SendMessage for claims, stand-downs, and a stash-window negotiation;
+independent cross-verification (one session caught another's case-sensitivity bug and
+a sweep its author had ruled out by checking files, not hunks).
+
+Observed failure modes (one afternoon, all real):
+1. **Commit sweeps** — three whole-file/`-A` stagings captured a PEER's hunks;
+   file-level "did I touch it" checks cannot detect hunk-level capture.
+2. **Dirty snapshots** — two panel dispatches pinned a peer's uncommitted WIP into the
+   review artifact as the visible diff-under-review; one survived only because the
+   request carried an explicit out-of-scope paragraph.
+3. **Half-written reads** — a running `runphase.sh await` crashed on a syntax error
+   from a peer's mid-write of the same helper; unreproducible afterwards.
+4. **Double-claiming** — two sessions claimed the same loop within minutes; resolved
+   only by direct messaging.
+
+Candidate formalizations to weigh at the reflection (minimal-first):
+- [ ] Staging discipline as a written rule: explicit paths / hunk-level adds in shared
+  checkouts (all three sessions converged on this ad hoc the same day).
+- [ ] Snapshot guard: `snapshot create`/`panel dispatch` warns or refuses when the
+  dirty diff exists, or requires the request to carry an explicit out-of-scope
+  paragraph for foreign WIP (the one mitigation with observed field success).
+- [ ] Atomic writes for installed/shared helpers (write temp + `mv`) so concurrent
+  readers never see a half-file.
+- [ ] A durable claim ledger (thread/region → session), so ownership is declared in
+  the repo instead of in chat; `sets.tsv` already models the shape.
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing
