@@ -3147,6 +3147,38 @@ grep -q 'npm_config_cache' "$REPO/helpers/acp.sh" \
 grep -q 'synthesized by await' "$REPO/helpers/runphase.sh" \
   && ok "a pid that dies without a result gets a synthetic one" || fail "synthetic failed result"
 
+echo "== review turns may read history, never publish or rewrite it =="
+# The threat model is deliberately "the same as running the agent by hand in the repo":
+# it may read the tree and the history. What it may not do is publish or destroy — a
+# linked worktree shares the main object store and the REAL remotes, so a `git push` from
+# inside a mount reaches production.
+GS="$WORK/gitshim"; mkdir -p "$GS"
+REAL_GIT="$(command -v git)"
+{ printf '#!/bin/bash\n'
+  printf 'for a in "$@"; do\n'
+  printf '  case "$a" in\n'
+  printf '    push|commit|am|rebase|reset|clean|gc|prune|"filter-branch"|"update-ref"|"remote")\n'
+  printf '      echo "agent-comms: refused" >&2; exit 1 ;;\n'
+  printf '  esac\n'
+  printf '  case "$a" in -*) continue ;; *) break ;; esac\n'
+  printf 'done\n'
+  printf 'exec %s "$@"\n' "$REAL_GIT"
+} > "$GS/git"
+chmod +x "$GS/git"
+gs() { PATH="$GS:$PATH" git "$@"; }
+gs log --oneline -1 >/dev/null 2>&1 && ok "a review turn can still read git history" || fail "shim blocks git log"
+gs diff --stat >/dev/null 2>&1 && ok "a review turn can still read the diff" || fail "shim blocks git diff"
+gs show HEAD --stat >/dev/null 2>&1 && ok "a review turn can still read a commit" || fail "shim blocks git show"
+check_not "a review turn cannot push" gs push origin main
+check_not "a review turn cannot commit" gs commit -m x
+check_not "a review turn cannot reset" gs reset --hard HEAD
+check_not "a review turn cannot rewrite refs" gs update-ref refs/heads/x HEAD
+# and the shim must not recurse into itself
+grep -q 'exec %s' "$REPO/helpers/runphase.sh" \
+  && ok "the shim execs the REAL git by absolute path, never itself" || fail "shim recursion guard"
+grep -q 'PATH="\${acp_shim:+\$acp_shim:}\$PATH"' "$REPO/helpers/runphase.sh" \
+  && ok "the shim is actually on the child's PATH" || fail "shim not wired to the child"
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 

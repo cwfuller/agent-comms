@@ -884,10 +884,19 @@ rest are open.
 - [x] **`send --wait`** *(shipped 2026-08-26 — runs the peer turn in the foreground, no detach)*. A detached process can be reaped when the
   managed shell command that spawned it ends, which is normal inside an agent sandbox. A
   synchronous runner would work in both terminals and sandboxes.
-- [ ] **An explicit public / no-worktree mode.** An elevated retry was refused because
-  grok could read the dirty checkout. A mode that runs the child in an empty temp
-  directory and permits only explicitly supplied public inputs would make external
-  consults auditable and safe.
+- [x] **Public / no-worktree mode — NOT DOING, by owner decision (2026-08-26).** The
+  threat model is deliberately *"the same as running this agent by hand in the repo"*,
+  because that is precisely what this tool replaces. A reviewer may read the tree and the
+  git history; isolating it would make it a worse reviewer without changing what the
+  owner was already doing manually.
+  **The line that IS drawn: read, never publish or rewrite.** A mounted turn runs with
+  `--approve-all` (the mount is a throwaway worktree), which means the child has a shell —
+  and a linked worktree shares the main object store and the REAL remotes, so a `git push`
+  from inside one reaches production. A `git` shim on the child's PATH refuses
+  `push/commit/am/rebase/reset/clean/gc/prune/filter-branch/update-ref/remote` and passes
+  everything else through, so `log`/`diff`/`show` — the reviewer's actual job — still work.
+  Verified: a commit inside a mount moves only the mount's detached HEAD, never the main
+  branch; the shim resolves the real `git` by absolute path so it cannot recurse.
 - [x] **One-off questions get their own ACP session** *(fixed 2026-08-26)*. A message with
   no `thread` fell back to `acp:agent-comms-loop`, so unrelated consults shared one warm
   context and earlier questions leaked into later answers. Now keyed on `message_id`,

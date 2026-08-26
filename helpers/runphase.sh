@@ -956,7 +956,7 @@ PROMPT
   # auto-approved so the turn can actually inspect the tree, and anything that would
   # write is denied outright, because prompting is impossible in a detached turn.
   if [ "$via" = "acp" ]; then
-    local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note=""
+    local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim=""
     acp_sh="$(dirname "$SELF")/acp.sh"
     [ -x "$acp_sh" ] || die "run: --via acp but acp.sh is not installed next to runphase.sh"
     acp_profile="$("$acp_sh" profile "$provider" 2>/dev/null || true)"
@@ -993,10 +993,37 @@ PROMPT
     local -a acp_perm
     if [ -n "$mount_dir" ]; then
       acp_perm=(--approve-all)
+      # --approve-all gives the child a shell, so the boundary has to be enforced where
+      # the damage would be, not by hoping it behaves. The threat model is deliberately
+      # "the same as running this agent by hand in the repo" — it may read the tree and
+      # the history, because that is what it is replacing. What it may NOT do is publish
+      # or destroy: a linked worktree shares the main object store and the real remotes,
+      # so `git push` from inside a mount reaches production. A shim on PATH refuses the
+      # publishing and destructive verbs and passes everything else through, which keeps
+      # `git log`/`diff`/`show` — the reviewer's actual job — working.
+      acp_shim="$run_dir/shim"
+      mkdir -p "$acp_shim"
+      # Resolve the REAL git now and hardcode it: `exec git` would find this shim again
+      # through PATH and spin forever.
+      local real_git; real_git="$(command -v git)"
+      {
+        printf '#!/bin/bash\n'
+        printf '# agent-comms guard: a review turn may inspect, never publish or destroy.\n'
+        printf 'for a in "$@"; do\n'
+        printf '  case "$a" in\n'
+        printf '    push|commit|am|rebase|reset|clean|gc|prune|"filter-branch"|"update-ref"|"remote")\n'
+        printf '      echo "agent-comms: refused \x27git $a\x27 — a review turn may read history but not publish or rewrite it" >&2\n'
+        printf '      exit 1 ;;\n'
+        printf '  esac\n'
+        printf '  case "$a" in -*) continue ;; *) break ;; esac\n'
+        printf 'done\n'
+        printf 'exec %s "$@"\n' "$real_git"
+      } > "$acp_shim/git"
+      chmod +x "$acp_shim/git"
     else
       acp_perm=(--approve-reads --non-interactive-permissions deny)
     fi
-    ( cd "$workdir" && "${acp_launch[@]}" \
+    ( cd "$workdir" && PATH="${acp_shim:+$acp_shim:}$PATH" "${acp_launch[@]}" \
         "${acp_perm[@]}" \
         --timeout "$timeout" --format quiet \
         "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
