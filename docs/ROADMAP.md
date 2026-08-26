@@ -873,15 +873,15 @@ Sequencing note: this is cheaper AFTER the panel, not before — `panel dispatch
 Independently demonstrated, in the reporter's own priority order. Item 5 is fixed; the
 rest are open.
 
-- [ ] **A first-class synchronous consult verb.** Codex currently has to hand-author
+- [x] **A first-class synchronous consult verb** *(shipped 2026-08-26 — `comms.sh ask --from X --to Y [--wait]`)*. Codex currently has to hand-author
   frontmatter, send, capture the run directory, await it, find the reply and archive it.
   Something like `comms.sh ask --from codex --to grok --wait --file q.md` would collapse
   that to one call. The asymmetry is the point: Claude has `/ask`, Codex has nothing.
-- [ ] **Stop requiring a writable `~/.npm`.** `npx` failed with EPERM under
+- [x] **Stop requiring a writable `~/.npm`** *(shipped 2026-08-26 — `ACPX_BIN` override, else a gitignored workspace cache; `acp.sh launcher` owns it so nothing guesses twice)*. `npx` failed with EPERM under
   `~/.npm/_cacache/tmp`. Support an `ACPX_BIN` override, or default the npm cache to a
   gitignored workspace path such as `.comms/cache/npm`. This makes ACP unusable in
   sandboxes that deny the home cache — i.e. exactly the agent sandboxes we target.
-- [ ] **`--foreground` / `send --wait`.** A detached process can be reaped when the
+- [x] **`send --wait`** *(shipped 2026-08-26 — runs the peer turn in the foreground, no detach)*. A detached process can be reaped when the
   managed shell command that spawned it ends, which is normal inside an agent sandbox. A
   synchronous runner would work in both terminals and sandboxes.
 - [ ] **An explicit public / no-worktree mode.** An elevated retry was refused because
@@ -892,7 +892,7 @@ rest are open.
   no `thread` fell back to `acp:agent-comms-loop`, so unrelated consults shared one warm
   context and earlier questions leaked into later answers. Now keyed on `message_id`,
   which is unique per dispatch.
-- [ ] **`await` should write a synthetic failed result** when a spawned pid dies without
+- [x] **`await` writes a synthetic failed result** *(shipped 2026-08-26)* when a spawned pid dies without
   producing `result.json`. Today it reports the failure but leaves an incomplete audit
   trail — and this session hit exactly that: a grok turn whose run dir held only a `pid`.
 

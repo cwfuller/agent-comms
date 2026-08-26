@@ -1,15 +1,16 @@
 # agent-comms
 
-Autonomous code-review loops between **Claude Code** and **Codex**, running side by side in your terminal.
+Autonomous code-review loops between AI coding agents. One agent implements, one or more
+review, and the loop runs until they approve — no copy-paste, no babysitting.
 
-One agent writes a markdown message into a local `.comms/` directory, nudges the other agent's pane (via [cmux](https://cmux.com)), and gets a structured reply back. Chain that and you get plan → review → implement → review cycles that run until the reviewer approves — no copy-paste, no babysitting.
+It exists because asking one agent to write code, then asking another to critique it, then
+feeding the critique back produces markedly better results than either alone. This is that
+loop, automated.
 
 ```
-┌─────────────┐  .comms/to-codex/   ┌─────────────┐
-│ Claude Code │ ──────────────────▶ │    Codex    │
-│ (implement) │ ◀────────────────── │  (review)   │
-└─────────────┘  .comms/to-claude/  └─────────────┘
-        loop until verdict: APPROVE (max N rounds)
+                 ┌─────────► codex ──┐
+  claude ────────┤  same artifact    ├────► one composed verdict ──► fix ──► repeat
+ (implement)     └─────────► grok  ──┘        until approved
 ```
 
 ## Quick start
@@ -19,75 +20,76 @@ One agent writes a markdown message into a local `.comms/` directory, nudges the
 curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=both
 ```
 
-Open a cmux workspace with Claude Code and Codex in adjacent panes, then ask Claude:
+Then, in Claude Code:
 
 ```
-`/auto` add rate limiting to the API
+/auto add rate limiting to the API
 ```
 
-Claude implements, sends the diff to Codex for review, fixes the blocking findings, and re-submits — looping until Codex replies `APPROVE` (default cap: 10 rounds). You watch, or you don't.
+That's it. Claude implements, sends the diff to a reviewer, fixes the blocking findings,
+and re-submits — until the reviewer approves or it runs out of rounds (default 4).
 
-Works without cmux too: messages are still written and validated, you just trigger each side manually.
+Nothing else is required: no terminal panes, no second window open. Review turns run over
+ACP in a warm background session.
 
-### Codex → Claude delivery on macOS
-
-Codex must be allowed to reach cmux's Unix socket. Configure this once as the global
-default—no launch flag or per-project setup:
+## Everyday use
 
 ```bash
-~/.agent-comms/comms.sh codex-permissions
+/auto <task>                      # implement → review → fix, until approved
+/auto --reviewers codex,grok      # a panel: both review the same pinned artifact
+/auto --plan <task>               # add a capped approach review first (high-stakes work)
+/auto --rounds 6 <task>           # more rounds than the default 4
+
+/ask codex <question>             # one-off consult, no loop, no verdict
+/ask                              # "thoughts?" on the current discussion
 ```
 
-Apply the printed `workspace-cmux` profile to `~/.codex/config.toml`, then restart
-Codex. The profile inherits the normal workspace sandbox and allowlists only the cmux
-socket. See [Codex socket permissions](docs/INSTALL.md#codex-socket-permissions).
+**When to reach for `--plan`:** only when a wrong *approach* would be expensive to discover
+after implementing — novel architecture, high blast radius, safety-critical. Most work
+should let the implementation speak for itself.
 
-## Commands
+**When to reach for a panel:** when you want coverage more than speed. Two reviewers on one
+artifact reliably find different things. A finding both raise gates the loop; a finding only
+one raises is flagged for you to cross-check rather than obeyed automatically.
 
-| Claude Code | What it does |
-|---|---|
-| `/auto` [--reviewer <agent>] <task>` | implement → review → fix, until approved (reviewer defaults to codex; `grok` reviews headless) |
-| `/auto --plan` <task>` | plan → review → refine, until approved |
-| `/auto --plan` <task>` | plan loop, then implement loop |
-| `/ask [agent] <question>` | one-off question — judgment call, no review framing; bare `/ask` sends an informal "thoughts?" consult on the current discussion (``/ask`` is a deprecated alias) |
-| `/send-to-codex` | one-shot review request for work you just did |
-| `/read-from-codex` | read + act on Codex's reply |
-| ``/auto` <subcommand>` | orchestrate loops across many cmux workspaces |
-| `/clean-comms [mode]` | guarded message cleanup (dry-run first) |
+Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
 
-| Codex | What it does |
-|---|---|
-| `$read-from-claude` | read + act on Claude's message |
-| `$send-to-claude` | send findings back, auto-deliver |
+## What makes the loops trustworthy
 
-Full reference with flags, modes, and the underlying helper CLI: **[docs/COMMANDS.md](docs/COMMANDS.md)**
+- **Every reviewer reads the same thing.** The tree is snapshotted when the request is sent
+  and mounted for the reviewer, so a review is about a pinned artifact — not whatever you
+  happened to be typing while it ran.
+- **Messages are validated before delivery.** Malformed messages are refused, never
+  half-processed. A failed delivery says so and is recoverable; it never looks like "the
+  reviewer is just slow".
+- **One noisy reviewer cannot hold the loop hostage.** A lone unsupported blocking finding
+  is cross-checked, not automatically obeyed.
+- **Nothing is silently dropped.** Composition keeps every finding, attributed to the
+  reviewer who made it. An unanswered panel leg blocks the gate rather than counting as
+  approval.
+- **Advisories survive.** Un-actioned advisory findings are carried into
+  `docs/advisories.md` when a loop ends, so lessons compound instead of evaporating.
 
-## What makes the loops reliable
-
-- **Validated messages** — frontmatter-checked before any delivery; malformed messages are refused, never half-processed
-- **Threaded** — `thread`/`message_id`/`in-reply-to` fields let concurrent loops share one workspace without consuming each other's replies
-- **Stateful** — `.comms/state/` records each loop's round, who owes the next message, and the last delivery outcome; survives compaction and session restarts
-- **Honest delivery** — a dropped pane nudge reports `FAILED` and is recoverable (`comms.sh stalled`), instead of silently looking like "the reviewer is slow"
-- **Review quality built in** — pass-oriented verdicts (blocking vs advisory), holistic re-review each round instead of fix-checklist tunnel vision, and approved-but-unactioned advisories carried over to `docs/advisories.md`
-
-The full message format, loop semantics, and state model: **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
+Message format, loop semantics, and the state model: **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
 
 ## Requirements
 
-- Claude Code and Codex CLIs
 - A git repository
-- Optional, for auto-delivery: [cmux](https://cmux.com), the two agents in adjacent panes, Claude Code in vim mode, and `python3` (for ``/auto``)
+- At least two agent CLIs — `claude`, `codex`, and `grok` are supported
+- Node ≥ 22.13 for the ACP transport (or set `ACPX_BIN` to an installed `acpx`)
+- Optional: [cmux](https://cmux.com), if you want loops to run in watchable panes
+  (`--via cmux`)
 
 ## Docs
 
 | | |
 |---|---|
-| [docs/loopspec/SPEC.md](docs/loopspec/SPEC.md) | **the portable review-loop contract** — message/verdict/round semantics, schemas, golden fixtures, conformance checker, prompt fragments |
-| [docs/PROTOCOL.md](docs/PROTOCOL.md) | how agent-comms implements it — transport (cmux + headless), state files, delivery, archive discipline |
-| [docs/COMMANDS.md](docs/COMMANDS.md) | every command, skill, and helper subcommand in detail |
-| [docs/INSTALL.md](docs/INSTALL.md) | install scopes, fork installs, local pinning, upgrading |
-| [docs/INTERNALS.md](docs/INTERNALS.md) | architecture, the template/helper split, editing rules, test harness |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | audit history, friction log, what's next |
+| [docs/COMMANDS.md](docs/COMMANDS.md) | every command, skill, and helper subcommand |
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | message format, transports, state, archive discipline |
+| [docs/loopspec/SPEC.md](docs/loopspec/SPEC.md) | the portable review-loop contract: verdicts, rounds, schemas, fixtures |
+| [docs/INSTALL.md](docs/INSTALL.md) | install scopes, local pinning, upgrading |
+| [docs/INTERNALS.md](docs/INTERNALS.md) | architecture, the template/helper split, test harness |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | decisions, field reports, what's next |
 
 ## License
 

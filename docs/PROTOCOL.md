@@ -95,10 +95,10 @@ cwd: /path/to/working/dir       # worktree hint — reader cds here before touch
 message_id: <filename sans .md>
 thread: rate-limiter-9331       # names the loop; constant across ALL its messages
 in-reply-to: <message_id>       # when replying
-workflow: auto-implement        # presence triggers autonomous mode
+workflow: auto                  # presence triggers autonomous mode (value is free-form)
 phase: plan | implement
 round: 2
-max-rounds: 10
+max-rounds: 4
 verdict: APPROVE | REQUEST_CHANGES   # reviewer replies only; read normalized
 ---
 ```
@@ -137,7 +137,7 @@ workflow message (filename components sanitized to `[A-Za-z0-9._-]`; workspace i
 {
   "workspace": "agent-comms",
   "thread": "rate-limiter-9331",
-  "workflow": "auto-implement",
+  "workflow": "auto",
   "phase": "implement",
   "round": "2",
   "max_rounds": "10",
