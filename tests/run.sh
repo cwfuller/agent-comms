@@ -198,7 +198,8 @@ echo "$LIST_ERR" | grep -q "latest archived" && ok "empty inbox reports latest a
 UNMATCHED="$REPO_FIX/.comms/to-claude/other-workspace_pending.md"
 printf '%s\n' pending > "$UNMATCHED"
 LIST_MISMATCH="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as claude) 2>&1 1>/dev/null || true)"
-echo "$LIST_MISMATCH" | grep -q "possible workspace identity mismatch" && ok "empty scoped list warns when unmatched inbox files exist" || fail "unmatched inbox warning (got: $LIST_MISMATCH)"
+echo "$LIST_MISMATCH" | grep -q "OTHER workspace identities" && echo "$LIST_MISMATCH" | grep -q "other-workspace(1)" \
+  && ok "empty scoped list NAMES the unmatched identities" || fail "unmatched inbox warning (got: $LIST_MISMATCH)"
 rm -f "$UNMATCHED"
 
 echo "== comms.sh: latest archive is direction/thread/time aware =="
@@ -1619,6 +1620,112 @@ awk '/Count EVERY explicit verdict/{c=NR} /vcount="\$\(awk/{v=NR} END{exit !(c>0
 # An explicit APPROVE over blocking findings is a contradiction, not a verdict.
 grep -q 'contradicts its own body' "$REPO/helpers/runphase.sh" \
   && ok "an APPROVE that lists blocking findings is refused" || fail "no APPROVE/body cross-check"
+
+echo "== stamped authorities: workspace pin (#3) + send-time git metadata (#6) =="
+SA_FIX="$WORK/stamped-auth"; mkdir -p "$SA_FIX"; SA_FIX="$(cd "$SA_FIX" && pwd -P)"
+git -C "$SA_FIX" init -q -b main
+git -C "$SA_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$SA_FIX/.comms/to-codex" "$SA_FIX/.comms/to-claude" "$SA_FIX/.comms/archive"
+printf 'agents = claude codex\ndefault-target = codex\n' > "$SA_FIX/.comms/config"
+run_sa() { (cd "$SA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+SA_HEAD="$(git -C "$SA_FIX" rev-parse HEAD)"
+
+# snapshot --with-base: clean tree -> id == base == HEAD
+SA_PAIR="$(run_sa snapshot create --with-base)"
+[ "$SA_PAIR" = "$(printf '%s\t%s' "$SA_HEAD" "$SA_HEAD")" ] \
+  && ok "clean-tree snapshot pair is HEAD/HEAD (its own base)" || fail "clean pair (got: $SA_PAIR)"
+# dirty tree -> synthetic id whose FIRST PARENT is the base, from one operation
+echo edit > "$SA_FIX/f.txt"
+SA_PAIR2="$(run_sa snapshot create --with-base)"
+SA_AID="${SA_PAIR2%%	*}"; SA_BASE="${SA_PAIR2#*	}"
+[ "$SA_AID" != "$SA_BASE" ] && [ "$SA_BASE" = "$SA_HEAD" ] \
+  && [ "$(git -C "$SA_FIX" rev-parse "$SA_AID^")" = "$SA_BASE" ] \
+  && ok "dirty-tree snapshot pair: base is the artifact's first parent" || fail "dirty pair (got: $SA_PAIR2)"
+
+# send OVERWRITES a hand-typed head_sha on a loop message from the same pair
+SA_WS="$(run_sa workspace)"
+SA_MSG="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T14-00-00_auto-1.md"
+cat > "$SA_MSG" <<SAEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-26T19:00:00Z
+workspace: $SA_WS
+head_sha: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+message_id: ${SA_WS}_2026-08-26T14-00-00_auto-1
+thread: sa-arc-1
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 5
+---
+
+body
+SAEOF
+run_sa send --to codex "$SA_MSG" >/dev/null 2>&1
+SA_MSG_AID="$(sed -n '2,/^---$/p' "$SA_MSG" | grep -m1 '^artifact_id:' | sed 's/^artifact_id: //')"
+SA_MSG_SHA="$(sed -n '2,/^---$/p' "$SA_MSG" | grep -m1 '^head_sha:' | sed 's/^head_sha: //')"
+[ -n "$SA_MSG_AID" ] && [ "$SA_MSG_SHA" != "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ] \
+  && [ "$SA_MSG_SHA" = "$(git -C "$SA_FIX" rev-parse "$SA_MSG_AID^")" ] \
+  && ok "send overwrites a hand-typed head_sha with the artifact's own base" || fail "send head_sha authority (aid=$SA_MSG_AID sha=$SA_MSG_SHA)"
+[ "$(sed -n '2,/^---$/p' "$SA_MSG" | grep -c '^head_sha:')" = "1" ] \
+  && ok "exactly one head_sha survives the overwrite" || fail "duplicate head_sha lines"
+
+# a consult with no head_sha gets the live HEAD stamped at send
+SA_Q="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T14-05-00_ask-1.md"
+cat > "$SA_Q" <<SAEOF
+---
+type: question
+from: claude
+timestamp: 2026-08-26T19:05:00Z
+workspace: $SA_WS
+message_id: ${SA_WS}_2026-08-26T14-05-00_ask-1
+---
+
+## Question
+is this fine
+SAEOF
+run_sa send --to codex "$SA_Q" >/dev/null 2>&1
+grep -q "^head_sha: $SA_HEAD$" "$SA_Q" \
+  && ok "consult head_sha is helper-stamped at send time" || fail "consult head_sha stamp"
+
+# workspace pin: an explicit set beats every inferred identity and repairs listing
+SA_OTHER="$SA_FIX/.comms/to-claude/fwh-platform_2026-08-26T14-10-00_reply-1.md"
+cat > "$SA_OTHER" <<SAEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-26T19:10:00Z
+workspace: fwh-platform
+message_id: fwh-platform_2026-08-26T14-10-00_reply-1
+thread: sa-arc-2
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 5
+verdict: APPROVE
+---
+
+## Summary
+pinned-identity fixture
+SAEOF
+SA_LIST_OUT="$(run_sa list --as claude 2>&1)" && sa_rc=0 || sa_rc=$?
+[ "$sa_rc" -ne 0 ] && echo "$SA_LIST_OUT" | grep -q 'fwh-platform(1)' \
+  && echo "$SA_LIST_OUT" | grep -q 'workspace set' \
+  && ok "empty listing NAMES the unmatched identities and the repair command" || fail "unmatched-identity diagnostics (got: $SA_LIST_OUT)"
+check_not "workspace set rejects an invalid name" run_sa workspace set 'Bad Name'
+check_not "workspace set rejects a path-shaped name" run_sa workspace set '../evil'
+run_sa workspace set fwh-platform >/dev/null
+[ "$(run_sa workspace)" = "fwh-platform" ] && ok "explicit pin IS the identity" || fail "pin not authoritative"
+run_sa list --as claude 2>/dev/null | grep -q 'fwh-platform_2026-08-26T14-10-00_reply-1' \
+  && ok "pin repairs the listing: hidden reply is now visible" || fail "pin listing repair"
+[ -f "$SA_MSG" ] || fail "diagnostics deleted mail (must never delete)"
+rm -f "$SA_FIX/.comms/workspace"
+
+# the review prompt's SHA instruction is conditional on mounting
+grep -q 'MOUNTED, pinned artifact' "$REPO/helpers/runphase.sh" \
+  && grep -q 'compare it with "git rev-parse HEAD"' "$REPO/helpers/runphase.sh" \
+  && ok "review prompt carries both SHA notes (mounted vs live tree)" || fail "conditional sha_note"
 
 echo "== friction: a one-line seam for reporting harness problems =="
 FR="$WORK/friction-repo"; mkdir -p "$FR"; FR="$(cd "$FR" && pwd -P)"

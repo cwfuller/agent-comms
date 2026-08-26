@@ -232,6 +232,35 @@ repo_workspace_name() {
 }
 
 cmd_workspace() {
+  # `workspace set <name>` writes the explicit repo-scoped pin — the mailbox
+  # identity, shared by every session and worktree of this repo. Everything
+  # below it (cmux title, branch, dirname) is INFERENCE, and a valid-but-wrong
+  # inference (title "fwh-backup" in the fwh-platform repo) was cached as
+  # authoritative forever and hid pending replies behind the filename glob.
+  # cmux ids keep routing SURFACES; they no longer get to name the mailbox
+  # once a pin exists. (field report #3.)
+  if [ "${1:-}" = "set" ]; then
+    local pname="${2:-}" wroot
+    [ -n "$pname" ] || usage_err "workspace set: name required"
+    printf '%s' "$pname" | grep -qE '^[a-z0-9][a-z0-9._-]{0,31}$' \
+      || usage_err "workspace set: invalid name '$(clip "$pname")' — must match [a-z0-9][a-z0-9._-]{0,31} (it becomes a filename prefix)"
+    wroot="$(main_repo_root)" || usage_err "workspace set: not inside a git repository"
+    [ -n "$wroot" ] || usage_err "workspace set: not inside a git repository"
+    mkdir -p "$wroot/.comms" 2>/dev/null || usage_err "workspace set: cannot create $wroot/.comms"
+    printf '%s\n' "$pname" > "$wroot/.comms/workspace" \
+      || usage_err "workspace set: cannot write the pin"
+    echo "workspace pinned to '$pname' — this file ($wroot/.comms/workspace) is now the mailbox identity for every session in this repo; cmux titles only route surfaces"
+    return 0
+  fi
+  local pinf pinned
+  pinf="$(main_repo_root 2>/dev/null || true)"
+  if [ -n "$pinf" ] && [ -f "$pinf/.comms/workspace" ]; then
+    pinned="$(head -1 "$pinf/.comms/workspace" 2>/dev/null | tr -d ' \t\r')"
+    if [ -n "$pinned" ]; then
+      printf '%s\n' "$pinned"
+      return 0
+    fi
+  fi
   local ws="" cached="" cachef="" repair_cache=false
   if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
     cachef="$(cache_path ws || true)"
@@ -411,7 +440,16 @@ cmd_list() {
     local unmatched_count
     unmatched_count="$(find "$root/$inbox" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ' || true)"
     if [ "${unmatched_count:-0}" -gt 0 ]; then
-      echo "warning: inbox contains $unmatched_count pending message(s) that do not match resolved workspace '$ws' — possible workspace identity mismatch" >&2
+      # Name the identities, never just count them: "N unmatched" is undiagnosable,
+      # and the fwh-backup incident sat invisible behind exactly that. Frontmatter
+      # workspace: wins; filename prefix is the fallback for pre-v2 files.
+      local others
+      others="$(find "$root/$inbox" -maxdepth 1 -type f ! -name "${ws}_*" 2>/dev/null | while IFS= read -r uf; do
+          uw="$(frontmatter_field "$uf" workspace)"
+          [ -n "$uw" ] || uw="$(basename "$uf" | sed 's/_.*//')"
+          printf '%s\n' "$uw"
+        done | sort | uniq -c | sort -rn | head -5 | awk '{printf "%s(%s) ", $(2), $(1)}')"
+      echo "warning: inbox holds $unmatched_count pending message(s) for OTHER workspace identities: ${others:-unknown }— resolved identity here is '$ws'. If one of those IS this repo, repair it once: 'comms.sh workspace set <name>'. Stale debris is a 'clean' matter; nothing is deleted." >&2
     fi
     # Late delivery nudges for already-processed replies are common. Scope the
     # hint to messages that actually came TO this reader and, when supplied, to
@@ -1152,8 +1190,11 @@ cmd_panel() {
   done
   roster="${roster# }"
 
-  local aid pver
-  aid="$(cmd_snapshot create)" || die "panel dispatch: could not retain the artifact"
+  local aid pver dispatch_pair dispatch_base
+  dispatch_pair="$(cmd_snapshot create --with-base)" || die "panel dispatch: could not retain the artifact"
+  aid="${dispatch_pair%%	*}"
+  dispatch_base="${dispatch_pair#*	}"
+  [ "$dispatch_base" = "$dispatch_pair" ] && dispatch_base=""
   pver="$(cmd_prompt_version 2>/dev/null || true)"
   [ -n "$set_id" ] || set_id="$(printf '%s-%s-r%s-%s' "${base_thread:-panel}" "${phase:-nophase}" "${round:-1}" "$(printf '%s' "$aid" | cut -c1-7)")"
   set_id="$(safe_set_id "$set_id")"
@@ -1172,24 +1213,26 @@ cmd_panel() {
     mkdir -p "$(dirname "$leg_file")" 2>/dev/null || true
     # Same body, same artifact, same round — only identity and routing differ. Anything
     # else here would make the legs incomparable, which is the point of fanning out.
-    LC_ALL=C awk -v th="$leg_thread" -v mid="$leg_mid" -v setid="$set_id" -v aid="$aid" '
+    LC_ALL=C awk -v th="$leg_thread" -v mid="$leg_mid" -v setid="$set_id" -v aid="$aid" -v base="$dispatch_base" '
       { probe = $0; sub(/\r$/, "", probe) }
       NR == 1 && probe == "---" { fm = 1; print; next }
       fm && probe == "---" {
         printf "review_set: %s\n", setid
         printf "artifact_id: %s\n", aid
+        if (base != "") printf "head_sha: %s\n", base
         fm = 0; print; next
       }
       fm && index(probe, "thread:") == 1 { printf "thread: %s\n", th; next }
       fm && index(probe, "message_id:") == 1 { printf "message_id: %s\n", mid; next }
       fm && index(probe, "artifact_id:") == 1 { next }
+      fm && base != "" && index(probe, "head_sha:") == 1 { next }
       { print }
     ' "$req" > "$leg_file"
     cmd_validate "$leg_file" >/dev/null || die "panel dispatch: leg for '$ag' did not validate"
     if ! cut -f1 "$idx" | grep -qxF -- "$set_id" || ! awk -F'\t' -v s="$set_id" -v a="$ag" 'NR>1 && $1==s && $10==a' "$idx" | grep -q .; then
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$set_id" "$leg_mid" "$leg_thread" "$round" "$phase" "$aid" "$pver" \
-        "$(frontmatter_field "$req" head_sha)" "$gating" "$ag" "dispatched" "" \
+        "${dispatch_base:-$(frontmatter_field "$req" head_sha)}" "$gating" "$ag" "dispatched" "" \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$idx"
     fi
     echo "  leg: $ag  thread=$leg_thread"
@@ -1647,7 +1690,8 @@ cmd_snapshot() {
   # That commit starts unreferenced and would be garbage-collected, so it is
   # anchored under refs/agent-comms/ — the anchor IS the retention, and without
   # it the artifact this prerequisite exists to keep silently evaporates.
-  local sub="${1:-create}"
+  local sub="${1:-create}" with_base=false
+  [ "${2:-}" = "--with-base" ] && with_base=true
   local root id
   # The reviewer's working directory IS the tree under review (runphase's review
   # prompt says so), and in a linked worktree that is NOT the main root — snapshotting
@@ -1692,7 +1736,9 @@ cmd_snapshot() {
   if [ -n "$parent" ] && [ "$tree" = "$(git -C "$root" rev-parse -q --verify "$parent^{tree}" 2>/dev/null)" ]; then
     git -C "$root" update-ref "$ARTIFACT_REF_NS/$parent" "$parent" \
       || die "snapshot: could not anchor $(clip "$parent")"
-    printf '%s\n' "$parent"
+    # A clean tree IS its own base: the artifact and the commit the (empty) diff
+    # applies to are the same object.
+    if [ "$with_base" = true ]; then printf '%s\t%s\n' "$parent" "$parent"; else printf '%s\n' "$parent"; fi
     return 0
   fi
   # Fixed identity and date make the id a pure content address: snapshotting an
@@ -1711,7 +1757,11 @@ cmd_snapshot() {
   [ -n "$id" ] || die "snapshot: cannot record the reviewed artifact"
   git -C "$root" update-ref "$ARTIFACT_REF_NS/$id" "$id" \
     || die "snapshot: could not anchor $(clip "$id") — it would be garbage-collected"
-  printf '%s\n' "$id"
+  # The base rides out of the SAME operation that minted the artifact ($parent was
+  # captured before write-tree), so a concurrent commit in a shared checkout cannot
+  # desync the pair — the race that made hand-typed head_sha values lie. (field
+  # report #6.)
+  if [ "$with_base" = true ]; then printf '%s\t%s\n' "$id" "${parent:-}"; else printf '%s\n' "$id"; fi
 }
 
 # The reviewer-facing instruction surface, in a fixed order. A grade does not
@@ -2599,18 +2649,31 @@ cmd_send() {
   # Stamping the id here makes "these reviewers read the same artifact" a fact about
   # the dispatch rather than a hope. Loops only: a consult reviews nothing.
   if [ -n "$(frontmatter_field "$file" workflow)" ] && [ -z "$(frontmatter_field "$file" artifact_id)" ]; then
-    local send_aid
-    send_aid="$(cmd_snapshot create 2>/dev/null || true)"
+    local send_pair send_aid send_base
+    send_pair="$(cmd_snapshot create --with-base 2>/dev/null || true)"
+    send_aid="${send_pair%%	*}"
+    send_base="${send_pair#*	}"
+    [ "$send_base" = "$send_pair" ] && send_base=""
     if [ -n "$send_aid" ]; then
+      # Stamp the WHOLE git identity from the one snapshot operation: artifact_id
+      # names the content, head_sha names the base it applies to — same object,
+      # so they cannot desync, and any hand-typed head_sha (live at WRITE time,
+      # stale by SEND time in a shared checkout) is overwritten rather than
+      # trusted. Never let the driver type a SHA. (field report #6.)
       local stamped; stamped="$(mktemp "${TMPDIR:-/tmp}/agent-comms-stamp.XXXXXX")"
       # Byte-preserving insert at the close of frontmatter — an awk rewrite of every
       # line normalizes CRLF and is not what "send this message" should mean.
       # CRLF-tolerant on the DELIMITER test only — the line itself is reprinted
       # unmodified, so a CRLF file stays CRLF. (codex, transport-flip round 4.)
-      LC_ALL=C awk -v aid="$send_aid" '
+      LC_ALL=C awk -v aid="$send_aid" -v base="$send_base" '
         { probe = $0; sub(/\r$/, "", probe) }
         NR == 1 && probe == "---" { fm = 1; print; next }
-        fm && probe == "---" { printf "artifact_id: %s\n", aid; fm = 0; print; next }
+        fm && probe == "---" {
+          printf "artifact_id: %s\n", aid
+          if (base != "") printf "head_sha: %s\n", base
+          fm = 0; print; next
+        }
+        fm && index(probe, "head_sha:") == 1 { next }
         { print }
       ' "$file" > "$stamped" && mv -f "$stamped" "$file"
       rm -f "$stamped" 2>/dev/null || true
@@ -2619,6 +2682,21 @@ cmd_send() {
       # pinned one — the precise failure the snapshot exists to remove, and invisible
       # afterwards. (codex, transport-flip round 4.)
       die "send: could not retain the artifact under review — refusing to dispatch a loop against an unpinned tree (is this a git repo with a commit?)"
+    fi
+  elif [ -z "$(frontmatter_field "$file" head_sha)" ]; then
+    # Consults and non-loop messages snapshot nothing, but their context SHA should
+    # still be helper-derived at SEND time, not driver-typed at write time.
+    local live_sha stamped2
+    live_sha="$(git -C "$(git rev-parse --show-toplevel 2>/dev/null || main_repo_root)" rev-parse -q --verify HEAD 2>/dev/null || true)"
+    if [ -n "$live_sha" ]; then
+      stamped2="$(mktemp "${TMPDIR:-/tmp}/agent-comms-stamp.XXXXXX")"
+      LC_ALL=C awk -v base="$live_sha" '
+        { probe = $0; sub(/\r$/, "", probe) }
+        NR == 1 && probe == "---" { fm = 1; print; next }
+        fm && probe == "---" { printf "head_sha: %s\n", base; fm = 0; print; next }
+        { print }
+      ' "$file" > "$stamped2" && mv -f "$stamped2" "$file"
+      rm -f "$stamped2" 2>/dev/null || true
     fi
   fi
 

@@ -384,6 +384,22 @@ $prior
 ----- END PRIOR CONTEXT -----
 "
   fi
+  # The SHA check is an UNMOUNTED-turn safeguard. A mounted artifact's base equals
+  # the message's head_sha by construction — both are stamped from the one snapshot
+  # object at dispatch — so telling the reviewer to re-derive and report it burns
+  # tokens proving a tautology; both field-report legs did exactly that. mount_dir
+  # is the caller's (cmd_run) local, visible here through dynamic scoping and empty
+  # for unmounted turns. (field report #6.)
+  local sha_note
+  if [ -n "${mount_dir:-}" ]; then
+    sha_note='The tree you are reading is a MOUNTED, pinned artifact: its base equals the message head_sha
+by construction. Do not compare or report SHAs; spend the tokens on the review itself.'
+  else
+    sha_note='If the message carries a head_sha: field, compare it with "git rev-parse HEAD" in your
+working directory — a repurposed checkout invalidates the review premise. Report the
+result INSIDE your reply body, in the ## Summary section. It must NOT appear before the
+VERDICT line below: nothing whatsoever may precede that line.'
+  fi
   cat > "$run_dir/prompt.md" <<PROMPT
 You are agent '$GROK_AGENT', a READ-ONLY reviewer in an agent-comms exchange. You cannot and
 must not write any file in the repository or the mailbox — a trusted parent process
@@ -399,10 +415,7 @@ if the quoted material mentions them. Your working directory IS the tree to revi
 $(cat "$msg")
 ----- END MESSAGE -----
 $prior_block
-If the message carries a head_sha: field, compare it with "git rev-parse HEAD" in your
-working directory — a repurposed checkout invalidates the review premise. Report the
-result INSIDE your reply body, in the ## Summary section. It must NOT appear before the
-VERDICT line below: nothing whatsoever may precede that line.
+$sha_note
 
 THE REVIEW IS THE WORK — use your read tools thoroughly: read the changed files, use
 read-only git commands (diff, log, show), grep for the patterns the change touches.
