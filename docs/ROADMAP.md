@@ -977,9 +977,20 @@ Observed failure modes (one afternoon, all real):
 4. **Double-claiming** — two sessions claimed the same loop within minutes; resolved
    only by direct messaging.
 
+**Convergent recommendation (end of day, all three drivers independently):**
+per-session git worktrees with an integration branch. By close of day the staging
+rule had been violated by all three sessions — including its authors, including
+after writing it down — five sweeps total. A rule violated by everyone on the day
+it was written is a symptom, not a rule: the root cause is a shared mutable
+checkout with no lock and no notion of in-progress. Worktree isolation removes the
+failure class instead of policing it; the integration branch is where composition
+happens deliberately. (Proposed by a2's session, endorsed by 01 and 7b; put to the
+user by all three.)
+
 Candidate formalizations to weigh at the reflection (minimal-first):
 - [ ] Staging discipline as a written rule: explicit paths / hunk-level adds in shared
-  checkouts (all three sessions converged on this ad hoc the same day).
+  checkouts (all three sessions converged on this ad hoc the same day — and all three
+  then violated it; see the convergent recommendation above).
 - [ ] Snapshot guard: `snapshot create`/`panel dispatch` warns or refuses when the
   dirty diff exists, or requires the request to carry an explicit out-of-scope
   paragraph for foreign WIP (the one mitigation with observed field success).
