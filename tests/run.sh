@@ -303,6 +303,17 @@ for dead in auto-plan.md auto-full.md auto-implement.md fleet.md ask-codex.md; d
   [ -f "$INST_FIX/.claude/commands/$dead" ] && fail "removed command $dead was installed" || ok "removed command $dead stays removed"
 done
 echo "$LOCAL_OUT" | grep -qi "shadow" && ok "local scope prints pin/shadow note" || fail "local scope prints pin/shadow note"
+# BEHAVIORAL delete-on-upgrade: a clean install not copying retired files proves
+# nothing about an upgrade — plant a pre-existing retired command AND a retired
+# local-pin helper, re-run the installer, and require both GONE. The local pin
+# outranks the global install, so a fleet.sh surviving here shadows its own
+# removal everywhere else. (codex + grok, panel r1: the old test was clean-install-only.)
+touch "$INST_FIX/.claude/commands/auto-plan.md" "$INST_FIX/.agent-comms/fleet.sh"
+(cd "$INST_FIX" && bash "$REPO/install.sh" --scope=local >/dev/null 2>&1)
+[ ! -f "$INST_FIX/.claude/commands/auto-plan.md" ] \
+  && ok "an upgrade DELETES a pre-existing retired command" || fail "retired auto-plan.md survived the upgrade"
+[ ! -f "$INST_FIX/.agent-comms/fleet.sh" ] \
+  && ok "an upgrade DELETES a pre-existing retired local-pin helper" || fail "retired fleet.sh survived the local upgrade"
 
 echo "== comms.sh: status smoke =="
 ST="$(run_comms status)"
@@ -379,6 +390,21 @@ SF="$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json"
 grep -q '"awaiting_from": "codex"' "$SF" && ok "state records who owes the next message" || fail "state awaiting_from"
 grep -q '"last_delivery": "manual"' "$SF" && ok "state records delivery outcome (manual)" || fail "state last_delivery manual"
 run_comms state list | grep -q 'loop-alpha.*r2/10' && ok "state list summarizes thread" || fail "state list (got: $(run_comms state list))"
+# loop-rounds is the loop's REAL budget riding through the capped plan phase; state
+# must keep a NON-DEFAULT value durably or a restart falls back to the default —
+# the exact starvation the field exists to prevent. (codex, panel r1: the restore
+# instruction existed but nothing mechanical preserved its source.)
+OUT_LR="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-06-00_plan-lr7.md"
+sed -e 's/^message_id: .*/message_id: feature-helper-tests_2026-06-04T13-06-00_plan-lr7/' \
+    -e 's/^thread: .*/thread: loop-lr7/' \
+    -e 's/^phase: implement/phase: plan/' -e 's/^round: 2/round: 1/' \
+    -e 's/^max-rounds: 10/max-rounds: 2\nloop-rounds: 7/' "$OUT_WF" > "$OUT_LR"
+check "send accepts a plan message carrying loop-rounds" run_comms send --to codex "$OUT_LR"
+SF_LR="$REPO_FIX/.comms/state/feature-helper-tests_loop-lr7.json"
+grep -q '"loop_rounds": "7"' "$SF_LR" \
+  && ok "a non-default loop-rounds (7) survives into thread state" || fail "state loop_rounds (got: $(cat "$SF_LR" 2>/dev/null | head -8))"
+grep -q '"max_rounds": "2"' "$SF_LR" \
+  && ok "the plan cap and the loop budget are DISTINCT state fields" || fail "plan cap vs loop budget conflated"
 # stalled: backdate the awaiting epoch by an hour
 perl -pi -e 's/"awaiting_since_epoch": "\d+"/"awaiting_since_epoch": "'"$(( $(date +%s) - 3600 ))"'"/' "$SF"
 run_comms stalled 15 | grep -q 'STALLED.*loop-alpha' && ok "stalled flags threads awaiting too long" || fail "stalled detection (got: $(run_comms stalled 15))"
@@ -1505,6 +1531,39 @@ grep -q '\[0-9\]+\[.)\]' "$REPO/helpers/runphase.sh" \
   && ok "verdict derivation counts numbered findings too" || fail "derivation still bullet-only"
 grep -q 'VERDICT line found at line' "$REPO/helpers/runphase.sh" \
   && ok "a VERDICT line below preamble is still honoured" || fail "verdict must be on line 1"
+# A finding that merely ENDS in "None." is not a placeholder. The first filter matched the
+# end of the line, so `1. \`helper.sh\` can incorrectly return None.` derived zero blockers
+# and stamped APPROVE while findings_extract kept it — the same stamped-verdict-contradicts-
+# body failure, one layer down. (codex, field-report round 1.)
+nb() { awk '
+  function isplaceholder(t) {
+    sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/\*/, "", t)
+    return (t == "None" || t == "None.")
+  }
+  /^### Blocking/{f=1;next} /^###/{f=0}
+  f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
+  END{print n+0}' "$1"; }
+NB="$WORK/noneedge"; mkdir -p "$NB"
+printf '### Blocking\n1. `helper.sh` can incorrectly return None.\n' > "$NB/ends-in-none.md"
+[ "$(nb "$NB/ends-in-none.md")" = "1" ] \
+  && ok "a finding that ends in 'None.' still counts as a finding" || fail "ends-in-None was swallowed"
+printf '### Blocking\n- None.\n' > "$NB/placeholder.md"
+[ "$(nb "$NB/placeholder.md")" = "0" ] && ok "a bare None. placeholder counts as zero" || fail "placeholder counted"
+printf '### Blocking\n- **None.**\n' > "$NB/bold.md"
+[ "$(nb "$NB/bold.md")" = "0" ] && ok "a bolded placeholder counts as zero" || fail "bold placeholder counted"
+printf '### Blocking\n1. **None**\n' > "$NB/numbered-none.md"
+[ "$(nb "$NB/numbered-none.md")" = "0" ] && ok "a numbered bold placeholder counts as zero" || fail "numbered placeholder counted"
+# Ambiguity must be caught even when line 1 is a verdict: the old code short-circuited
+# there and never reached the count.
+grep -q 'ambiguous, falling back to derivation' "$REPO/helpers/runphase.sh" \
+  && ok "multiple VERDICT lines fall back to derivation" || fail "ambiguous verdicts not caught"
+# The count must come BEFORE any case-match on line 1, or the ambiguity check is dead code.
+awk '/Count EVERY explicit verdict/{c=NR} /vcount="\$\(awk/{v=NR} END{exit !(c>0 && v>c && v-c<12)}' "$REPO/helpers/runphase.sh" \
+  && ok "verdict lines are counted before any is trusted" || fail "line-1 still short-circuits the count"
+# An explicit APPROVE over blocking findings is a contradiction, not a verdict.
+grep -q 'contradicts its own body' "$REPO/helpers/runphase.sh" \
+  && ok "an APPROVE that lists blocking findings is refused" || fail "no APPROVE/body cross-check"
 
 echo "== friction: a one-line seam for reporting harness problems =="
 FR="$WORK/friction-repo"; mkdir -p "$FR"; FR="$(cd "$FR" && pwd -P)"
@@ -2583,6 +2642,25 @@ SH_RETRY_OUT="$( (cd "$SH_FIX" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" 
 printf '%s\n' "$SH_RETRY_OUT" | grep -q 'nothing was run' \
   && ok "the refusal says nothing was run" || fail "retry refusal message"
 
+# loop-rounds must ride the broker stamp onto the REPLY: the approval reply is the
+# only file the driver holds at the plan->implement handoff, so a budget that lives
+# solely in the (archived) plan message silently falls back to the default.
+# (codex, panel r1.)
+cat > "$SH_BIN/grok" <<'SHSTUB5'
+#!/bin/bash
+case "$1" in --version) echo "grok 9.9.9-stub"; exit 0 ;; esac
+printf '{"type":"system","subtype":"init","session_id":"stub-loopr"}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: APPROVE\\n\\n## Summary\\nplan direction is sound.\\n"}\n'
+SHSTUB5
+chmod +x "$SH_BIN/grok"
+SH_REQ_LOOPR="$(sh_req_for loopr)"
+perl -pi -e 's/^(max-rounds: .*)$/$1\nloop-rounds: 7/' "$SH_REQ_LOOPR"
+run_sh shadow --to grok --review-set loopr-set "$SH_REQ_LOOPR" >/dev/null 2>&1 || true
+SH_LOOPR_DIR="$(find "$SH_FIX/.comms/grades/shadow" -maxdepth 1 -type d -name 'loopr-set-*' | head -1)"
+[ -n "$SH_LOOPR_DIR" ] && grep -q '^loop-rounds: 7' "$SH_LOOPR_DIR/grok.md" 2>/dev/null \
+  && ok "the broker stamps loop-rounds onto the reply (budget survives the handoff)" \
+  || fail "loop-rounds did not survive the broker stamp (got: $(grep -m1 loop-rounds "$SH_LOOPR_DIR/grok.md" 2>/dev/null))"
+
 echo "== grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims) =="
 GR2="$WORK/shadow-repo2"
 mkdir -p "$GR2"; GR2="$(cd "$GR2" && pwd -P)"
@@ -3179,18 +3257,22 @@ check_not "panel refuses an unregistered reviewer" run_pn panel dispatch --to co
 check_not "panel refuses the request's own author" run_pn panel dispatch --to claude "$PN_REQ"
 check_not "panel refuses a duplicate reviewer" run_pn panel dispatch --to codex,codex "$PN_REQ"
 # COMPOSE: cluster by support, drop nothing, let judgment live in the gate.
-mk_leg_reply() { # <agent> <thread> <blocking-anchor> <extra-blocking-anchor-or-empty>
-  local ag="$1" th="$2" a1="$3" a2="${4:-}"
+# A conformant reply is BOUND to its request via in-reply-to — compose refuses anything
+# else, so the fixtures must model the binding too.
+PN_MID_C="$(grep -m1 '^message_id:' "$PN_LEG_C" | sed 's/^message_id: //')"
+PN_MID_G="$(grep -m1 '^message_id:' "$PN_LEG_G" | sed 's/^message_id: //')"
+mk_leg_reply() { # <agent> <thread> <blocking-anchor> <extra-blocking-anchor-or-empty> <minute> <in-reply-to>
+  local ag="$1" th="$2" a1="$3" a2="${4:-}" irt="${6:-}"
   local f="$PN_FIX/.comms/archive/${PN_WS}_2026-08-26T12-3${5:-0}-00_${ag}-reply.md"
-  { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T12:3%s:00Z\nworkspace: %s\nmessage_id: %s-reply\nthread: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: REQUEST_CHANGES\n---\n\n## Findings\n\n### Blocking\n' "$ag" "${5:-0}" "$PN_WS" "$ag" "$th"
+  { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T12:3%s:00Z\nworkspace: %s\nmessage_id: %s-reply\nthread: %s\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: REQUEST_CHANGES\n---\n\n## Findings\n\n### Blocking\n' "$ag" "${5:-0}" "$PN_WS" "$ag" "$th" "$irt"
     printf -- '- `%s` — %s says this one is real.\n' "$a1" "$ag"
     [ -n "$a2" ] && printf -- '- `%s` — only %s saw this.\n' "$a2" "$ag"
     printf -- '\n### Advisory\n- `s.txt:9` — %s advisory.\n' "$ag"
   } > "$f"
 }
 # Both flag s.txt:1 (corroborated); each also has one nobody else saw (unique).
-mk_leg_reply codex "$PN_TC" "s.txt:1" "s.txt:2" 0
-mk_leg_reply grok  "$PN_TG" "s.txt:1" "s.txt:3" 1
+mk_leg_reply codex "$PN_TC" "s.txt:1" "s.txt:2" 0 "$PN_MID_C"
+mk_leg_reply grok  "$PN_TG" "s.txt:1" "s.txt:3" 1 "$PN_MID_G"
 PN_COMP="$(run_pn compose --set "$PN_SC" 2>&1)"
 printf '%s\n' "$PN_COMP" | grep -q '2 legs, all answered' && ok "compose reports full-panel coverage" || fail "compose coverage (got: $(printf '%s' "$PN_COMP" | head -2))"
 # The corroborated anchor gates.
@@ -3207,12 +3289,22 @@ printf '%s\n' "$PN_COMP" | grep -q '\[codex\]' && printf '%s\n' "$PN_COMP" | gre
   && ok "every finding stays attributed to the reviewer that made it" || fail "attribution lost in composition"
 
 # A PARTIAL panel must never gate: composing over a missing voice looks like more
-# review than actually happened.
-PN_SET2="pn-partial"
-run_pn panel dispatch --to codex,grok --set "$PN_SET2" "$PN_REQ" >/dev/null 2>&1 || true
-PN_PART="$(run_pn compose --set "$(run_pn panel status --set "$PN_SET2" >/dev/null 2>&1; echo "$PN_SET2")" 2>&1)" && PN_PRC=0 || PN_PRC=$?
-printf '%s\n' "$PN_PART" | grep -qi 'incomplete\|no review sets\|no legs' \
-  && ok "an unanswered leg blocks composition instead of counting as approval" || fail "partial panel composed anyway"
+# review than actually happened. This second dispatch REUSES the same base thread at
+# the same round and phase, and the archive already holds valid round-1 replies on
+# those threads — the exact false-complete a thread+round match alone would compose.
+# Only the in-reply-to binding keeps these legs unanswered. The set id is read back
+# from dispatch because safe_set_id rewrites the raw value; composing the raw token
+# used to error 'no legs' and let the old grep pass without touching this path at
+# all. (grok, panel r1 — the vacuous-test finding.)
+PN_P2OUT="$(run_pn panel dispatch --to codex,grok --set pn-partial "$PN_REQ" 2>&1 || true)"
+PN_SET2="$(printf '%s\n' "$PN_P2OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ -n "$PN_SET2" ] && ok "partial-panel test composes the id dispatch actually used" || fail "could not read back pn-partial set id"
+PN_PART="$(run_pn compose --set "$PN_SET2" 2>&1)" && PN_PRC=0 || PN_PRC=$?
+[ "${PN_PRC:-0}" = "3" ] && printf '%s\n' "$PN_PART" | grep -q 'INCOMPLETE' \
+  && ok "an unanswered leg blocks composition instead of counting as approval" || fail "partial panel composed anyway (rc=$PN_PRC: $(printf '%s' "$PN_PART" | head -1))"
+printf '%s\n' "$PN_PART" | grep -q 'all answered' \
+  && fail "a re-dispatched set counted another request's replies as its own" \
+  || ok "a reply never answers a request it was not written to (in-reply-to binding)"
 
 # ROUND STALENESS: a panel round 2 must not compose round 1's replies. The set index
 # keys on thread+phase+round but compose found replies by reviewer+thread alone, so it
@@ -3235,6 +3327,14 @@ printf '%s\n' "$PN_R2" | grep -q 'all answered' \
 PN_STATUS="$(run_pn panel status --set "$PN_SC" 2>&1)"
 printf '%s\n' "$PN_STATUS" | grep -q 'codex' && printf '%s\n' "$PN_STATUS" | grep -q 'grok' \
   && ok "panel status lists every leg in the set" || fail "panel status (got: $PN_STATUS)"
+printf '%s\n' "$PN_STATUS" | awk -F'\t' 'NR>1 && $3!="yes"' | grep -q . \
+  && fail "status missed a genuinely bound answer" || ok "panel status sees bound answers"
+# Status shares compose's binding: the pn-partial legs sit on the SAME threads with
+# valid same-round replies in the archive, and must still read unanswered.
+PN_STAT2="$(run_pn panel status --set "$PN_SET2" 2>&1)"
+printf '%s\n' "$PN_STAT2" | awk -F'\t' 'NR>1 && $3=="yes"' | grep -q . \
+  && fail "panel status counted another request's reply as answered" \
+  || ok "panel status never reports a stale or unbound reply as answered"
 
 echo "== ask: the driver-neutral consult verb =="
 AK="$WORK/ask-repo"; mkdir -p "$AK"; AK="$(cd "$AK" && pwd -P)"

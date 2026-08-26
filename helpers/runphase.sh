@@ -316,6 +316,11 @@ build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> [agent] — sets the
   GROK_PHASE="$(frontmatter_field "$msg" phase)"
   GROK_ROUND="$(frontmatter_field "$msg" round)"
   GROK_MAXR="$(frontmatter_field "$msg" max-rounds)"
+  # loop-rounds is the loop's REAL budget riding through the capped plan phase; it
+  # must survive onto the reply because the approval reply is the only file the
+  # driver still holds at the plan->implement handoff. (codex, panel r1: the restore
+  # instruction existed but its source file did not.)
+  GROK_LOOPR="$(frontmatter_field "$msg" loop-rounds)"
   GROK_INID="$(frontmatter_field "$msg" message_id)"
   # The two prompt shapes are fully split on the reply type — a consult never
   # sees reviewer framing or the verdict bar, and a review never hears "this is
@@ -481,24 +486,19 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
   # never attach to a consult.
   local first verdict="" body_start=1
   if [ "$GROK_RTYPE" = "review-feedback" ]; then
-    first="$(head -1 "$run_dir/reply-raw.md")"
-    case "$first" in
-      "VERDICT: APPROVE"|"VERDICT: REQUEST_CHANGES")
-        verdict="${first#VERDICT: }"; body_start=2 ;;
-    esac
-    if [ -z "$verdict" ]; then
-      # Harness warnings ("Skill descriptions were shortened...") and reviewer narration
-      # get prepended to the body, pushing a perfectly good VERDICT line off line 1.
-      # Accept it anywhere in the head of the reply, but ONLY if exactly one such line
-      # exists — ambiguity is worse than absence, and derivation is the safe fallback.
-      local vline vcount
-      vcount="$(awk 'NR<=40 && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{n++} END{print n+0}' "$run_dir/reply-raw.md")"
-      if [ "${vcount:-0}" -eq 1 ]; then
-        vline="$(awk 'NR<=40 && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{print NR; exit}' "$run_dir/reply-raw.md")"
-        verdict="$(sed -n "${vline}p" "$run_dir/reply-raw.md" | sed 's/^VERDICT: //')"
-        body_start=$((vline + 1))
-        echo "note: VERDICT line found at line $vline, not line 1 (preamble above it was skipped)" >>"$run_dir/runner.log"
-      fi
+    # Count EVERY explicit verdict line first, including one on line 1. The earlier
+    # version short-circuited on line 1 and never reached the ambiguity check, so
+    # `VERDICT: APPROVE` on line 1 plus `VERDICT: REQUEST_CHANGES` further down was
+    # silently accepted as APPROVE. (codex, field-report round 1.)
+    local vline vcount
+    vcount="$(awk 'NR<=40 && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{n++} END{print n+0}' "$run_dir/reply-raw.md")"
+    if [ "${vcount:-0}" -eq 1 ]; then
+      vline="$(awk 'NR<=40 && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{print NR; exit}' "$run_dir/reply-raw.md")"
+      verdict="$(sed -n "${vline}p" "$run_dir/reply-raw.md" | sed 's/^VERDICT: //')"
+      body_start=$((vline + 1))
+      [ "$vline" = "1" ] || echo "note: VERDICT line found at line $vline, not line 1 (preamble above it was skipped)" >>"$run_dir/runner.log"
+    elif [ "${vcount:-0}" -gt 1 ]; then
+      echo "note: $vcount VERDICT lines in the reply — ambiguous, falling back to derivation" >>"$run_dir/runner.log"
     fi
     if [ -z "$verdict" ]; then
       # DERIVE it rather than discard the review. loopspec already defines the
@@ -510,13 +510,41 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
       # Only the STRUCTURE is trusted; nothing is inferred from prose.
       local nblock
       if grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
-        nblock="$(awk '/^### Blocking/{f=1;next} /^###/{f=0} f && (/^[-*+] /||/^[0-9]+[.)] /){ if ($0 !~ /[Nn]one\.?\**[[:space:]]*$/) n++ } END{print n+0}' "$run_dir/reply-raw.md")"
+        nblock="$(awk '
+          function isplaceholder(t) {
+            sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/\*/, "", t)
+            return (t == "None" || t == "None.")
+          }
+          /^### Blocking/{f=1;next} /^###/{f=0}
+          f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
+          END{print n+0}' "$run_dir/reply-raw.md")"
         if [ "${nblock:-0}" -gt 0 ]; then verdict="REQUEST_CHANGES"; else verdict="APPROVE"; fi
         body_start=1
         echo "note: reply carried no VERDICT line; DERIVED '$verdict' from ${nblock:-0} blocking finding(s) per the loopspec equivalence" >>"$run_dir/runner.log"
         GROK_BROKER_DERIVED="$verdict"
       else
         GROK_BROKER_NOTE="review reply carries no 'VERDICT:' line AND no '### Blocking' section to derive one from — refusing to stamp an envelope (first line was: $(printf '%.60s' "$first"))"
+        return 1
+      fi
+    fi
+    # CROSS-CHECK an explicit APPROVE against the body's own findings. A stamped verdict
+    # that contradicts the review it stamps is the failure that started this whole thread:
+    # a clean panel reported over real blocking findings. Trusting the line without
+    # checking it just moves the contradiction one layer up.
+    if [ "$verdict" = "APPROVE" ] && grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
+      local xblock
+      xblock="$(awk '
+        function isplaceholder(t) {
+          sub(/^[-*+][[:space:]]+/, "", t); sub(/^[0-9]+[.)][[:space:]]+/, "", t)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gsub(/\*/, "", t)
+          return (t == "None" || t == "None.")
+        }
+        /^### Blocking/{f=1;next} /^###/{f=0}
+        f && (/^[-*+] /||/^[0-9]+[.)] /){ if (!isplaceholder($0)) n++ }
+        END{print n+0}' "$run_dir/reply-raw.md")"
+      if [ "${xblock:-0}" -gt 0 ]; then
+        GROK_BROKER_NOTE="reply says 'VERDICT: APPROVE' but lists ${xblock} blocking finding(s) — refusing to stamp a verdict that contradicts its own body"
         return 1
       fi
     fi
@@ -534,6 +562,7 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     [ -n "$GROK_PHASE" ] && printf 'phase: %s\n' "$GROK_PHASE"
     [ -n "$GROK_ROUND" ] && printf 'round: %s\n' "$GROK_ROUND"
     [ -n "$GROK_MAXR" ] && printf 'max-rounds: %s\n' "$GROK_MAXR"
+    [ -n "$GROK_LOOPR" ] && printf 'loop-rounds: %s\n' "$GROK_LOOPR"
     [ -n "$verdict" ] && printf 'verdict: %s\n' "$verdict"
     printf -- '---\n\n'
     tail -n +"$body_start" "$run_dir/reply-raw.md"
