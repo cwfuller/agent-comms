@@ -1143,6 +1143,13 @@ cmd_compose() {
     n_legs=$((n_legs + 1))
     reply="$(sorted_message_files "$root/.comms/archive" "$ws" "$ag" "$th" newest | head -1 || true)"
     [ -n "$reply" ] || reply="$(sorted_message_files "$root/.comms/to-claude" "$ws" "$ag" "$th" newest | head -1 || true)"
+    # A leg is answered only by a VALID review-feedback. Counting any message in the
+    # thread lets a stray note complete a panel and unblock the gate. (codex, panel r1.)
+    if [ -n "$reply" ] && { [ "$(frontmatter_field "$reply" type)" != "review-feedback" ] \
+       || ! cmd_validate "$reply" >/dev/null 2>&1; }; then
+      emit_diagnostic "compose: ignoring a non-review message on $ag's leg"
+      reply=""
+    fi
     if [ -z "$reply" ]; then pending="$pending $ag"; continue; fi
     n_answered=$((n_answered + 1))
     rows="$rows

@@ -711,7 +711,16 @@ cmd_run() {
   if [ "$via" != "acp" ] && [ "$provider" != "grok" ]; then
     msg_artifact=""
   fi
-  if [ -n "$msg_artifact" ] && git -C "$main_root" cat-file -e "${msg_artifact}^{commit}" 2>/dev/null; then
+  # A named-but-unresolvable artifact is a FAILURE, not a reason to fall back to the live
+  # tree: the message promises a pinned artifact either way. The earlier guard only
+  # covered failures AFTER cat-file succeeded. (codex, panel r1.)
+  if [ -n "$msg_artifact" ] && ! git -C "$main_root" cat-file -e "${msg_artifact}^{commit}" 2>/dev/null; then
+    update_thread_state "$msg_thread" failed "" "$sfield" || true
+    write_result "$run_dir" failed 1 "" "$msg" "message names artifact $msg_artifact but it does not resolve to a commit — refusing to review the live tree in its place"
+    trap - EXIT
+    exit 1
+  fi
+  if [ -n "$msg_artifact" ]; then
     local mount_base
     mount_base="$(frontmatter_field "$msg" head_sha)"
     [ -n "$mount_base" ] || mount_base="$(git -C "$main_root" rev-parse -q --verify "${msg_artifact}^" 2>/dev/null || printf '%s' "$msg_artifact")"

@@ -44,11 +44,13 @@ It is capped at 2 rounds and judged on DIRECTION, never on the prose of the plan
 3. **`--plan` only — the approach round.** Skip entirely without the flag.
    - Write the approach: the goal, the mechanism, the invariants it must not break, and
      what you deliberately are NOT doing. A real approach doc, not a 2-line intent.
-   - Frontmatter: `workflow: auto`, `phase: plan`, `round: 1`, `max-rounds: 2`.
-     **The 2 is the PLAN cap only.** When you continue into implementation, write
-     `max-rounds: <N>` — the loop's real budget from `--rounds` (default 4). Copying the
-     plan's cap forward starves implementation of half its rounds, and it is invisible
-     because both messages look well-formed. *(grok, collapse round 1.)*
+   - Frontmatter: `workflow: auto`, `phase: plan`, `round: 1`, `max-rounds: 2`, and
+     **`loop-rounds: <N>`** — the loop's real budget from `--rounds` (default 4).
+     **The 2 is the PLAN cap only**, and `loop-rounds` is where the real budget survives:
+     the plan message is the ONLY artifact the handoff can read, so without that field
+     there is nothing to restore N from and implementation silently inherits 2 rounds.
+     Both messages look well-formed either way, which is what makes it invisible.
+     *(grok found the starvation, codex found that the fix had no durable source.)*
    - **The bar is DIRECTION, and the message must say so.** A plan has no ship-stopping
      bugs; it has wrong directions. `REQUEST_CHANGES` on a plan means: wrong approach, a
      missed invariant, or an unsafe mechanic. Style, wording, and completeness of the

@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.s
 Open a cmux workspace with Claude Code and Codex in adjacent panes, then ask Claude:
 
 ```
-/auto-implement add rate limiting to the API
+`/auto` add rate limiting to the API
 ```
 
 Claude implements, sends the diff to Codex for review, fixes the blocking findings, and re-submits — looping until Codex replies `APPROVE` (default cap: 10 rounds). You watch, or you don't.
@@ -46,13 +46,13 @@ socket. See [Codex socket permissions](docs/INSTALL.md#codex-socket-permissions)
 
 | Claude Code | What it does |
 |---|---|
-| `/auto-implement [--reviewer <agent>] <task>` | implement → review → fix, until approved (reviewer defaults to codex; `grok` reviews headless) |
-| `/auto-plan <task>` | plan → review → refine, until approved |
-| `/auto-full <task>` | plan loop, then implement loop |
-| `/ask [agent] <question>` | one-off question — judgment call, no review framing; bare `/ask` sends an informal "thoughts?" consult on the current discussion (`/ask-codex` is a deprecated alias) |
+| `/auto` [--reviewer <agent>] <task>` | implement → review → fix, until approved (reviewer defaults to codex; `grok` reviews headless) |
+| `/auto --plan` <task>` | plan → review → refine, until approved |
+| `/auto --plan` <task>` | plan loop, then implement loop |
+| `/ask [agent] <question>` | one-off question — judgment call, no review framing; bare `/ask` sends an informal "thoughts?" consult on the current discussion (``/ask`` is a deprecated alias) |
 | `/send-to-codex` | one-shot review request for work you just did |
 | `/read-from-codex` | read + act on Codex's reply |
-| `/fleet <subcommand>` | orchestrate loops across many cmux workspaces |
+| ``/auto` <subcommand>` | orchestrate loops across many cmux workspaces |
 | `/clean-comms [mode]` | guarded message cleanup (dry-run first) |
 
 | Codex | What it does |
@@ -76,7 +76,7 @@ The full message format, loop semantics, and state model: **[docs/PROTOCOL.md](d
 
 - Claude Code and Codex CLIs
 - A git repository
-- Optional, for auto-delivery: [cmux](https://cmux.com), the two agents in adjacent panes, Claude Code in vim mode, and `python3` (for `/fleet`)
+- Optional, for auto-delivery: [cmux](https://cmux.com), the two agents in adjacent panes, Claude Code in vim mode, and `python3` (for ``/auto``)
 
 ## Docs
 

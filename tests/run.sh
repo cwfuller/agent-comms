@@ -1410,6 +1410,19 @@ grep -q '^### Blocking' "$DV/no-structure.md" && fail "fixture has structure" \
 grep -q 'DERIVED' "$REPO/helpers/runphase.sh" && ok "the broker records that a verdict was derived, not stated" || fail "derivation not recorded"
 grep -q 'no .### Blocking. section to derive one from' "$REPO/helpers/runphase.sh" \
   && ok "a structureless reply is still refused — nothing is inferred from prose" || fail "structureless reply not refused"
+
+# A leg is answered only by a VALID review-feedback — a stray note must not complete a
+# panel and unblock its gate. (codex, panel r1.)
+grep -q 'ignoring a non-review message' "$COMMS" \
+  && ok "compose ignores non-review messages on a leg" || fail "compose leg validation"
+# A named-but-unresolvable artifact is a failure, not a reason to review the live tree.
+grep -q 'does not resolve to a commit' "$REPO/helpers/runphase.sh" \
+  && ok "an unresolvable artifact_id refuses the turn" || fail "unresolvable artifact fail-closed"
+# --rounds must survive the plan phase: the plan message is the handoff's only artifact.
+grep -q 'loop-rounds' "$REPO/templates/claude-commands/auto.md" \
+  && ok "the plan message records the loop's real round budget" || fail "auto.md loop-rounds"
+grep -q "grep -m1 '\^loop-rounds:'" "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "the handoff restores the budget mechanically, not from memory" || fail "read-from-codex loop-rounds"
 grep -qF 'REVIEWER=$(awk' "$REPO/templates/claude-commands/read-from-codex.md" \
   && grep -q 'ok) print v' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader extractor is close-delimiter-gated" || fail "reader REVIEWER capture (bounded)"

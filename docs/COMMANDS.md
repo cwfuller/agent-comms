@@ -39,8 +39,7 @@ they fit. With no completed prior exchange the command fails closed and asks wha
 send. The message is written with a non-interpolating writer (verbatim excerpts can
 contain any heredoc delimiter).
 
-`/ask-codex` remains as a deprecated alias for `/ask codex` for one transition
-release, then drops.
+`/ask-codex` was removed in the 2026-08-26 collapse; the installer deletes it on upgrade.
 
 **`--via acp` (synchronous transport):** skips the mailbox entirely — the consult
 runs as one blocking acpx call (pinned, via npx; Node >= 22.13) and the answer
@@ -184,7 +183,7 @@ comparison is measurable at all before anything richer is justified. See the
   the tree or prompt moved would silently stamp later gating findings with the older
   artifact, and "take the first row" is an arbitrary answer to a question with no right
   answer. `shadow` refuses it and names the existing set. Phase is part of the key
-  because `/auto-full` keeps one thread across the plan→implement transition and
+  because `/auto --plan` keeps one thread across the plan→implement transition and
   restarts at round 1 — plan r1 and implement r1 are different artifacts under the same
   thread and round.
 - **The claim is stored whole.** Rows are immutable and idempotent by `finding_id`, so a
@@ -310,7 +309,7 @@ default `workspace-write`), `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800),
 
 ```text
 # autonomous feature, single workspace
-/auto-full 5 add CSV export to the reports page
+/auto --plan --rounds 5 add CSV export to the reports page
 
 # quick design consult while implementing
 /ask --with-diff is the retry/backoff approach here sound?

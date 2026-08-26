@@ -1,6 +1,6 @@
 Ask a supported agent a one-off question via `.comms/` and auto-deliver it — or, with no question at all, send an informal "thoughts?" consult on the current discussion. No review framing, no autonomous loop, no verdict.
 
-Use this when you want a second opinion — a design choice, an open question, a tradeoff, or simply "thoughts?" on what is being discussed — not a review of work you already did. For review-shaped handoffs use `/send-to-codex`. For autonomous loops use `/auto-plan`, `/auto-implement`, or `/auto-full`.
+Use this when you want a second opinion — a design choice, an open question, a tradeoff, or simply "thoughts?" on what is being discussed — not a review of work you already did. For review-shaped handoffs use `/send-to-codex`. For autonomous loops use `/auto-plan`, `/auto`, or `/auto --plan`.
 
 ## Instructions
 

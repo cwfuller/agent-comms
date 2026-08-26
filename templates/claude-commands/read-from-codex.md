@@ -119,8 +119,15 @@ SAME reviewer for its entire lifecycle.
      - Write the implement-phase message with updated frontmatter: `phase: implement`,
        `round: 1`, same `workflow` and `thread`. **Do NOT copy `max-rounds` from a plan
        message** — the plan phase is capped at 2, and carrying that forward gives
-       implementation 2 rounds instead of its real budget. Use the loop's `--rounds`
-       value (default 4). *(grok, collapse round 1.)*
+       implementation 2 rounds instead of its real budget. Restore it from the plan
+       message's `loop-rounds:` field; if that field is absent (a pre-2026-08-26 loop),
+       fall back to 4 and say so in the handoff. Capture it mechanically, never by
+       memory:
+       ```bash
+       LOOP_ROUNDS="$(grep -m1 '^loop-rounds:' "<the approved plan message>" | sed 's/^loop-rounds: *//')"
+       [ -n "$LOOP_ROUNDS" ] || LOOP_ROUNDS=4
+       ```
+       *(grok found the starvation; codex found the fix had no durable source.)*
      - Include a pinned `## Acceptance criteria` section (3-7 testable statements — carry
        the approved plan's criteria forward if the plan pinned them, else derive them now).
        Later rounds are judged against these; the bar does not move with each holistic pass,
