@@ -276,3 +276,25 @@ Un-actioned advisories carried out of the loop so they survive its end:
   `grep '^### Blocking'` next to a case-tolerant probe — leftover dual-scan on the
   stamp path; compose is unaffected (AC2 holds). Proper fix belongs to the
   scanner/probe unification: gate on `probe_field blocking` unconditionally. [codex+grok r4]
+
+## 2026-08-26 — field-report-9446 (closed at max-rounds, 5 of 5)
+
+Un-actioned advisories carried out of the loop so they survive its end.
+
+- **The corpus still enumerates known bugs rather than constraining the rule.** grok, round 4:
+  a property like "every fenced region is invisible to both the count and the structure bit"
+  would have caught the `grep` hole without anyone naming it first. Each round so far added
+  cases for the variant just found; none stated the invariant.
+- **Trailing-fence conservatism is accepted, deliberately.** A leftover unclosed fence after a
+  finished review refuses the turn even when a verdict and findings were already read. grok
+  argued this is not a unique kill switch — a reviewer who wants to fail a round can already
+  omit structure or write REQUEST_CHANGES — so do not fail open to make trailing fences nicer.
+- **Headings remain model-authored, and that is the contract.** Placeholder matching and now
+  heading matching were made case-tolerant for template drift; the heading *vocabulary* is
+  still trusted input by design.
+- **Claim/evidence discipline.** codex wants a compact hand-written `claim | production path |
+  behavioral test` table every implementation round, explicitly NOT generated — generation can
+  confirm a reference exists but not that a test exercises the claimed path. grok wants only a
+  test pointer per "What changed" line, and only when a round asserts a prior round's fix still
+  holds. Both were proposed after two rounds in which a false prose claim of mine survived
+  review; neither is built.
