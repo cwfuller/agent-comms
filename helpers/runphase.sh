@@ -705,11 +705,15 @@ cmd_run() {
        && git -C "$mount_dir" reset -q --mixed "$mount_base" 2>>"$run_dir/runner.log"; then
       workdir="$mount_dir"
     else
-      # Fail LOUD but do not strand the turn: reviewing the live tree is worse than
-      # nothing only if nobody knows it happened.
-      echo "warning: could not mount artifact $msg_artifact — reviewing the LIVE tree instead" >>"$run_dir/runner.log"
+      # FAIL CLOSED. The message names a pinned artifact; reviewing the live tree
+      # instead produces a review of something nobody asked about, and nothing
+      # downstream can tell. (grok, collapse round 1.)
       git -C "$main_root" worktree remove --force "$mount_dir" 2>/dev/null || true
       mount_dir=""
+      update_thread_state "$msg_thread" failed "" "$sfield" || true
+      write_result "$run_dir" failed 1 "" "$msg" "could not mount artifact $msg_artifact — refusing to review the live tree in its place"
+      trap - EXIT
+      exit 1
     fi
   fi
   unmount_artifact() {
@@ -940,8 +944,21 @@ PROMPT
     local acp_ver; acp_ver="$("$acp_sh" version)"
     ( cd "$workdir" && npx -y "acpx@$acp_ver" "$acp_profile" sessions ensure --name "$acp_session" ) \
       >>"$run_dir/runner.log" 2>&1 || true
+    # Permission profile depends on WHERE the turn runs. A review prompt tells the
+    # reviewer to run read-only git commands and compare head_sha — those are terminal
+    # requests, not file reads, so --approve-reads denies them and the turn dies after
+    # doing the work (observed: grok produced a 9,865-byte review, then exited 5).
+    # Inside a MOUNT the sandbox is the mount itself: a throwaway linked worktree with no
+    # .comms in it, whose reply the parent brokers, so the child can reach neither the
+    # real tree nor the mailbox. Outside one, stay narrow. (grok, collapse round 1.)
+    local -a acp_perm
+    if [ -n "$mount_dir" ]; then
+      acp_perm=(--approve-all)
+    else
+      acp_perm=(--approve-reads --non-interactive-permissions deny)
+    fi
     ( cd "$workdir" && npx -y "acpx@$acp_ver" \
-        --approve-reads --non-interactive-permissions deny \
+        "${acp_perm[@]}" \
         --timeout "$timeout" --format quiet \
         "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
       > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" || acp_rc=$?

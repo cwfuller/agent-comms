@@ -1355,6 +1355,20 @@ grep -qi 'not auto-address every blocking' "$AUTOF" \
   && ok "auto.md forbids auto-addressing every reviewer's blockers" || fail "auto.md hostage guard"
 grep -qi 'REFUSES a partial panel' "$AUTOF" \
   && ok "auto.md says an unanswered leg is not an approval" || fail "auto.md partial-panel rule"
+# The plan cap is the PLAN's, not the loop's. Copying `max-rounds: 2` into implement
+# halves the real budget and both messages still look well-formed. (grok, collapse r1.)
+grep -qi 'PLAN cap only' "$AUTOF" && ok "auto.md scopes the 2-round cap to the plan phase" || fail "auto.md plan cap scoping"
+grep -qi 'Do NOT copy .max-rounds. from a plan' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "the handoff refuses to carry the plan cap into implementation" || fail "read-from-codex plan cap carry"
+# An upgrade must REMOVE retired commands; only ceasing to copy them leaves them callable.
+grep -q 'RETIRED_COMMANDS=' "$REPO/install.sh" && ok "installer names the retired commands" || fail "installer retired list"
+[ "$(grep -c 'for f in \$RETIRED_COMMANDS' "$REPO/install.sh")" -ge 2 ] \
+  && ok "installer removes retired commands in BOTH scopes" || fail "installer retired removal"
+# prompt_version must hash the surface that exists, not the one that was deleted.
+grep -q 'auto.md:\$HOME/.claude/commands/auto.md' "$COMMS" \
+  && ok "prompt surface hashes /auto" || fail "prompt surface missing auto.md"
+grep -q 'auto-implement.md:\$HOME' "$COMMS" && fail "prompt surface still hashes a deleted template" \
+  || ok "prompt surface no longer hashes deleted templates"
 grep -qF 'REVIEWER=$(awk' "$REPO/templates/claude-commands/read-from-codex.md" \
   && grep -q 'ok) print v' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader extractor is close-delimiter-gated" || fail "reader REVIEWER capture (bounded)"
@@ -2130,24 +2144,24 @@ echo "== grading pilot: prompt-version partitions grades across an instruction e
 GR_HOME="$WORK/grading-home"
 mkdir -p "$GR_HOME"
 mkdir -p "$GR_FIX/.agent-comms" "$GR_FIX/.claude/commands"
-echo "reviewer prompt v1" > "$GR_FIX/.claude/commands/auto-implement.md"
+echo "reviewer prompt v1" > "$GR_FIX/.claude/commands/auto.md"
 run_gr_h() { (cd "$GR_FIX" && env -u CMUX_WORKSPACE_ID HOME="$GR_HOME" "$COMMS" "$@"); }
 PV1="$(run_gr_h prompt-version)"
 printf '%s' "$PV1" | grep -qE '^[0-9a-f]{12}$' && ok "prompt-version prints a short content hash" || fail "prompt-version shape (got $PV1)"
 [ "$PV1" = "$(run_gr_h prompt-version)" ] && ok "prompt-version is stable when nothing changes" || fail "prompt-version unstable"
-echo "reviewer prompt v2 — one sentence added" > "$GR_FIX/.claude/commands/auto-implement.md"
+echo "reviewer prompt v2 — one sentence added" > "$GR_FIX/.claude/commands/auto.md"
 [ "$PV1" != "$(run_gr_h prompt-version)" ] && ok "editing a reviewer instruction changes the version" || fail "prompt-version blind to an edit"
-echo "reviewer prompt v1" > "$GR_FIX/.claude/commands/auto-implement.md"
+echo "reviewer prompt v1" > "$GR_FIX/.claude/commands/auto.md"
 [ "$PV1" = "$(run_gr_h prompt-version)" ] && ok "reverting the edit restores the version" || fail "prompt-version not content-addressed"
 PV_BEFORE="$(run_gr_h prompt-version)"
-echo "a newly installed surface" > "$GR_FIX/.claude/commands/auto-plan.md"
+echo "a newly installed surface" > "$GR_FIX/.claude/commands/read-from-codex.md"
 [ "$PV_BEFORE" != "$(run_gr_h prompt-version)" ] \
   && ok "a surface APPEARING changes the version (missing files are hashed as markers)" || fail "prompt-version blind to an added surface"
 # Capture BEFORE grepping: `producer | grep -q` races under `set -o pipefail` —
 # grep exits on the first match, the producer takes SIGPIPE, and the pipeline
 # reports 141. Cost us two phantom failures.
 PV_LIST="$(run_gr_h prompt-version --list)"
-printf '%s\n' "$PV_LIST" | grep -q 'auto-implement.md' && ok "prompt-version --list names its inputs" || fail "prompt-version --list"
+printf '%s\n' "$PV_LIST" | grep -q 'auto.md' && ok "prompt-version --list names its inputs" || fail "prompt-version --list"
 printf '%s\n' "$PV_LIST" | grep -q '^MISSING ' && ok "--list marks surfaces this install does not have" || fail "prompt-version missing marker"
 check_not "prompt-version rejects an unknown option" run_gr_h prompt-version --bogus
 

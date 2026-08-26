@@ -1557,9 +1557,7 @@ prompt_surface_files() {
   local root="$1" p rel glob hit name
   for p in \
     ".agent-comms/runphase.sh:$HOME/.agent-comms/runphase.sh" \
-    ".claude/commands/auto-plan.md:$HOME/.claude/commands/auto-plan.md" \
-    ".claude/commands/auto-implement.md:$HOME/.claude/commands/auto-implement.md" \
-    ".claude/commands/auto-full.md:$HOME/.claude/commands/auto-full.md" \
+    ".claude/commands/auto.md:$HOME/.claude/commands/auto.md" \
     ".claude/commands/read-from-codex.md:$HOME/.claude/commands/read-from-codex.md" \
     ".claude/commands/send-to-codex.md:$HOME/.claude/commands/send-to-codex.md"
   do
@@ -1798,7 +1796,7 @@ deliver_headless() {
   local rp="$(dirname "$SELF")/runphase.sh"
   export COMMS_RUNPHASE_VIA="${COMMS_RUNPHASE_VIA:-}"
   if [ ! -x "$rp" ]; then
-    echo "warning: headless is the default for loops but runphase.sh was not found next to comms.sh — message written for manual pickup (re-run install.sh, or use --via cmux / COMMS_DELIVERY=cmux)"
+    echo "warning: this loop needs the headless runner but runphase.sh was not found next to comms.sh — message written for manual pickup (re-run install.sh, or use --via cmux / COMMS_DELIVERY=cmux)"
     return 0
   fi
   if [ -z "$msgfile" ]; then

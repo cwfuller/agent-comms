@@ -71,7 +71,7 @@ cwd: <current working directory>
 message_id: <this file's name, without .md>
 thread: <copy from incoming message if present — identifies the loop>
 in-reply-to: <message_id of the message you're responding to, if any>
-workflow: <copy from incoming message if present — auto-plan | auto-implement | auto-full>
+workflow: <copy from the incoming message verbatim if present>
 phase: <copy from incoming message if present — plan | implement>
 round: <copy from incoming message if present>
 max-rounds: <copy from incoming message if present>

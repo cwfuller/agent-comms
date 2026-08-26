@@ -22,6 +22,10 @@ fi
 CLAUDE_COMMANDS_DIR="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
 CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask.md auto.md clean-comms.md"
+# Commands this project used to install. An upgrade that only stops COPYING them leaves
+# them on disk and callable, so the agent keeps being told to use surfaces that no longer
+# exist. Removing them is part of installing. (grok, collapse round 1.)
+RETIRED_COMMANDS="auto-plan.md auto-implement.md auto-full.md fleet.md ask-codex.md"
 CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
@@ -172,6 +176,9 @@ install_global_assets() {
   for f in $CLAUDE_COMMANDS; do
     cp "$TEMPLATE_DIR/claude-commands/$f" "$CLAUDE_COMMANDS_DIR/$f"
   done
+  for f in $RETIRED_COMMANDS; do
+    [ -f "$CLAUDE_COMMANDS_DIR/$f" ] && { rm -f "$CLAUDE_COMMANDS_DIR/$f"; echo "  removed retired command /${f%.md}"; }
+  done
 
   echo "  installing global Codex skills..."
   for skill in $CODEX_SKILLS; do
@@ -197,6 +204,9 @@ install_local_assets() {
   mkdir -p "$PROJECT_ROOT/.claude/commands"
   for f in $CLAUDE_COMMANDS; do
     cp "$TEMPLATE_DIR/claude-commands/$f" "$PROJECT_ROOT/.claude/commands/$f"
+  done
+  for f in $RETIRED_COMMANDS; do
+    [ -f "$PROJECT_ROOT/.claude/commands/$f" ] && { rm -f "$PROJECT_ROOT/.claude/commands/$f"; echo "  removed retired command /${f%.md}"; }
   done
 
   echo "  installing project-local Codex skills..."

@@ -116,7 +116,11 @@ SAME reviewer for its entire lifecycle.
      - **Live-validate when the change is model- or runtime-coupled** (a model call, network API,
        daemon): run the real surface once before handing off — green unit tests alone have shipped
        wrong premises into review rounds before
-     - Write the implement-phase message with updated frontmatter: `phase: implement`, `round: 1`, same `workflow`, `max-rounds`, and `thread`
+     - Write the implement-phase message with updated frontmatter: `phase: implement`,
+       `round: 1`, same `workflow` and `thread`. **Do NOT copy `max-rounds` from a plan
+       message** — the plan phase is capped at 2, and carrying that forward gives
+       implementation 2 rounds instead of its real budget. Use the loop's `--rounds`
+       value (default 4). *(grok, collapse round 1.)*
      - Include a pinned `## Acceptance criteria` section (3-7 testable statements — carry
        the approved plan's criteria forward if the plan pinned them, else derive them now).
        Later rounds are judged against these; the bar does not move with each holistic pass,
