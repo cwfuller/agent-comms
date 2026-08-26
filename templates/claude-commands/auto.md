@@ -13,10 +13,12 @@ cap, is what keeps a plan phase from becoming a document-nit loop.
 
 1. **Parse arguments:**
    - The argument text describes what to implement (or references an existing plan).
-   - `--rounds N` sets max rounds for EACH phase. **Default 5.** Every loop in this
-     repo's history terminated by round 4, and each one that hit the cap escalated to the
-     human — which is the involvement this tool exists to remove. 5 leaves headroom to
-     finish rather than hand back.
+   - `--rounds N` sets max rounds for EACH phase. **Default 10.** A cap you actually hit
+     is a wall, not a budget: every loop that hit one escalated to the human, which is the
+     involvement this tool exists to remove. field-report-9446 is the evidence — it took a
+     real blocking finding in every one of its first five rounds and was still finding them
+     when the cap stopped it. Cheap rounds are not the cost worth optimising; handing
+     unfinished work back to a human is.
    - `--plan` runs an approach review first (step 3). Off by default. It gets its OWN
      budget of `--rounds`; the phases do not share one.
    - `--reviewers a,b` selects the reviewing agents. **The default is a PANEL: every
@@ -53,9 +55,11 @@ cap, is what keeps a plan phase from becoming a document-nit loop.
 3. **`--plan` only — the approach round.** Skip entirely without the flag.
    - Write the approach: the goal, the mechanism, the invariants it must not break, and
      what you deliberately are NOT doing. A real approach doc, not a 2-line intent.
-   - Frontmatter: `workflow: auto`, `phase: plan`, `round: 1`, `max-rounds: 2`, and
-     **`loop-rounds: <N>`** — the loop's real budget from `--rounds` (default 5).
-     **The 2 is the PLAN cap only**, and `loop-rounds` is where the real budget survives:
+   - Frontmatter: `workflow: auto`, `phase: plan`, `round: 1`, `max-rounds: <N>`, and
+     **`loop-rounds: <N>`** — the loop's real budget from `--rounds` (default 10).
+     **`max-rounds` here is the PLAN cap only**, and `loop-rounds` is where the real budget
+     survives. The two are EQUAL by default now, which makes the distinction easy to forget
+     and the starvation bug easy to reintroduce — keep both fields regardless:
      the plan message is the ONLY artifact the handoff can read, so without that field
      there is nothing to restore N from and implementation silently inherits the wrong one.
      Both messages look well-formed either way, which is what makes it invisible.

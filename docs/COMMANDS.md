@@ -9,7 +9,7 @@ prompt-wrappers; the shell logic lives in the installed helpers (see
 ### `/auto [--plan] [--reviewers a,b] [--rounds N] [--via cmux] <task>`
 
 Implement → send to Codex → fix blocking findings → repeat until `APPROVE` or `N`
-rounds (default 5). The task text can describe work or reference an existing plan file.
+rounds (default 10). The task text can describe work or reference an existing plan file.
 Round messages keep stable context (latest findings bundle + `git diff --stat` +
 validation results), never per-finding fix narration.
 

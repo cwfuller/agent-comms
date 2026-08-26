@@ -28,7 +28,7 @@ Then, in Claude Code:
 
 That's it. Claude implements, sends the diff to **every other registered agent** for
 review, fixes what they agree on, and re-submits — until they approve or it runs out of
-rounds (default 5 per phase).
+rounds (default 10 per phase).
 
 Nothing else is required: no terminal panes, no second window open. Review turns run over
 ACP in a warm background session.
@@ -40,7 +40,7 @@ ACP in a warm background session.
                                   #   reviewed by a PANEL of every other agent by default
 /auto --reviewers codex           # narrow it to one reviewer
 /auto --plan <task>               # add an approach review first (high-stakes work)
-/auto --rounds 8 <task>           # more rounds than the default 5
+/auto --rounds 3 <task>           # a tighter cap than the default 10
 
 /ask codex <question>             # one-off consult, no loop, no verdict
 /ask                              # "thoughts?" on the current discussion
