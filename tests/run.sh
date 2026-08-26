@@ -2748,7 +2748,25 @@ max-rounds: 4
 loop message
 TRW
 TR_WS="$(basename "$TR_FIX")"
-run_tr_deliver() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
+# Delivery here must NOT spawn a real agent: COMMS_DELIVERY=cmux pins the stubbed
+# transport. Tests that assert the DEFAULT routing use run_tr, which only asks
+# `transport` and never delivers.
+run_tr_deliver() { (cd "$TR_FIX" && env COMMS_DELIVERY=cmux PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
+# End-to-end delivery on the REAL default, without spawning a real agent: a copy of the
+# helper beside a STUB runphase.sh. `deliver` resolves runphase next to comms.sh, so the
+# stub is what gets spawned. This is how a default-routing test stays honest and still
+# leaves no background process behind.
+TR_SANDBOX="$WORK/tr-sandbox"; mkdir -p "$TR_SANDBOX"
+cp "$COMMS" "$TR_SANDBOX/comms.sh"; chmod +x "$TR_SANDBOX/comms.sh"
+cat > "$TR_SANDBOX/runphase.sh" <<'RPSTUB'
+#!/bin/bash
+# stub runphase: report what a real spawn would report, spawn nothing
+echo "spawned runphase pid=stub provider=${3:-codex}"
+exit 0
+RPSTUB
+chmod +x "$TR_SANDBOX/runphase.sh"
+run_tr_default() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$TR_SANDBOX/comms.sh" "$@"); }
+
 cat > "$CMUX_STUB_DIR/tree-workspace_7.txt" <<'TRTREE2'
 workspace:7
   pane:1
@@ -2758,7 +2776,7 @@ TR_CONSULT_OUT="$(run_tr_deliver deliver codex "$TR_CONSULT" 2>&1 || true)"
 printf '%s\n' "$TR_CONSULT_OUT" | grep -q 'delivered to surface' \
   && ok "a CONSULT with a live pane is nudged, not spawned headless" \
   || fail "consult reclassified as a loop (got: $TR_CONSULT_OUT)"
-TR_LOOP_OUT="$(run_tr_deliver deliver codex "$TR_LOOPMSG" 2>&1 || true)"
+TR_LOOP_OUT="$(run_tr_default deliver codex "$TR_LOOPMSG" 2>&1 || true)"
 printf '%s\n' "$TR_LOOP_OUT" | grep -q 'delivered to surface' \
   && fail "a workflow message took the pane instead of the headless runner" \
   || ok "a LOOP message goes headless even with a live pane"
@@ -2778,7 +2796,7 @@ printf '%s\n' "$TR_NOWS" | grep -q 'tree unavailable' \
   || fail "specific reason lost (got: $TR_NOWS)"
 # The mode comes from the MESSAGE, so `transport` agrees with what deliver did.
 [ "$(run_tr_deliver transport codex)" = "cmux" ] && ok "consult mode resolves to the live pane" || fail "consult transport"
-[ "$(run_tr_deliver transport codex --loop)" != "cmux" ] && ok "loop mode never resolves to the pane by default" || fail "loop transport"
+[ "$(run_tr_default transport codex --loop)" != "cmux" ] && ok "loop mode never resolves to the pane by default" || fail "loop transport"
 
 # Criterion 3: with runphase.sh genuinely absent, a loop must fall back to the pane
 # rather than strand. Untested until grok pointed it out. A bare copy of the helper (no
@@ -2890,7 +2908,8 @@ git -C "$PN_FIX" add -A >/dev/null 2>&1
 git -C "$PN_FIX" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$PN_FIX/.comms/to-codex" "$PN_FIX/.comms/to-grok" "$PN_FIX/.comms/to-claude" "$PN_FIX/.comms/archive"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$PN_FIX/.comms/config"
-run_pn() { (cd "$PN_FIX" && env -u CMUX_WORKSPACE_ID -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+# Same rule: a panel dispatch delivers to every leg, so it must ride the stub.
+run_pn() { (cd "$PN_FIX" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 PN_WS="$(run_pn workspace)"
 PN_REQ="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-00-00_req.md"
 cat > "$PN_REQ" <<PNEOF
