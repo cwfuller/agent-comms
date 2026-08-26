@@ -2891,6 +2891,7 @@ git -C "$PN_FIX" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$PN_FIX/.comms/to-codex" "$PN_FIX/.comms/to-grok" "$PN_FIX/.comms/to-claude" "$PN_FIX/.comms/archive"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$PN_FIX/.comms/config"
 run_pn() { (cd "$PN_FIX" && env -u CMUX_WORKSPACE_ID -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+PN_WS="$(run_pn workspace)"
 PN_REQ="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-00-00_req.md"
 cat > "$PN_REQ" <<PNEOF
 ---
@@ -2939,6 +2940,42 @@ run_pn validate "$PN_LEG_C" >/dev/null 2>&1 && ok "a dispatched leg validates" |
 check_not "panel refuses an unregistered reviewer" run_pn panel dispatch --to codex,gemini "$PN_REQ"
 check_not "panel refuses the request's own author" run_pn panel dispatch --to claude "$PN_REQ"
 check_not "panel refuses a duplicate reviewer" run_pn panel dispatch --to codex,codex "$PN_REQ"
+# COMPOSE: cluster by support, drop nothing, let judgment live in the gate.
+mk_leg_reply() { # <agent> <thread> <blocking-anchor> <extra-blocking-anchor-or-empty>
+  local ag="$1" th="$2" a1="$3" a2="${4:-}"
+  local f="$PN_FIX/.comms/archive/${PN_WS}_2026-08-26T12-3${5:-0}-00_${ag}-reply.md"
+  { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T12:3%s:00Z\nworkspace: %s\nmessage_id: %s-reply\nthread: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: REQUEST_CHANGES\n---\n\n## Findings\n\n### Blocking\n' "$ag" "${5:-0}" "$PN_WS" "$ag" "$th"
+    printf -- '- `%s` — %s says this one is real.\n' "$a1" "$ag"
+    [ -n "$a2" ] && printf -- '- `%s` — only %s saw this.\n' "$a2" "$ag"
+    printf -- '\n### Advisory\n- `s.txt:9` — %s advisory.\n' "$ag"
+  } > "$f"
+}
+# Both flag s.txt:1 (corroborated); each also has one nobody else saw (unique).
+mk_leg_reply codex "$PN_TC" "s.txt:1" "s.txt:2" 0
+mk_leg_reply grok  "$PN_TG" "s.txt:1" "s.txt:3" 1
+PN_COMP="$(run_pn compose --set "$PN_SC" 2>&1)"
+printf '%s\n' "$PN_COMP" | grep -q '2 legs, all answered' && ok "compose reports full-panel coverage" || fail "compose coverage (got: $(printf '%s' "$PN_COMP" | head -2))"
+# The corroborated anchor gates.
+printf '%s\n' "$PN_COMP" | awk '/^## Gates/,/^## Uncorroborated/' | grep -q 's.txt:1' \
+  && ok "an anchor two reviewers independently flagged is a GATE" || fail "corroborated finding not gated"
+# Unique findings are PRESERVED, not dropped — grok's core objection to condensing.
+printf '%s\n' "$PN_COMP" | grep -q 's.txt:2' && printf '%s\n' "$PN_COMP" | grep -q 's.txt:3' \
+  && ok "unique findings from BOTH reviewers survive composition" || fail "a unique finding was dropped"
+printf '%s\n' "$PN_COMP" | awk '/^## Uncorroborated/,/^## Unanchored/' | grep -q 's.txt:2' \
+  && ok "a lone blocking finding is flagged for cross-check, not silently obeyed" || fail "uncorroborated labelling"
+printf '%s\n' "$PN_COMP" | grep -q 's.txt:9' && ok "advisories are carried but never gate" || fail "advisory dropped"
+# Every finding stays ATTRIBUTED — a bundle that is nobody's review is the failure mode.
+printf '%s\n' "$PN_COMP" | grep -q '\[codex\]' && printf '%s\n' "$PN_COMP" | grep -q '\[grok\]' \
+  && ok "every finding stays attributed to the reviewer that made it" || fail "attribution lost in composition"
+
+# A PARTIAL panel must never gate: composing over a missing voice looks like more
+# review than actually happened.
+PN_SET2="pn-partial"
+run_pn panel dispatch --to codex,grok --set "$PN_SET2" "$PN_REQ" >/dev/null 2>&1 || true
+PN_PART="$(run_pn compose --set "$(run_pn panel status --set "$PN_SET2" >/dev/null 2>&1; echo "$PN_SET2")" 2>&1)" && PN_PRC=0 || PN_PRC=$?
+printf '%s\n' "$PN_PART" | grep -qi 'incomplete\|no review sets\|no legs' \
+  && ok "an unanswered leg blocks composition instead of counting as approval" || fail "partial panel composed anyway"
+
 PN_STATUS="$(run_pn panel status --set "$PN_SC" 2>&1)"
 printf '%s\n' "$PN_STATUS" | grep -q 'codex' && printf '%s\n' "$PN_STATUS" | grep -q 'grok' \
   && ok "panel status lists every leg in the set" || fail "panel status (got: $PN_STATUS)"

@@ -51,6 +51,10 @@
 #                               fan ONE artifact out to N reviewers as N parallel 2-party
 #                               legs sharing a review_set. One snapshot for the whole set.
 #   panel status --set <id>     which legs have answered, and with what verdict
+#   compose --set <id> [--out F]
+#                               cluster every leg's findings and label them by SUPPORT:
+#                               corroborated (gates), uncorroborated (cross-check first),
+#                               unanchored, advisory. Drops nothing; no model arbitrates.
 #   round-note <reply> --note "<text>"
 #                               record how a reviewer performed on ONE round: counts are
 #                               derived from the reply, the prose is your assessment.
@@ -1099,6 +1103,89 @@ cmd_panel() {
     n=$((n + 1))
   done
   echo "panel: $set_id dispatched to $n reviewer(s); compose with 'comms.sh panel status --set $set_id'"
+}
+
+cmd_compose() {
+  # compose --set <id> [--out F] — read every leg's findings, cluster them, and say what
+  # the panel actually gates on.
+  #
+  # THIS IS NOT A JUDGE. Nothing is dropped, nothing is rewritten, and no model is asked
+  # to arbitrate: the union is preserved verbatim and each finding is labelled by how much
+  # SUPPORT it has. Judgment lives in the gate, not in a rewritten bundle — a bundle that
+  # is "nobody's review" is how unique real findings vanish without a trace, and recall is
+  # already unobservable here.
+  #
+  # The gate is CORROBORATION, deliberately neither of the two obvious rules:
+  #   any-blocks      — one noisy reviewer holds every loop hostage
+  #   primary-only    — unique findings never gate, which wastes the panel entirely
+  local set_id="" out=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --set) shift; set_id="${1:-}" ;;
+      --out) shift; out="${1:-}" ;;
+      -?*)   usage_err "compose: unknown option '$(clip "$1")'" ;;
+      *)     usage_err "compose: unexpected argument '$(clip "$1")'" ;;
+    esac
+    shift
+  done
+  [ -n "$set_id" ] || usage_err "compose: --set <id> is required"
+  local root; root="$(main_repo_root)"; [ -n "$root" ] || usage_err "compose: not inside a git repository"
+  local idx; idx="$(findings_set_index "$root")"
+  [ -f "$idx" ] || usage_err "compose: no review sets recorded"
+
+  local ws; ws="$(cmd_workspace)"
+  local legs; legs="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3}' "$idx")"
+  [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
+
+  local rows="" ag th reply n_legs=0 n_answered=0 pending=""
+  while IFS=$'\t' read -r ag th; do
+    [ -n "$ag" ] || continue
+    n_legs=$((n_legs + 1))
+    reply="$(sorted_message_files "$root/.comms/archive" "$ws" "$ag" "$th" newest | head -1 || true)"
+    [ -n "$reply" ] || reply="$(sorted_message_files "$root/.comms/to-claude" "$ws" "$ag" "$th" newest | head -1 || true)"
+    if [ -z "$reply" ]; then pending="$pending $ag"; continue; fi
+    n_answered=$((n_answered + 1))
+    rows="$rows
+$(findings_extract "$reply" gating "$set_id" "" "" "" "")"
+  done <<< "$legs"
+
+  # An unanswered leg is NOT an approval. A panel that quietly composes over a missing
+  # voice is worse than one reviewer, because it looks like more.
+  if [ -n "$pending" ]; then
+    echo "compose: INCOMPLETE — no reply yet from:$pending ($n_answered of $n_legs legs answered)"
+    echo "compose: refusing to gate on a partial panel; re-run when the set is complete"
+    return 3
+  fi
+
+  # Cluster on the anchor ONLY, and only exact matches. Two findings on one anchor may
+  # still assert different things, so every source line is retained and printed.
+  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/agent-comms-compose.XXXXXX")"
+  printf '%s\n' "$rows" | awk -F'\t' 'NF>5 && $15 != ""' > "$tmp"
+  local total blocking corroborated unique
+  total="$(grep -c . "$tmp" || true)"
+  blocking="$(awk -F'\t' '$13=="blocking"' "$tmp" | grep -c . || true)"
+  corroborated="$(awk -F'\t' '$13=="blocking" && $14!=""{k[$14]=k[$14] " " $9} END{n=0; for (a in k){c=split(k[a],p," "); u=""; for(i=1;i<=c;i++){if (index(u," " p[i] " ")==0) u=u " " p[i] " "}; m=split(u,q," "); if (m>1) n++} print n+0}' "$tmp")"
+  unique=$(( ${blocking:-0} - 0 ))
+
+  {
+    printf '# Panel composition — review set %s\n\n' "$set_id"
+    printf '%s legs, all answered. %s findings (%s blocking).\n' "$n_legs" "${total:-0}" "${blocking:-0}"
+    printf 'Anchored blocking findings supported by MORE THAN ONE reviewer: %s\n\n' "${corroborated:-0}"
+    printf '## Gates (corroborated — an anchor two reviewers independently flagged)\n\n'
+    awk -F'\t' '$13=="blocking" && $14!=""{k[$14]=k[$14] "\n- [" $9 "] " $15; who[$14]=who[$14] " " $9}
+      END{for (a in k){c=split(who[a],p," "); u=""; for(i=1;i<=c;i++){if (index(u," " p[i] " ")==0) u=u " " p[i] " "}; m=split(u,q," ");
+        if (m>1) printf "### %s\n%s\n\n", a, k[a]}}' "$tmp"
+    printf '## Uncorroborated blocking findings (cross-check before spending a round)\n\n'
+    awk -F'\t' '$13=="blocking" && $14!=""{k[$14]=k[$14] "\n- [" $9 "] " $15; who[$14]=who[$14] " " $9}
+      END{for (a in k){c=split(who[a],p," "); u=""; for(i=1;i<=c;i++){if (index(u," " p[i] " ")==0) u=u " " p[i] " "}; m=split(u,q," ");
+        if (m==1) printf "### %s\n%s\n\n", a, k[a]}}' "$tmp"
+    printf '## Unanchored blocking findings (no anchor — cannot be clustered)\n\n'
+    awk -F'\t' '$13=="blocking" && $14==""{printf "- [%s] %s\n", $9, $15}' "$tmp"
+    printf '\n## Advisory (never gates)\n\n'
+    awk -F'\t' '$13=="advisory"{printf "- [%s] %s%s\n", $9, ($14!="" ? "`" $14 "` — " : ""), $15}' "$tmp"
+  } > "${out:-/dev/stdout}"
+  rm -f "$tmp"
+  [ -z "$out" ] || echo "compose: wrote ${out#"$root"/}"
 }
 
 cmd_round_note() {
@@ -2449,6 +2536,7 @@ case "${1:-}" in
   archive-search) shift; cmd_archive_search "$@" ;;
   findings)       shift; cmd_findings "$@" ;;
   panel)          shift; cmd_panel "$@" ;;
+  compose)        shift; cmd_compose "$@" ;;
   round-note)     shift; cmd_round_note "$@" ;;
   shadow)         shift; cmd_shadow "$@" ;;
   snapshot)       shift; cmd_snapshot "$@" ;;
