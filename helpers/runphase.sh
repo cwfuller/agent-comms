@@ -534,9 +534,9 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     # verdict line — round-N bodies routinely quote round N-1 — cannot forge or
     # duplicate one. (codex, field-report round 2.)
     local vline vcount
-    vcount="$(awk '/^```/{fence=!fence; next} !fence && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{n++} END{print n+0}' "$run_dir/reply-raw.md")"
+    vcount="$(awk '{ind=0; while (substr($0,ind+1,1)==" ") ind++; fl=substr($0,ind+1)} ind<=3 && (index(fl,"```")==1 || index(fl,"~~~")==1){fence=!fence; next} !fence && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{n++} END{print n+0}' "$run_dir/reply-raw.md")"
     if [ "${vcount:-0}" -eq 1 ]; then
-      vline="$(awk '/^```/{fence=!fence; next} !fence && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{print NR; exit}' "$run_dir/reply-raw.md")"
+      vline="$(awk '{ind=0; while (substr($0,ind+1,1)==" ") ind++; fl=substr($0,ind+1)} ind<=3 && (index(fl,"```")==1 || index(fl,"~~~")==1){fence=!fence; next} !fence && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{print NR; exit}' "$run_dir/reply-raw.md")"
       verdict="$(sed -n "${vline}p" "$run_dir/reply-raw.md" | sed 's/^VERDICT: //')"
       body_start=$((vline + 1))
       [ "$vline" = "1" ] || echo "note: VERDICT line found at line $vline, not line 1 (preamble above it was skipped)" >>"$run_dir/runner.log"

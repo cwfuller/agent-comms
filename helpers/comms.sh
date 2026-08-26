@@ -827,7 +827,8 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
       fi
     fi
   fi
-  awk -v schema="$FINDINGS_SCHEMA_VERSION" \
+  awk -v raw="${FINDINGS_RAW:-}" \
+      -v schema="$FINDINGS_SCHEMA_VERSION" \
       -v mid="$mid" \
       -v thread="$(frontmatter_field "$f" thread)" \
       -v phase="$(frontmatter_field "$f" phase)" \
@@ -873,9 +874,26 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
         role, blane, anchor, claim, verdict, mid
     }
     { sub(/\r$/, "") }
-    NR == 1 && $0 == "---" { fm = 1; next }
+    # Raw mode parses the ENTIRE input as body. A child that wrapped its reply in
+    # horizontal rules could otherwise hide a real blocking item inside what looked
+    # like frontmatter: raw counted zero and derived APPROVE, then the stamped envelope
+    # pushed that same delimiter off line 1 and normal extraction saw the blocker --
+    # the stamped-verdict/body contradiction again, this time built by the child.
+    # Structure is never sourced from delimiters the model authored. (codex, round 3.)
+    NR == 1 && $0 == "---" && raw != "1" { fm = 1; next }
     fm && $0 == "---" { fm = 0; next }
     fm { next }
+    # Fenced blocks are QUOTES, not findings. A reply that quotes a prior round --
+    # which every round-N body does -- was having the quoted blockers counted
+    # as its own, so a clean APPROVE failed the body cross-check and the round died.
+    # The verdict scan already skipped fences; this makes the findings parser agree.
+    {
+      ind = 0
+      while (substr($0, ind + 1, 1) == " ") ind++
+      fl = substr($0, ind + 1)
+    }
+    ind <= 3 && (index(fl, "```") == 1 || index(fl, "~~~") == 1) { fence = !fence; next }
+    fence { next }
     /^### Blocking/ { flush(); lane = "blocking"; next }
     /^### Advisory/ { flush(); lane = "advisory"; next }
     # Any other heading closes the lane — `### Process` never gates a verdict and
