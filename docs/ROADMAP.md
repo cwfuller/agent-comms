@@ -816,6 +816,65 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
 - [ ] **End-to-end coverage for the `deliver → acp → spawn --via acp` path.** The committed
   suite asserts the selector; the path itself is proven only by a live run. *(codex.)*
 
+### Any agent drives (2026-08-26, owner direction)
+
+The project was built for **Claude to drive**: Claude has commands, Codex has reviewer
+skills, grok has neither. The goal is for ANY registered agent to drive a loop and put the
+others — **and/or another instance of itself** — on the panel.
+
+Most of the plumbing is already agent-neutral: the registry, `inbox_for`, `transport`,
+`peer_of`, the verdict rule binding by TYPE not sender, and `panel dispatch`. What is not:
+
+- [ ] **The command surface is Claude-only.** `/auto`, `/ask` and the rest install into
+  `.claude/commands/`. A driving Codex or grok has no equivalent verb — the 2026-08-26
+  field report is exactly this ("Codex currently has to manually author frontmatter, send,
+  capture the run directory, await it, locate the response, and archive it"). The loop
+  logic already lives in `comms.sh`; what is missing is a per-agent thin surface over it.
+- [ ] **`from:` is written by the template, not derived.** A driver-neutral flow has to
+  learn its own identity rather than hardcode `from: claude`.
+- [ ] **Agent-named internals.** `send-to-codex` / `read-from-codex` bake a peer into the
+  name; they should be `send` / `read` over `$REVIEWER` / `$SELF`, which the helper
+  already is underneath.
+- [ ] **Same-model panelists need distinct registered identities.** Two Claudes cannot
+  share `to-claude/` — one inbox, one `peer_of`, one `awaiting_from`. A self-panel needs a
+  second registered identity (e.g. `claude-review`, same backend, its own inbox), which is
+  a registry and protocol change rather than a prompt one. *(grok, 2026-08-25.)*
+- [ ] **Reviewer instructions are per-agent products.** Codex has skills, grok gets a
+  parent-built prompt. Unifying on parent-brokering (already required for artifact mounts)
+  would make reviewer-side instructions prompt FRAGMENTS rather than a second install
+  surface — which is also what lets any agent review without bespoke wiring.
+
+Sequencing note: this is cheaper AFTER the panel, not before — `panel dispatch` and
+`compose` are already driver-neutral, so generalizing the surface is the remaining half.
+
+### Field report from a Codex session (2026-08-26) — codex tried to consult grok and could not
+
+Independently demonstrated, in the reporter's own priority order. Item 5 is fixed; the
+rest are open.
+
+- [ ] **A first-class synchronous consult verb.** Codex currently has to hand-author
+  frontmatter, send, capture the run directory, await it, find the reply and archive it.
+  Something like `comms.sh ask --from codex --to grok --wait --file q.md` would collapse
+  that to one call. The asymmetry is the point: Claude has `/ask`, Codex has nothing.
+- [ ] **Stop requiring a writable `~/.npm`.** `npx` failed with EPERM under
+  `~/.npm/_cacache/tmp`. Support an `ACPX_BIN` override, or default the npm cache to a
+  gitignored workspace path such as `.comms/cache/npm`. This makes ACP unusable in
+  sandboxes that deny the home cache — i.e. exactly the agent sandboxes we target.
+- [ ] **`--foreground` / `send --wait`.** A detached process can be reaped when the
+  managed shell command that spawned it ends, which is normal inside an agent sandbox. A
+  synchronous runner would work in both terminals and sandboxes.
+- [ ] **An explicit public / no-worktree mode.** An elevated retry was refused because
+  grok could read the dirty checkout. A mode that runs the child in an empty temp
+  directory and permits only explicitly supplied public inputs would make external
+  consults auditable and safe.
+- [x] **One-off questions get their own ACP session** *(fixed 2026-08-26)*. A message with
+  no `thread` fell back to `acp:agent-comms-loop`, so unrelated consults shared one warm
+  context and earlier questions leaked into later answers. Now keyed on `message_id`,
+  which is unique per dispatch.
+- [ ] **`await` should write a synthetic failed result** when a spawned pid dies without
+  producing `result.json`. Today it reports the failure but leaves an incomplete audit
+  trail — and this session hit exactly that: a grok turn whose run dir held only a `pid`.
+
 ### Deferred, recorded so it is not lost
 
 - A human seam in the plan phase (interview-until-answered, GSD-style) — wanted, not now.

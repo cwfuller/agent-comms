@@ -1042,8 +1042,8 @@ R4="$WORK/ma-leg4"; mkdir -p "$R4"
 PRE_CLAUDE_CT="$(find "$MA_FIX/.comms/to-claude" -type f | wc -l | tr -d ' ')"
 GROK_STUB_NO_VERDICT=1 run_grok_leg "$MA_MSG4" "$R4" >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R4/result.json" | head -1)" = "failed" ] \
-  && grep -q 'no leading' "$R4/result.json" && [ -f "$MA_MSG4" ] \
-  && ok "review reply without a VERDICT line fails closed" || fail "missing-verdict broker path"
+  && grep -q 'no .### Blocking. section' "$R4/result.json" && [ -f "$MA_MSG4" ] \
+  && ok "a reply with neither a VERDICT line nor findings structure fails closed" || fail "missing-verdict broker path"
 MA_MSG5="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-35-00_badverdict-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-4/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG5"
 R6="$WORK/ma-leg6"; mkdir -p "$R6"
@@ -1369,6 +1369,47 @@ grep -q 'auto.md:\$HOME/.claude/commands/auto.md' "$COMMS" \
   && ok "prompt surface hashes /auto" || fail "prompt surface missing auto.md"
 grep -q 'auto-implement.md:\$HOME' "$COMMS" && fail "prompt surface still hashes a deleted template" \
   || ok "prompt surface no longer hashes deleted templates"
+
+echo "== broker: a missing VERDICT line is DERIVED, not discarded =="
+# Three live reviews were thrown away over a missing first line while carrying thousands
+# of bytes of real findings. loopspec already defines the equivalence, so the structure
+# states the verdict even when the line does not.
+DV="$WORK/derive"; mkdir -p "$DV"
+mkdir -p "$STUB_BIN"
+cat > "$DV/with-blocking.md" <<'DVEOF'
+I'll review this as a read-only pass.
+
+## Summary
+narration first, no verdict line
+
+## Findings
+
+### Blocking
+- `a.sh:1` — a real blocking finding.
+
+### Advisory
+- None.
+DVEOF
+cat > "$DV/clean.md" <<'DVEOF'
+## Findings
+
+### Blocking
+- None.
+
+### Advisory
+- `b.sh:2` — advisory only.
+DVEOF
+cat > "$DV/no-structure.md" <<'DVEOF'
+I looked at it and it seems fine to me, shipping.
+DVEOF
+dv_count() { awk '/^### Blocking/{f=1;next} /^###/{f=0} f && /^[-*] /{ if ($0 !~ /^[-*] *[Nn]one\.? *$/) n++ } END{print n+0}' "$1"; }
+[ "$(dv_count "$DV/with-blocking.md")" = "1" ] && ok "derivation counts a real blocking finding" || fail "derive count blocking"
+[ "$(dv_count "$DV/clean.md")" = "0" ] && ok "derivation does not count a 'None.' placeholder" || fail "derive count none"
+grep -q '^### Blocking' "$DV/no-structure.md" && fail "fixture has structure" \
+  || ok "a reply with NO findings structure has nothing to derive from"
+grep -q 'DERIVED' "$REPO/helpers/runphase.sh" && ok "the broker records that a verdict was derived, not stated" || fail "derivation not recorded"
+grep -q 'no .### Blocking. section to derive one from' "$REPO/helpers/runphase.sh" \
+  && ok "a structureless reply is still refused — nothing is inferred from prose" || fail "structureless reply not refused"
 grep -qF 'REVIEWER=$(awk' "$REPO/templates/claude-commands/read-from-codex.md" \
   && grep -q 'ok) print v' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader extractor is close-delimiter-gated" || fail "reader REVIEWER capture (bounded)"
@@ -2355,15 +2396,20 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' 
 SHSTUB2
 chmod +x "$SH_BIN/grok"
 SH_NOVERD_OUT="$(run_sh shadow --to grok --review-set noverdict-set "$(sh_req_for noverdict)" 2>&1)" && SH_NRC=0 || SH_NRC=$?
-[ "$SH_NRC" != "0" ] && ok "a contract-breaking reply fails the shadow run" || fail "no-verdict shadow exit code"
+# A reply that omits the VERDICT line but carries `### Blocking` findings now has its
+# verdict DERIVED from the structure — loopspec's own equivalence — instead of the whole
+# review being discarded over a formatting slip. (Observed three times live.)
+[ "$SH_NRC" = "0" ] && ok "a reply with findings but no VERDICT line is derived, not discarded" || fail "no-verdict derivation (rc=$SH_NRC)"
 SH_NOVERD_DIR="$(find "$SH_FIX/.comms/grades/shadow" -maxdepth 1 -type d -name 'noverdict-set-*' | head -1)"
-[ -n "$SH_NOVERD_DIR" ] && [ -s "$SH_NOVERD_DIR/grok.raw.md" ] \
-  && ok "the reviewer's RAW text is preserved when the reply breaks the contract" || fail "raw text discarded"
-grep -q 'must not be thrown away' "$SH_NOVERD_DIR/grok.raw.md" 2>/dev/null \
-  && ok "the preserved raw text is the reviewer's actual output" || fail "raw text content"
+[ -n "$SH_NOVERD_DIR" ] && [ -s "$SH_NOVERD_DIR/grok.md" ] \
+  && ok "the derived reply is stored as a normal stamped review" || fail "derived reply not stored"
+grep -q '^verdict: REQUEST_CHANGES' "$SH_NOVERD_DIR/grok.md" 2>/dev/null \
+  && ok "a blocking finding derives REQUEST_CHANGES" || fail "derived verdict wrong"
+grep -q 'must not be thrown away' "$SH_NOVERD_DIR/grok.md" 2>/dev/null \
+  && ok "the reviewer's actual findings survive derivation" || fail "findings lost in derivation"
 tail -n +2 "$SH_LED" | grep -q 'must not be thrown away' \
-  && fail "an unstamped reply was scored into the ledger" \
-  || ok "a reply that failed the contract is preserved but NOT scored"
+  && ok "a derived reply IS scored — it is a real review, not a failed turn" \
+  || fail "derived reply was not scored"
 
 # A contract-break writes no set row, so the pairing guard does not catch a retry. Without
 # an EARLY store check the retry re-ran the reviewer for the full review and only then

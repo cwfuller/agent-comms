@@ -487,8 +487,24 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
         verdict="${first#VERDICT: }"; body_start=2 ;;
     esac
     if [ -z "$verdict" ]; then
-      GROK_BROKER_NOTE="review reply carries no leading 'VERDICT: APPROVE|REQUEST_CHANGES' line — refusing to stamp an envelope (first line was: $(printf '%.60s' "$first"))"
-      return 1
+      # DERIVE it rather than discard the review. loopspec already defines the
+      # equivalence — `blocking_findings > 0` IS `REQUEST_CHANGES`, and `status: pass`
+      # with none is `APPROVE` — so a reply carrying the mandated `### Blocking` /
+      # `### Advisory` structure states its verdict in substance even when it omits the
+      # line. Observed three times running: a reviewer produced thousands of bytes of
+      # real findings and the whole turn was thrown away over a missing first line.
+      # Only the STRUCTURE is trusted; nothing is inferred from prose.
+      local nblock
+      if grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
+        nblock="$(awk '/^### Blocking/{f=1;next} /^###/{f=0} f && /^[-*] /{ if ($0 !~ /^[-*] *[Nn]one\.? *$/) n++ } END{print n+0}' "$run_dir/reply-raw.md")"
+        if [ "${nblock:-0}" -gt 0 ]; then verdict="REQUEST_CHANGES"; else verdict="APPROVE"; fi
+        body_start=1
+        echo "note: reply carried no VERDICT line; DERIVED '$verdict' from ${nblock:-0} blocking finding(s) per the loopspec equivalence" >>"$run_dir/runner.log"
+        GROK_BROKER_DERIVED="$verdict"
+      else
+        GROK_BROKER_NOTE="review reply carries no 'VERDICT:' line AND no '### Blocking' section to derive one from — refusing to stamp an envelope (first line was: $(printf '%.60s' "$first"))"
+        return 1
+      fi
     fi
   fi
   {
@@ -936,7 +952,16 @@ PROMPT
     [ -x "$acp_sh" ] || die "run: --via acp but acp.sh is not installed next to runphase.sh"
     acp_profile="$("$acp_sh" profile "$provider" 2>/dev/null || true)"
     [ -n "$acp_profile" ] || die "run: '$provider' has no ACP profile"
-    acp_session="agent-comms-${msg_thread:-loop}"
+    # Session identity is per THREAD, because that is what makes round N pay a delta.
+    # A message with no thread (a one-off consult) must NOT fall into a shared bucket:
+    # `agent-comms-loop` would mix unrelated consults into one warm context, leaking
+    # earlier questions into later answers. Fall back to the message id, which is unique
+    # per dispatch. (Field report from a codex session, 2026-08-26.)
+    if [ -n "$msg_thread" ]; then
+      acp_session="agent-comms-$(safe_name "$msg_thread")"
+    else
+      acp_session="agent-comms-oneoff-$(safe_name "$(frontmatter_field "$msg" message_id)")"
+    fi
     # acpx GLOBAL options must precede the profile; only subcommand flags follow it.
     # (`--cwd` after the profile is rejected outright — caught live.) The turn runs
     # IN $workdir because acpx keys session identity on (agent, cwd, name), so the
