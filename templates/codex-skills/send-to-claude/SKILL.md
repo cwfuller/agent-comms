@@ -105,7 +105,7 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
    ```
    If it returns `RESULT: blocked`, follow **Sandbox & permissions** below — the single home for that path.
    <!-- loopspec:fragment result-headless-codex-side -->
-   Exceptions in headless mode (`COMMS_DELIVERY=headless`): `RESULT: manual — headless mode: the reply is on disk...` is EXPECTED when you are the spawned peer (the driving session picks your reply up when your turn ends — do not retry). `RESULT: spawned` means a detached headless Claude turn is now processing your message: await the printed run dir (`.../runphase.sh await "<run dir>"`), then `$read-from-claude` for the reply; a non-zero await means the turn failed or timed out — check its `result.json` and report that instead of waiting.
+   Exceptions when a runphase turn is in flight (`acp` or `headless`): `RESULT: manual — headless mode: the reply is on disk...` is EXPECTED when you are the spawned peer (the driving session picks your reply up when your turn ends — do not retry). `RESULT: spawned` means a detached Claude turn is now processing your message: await the printed run dir (`.../runphase.sh await "<run dir>"`), then `$read-from-claude` for the reply; a non-zero await means the turn failed or timed out — check its `result.json` and report that instead of waiting.
    <!-- /loopspec:fragment -->
    Without cmux the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk). A non-sandbox mid-sequence cmux failure is reported as `delivery FAILED`; retry the send once. `send` updates `.comms/state/<workspace>_<thread>.json` automatically for workflow messages.
 
