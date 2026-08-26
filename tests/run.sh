@@ -2881,6 +2881,68 @@ grep -q 'mkdir "\$claim"' "$REPO/helpers/runphase.sh" \
 grep -q 'rm -rf "\$claim"' "$REPO/helpers/runphase.sh" \
   && ok "a stale claim from a dead holder is reclaimable" || fail "stale claim is not reclaimable"
 
+echo "== panel: N parallel 2-party legs over ONE artifact =="
+PN_FIX="$WORK/panel-repo"; mkdir -p "$PN_FIX"; PN_FIX="$(cd "$PN_FIX" && pwd -P)"
+git -C "$PN_FIX" init -q -b main
+printf '.comms/\n' > "$PN_FIX/.gitignore"
+echo "subject" > "$PN_FIX/s.txt"
+git -C "$PN_FIX" add -A >/dev/null 2>&1
+git -C "$PN_FIX" -c user.email=t@t -c user.name=t commit -q -m init
+mkdir -p "$PN_FIX/.comms/to-codex" "$PN_FIX/.comms/to-grok" "$PN_FIX/.comms/to-claude" "$PN_FIX/.comms/archive"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$PN_FIX/.comms/config"
+run_pn() { (cd "$PN_FIX" && env -u CMUX_WORKSPACE_ID -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+PN_REQ="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-00-00_req.md"
+cat > "$PN_REQ" <<PNEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-26T12:00:00Z
+head_sha: $(git -C "$PN_FIX" rev-parse HEAD)
+workspace: $(basename "$PN_FIX")
+message_id: pn-req-1
+thread: pn-thread
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## What was done
+panel fixture
+PNEOF
+PN_OUT="$(run_pn panel dispatch --to codex,grok "$PN_REQ" 2>&1)" && PN_RC=0 || PN_RC=$?
+printf '%s\n' "$PN_OUT" | grep -q 'dispatching artifact' && ok "panel dispatch runs" || fail "panel dispatch (got: $PN_OUT)"
+
+# ONE artifact for the whole set — if each leg snapshotted itself they would review
+# different trees and "they saw the same artifact" would be false where it must be true.
+PN_LEG_C="$(find "$PN_FIX/.comms/to-codex" -name '*panel-codex*' -type f | head -1)"
+PN_LEG_G="$(find "$PN_FIX/.comms/to-grok" -name '*panel-grok*' -type f | head -1)"
+[ -n "$PN_LEG_C" ] && [ -n "$PN_LEG_G" ] && ok "a leg was written into EACH reviewer's inbox" || fail "panel legs not written"
+PN_AC="$(grep -m1 '^artifact_id:' "$PN_LEG_C" | sed 's/^artifact_id: //')"
+PN_AG="$(grep -m1 '^artifact_id:' "$PN_LEG_G" | sed 's/^artifact_id: //')"
+[ -n "$PN_AC" ] && [ "$PN_AC" = "$PN_AG" ] && ok "every leg carries the SAME artifact_id" || fail "legs disagree on the artifact ($PN_AC vs $PN_AG)"
+
+# 2-party per leg: distinct threads, shared review_set. Never an N-party thread.
+PN_TC="$(grep -m1 '^thread:' "$PN_LEG_C" | sed 's/^thread: //')"
+PN_TG="$(grep -m1 '^thread:' "$PN_LEG_G" | sed 's/^thread: //')"
+[ "$PN_TC" != "$PN_TG" ] && ok "each leg is its own 2-party thread" || fail "legs share a thread ($PN_TC)"
+PN_SC="$(grep -m1 '^review_set:' "$PN_LEG_C" | sed 's/^review_set: //')"
+[ -n "$PN_SC" ] && [ "$PN_SC" = "$(grep -m1 '^review_set:' "$PN_LEG_G" | sed 's/^review_set: //')" ] \
+  && ok "legs share one review_set" || fail "review_set not shared"
+[ "$(grep -c '^message_id:' "$PN_LEG_C")" = "1" ] && ok "each leg has exactly one message_id" || fail "leg message_id duplicated"
+[ "$(grep -m1 '^message_id:' "$PN_LEG_C")" != "$(grep -m1 '^message_id:' "$PN_LEG_G")" ] \
+  && ok "legs have distinct message ids" || fail "legs share a message_id"
+run_pn validate "$PN_LEG_C" >/dev/null 2>&1 && ok "a dispatched leg validates" || fail "leg does not validate"
+
+# Roster is validated BEFORE anything is sent: a half-fanned panel silently drops a voice
+# from the composed gate.
+check_not "panel refuses an unregistered reviewer" run_pn panel dispatch --to codex,gemini "$PN_REQ"
+check_not "panel refuses the request's own author" run_pn panel dispatch --to claude "$PN_REQ"
+check_not "panel refuses a duplicate reviewer" run_pn panel dispatch --to codex,codex "$PN_REQ"
+PN_STATUS="$(run_pn panel status --set "$PN_SC" 2>&1)"
+printf '%s\n' "$PN_STATUS" | grep -q 'codex' && printf '%s\n' "$PN_STATUS" | grep -q 'grok' \
+  && ok "panel status lists every leg in the set" || fail "panel status (got: $PN_STATUS)"
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 

@@ -47,6 +47,10 @@
 #                               have a SECOND reviewer read the same artifact. The reply is
 #                               produced and stored but NEVER delivered and never written to
 #                               thread state — a shadow verdict cannot gate the loop.
+#   panel dispatch --to a,b <review-request> [--set ID]
+#                               fan ONE artifact out to N reviewers as N parallel 2-party
+#                               legs sharing a review_set. One snapshot for the whole set.
+#   panel status --set <id>     which legs have answered, and with what verdict
 #   round-note <reply> --note "<text>"
 #                               record how a reviewer performed on ONE round: counts are
 #                               derived from the reply, the prose is your assessment.
@@ -974,6 +978,127 @@ findings_set_lookup() {  # <root> <thread> <round> <phase> -> set\tartifact\tpro
     return 0
   fi
   awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph {print $1 "\t" $6 "\t" $7; exit}' "$idx"
+}
+
+cmd_panel() {
+  # panel dispatch --to a,b <review-request>   — fan one artifact out to N reviewers
+  # panel status  --set <id>                   — which legs have answered
+  #
+  # N PARALLEL 2-PARTY LEGS, never an N-party thread. Each reviewer gets its own thread
+  # (`<base>-<agent>`) so the wire protocol, the state layer and every existing reader
+  # keep working unchanged; a shared `review_set` links them and the DRIVER composes
+  # above them. That is the whole trick: nothing below the driver has to learn about
+  # panels.
+  #
+  # ONE snapshot for the whole set. If each leg snapshotted itself they would review
+  # different trees and "they saw the same artifact" would be false in the one place it
+  # has to be true.
+  local sub="${1:-}"; shift 2>/dev/null || true
+  case "$sub" in dispatch|status) ;; *) usage_err "panel: expected 'dispatch' or 'status'" ;; esac
+
+  local root; root="$(main_repo_root)"; [ -n "$root" ] || usage_err "panel: not inside a git repository"
+
+  if [ "$sub" = "status" ]; then
+    local set_id=""
+    while [ $# -gt 0 ]; do
+      case "$1" in --set) shift; set_id="${1:-}" ;; -?*) usage_err "panel status: unknown option '$(clip "$1")'" ;; esac
+      shift
+    done
+    [ -n "$set_id" ] || usage_err "panel status: --set <id> is required"
+    local idx; idx="$(findings_set_index "$root")"
+    [ -f "$idx" ] || { emit_diagnostic "panel: no review sets recorded yet"; return 0; }
+    printf 'reviewer\tthread\tanswered\tverdict\n'
+    awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3}' "$idx" | while IFS=$'\t' read -r ag th; do
+      [ -n "$ag" ] || continue
+      local reply verdict="" answered=no
+      reply="$(sorted_message_files "$root/.comms/archive" "$(cmd_workspace)" "$ag" "$th" newest | head -1 || true)"
+      [ -n "$reply" ] || reply="$(sorted_message_files "$root/.comms/to-claude" "$(cmd_workspace)" "$ag" "$th" newest | head -1 || true)"
+      if [ -n "$reply" ]; then answered=yes; verdict="$(cmd_verdict "$reply" 2>/dev/null || true)"; fi
+      printf '%s\t%s\t%s\t%s\n' "$ag" "$th" "$answered" "$verdict"
+    done
+    return 0
+  fi
+
+  # ---- dispatch ----
+  local to="" req="" set_id=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to)  shift; to="${1:-}" ;;
+      --set) shift; set_id="${1:-}" ;;
+      -?*)   usage_err "panel dispatch: unknown option '$(clip "$1")'" ;;
+      *)     [ -z "$req" ] || usage_err "panel dispatch: one review-request only"; req="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$to" ] || usage_err "panel dispatch: --to a,b is required"
+  [ -n "$req" ] || usage_err "panel dispatch: a review-request file is required"
+  [ -f "$req" ] || usage_err "panel dispatch: no such file '$(clip "$req")'"
+  [ "$(frontmatter_field "$req" type)" = "review-request" ] \
+    || usage_err "panel dispatch: only a review-request can be fanned out"
+
+  local author base_thread phase round maxr wf
+  author="$(frontmatter_field "$req" from)"
+  base_thread="$(frontmatter_field "$req" thread)"
+  phase="$(frontmatter_field "$req" phase)"; round="$(frontmatter_field "$req" round)"
+  maxr="$(frontmatter_field "$req" max-rounds)"; wf="$(frontmatter_field "$req" workflow)"
+  [ -n "$wf" ] || usage_err "panel dispatch: the request carries no workflow — a panel reviews a loop turn"
+
+  # Validate the whole roster BEFORE dispatching any leg: a half-fanned panel is worse
+  # than none, because the composed gate would silently be missing a voice.
+  local ag roster=""
+  for ag in $(printf '%s' "$to" | tr ',' ' '); do
+    require_agent "$ag" "panel dispatch"
+    [ "$ag" != "$author" ] || usage_err "panel dispatch: '$ag' authored this request — it cannot review it"
+    case " $roster " in *" $ag "*) usage_err "panel dispatch: '$ag' listed twice" ;; esac
+    roster="$roster $ag"
+  done
+  roster="${roster# }"
+
+  local aid pver
+  aid="$(cmd_snapshot create)" || die "panel dispatch: could not retain the artifact"
+  pver="$(cmd_prompt_version 2>/dev/null || true)"
+  [ -n "$set_id" ] || set_id="$(printf '%s-%s-r%s-%s' "${base_thread:-panel}" "${phase:-nophase}" "${round:-1}" "$(printf '%s' "$aid" | cut -c1-7)")"
+  set_id="$(safe_set_id "$set_id")"
+
+  local idx; idx="$(findings_set_index "$root")"
+  mkdir -p "$(dirname "$idx")" 2>/dev/null || true
+  [ -s "$idx" ] || printf 'review_set_id\trequest_message_id\tthread\tround\tphase\tartifact_id\tprompt_version\tbase_sha\tgating_agent\tshadow_agent\tdrift_status\tdrift_artifact_id\tcreated\n' > "$idx"
+
+  local gating="${roster%% *}" leg_thread leg_file leg_mid ts n=0
+  echo "panel: dispatching artifact ${aid} to [$roster] as review set $set_id (gating: $gating)"
+  for ag in $roster; do
+    ts="$(date -u +%Y-%m-%dT%H-%M-%S)"
+    leg_thread="${base_thread:-panel}-${ag}"
+    leg_mid="$(safe_name "$(cmd_workspace)")_${ts}_panel-${ag}-$$-${n}"
+    leg_file="$root/.comms/$(inbox_for "$ag")/${leg_mid}.md"
+    mkdir -p "$(dirname "$leg_file")" 2>/dev/null || true
+    # Same body, same artifact, same round — only identity and routing differ. Anything
+    # else here would make the legs incomparable, which is the point of fanning out.
+    LC_ALL=C awk -v th="$leg_thread" -v mid="$leg_mid" -v setid="$set_id" -v aid="$aid" '
+      { probe = $0; sub(/\r$/, "", probe) }
+      NR == 1 && probe == "---" { fm = 1; print; next }
+      fm && probe == "---" {
+        printf "review_set: %s\n", setid
+        printf "artifact_id: %s\n", aid
+        fm = 0; print; next
+      }
+      fm && index(probe, "thread:") == 1 { printf "thread: %s\n", th; next }
+      fm && index(probe, "message_id:") == 1 { printf "message_id: %s\n", mid; next }
+      fm && index(probe, "artifact_id:") == 1 { next }
+      { print }
+    ' "$req" > "$leg_file"
+    cmd_validate "$leg_file" >/dev/null || die "panel dispatch: leg for '$ag' did not validate"
+    if ! cut -f1 "$idx" | grep -qxF -- "$set_id" || ! awk -F'\t' -v s="$set_id" -v a="$ag" 'NR>1 && $1==s && $10==a' "$idx" | grep -q .; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$set_id" "$leg_mid" "$leg_thread" "$round" "$phase" "$aid" "$pver" \
+        "$(frontmatter_field "$req" head_sha)" "$gating" "$ag" "dispatched" "" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$idx"
+    fi
+    echo "  leg: $ag  thread=$leg_thread"
+    cmd_send --to "$ag" "$leg_file" || echo "  warning: leg for '$ag' did not deliver — the set is incomplete"
+    n=$((n + 1))
+  done
+  echo "panel: $set_id dispatched to $n reviewer(s); compose with 'comms.sh panel status --set $set_id'"
 }
 
 cmd_round_note() {
@@ -2323,6 +2448,7 @@ case "${1:-}" in
   lessons)        shift; cmd_lessons "$@" ;;
   archive-search) shift; cmd_archive_search "$@" ;;
   findings)       shift; cmd_findings "$@" ;;
+  panel)          shift; cmd_panel "$@" ;;
   round-note)     shift; cmd_round_note "$@" ;;
   shadow)         shift; cmd_shadow "$@" ;;
   snapshot)       shift; cmd_snapshot "$@" ;;
