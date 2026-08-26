@@ -33,6 +33,13 @@ check_not() {
 
 # ---------- fixtures ----------
 WORK="$(mktemp -d)"
+# NOTHING in this suite may touch the real global rollup. `friction` appends to
+# ${AGENT_COMMS_HOME:-$HOME/.agent-comms}/friction.tsv, and the fixture calls below were
+# writing straight into the developer's own ledger: 74 of 86 rows in it were this suite's
+# "compose reported a false all-clear" fixture note, drowning the real reports the seam
+# exists to collect. Suite-wide default; individual tests still override it explicitly.
+export AGENT_COMMS_HOME="$WORK/global-home"
+mkdir -p "$AGENT_COMMS_HOME"
 trap 'rm -rf "$WORK"' EXIT
 
 # Fake repo with a deterministic branch name.
