@@ -1513,9 +1513,9 @@ git -C "$FR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 run_fr() { (cd "$FR" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
 run_fr friction --severity 5 --thread t-1 "compose reported a false all-clear" >/dev/null 2>&1
 [ -s "$FR/.comms/friction.tsv" ] && ok "friction writes a log" || fail "friction.tsv"
-awk -F'\t' 'NR>1 && $4=="5" && $3=="t-1"' "$FR/.comms/friction.tsv" | grep -q . \
+awk -F'\t' 'NR>1 && $5=="5" && $4=="t-1"' "$FR/.comms/friction.tsv" | grep -q . \
   && ok "severity and thread are recorded" || fail "friction fields"
-awk -F'\t' 'NR>1 && $5!=""' "$FR/.comms/friction.tsv" | grep -q . \
+awk -F'\t' 'NR>1 && $6!=""' "$FR/.comms/friction.tsv" | grep -q . \
   && ok "the commit it happened on is recorded" || fail "friction head_sha"
 run_fr friction "a second note" >/dev/null 2>&1
 [ "$(tail -n +2 "$FR/.comms/friction.tsv" | grep -c .)" = "2" ] && ok "friction appends" || fail "friction append"
