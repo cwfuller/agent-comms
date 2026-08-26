@@ -99,7 +99,6 @@ type: question
 from: claude
 timestamp: <ISO 8601>
 branch: <current branch>
-head_sha: <git rev-parse HEAD>
 workspace: <workspace name>
 cwd: <current working directory from pwd>
 message_id: <the filename, without .md>

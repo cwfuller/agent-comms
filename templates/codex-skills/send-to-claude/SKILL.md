@@ -65,7 +65,6 @@ type: review-feedback | response | question | request | error
 from: codex
 timestamp: <ISO 8601>
 branch: <current branch>
-head_sha: <git rev-parse HEAD>
 workspace: <workspace name from step 2>
 cwd: <current working directory>
 message_id: <this file's name, without .md>

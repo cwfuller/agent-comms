@@ -93,7 +93,6 @@ type: review-request
 from: claude
 timestamp: <ISO 8601>
 branch: <current branch>
-head_sha: <git rev-parse HEAD>
 workspace: <workspace>
 cwd: <pwd>
 message_id: <filename, without .md>
@@ -103,6 +102,8 @@ phase: implement
 round: 1
 max-rounds: <N>
 ---
+
+<!-- head_sha and artifact_id are STAMPED BY SEND from the retained snapshot — never hand-type a SHA -->
 
 ## Intent / approach
 <2-4 lines: the GOAL and the approach taken. Context so the reviewer never reads cold.>
