@@ -1368,6 +1368,10 @@ grep -qi 'Do NOT copy .max-rounds. from a plan' "$REPO/templates/claude-commands
 grep -q 'RETIRED_COMMANDS=' "$REPO/install.sh" && ok "installer names the retired commands" || fail "installer retired list"
 [ "$(grep -c 'for f in \$RETIRED_COMMANDS' "$REPO/install.sh")" -ge 2 ] \
   && ok "installer removes retired commands in BOTH scopes" || fail "installer retired removal"
+# Helpers rot the same way: ceasing to copy one leaves it on disk and callable.
+grep -q 'RETIRED_HELPERS=' "$REPO/install.sh" && ok "installer names retired helpers too" || fail "installer retired helpers"
+grep -q 'for h in \$RETIRED_HELPERS' "$REPO/install.sh" \
+  && ok "installer removes retired helpers on upgrade" || fail "installer helper removal"
 # prompt_version must hash the surface that exists, not the one that was deleted.
 grep -q 'auto.md:\$HOME/.claude/commands/auto.md' "$COMMS" \
   && ok "prompt surface hashes /auto" || fail "prompt surface missing auto.md"

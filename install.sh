@@ -26,6 +26,9 @@ CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask.md auto.md clean-comms.
 # them on disk and callable, so the agent keeps being told to use surfaces that no longer
 # exist. Removing them is part of installing. (grok, collapse round 1.)
 RETIRED_COMMANDS="auto-plan.md auto-implement.md auto-full.md fleet.md ask-codex.md"
+# Same rule for helpers: an upgrade that stops copying one leaves it on disk, callable and
+# stale. Removing retired surface is part of installing, not a separate chore.
+RETIRED_HELPERS="fleet.sh"
 CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
@@ -191,6 +194,9 @@ install_global_assets() {
   for h in $HELPERS; do
     cp "$HELPER_SRC/$h" "$AGENT_COMMS_HOME/$h"
     chmod +x "$AGENT_COMMS_HOME/$h"
+  done
+  for h in $RETIRED_HELPERS; do
+    [ -f "$AGENT_COMMS_HOME/$h" ] && { rm -f "$AGENT_COMMS_HOME/$h"; echo "  removed retired helper $h"; }
   done
   echo "  Loops run over ACP by default — no cmux pane required."
   echo "  Only if you opt into cmux delivery (--via cmux): run"
