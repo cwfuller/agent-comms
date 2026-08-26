@@ -122,12 +122,21 @@ IRT="$(printf '%s\n' "$FM" | grep -m1 '^in-reply-to:' | sed 's/^in-reply-to: *//
 SETS="$COMMS_ROOT/grades/sets.tsv"
 SET_IDX=""; [ -n "$IRT" ] && SET_IDX="$(awk -F'\t' -v m="$IRT" 'NR>1 && $(2)==m {print $(1); exit}' "$SETS" 2>/dev/null)"
 SET_FIELD="$(printf '%s\n' "$FM" | grep -m1 '^review_set:' | sed 's/^review_set: *//')"
-if [ -n "$SET_IDX" ] && [ -n "$SET_FIELD" ] && [ "$SET_IDX" != "$SET_FIELD" ]; then
-  echo "review_set mismatch: field '$SET_FIELD' vs index '$SET_IDX' — FAIL CLOSED" >&2
-  # Report to the user and STOP: composing either set on a disagreement gates the
-  # loop on an identity nobody can vouch for. Do not archive the reply.
+SET="$SET_IDX"   # the INDEX is the only authority for panel identity
+if [ -n "$SET_FIELD" ] && [ -z "$SET_IDX" ]; then
+  # A field with NO index row can name an unrelated (even completed) set and turn
+  # its stale replies into this request's answers — AC3 through the side door.
+  # STOP: report the unresolvable panel identity to the user, do not compose ANY
+  # set, do not archive the reply. (codex, panel r4.)
+  echo "review_set '$SET_FIELD' has no index row for in-reply-to '$IRT' — refusing to compose; manual review required" >&2
+  SET=""
+elif [ -n "$SET_FIELD" ] && [ "$SET_IDX" != "$SET_FIELD" ]; then
+  # Index and field disagree: compose NOTHING, surface both identities. The index
+  # would be right, but a wrong field means something upstream is corrupted and a
+  # human should look before the loop advances.
+  echo "review_set mismatch: field '$SET_FIELD' vs index '$SET_IDX' — refusing to compose; manual review required" >&2
+  SET=""
 fi
-SET="${SET_IDX:-$SET_FIELD}"                      # index wins; field only when no row
 "$COMMS_SH" panel status  --set "$SET"     # which legs have answered
 "$COMMS_SH" compose --set "$SET"           # exits non-zero while any leg is missing
 ```

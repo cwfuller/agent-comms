@@ -2063,8 +2063,10 @@ grep -q 'review_set' "$RFCP" && ok "the reader recognises a panel leg" || fail "
 # a bare word-grep let this whole mechanism vanish without a red test. (grok, panel r3.)
 grep -q 'SET_IDX=' "$RFCP" && grep -q 'SET_FIELD=' "$RFCP" \
   && ok "the reader resolves the set from the index AND captures the field" || fail "reader index-first resolution"
-grep -q 'FAIL CLOSED' "$RFCP" && grep -qE 'SET="\$\{SET_IDX:-\$SET_FIELD\}"' "$RFCP" \
-  && ok "index wins; a field/index disagreement fails closed" || fail "reader mismatch discipline"
+grep -qE 'SET="\$SET_IDX"' "$RFCP" && grep -qc 'refusing to compose; manual review required' "$RFCP" >/dev/null \
+  && [ "$(grep -c 'refusing to compose; manual review required' "$RFCP")" = "2" ] \
+  && ok "the index is the ONLY panel authority; field-only and mismatch both refuse to compose" \
+  || fail "reader mismatch discipline (field must never become authority)"
 grep -q "sed -n '2,/\^---\$/p'" "$RFCP" \
   && ok "the reader's set greps are frontmatter-bounded (quoted bodies cannot win)" || fail "reader frontmatter bounding"
 grep -q 'compose --set' "$RFCP" && ok "the reader composes instead of acting on one leg" || fail "reader compose wiring"
@@ -3944,12 +3946,19 @@ echo "== review turns may read history, never publish or rewrite it =="
 GS="$WORK/gitshim"; mkdir -p "$GS"
 REAL_GIT="$(command -v git)"
 { printf '#!/bin/bash\n'
+  printf 'skip=0\n'
   printf 'for a in "$@"; do\n'
+  printf '  if [ "$skip" = 1 ]; then skip=0; continue; fi\n'
+  printf '  case "$a" in\n'
+  printf '    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--config-env)\n'
+  printf '      skip=1; continue ;;\n'
+  printf '    -*) continue ;;\n'
+  printf '  esac\n'
   printf '  case "$a" in\n'
   printf '    push|commit|am|rebase|reset|clean|gc|prune|"filter-branch"|"update-ref"|"remote")\n'
   printf '      echo "agent-comms: refused" >&2; exit 1 ;;\n'
   printf '  esac\n'
-  printf '  case "$a" in -*) continue ;; *) break ;; esac\n'
+  printf '  break\n'
   printf 'done\n'
   printf 'exec %s "$@"\n' "$REAL_GIT"
 } > "$GS/git"
@@ -3962,6 +3971,17 @@ check_not "a review turn cannot push" gs push origin main
 check_not "a review turn cannot commit" gs commit -m x
 check_not "a review turn cannot reset" gs reset --hard HEAD
 check_not "a review turn cannot rewrite refs" gs update-ref refs/heads/x HEAD
+# GLOBAL-OPTION BYPASS: -C/-c take a VALUE, and the old first-non-option break treated
+# that value as the subcommand — `git -C . push` sailed straight through the refusal
+# list. The scan must find the real subcommand past value-taking globals. (codex, panel r4.)
+check_not "a review turn cannot push behind -C" gs -C . push origin main
+check_not "a review turn cannot reset behind -c" gs -c user.name=x reset --hard HEAD
+gs -C . log --oneline -1 >/dev/null 2>&1 \
+  && ok "value-taking globals still work for reads (-C . log)" || fail "shim broke -C reads"
+# Drift canary: the REAL generator in runphase.sh must carry the same value-skip
+# mechanism this fixture models — if either side changes shape, look at both.
+grep -q -- '-C|-c|--git-dir' "$REPO/helpers/runphase.sh" && grep -q 'skip=1; continue' "$REPO/helpers/runphase.sh" \
+  && ok "the production shim generator skips option values too" || fail "shim generator drifted from the fixture"
 # and the shim must not recurse into itself
 grep -q 'exec %s' "$REPO/helpers/runphase.sh" \
   && ok "the shim execs the REAL git by absolute path, never itself" || fail "shim recursion guard"

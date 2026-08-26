@@ -771,8 +771,16 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
 - [ ] **Naming.** `panel` = the collection (user-facing), `reviewer` = one agent (keep —
   the ledger column, `from:`, and round-notes are all per-agent). `review_set_id` stays the
   internal grouping key. Not "board": it implies voting, which the gate deliberately is not.
+- [x] **`max-rounds` default 10 PER PHASE** *(owner decision 2026-08-26, superseding the
+  5-per-phase decision below on the same day)*. field-report-9446 is why: it returned a real
+  blocking finding in EVERY one of its first five rounds — including two rounds where a
+  confident "this is fixed" claim of the driver's turned out to be false — and was still
+  finding them when the cap stopped it. The 5 was chosen from an archive in which no loop had
+  ever reached round 5; the first loop that genuinely needed more immediately proved the
+  sample was the artifact of a low cap, not evidence of convergence. The plan phase gets 10
+  too: its DIRECTION-only bar, not a tight cap, is what prevents document-nit loops.
 - [x] **`max-rounds` default 5 PER PHASE** *(owner decision 2026-08-26, revising the
-  consult)*. Both consults argued for 4 and a 2-round plan cap, citing this repo's own
+  consult; SUPERSEDED same day — see above)*. Both consults argued for 4 and a 2-round plan cap, citing this repo's own
   "rounds 6-9 were unpriced" note. The archive says no loop ever reached round 5 — but it
   also says every loop that hit the cap **escalated to the human**, which is the
   involvement this tool exists to remove. A cap you always hit is a wall, not a budget.
@@ -977,6 +985,13 @@ Observed failure modes (one afternoon, all real):
 4. **Double-claiming** — two sessions claimed the same loop within minutes; resolved
    only by direct messaging.
 
+**DECIDED 2026-08-26 (user):** per-session worktrees + integration branch is the
+long-term direction — adopt as the next protocol arc (installer support, docs,
+and loop-driver guidance). Sessions should begin practicing worktree isolation for
+multi-file changes now, ahead of the formal mechanism. Related user decision the
+same evening: the loop round limit moves to 10 (default `--rounds`), landed by the
+field-report driver — round-budget references in docs/templates follow that change.
+
 **Convergent recommendation (end of day, all three drivers independently):**
 per-session git worktrees with an integration branch. By close of day the staging
 rule had been violated by all three sessions — including its authors, including
@@ -997,7 +1012,13 @@ Candidate formalizations to weigh at the reflection (minimal-first):
 - [ ] Atomic writes for installed/shared helpers (write temp + `mv`) so concurrent
   readers never see a half-file.
 - [ ] A durable claim ledger (thread/region → session), so ownership is declared in
-  the repo instead of in chat; `sets.tsv` already models the shape.
+  the repo instead of in chat; `sets.tsv` already models the shape. Refined
+  2026-08-26 (user): the ledger should also carry a DECLARED ROLE per session —
+  harness session names are identity-shaped (`<workspace>-<suffix>`, not
+  controllable from inside a session), so the protocol names the task itself:
+  `role set "panel-arc-7972 driver"` → a sessions table mapping harness name →
+  role → claimed threads/regions. Same declared-beats-inferred principle as the
+  `workspace set` pin; anchors naturally to the per-session worktree.
 
 ## Priorities (2026-08-20, user-confirmed order)
 
