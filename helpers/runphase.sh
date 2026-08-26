@@ -487,6 +487,20 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
         verdict="${first#VERDICT: }"; body_start=2 ;;
     esac
     if [ -z "$verdict" ]; then
+      # Harness warnings ("Skill descriptions were shortened...") and reviewer narration
+      # get prepended to the body, pushing a perfectly good VERDICT line off line 1.
+      # Accept it anywhere in the head of the reply, but ONLY if exactly one such line
+      # exists — ambiguity is worse than absence, and derivation is the safe fallback.
+      local vline vcount
+      vcount="$(awk 'NR<=40 && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{n++} END{print n+0}' "$run_dir/reply-raw.md")"
+      if [ "${vcount:-0}" -eq 1 ]; then
+        vline="$(awk 'NR<=40 && /^VERDICT: (APPROVE|REQUEST_CHANGES)$/{print NR; exit}' "$run_dir/reply-raw.md")"
+        verdict="$(sed -n "${vline}p" "$run_dir/reply-raw.md" | sed 's/^VERDICT: //')"
+        body_start=$((vline + 1))
+        echo "note: VERDICT line found at line $vline, not line 1 (preamble above it was skipped)" >>"$run_dir/runner.log"
+      fi
+    fi
+    if [ -z "$verdict" ]; then
       # DERIVE it rather than discard the review. loopspec already defines the
       # equivalence — `blocking_findings > 0` IS `REQUEST_CHANGES`, and `status: pass`
       # with none is `APPROVE` — so a reply carrying the mandated `### Blocking` /
@@ -496,7 +510,7 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
       # Only the STRUCTURE is trusted; nothing is inferred from prose.
       local nblock
       if grep -q '^### Blocking' "$run_dir/reply-raw.md"; then
-        nblock="$(awk '/^### Blocking/{f=1;next} /^###/{f=0} f && /^[-*] /{ if ($0 !~ /^[-*] *[Nn]one\.? *$/) n++ } END{print n+0}' "$run_dir/reply-raw.md")"
+        nblock="$(awk '/^### Blocking/{f=1;next} /^###/{f=0} f && (/^[-*+] /||/^[0-9]+[.)] /){ if ($0 !~ /[Nn]one\.?\**[[:space:]]*$/) n++ } END{print n+0}' "$run_dir/reply-raw.md")"
         if [ "${nblock:-0}" -gt 0 ]; then verdict="REQUEST_CHANGES"; else verdict="APPROVE"; fi
         body_start=1
         echo "note: reply carried no VERDICT line; DERIVED '$verdict' from ${nblock:-0} blocking finding(s) per the loopspec equivalence" >>"$run_dir/runner.log"

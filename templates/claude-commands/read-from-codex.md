@@ -61,6 +61,21 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 
 ---
 
+### Harness friction — record it the moment you hit it
+
+If anything about the TOOL went wrong during this loop — a false verdict, a parser that
+found nothing, a message in the wrong inbox, a transport that did not do what
+`transport` said it would — record it in one line, immediately:
+
+```bash
+"$COMMS_SH" friction --thread "<thread>" --severity 4 "compose reported 0 findings on replies that used numbered lists"
+```
+
+Severity 1 is cosmetic, 5 means the harness produced a WRONG RESULT. Do not save it for
+the end and do not decide it is too small — a false all-clear from a list-form parser
+survived an entire real loop because the only record of it was a human noticing
+afterwards. This costs one line and goes to `.comms/friction.tsv`; reviewers never see it.
+
 ### Reviewer performance note — EVERY round, no exceptions
 
 Before reporting a round's outcome to the user, record how the reviewer performed:

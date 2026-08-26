@@ -1423,6 +1423,109 @@ grep -q 'no .### Blocking. section to derive one from' "$REPO/helpers/runphase.s
 # panel and unblock its gate. (codex, panel r1.)
 grep -q 'ignoring a non-review message' "$COMMS" \
   && ok "compose ignores non-review messages on a leg" || fail "compose leg validation"
+
+echo "== findings are LIST ITEMS in any markdown form (field bug, 2026-08-26) =="
+# A real loop produced numbered findings. The extractor matched only "- ", so it pulled
+# ZERO findings; the verdict is derived from the same count, so a review with real
+# blocking bugs was stamped APPROVE and composed as a clean panel. A false all-clear is
+# the worst failure this tool has.
+LF="$WORK/listforms"; mkdir -p "$LF"
+cat > "$LF/numbered.md" <<'LFEOF'
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-26T12:00:00Z
+workspace: lf
+message_id: lf-1
+thread: lf-thread
+phase: plan
+round: 2
+verdict: APPROVE
+---
+
+Warning: Skill descriptions were shortened to fit the context budget.
+
+I'll review the pinned tree read-only.
+
+## Summary
+narration above, numbered findings below
+
+## Findings
+
+### Blocking
+1. **The tuple comparison mixes one-based and zero-based months.** Splitting `2026-08-31`
+   produces a month that is off by one.
+
+### Advisory
+1. `DispatchInvoice` remains mounted when closed.
+
+### Process
+- no friction
+LFEOF
+# self-contained: run_tr is defined much later in this file
+run_lf() { (cd "$REPO" && env -u CMUX_WORKSPACE_ID -u COMMS_DELIVERY "$COMMS" "$@"); }
+LF_ROWS="$(run_lf findings "$LF/numbered.md" 2>/dev/null | tail -n +2)"
+[ "$(printf '%s\n' "$LF_ROWS" | grep -c .)" = "2" ] \
+  && ok "numbered findings are extracted (1 blocking, 1 advisory)" || fail "numbered list yielded $(printf '%s' "$LF_ROWS" | grep -c .) findings"
+printf '%s\n' "$LF_ROWS" | awk -F'\t' '$13=="blocking"' | grep -q 'tuple comparison' \
+  && ok "a numbered blocking finding lands in the blocking lane" || fail "numbered blocking lane"
+printf '%s\n' "$LF_ROWS" | grep -q 'narration above' && fail "prose above the findings was extracted" \
+  || ok "narration and harness warnings are not mistaken for findings"
+# every list marker markdown allows
+cat > "$LF/mixed.md" <<'LFEOF'
+---
+type: review-feedback
+from: grok
+timestamp: 2026-08-26T12:00:00Z
+workspace: lf
+message_id: lf-2
+thread: lf-thread-2
+verdict: REQUEST_CHANGES
+---
+
+## Findings
+
+### Blocking
+- dash form
+* star form
++ plus form
+1. dot-numbered form
+2) paren-numbered form
+
+### Advisory
+- **None.**
+LFEOF
+LF_MIX="$(run_lf findings "$LF/mixed.md" 2>/dev/null | tail -n +2)"
+[ "$(printf '%s\n' "$LF_MIX" | grep -c .)" = "5" ] \
+  && ok "every markdown list marker counts as a finding" || fail "mixed markers yielded $(printf '%s' "$LF_MIX" | grep -c .)"
+printf '%s\n' "$LF_MIX" | grep -q 'None' && fail "a bolded None. placeholder was counted" \
+  || ok "a **None.** placeholder is still not a finding"
+# the derivation reads the same shapes, or the verdict contradicts the body again
+grep -q '\[0-9\]+\[.)\]' "$REPO/helpers/runphase.sh" \
+  && ok "verdict derivation counts numbered findings too" || fail "derivation still bullet-only"
+grep -q 'VERDICT line found at line' "$REPO/helpers/runphase.sh" \
+  && ok "a VERDICT line below preamble is still honoured" || fail "verdict must be on line 1"
+
+echo "== friction: a one-line seam for reporting harness problems =="
+FR="$WORK/friction-repo"; mkdir -p "$FR"; FR="$(cd "$FR" && pwd -P)"
+git -C "$FR" init -q -b main
+git -C "$FR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+run_fr() { (cd "$FR" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_fr friction --severity 5 --thread t-1 "compose reported a false all-clear" >/dev/null 2>&1
+[ -s "$FR/.comms/friction.tsv" ] && ok "friction writes a log" || fail "friction.tsv"
+awk -F'\t' 'NR>1 && $4=="5" && $3=="t-1"' "$FR/.comms/friction.tsv" | grep -q . \
+  && ok "severity and thread are recorded" || fail "friction fields"
+awk -F'\t' 'NR>1 && $5!=""' "$FR/.comms/friction.tsv" | grep -q . \
+  && ok "the commit it happened on is recorded" || fail "friction head_sha"
+run_fr friction "a second note" >/dev/null 2>&1
+[ "$(tail -n +2 "$FR/.comms/friction.tsv" | grep -c .)" = "2" ] && ok "friction appends" || fail "friction append"
+check_not "friction requires a note" run_fr friction
+check_not "friction rejects a severity outside 1-5" run_fr friction --severity 9 x
+# it must never reach a reviewer: it is a report about the tool, not a lesson about code
+grep -q 'friction' "$REPO/helpers/comms.sh" && ! grep -q 'friction.tsv' "$REPO/templates/codex-skills/read-from-claude/SKILL.md" \
+  && ok "reviewers are never pointed at the friction log" || fail "friction leaked into reviewer context"
+grep -q 'friction --thread' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "the loop tells the driver to record friction as it happens" || fail "friction not wired into the loop"
 # A named-but-unresolvable artifact is a failure, not a reason to review the live tree.
 grep -q 'does not resolve to a commit' "$REPO/helpers/runphase.sh" \
   && ok "an unresolvable artifact_id refuses the turn" || fail "unresolvable artifact fail-closed"

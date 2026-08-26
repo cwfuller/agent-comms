@@ -64,6 +64,9 @@
 #                               cluster every leg's findings and label them by SUPPORT:
 #                               corroborated (gates), uncorroborated (cross-check first),
 #                               unanchored, advisory. Drops nothing; no model arbitrates.
+#   friction [--thread T] [--severity 1-5] "<note>"
+#                               record harness friction the moment you hit it. Appends
+#                               .comms/friction.tsv. Never shown to reviewers.
 #   round-note <reply> --note "<text>"
 #                               record how a reviewer performed on ONE round: counts are
 #                               derived from the reply, the prose is your assessment.
@@ -794,6 +797,7 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
       if (buf == "") return
       claim = trim(buf); buf = ""
       if (claim ~ /^[Nn]one\.?$/) return
+      if (claim ~ /^\*\*[Nn]one\.?\*\*$/) return
       gsub(/\t/, " ", claim)
       anchor = ""
       if (match(claim, /`[^`]+`/)) {
@@ -822,7 +826,12 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
     # is not a code finding, so it is not a graded observation either.
     /^#/ { flush(); lane = ""; next }
     lane == "" { next }
-    /^[-*] / { flush(); blane = lane; buf = substr($0, 3); next }
+    # A finding is a LIST ITEM, in any markdown list form. Matching only "- " silently
+    # extracted nothing from a numbered list — and because the verdict is derived from
+    # the same count, a review with real blocking findings was stamped APPROVE and
+    # composed as a clean panel. Observed in the field, 2026-08-26.
+    /^[-*+] / { flush(); blane = lane; buf = substr($0, 3); next }
+    /^[0-9]+[.)] / { flush(); blane = lane; sub(/^[0-9]+[.)] +/, ""); buf = $0; next }
     buf != "" && /^[[:space:]]+[^[:space:]]/ { buf = buf " " trim($0); next }
     buf != "" && /^[[:space:]]*$/ { flush(); next }
     END { flush() }
@@ -1273,6 +1282,40 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   } > "${out:-/dev/stdout}"
   rm -f "$tmp"
   [ -z "$out" ] || echo "compose: wrote ${out#"$root"/}"
+}
+
+cmd_friction() {
+  # friction [--thread T] [--severity 1-5] "<note>" — record harness friction, mid-loop.
+  #
+  # The `### Process` meta-channel already carries REVIEWER-to-driver friction. This is the
+  # other direction and the one that was missing: the DRIVER hitting something wrong with
+  # the harness itself. Without a seam that costs one line, friction reaches the owner only
+  # if a human happens to write it up afterwards — which is exactly how a false all-clear
+  # from a numbered-list parser survived a whole loop before anyone noticed.
+  #
+  # Deliberately NOT in anything `lessons` feeds to reviewers: this is a report about the
+  # tool, not a lesson about the code, and a reviewer reading it would just be noise.
+  local note="" thread="" sev=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --thread)   shift; thread="${1:-}" ;;
+      --severity) shift; sev="${1:-}" ;;
+      -?*)        usage_err "friction: unknown option '$(clip "$1")'" ;;
+      *)          note="${note:+$note }$1" ;;
+    esac
+    shift
+  done
+  [ -n "$note" ] || usage_err "friction: a note is required — what went wrong, in one or two lines"
+  case "${sev:-3}" in [1-5]) ;; *) usage_err "friction: --severity must be 1-5 (1 = cosmetic, 5 = wrong results)" ;; esac
+  local root; root="$(main_repo_root)"; [ -n "$root" ] || usage_err "friction: not inside a git repository"
+  local out="$root/.comms/friction.tsv"
+  mkdir -p "$(dirname "$out")" 2>/dev/null || die "friction: cannot create $(dirname "$out")"
+  [ -s "$out" ] || printf 'timestamp\tworkspace\tthread\tseverity\thead_sha\tnote\n' > "$out"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cmd_workspace)" "${thread:-}" "${sev:-3}" \
+    "$(git -C "$root" rev-parse --short HEAD 2>/dev/null || true)" \
+    "$(printf '%s' "$note" | tr '\t\n' '  ')" >> "$out"
+  printf 'friction: recorded (severity %s) -> %s\n' "${sev:-3}" "${out#"$root"/}"
 }
 
 cmd_round_note() {
@@ -2642,6 +2685,7 @@ case "${1:-}" in
   panel)          shift; cmd_panel "$@" ;;
   compose)        shift; cmd_compose "$@" ;;
   round-note)     shift; cmd_round_note "$@" ;;
+  friction)       shift; cmd_friction "$@" ;;
   shadow)         shift; cmd_shadow "$@" ;;
   snapshot)       shift; cmd_snapshot "$@" ;;
   prompt-version) shift; cmd_prompt_version "$@" ;;
