@@ -4498,6 +4498,159 @@ fi
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 
+echo "== presence & worktrees: advisory coordination (plan presence-worktrees-15135) =="
+# Self-contained section (maintainability track: pre-split, local fixtures).
+PW="$WORK/presence-repo"; mkdir -p "$PW"; PW="$(cd "$PW" && pwd -P)"
+git -C "$PW" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$PW/.gitignore"
+echo base > "$PW/a.txt"
+printf '#!/bin/bash\ntest -f a.txt\n' > "$PW/suite.sh"; chmod +x "$PW/suite.sh"
+git -C "$PW" add -A >/dev/null 2>&1
+git -C "$PW" -c user.email=t@t -c user.name=t commit -qm init
+mkdir -p "$PW/.comms"; printf 'suite-cmd = bash ./suite.sh\n' > "$PW/.comms/config"
+run_pw() { (cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" "$@"); }
+PW_SD="$PW/.comms/sessions"
+
+# Claim-then-check + exit contract (AC1).
+PW_C1="$(run_pw presence claim --name alpha --role "first driver")"; PW_R1=$?
+[ "$PW_R1" = 0 ] && ok "first claim on an empty field is direct-safe (exit 0)" || fail "first claim rc=$PW_R1"
+PW_I1="$(printf '%s' "$PW_C1" | sed -n 's/.*instance: //p')"
+[ -f "$PW_SD/alpha-$PW_I1.json" ] && ok "claim records BEFORE evaluating (file exists)" || fail "claim did not record"
+PW_C2="$(run_pw presence claim --name beta --role "second")"; PW_R2=$?
+[ "$PW_R2" = 3 ] && printf '%s' "$PW_C2" | grep -q 'peer: alpha' \
+  && ok "a live peer forces isolation (exit 3, peer listed)" || fail "second claim rc=$PW_R2"
+PW_I2="$(printf '%s' "$PW_C2" | sed -n 's/.*instance: //p')"
+
+# Same-name lifecycle (AC4, plan r4): same-name B is a PEER to A, and B's release
+# cannot touch A.
+PW_C3="$(run_pw presence claim --name alpha --role "same-name interloper")"; PW_R3=$?
+[ "$PW_R3" = 3 ] && ok "a same-name second session isolates (per-instance files)" || fail "same-name claim rc=$PW_R3"
+PW_I3="$(printf '%s' "$PW_C3" | sed -n 's/.*instance: //p')"
+run_pw presence release --name alpha --instance "$PW_I3"
+[ -f "$PW_SD/alpha-$PW_I1.json" ] && ok "release deletes exactly self — A survives B's release" || fail "release crossed instances"
+run_pw presence release --name beta --instance "$PW_I2"
+
+# Heal restores presence, not tenure (AC1, plan r9).
+rm -f "$PW_SD/alpha-$PW_I1.json"
+run_pw presence beat --name alpha --instance "$PW_I1" --role "first driver" >/dev/null 2>&1; PW_RH=$?
+[ "$PW_RH" = 5 ] && [ -f "$PW_SD/alpha-$PW_I1.json" ] \
+  && ok "a beat that heals a vanished record exits 5 (re-check required)" || fail "heal rc=$PW_RH"
+
+# Fail-closed reading (AC2): corrupt record and foreign host are peers; stale+live
+# pid is LIVE (suspend rule); stale+dead pid is confidently dead.
+printf 'not json' > "$PW_SD/corrupt-ffffffffffffffffffffffffffffffff.json"
+run_pw presence others --name alpha --instance "$PW_I1" >/dev/null 2>&1; PW_RC=$?
+[ "$PW_RC" = 3 ] && ok "a corrupt record reads as a peer (fail closed)" || fail "corrupt not a peer (rc=$PW_RC)"
+rm -f "$PW_SD/corrupt-ffffffffffffffffffffffffffffffff.json"
+printf '{\n  "name": "far", "instance": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "state": "working", "host": "another-machine", "pid": "1", "pid_started": "x", "last_heartbeat_epoch": "1"\n}\n' > "$PW_SD/far-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json"
+run_pw presence others --name alpha --instance "$PW_I1" >/dev/null 2>&1; PW_RF=$?
+[ "$PW_RF" = 3 ] && ok "a foreign-host record is ambiguous, never dead" || fail "foreign host not a peer"
+run_pw presence expire >/dev/null 2>&1; run_pw presence expire >/dev/null 2>&1
+[ -f "$PW_SD/far-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json" ] \
+  && ok "expire never reaps a foreign-host record" || fail "foreign host reaped"
+run_pw presence expire --force far >/dev/null 2>&1
+[ ! -f "$PW_SD/far-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json" ] \
+  && ok "expire --force is the explicit operator path" || fail "force did not remove"
+PW_MYPID=$$
+PW_MYSTART="$(ps -p $PW_MYPID -o lstart= 2>/dev/null)"
+printf '{\n  "name": "napper", "instance": "dddddddddddddddddddddddddddddddd", "state": "working", "host": "%s", "pid": "%s", "pid_started": "%s", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" "$PW_MYPID" "$PW_MYSTART" > "$PW_SD/napper-dddddddddddddddddddddddddddddddd.json"
+PW_NAPO="$(run_pw presence others --name alpha --instance "$PW_I1" || true)"
+printf '%s\n' "$PW_NAPO" | grep -q 'napper.*live' \
+  && ok "stale heartbeat + live matching pid = LIVE (suspend, not death)" || fail "suspend read as death"
+rm -f "$PW_SD/napper-dddddddddddddddddddddddddddddddd.json"
+
+# Two-pass reap + TOCTOU forcing (AC1/AC2, plan r7-r10): observation → BEAT → pass 2
+# must not reap; unchanged-dead bytes must reap with a nonce tombstone cover.
+printf '{\n  "name": "ghost", "instance": "cccccccccccccccccccccccccccccccc", "state": "working", "host": "%s", "pid": "99999999", "pid_started": "gone", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" > "$PW_SD/ghost-cccccccccccccccccccccccccccccccc.json"
+run_pw presence expire >/dev/null 2>&1
+PW_OBS="$PW_SD/.reap/ghost-cccccccccccccccccccccccccccccccc.obs"
+[ -f "$PW_OBS" ] && [ -f "$PW_SD/ghost-cccccccccccccccccccccccccccccccc.json" ] \
+  && ok "pass one observes and touches nothing" || fail "pass one misbehaved"
+perl -pi -e 's/^#obs \d+/"#obs " . (time()-99999)/e' "$PW_OBS"
+run_pw presence beat --name ghost --instance cccccccccccccccccccccccccccccccc >/dev/null 2>&1  # the racing beat
+run_pw presence expire >/dev/null 2>&1
+[ -f "$PW_SD/ghost-cccccccccccccccccccccccccccccccc.json" ] \
+  && ok "a beat between passes ABORTS the reap (byte-identity, TOCTOU forced)" || fail "reaped a beaten record"
+run_pw presence release --name ghost --instance cccccccccccccccccccccccccccccccc
+printf '{\n  "name": "ghost2", "instance": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "state": "working", "host": "%s", "pid": "99999999", "pid_started": "gone", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" > "$PW_SD/ghost2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json"
+run_pw presence expire >/dev/null 2>&1
+perl -pi -e 's/^#obs \d+/"#obs " . (time()-99999)/e' "$PW_SD/.reap/ghost2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.obs"
+run_pw presence expire >/dev/null 2>&1
+[ ! -f "$PW_SD/ghost2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json" ] \
+  && ls "$PW_SD/.reap/"ghost2-*.tomb.* >/dev/null 2>&1 \
+  && ok "unchanged dead bytes reap after the grace, leaving a nonce tombstone" || fail "clean reap failed"
+PW_COVO="$(run_pw presence others --name alpha --instance "$PW_I1" || true)"
+printf '%s\n' "$PW_COVO" | grep -q 'ghost2.*reaped-cover' \
+  && ok "a young tombstone with no record reads as a peer (cover)" || fail "cover not a peer"
+PW_TOMB="$(ls "$PW_SD/.reap/"ghost2-*.tomb.* | head -1)"
+run_pw presence expire >/dev/null 2>&1
+[ -f "$PW_TOMB" ] && ok "cover GC never fires young (1(a) only)" || fail "young cover deleted"
+printf '{\n  "name": "ghost2", "instance": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "state": "working", "host": "%s", "last_heartbeat_epoch": "%s"\n}\n' "$(hostname)" "$(date +%s)" > "$PW_SD/ghost2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json"
+perl -pi -e 's/^#tomb \d+/"#tomb 1"/e' "$PW_TOMB"
+run_pw presence expire >/dev/null 2>&1
+[ -f "$PW_TOMB" ] && ok "a cover is NEVER deleted because a record exists" || fail "cover GC'd beside a live record"
+run_pw presence release --name ghost2 --instance bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+run_pw presence expire >/dev/null 2>&1
+[ ! -f "$PW_TOMB" ] && ok "an old recordless cover is GC'd (old AND no record)" || fail "old cover survived"
+
+# worktree new (AC4/AC6): grammar, ignore-gate, local tip, main-root anchoring.
+check_not "worktree new refuses a bad slug" run_pw worktree new 'Bad/Slug'
+(cd "$PW" && git checkout -q -b session-primary)   # never-occupy-main migration
+run_pw worktree new featone >/dev/null 2>&1 && [ -d "$PW/.claude/worktrees/featone" ] \
+  && ok "worktree new creates under .claude/worktrees on its own branch" || fail "worktree new"
+(cd "$PW/.claude/worktrees/featone" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" worktree new nested >/dev/null 2>&1)
+[ -d "$PW/.claude/worktrees/nested" ] && [ ! -d "$PW/.claude/worktrees/featone/.claude/worktrees/nested" ] \
+  && ok "worktree new from inside a worktree anchors on the MAIN root (never nests)" || fail "worktree nesting"
+PW_ST_BEFORE="$(cd "$PW" && git status --porcelain)"
+[ -z "$PW_ST_BEFORE" ] && ok "session worktrees leave main's status untouched (ignored)" || fail "worktree dirtied status: $PW_ST_BEFORE"
+
+# Snapshot strips session worktrees MECHANICALLY, even without the ignore entry (AC6).
+printf '.comms/\n' > "$PW/.gitignore"    # remove the worktree ignore in the fixture
+PW_SNAP="$(run_pw snapshot create 2>/dev/null)"
+(cd "$PW" && git ls-tree -r --name-only "$PW_SNAP" 2>/dev/null) | grep -q 'claude/worktrees' \
+  && fail "snapshot ingested a session worktree" || ok "snapshot strips session worktrees mechanically (ignore entry removed)"
+printf '.comms/\n.claude/worktrees/\n' > "$PW/.gitignore"
+
+# integrate (AC3/AC5): ff lands at the tested OID via CAS; non-ff and unset config refuse.
+(cd "$PW/.claude/worktrees/featone" && echo two > b.txt && git add b.txt && git -c user.email=t@t -c user.name=t commit -qm "feat: b")
+run_pw integrate worktree-featone >/dev/null 2>&1 \
+  && [ "$(cd "$PW" && git rev-parse main)" = "$(cd "$PW" && git rev-parse worktree-featone)" ] \
+  && ok "integrate lands the candidate OID on main (suite green, CAS)" || fail "integrate did not land"
+check_not "integrate refuses a non-descendant (ff-only)" run_pw integrate session-primary
+PW_CFG="$(cat "$PW/.comms/config")"; printf '' > "$PW/.comms/config"
+check_not "integrate refuses without explicit suite-cmd" run_pw integrate worktree-featone
+printf '%s\n' "$PW_CFG" > "$PW/.comms/config"
+# CAS race: main advances after resolve — model by handing integrate a stale branch.
+(cd "$PW" && git checkout -q -b session-c main && echo c > c.txt && git add c.txt && git -c user.email=t@t -c user.name=t commit -qm "feat: c" && git checkout -q session-primary)
+run_pw integrate session-c >/dev/null 2>&1
+(cd "$PW/.claude/worktrees/nested" && git merge -q --ff-only "$(cd "$PW" && git rev-parse main)" 2>/dev/null; echo d > d.txt; git add d.txt; git -c user.email=t@t -c user.name=t commit -qm "feat: d")
+run_pw integrate worktree-nested >/dev/null 2>&1 \
+  && ok "serial landings compose (second branch rebased onto advanced main)" || fail "serial landing failed"
+# Failed suite leaves main untouched.
+PW_MAIN_BEFORE="$(cd "$PW" && git rev-parse main)"
+(cd "$PW/.claude/worktrees/featone" && git merge -q --ff-only "$PW_MAIN_BEFORE" 2>/dev/null; printf '#!/bin/bash\nexit 1\n' > suite.sh; git add -A; git -c user.email=t@t -c user.name=t commit -qm "break suite" ) 2>/dev/null
+check_not "a failed suite refuses to land" run_pw integrate worktree-featone
+[ "$(cd "$PW" && git rev-parse main)" = "$PW_MAIN_BEFORE" ] \
+  && ok "a failed suite leaves main untouched (verify-then-move)" || fail "main moved on red suite"
+# Lease refusal: a live integrating presence blocks a second integrator.
+PW_C4="$(run_pw presence claim --name landlord --role "landing" --state integrating)"; PW_I4="$(printf '%s' "$PW_C4" | sed -n 's/.*instance: //p')"
+check_not "a live integrating lease refuses a second integrator" run_pw integrate worktree-nested
+run_pw presence release --name landlord --instance "$PW_I4"
+
+# with-beat: a beat lands DURING a blocked child (AC1).
+PW_HB_BEFORE="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
+(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 4) >/dev/null 2>&1
+PW_HB_AFTER="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
+[ "$PW_HB_AFTER" != "$PW_HB_BEFORE" ] && ok "with-beat lands a heartbeat DURING a blocked child" || fail "no beat during block"
+run_pw presence release --name alpha --instance "$PW_I1"
+
+# Template wiring (AC4): the gate and the re-check rule are in the always-loaded surfaces.
+grep -q 'presence claim' "$REPO/templates/claude-commands/auto.md" \
+  && grep -qi 'After EVERY wait' "$REPO/templates/claude-commands/auto.md" \
+  && ok "auto.md carries the presence gate and the post-wait re-check" || fail "auto.md presence wiring"
+grep -qi 'Presence re-check after the wait' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "the reader re-checks presence after reviewer waits" || fail "reader presence wiring"
+
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
 DRY="$(run_comms clean --as claude workspace)"

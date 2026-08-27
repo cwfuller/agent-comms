@@ -41,6 +41,37 @@ directory the inbound actually occupies; already-archived is an idempotent no-op
 
 `.comms/` is gitignored — messages are local plumbing, not project history.
 
+## Presence & worktrees (multi-session coordination)
+
+Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized by
+`comms.sh presence` (see COMMANDS.md):
+
+1. **Claim then check.** Before touching the tree, a session records its presence
+   (`.comms/sessions/<name>-<instance>.json` — role, state, host, optional
+   long-lived pid) and THEN evaluates peers. Exit 0 = no live/ambiguous peers,
+   the shared checkout is free; exit 3/4 = isolate into a session worktree
+   (`comms.sh worktree new`). Task size never matters; peer presence does.
+2. **Never occupy `main`.** Every persistent checkout — the primary included —
+   runs on a session branch. `main` is a ref that advances; it is checked out only
+   transiently inside `integrate`'s throwaway verification worktree. Migration for
+   an existing checkout: `comms.sh workspace set <name>` FIRST (pins mailbox
+   identity so the branch switch cannot flap prefixes), then `git checkout -b`.
+3. **Landing = `comms.sh integrate <branch>`.** Advisory lease, ff-only, the suite
+   runs at the CANDIDATE OID in an immutable detached worktree, and `main` moves by
+   compare-and-swap `update-ref` — a race loses cleanly, an untested or non-ff OID
+   cannot land, and main never points at a commit the suite has not passed at.
+   Integrate small and often: isolation removes collision, but cross-session
+   visibility lives in landed work.
+4. **Direct is re-earned, never tenure.** After every wait (reviewer round, await,
+   resume) a direct session re-runs `presence others` before its next write; a
+   `beat` that heals a vanished record (exit 5) demands the same re-check.
+5. **Fail closed.** Corrupt records, foreign hosts, unverifiable pids, an
+   unwritable sessions dir, and freshly-reaped covers all read as peers.
+   Staleness alone never implies death (suspend); only `expire`'s two-pass
+   byte-identical reap with confident-death evidence removes another session's
+   record, and its nonce tombstones shield the transition. The one documented
+   residual and its exact preconditions live in INTERNALS.
+
 ## Worktrees & branches
 
 Loops often run in a `git worktree` (one per cmux workspace). Two rules

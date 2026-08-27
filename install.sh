@@ -290,6 +290,9 @@ init_project_state() {
     grep -qxF '.comms/' "$PROJECT_ROOT/.gitignore" || MISSING=".comms/"
     grep -qxF '.codex/AGENTS.md' "$PROJECT_ROOT/.gitignore" || MISSING="$MISSING .codex/AGENTS.md"
     grep -qxF '.agent-comms/' "$PROJECT_ROOT/.gitignore" || MISSING="$MISSING .agent-comms/"
+    # Session worktrees inside the checkout must be ignore-covered or they walk a
+    # full second repo copy into snapshots and broad staging (panel r1 + 7dc08b4).
+    grep -qxF '.claude/worktrees/' "$PROJECT_ROOT/.gitignore" || MISSING="$MISSING .claude/worktrees/"
     if [ -n "$MISSING" ]; then
       # Guard against a missing trailing newline swallowing our first appended line.
       [ -n "$(tail -c1 "$PROJECT_ROOT/.gitignore")" ] && echo "" >> "$PROJECT_ROOT/.gitignore"
@@ -308,8 +311,9 @@ init_project_state() {
       echo ".comms/"
       echo ".codex/AGENTS.md"
       echo ".agent-comms/"
+      echo ".claude/worktrees/"
     } > "$PROJECT_ROOT/.gitignore"
-    echo "  created .gitignore with .comms/, .codex/AGENTS.md, .agent-comms/"
+    echo "  created .gitignore with .comms/, .codex/AGENTS.md, .agent-comms/, .claude/worktrees/"
   fi
 
   install_agents_block "$PROJECT_ROOT/.codex/AGENTS.md"

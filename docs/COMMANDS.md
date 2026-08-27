@@ -121,6 +121,9 @@ agnostic.
 | `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`delivered`/`spawned`/`manual`/`blocked`/`failed`) |
 | `reconcile <message-file\|message-id>` | record a successful external/direct nudge; used as the final guarded segment of `RECOVER:` |
 | `bind <claude\|codex> [surface:N]` | pin which surface delivery targets (show current with no arg); successful deliveries auto-refresh it; ignored if the surface disappears |
+| `presence claim\|beat\|others\|release\|expire\|with-beat` | advisory multi-session coordination on `.comms/sessions/` — claim-then-check (exit 0 direct-safe / 3 peers / 4 fail-closed ambiguity), whole-file heartbeats (exit 5 = healed, re-check before writing), exact-self release, two-pass byte-identical reap with nonce tombstone covers, and a beat-wrapper for long-running children. See PROTOCOL "Presence & worktrees" |
+| `worktree new [<slug>]` | session worktree under the MAIN root's `.claude/worktrees/` on branch `worktree-<slug>`, from the LOCAL default-branch tip; refuses without ignore coverage |
+| `integrate <branch>` | land on `main`: advisory lease, ff-only, suite (config `suite-cmd = ...`) at the candidate OID in a detached worktree, then CAS `update-ref` — a race loses cleanly, main only ever advances to suite-verified commits |
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |
 | `clean --as <claude\|codex> [mode] [--yes]` | guarded delete; dry-run without `--yes` |

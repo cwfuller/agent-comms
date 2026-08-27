@@ -64,6 +64,40 @@ Why it's this way (each reason independently sufficient):
   `---` block; matching anywhere in the file lets a body line that *quotes* frontmatter
   (e.g. `verdict: APPROVE` in prose) fake protocol signals.
 
+## Presence: advisory, not locks — and the one residual
+
+Presence (`comms.sh presence`) coordinates sessions without ever holding a lock: a
+stuck lease is an outage, a rare double-isolation costs ~300ms. Design rules that
+took ten review rounds to converge (thread `presence-worktrees-15135`):
+
+- **Two clocks, never unified.** TTL (I, default 2700s) is the freshness window and
+  the reap-observation grace; tombstone covers hold 2I from their own unlink stamp.
+  Collapsing them recreates the "ages out exactly when needed" failure.
+- **Only `expire` deletes others' records**, via two-pass byte-identical reap:
+  observe (original timestamp never refreshed — `expire; expire` cannot shorten the
+  grace), then reap only if bytes are identical, the grace is served, and confident
+  death still holds (same host, pid ESRCH-absent by `ps -p` — EPERM means alive —
+  and the recorded `pid_started` matches no live process; pid reuse cannot hold a
+  dead claim). The nonce-named tombstone is written BEFORE the unlink and GC'd only
+  when old AND recordless — never because a record exists, and only the exact nonce
+  file observed (a paused GC cannot clobber a newer generation).
+- **Readers go records-first, then covers** — with tombstone-before-unlink, every
+  expire interleaving shows a reader at least one of the two.
+- **Beats are whole-file rewrites** — a lost unlink race heals on the next beat,
+  and healing restores PRESENCE, never direct tenure (exit 5 forces re-check).
+- **The documented residual:** a falsely-reaped DIRECT session that performs no
+  beat and no wait-checkpoint for more than 2I (an unnoticed suspend resuming
+  straight into a write) while a newcomer legitimately claims. Closing it requires
+  per-write lease semantics — rejected; the templates place checkpoints at every
+  wait boundary, and the harness pins the reproduction to exactly these
+  preconditions.
+- **Worktree helpers anchor on `main_repo_root()`** (the mailbox resolver, not
+  `--show-toplevel`) so creation from inside a worktree cannot nest checkouts; and
+  session worktrees are excluded from artifacts three ways — gitignore at init,
+  mechanical snapshot strip, and `worktree new` refusing without ignore coverage.
+  The local default-branch tip (never `origin/<default>`) is the base: origin can
+  lag a full unpushed day.
+
 ## Workspace resolution
 
 One algorithm, one implementation (`comms.sh workspace`), with an explicit escape

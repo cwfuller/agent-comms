@@ -339,7 +339,7 @@ registry_parse() {
   default_ct="$(grep -c '^[[:space:]]*default-target[[:space:]]*=' "$f" 2>/dev/null || true)"
   [ "${agents_ct:-0}" -le 1 ] || die "config: duplicate 'agents' key in $f"
   [ "${default_ct:-0}" -le 1 ] || die "config: duplicate 'default-target' key in $f"
-  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=)' "$f" \
+  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|suite-cmd[[:space:]]*=)' "$f" \
     | head -3 | sed 's/^/warning: config: unknown line: /' >&2 || true
   if [ "${agents_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
@@ -1822,6 +1822,338 @@ agent_version() {  # best-effort CLI identity — empty beats a guess
   printf '%s' "${v:-}"
 }
 
+# ---------- presence: advisory multi-session coordination ----------
+# Plan thread presence-worktrees-15135 (10 review rounds; design decisions in
+# docs/ROADMAP.md "Design settled" + INTERNALS "Presence & worktrees"). Everything
+# here is ADVISORY: refusals on visible state, documented race windows, no locks.
+# Correctness never depends on this layer — the CAS in cmd_integrate and the
+# fail-closed reading rules are what carry the invariants.
+#
+# Two clocks, deliberately distinct (grok, plan r5/r10):
+#   TTL (I)      — freshness window; a live session beats at least once per I.
+#   cover (2I)   — how long a tombstone shields a reaped name-instance.
+PRESENCE_TTL_SECS="${COMMS_PRESENCE_TTL_SECS:-2700}"
+
+presence_dir() { printf '%s/.comms/sessions' "$(main_repo_root)"; }
+presence_host() { hostname 2>/dev/null || echo unknown-host; }
+presence_field() { sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1; }
+
+presence_write() {  # <dest> <name> <instance> <role> <state> <pid> <pid_started> <started>
+  # Whole-file temp+mv, temps OUT of the readers' record glob (.tmp/). A beat is a
+  # full rewrite, never an update — a deleted record heals on the next beat, and the
+  # bytes always change (the heartbeat), which is what invalidates reap observations.
+  local dest="$1" dir tmp
+  dir="$(dirname "$dest")"
+  mkdir -p "$dir/.tmp" 2>/dev/null || return 1
+  tmp="$dir/.tmp/$(basename "$dest").$$.$RANDOM"
+  printf '{\n  "name": "%s",\n  "instance": "%s",\n  "role": "%s",\n  "state": "%s",\n  "host": "%s",\n  "pid": "%s",\n  "pid_started": "%s",\n  "started": "%s",\n  "last_heartbeat": "%s",\n  "last_heartbeat_epoch": "%s"\n}\n' \
+    "$(json_escape "$2")" "$3" "$(json_escape "$4")" "$5" "$(presence_host)" \
+    "$6" "$(json_escape "$7")" "$8" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date +%s)" \
+    > "$tmp" 2>/dev/null || return 1
+  command mv -f "$tmp" "$dest" 2>/dev/null
+}
+
+presence_eval() {  # <record> — prints live|dead|ambig. FAIL CLOSED: every uncertain case is ambig.
+  local f="$1" host hb pid pstart now age
+  host="$(presence_field "$f" host)"
+  hb="$(presence_field "$f" last_heartbeat_epoch)"
+  case "$hb" in ''|*[!0-9]*) echo ambig; return 0 ;; esac   # corrupt/unreadable → peer
+  # Foreign host: a pid from another machine is meaningless here — ambiguous, never
+  # dead, never GC'd (01's cross-host analysis, folded plan r2).
+  [ "$host" = "$(presence_host)" ] || { echo ambig; return 0; }
+  now="$(date +%s)"; age=$((now - hb))
+  [ "$age" -le "$PRESENCE_TTL_SECS" ] && { echo live; return 0; }
+  # Stale. Staleness alone NEVER implies death (suspend/clock skew): only a recorded
+  # pid can prove anything, and only existence-by-ps (EPERM-safe), with the recorded
+  # start-time identity so a recycled pid cannot keep a dead claim alive.
+  pid="$(presence_field "$f" pid)"
+  case "$pid" in ''|*[!0-9]*) echo ambig; return 0 ;; esac  # stale + no pid → ambig
+  if ps -p "$pid" -o pid= >/dev/null 2>&1; then
+    pstart="$(presence_field "$f" pid_started)"
+    [ -n "$pstart" ] && [ "$(ps -p "$pid" -o lstart= 2>/dev/null)" = "$pstart" ] \
+      && { echo live; return 0; }     # same process, just stale (suspend) → live
+    echo dead; return 0               # pid recycled: the recorded process is gone
+  fi
+  echo dead                           # ESRCH-confirmed absent
+}
+
+presence_peers() {  # <self-name> <self-instance> — prints peers; return 0 none / 3 peers.
+  # Reader protocol (plan r9): RECORDS first, then reap artifacts. The tombstone is
+  # written BEFORE its record's unlink, so every expire interleaving shows a reader
+  # at least one of the two until the cover legitimately ages out.
+  local dir self="$1-$2.json" found=0 f verdict base tomb tepoch now covered
+  dir="$(presence_dir)"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*.json; do
+    [ -f "$f" ] || continue
+    [ "$(basename "$f")" = "$self" ] && continue
+    verdict="$(presence_eval "$f")"
+    [ "$verdict" = "dead" ] && continue
+    found=1
+    printf 'peer: %s  state=%s  role=%s  (%s)\n' \
+      "$(presence_field "$f" name)-$(printf '%.8s' "$(presence_field "$f" instance)")" \
+      "$(presence_field "$f" state)" "$(presence_field "$f" role)" "$verdict"
+  done
+  now="$(date +%s)"
+  for tomb in "$dir"/.reap/*.tomb.*; do
+    [ -f "$tomb" ] || continue
+    base="$(basename "$tomb")"; base="${base%%.tomb.*}"
+    [ -f "$dir/$base.json" ] && continue          # record back → cover is redundant
+    [ "$base" = "$1-$2" ] && continue             # own reaped ghost is not a peer to self
+    tepoch="$(sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" | head -1)"
+    case "$tepoch" in ''|*[!0-9]*) tepoch=0 ;; esac
+    covered=$((now - tepoch))
+    if [ "$covered" -le $((PRESENCE_TTL_SECS * 2)) ]; then
+      found=1
+      printf 'peer: %s  (reaped-cover, heals or expires in %ss)\n' "$base" $((PRESENCE_TTL_SECS * 2 - covered))
+    fi
+  done
+  [ "$found" = 0 ] && return 0 || return 3
+}
+
+cmd_presence() {
+  # presence claim|beat|others|release|expire|with-beat — see docs/COMMANDS.md.
+  # Exit contract for claim/others: 0 = recorded, no live/ambiguous peers (direct
+  # work is safe); 3 = peers listed (isolate); 4 = the claim could not be recorded
+  # or the sessions dir is unreadable — ambiguous ENVIRONMENT, isolate (fail
+  # closed), never a hard error. beat exits 5 when it HEALED a vanished record:
+  # presence is restored but DIRECT tenure is not — re-run claim-then-check before
+  # the next shared-checkout write.
+  local sub="${1:-}"; shift 2>/dev/null || true
+  local name="" instance="" role="" state="" pid="" force=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name)     shift; name="${1:-}" ;;
+      --instance) shift; instance="${1:-}" ;;
+      --role)     shift; role="${1:-}" ;;
+      --state)    shift; state="${1:-}" ;;
+      --pid)      shift; pid="${1:-}" ;;
+      --force)    shift; force="${1:-}" ;;
+      --) shift; break ;;
+      -?*) usage_err "presence $sub: unknown option '$(clip "$1")'" ;;
+      *) break ;;
+    esac
+    shift
+  done
+  local dir; dir="$(presence_dir)"
+  case "$sub" in
+    claim)
+      [ -n "$name" ] || usage_err "presence claim: --name required"
+      printf '%s' "$name" | grep -qE '^[a-z0-9][a-z0-9._-]{0,40}$' \
+        || usage_err "presence claim: invalid name '$(clip "$name")'"
+      case "$pid" in *[!0-9]*) usage_err "presence claim: --pid must be numeric" ;; esac
+      instance="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+      [ -n "$instance" ] || { echo "presence: could not mint an instance token — ISOLATE" >&2; return 4; }
+      local pstart=""
+      [ -n "$pid" ] && pstart="$(ps -p "$pid" -o lstart= 2>/dev/null)"
+      # CLAIM THEN CHECK: record own presence FIRST, evaluate peers second — the
+      # ordering that shrinks the simultaneous-start race to seconds.
+      if ! presence_write "$dir/$name-$instance.json" "$name" "$instance" "$role" "${state:-working}" "$pid" "$pstart" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; then
+        echo "presence: could not record the claim in $dir — ambiguous environment, ISOLATE" >&2
+        return 4
+      fi
+      echo "claimed: $name  instance: $instance"
+      presence_peers "$name" "$instance"
+      ;;
+    beat)
+      [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence beat: --name and --instance required"
+      local rec="$dir/$name-$instance.json" healed=0 orole ostate opid opstart ostarted
+      if [ -f "$rec" ]; then
+        # Token match is implicit in the path: this file IS ours or it does not exist.
+        orole="$(presence_field "$rec" role)"; ostate="$(presence_field "$rec" state)"
+        opid="$(presence_field "$rec" pid)"; opstart="$(presence_field "$rec" pid_started)"
+        ostarted="$(presence_field "$rec" started)"
+      else
+        healed=1; orole="$role"; ostate="${state:-working}"; opid="$pid"; opstart=""; ostarted="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      fi
+      [ -n "$state" ] && ostate="$state"
+      [ -n "$role" ] && orole="$role"
+      presence_write "$rec" "$name" "$instance" "$orole" "$ostate" "$opid" "$opstart" "$ostarted" \
+        || { echo "presence beat: write failed" >&2; return 4; }
+      if [ "$healed" = 1 ]; then
+        echo "presence: record was GONE and has been healed — tenure is NOT restored; re-run claim-then-check before the next shared-checkout write" >&2
+        return 5
+      fi
+      ;;
+    others)
+      [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence others: --name and --instance required"
+      [ -d "$dir" ] || return 0
+      [ -r "$dir" ] || { echo "presence: sessions dir unreadable — ISOLATE" >&2; return 4; }
+      presence_peers "$name" "$instance"
+      ;;
+    release)
+      [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence release: --name and --instance required"
+      # Exact-self deletion only — the token is the path, so a same-name successor's
+      # record is untouchable by construction. (Deletion invariant, plan r5.)
+      rm -f "$dir/$name-$instance.json" 2>/dev/null || true
+      ;;
+    expire)
+      presence_expire "$dir" "$force"
+      ;;
+    with-beat)
+      [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence with-beat: --name and --instance required"
+      [ $# -gt 0 ] || usage_err "presence with-beat: a command is required after --"
+      local parent=$$ beater rc=0
+      ( while :; do
+          sleep $((PRESENCE_TTL_SECS / 3))
+          kill -0 "$parent" 2>/dev/null || exit 0   # orphan beater suicide (plan r5)
+          "$0" presence beat --name "$name" --instance "$instance" >/dev/null 2>&1 || true
+        done ) & beater=$!
+      trap 'kill "$beater" 2>/dev/null' INT TERM
+      "$@" || rc=$?
+      kill "$beater" 2>/dev/null; wait "$beater" 2>/dev/null   # join-before-restore
+      trap - INT TERM
+      return "$rc"
+      ;;
+    *) usage_err "presence: expected claim|beat|others|release|expire|with-beat" ;;
+  esac
+}
+
+presence_expire() {  # <dir> [force-name] — the ONLY verb that deletes OTHERS' records.
+  # Two-pass byte-identical reap (plan r7) with unlink-time nonce tombstones (r9/r10):
+  # pass 1 stores an observation; a LATER invocation reaps only if the record is
+  # byte-identical, the observation is a full TTL old (its ORIGINAL stamp — never
+  # refreshed), and confident-death still holds. The tombstone is written BEFORE the
+  # unlink, carries its own clock, and GC unlinks only the exact nonce file it
+  # observed — a paused GC cannot clobber a newer generation. Cover GC is
+  # "old AND no record" ONLY: a cover is never deleted because a record exists.
+  local dir="$1" force="$2" reap="$dir/.reap" now f base obs oepoch nonce tomb tepoch
+  now="$(date +%s)"
+  mkdir -p "$reap" 2>/dev/null || { echo "expire: cannot use $reap" >&2; return 1; }
+  if [ -n "$force" ]; then
+    # Explicit operator path for forever-ambiguous entries (foreign host, no pid).
+    rm -f "$dir/$force"-*.json "$reap/$force"-* 2>/dev/null || true
+    echo "expire: forced removal of every '$force' record and artifact"
+    return 0
+  fi
+  for f in "$dir"/*.json; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f" .json)"
+    obs="$reap/$base.obs"
+    [ "$(presence_eval "$f")" = "dead" ] || { rm -f "$obs" 2>/dev/null; continue; }
+    if [ ! -f "$obs" ]; then
+      { printf '#obs %s\n' "$now"; cat "$f"; } > "$reap/.tmp.$$" 2>/dev/null \
+        && command mv -f "$reap/.tmp.$$" "$obs" 2>/dev/null
+      continue                                    # pass 1: observe, touch nothing
+    fi
+    oepoch="$(sed -n 's/^#obs \([0-9]*\).*/\1/p' "$obs" | head -1)"
+    case "$oepoch" in ''|*[!0-9]*) rm -f "$obs"; continue ;; esac
+    [ $((now - oepoch)) -ge "$PRESENCE_TTL_SECS" ] || continue     # grace not served
+    if ! tail -n +2 "$obs" | cmp -s - "$f"; then
+      rm -f "$obs" 2>/dev/null; continue          # a beat intervened — abort in-progress reap
+    fi
+    # Reap: tombstone BEFORE unlink (r9), nonce-named (r10), then the record.
+    nonce="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    tomb="$reap/$base.tomb.$nonce"
+    printf '#tomb %s\n' "$now" > "$reap/.tmp.$$" 2>/dev/null \
+      && command mv -f "$reap/.tmp.$$" "$tomb" 2>/dev/null || { rm -f "$obs"; continue; }
+    rm -f "$f" 2>/dev/null
+    rm -f "$obs" 2>/dev/null                      # observation is spent; the TOMB is the cover
+    echo "reaped: $base (cover $nonce holds for $((PRESENCE_TTL_SECS * 2))s)"
+  done
+  # Cover GC — 1(a) only: old AND no record; age re-checked AFTER the record check
+  # on the exact nonce file; a new generation is a different pathname entirely.
+  for tomb in "$reap"/*.tomb.*; do
+    [ -f "$tomb" ] || continue
+    base="$(basename "$tomb")"; base="${base%%.tomb.*}"
+    [ -f "$dir/$base.json" ] && continue          # record exists → cover stays, always
+    tepoch="$(sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" | head -1)"
+    case "$tepoch" in ''|*[!0-9]*) continue ;; esac
+    [ $(( $(date +%s) - tepoch )) -gt $((PRESENCE_TTL_SECS * 2)) ] || continue
+    [ -f "$dir/$base.json" ] && continue          # re-check after age read
+    rm -f "$tomb" 2>/dev/null
+  done
+  return 0
+}
+
+cmd_worktree() {
+  # worktree new [<slug>] — a session worktree under the MAIN root (never nested,
+  # never cwd-relative: the two-resolver rule, third appearance — grok, plan r7),
+  # branched from the LOCAL default-branch tip (origin can lag a full unpushed day).
+  local sub="${1:-new}"; shift 2>/dev/null || true
+  [ "$sub" = "new" ] || usage_err "worktree: expected 'new'"
+  local slug="${1:-session-$$-$RANDOM}"
+  printf '%s' "$slug" | grep -qE '^[a-z0-9][a-z0-9._-]{0,40}$' \
+    || usage_err "worktree new: invalid slug '$(clip "$slug")'"
+  local root tip path branch
+  root="$(main_repo_root)"; [ -n "$root" ] || die "worktree new: cannot resolve the main repo root"
+  tip="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null \
+      || git -C "$root" rev-parse --verify refs/heads/master 2>/dev/null)" \
+    || die "worktree new: no local main/master tip to branch from"
+  path="$root/.claude/worktrees/$slug"; branch="worktree-$slug"
+  [ -e "$path" ] && die "worktree new: $path already exists"
+  git -C "$root" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && die "worktree new: branch $branch already exists"
+  # The ignore coverage is load-bearing: an unignored in-checkout worktree walks a
+  # full second repo copy into every review artifact. Verified, not assumed.
+  mkdir -p "$root/.claude/worktrees" 2>/dev/null || true
+  git -C "$root" check-ignore -q ".claude/worktrees/$slug" \
+    || die "worktree new: .claude/worktrees/ is not ignore-covered — refusing (re-run install.sh or restore the .gitignore entry)"
+  git -C "$root" worktree add -b "$branch" "$path" "$tip" >/dev/null 2>&1 \
+    || die "worktree new: git worktree add failed"
+  echo "worktree: $path"
+  echo "branch:   $branch (from $(git -C "$root" rev-parse --short "$tip"))"
+}
+
+cmd_integrate() {
+  # integrate <branch> — land a session branch on main: advisory lease, ff-only,
+  # suite at the CANDIDATE OID in an immutable detached worktree, then the CAS
+  # update-ref. The lease is an economizer; the CAS is the safety. main is never
+  # checked out anywhere: it moves by ref, verified first. (Plan r3-r6.)
+  local branch="${1:-}"; shift 2>/dev/null || true
+  [ -n "$branch" ] || usage_err "integrate: a branch is required"
+  local name="${COMMS_PRESENCE_NAME:-}" instance="${COMMS_PRESENCE_INSTANCE:-}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) shift; name="${1:-}" ;;
+      --instance) shift; instance="${1:-}" ;;
+      -?*) usage_err "integrate: unknown option '$(clip "$1")'" ;;
+    esac; shift
+  done
+  local root; root="$(main_repo_root)"; [ -n "$root" ] || die "integrate: no main repo root"
+  local suite_cmd
+  suite_cmd="$(sed -n 's/^suite-cmd *= *//p' "$root/.comms/config" 2>/dev/null | head -1)"
+  [ -n "$suite_cmd" ] || die "integrate: no 'suite-cmd = ...' in .comms/config — refusing to land unverified (explicit configuration required)"
+  # Advisory lease: refuse while any OTHER live presence is integrating.
+  local dir f
+  dir="$(presence_dir)"
+  if [ -d "$dir" ]; then
+    for f in "$dir"/*.json; do
+      [ -f "$f" ] || continue
+      [ "$(basename "$f" .json)" = "$name-$instance" ] && continue
+      [ "$(presence_field "$f" state)" = "integrating" ] || continue
+      [ "$(presence_eval "$f")" = "dead" ] && continue
+      die "integrate: $(presence_field "$f" name) holds a live integrating lease — serialize (advisory; re-run when it releases)"
+    done
+  fi
+  [ -n "$name" ] && [ -n "$instance" ] && "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1
+  local expected cand tw rc=0
+  expected="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" || die "integrate: no refs/heads/main"
+  cand="$(git -C "$root" rev-parse --verify "$branch^{commit}" 2>/dev/null)" || die "integrate: cannot resolve '$branch'"
+  echo "integrate: candidate $cand (from $branch), expected main $expected"
+  git -C "$root" merge-base --is-ancestor "$expected" "$cand" \
+    || die "integrate: $branch is not a descendant of main — rebase first (ff-only)"
+  tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
+  rm -rf "$tw" 2>/dev/null
+  git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || die "integrate: could not materialize $cand"
+  # shellcheck disable=SC2064
+  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
+  # Structured argv: whitespace split only, nothing shell-interpreted.
+  set -f; set -- $suite_cmd; set +f
+  if [ -n "$name" ] && [ -n "$instance" ]; then
+    ( cd "$tw" && "$0" presence with-beat --name "$name" --instance "$instance" -- "$@" ) || rc=$?
+  else
+    ( cd "$tw" && "$@" ) || rc=$?
+  fi
+  [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; fix on the branch and re-run"
+  [ -z "$(git -C "$tw" status --porcelain 2>/dev/null)" ] || die "integrate: the suite dirtied the verification tree — refusing to trust the result"
+  git -C "$root" worktree list --porcelain | grep -qx 'branch refs/heads/main' \
+    && die "integrate: main is checked out somewhere — refusing (never-occupy-main)"
+  git -C "$root" update-ref refs/heads/main "$cand" "$expected" \
+    || die "integrate: main moved (CAS refused) — nothing landed; re-run to re-verify against the new tip"
+  echo "integrate: LANDED $cand as main (was $expected); suite green at the landed OID"
+}
+
 cmd_snapshot() {
   # snapshot [create|list] — RETAIN the tree under review as a durable git object.
   #
@@ -1866,8 +2198,11 @@ cmd_snapshot() {
   # be pushed. Same boundary rule as the archive-search scope fix. (An exclude
   # PATHSPEC cannot do this — `git add` reads it as naming an ignored path and
   # fails the whole command.)
-  GIT_INDEX_FILE="$idx" git -C "$root" rm --cached -r -q --ignore-unmatch -- .comms .agent-comms 2>/dev/null \
+  GIT_INDEX_FILE="$idx" git -C "$root" rm --cached -r -q --ignore-unmatch -- .comms .agent-comms .claude/worktrees 2>/dev/null \
     || { rm -rf "$idxdir"; die "snapshot: cannot exclude the mailbox from the artifact"; }
+  # .claude/worktrees joins the mechanical strip: an in-checkout session worktree is
+  # a full second repo copy, and relying on .gitignore alone let one walk into a
+  # sibling loop's review artifact before 7dc08b4. Mechanical, like the mailbox.
   tree="$(GIT_INDEX_FILE="$idx" git -C "$root" write-tree 2>/dev/null || true)"
   rm -rf "$idxdir"
   [ -n "$tree" ] || die "snapshot: cannot write the reviewed tree"
@@ -3037,6 +3372,9 @@ case "${1:-}" in
   send)      shift; cmd_send "$@" ;;
   reconcile) shift; cmd_reconcile "$@" ;;
   state)     shift; cmd_state "$@" ;;
+  presence)  shift; cmd_presence "$@" ;;
+  worktree)  shift; cmd_worktree "$@" ;;
+  integrate) shift; cmd_integrate "$@" ;;
   stalled)   shift; cmd_stalled "$@" ;;
   bind)      shift; cmd_bind "$@" ;;
   clean)     shift; cmd_clean "$@" ;;

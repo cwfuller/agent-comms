@@ -11,6 +11,26 @@ cap, is what keeps a plan phase from becoming a document-nit loop.
 
 ## Instructions
 
+0. **Presence gate — before touching the tree.** Claim presence, then let the exit
+   code decide WHERE you work (never how much — task size is irrelevant by design):
+   ```bash
+   CLAIM="$("$COMMS_SH" presence claim --name "<session-name>" --role "<one-line task>")"; RC=$?
+   export COMMS_PRESENCE_NAME="<session-name>" COMMS_PRESENCE_INSTANCE="$(printf '%s' "$CLAIM" | sed -n 's/.*instance: //p')"
+   ```
+   - **Exit 0** — no live peers: work in the shared checkout directly (on a session
+     branch; `main` is never checked out — see PROTOCOL "Presence & worktrees").
+   - **Exit 3 or 4** — peers exist, or the claim could not be recorded: take a
+     worktree (`"$COMMS_SH" worktree new <slug>`) and work there. 4 is fail-closed
+     ambiguity, not an error.
+   - **After EVERY wait** (a reviewer round, an await, a resume): re-run
+     `"$COMMS_SH" presence others --name ... --instance ...` BEFORE the next write
+     to the shared checkout — starting direct-safe is not tenure. A `beat` that
+     exits 5 healed a vanished record: same rule, re-check before writing.
+   - Long runs beat via `"$COMMS_SH" presence with-beat ... -- <cmd>`; `send` and
+     `await` beat automatically when the env vars are set. `release` on clean exit.
+   - Landing goes through `"$COMMS_SH" integrate <branch>` — never a manual merge
+     while sessions are live.
+
 1. **Parse arguments:**
    - The argument text describes what to implement (or references an existing plan).
    - `--rounds N` sets max rounds for EACH phase. **Default 10.** A cap you actually hit
