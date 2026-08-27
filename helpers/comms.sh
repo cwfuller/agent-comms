@@ -353,7 +353,16 @@ registry_parse() {
   default_ct="$(grep -c '^[[:space:]]*default-target[[:space:]]*=' "$f" 2>/dev/null || true)"
   [ "${agents_ct:-0}" -le 1 ] || die "config: duplicate 'agents' key in $f"
   [ "${default_ct:-0}" -le 1 ] || die "config: duplicate 'default-target' key in $f"
-  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|suite-cmd[[:space:]]*=)' "$f" \
+  # Single-occurrence keys are enforced HERE, at the one full-config validation
+  # path: the consumers read the FIRST match, so a later `suite-attest-secs = 0`
+  # appended to disable the skip would leave the earlier enabling value
+  # authoritative — the failure mode points the unsafe way. (codex, r1.)
+  local attest_ct suite_ct
+  attest_ct="$(grep -c '^[[:space:]]*suite-attest-secs[[:space:]]*=' "$f" 2>/dev/null || true)"
+  suite_ct="$(grep -c '^[[:space:]]*suite-cmd[[:space:]]*=' "$f" 2>/dev/null || true)"
+  [ "${attest_ct:-0}" -le 1 ] || die "config: duplicate 'suite-attest-secs' key in $f"
+  [ "${suite_ct:-0}" -le 1 ] || die "config: duplicate 'suite-cmd' key in $f"
+  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|suite-cmd[[:space:]]*=|suite-attest-secs[[:space:]]*=)' "$f" \
     | head -3 | sed 's/^/warning: config: unknown line: /' >&2 || true
   if [ "${agents_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
@@ -2277,10 +2286,14 @@ cmd_attest_green() {
   # (user, 2026-08-27: ~24 minutes to merge a branch). Consumption is opt-in
   # (suite-attest-secs in .comms/config) and time-bounded; the paranoid re-run
   # stays the default.
-  local passed=""
+  # A value-taking flag REQUIRES its value: the bare `shift; var="${1:-}"` shape
+  # leaves $# at 0 and the loop's trailing shift then exits 1 under errexit with
+  # no diagnostic — a usage error that reads as a crash. (grok, r1.)
+  local passed="" expect=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --passed) shift; passed="${1:-}" ;;
+      --passed) [ $# -ge 2 ] || usage_err "attest-green: --passed needs a value"; shift; passed="$1" ;;
+      --expect) [ $# -ge 2 ] || usage_err "attest-green: --expect needs a value"; shift; expect="$1" ;;
       -?*) usage_err "attest-green: unknown option '$(clip "$1")'" ;;
       *)  usage_err "attest-green: unexpected argument '$(clip "$1")'" ;;
     esac; shift
@@ -2288,6 +2301,13 @@ cmd_attest_green() {
   local top oid dirty root
   top="$(git rev-parse --show-toplevel 2>/dev/null)" || die "attest-green: not inside a git repository"
   oid="$(git -C "$top" rev-parse --verify HEAD 2>/dev/null)" || die "attest-green: cannot resolve HEAD"
+  # --expect binds the record to the commit the CALLER actually verified: a
+  # checkout or commit that lands between the caller's run and this read would
+  # otherwise be attested with a green result it never earned. (codex,
+  # integrate-ergonomics r1.)
+  if [ -n "$expect" ]; then
+    [ "$oid" = "$expect" ] || die "attest-green: HEAD is $oid but the verified commit was $expect — refusing to attest a commit the run was not about"
+  fi
   # -uno: tracked changes void the attestation; untracked files do not. That is a
   # deliberate, documented residual — session logs and scratch files beside the
   # checkout are routine, and an attestation nobody can ever mint protects no one.
@@ -2305,8 +2325,10 @@ cmd_attest_green() {
 cmd_integrate() {
   # integrate <branch> — land a session branch on main: advisory lease, ff-only,
   # suite at the CANDIDATE OID in an immutable detached worktree, then the CAS
-  # update-ref. The lease is an economizer; the CAS is the safety. main is never
-  # checked out anywhere: it moves by ref, verified first. (Plan r3-r6.)
+  # update-ref. The lease is an economizer; the CAS is the safety. main never
+  # holds WORK: it moves by ref, verified first. One clean checkout may idle on
+  # it as a console — that one is healed through the landing, not refused.
+  # (Plan r3-r6; the idle-console exception 2026-08-27.)
   local branch="${1:-}"; shift 2>/dev/null || true
   [ -n "$branch" ] || usage_err "integrate: a branch is required"
   local name="${COMMS_PRESENCE_NAME:-}" instance="${COMMS_PRESENCE_INSTANCE:-}"
@@ -2382,9 +2404,13 @@ cmd_integrate() {
     git -C "$occ" checkout --detach >/dev/null 2>&1 || die "integrate: could not detach main occupant $occ — refusing (never-occupy-main)"
     healed="$occ"
     # Re-arm the trap WITH the undo baked in as a literal: a die past this point
-    # must put the occupant back on (unmoved) main, not strand it detached.
+    # must put the occupant back on main, not strand it detached. The undo is
+    # CONDITIONAL on main still being at the tip we detached from — another
+    # writer may have advanced it, and silently attaching an idle console to a
+    # tip this run never verified is not the promise "unmoved main" made.
+    # (codex, r1.) Leaving it detached is the safe residual; the message says so.
     # shellcheck disable=SC2064
-    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; git -C '$healed' checkout main >/dev/null 2>&1 || true; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
+    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null) — main or the checkout moved during the attempt\" >&2; fi; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
     echo "integrate: healed — detached clean main occupant $occ for the landing"
   fi
   # ATTESTED GREEN: when .comms/config opts in (suite-attest-secs = N), a fresh
@@ -2449,9 +2475,18 @@ cmd_integrate() {
   # this is the fast-forward the self-heal promised. Failure to re-attach is not
   # a failed landing: report it and leave the checkout safely detached.
   if [ -n "$healed" ]; then
-    git -C "$healed" checkout main >/dev/null 2>&1 \
-      && echo "integrate: healed occupant $healed fast-forwarded onto the new main" \
-      || echo "integrate: warning — could not re-attach $healed to main; it is parked detached at $expected"
+    # Re-attach only an occupant that is STILL the idle console we detached: if
+    # someone committed there during the landing window, `checkout main` would
+    # silently abandon those commits on an unreferenced HEAD. (grok, r1.)
+    local heal_now
+    heal_now="$(git -C "$healed" rev-parse HEAD 2>/dev/null || true)"
+    if [ "$heal_now" != "$expected" ]; then
+      echo "integrate: warning — $healed moved to $heal_now during the landing; left detached (its commits are intact, re-attach by hand)"
+    elif git -C "$healed" checkout main >/dev/null 2>&1; then
+      echo "integrate: healed occupant $healed fast-forwarded onto the new main"
+    else
+      echo "integrate: warning — could not re-attach $healed to main; it is parked detached at $expected"
+    fi
   fi
   [ -n "$name" ] && "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
   trap - EXIT

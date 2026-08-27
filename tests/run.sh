@@ -18,6 +18,9 @@ export COMMS_DELIVERY=cmux
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMS="$REPO/helpers/comms.sh"
+# The commit UNDER TEST, captured before the first assertion — the self-attestation
+# at the end binds to this, never to whatever HEAD has become by then.
+TESTED_OID="$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || true)"
 PASS=0; FAIL=0
 
 ok()   { PASS=$((PASS+1)); echo "  ok: $1"; }
@@ -4709,11 +4712,43 @@ check_not "a red suite still refuses with a healed occupant" run_pw integrate wo
 [ "$(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null)" = "main" ] && [ "$(cd "$PW" && git rev-parse main)" = "$PW_MAIN_OCC" ] \
   && ok "the failed landing re-attaches the healed occupant to the unmoved main" || fail "occupant stranded after red suite: $(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null)"
 (cd "$PW/.claude/worktrees/nested" && printf '#!/bin/bash\ntest -f a.txt\n' > suite.sh && git add suite.sh && git -c user.email=t@t -c user.name=t commit -qm "green suite")
+# An occupant that COMMITTED during the landing window is not the idle console
+# we detached: re-attaching would abandon those commits (grok, r1).
+(cd "$PW" && git checkout -q main)
+(cd "$PW/.claude/worktrees/nested" && git merge -q --ff-only "$(cd "$PW" && git rev-parse main)" 2>/dev/null; echo h > h.txt; git add h.txt; git -c user.email=t@t -c user.name=t commit -qm "feat: h")
+PW_OCC_CFG="$(cat "$PW/.comms/config")"
+# suite-cmd is whitespace-split into argv with NOTHING shell-interpreted, so the
+# racer must be a script file, not an inline `bash -c "..."` (that string is
+# shredded into meaningless words — the shape this very test first got wrong).
+printf '#!/bin/bash\ncd "%s" || exit 1\necho moved > moved.txt\ngit add moved.txt\ngit -c user.email=t@t -c user.name=t commit -qm racer >/dev/null 2>&1\nexit 0\n' "$PW" > "$WORK/racer.sh"
+printf 'suite-cmd = bash %s\n' "$WORK/racer.sh" > "$PW/.comms/config"
+run_pw integrate worktree-nested >/dev/null 2>&1
+[ "$(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null)" != "main" ] \
+  && (cd "$PW" && git log -1 --format=%s | grep -q racer) \
+  && ok "an occupant that moved during the landing is left detached with its commit intact" \
+  || fail "moved occupant was re-attached (commit abandoned): $(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null)"
+printf '%s\n' "$PW_OCC_CFG" > "$PW/.comms/config"
 (cd "$PW" && git checkout -q session-primary)
+# The opt-in key is KNOWN to the one full-config validation path, and a
+# duplicate (an appended `= 0` that consumers would never reach) is refused.
+printf 'suite-cmd = bash ./suite.sh\nsuite-attest-secs = 600\n' > "$PW/.comms/config"
+PW_CFGWARN="$( (cd "$PW" && env -u CMUX_WORKSPACE_ID "$COMMS" agents) 2>&1 || true)"
+printf '%s' "$PW_CFGWARN" | grep -q 'unknown line' \
+  && fail "suite-attest-secs warns as an unknown config key" || ok "suite-attest-secs is a known config key"
+printf 'suite-cmd = bash ./suite.sh\nsuite-attest-secs = 600\nsuite-attest-secs = 0\n' > "$PW/.comms/config"
+check_not "a duplicate suite-attest-secs is refused (the disabling line must win)" bash -c "cd '$PW' && env -u CMUX_WORKSPACE_ID '$COMMS' agents"
+printf 'suite-cmd = bash ./suite.sh\n' > "$PW/.comms/config"
 
 # Attested green (2026-08-27): a fresh attest-green record for EXACTLY the
 # candidate OID stands in for integrate's re-run when config opts in.
 check_not "attest-green refuses a tree with tracked changes" bash -c "cd '$PW/.claude/worktrees/nested' && echo dirty >> a.txt && '$COMMS' attest-green; rc=\$?; git checkout -q -- a.txt; exit \$rc"
+# The attestation is bound to the commit the RUN was about: a checkout that
+# races the end of a green run must not inherit its result (codex, r1 blocking).
+PW_ATT_OTHER="$(cd "$PW/.claude/worktrees/nested" && git rev-parse HEAD~1)"
+check_not "attest-green refuses when HEAD moved off the verified commit" bash -c "cd '$PW/.claude/worktrees/nested' && env -u CMUX_WORKSPACE_ID '$COMMS' attest-green --expect '$PW_ATT_OTHER'"
+grep -q "^$PW_ATT_OTHER " "$PW/.comms/cache/suite-attest.log" 2>/dev/null \
+  && fail "a refused attestation still wrote a record" || ok "a refused --expect attestation records nothing"
+check_not "attest-green --passed with no value is a usage error, not a crash" bash -c "cd '$PW/.claude/worktrees/nested' && env -u CMUX_WORKSPACE_ID '$COMMS' attest-green --passed"
 (cd "$PW/.claude/worktrees/nested" && env -u CMUX_WORKSPACE_ID "$COMMS" attest-green --passed 7 >/dev/null 2>&1)
 grep -q "^$(cd "$PW/.claude/worktrees/nested" && git rev-parse HEAD) " "$PW/.comms/cache/suite-attest.log" \
   && ok "attest-green records the checkout's HEAD in the main root's cache" || fail "attestation not recorded"
@@ -4946,9 +4981,13 @@ run_comms clean --as claude all --yes >/dev/null
 echo ""
 echo "passed: $PASS  failed: $FAIL"
 # A fully green run attests itself so integrate can skip its re-verification of
-# the SAME commit (opt-in via suite-attest-secs). Best-effort: a failure to
-# attest (dirty tracked tree, no repo) never fails a green suite.
-if [ "$FAIL" -eq 0 ]; then
-  (cd "$REPO" && "$COMMS" attest-green --passed "$PASS") >/dev/null 2>&1 || true
+# the SAME commit (opt-in via suite-attest-secs). The attestation is bound to
+# TESTED_OID — the commit captured BEFORE the first assertion — so a checkout or
+# commit racing the end of the run cannot inherit a green result it never
+# earned; --expect makes attest-green refuse rather than record the wrong OID.
+# (codex, integrate-ergonomics r1 — blocking.) Best-effort otherwise: a refusal
+# (dirty tree, moved HEAD, no repo) never fails a green suite.
+if [ "$FAIL" -eq 0 ] && [ -n "${TESTED_OID:-}" ]; then
+  (cd "$REPO" && "$COMMS" attest-green --passed "$PASS" --expect "$TESTED_OID") >/dev/null 2>&1 || true
 fi
 [ "$FAIL" -eq 0 ]

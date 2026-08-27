@@ -1172,10 +1172,13 @@ Ranked work, foldable into the step-2 harness split:
 2. [ ] **Tier the suite.** Fast default tier skips the stress probes (the
    20-iteration cancellation loop and quiescence torture runs guard an invariant
    5 iterations still catch); full stress tier reserved for integrate and CI.
-3. [ ] **Attested-green shortcut for integrate.** Record "suite green at
-   tree-OID X"; integrate accepts a recent same-OID attestation instead of
-   re-running — halves landing time. Opt-in via config; the paranoid re-run
-   stays the default.
+3. [x] **Attested-green shortcut for integrate.** DONE 2026-08-27 (double
+   APPROVE, integrate-ergonomics r1): `attest-green` records "green at this
+   HEAD" bound to the commit the run started on; integrate consumes a fresh
+   same-OID record when `suite-attest-secs = N` is configured. Opt-in; the
+   paranoid re-run stays the default. Landed alongside self-healing
+   never-occupy-main (a clean checkout idling on `main` is fast-forwarded
+   through the landing instead of refusing it after a ten-minute suite).
 4. [ ] **Shard sections in parallel** with isolated TMPDIRs — except the
    signal-timing presence section, which stays in its own unshared lane (machine
    load provably flaked it during the presence arc).
