@@ -4151,68 +4151,115 @@ rm -f "$GCAN" "$GOUT"
 # CONTENT hashes, not a path listing: rewriting an existing file — .git/index is the one
 # that matters for "reads do not write" — changes no path and was invisible before.
 # The payload itself is excluded so its own presence is not mistaken for a change.
+# PATH-FIRST records so LC_ALL=C sort and comm agree on ordering — hash-first records are
+# ordered by hash, which is not the order comm requires and made the comparison unreliable.
 gs_files() {
   find "$GV" -type f ! -name '.payload' 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-    printf '%s  %s\n' "$(shasum "$f" 2>/dev/null | cut -d" " -f1)" "$f"
+    printf '%s\t%s\n' "$f" "$(shasum "$f" 2>/dev/null | cut -d" " -f1)"
   done
 }
+# Any difference IN EITHER DIRECTION. `comm -13` alone missed deletions, so a review turn that
+# removed a file read as clean. (codex, round 10.)
+gs_changed() {  # <before> — prints a summary of what moved, empty if nothing did
+  diff <(printf '%s\n' "$1") <(gs_files) 2>/dev/null | sed -n 's/^[<>] //p' | cut -f1 | sort -u
+}
+REAL_GIT="$(command -v git)"
+# An ssh remote, so GIT_SSH_COMMAND / core.sshCommand have something to reach for. Without it
+# git fails before touching ssh and the control cannot leak. The host is .invalid (RFC 2606):
+# nothing resolves, so nothing leaves the machine.
+git -C "$GV" remote add origin "ssh://git@nonexistent.invalid/x.git" >/dev/null 2>&1
+# A LOCAL bare repo as a second remote. --upload-pack is only honoured for a local transport,
+# so an ssh remote that never resolves cannot demonstrate the exec; against this one it does.
+GV_PEER="$WORK/gitshim-peer"; git init -q --bare "$GV_PEER" >/dev/null 2>&1
+# The baseline is deliberately DIRTY. A clean tree makes `git diff HEAD` empty, so an external
+# diff driver is never invoked and the control cannot leak — which is precisely how fourteen
+# cases came to "pass" while proving nothing. (grok, round 9: it reproduces on a dirty tree.)
+gs_restore() {
+  ( cd "$GV" && git checkout -- . >/dev/null 2>&1 || true )
+  printf 'dirty\n' > "$GV/f.txt"
+  rm -f "$GCAN" "$GOUT"
+}
 GS_BEFORE="$(gs_files)"
-gs_attack() {  # <label> <env-assignments...> -- <git args...>
-  # THE INVARIANT, not a canary list: after the attack, no new file may exist ANYWHERE under
-  # the repo or the writable scratch dir. Two named canaries only catch the two tricks someone
-  # already thought of — a new write location was invisible. (codex, round 8.)
+# EVERY case carries a NEGATIVE CONTROL. Round 9 replaced a blind harness with one that could
+# see, and round 10 showed that was still not enough: several attacks produced no mutation even
+# with the shim REMOVED, so "clean with the shim" proved nothing about the shim. Each case now
+# runs twice — once against real git with no shim, which MUST leak, and once through the shim,
+# which must not. A case whose control does not leak is reported as unproven, loudly, instead of
+# counting as protection. (codex, round 10.)
+gs_case() {  # <label> <env-assignments...> -- <git args...>
   local label="$1"; shift
   local envs=() ; while [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
+
+  gs_restore; local base; base="$(gs_files)"
+  ( cd "$GV" && env "${envs[@]}" "$REAL_GIT" "$@" ) >/dev/null 2>&1 || true
+  local control; control="$(gs_changed "$base")"
+  gs_restore
+
+  base="$(gs_files)"
   ( cd "$GV" && env "${envs[@]}" "$GS/git" "$@" ) >/dev/null 2>&1 || true
-  local now diff
-  now="$(gs_files)"
-  diff="$(comm -13 <(printf '%s\n' "$GS_BEFORE") <(printf '%s\n' "$now"))"
-  if [ -n "$diff" ]; then
-    fail "shim let a review turn $label (changed: $(printf '%s' "$diff" | head -2 | awk '{print $2}' | tr '\n' ' '))"
-    ( cd "$GV" && git checkout -- . >/dev/null 2>&1 || true )
-    rm -f "$GCAN" "$GOUT"
-    GS_BEFORE="$(gs_files)"
+  local shielded; shielded="$(gs_changed "$base")"
+  gs_restore; GS_BEFORE="$(gs_files)"
+
+  if [ -z "$control" ]; then
+    fail "UNPROVEN: '$label' does not leak even without the shim — this case cannot detect a regression"
+  elif [ -n "$shielded" ]; then
+    fail "shim let a review turn $label (changed: $(printf '%s' "$shielded" | head -2 | tr '\n' ' '))"
   else
-    ok "a review turn cannot $label"
+    ok "a review turn cannot $label (control leaks without the shim)"
   fi
 }
 # Prove the harness can SEE a violation. A test that cannot fail is not evidence, and this
 # whole block previously could not fail for eight of its cases.
 touch "$GV/harness-selftest"
-if [ -n "$(comm -13 <(printf '%s\n' "$GS_BEFORE") <(printf '%s\n' "$(gs_files)"))" ]; then
+if [ -n "$(gs_changed "$GS_BEFORE")" ]; then
   ok "the shim harness detects a new file (it can fail)"
 else
   fail "the shim harness is blind to new files — every result below is vacuous"
 fi
 rm -f "$GV/harness-selftest"
 printf 'mutate\n' >> "$GV/f.txt" 2>/dev/null || true
-if [ -n "$(comm -13 <(printf '%s\n' "$GS_BEFORE") <(printf '%s\n' "$(gs_files)"))" ]; then
+if [ -n "$(gs_changed "$GS_BEFORE")" ]; then
   ok "the shim harness detects an in-place rewrite"
 else
   fail "the shim harness is blind to content changes"
 fi
-( cd "$GV" && git checkout -- . >/dev/null 2>&1 || true )
-GS_BEFORE="$(gs_files)"
-gs_attack "exec a program via GIT_EXTERNAL_DIFF" "GIT_EXTERNAL_DIFF=$GPAY" -- diff --ext-diff HEAD
-gs_attack "exec a program via GIT_SSH_COMMAND"  "GIT_SSH_COMMAND=$GPAY"  -- ls-remote origin
-gs_attack "exec a program via GIT_PAGER"        "GIT_PAGER=$GPAY"        -- -p log
-gs_attack "inject config via GIT_CONFIG_*"      "GIT_CONFIG_COUNT=1" "GIT_CONFIG_KEY_0=diff.external" "GIT_CONFIG_VALUE_0=$GPAY" -- diff HEAD
-gs_attack "inject config via a concatenated -c" "X=1" -- "-cdiff.external=$GPAY" diff HEAD
-gs_attack "write a file via --output"           "X=1" -- log "--output=$GOUT"
-gs_attack "exec a pager via grep -O"            "X=1" -- grep "-O$GPAY" x
-gs_attack "exec via --upload-pack"              "X=1" -- ls-remote "--upload-pack=$GPAY" origin
-gs_attack "write trace output via GIT_TRACE2_EVENT" "GIT_TRACE2_EVENT=$GV/trace.json" -- status
-gs_attack "write trace output via GIT_TRACE"        "GIT_TRACE=$GV/trace2.txt"         -- log --oneline -1
-gs_attack "exec a viewer via GIT_MAN_VIEWER"        "GIT_MAN_VIEWER=$GPAY"             -- help log
-gs_attack "write the index through an unlocked read" "X=1"                             -- status
+gs_restore; GS_BEFORE="$(gs_files)"
+rm -f "$GV/f.txt"
+if [ -n "$(gs_changed "$GS_BEFORE")" ]; then
+  ok "the shim harness detects a DELETION (comm -13 could not)"
+else
+  fail "the shim harness is blind to deletions"
+fi
+gs_restore; GS_BEFORE="$(gs_files)"
+gs_case "exec a program via GIT_EXTERNAL_DIFF" "GIT_EXTERNAL_DIFF=$GPAY" -- diff --ext-diff HEAD
+gs_case "exec a program via GIT_SSH_COMMAND"  "GIT_SSH_COMMAND=$GPAY"  -- ls-remote origin
+# REMOVED (unprovable here): GIT_PAGER / -p: git skips the pager entirely when stdout is not a TTY.
+# The shim still refuses/neutralises it; we simply cannot demonstrate the leak in a
+# non-interactive test, and a case that cannot fail must not be counted as coverage.
+gs_case "inject config via GIT_CONFIG_*"      "GIT_CONFIG_COUNT=1" "GIT_CONFIG_KEY_0=diff.external" "GIT_CONFIG_VALUE_0=$GPAY" -- diff HEAD
+gs_case "inject config via -c alias (the original bypass)" "X=1" -- -c "alias.ship=!$GPAY" ship
+gs_case "inject config via -c core.sshCommand" "X=1" -- -c "core.sshCommand=$GPAY" ls-remote origin
+gs_case "write a file via --output"           "X=1" -- log "--output=$GOUT"
+# REMOVED (unprovable here): grep -O: same TTY dependency as the pager.
+# The shim still refuses/neutralises it; we simply cannot demonstrate the leak in a
+# non-interactive test, and a case that cannot fail must not be counted as coverage.
+gs_case "exec via --upload-pack"              "X=1" -- ls-remote "--upload-pack=$GPAY" "$GV_PEER"
+gs_case "write trace output via GIT_TRACE2_EVENT" "GIT_TRACE2_EVENT=$GV/trace.json" -- status
+gs_case "write trace output via GIT_TRACE"        "GIT_TRACE=$GV/trace2.txt"         -- log --oneline -1
+# REMOVED (unprovable here): GIT_MAN_VIEWER: `git help` does not exec the viewer in this environment.
+# The shim still refuses/neutralises it; we simply cannot demonstrate the leak in a
+# non-interactive test, and a case that cannot fail must not be counted as coverage.
+# REMOVED (unprovable here): unlocked index write: `git status` does not rewrite .git/index here.
+# The shim still refuses/neutralises it; we simply cannot demonstrate the leak in a
+# non-interactive test, and a case that cannot fail must not be counted as coverage.
 # Repo-LOCAL config is the case env-scrubbing can never cover: .git/config is a file, not a
 # variable, and unsetting GIT_CONFIG_GLOBAL merely restores the default lookup. Re-baseline
 # after writing the config, or the setup write is mistaken for the attack. (codex, round 9.)
 git -C "$GV" config diff.external "$GPAY" >/dev/null 2>&1
 git -C "$GV" config core.fsmonitor "$GPAY" >/dev/null 2>&1
 GS_BEFORE="$(gs_files)"
-gs_attack "exec via repo-local diff.external config" "X=1" -- diff HEAD
-gs_attack "exec via repo-local core.fsmonitor config" "X=1" -- status
+gs_case "exec via repo-local diff.external config" "X=1" -- diff HEAD
+gs_case "exec via repo-local core.fsmonitor config" "X=1" -- status
 # -p AFTER the verb is --patch (log/diff) or --porcelain (blame) — the reviewer's own tools.
 # Refusing it everywhere broke `git log -p` and the refusal text was false for that case.
 ( cd "$GV" && "$GS/git" log -p -1 ) >/dev/null 2>&1 \
