@@ -4684,6 +4684,53 @@ grep -q '"state": "working"' "$PW_SD/retrier-$PW_I6.json" \
   && ok "the lease is restored after both the failure and the landing" || fail "lease stuck after retry"
 run_pw presence release --name retrier --instance "$PW_I6"
 
+# Self-heal (2026-08-27, from the arc's own first landing): ONE clean checkout
+# idling on main at the expected tip is fast-forwarded through the landing
+# instead of refused. Dirty occupants still refuse; a failed landing re-attaches
+# the healed occupant to the unmoved main.
+(cd "$PW" && git checkout -q main)
+(cd "$PW/.claude/worktrees/nested" && git merge -q --ff-only "$(cd "$PW" && git rev-parse main)" 2>/dev/null; echo f > f.txt; git add f.txt; git -c user.email=t@t -c user.name=t commit -qm "feat: f")
+run_pw integrate worktree-nested >/dev/null 2>&1; PW_HEAL=$?
+[ "$PW_HEAL" = 0 ] && [ "$(cd "$PW" && git rev-parse main)" = "$(cd "$PW" && git rev-parse worktree-nested)" ] \
+  && ok "a clean main occupant at the expected tip is healed through the landing" || fail "self-heal landing rc=$PW_HEAL"
+[ "$(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null)" = "main" ] \
+  && [ "$(cd "$PW" && git rev-parse HEAD)" = "$(cd "$PW" && git rev-parse worktree-nested)" ] \
+  && ok "the healed occupant ends re-attached to main at the LANDED tip" || fail "occupant not fast-forwarded: $(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null) @ $(cd "$PW" && git rev-parse --short HEAD)"
+# Dirty occupant: refused BEFORE the suite, main untouched, dirt intact.
+(cd "$PW" && echo dirty >> a.txt)
+PW_MAIN_OCC="$(cd "$PW" && git rev-parse main)"
+check_not "a DIRTY main occupant refuses the landing (never-occupy-main)" run_pw integrate worktree-nested
+[ "$(cd "$PW" && git rev-parse main)" = "$PW_MAIN_OCC" ] && (cd "$PW" && git status --porcelain | grep -q 'a.txt') \
+  && ok "the dirty-occupant refusal touches neither main nor the dirt" || fail "dirty-occupant refusal mutated state"
+(cd "$PW" && git checkout -q -- a.txt)
+# Failed landing with a healed occupant: the trap re-attaches it to the UNMOVED main.
+(cd "$PW/.claude/worktrees/nested" && printf '#!/bin/bash\nexit 1\n' > suite.sh && git add suite.sh && git -c user.email=t@t -c user.name=t commit -qm "red suite")
+check_not "a red suite still refuses with a healed occupant" run_pw integrate worktree-nested
+[ "$(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null)" = "main" ] && [ "$(cd "$PW" && git rev-parse main)" = "$PW_MAIN_OCC" ] \
+  && ok "the failed landing re-attaches the healed occupant to the unmoved main" || fail "occupant stranded after red suite: $(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null)"
+(cd "$PW/.claude/worktrees/nested" && printf '#!/bin/bash\ntest -f a.txt\n' > suite.sh && git add suite.sh && git -c user.email=t@t -c user.name=t commit -qm "green suite")
+(cd "$PW" && git checkout -q session-primary)
+
+# Attested green (2026-08-27): a fresh attest-green record for EXACTLY the
+# candidate OID stands in for integrate's re-run when config opts in.
+check_not "attest-green refuses a tree with tracked changes" bash -c "cd '$PW/.claude/worktrees/nested' && echo dirty >> a.txt && '$COMMS' attest-green; rc=\$?; git checkout -q -- a.txt; exit \$rc"
+(cd "$PW/.claude/worktrees/nested" && env -u CMUX_WORKSPACE_ID "$COMMS" attest-green --passed 7 >/dev/null 2>&1)
+grep -q "^$(cd "$PW/.claude/worktrees/nested" && git rev-parse HEAD) " "$PW/.comms/cache/suite-attest.log" \
+  && ok "attest-green records the checkout's HEAD in the main root's cache" || fail "attestation not recorded"
+# Fresh attestation + a suite-cmd that would FAIL: landing succeeds only if the
+# re-run was actually skipped.
+printf 'suite-cmd = false\nsuite-attest-secs = 600\n' > "$PW/.comms/config"
+run_pw integrate worktree-nested >/dev/null 2>&1; PW_ATT=$?
+[ "$PW_ATT" = 0 ] && [ "$(cd "$PW" && git rev-parse main)" = "$(cd "$PW" && git rev-parse worktree-nested)" ] \
+  && ok "a fresh same-OID attestation lands without the re-run" || fail "attested landing rc=$PW_ATT"
+# A NEW candidate has no attestation: the (failing) suite must actually run.
+(cd "$PW/.claude/worktrees/nested" && echo g > g.txt && git add g.txt && git -c user.email=t@t -c user.name=t commit -qm "feat: g")
+check_not "an unattested candidate falls through to the real suite" run_pw integrate worktree-nested
+# A STALE attestation for the right OID also falls through.
+printf '%s 100 7\n' "$(cd "$PW/.claude/worktrees/nested" && git rev-parse HEAD)" >> "$PW/.comms/cache/suite-attest.log"
+check_not "a stale attestation falls through to the real suite" run_pw integrate worktree-nested
+printf 'suite-cmd = bash ./suite.sh\n' > "$PW/.comms/config"
+
 # with-beat: a beat lands DURING a blocked child (AC1).
 PW_HB_BEFORE="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
 (cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 4) >/dev/null 2>&1
@@ -4898,4 +4945,10 @@ run_comms clean --as claude all --yes >/dev/null
 
 echo ""
 echo "passed: $PASS  failed: $FAIL"
+# A fully green run attests itself so integrate can skip its re-verification of
+# the SAME commit (opt-in via suite-attest-secs). Best-effort: a failure to
+# attest (dirty tracked tree, no repo) never fails a green suite.
+if [ "$FAIL" -eq 0 ]; then
+  (cd "$REPO" && "$COMMS" attest-green --passed "$PASS") >/dev/null 2>&1 || true
+fi
 [ "$FAIL" -eq 0 ]

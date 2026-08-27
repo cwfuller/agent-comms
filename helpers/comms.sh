@@ -43,7 +43,13 @@
 #   worktree new [<slug>]       session worktree under the MAIN root, local-tip base
 #   integrate <branch>          land on main: lease + ff + suite at the candidate OID
 #                               in a detached worktree + CAS update-ref (suite-cmd
-#                               config required)
+#                               config required). A clean checkout idling on main at
+#                               the expected tip is self-healed through the landing;
+#                               suite-attest-secs = N config accepts a fresh
+#                               attest-green record for the candidate OID in place
+#                               of the re-run
+#   attest-green [--passed N]   record "suite green at this exact HEAD" (clean
+#                               tracked tree required) for integrate's opt-in skip
 #   bind <claude|codex> [surface:N]   pin which surface delivery targets (show with no arg)
 #   clean --as <agent> [workspace|all|archive|<file>] [--yes]
 #                               guarded delete; dry-run without --yes; own-inbox default
@@ -2263,6 +2269,39 @@ cmd_worktree() {
   echo "branch:   $branch (from $(git -C "$root" rev-parse --short "$tip"))"
 }
 
+cmd_attest_green() {
+  # attest-green [--passed N] — record "the suite ran green at this exact commit".
+  # The record lets integrate skip its re-verification when the SAME OID was
+  # verified moments ago: without it every landing costs two full suite runs — the
+  # pre-flight and integrate's re-run — of which the second proves nothing new
+  # (user, 2026-08-27: ~24 minutes to merge a branch). Consumption is opt-in
+  # (suite-attest-secs in .comms/config) and time-bounded; the paranoid re-run
+  # stays the default.
+  local passed=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --passed) shift; passed="${1:-}" ;;
+      -?*) usage_err "attest-green: unknown option '$(clip "$1")'" ;;
+      *)  usage_err "attest-green: unexpected argument '$(clip "$1")'" ;;
+    esac; shift
+  done
+  local top oid dirty root
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || die "attest-green: not inside a git repository"
+  oid="$(git -C "$top" rev-parse --verify HEAD 2>/dev/null)" || die "attest-green: cannot resolve HEAD"
+  # -uno: tracked changes void the attestation; untracked files do not. That is a
+  # deliberate, documented residual — session logs and scratch files beside the
+  # checkout are routine, and an attestation nobody can ever mint protects no one.
+  # The consumer is opt-in and time-bounded; a stricter tree hash can replace this
+  # if the residual ever bites.
+  dirty="$(git -C "$top" status --porcelain -uno 2>/dev/null)" || die "attest-green: cannot read the tree status"
+  [ -z "$dirty" ] || die "attest-green: tracked changes present — a green run here proves nothing about $oid"
+  root="$(main_repo_root)"; [ -n "$root" ] || die "attest-green: no main repo root"
+  mkdir -p "$root/.comms/cache" 2>/dev/null || true
+  printf '%s %s %s\n' "$oid" "$(date +%s)" "${passed:-0}" >> "$root/.comms/cache/suite-attest.log" \
+    || die "attest-green: cannot write the attestation log"
+  echo "attest-green: recorded $oid"
+}
+
 cmd_integrate() {
   # integrate <branch> — land a session branch on main: advisory lease, ff-only,
   # suite at the CANDIDATE OID in an immutable detached worktree, then the CAS
@@ -2322,32 +2361,82 @@ cmd_integrate() {
   echo "integrate: candidate $cand (from $branch), expected main $expected"
   git -C "$root" merge-base --is-ancestor "$expected" "$cand" \
     || die "integrate: $branch is not a descendant of main — rebase first (ff-only)"
-  # Recover any prior crash's stale registration before adding: remove the entry
-  # if git still knows it, prune dangling metadata, then clear the directory.
-  git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
-  git -C "$root" worktree prune >/dev/null 2>&1 || true
-  rm -rf "$tw" 2>/dev/null || true
-  git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || die "integrate: could not materialize $cand"
-  # Structured argv: whitespace split only, nothing shell-interpreted. An
-  # empty/whitespace-only suite-cmd expanded to zero argv and SUCCEEDED as a
-  # no-op — the exact unverified landing the config gate exists to refuse.
-  # (codex, impl r1.)
-  set -f; set -- $suite_cmd; set +f
-  [ $# -gt 0 ] || die "integrate: suite-cmd is empty after splitting — refusing to land unverified"
-  if [ -n "$name" ] && [ -n "$instance" ]; then
-    ( cd "$tw" && "$0" presence with-beat --name "$name" --instance "$instance" -- "$@" ) || rc=$?
-  else
-    ( cd "$tw" && "$@" ) || rc=$?
+  # NEVER-OCCUPY-MAIN, decided BEFORE the suite: refusing after a green
+  # 10-minute run is the expensive way to learn main was occupied (user,
+  # 2026-08-27 — the arc's own first landing hit exactly that). ONE clean
+  # occupant parked exactly at the expected tip is SELF-HEALED — detached now,
+  # re-attached to main after the CAS — because that is the root checkout idling
+  # on main, the common case, and re-pointing an idle clean tree is just a
+  # fast-forward. Anything else (dirty, diverged, multiple occupants) refuses:
+  # re-pointing a tree someone is working in corrupts their session.
+  local heal_list occ occ_n occ_head occ_status healed=""
+  heal_list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || die "integrate: cannot enumerate worktrees — refusing"
+  occ="$(printf '%s\n' "$heal_list" | LC_ALL=C awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/main$/{print p}')"
+  if [ -n "$occ" ]; then
+    occ_n="$(printf '%s\n' "$occ" | grep -c .)"
+    [ "$occ_n" = 1 ] || die "integrate: main is checked out in $occ_n worktrees — refusing (never-occupy-main)"
+    occ_head="$(git -C "$occ" rev-parse --verify HEAD 2>/dev/null)" || die "integrate: cannot read main occupant's HEAD ($occ) — refusing (never-occupy-main)"
+    [ "$occ_head" = "$expected" ] || die "integrate: main occupant $occ sits at $occ_head, not the main tip — refusing (never-occupy-main)"
+    occ_status="$(git -C "$occ" status --porcelain -uno 2>/dev/null)" || die "integrate: cannot read main occupant's status ($occ) — refusing (never-occupy-main)"
+    [ -z "$occ_status" ] || die "integrate: main occupant $occ has uncommitted changes — refusing (never-occupy-main; commit them or move it off main)"
+    git -C "$occ" checkout --detach >/dev/null 2>&1 || die "integrate: could not detach main occupant $occ — refusing (never-occupy-main)"
+    healed="$occ"
+    # Re-arm the trap WITH the undo baked in as a literal: a die past this point
+    # must put the occupant back on (unmoved) main, not strand it detached.
+    # shellcheck disable=SC2064
+    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; git -C '$healed' checkout main >/dev/null 2>&1 || true; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
+    echo "integrate: healed — detached clean main occupant $occ for the landing"
   fi
-  [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; fix on the branch and re-run"
-  # BIND the result to the candidate: a suite that checked out another OID and
-  # passed there proves nothing about $cand. Every verification below fails
-  # CLOSED — a command that cannot answer refuses the landing. (codex, impl r1.)
-  local tw_head tw_status wt_list
-  tw_head="$(git -C "$tw" rev-parse HEAD 2>/dev/null)" || die "integrate: cannot read the verification tree's HEAD — refusing"
-  [ "$tw_head" = "$cand" ] || die "integrate: the verification tree is at $tw_head, not the candidate $cand — the suite result is not about this landing; refusing"
-  tw_status="$(git -C "$tw" status --porcelain 2>/dev/null)" || die "integrate: cannot read the verification tree's status — refusing"
-  [ -z "$tw_status" ] || die "integrate: the suite dirtied the verification tree — refusing to trust the result"
+  # ATTESTED GREEN: when .comms/config opts in (suite-attest-secs = N), a fresh
+  # attest-green record for EXACTLY this candidate OID stands in for the re-run —
+  # the tree cannot have changed under an identical commit id, so the second run
+  # proves nothing the first did not. Absent, stale, or wrong-OID attestations
+  # fall through to the full suite; with no config the behavior is unchanged.
+  local attest_secs attest_age="" skip_suite=""
+  attest_secs="$({ sed -n 's/^suite-attest-secs *= *//p' "$root/.comms/config" 2>/dev/null || true; } | head -1)"
+  case "$attest_secs" in ''|*[!0-9]*) attest_secs=0 ;; esac
+  if [ "$attest_secs" -gt 0 ] && [ -f "$root/.comms/cache/suite-attest.log" ]; then
+    local att_epoch
+    att_epoch="$(LC_ALL=C awk -v c="$cand" '$1==c && $2 ~ /^[0-9]+$/ {e=$2} END{if (e != "") print e}' "$root/.comms/cache/suite-attest.log" 2>/dev/null || true)"
+    if [ -n "$att_epoch" ]; then
+      attest_age=$(( $(date +%s) - att_epoch ))
+      if [ "$attest_age" -ge 0 ] && [ "$attest_age" -le "$attest_secs" ]; then
+        skip_suite=yes
+        echo "integrate: accepting recorded green suite for $cand (${attest_age}s old, window ${attest_secs}s) — skipping the re-run"
+      fi
+    fi
+  fi
+  if [ -z "$skip_suite" ]; then
+    # Recover any prior crash's stale registration before adding: remove the entry
+    # if git still knows it, prune dangling metadata, then clear the directory.
+    git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
+    git -C "$root" worktree prune >/dev/null 2>&1 || true
+    rm -rf "$tw" 2>/dev/null || true
+    git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || die "integrate: could not materialize $cand"
+    # Structured argv: whitespace split only, nothing shell-interpreted. An
+    # empty/whitespace-only suite-cmd expanded to zero argv and SUCCEEDED as a
+    # no-op — the exact unverified landing the config gate exists to refuse.
+    # (codex, impl r1.)
+    set -f; set -- $suite_cmd; set +f
+    [ $# -gt 0 ] || die "integrate: suite-cmd is empty after splitting — refusing to land unverified"
+    if [ -n "$name" ] && [ -n "$instance" ]; then
+      ( cd "$tw" && "$0" presence with-beat --name "$name" --instance "$instance" -- "$@" ) || rc=$?
+    else
+      ( cd "$tw" && "$@" ) || rc=$?
+    fi
+    [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; fix on the branch and re-run"
+    # BIND the result to the candidate: a suite that checked out another OID and
+    # passed there proves nothing about $cand. Every verification below fails
+    # CLOSED — a command that cannot answer refuses the landing. (codex, impl r1.)
+    local tw_head tw_status
+    tw_head="$(git -C "$tw" rev-parse HEAD 2>/dev/null)" || die "integrate: cannot read the verification tree's HEAD — refusing"
+    [ "$tw_head" = "$cand" ] || die "integrate: the verification tree is at $tw_head, not the candidate $cand — the suite result is not about this landing; refusing"
+    tw_status="$(git -C "$tw" status --porcelain 2>/dev/null)" || die "integrate: cannot read the verification tree's status — refusing"
+    [ -z "$tw_status" ] || die "integrate: the suite dirtied the verification tree — refusing to trust the result"
+  fi
+  # Final occupancy guard — a checkout could have moved onto main DURING the
+  # suite; the CAS must still never move a ref under a live working tree.
+  local wt_list
   wt_list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || die "integrate: cannot enumerate worktrees — refusing"
   printf '%s\n' "$wt_list" | grep -qx 'branch refs/heads/main' \
     && die "integrate: main is checked out somewhere — refusing (never-occupy-main)"
@@ -2356,9 +2445,21 @@ cmd_integrate() {
   # Success path: clean up and clear the trap NOW, inside function scope, so the
   # process-exit path has nothing deferred left to evaluate.
   git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
+  # A healed occupant goes back ON main, which now points at the landed tip —
+  # this is the fast-forward the self-heal promised. Failure to re-attach is not
+  # a failed landing: report it and leave the checkout safely detached.
+  if [ -n "$healed" ]; then
+    git -C "$healed" checkout main >/dev/null 2>&1 \
+      && echo "integrate: healed occupant $healed fast-forwarded onto the new main" \
+      || echo "integrate: warning — could not re-attach $healed to main; it is parked detached at $expected"
+  fi
   [ -n "$name" ] && "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
   trap - EXIT
-  echo "integrate: LANDED $cand as main (was $expected); suite green at the landed OID"
+  if [ -n "$skip_suite" ]; then
+    echo "integrate: LANDED $cand as main (was $expected); green by attestation (${attest_age}s old)"
+  else
+    echo "integrate: LANDED $cand as main (was $expected); suite green at the landed OID"
+  fi
 }
 
 cmd_snapshot() {
@@ -3590,6 +3691,7 @@ case "${1:-}" in
   presence)  shift; cmd_presence "$@" ;;
   worktree)  shift; cmd_worktree "$@" ;;
   integrate) shift; cmd_integrate "$@" ;;
+  attest-green) shift; cmd_attest_green "$@" ;;
   stalled)   shift; cmd_stalled "$@" ;;
   bind)      shift; cmd_bind "$@" ;;
   clean)     shift; cmd_clean "$@" ;;

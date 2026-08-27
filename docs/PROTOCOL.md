@@ -61,7 +61,17 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    compare-and-swap `update-ref` — a race loses cleanly, an untested or non-ff OID
    cannot land, and main never points at a commit the suite has not passed at.
    Integrate small and often: isolation removes collision, but cross-session
-   visibility lives in landed work.
+   visibility lives in landed work. Two ergonomics on that skeleton, added after
+   the first real landing paid for both (2026-08-27): a SINGLE clean checkout
+   idling on `main` at the expected tip is **self-healed** — detached for the
+   landing and re-attached to the advanced `main` after the CAS (a fast-forward
+   of an idle tree; dirty, diverged, or multiple occupants still refuse, decided
+   BEFORE the suite spends ten minutes) — and with `suite-attest-secs = N` in
+   `.comms/config`, a fresh `attest-green` record for EXACTLY the candidate OID
+   stands in for integrate's re-run (a green suite attests its own commit; an
+   identical OID cannot have changed, so the second run proves nothing). Both
+   default off-path: no config, no attestation, no occupant → the paranoid
+   behavior is unchanged.
 4. **Direct is re-earned, never tenure.** After every wait (reviewer round, await,
    resume) a direct session re-runs `presence others` before its next write; a
    `beat` that heals a vanished record (exit 5) demands the same re-check.
