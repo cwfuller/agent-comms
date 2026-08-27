@@ -1235,7 +1235,15 @@ fix is to observe the thing itself.
   value truthiness; every value is checked, unstripped, then normalized.
 - [ ] **Session layer** (presence arc, in flight with presence-worktrees-3a):
   declared roles + pid + start-time in `.comms/sessions/` make a resume-fork twin
-  self-evident at claim-then-check; one live process per session.
+  self-evident at claim-then-check; one live process per session. The pid field
+  needs its definition DECLARED too (agent-comms-01, self-caught): a record written
+  with the transient tool-shell's `$$` is dead seconds later — "a field that names
+  a property (this session is alive) while observing a proxy that does not track it
+  (whatever shell happened to run the write)." Correct definition: the Claude
+  process pid, which equals the session's socket name
+  (`/tmp/cc-socks/<pid>.sock`) — an independent second liveness check that does not
+  trust the number in the file. Existing records predating this rule carry absent
+  or proxy pids and cannot be staleness-checked.
 - [ ] **Run layer**: panel run dirs and leg filenames must EMBED the thread —
   three simultaneous `panel-codex-NNNNN` dirs were indistinguishable without opening
   messages, which enabled the 2026-08-27 wrong-kill (7b's r6 codex reviewer).
