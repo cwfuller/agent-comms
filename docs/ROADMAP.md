@@ -1184,3 +1184,36 @@ What would make it real, roughly in order of cost:
 
 Until one of those lands, the honest statement is the one now in the code comment and in
 acceptance criterion 9: defence in depth, tested by invariant, not a containment guarantee.
+
+## Field report — cmux freeze incident (2026-08-27, coordinator session)
+
+Live 90-minute recovery: the cmux host livelocked its main thread with four agent
+sessions as pty children; three parked at unapprovable permission prompts, every
+liveness signal went dark identically to death, and one near-miss staleness-rule
+takeover targeted WIP that later fingerprinted to a DIFFERENT agent than assumed.
+Full narrative in the archived report
+(`field-report-cmux-freeze`, 2026-08-27). Items, feeding the presence-worktrees arc:
+
+1. **Presence needs a third state: `blocked-on-human`.** Parked-at-prompt is the
+   dominant real failure mode and reads as dead under the staleness rule. A
+   Notification-hook beat (`awaiting-approval`) makes it visible for free; blocked
+   agents keep leases longer than silent ones.
+2. **Absence = beat staleness AND a process check.** A 12h-stale beat sat next to a
+   live pid mid-await. Presence records must carry the pid; `kill -0` + children
+   check disambiguated every case live. Uncheckable stays ambiguous (fail-closed).
+3. **Presence records as resume manifests**: session_id, pid, cwd, and the literal
+   resume command — takeover reads facts instead of doing transcript forensics.
+4. **No uncommitted WIP in the shared checkout across a turn boundary** — commit to
+   `wip/<agent>` or agent-tagged stash first; ownerless working-tree changes caused
+   today's misattribution. (Interim practiced: `wip/01-orphan` parking.)
+5. **Awaits must drain the inbox while waiting** — the file-drop channel survives a
+   wedged socket only if await loops poll it; add a sentinel-file interrupt.
+6. **Panel completion writes to the awaiting agent's inbox, not only the run dir** —
+   verdicts sat unconsumed 40+ minutes because their only consumer died with its
+   session.
+7. **Reduce single-host blast radius**: detached supervisor (tmux/launchd) over
+   UI-owned ptys; with item 3, agents become recoverable anywhere. (Deployment
+   guidance.)
+
+Priority per the coordinator: 1–4 small with this incident as their test case; 5–6
+would have most shortened recovery; 7 is deployment guidance.
