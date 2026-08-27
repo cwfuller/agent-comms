@@ -1846,6 +1846,10 @@ presence_dir() { printf '%s/.comms/sessions' "$(main_repo_root)"; }
 presence_validate_ids() {  # <name> [instance] — strict grammar at EVERY entry point:
   # these values become record paths, glob deletions, an rm -rf target, and trap
   # text. Validating only at claim left every later verb injectable. (codex, impl r1.)
+  # '.tomb.' is a RESERVED delimiter: names may contain dots, and a name like
+  # 'foo.tomb.bar' mis-split the cover parse at three sites — force reported
+  # success while removing nothing. (codex, impl r6.)
+  case "$1" in *.tomb.*) return 1 ;; esac
   printf '%s' "$1" | grep -qE '^[a-z0-9][a-z0-9._-]{0,40}$' || return 1
   [ $# -lt 2 ] || [ -z "$2" ] || printf '%s' "$2" | grep -qE '^[a-z0-9]{8,64}$' || return 1
   return 0
@@ -2098,14 +2102,6 @@ cmd_presence() {
       [ -n "$latched" ] && kill "-$latched" -- "-$child" 2>/dev/null || true
       set +m
       rc=0; wait "$child" || rc=$?
-      # A LATCHED CANCELLATION NEVER RETURNS SUCCESS: a fast child can exit 0
-      # before the re-signal lands (codex probed 2,000 runs and caught 225 false
-      # successes) — and integrate would land that "success". The child's own
-      # nonzero status is preserved; only a clean 0 under cancellation is forced
-      # to the signal's status. (codex, impl r5.)
-      if [ -n "$latched" ] && [ "$rc" -eq 0 ]; then
-        [ "$latched" = INT ] && rc=130 || rc=143
-      fi
       # QUIESCENCE before return (codex, impl r4): the wrapper's success must mean
       # the child's whole group is GONE — integrate trusts the tree state on
       # return, and a straggling suite descendant made a same-shaped model return
@@ -2132,6 +2128,15 @@ cmd_presence() {
       kill -TERM -- "-$beater" 2>/dev/null || true
       wait "$beater" 2>/dev/null || true             # join-before-restore
       trap - INT TERM
+      # A LATCHED CANCELLATION NEVER RETURNS SUCCESS — applied AFTER teardown and
+      # trap restoration, because the traps stay live through the quiescence
+      # polls and a late INT there updated the latch after an earlier coercion
+      # and still returned 0 (codex reproduced it, impl r6; the fast-child probe
+      # was impl r5: 225/2000 false successes). The child's own nonzero status is
+      # preserved; only a clean 0 under cancellation is forced to the signal's.
+      if [ -n "$latched" ] && [ "$rc" -eq 0 ]; then
+        [ "$latched" = INT ] && rc=130 || rc=143
+      fi
       if [ -f "$healmark" ]; then
         rm -f "$healmark" 2>/dev/null || true
         echo "presence: a beat during this run HEALED a vanished record — tenure is NOT restored; re-run claim-then-check before the next shared-checkout write" >&2

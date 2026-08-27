@@ -4551,12 +4551,17 @@ run_pw presence expire >/dev/null 2>&1; run_pw presence expire >/dev/null 2>&1
 # --force is EXACT-name (codex, impl r5: `--force alpha` glob-matched
 # `alpha-team-*` and erased an unrelated live session's records and covers).
 printf '{\n  "name": "far-team", "instance": "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2", "state": "working", "host": "%s", "last_heartbeat_epoch": "%s"\n}\n' "$(hostname)" "$(date +%s)" > "$PW_SD/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.json"
+mkdir -p "$PW_SD/.reap"
+printf '#obs 1\nx\n' > "$PW_SD/.reap/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.obs"
+printf '#tomb 1\n' > "$PW_SD/.reap/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.tomb.beefbeef"
 run_pw presence expire --force far >/dev/null 2>&1
 [ ! -f "$PW_SD/far-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json" ] \
   && ok "expire --force is the explicit operator path" || fail "force did not remove"
 [ -f "$PW_SD/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.json" ] \
-  && ok "--force far leaves far-team's records untouched (exact-name match)" || fail "force over-matched a hyphenated sibling"
-rm -f "$PW_SD/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.json"
+  && [ -f "$PW_SD/.reap/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.obs" ] \
+  && [ -f "$PW_SD/.reap/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.tomb.beefbeef" ] \
+  && ok "--force far leaves far-team's records AND covers untouched (exact-name match)" || fail "force over-matched a hyphenated sibling"
+rm -f "$PW_SD/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.json" "$PW_SD/.reap/far-team"-* 2>/dev/null
 PW_MYPID=$$
 PW_MYSTART="$(ps -p $PW_MYPID -o lstart= 2>/dev/null)"
 printf '{\n  "name": "napper", "instance": "dddddddddddddddddddddddddddddddd", "state": "working", "host": "%s", "pid": "%s", "pid_started": "%s", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" "$PW_MYPID" "$PW_MYSTART" > "$PW_SD/napper-dddddddddddddddddddddddddddddddd.json"
@@ -4747,6 +4752,18 @@ for pw_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   [ "$PW_FRC" = 0 ] && PW_FALSE0=$((PW_FALSE0 + 1))
 done
 [ "$PW_FALSE0" = 0 ] && ok "a latched cancellation never returns success (20/20 nonzero)" || fail "$PW_FALSE0/20 cancelled runs returned 0"
+# LATE CANCEL during quiescence (codex, impl r6: the latch updated after the old
+# coercion point and a signal during the polls returned 0): the child exits 0
+# instantly but parks a TERM-ignoring descendant so the polls run; INT mid-poll
+# must still yield a nonzero wrapper status.
+set -m
+( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- bash -c "trap '' TERM; sleep 4 & exit 0" ) & PW_LW=$!
+set +m
+sleep 1; kill -INT "$PW_LW" 2>/dev/null
+PW_LRC=0; wait "$PW_LW" 2>/dev/null || PW_LRC=$?
+[ "$PW_LRC" != 0 ] && ok "a cancel DURING quiescence still refuses success" || fail "late cancel returned 0"
+# Reserved delimiter: a dotted name containing '.tomb.' is refused at every entry.
+check_not "a name containing the reserved .tomb. delimiter is refused" run_pw presence claim --name 'foo.tomb.bar' --role x
 # QUIESCENCE (codex, impl r4): a successful wrapper return means the child's whole
 # group is GONE — a TERM-ignoring descendant must be escalated to KILL, not left
 # straggling for integrate to trust a live tree.
