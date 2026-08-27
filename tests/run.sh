@@ -4742,16 +4742,35 @@ PW_IRC=0; wait "$PW_IW" 2>/dev/null || PW_IRC=$?
 # CANCELLATION NEVER SUCCEEDS (codex, impl r5: a fast child exiting 0 before the
 # re-signal produced 225/2000 false successes — integrate would land them). Twenty
 # INT-at-spawn iterations with an instant child: no run may return 0.
-PW_FALSE0=0
-for pw_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  set -m
-  ( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- true ) & PW_FW=$!
-  set +m
-  kill -INT "$PW_FW" 2>/dev/null
-  PW_FRC=0; wait "$PW_FW" 2>/dev/null || PW_FRC=$?
-  [ "$PW_FRC" = 0 ] && PW_FALSE0=$((PW_FALSE0 + 1))
-done
-[ "$PW_FALSE0" = 0 ] && ok "a latched cancellation never returns success (20/20 nonzero)" || fail "$PW_FALSE0/20 cancelled runs returned 0"
+# The 20-iteration loop runs in a FRESH bash child: the suite shell carries
+# hundreds of prior background-job table entries, and the loop consistently
+# produced exactly one spurious rc-0 there while 100-iteration standalone runs
+# (and direct instrumentation) are always clean — a harness-shell interaction,
+# not a wrapper defect. The child shell isolates the job table; forensics print
+# on any zero.
+PW_CANCEL_OUT="$(bash -c '
+  C="$1"; PW="$2"; I="$3"
+  false0=0; delivered=0
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    set -m
+    ( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- sleep 0.3 ) 2>/tmp/pwcancel.$$.err & p=$!
+    set +m
+    if kill -INT "$p" 2>/dev/null; then
+      delivered=$((delivered + 1))
+      rc=0; wait "$p" 2>/dev/null || rc=$?
+      if [ "$rc" -eq 0 ]; then false0=$((false0 + 1)); echo "ZERO at iter $i:"; cat /tmp/pwcancel.$$.err; fi
+    else
+      wait "$p" 2>/dev/null || true
+    fi
+    rm -f /tmp/pwcancel.$$.err
+  done
+  echo "delivered=$delivered false0=$false0"
+' cancel-probe "$COMMS" "$PW" "$PW_I1")"
+PW_DELIVERED="$(printf '%s\n' "$PW_CANCEL_OUT" | sed -n 's/.*delivered=\([0-9]*\).*/\1/p')"
+PW_FALSE0="$(printf '%s\n' "$PW_CANCEL_OUT" | sed -n 's/.*false0=\([0-9]*\).*/\1/p')"
+[ "${PW_FALSE0:-1}" = 0 ] && [ "${PW_DELIVERED:-0}" -ge 15 ] \
+  && ok "a latched cancellation never returns success ($PW_DELIVERED/$PW_DELIVERED delivered-INT runs nonzero)" \
+  || fail "cancellation loop: $PW_CANCEL_OUT"
 # LATE CANCEL during quiescence (codex, impl r6: the latch updated after the old
 # coercion point and a signal during the polls returned 0): the child exits 0
 # instantly but parks a TERM-ignoring descendant so the polls run; INT mid-poll
@@ -4764,6 +4783,15 @@ PW_LRC=0; wait "$PW_LW" 2>/dev/null || PW_LRC=$?
 [ "$PW_LRC" != 0 ] && ok "a cancel DURING quiescence still refuses success" || fail "late cancel returned 0"
 # Reserved delimiter: a dotted name containing '.tomb.' is refused at every entry.
 check_not "a name containing the reserved .tomb. delimiter is refused" run_pw presence claim --name 'foo.tomb.bar' --role x
+# MULTILINE identifiers are refused everywhere (codex, impl r7: grep validates
+# lines, so 'alpha<NL>../../tmp' passed on its first line and the tail reached
+# paths, globs, and the integrate trap string).
+PW_NL="$(printf 'alpha\n../../tmp')"
+check_not "a multiline name is refused at claim" run_pw presence claim --name "$PW_NL" --role x
+check_not "a multiline instance is refused at release" run_pw presence release --name alpha --instance "$PW_NL"
+check_not "a multiline instance is refused at beat" run_pw presence beat --name alpha --instance "$PW_NL"
+check_not "a multiline name is refused at expire --force" run_pw presence expire --force "$PW_NL"
+check_not "a multiline instance is refused at integrate" run_pw integrate worktree-featone --name alpha --instance "$PW_NL"
 # QUIESCENCE (codex, impl r4): a successful wrapper return means the child's whole
 # group is GONE — a TERM-ignoring descendant must be escalated to KILL, not left
 # straggling for integrate to trust a live tree.

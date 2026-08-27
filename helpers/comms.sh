@@ -1850,8 +1850,17 @@ presence_validate_ids() {  # <name> [instance] — strict grammar at EVERY entry
   # 'foo.tomb.bar' mis-split the cover parse at three sites — force reported
   # success while removing nothing. (codex, impl r6.)
   case "$1" in *.tomb.*) return 1 ;; esac
+  # Newlines are rejected FIRST: grep validates LINES, so a multiline value like
+  # 'alpha<NL>../../tmp' passed because its first line matched — and the later
+  # lines reached record paths, glob deletions, and the string-built integrate
+  # trap. With newlines gone, grep's line semantics equal whole-scalar semantics.
+  # (codex, impl r7.)
+  case "$1" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s' "$1" | grep -qE '^[a-z0-9][a-z0-9._-]{0,40}$' || return 1
-  [ $# -lt 2 ] || [ -z "$2" ] || printf '%s' "$2" | grep -qE '^[a-z0-9]{8,64}$' || return 1
+  if [ $# -ge 2 ] && [ -n "$2" ]; then
+    case "$2" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    printf '%s' "$2" | grep -qE '^[a-z0-9]{8,64}$' || return 1
+  fi
   return 0
 }
 presence_host() { hostname 2>/dev/null || echo unknown-host; }
@@ -2056,26 +2065,25 @@ cmd_presence() {
       presence_expire "$dir" "$force"
       ;;
     with-beat)
+      # Traps FIRST — before validation, before any command substitution: the
+      # pre-trap stretch ran presence_dir's git call, and a signal absorbed
+      # anywhere in that window is neither death nor latch. With the traps at
+      # the arm's first line, the only unlatchable window left is bash's own
+      # startup parse, where default-disposition death is the correct outcome.
+      local parent=$$ beater="" child="" rc=0 healmark brc latched=""
+      trap 'latched=INT;  kill -INT  -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' INT
+      trap 'latched=TERM; kill -TERM -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' TERM
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence with-beat: --name and --instance required"
       presence_validate_ids "$name" "$instance" || usage_err "presence with-beat: invalid name/instance"
       [ $# -gt 0 ] || usage_err "presence with-beat: a command is required after --"
-      local parent=$$ beater="" child="" rc=0 healmark brc
       healmark="$(presence_dir)/.tmp/healed-$name-$instance"
       rm -f "$healmark" 2>/dev/null || true
-      # Signal contract (codex, impl r3): traps are installed BEFORE any spawn
-      # (no unprotected window), each job gets its OWN PROCESS GROUP via set -m
-      # so teardown reaches grandchildren (a real suite spawns trees), and the
-      # signal keeps its IDENTITY (INT forwards as INT, TERM as TERM). These
-      # traps fire while the function is live, so deferred ${child:-} is safe —
-      # unlike the EXIT-trap locals lesson from integrate.
-      # The signal is LATCHED as well as forwarded: a signal landing in the gap
-      # between the two spawns used to kill only what existed and let the child
-      # launch afterwards and return 0 (codex modeled it empirically, impl r4).
-      # Each spawn re-checks the latch immediately and applies the latched
-      # identity to the newborn group.
-      local latched=""
-      trap 'latched=INT;  kill -INT  -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' INT
-      trap 'latched=TERM; kill -TERM -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' TERM
+      # Signal contract (codex, impl r3/r4): traps live at the arm's top; each
+      # job gets its OWN PROCESS GROUP via set -m so teardown reaches
+      # grandchildren; identity is preserved (INT as INT, TERM as TERM); the
+      # LATCH records a signal landing in any gap and each spawn re-applies it
+      # to the newborn group. These traps fire while the function is live, so
+      # deferred ${child:-} is safe — unlike the EXIT-trap locals lesson.
       set -m
       # EVERY command in the beater is errexit-immune: the subshell inherits
       # set -e, so a bare beat exiting 5 (heal) killed the beater before the
