@@ -5080,17 +5080,22 @@ grep -q '"last_delivery": "failed"' "$SW_SF" 2>/dev/null \
   || fail "state file found but last_delivery not updated ($(cat "$SW_SF" 2>/dev/null | tr -d '\n'))"
 rm -f "$SW_SF"
 
-# 3a. The poll must WAKE EARLY. Tests 2 and 3 together would still pass if the
-#     loop were a flat `sleep $budget`: 3's file already exists when the waiter
-#     starts, so nothing there exercises the polling. Here the file lands ~2s into
-#     a 10s budget, so a non-polling implementation takes 10s and this fails.
-#     (codex + grok, panel r2 — both flagged the gap independently.)
+# 3a. The poll must WAKE EARLY. Test 2 already covers "the wait exists at all"; 3a's
+#     unique job is narrower — that the wait is a POLL and not a flat `sleep $budget`.
+#     Test 3's file already exists when the waiter starts, so nothing there touches
+#     the polling. Here the file lands ~2s into a 20s budget: a non-polling
+#     implementation takes 20s and fails the <12s bound, while the real one returns
+#     in ~2s. The margin is deliberately wide because this suite is known to flake
+#     under machine load, and a false failure here costs more than a loose bound.
+#     If load delays the runner past the 2s write, this degrades to test 3 (file
+#     already present) and still passes — it loses coverage, never invents failure.
+#     (codex + grok, panel r2 flagged the gap; codex, r3 asked for the wider margin.)
 ( sleep 2; printf '{\n  "workspace": "sw",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' > "$SW_SF" ) &
 SW_MIDW=$!
-SW_E3A="$(sw_elapsed sw_run "$WORK/sw-r3a" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=10)"
+SW_E3A="$(sw_elapsed sw_run "$WORK/sw-r3a" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=20)"
 wait "$SW_MIDW" 2>/dev/null || true
-[ "$SW_E3A" -lt 6 ] && ok "a file landing mid-wait wakes the poll early (${SW_E3A}s of a 10s budget)" \
-  || fail "the wait did not wake early (${SW_E3A}s of a 10s budget — is it polling?)"
+[ "$SW_E3A" -lt 12 ] && ok "a file landing mid-wait wakes the poll early (${SW_E3A}s of a 20s budget)" \
+  || fail "the wait did not wake early (${SW_E3A}s of a 20s budget — is it polling?)"
 grep -q '"last_delivery": "failed"' "$SW_SF" 2>/dev/null \
   && ok "the mid-wait file is mutated too" || fail "mid-wait file not mutated"
 rm -f "$SW_SF"

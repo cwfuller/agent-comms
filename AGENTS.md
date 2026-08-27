@@ -162,7 +162,7 @@ bash tests/run.sh
 One umbrella suite. It is still slow — measured 2026-08-27 at **~340s for 954 assertions**
 on an unloaded machine, down from 505s once an unconditional 6s wait per spawned turn was
 removed (505s → 326s on identical trees; the rest of the difference is new assertions that
-deliberately spend ~7s exercising that wait) — and reducing it further is active work; see
+deliberately spend ~25s exercising that wait) — and reducing it further is active work; see
 the "Suite runtime" subsection of
 `docs/ROADMAP.md`, which now carries the full profile. The cost is concentrated, not
 spread: ten of the 59 sections accounted for ~87% of the original runtime, and spawn

@@ -303,7 +303,10 @@ target), and records the provider session id (`codex_thread_id` /
 default `workspace-write`), `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800),
 `COMMS_RUNPHASE_CLAUDE_PERMISSION_MODE` (default `acceptEdits`),
 `COMMS_RUNPHASE_CLAUDE_ALLOWED_TOOLS` (default `Bash`), `COMMS_RUNPHASE_CLAUDE_ARGS`
-(extra flags; bypass/danger permission flags are refused).
+(extra flags; bypass/danger permission flags are refused),
+`COMMS_RUNPHASE_STATE_WAIT_SECS` (default 6; how long a turn waits for the thread-state
+file when `send` declared one is coming — out-of-range or non-integer values fall back to
+the default rather than aborting teardown).
 
 ## Typical sessions
 
