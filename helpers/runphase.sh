@@ -486,7 +486,10 @@ text = final or ''
 # on one transport and a quoted no-structure refusal on the other. Unwrapping now happens
 # once, in the broker, on the path BOTH transports share. A transport must never decide
 # what a reply says. (codex and grok independently, round 6.)
-sys.stdout.write(text + '\n')
+# VERBATIM, including the absence of a trailing newline. ACP redirects acpx stdout with no
+# transformation, so appending an LF here made an empty result a one-byte file -- a different
+# failure path on one transport than the other, which is criterion 8 broken by a single byte.
+sys.stdout.write(text)
 PYX
   then
     GROK_BROKER_NOTE="reply extraction failed — see events.ndjson / runner.log"
@@ -529,6 +532,13 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
     # 1. SCRUB THE ENVIRONMENT. GIT_CONFIG_* injects arbitrary config with nothing on argv,
     #    and config is how a read verb becomes an exec: core.sshCommand, diff.external,
     #    core.pager. GIT_SSH_COMMAND / GIT_EXTERNAL_DIFF / GIT_PAGER do it without config.
+    # GIT_TRACE* is a whole FAMILY and each member names a writable path, so it is matched
+    # by prefix rather than listed -- listing is how GIT_TRACE2_EVENT was missed. GIT_MAN_VIEWER
+    # execs through `help`, which is why `help` also left the allowlist below.
+    printf 'for v in $(env | sed -n "s/^\\(GIT_TRACE[A-Z0-9_]*\\)=.*/\\1/p"); do unset "$v"; done\n'
+    printf 'unset GIT_MAN_VIEWER MANPAGER PAGER LESS GIT_ATTR_NOSYSTEM 2>/dev/null\n'
+    # `status` and other reads can refresh and rewrite the index; this makes reads truly read.
+    printf 'GIT_OPTIONAL_LOCKS=0; export GIT_OPTIONAL_LOCKS\n'
     printf 'unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG GIT_CONFIG_GLOBAL \\\n'
     printf '      GIT_CONFIG_SYSTEM GIT_SSH GIT_SSH_COMMAND GIT_EXTERNAL_DIFF GIT_PAGER \\\n'
     printf '      GIT_EDITOR GIT_SEQUENCE_EDITOR GIT_PROXY_COMMAND GIT_ASKPASS SSH_ASKPASS \\\n'
@@ -564,14 +574,14 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
     printf '    log|show|diff|"diff-tree"|"diff-index"|status|"rev-parse"|"rev-list"|"cat-file"|\\\n'
     printf '    "ls-files"|"ls-tree"|blame|annotate|describe|grep|shortlog|"for-each-ref"|\\\n'
     printf '    "name-rev"|"merge-base"|"check-ignore"|"check-attr"|"count-objects"|\\\n'
-    printf '    "verify-pack"|whatchanged|version|help|var)\n'
+    printf '    "verify-pack"|whatchanged|version|var)\n'
     printf '      break ;;\n'
     printf '  esac\n'
     printf '  echo "agent-comms: refused \x27git $a\x27 — a review turn may read history but not write, publish, or rewrite it; only read-only verbs are permitted" >&2\n'
     printf '  exit 1\n'
     printf 'done\n'
     # 4. --no-pager: the pager is configurable in-repo, so a permitted read could exec it.
-    printf 'exec %s --no-pager "$@"\n' "$real_git"
+    printf 'exec %s --no-pager --no-optional-locks "$@"\n' "$real_git"
   } > "$acp_shim/git"
   chmod +x "$acp_shim/git"
 }

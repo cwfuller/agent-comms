@@ -1156,3 +1156,31 @@ Sequence — begin only after the current concurrent work lands on a pinned, gre
    grading track, but their deliverables stay tracked in the scope-dial section above;
    budget signaling; stakes-tiering docs) and the standing DEFERRED backlog in
    docs/advisories.md
+
+## Open security item: the mounted review turn has no enforced boundary
+
+*(field-report-9446 round 8, codex. The top open item on this track.)*
+
+A mounted ACP review turn runs with `--approve-all`, which grants the child a shell. The
+protections on that path are the mount (a throwaway linked worktree with no `.comms` in it)
+and a PATH shim that permits only read-only git verbs, scrubs the config/exec environment,
+and refuses write/exec flags. Both raise the cost of an accident and close the easy
+deliberate paths. **Neither is a boundary.** A child can call git by absolute path or write
+files with the shell, and a linked worktree shares the main object store and the real remotes.
+
+`COMMS_RUNPHASE_GROK_SANDBOX` does NOT apply here — it configures the direct grok command
+path only. Claiming it as the boundary for mounted turns was wrong, and was corrected in
+round 8 after a reviewer traced the flag to its actual call site.
+
+What would make it real, roughly in order of cost:
+
+- `acpx --permission-policy <json>` (autoApprove/autoDeny/escalate/defaultAction) instead of
+  `--approve-all`, denying writes and non-git execs while still allowing the read-only
+  terminal commands a review genuinely needs. This is the ACP-layer lever that already
+  exists and is unused on this path.
+- An OS sandbox profile applied to the mounted turn, the way the direct grok path does it.
+- Running the mount from a repository with no remotes and a detached object store, so a
+  publish has nowhere to go even if a write escapes.
+
+Until one of those lands, the honest statement is the one now in the code comment and in
+acceptance criterion 9: defence in depth, tested by invariant, not a containment guarantee.

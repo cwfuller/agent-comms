@@ -2156,6 +2156,45 @@ GOT3="$(eval "${EXTRACT_LINE/\"<message file>\"/\"$DUPFROM\"}"; printf '%s' "$RE
 grep -qF 'send --to "$REVIEWER" "<your reply file>"' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader continuations send to the derived reviewer" || fail "reader continuation target"
 
+echo "== transports emit the child\'s bytes, verbatim and identically =="
+# Criterion 8 by construction. The streaming extractor is a python block inside runphase.sh;
+# ACP redirects acpx stdout with no transformation at all. So the extractor must be a pure
+# pass-through of the result string — a single appended LF made an empty reply a one-byte file
+# on one transport and an empty file on the other, which are DIFFERENT failure paths.
+# (codex, round 8.)
+BX="$WORK/byte-extract"; mkdir -p "$BX"
+python3 - "$REPO/helpers/runphase.sh" "$BX/extract.py" <<'PYX'
+import io, sys, re
+src = io.open(sys.argv[1], encoding="utf-8").read()
+i = src.index("import json")
+j = src.index("PYX", i)
+io.open(sys.argv[2], "w", encoding="utf-8").write(src[i:j])
+PYX
+bx() {  # <result-string> -> the bytes the streaming path would write
+  # The extractor reads an events file as argv[1], the same way the runner invokes it.
+  python3 -c "
+import json,subprocess,sys
+ev = json.dumps({'type':'result','subtype':'success','is_error':False,'result':sys.argv[1]})
+open(sys.argv[3],'w').write(ev+chr(10))
+r = subprocess.run([sys.executable, sys.argv[2], sys.argv[3]], capture_output=True, text=True)
+sys.stdout.write(r.stdout)
+" "$1" "$BX/extract.py" "$BX/events.ndjson"
+}
+for CASE in "plain" "" "no-trailing-lf" "leading
+blank" "trailing
+"; do
+  GOT="$(bx "$CASE"; printf X)"; GOT="${GOT%X}"
+  [ "$GOT" = "$CASE" ] && ok "streaming emits the result verbatim (${#CASE} bytes)" \
+    || fail "streaming altered the bytes (in ${#CASE}, out ${#GOT})"
+done
+FENCED='```
+### Blocking
+- x
+```'
+GOT="$(bx "$FENCED"; printf X)"; GOT="${GOT%X}"
+[ "$GOT" = "$FENCED" ] && ok "a whole-answer fence reaches the lexer intact on streaming" \
+  || fail "streaming still unwraps a whole-answer fence"
+
 echo "== acp.sh: consult transport (stubbed npx) =="
 ACP="$REPO/helpers/acp.sh"
 ACP_STUB="$WORK/acp-bin"; mkdir -p "$ACP_STUB"
@@ -4017,13 +4056,23 @@ git -C "$GV" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base >/
 GPAY="$WORK/gitshim-payload"; GCAN="$WORK/gitshim-CANARY"; GOUT="$WORK/gitshim-WROTE"
 printf '#!/bin/sh\ntouch "%s"\n' "$GCAN" > "$GPAY"; chmod +x "$GPAY"
 rm -f "$GCAN" "$GOUT"
+gs_files() { find "$GV" "$WORK/gitshim-out" -type f 2>/dev/null | LC_ALL=C sort; }
+mkdir -p "$WORK/gitshim-out"
+GS_BEFORE="$(gs_files)"
 gs_attack() {  # <label> <env-assignments...> -- <git args...>
+  # THE INVARIANT, not a canary list: after the attack, no new file may exist ANYWHERE under
+  # the repo or the writable scratch dir. Two named canaries only catch the two tricks someone
+  # already thought of — a new write location was invisible. (codex, round 8.)
   local label="$1"; shift
   local envs=() ; while [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
   ( cd "$GV" && env "${envs[@]}" "$GS/git" "$@" ) >/dev/null 2>&1 || true
-  if [ -e "$GCAN" ] || [ -e "$GOUT" ]; then
-    fail "shim let a review turn $label"
-    rm -f "$GCAN" "$GOUT"
+  local now new
+  now="$(gs_files)"
+  new="$(comm -13 <(printf '%s\n' "$GS_BEFORE") <(printf '%s\n' "$now"))"
+  if [ -n "$new" ]; then
+    fail "shim let a review turn $label (wrote: $(printf '%s' "$new" | head -2 | tr '\n' ' '))"
+    printf '%s\n' "$new" | while IFS= read -r f; do [ -n "$f" ] && rm -f "$f"; done
+    GS_BEFORE="$(gs_files)"
   else
     ok "a review turn cannot $label"
   fi
@@ -4036,6 +4085,10 @@ gs_attack "inject config via a concatenated -c" "X=1" -- "-cdiff.external=$GPAY"
 gs_attack "write a file via --output"           "X=1" -- log "--output=$GOUT"
 gs_attack "exec a pager via grep -O"            "X=1" -- grep "-O$GPAY" x
 gs_attack "exec via --upload-pack"              "X=1" -- ls-remote "--upload-pack=$GPAY" origin
+gs_attack "write trace output via GIT_TRACE2_EVENT" "GIT_TRACE2_EVENT=$GV/trace.json" -- status
+gs_attack "write trace output via GIT_TRACE"        "GIT_TRACE=$GV/trace2.txt"         -- log --oneline -1
+gs_attack "exec a viewer via GIT_MAN_VIEWER"        "GIT_MAN_VIEWER=$GPAY"             -- help log
+gs_attack "write the index through an unlocked read" "X=1"                             -- status
 
 gs() { PATH="$GS:$PATH" git "$@"; }
 # A DENYLIST of subcommands cannot hold: git is user-extensible, so an alias runs under a
