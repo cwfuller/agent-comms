@@ -4975,6 +4975,100 @@ grep -qi 'Presence re-check after the wait — single-reviewer and panel alike' 
 grep -qi 'presence <claim|beat' "$REPO/helpers/comms.sh" \
   && ok "comms.sh help names the presence/worktree/integrate verbs" || fail "help drift"
 
+echo "== runphase: the state-file wait is DECLARED by the spawner, never guessed =="
+# The runner may wait for the thread-state file that `send` writes just after it
+# spawns us. It must wait ONLY when a send is actually behind it. A bare
+# `comms.sh deliver` (a public verb) spawns a runner with no send following, so
+# the file is never coming and a timed wait is pure latency — this was a flat 6s
+# on EVERY such turn, invisible because every caller redirects the note to
+# /dev/null. Measured at 179s (35%) of this suite's own runtime.
+SW="$WORK/statewait"; mkdir -p "$SW"; SW="$(cd "$SW" && pwd -P)"
+git -C "$SW" init -q -b feature/sw-tests
+git -C "$SW" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$SW/.comms/to-grok" "$SW/.comms/to-claude" "$SW/.comms/archive" "$SW/.comms/state"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$SW/.comms/config"
+SW_WS="$(cd "$SW" && env -u CMUX_WORKSPACE_ID "$COMMS" workspace)"
+SW_MSG="$SW/.comms/to-grok/${SW_WS}_2026-08-27T10-00-00_sw-1.md"
+cat > "$SW_MSG" <<SWEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-27T10:00:00Z
+workspace: $SW_WS
+message_id: ${SW_WS}_2026-08-27T10-00-00_sw-1
+thread: sw-arc-1
+workflow: auto-full
+phase: plan
+round: 1
+max-rounds: 4
+---
+
+## Plan
+review this plan
+SWEOF
+SW_SF="$SW/.comms/state/$(echo "$SW_WS" | tr '/' '-')_sw-arc-1.json"
+# A turn that refuses its arguments still runs the EXIT trap, which is the path
+# that reaches update_thread_state — the cheapest way to exercise the wait.
+sw_run() {  # sw_run <rundir> [env assignments...] -- refuses, exits nonzero
+  local rd="$1"; shift
+  mkdir -p "$rd"
+  ( cd "$SW" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$@" \
+      "COMMS_RUNPHASE_GROK_ARGS=--sandbox off" \
+      "$RP" run --message "$SW_MSG" --dir "$rd" --provider grok ) 2>&1
+}
+sw_elapsed() {  # prints whole seconds elapsed while running "$@"
+  local t0 t1; t0=$(date +%s); "$@" >/dev/null 2>&1; t1=$(date +%s); echo $((t1 - t0))
+}
+
+# 1. No declaration -> no wait. This is the regression that mattered.
+SW_E1="$(sw_elapsed sw_run "$WORK/sw-r1")"
+[ "$SW_E1" -lt 3 ] && ok "unheralded spawn does not wait for a state file that is not coming (${SW_E1}s)" \
+  || fail "unheralded spawn still waits (${SW_E1}s, expected <3)"
+# NB: sw_run exits nonzero BY DESIGN (it refuses), and this suite sets pipefail,
+# so `sw_run | grep -q ...` is decided by the refusal's status, not by grep —
+# it fails when the note is present and "passes" when it is absent. Capture,
+# then match.
+SW_O1="$(sw_run "$WORK/sw-r1b" || true)"
+case "$SW_O1" in
+  *'no thread state file to update'*) ok "unheralded spawn still reports the missing state file" ;;
+  *) fail "missing-state note lost" ;;
+esac
+
+# 2. Declared, file never arrives -> the budget is HONOURED, not ignored. A fix
+#    that simply deleted the wait would pass test 1 and fail this one.
+SW_E2="$(sw_elapsed sw_run "$WORK/sw-r2" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=3)"
+[ "$SW_E2" -ge 3 ] && ok "declared spawn waits out its budget when the write never lands (${SW_E2}s)" \
+  || fail "declared spawn skipped its budget (${SW_E2}s, expected >=3)"
+
+# 3. Declared, file lands LATE -> the race window still works. This is the
+#    coverage the wait exists for; losing it is the real risk of this change.
+( sleep 1; printf '{\n  "workspace": "%s",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' "$SW_WS" > "$SW_SF" ) &
+SW_LATE=$!
+SW_O3="$(sw_run "$WORK/sw-r3" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=8 || true)"
+case "$SW_O3" in
+  *'no thread state file to update'*) fail "late state write was missed — the race window regressed" ;;
+  *) ok "declared spawn still catches a state file written after it starts" ;;
+esac
+wait "$SW_LATE" 2>/dev/null || true
+rm -f "$SW_SF"
+
+# 4. Anti-drift, as a SOURCE contract: the writer's rule and the spawner's
+#    promise must be the same predicate, not two copies that agree today. If
+#    they diverge, nothing fails loudly — the runner just stalls for its whole
+#    budget again, silently, exactly as it did before this fix.
+SWC="$REPO/helpers/comms.sh"
+[ "$(grep -c '^state_write_expected()' "$SWC")" = 1 ] \
+  && ok "state_write_expected is defined exactly once" || fail "state_write_expected definition count"
+grep -q 'state_write_expected "$thread" "$wf" || return 0' "$SWC" \
+  && ok "state_update_from gates its write on the shared predicate" || fail "writer bypasses the shared predicate"
+grep -q 'if state_write_expected "$(frontmatter_field "$file" thread)" "$(frontmatter_field "$file" workflow)"; then' "$SWC" \
+  && ok "cmd_send gates COMMS_RUNPHASE_EXPECT_STATE on the shared predicate" || fail "spawner bypasses the shared predicate"
+[ "$(grep -c 'COMMS_RUNPHASE_EXPECT_STATE' "$SWC")" = 1 ] \
+  && ok "only one site declares an expected state write" || fail "COMMS_RUNPHASE_EXPECT_STATE set in more than one place"
+grep -q 'COMMS_RUNPHASE_EXPECT_STATE:-' "$REPO/helpers/runphase.sh" \
+  && ok "the waiter reads the declaration set-u safely" || fail "waiter does not read the declaration safely"
+
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
 DRY="$(run_comms clean --as claude workspace)"

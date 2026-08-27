@@ -3205,12 +3205,20 @@ json_get() {  # json_get <file> <key> — one key per line in our writer, so sed
 # state are this (via send), runphase's exit mirror, and `state complete`;
 # readers must treat it as advisory ground truth. run-dir (headless spawns)
 # gives `stalled` a live pid to watchdog.
+# state_write_expected <thread> <workflow> — the SINGLE definition of "this
+# message gets thread state". state_update_from gates its write on it, and
+# cmd_send tells the spawned runner the answer with it. runphase's
+# update_thread_state waits for that write; if the writer's rule and the
+# waiter's expectation ever drift apart, the runner stalls for its whole budget
+# on a file that is never coming (measured: 6s per turn, 35% of the suite).
+state_write_expected() { [ -n "$1" ] && [ -n "$2" ]; }
+
 state_update_from() {
   local mf="$1" outcome="${2:-unknown}" run_dir="${3:-}" awaiting_override="${4:-}"
   local thread wf
   thread="$(frontmatter_field "$mf" thread)"
   wf="$(frontmatter_field "$mf" workflow)"
-  [ -n "$thread" ] && [ -n "$wf" ] || return 0   # one-shot or pre-v2 message: no state
+  state_write_expected "$thread" "$wf" || return 0   # one-shot or pre-v2 message: no state
   local ws fm_ws phase round maxr loopr from awaiting_from mid dir
   # Key on the RESOLVED workspace — the same resolver every reader uses — so a
   # divergent frontmatter workspace value can't make the state file invisible.
@@ -3650,6 +3658,14 @@ cmd_send() {
       [ -z "$found_dir" ] || die "send: refusing --archive-inbound — $ib_base sits in $found_dir but the outbound 'from:' is '$arch_owner' (cross-inbox mismatch); nothing was delivered"
       arch_action="noop"
     fi
+  fi
+  # A runner spawned from here races this function's state_update_from below, so
+  # it is allowed to wait for that write. A runner spawned any OTHER way — a bare
+  # `comms.sh deliver`, which is a public verb — has no send behind it and no
+  # state file is ever coming, so it must not wait. Declared here, by the one
+  # caller that knows, instead of inferred by a timer in the child.
+  if state_write_expected "$(frontmatter_field "$file" thread)" "$(frontmatter_field "$file" workflow)"; then
+    export COMMS_RUNPHASE_EXPECT_STATE=1
   fi
   local del_out outcome=manual rundir=""
   del_out="$(cmd_deliver "$to" "$file")"

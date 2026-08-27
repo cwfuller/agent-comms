@@ -205,12 +205,27 @@ update_thread_state() {
   ws="$("$COMMS" workspace 2>/dev/null)" || return 0
   root="$("$COMMS" root 2>/dev/null)" || return 0
   sf="$root/state/$(safe_name "$ws")_$(safe_name "$thread").json"
-  # send writes this file moments AFTER deliver spawns us — tolerate the window.
-  local i
-  for i in 1 2 3; do
-    [ -f "$sf" ] && break
-    sleep 2
-  done
+  # send writes this file moments AFTER deliver spawns us (cmd_send calls
+  # cmd_deliver first, then state_update_from with the run dir deliver returned —
+  # the ordering is forced, not lazy), so tolerate that window. Wait ONLY when a
+  # send is actually behind us: cmd_send exports the marker using the same
+  # predicate that decides whether it writes at all. A bare `comms.sh deliver`,
+  # or any other non-send spawn, gets no state file ever, and waiting for one is
+  # pure latency — 6s per turn, and it was invisible because every caller
+  # redirects the note below into a variable or /dev/null.
+  if [ "${COMMS_RUNPHASE_EXPECT_STATE:-}" = 1 ]; then
+    local i tenths
+    # Same default budget as the 3x2s loop this replaces; poll finely so the
+    # common case (the file lands in milliseconds) returns immediately instead
+    # of sitting out a fixed 2s tick.
+    tenths=$(( ${COMMS_RUNPHASE_STATE_WAIT_SECS:-6} * 10 ))
+    i=0
+    while [ "$i" -lt "$tenths" ]; do
+      [ -f "$sf" ] && break
+      sleep 0.1
+      i=$((i+1))
+    done
+  fi
   if [ ! -f "$sf" ]; then
     echo "note: no thread state file to update ($sf)" >&2
     return 0

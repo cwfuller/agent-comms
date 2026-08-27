@@ -1196,21 +1196,66 @@ bought a spec, whichever language executes it.
 
 ### Suite runtime (2026-08-27, user: "that seems excessive") — extends step 2
 
-A full run is ~8–12 minutes wall-clock at ~912 assertions, and a landing costs
-TWO runs (the pre-flight plus integrate's re-run at the candidate OID). Cost
-profile, estimated not yet measured: per-assertion `comms.sh` spawns (fresh bash
-+ several git subprocesses, likely the dominant term), deliberate real-time
-waits in the cancellation/quiescence/TTL sections (~2 min), per-section
-`git init` fixture churn, and fully serial execution.
+**PROFILED 2026-08-27 (suite-perf). The original estimate below was REFUTED on
+both of its main claims; the measured numbers replace it.** A landing still costs
+TWO runs (the pre-flight plus integrate's re-run at the candidate OID), which is
+what makes the wall-clock hurt.
+
+*Superseded estimate, kept so the next reader can see what was wrong and why:*
+~8–12 min at ~912 assertions; per-assertion `comms.sh` spawns "likely the
+dominant term"; ~2 min of deliberate sleeps; per-section `git init` churn.
+
+Measured on an unloaded machine (load ~8), instrumented clone at `3be9044`:
+
+- **Baseline: 504.8s for 932 assertions.** Two independent runs agreed within 1%.
+- **Spawns are ~5%, not dominant.** 1,165 helper spawns total (989 `comms.sh`,
+  107 `runphase.sh`, 47 `acp.sh`, 22 `install.sh`), and one `comms.sh`
+  invocation costs **23.6ms** (bare `bash -c true` baseline: 3.5ms). All
+  spawning together is ~28s. Batching assertions per invocation — the fix the
+  old item 1 called durable — has a ceiling of about 5% and is NOT worth doing.
+- **Deliberate sleeps are ~27s, not ~2 min.** 15 `sleep` sites: 2×6s watchdog
+  waits, 2×2s stub waits, ~9s in the presence `with-beat` signal tests. The
+  "~2 min" figure came from summing two `sleep 30`s that the tests kill early
+  *by design* — killing them early is the assertion.
+- **`git init` fixture churn is not a term worth chasing.** A full worktree
+  add + read-tree + reset + remove measures 92ms.
+- **The cost is CONCENTRATED, not spread.** Ten of 59 sections = 86.6% of
+  runtime; the top two = 35.8% on just 77 of 932 assertions. The remaining 50
+  sections share 67s between them.
+
+**Root cause of the worst offenders, found and fixed 2026-08-27: a 6-second
+sleep-poll in `update_thread_state` (`helpers/runphase.sh`).** The runner waited
+`for i in 1 2 3; do [ -f "$sf" ] && break; sleep 2; done` for the thread-state
+file that `send` writes just after it spawns the runner. The window is real —
+`cmd_send` calls `cmd_deliver` first and only then `state_update_from`, because
+the state write consumes the run dir deliver returns, so the ordering is forced.
+But the wait was UNCONDITIONAL, so every turn with no `send` behind it — a bare
+`comms.sh deliver`, which is a public verb, and every direct `runphase.sh run`
+in the suite — paid a flat 6s for a file that was never coming. It was invisible
+because the "no thread state file to update" note goes to stderr and every
+caller redirects it into a variable or `/dev/null`.
+
+Fix (declared-beats-inferred, applied to a spawn): `cmd_send` exports
+`COMMS_RUNPHASE_EXPECT_STATE=1` when it is actually going to write, and the
+runner waits only on that declaration. Both sides gate on ONE predicate,
+`state_write_expected`, so the writer's rule and the waiter's expectation cannot
+drift. The budget is retained and configurable
+(`COMMS_RUNPHASE_STATE_WAIT_SECS`, default 6 = prior behaviour) and now polls at
+0.1s instead of 2s, so the live race case returns as soon as the file lands
+instead of sitting out a fixed tick. **Measured: 504.8s → 327.4s (−35%), 941
+assertions green.** This also removes 6s from every non-`send` spawn in
+production, not only in tests.
 
 Ranked work, foldable into the step-2 harness split:
 
-1. [ ] **Profile before optimizing.** Per-section timers in `run.sh`; confirm or
-   refute the spawn-overhead estimate. If spawning dominates, the durable fix is
-   batching assertions per invocation, not trimming sleeps.
-2. [ ] **Tier the suite.** Fast default tier skips the stress probes (the
-   20-iteration cancellation loop and quiescence torture runs guard an invariant
-   5 iterations still catch); full stress tier reserved for integrate and CI.
+1. [x] **Profile before optimizing.** DONE 2026-08-27 — see the numbers above.
+   The estimate it was meant to test was wrong in both directions, which is the
+   whole argument for the item: implementing on the guess would have bought ~5%
+   and left the real 35% in place.
+2. [ ] **Tier the suite.** DEPRIORITISED by the profile: the stress probes are
+   not where the time is. The presence section — the most obvious "stress"
+   candidate — is 34s for 91 assertions, the second-best density in the top ten.
+   Re-open only if a specific probe shows up hot in a fresh profile.
 3. [x] **Attested-green shortcut for integrate.** DONE 2026-08-27 (double
    APPROVE, integrate-ergonomics r1): `attest-green` records "green at this
    HEAD" bound to the commit the run started on; integrate consumes a fresh
@@ -1220,9 +1265,23 @@ Ranked work, foldable into the step-2 harness split:
    through the landing instead of refusing it after a ten-minute suite).
 4. [ ] **Shard sections in parallel** with isolated TMPDIRs — except the
    signal-timing presence section, which stays in its own unshared lane (machine
-   load provably flaked it during the presence arc).
+   load provably flaked it during the presence arc; keeping it serial is now
+   known to be cheap). **This is the remaining lever.** Note the floor: after
+   the fix above the largest single section is ~50s, so section-level
+   parallelism alone cannot go below that without splitting it. Three
+   constraints: the suite runs under **bash 3.2.57** (macOS system bash) so
+   there is no `wait -n` — use `xargs -P` or explicit pid waits; add no new
+   dependency, because a zero-install story is a real feature for this tool's
+   users; and **a sharded or partial run must never mint an attestation** (see
+   the attestation invariant in AGENTS.md) or `integrate` will land code the
+   deep tests never ran.
 5. [ ] **Back-date instead of sleep** in the remaining age-based tests (most
-   already stamp epochs).
+   already stamp epochs). Worth ~27s at the absolute most — do it for
+   determinism under load, not for speed.
+6. [ ] **Make silent stalls visible.** This defect survived because a
+   six-second wait announced itself only on stderr, into `/dev/null`. Consider
+   whether the runner should record waits it actually served somewhere a human
+   or the suite reads. A stall nobody can see is the shape of the next one.
 
 ## Priorities (2026-08-20, user-confirmed order)
 

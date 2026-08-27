@@ -159,16 +159,12 @@ the interleaving I think is safe — find one where it isn't" earns its tokens.
 bash tests/run.sh
 ```
 
-One umbrella suite. It is slow — measured 2026-08-27 at 505s for 932 assertions on an
-unloaded machine — and that is a known problem being actively worked; see the "Suite
-runtime" subsection of `docs/ROADMAP.md`. The cost is concentrated, not spread: ten of the
-59 sections account for ~87% of it.
-
-> Note (2026-08-27): the ROADMAP subsection still carries the pre-measurement ESTIMATE
-> (~8–12 min at ~912 assertions, spawn overhead "likely dominant"). That estimate was
-> refuted by the profile above — spawns are ~5% of runtime — and the rewrite is owned by
-> the session that measured it. Where the two disagree today, the figures here are the
-> measured ones. Delete this note once ROADMAP lands the profile.
+One umbrella suite. It is still slow — measured 2026-08-27 at **327s for 941 assertions**
+on an unloaded machine, down from 505s once an unconditional 6s wait per spawned turn was
+removed — and reducing it further is active work; see the "Suite runtime" subsection of
+`docs/ROADMAP.md`, which now carries the full profile. The cost is concentrated, not
+spread: ten of the 59 sections accounted for ~87% of the original runtime, and spawn
+overhead is ~5%, not the dominant term it was once estimated to be.
 
 - A **fully green** run records an attestation for the exact commit it started on
   (`attest-green`), which lets `integrate` skip a redundant re-run of identical code when
