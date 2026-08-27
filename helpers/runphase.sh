@@ -241,6 +241,15 @@ update_thread_state() {
     budget="${COMMS_RUNPHASE_STATE_WAIT_SECS:-6}"
     case "$budget" in ''|*[!0-9]*) budget=6 ;; esac
     budget="${budget#"${budget%%[!0]*}"}"; budget="${budget:-0}"   # strip leading zeros
+    # Bound by DIGIT COUNT, before any arithmetic touches the value. Digits-only is
+    # not enough: bash 3.2 wraps at 2^63, so `1844674407370955161 * 10` evaluates
+    # to -6 and the loop never runs — a declared wait silently skipped, which is
+    # the exact failure this whole change exists to prevent. Comparing with -gt
+    # would overflow too, so the guard is on the string. Five or more digits is
+    # treated as MALFORMED and falls back to the default, exactly like `abc`;
+    # clamping to a huge-but-legal value would instead stall a turn for hours.
+    # Anything up to 9999s remains honoured. (codex, panel r2.)
+    [ "${#budget}" -gt 4 ] && budget=6
     tenths=$(( budget * 10 ))
     i=0
     while [ "$i" -lt "$tenths" ]; do

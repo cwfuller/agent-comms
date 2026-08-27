@@ -5080,15 +5080,39 @@ grep -q '"last_delivery": "failed"' "$SW_SF" 2>/dev/null \
   || fail "state file found but last_delivery not updated ($(cat "$SW_SF" 2>/dev/null | tr -d '\n'))"
 rm -f "$SW_SF"
 
+# 3a. The poll must WAKE EARLY. Tests 2 and 3 together would still pass if the
+#     loop were a flat `sleep $budget`: 3's file already exists when the waiter
+#     starts, so nothing there exercises the polling. Here the file lands ~2s into
+#     a 10s budget, so a non-polling implementation takes 10s and this fails.
+#     (codex + grok, panel r2 — both flagged the gap independently.)
+( sleep 2; printf '{\n  "workspace": "sw",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' > "$SW_SF" ) &
+SW_MIDW=$!
+SW_E3A="$(sw_elapsed sw_run "$WORK/sw-r3a" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=10)"
+wait "$SW_MIDW" 2>/dev/null || true
+[ "$SW_E3A" -lt 6 ] && ok "a file landing mid-wait wakes the poll early (${SW_E3A}s of a 10s budget)" \
+  || fail "the wait did not wake early (${SW_E3A}s of a 10s budget — is it polling?)"
+grep -q '"last_delivery": "failed"' "$SW_SF" 2>/dev/null \
+  && ok "the mid-wait file is mutated too" || fail "mid-wait file not mutated"
+rm -f "$SW_SF"
+
 # 3b. The declaration is THIS turn's, and must not reach the provider child. A
 #     reviewer turn that runs this suite would otherwise inherit it and every direct
 #     runner call above would wait again — re-acquiring the stall, and only when the
 #     suite runs inside a headless turn. (codex, panel r1, blocking.)
 SW_ENV_DUMP="$WORK/sw-childenv.txt" sw_turn "$WORK/sw-r3b" COMMS_RUNPHASE_EXPECT_STATE=1 >/dev/null 2>&1 || true
-[ -s "$WORK/sw-childenv.txt" ] && ok "provider child env was captured" || fail "provider child env not captured"
-grep -q '^COMMS_RUNPHASE_EXPECT_STATE=' "$WORK/sw-childenv.txt" \
-  && fail "the state declaration leaked into the provider child" \
-  || ok "the state declaration does not reach the provider child"
+if [ -s "$WORK/sw-childenv.txt" ]; then
+  ok "provider child env was captured"
+  # Gate on the dump: a MISSING dump makes grep fail, which would otherwise take
+  # the "no leak" branch and report a pass for a test that never ran. (grok, r2.)
+  if grep -q '^COMMS_RUNPHASE_EXPECT_STATE=' "$WORK/sw-childenv.txt"; then
+    fail "the state declaration leaked into the provider child"
+  else
+    ok "the state declaration does not reach the provider child"
+  fi
+else
+  fail "provider child env not captured"
+  fail "leak check could not run (no env dump)"
+fi
 
 # 3c. A malformed budget must not abort the exit trap mid-teardown: it is
 #     interpolated into arithmetic, where `abc` or `08` kills the shell before the
@@ -5098,6 +5122,18 @@ case "$SW_O3C" in
   *'no thread state file to update'*) ok "a non-integer budget falls back instead of aborting teardown" ;;
   *) fail "non-integer budget aborted the exit trap (teardown output lost)" ;;
 esac
+# The diagnostic alone does not prove the trap RAN TO COMPLETION — result.json is
+# written after it, and an arithmetic abort would lose exactly that. (codex, r2.)
+grep -q '"status"' "$WORK/sw-r3c/result.json" 2>/dev/null \
+  && ok "teardown still recorded a result after a malformed budget" \
+  || fail "result.json missing or statusless after a malformed budget"
+# An absurd budget must not wrap negative and silently skip the declared wait —
+# nor stall the turn for hours. It is malformed input: fall back to the default.
+SW_E3D="$(sw_elapsed sw_run "$WORK/sw-r3d" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=1844674407370955161)"
+[ "$SW_E3D" -ge 3 ] && ok "an overflowing budget still waits, not wrapped into no wait (${SW_E3D}s)" \
+  || fail "an overflowing budget skipped the declared wait entirely (${SW_E3D}s)"
+[ "$SW_E3D" -le 20 ] && ok "an overflowing budget falls back rather than stalling for hours (${SW_E3D}s)" \
+  || fail "an overflowing budget was clamped to something enormous (${SW_E3D}s)"
 
 # 4. Anti-drift, as a SOURCE contract: the writer's rule and the spawner's
 #    promise must be the same predicate, not two copies that agree today. If
@@ -5116,8 +5152,8 @@ grep -q 'if state_write_expected "$(frontmatter_field "$file" thread)" "$(frontm
   && ok "exactly one site withdraws the declaration" || fail "declaration withdrawn in more than one place"
 grep -q 'RP_EXPECT_STATE="\${COMMS_RUNPHASE_EXPECT_STATE:-}"' "$REPO/helpers/runphase.sh" \
   && ok "the runner captures the declaration before any child can inherit it" || fail "runner does not capture the declaration"
-grep -q 'COMMS_RUNPHASE_EXPECT_STATE:-' "$REPO/helpers/runphase.sh" \
-  && ok "the waiter reads the declaration set-u safely" || fail "waiter does not read the declaration safely"
+grep -q 'RP_EXPECT_STATE:-' "$REPO/helpers/runphase.sh" \
+  && ok "the waiter reads the captured copy set-u safely" || fail "waiter does not read the captured copy safely"
 grep -q 'unset COMMS_RUNPHASE_EXPECT_STATE' "$REPO/helpers/runphase.sh" \
   && ok "the runner clears the declaration before launching the provider" || fail "runner does not clear the declaration for the child"
 grep -A1 '^unset COMMS_DELIVERY' "$REPO/tests/run.sh" | grep -q 'COMMS_RUNPHASE_EXPECT_STATE' \
