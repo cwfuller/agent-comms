@@ -76,7 +76,7 @@
 #                               Appends .comms/grades/rounds.tsv. Never shown to reviewers.
 #   snapshot [create|list] [--with-base]   retain the tree under review as a durable git
 #                               object; --with-base prints "artifact_id<TAB>base_sha"
-#                               (stash-create commit anchored under refs/agent-comms/)
+#                               (a real commit object anchored under refs/agent-comms/)
 #   prompt-version [--list]     content hash of the reviewer instruction surface; grades
 #                               are partitioned on it, never pooled across an edit
 set -euo pipefail
@@ -1330,16 +1330,17 @@ cmd_panel() {
     # Same body, same artifact, same round — only identity and routing differ. Anything
     # else here would make the legs incomparable, which is the point of fanning out.
     LC_ALL=C awk -v th="$leg_thread" -v mid="$leg_mid" -v setid="$set_id" -v aid="$aid" -v base="$dispatch_base" '
+      NR == 1 { nl = ($0 ~ /\r$/) ? "\r\n" : "\n" }
       { probe = $0; sub(/\r$/, "", probe) }
       NR == 1 && probe == "---" { fm = 1; print; next }
       fm && probe == "---" {
-        printf "review_set: %s\n", setid
-        printf "artifact_id: %s\n", aid
-        if (base != "") printf "head_sha: %s\n", base
+        printf "review_set: %s%s", setid, nl
+        printf "artifact_id: %s%s", aid, nl
+        if (base != "") printf "head_sha: %s%s", base, nl
         fm = 0; print; next
       }
-      fm && index(probe, "thread:") == 1 { printf "thread: %s\n", th; next }
-      fm && index(probe, "message_id:") == 1 { printf "message_id: %s\n", mid; next }
+      fm && index(probe, "thread:") == 1 { printf "thread: %s%s", th, nl; next }
+      fm && index(probe, "message_id:") == 1 { printf "message_id: %s%s", mid, nl; next }
       fm && index(probe, "artifact_id:") == 1 { next }
       # A request derived from a prior panel inbound can already carry review_set —
       # appending the new one after it loses to grep -m1 and the round would gate on
@@ -2805,9 +2806,13 @@ cmd_send() {
   # the OBJECT: a synthetic snapshot commit bases on its first parent; anything
   # else (a clean tree pinned as HEAD) is its own base.
   artifact_base() {
-    local a="$1" subj
-    subj="$(git -C "$(main_repo_root)" log -1 --format=%s "$a" 2>/dev/null || true)"
-    if [ "$subj" = "agent-comms reviewed artifact" ]; then
+    # Synthetic detection matches the OBJECT, not just its subject line: snapshot
+    # pins author email and epoch-0 dates, so an ordinary commit that happens to
+    # reuse the message cannot have its parent mistaken for a base. (codex + grok,
+    # stamped-authorities round 2.)
+    local a="$1" meta
+    meta="$(git -C "$(main_repo_root)" log -1 --format='%s|%ae|%at' "$a" 2>/dev/null || true)"
+    if [ "$meta" = "agent-comms reviewed artifact|agent-comms@localhost|0" ]; then
       git -C "$(main_repo_root)" rev-parse -q --verify "${a}^" 2>/dev/null || true
     else
       printf '%s' "$a"
@@ -2842,15 +2847,30 @@ cmd_send() {
       # message must never fall through to a live-HEAD stamp, and a mismatched
       # pair is a lie about what the diff applies to. Fail closed either way.
       # (codex, stamped-authorities round 1.)
+      # The id must be an IMMUTABLE full object id — `HEAD`, refs, and
+      # abbreviations resolve today and move tomorrow, which un-pins the pin.
+      # (codex, round 2.)
+      printf '%s' "$existing_aid" | grep -qE '^[0-9a-f]{40}$' \
+        || die "send: artifact_id '$(clip "$existing_aid")' is not a full 40-hex object id — symbolic or abbreviated revisions are movable and cannot pin an artifact"
       git -C "$(main_repo_root)" cat-file -e "${existing_aid}^{commit}" 2>/dev/null \
         || die "send: artifact_id '$(clip "$existing_aid")' does not resolve — refusing to dispatch against a phantom artifact"
       send_base="$(artifact_base "$existing_aid")"
-      existing_sha="$(frontmatter_field "$file" head_sha)"
-      if [ -z "$existing_sha" ]; then
-        [ -n "$send_base" ] && stamp_head_sha "$file" "" "$send_base"
-      elif [ -n "$send_base" ] && [ "$existing_sha" != "$send_base" ]; then
-        die "send: head_sha '$(clip "$existing_sha")' does not match artifact '$(clip "$existing_aid")' base '$(clip "$send_base")' — refusing to dispatch a mismatched pair"
+      # EVERY head_sha value in the frontmatter must equal the derived base —
+      # frontmatter_field reads only the first, so a stale or forged duplicate
+      # behind a matching first line would otherwise ride through. The message is
+      # then NORMALIZED to exactly one canonical line. A pair that cannot be
+      # checked (parentless synthetic artifact) refuses rather than trusts.
+      # (codex + grok, round 2.)
+      local sha_vals one_sha
+      sha_vals="$(LC_ALL=C awk '{sub(/\r$/,"")} NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{exit} fm && index($0,"head_sha:")==1 {sub(/^head_sha:[[:space:]]*/,""); print}' "$file")"
+      if [ -n "$sha_vals" ] && [ -z "$send_base" ]; then
+        die "send: head_sha present but artifact '$(clip "$existing_aid")' has no derivable base — refusing an uncheckable pair"
       fi
+      for one_sha in $sha_vals; do
+        [ "$one_sha" = "$send_base" ] \
+          || die "send: head_sha '$(clip "$one_sha")' does not match artifact '$(clip "$existing_aid")' base '$(clip "$send_base")' — refusing to dispatch a mismatched pair"
+      done
+      [ -n "$send_base" ] && stamp_head_sha "$file" "" "$send_base"
     fi
   else
     # Consults snapshot nothing, but their context SHA is still helper-derived at

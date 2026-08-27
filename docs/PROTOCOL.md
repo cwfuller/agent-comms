@@ -80,9 +80,11 @@ to track/push to `main`). When creating a worktree for a loop:
 <workspace>_<YYYY-MM-DDTHH-MM-SS>_<slug>-<random>.md
 ```
 
-- `workspace` scopes messages when several workspaces share one repo (cmux workspace
-  name → git branch → repo dir, lowercased/hyphenated — both sides resolve it via the
-  same `comms.sh workspace` so they can never disagree)
+- `workspace` scopes messages when several workspaces share one repo. Resolution:
+  the repo-scoped PIN (`.comms/workspace`, written by `comms.sh workspace set`) →
+  cmux workspace name → git branch → repo dir, lowercased/hyphenated — both sides
+  resolve via the same `comms.sh workspace` so they can never disagree, and the pin
+  makes the identity an explicit decision rather than an inference
 - the `<random>` suffix prevents same-second collisions
 - readers list with `comms.sh list --as <agent>`, newest first
 

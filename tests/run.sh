@@ -2005,6 +2005,59 @@ echo "$SA_TH_OUT" | grep -q 'outside the current filter' \
 echo "$SA_TH_OUT" | grep -q 'OTHER workspace identities' \
   && fail "thread miss mislabeled as identity mismatch" || ok "thread miss is not an identity warning"
 
+# ---- round 3: immutable ids, duplicate values, object-shape synthetic test ----
+# duplicate head_sha where the FIRST matches but a stale second hides behind it
+SA_DUP="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-30-00_dup-1.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T15-30-00_dup-1/' "$SA_RS" > "$SA_DUP"
+printf '%s\n' "0000000000000000000000000000000000000000" | { read -r STALE
+  awk -v stale="$STALE" '{print} /^head_sha:/ && !d {print "head_sha: " stale; d=1}' "$SA_DUP" > "$SA_DUP.t" && mv "$SA_DUP.t" "$SA_DUP"; }
+DUP_OUT="$(run_sa send --to codex "$SA_DUP" 2>&1)" && dup_rc=0 || dup_rc=$?
+[ "$dup_rc" -ne 0 ] && echo "$DUP_OUT" | grep -q 'mismatched pair' \
+  && ok "a stale duplicate behind a matching head_sha is refused" || fail "dup-forged head_sha (rc=$dup_rc)"
+# identical duplicates normalize to exactly one line and pass
+SA_DUP2="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-32-00_dup-2.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T15-32-00_dup-2/' "$SA_RS" > "$SA_DUP2"
+awk '{print} /^head_sha:/ && !d {print; d=1}' "$SA_DUP2" > "$SA_DUP2.t" && mv "$SA_DUP2.t" "$SA_DUP2"
+[ "$(grep -c '^head_sha:' "$SA_DUP2")" = "2" ] || fail "dup fixture construction"
+run_sa send --to codex "$SA_DUP2" >/dev/null 2>&1
+[ "$(grep -c '^head_sha:' "$SA_DUP2")" = "1" ] \
+  && ok "identical duplicate head_sha lines normalize to one" || fail "dup normalize"
+# symbolic artifact_id is refused before it can resolve
+SA_SYM="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-34-00_sym-1.md"
+sed -e 's/^artifact_id: .*/artifact_id: HEAD/' -e '/^head_sha:/d' \
+    -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T15-34-00_sym-1/' "$SA_RS" > "$SA_SYM"
+SYM_OUT="$(run_sa send --to codex "$SA_SYM" 2>&1)" && sym_rc=0 || sym_rc=$?
+[ "$sym_rc" -ne 0 ] && echo "$SYM_OUT" | grep -q 'not a full 40-hex' \
+  && ok "symbolic artifact_id (HEAD) is refused as movable" || fail "symbolic id (rc=$sym_rc)"
+# an ordinary commit reusing the snapshot subject is NOT treated as synthetic
+git -C "$SA_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m 'agent-comms reviewed artifact'
+SA_FAKE="$(git -C "$SA_FIX" rev-parse HEAD)"
+SA_FK="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-36-00_fake-1.md"
+sed -e "s/^artifact_id: .*/artifact_id: $SA_FAKE/" -e '/^head_sha:/d' \
+    -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T15-36-00_fake-1/' "$SA_RS" > "$SA_FK"
+run_sa send --to codex "$SA_FK" >/dev/null 2>&1
+grep -q "^head_sha: $SA_FAKE$" "$SA_FK" \
+  && ok "subject-collision commit is its OWN base (object-shape synthetic test)" || fail "subject collision (got $(grep '^head_sha:' "$SA_FK"))"
+# pin beats a LIVE cmux identity (stub title + poisoned cache), not just repo fallback
+printf 'fwh-backup' > "$SA_FIX/.comms/.cache/workspace-77_ws" 2>/dev/null || true
+mkdir -p "$SA_FIX/.comms/.cache" && printf 'fwh-backup' > "$SA_FIX/.comms/.cache/workspace-77_ws" 2>/dev/null || true
+run_sa workspace set pinned-name >/dev/null
+WS_LIVE="$(cd "$SA_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:77 "$COMMS" workspace)"
+[ "$WS_LIVE" = "pinned-name" ] && ok "pin beats a live cmux id and poisoned cache" || fail "pin vs live cmux (got $WS_LIVE)"
+rm -f "$SA_FIX/.comms/workspace"
+# prefix-fallback fixtures: the two shapes that previously lied
+rm -f "$SA_FIX/.comms/to-claude/${SA_WS}_2026-08-26T15-20-00_otherthread-1.md"
+mkdir -p "$SA_FIX/.comms/to-claude"
+: > "$SA_FIX/.comms/to-claude/foo_bar_2026-08-26T15-40-00_x-1.md"
+: > "$SA_FIX/.comms/to-claude/other-workspace_pending.md"
+PF_OUT="$(run_sa list --as claude 2>&1)" || true
+echo "$PF_OUT" | grep -q 'foo_bar(1)' && echo "$PF_OUT" | grep -q 'other-workspace(1)' \
+  && ok "prefix fallback names foo_bar and other-workspace correctly" || fail "prefix fallback shapes (got: $PF_OUT)"
+rm -f "$SA_FIX/.comms/to-claude/foo_bar_2026-08-26T15-40-00_x-1.md" "$SA_FIX/.comms/to-claude/other-workspace_pending.md"
+# panel-dispatch CRLF: source-level parity check (all writers newline-aware)
+[ "$(grep -c 'NR == 1 { nl = ' "$REPO/helpers/comms.sh")" -ge 2 ] \
+  && ok "both frontmatter writers are newline-aware (send + panel dispatch)" || fail "panel CRLF writer parity"
+
 # the review prompt's SHA instruction is conditional on mounting
 grep -q 'MOUNTED, pinned artifact' "$REPO/helpers/runphase.sh" \
   && grep -q 'compare it with "git rev-parse HEAD"' "$REPO/helpers/runphase.sh" \
