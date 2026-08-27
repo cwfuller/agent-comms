@@ -1130,6 +1130,31 @@ Sequence — begin only after the current concurrent work lands on a pinned, gre
    needs before/after protocol fixtures, installed-scope coverage, and byte-for-byte
    compatibility for existing messages/state before it can ship.
 
+**Step-3 evidence, recorded 2026-08-27 (presence-worktrees-15135 implement rounds).**
+The presence arc's review history is a controlled measurement of shell friction:
+of ~19 implement-phase findings across five panel rounds, ~13 were SHELL-SEMANTICS
+defects, not logic defects — `wait` returning 143 under errexit, `set -e` killing a
+background beater on a nonzero beat, `var=$(cmd); rc=$?` breaking on bash 4.4
+inside substitutions, EXIT traps firing after function locals vanish (twice),
+background stdin silently rebinding to /dev/null, PID-vs-process-group teardown,
+a signal latch gap, inherited-SIG_IGN untrappability, and pipefail aborting
+readers on `sed` of vanished/EACCES files at three sites. The design itself
+survived ten plan rounds unchanged; the language fought the implementation.
+
+The friction CONCENTRATES: the liveness/reap core (pure state logic) and the
+`with-beat` supervisor (~40 lines that consumed most of three rounds) account for
+nearly all of it, while `worktree new`/`integrate` are thin git orchestration
+where shell is the right tool (the CAS is one `update-ref`). Named extraction
+candidates when the gate opens: **presence liveness/reap + with-beat**, behind the
+existing verb/exit-code CLI contract, as the dependency-light Node artifact step 3
+describes — Node handles signals, child processes, and JSON natively, deleting
+the errexit finding class outright. Integrate/worktree stay shell.
+
+Two mitigations that lower the urgency: every shell trap found is now a pinned
+behavioral regression test (the marginal risk of the shell version dropped each
+round), and that suite transfers to any reimplementation as its spec — the rounds
+bought a spec, whichever language executes it.
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing
