@@ -2043,9 +2043,18 @@ sed -e "s/^artifact_id: .*/artifact_id: $SA_FAKE/" -e '/^head_sha:/d' \
 run_sa send --to codex "$SA_FK" >/dev/null 2>&1
 grep -q "^head_sha: $SA_FAKE$" "$SA_FK" \
   && ok "subject-collision commit is its OWN base (object-shape synthetic test)" || fail "subject collision (got $(grep '^head_sha:' "$SA_FK"))"
-# pin beats a LIVE cmux identity (stub title + poisoned cache), not just repo fallback
-printf 'fwh-backup' > "$SA_FIX/.comms/.cache/workspace-77_ws" 2>/dev/null || true
-mkdir -p "$SA_FIX/.comms/.cache" && printf 'fwh-backup' > "$SA_FIX/.comms/.cache/workspace-77_ws" 2>/dev/null || true
+# pin beats a LIVE cmux identity: the cache file the resolver actually reads
+# (ws-<safe_name(id)>) AND a stub tree title, both claiming fwh-backup. (grok, r3:
+# the earlier fixture poisoned a path nothing reads and seeded no title.)
+mkdir -p "$SA_FIX/.comms/.cache"
+printf 'fwh-backup' > "$SA_FIX/.comms/.cache/ws-workspace_77"
+cat > "$CMUX_STUB_DIR/tree-workspace_77.txt" <<'SATREE'
+workspace workspace:77 "fwh-backup"
+├── pane pane:1
+│   └── surface surface:78 [terminal] "idle" ◀ here
+SATREE
+WS_UNPINNED="$(cd "$SA_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:77 "$COMMS" workspace)"
+[ "$WS_UNPINNED" = "fwh-backup" ] || fail "fixture wiring: cmux identity should win pre-pin (got $WS_UNPINNED)"
 run_sa workspace set pinned-name >/dev/null
 WS_LIVE="$(cd "$SA_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:77 "$COMMS" workspace)"
 [ "$WS_LIVE" = "pinned-name" ] && ok "pin beats a live cmux id and poisoned cache" || fail "pin vs live cmux (got $WS_LIVE)"
@@ -2059,6 +2068,67 @@ PF_OUT="$(run_sa list --as claude 2>&1)" || true
 echo "$PF_OUT" | grep -q 'foo_bar(1)' && echo "$PF_OUT" | grep -q 'other-workspace(1)' \
   && ok "prefix fallback names foo_bar and other-workspace correctly" || fail "prefix fallback shapes (got: $PF_OUT)"
 rm -f "$SA_FIX/.comms/to-claude/foo_bar_2026-08-26T15-40-00_x-1.md" "$SA_FIX/.comms/to-claude/other-workspace_pending.md"
+# ---- round 4: blank fields, artifact_id duplicates, parentless refusal ----
+# blank head_sha line on an ordinary resend: physically present, value empty -> mismatch
+SA_BL="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T16-00-00_blank-1.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T16-00-00_blank-1/' \
+    -e 's/^head_sha: .*/head_sha:/' "$SA_RS" > "$SA_BL"
+BL_OUT="$(run_sa send --to codex "$SA_BL" 2>&1)" && bl_rc=0 || bl_rc=$?
+[ "$bl_rc" -ne 0 ] && echo "$BL_OUT" | grep -q 'mismatched pair' \
+  && ok "a BLANK head_sha line is a present, non-matching value" || fail "blank head_sha resend (rc=$bl_rc)"
+# parentless synthetic artifact + blank head_sha line -> uncheckable pair refused
+SA2="$WORK/stamped-parentless"; mkdir -p "$SA2"; SA2="$(cd "$SA2" && pwd -P)"
+git -C "$SA2" init -q -b main
+mkdir -p "$SA2/.comms/to-codex" "$SA2/.comms/archive"
+printf 'agents = claude codex\ndefault-target = codex\n' > "$SA2/.comms/config"
+echo content > "$SA2/f.txt"
+run_sa2() { (cd "$SA2" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+SA2_PAIR="$(run_sa2 snapshot create --with-base)"
+SA2_AID="${SA2_PAIR%%	*}"; SA2_BASE="${SA2_PAIR#*	}"
+[ -n "$SA2_AID" ] && [ -z "$SA2_BASE" ] && ok "parentless snapshot pair has an empty base" || fail "parentless pair (got: $SA2_PAIR)"
+SA2_WS="$(run_sa2 workspace)"
+SA2_MSG="$SA2/.comms/to-codex/${SA2_WS}_2026-08-26T16-05-00_pl-1.md"
+cat > "$SA2_MSG" <<SAEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-26T21:05:00Z
+workspace: $SA2_WS
+artifact_id: $SA2_AID
+head_sha:
+message_id: ${SA2_WS}_2026-08-26T16-05-00_pl-1
+thread: sa2-arc-1
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 5
+---
+
+body
+SAEOF
+PL_OUT="$(run_sa2 send --to codex "$SA2_MSG" 2>&1)" && pl_rc=0 || pl_rc=$?
+[ "$pl_rc" -ne 0 ] && echo "$PL_OUT" | grep -q 'uncheckable pair' \
+  && ok "blank head_sha on a parentless artifact refuses (presence is physical)" || fail "parentless blank head_sha (rc=$pl_rc got: $PL_OUT)"
+# artifact-only parentless message (NO head_sha line at all) still dispatches artifact-only
+SA2_MSG2="$SA2/.comms/to-codex/${SA2_WS}_2026-08-26T16-07-00_pl-2.md"
+sed -e '/^head_sha:/d' -e 's/^message_id: .*/message_id: '"${SA2_WS}"'_2026-08-26T16-07-00_pl-2/' "$SA2_MSG" > "$SA2_MSG2"
+run_sa2 send --to codex "$SA2_MSG2" >/dev/null 2>&1 \
+  && ! grep -q '^head_sha' "$SA2_MSG2" \
+  && ok "artifact-only parentless message stays artifact-only" || fail "parentless artifact-only"
+# duplicate artifact_id lines: differing -> ambiguous pin refused; identical -> one line
+SA_DA="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T16-10-00_dupaid-1.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T16-10-00_dupaid-1/' "$SA_RS" > "$SA_DA"
+awk '{print} /^artifact_id:/ && !d {print "artifact_id: 2222222222222222222222222222222222222222"; d=1}' "$SA_DA" > "$SA_DA.t" && mv "$SA_DA.t" "$SA_DA"
+DA_OUT="$(run_sa send --to codex "$SA_DA" 2>&1)" && da_rc=0 || da_rc=$?
+[ "$da_rc" -ne 0 ] && echo "$DA_OUT" | grep -q 'ambiguous pin' \
+  && ok "differing duplicate artifact_id lines are refused" || fail "dup artifact_id differ (rc=$da_rc)"
+SA_DA2="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T16-12-00_dupaid-2.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T16-12-00_dupaid-2/' "$SA_RS" > "$SA_DA2"
+awk '{print} /^artifact_id:/ && !d {print; d=1}' "$SA_DA2" > "$SA_DA2.t" && mv "$SA_DA2.t" "$SA_DA2"
+run_sa send --to codex "$SA_DA2" >/dev/null 2>&1
+[ "$(grep -c '^artifact_id:' "$SA_DA2")" = "1" ] \
+  && ok "identical duplicate artifact_id lines normalize to one" || fail "dup artifact_id normalize"
+
 # panel-dispatch CRLF: source-level parity check (all writers newline-aware)
 [ "$(grep -c 'NR == 1 { nl = ' "$REPO/helpers/comms.sh")" -ge 2 ] \
   && ok "both frontmatter writers are newline-aware (send + panel dispatch)" || fail "panel CRLF writer parity"
@@ -3825,6 +3895,17 @@ PN_LEG_G="$(find "$PN_FIX/.comms/to-grok" -name '*panel-grok*' -type f | head -1
 PN_AC="$(grep -m1 '^artifact_id:' "$PN_LEG_C" | sed 's/^artifact_id: //')"
 PN_AG="$(grep -m1 '^artifact_id:' "$PN_LEG_G" | sed 's/^artifact_id: //')"
 [ -n "$PN_AC" ] && [ "$PN_AC" = "$PN_AG" ] && ok "every leg carries the SAME artifact_id" || fail "legs disagree on the artifact ($PN_AC vs $PN_AG)"
+
+# CRLF request through the REAL dispatch: rewritten AND inserted fields keep CRLF
+PN_CR="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-30-00_crlfreq.md"
+printf -- '---\r\ntype: review-request\r\nfrom: claude\r\ntimestamp: 2026-08-26T12:30:00Z\r\nworkspace: %s\r\nmessage_id: pn-crlf-1\r\nthread: pn-crlf-thread\r\nworkflow: auto\r\nphase: implement\r\nround: 1\r\nmax-rounds: 4\r\n---\r\n\r\npanel CRLF fixture\r\n' "$(basename "$PN_FIX")" > "$PN_CR"
+run_pn panel dispatch --to codex,grok "$PN_CR" >/dev/null 2>&1
+PN_CRLEG="$(find "$PN_FIX/.comms/to-codex" -name '*panel-codex*' -type f -newer "$PN_CR" | head -1)"
+[ -n "$PN_CRLEG" ] || PN_CRLEG="$(grep -l 'pn-crlf-thread' "$PN_FIX/.comms/to-codex/"*panel-codex* 2>/dev/null | head -1)"
+[ -n "$PN_CRLEG" ] && grep -q $'^artifact_id: .*\r$' "$PN_CRLEG" && grep -q $'^thread: .*\r$' "$PN_CRLEG" \
+  && ok "CRLF request dispatches with CRLF on inserted AND rewritten leg fields" || fail "panel CRLF end-to-end"
+(cd "$PN_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" validate "$PN_CRLEG" >/dev/null 2>&1) \
+  && ok "the CRLF leg still validates" || fail "CRLF leg validation"
 
 # A request derived from a prior panel inbound already carries review_set. Dispatch
 # must REPLACE it: appending the new one after loses to grep -m1 and every later

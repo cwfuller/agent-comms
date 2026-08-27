@@ -1479,7 +1479,13 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
     awk -F'\t' '$13=="blocking" && $14==""{printf "- [%s] %s\n", $9, $15}' "$tmp"
     printf '\n## Advisory (never gates)\n\n'
     awk -F'\t' '$13=="advisory"{printf "- [%s] %s%s\n", $9, ($14!="" ? "`" $14 "` — " : ""), $15}' "$tmp"
-  } > "${out:-/dev/stdout}"
+  } | {
+    # No /dev/stdout reopen: managed sandboxes deny it, failing ordinary
+    # composition even with every leg answered. Plain cat IS stdout; a file
+    # target gets a real redirect. (codex, stamped-authorities round 3 —
+    # pre-existing, advisory.)
+    if [ -n "$out" ]; then cat > "$out"; else cat; fi
+  }
   rm -f "$tmp"
   [ -z "$out" ] || echo "compose: wrote ${out#"$root"/}"
 }
@@ -2863,16 +2869,43 @@ cmd_send() {
       # then NORMALIZED to exactly one canonical line. A pair that cannot be
       # checked (parentless synthetic artifact) refuses rather than trusts.
       # (codex + grok, round 2.)
-      local sha_vals one_sha
-      sha_vals="$(LC_ALL=C awk '{sub(/\r$/,"")} NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{exit} fm && index($0,"head_sha:")==1 {sub(/^head_sha:[[:space:]]*/,""); print}' "$file")"
-      if [ -n "$sha_vals" ] && [ -z "$send_base" ]; then
+      # PRESENCE is counted physically (field lines), never inferred from value
+      # content: a blank `head_sha:` line has an empty value that command
+      # substitution erases, which let it bypass both the uncheckable-pair
+      # refusal and the per-value comparison. Values are checked PER LINE
+      # (including empties) — word-splitting skips blanks. (codex, round 3.)
+      fm_field_lines() {  # <file> <field> — every value line of <field> in the frontmatter, blanks preserved
+        LC_ALL=C awk -v f="$2" '{sub(/\r$/,"")} NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{exit} fm && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print}' "$1"
+      }
+      local sha_ct one_sha
+      sha_ct="$(fm_field_lines "$file" head_sha | wc -l | tr -d ' ')"
+      if [ "${sha_ct:-0}" -gt 0 ] && [ -z "$send_base" ]; then
         die "send: head_sha present but artifact '$(clip "$existing_aid")' has no derivable base — refusing an uncheckable pair"
       fi
-      for one_sha in $sha_vals; do
-        [ "$one_sha" = "$send_base" ] \
-          || die "send: head_sha '$(clip "$one_sha")' does not match artifact '$(clip "$existing_aid")' base '$(clip "$send_base")' — refusing to dispatch a mismatched pair"
-      done
-      [ -n "$send_base" ] && stamp_head_sha "$file" "" "$send_base"
+      if [ "${sha_ct:-0}" -gt 0 ]; then
+        while IFS= read -r one_sha; do
+          [ "$one_sha" = "$send_base" ] \
+            || die "send: head_sha '$(clip "$one_sha")' does not match artifact '$(clip "$existing_aid")' base '$(clip "$send_base")' — refusing to dispatch a mismatched pair"
+        done <<EOF_SHA
+$(fm_field_lines "$file" head_sha)
+EOF_SHA
+      fi
+      # artifact_id gets the SAME all-values discipline — round 2 proved the
+      # first-value-only shape bypassable for head_sha; the id field is not
+      # different. Duplicates must all equal the validated first id, and the
+      # normalize pass below collapses them to one line. (grok, round 3 —
+      # declared as a criteria amendment, not a silent bar raise.)
+      local one_aid
+      while IFS= read -r one_aid; do
+        [ "$one_aid" = "$existing_aid" ] \
+          || die "send: duplicate artifact_id '$(clip "$one_aid")' disagrees with '$(clip "$existing_aid")' — refusing an ambiguous pin"
+      done <<EOF_AID
+$(fm_field_lines "$file" artifact_id)
+EOF_AID
+      # Normalize BOTH fields to exactly one canonical line each (re-stamping the
+      # id collapses duplicate artifact_id lines; base may be empty for a
+      # parentless artifact-only message, which stays artifact-only).
+      stamp_head_sha "$file" "$existing_aid" "$send_base"
     fi
   else
     # Consults snapshot nothing, but their context SHA is still helper-derived at
