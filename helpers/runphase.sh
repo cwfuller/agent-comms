@@ -476,7 +476,11 @@ for line in open(sys.argv[1]):
         continue
     if e.get('type') == 'result' and not e.get('is_error') and isinstance(e.get('result'), str):
         final = e['result']
-text = (final or '').strip()
+# NO normalisation: not .strip(), not unwrapping. Whitespace is bytes like any other, and
+# ACP writes acpx stdout verbatim. A leading blank line was enough to make streaming unwrap a
+# reply that ACP left fenced, so identical bytes were a review on one transport and a
+# no-structure refusal on the other. (codex and grok, round 7.)
+text = final or ''
 # NO unwrapping here. Making this rule delimiter-aware (round 5) fixed the wrong half:
 # streaming still normalised the reply and ACP did not, so identical bytes were a review
 # on one transport and a quoted no-structure refusal on the other. Unwrapping now happens
@@ -512,82 +516,75 @@ probe_field() {  # <probe output> <key>
 }
 
 write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review turn sees
-  # A FUNCTION, so the suite can exercise the shipped generator instead of a copy of it.
-  # The old test hand-copied this block, which meant it could only ever confirm that the
-  # copy behaved like itself -- the same defect that let the placeholder rule and the
-  # fence rule each drift for a full round. (codex, round 6.)
+  # DEFENCE IN DEPTH, NOT A BOUNDARY. A PATH shim cannot be a security boundary: a child can
+  # call git by absolute path, or just write files with the shell. The enforced boundary is
+  # the sandbox profile (docs/INTERNALS.md). What this raises is the cost of an ACCIDENT and
+  # of the easy deliberate paths. Round 7 found the previous version trivially defeated three
+  # ways at once — env-injected config, exec-taking flags on permitted verbs, and a scan that
+  # stopped at the verb so no later flag was ever examined. Claiming more than this comment
+  # says is how criterion 9 got written as a falsehood.
   local acp_shim="$1" real_git="$2"
   {
     printf '#!/bin/bash\n'
-    printf '# agent-comms guard: a review turn may inspect, never publish or destroy.\n'
-    printf '# The scan finds the SUBCOMMAND: value-taking globals (-C <path>, -c <kv>,\n'
-    printf '# --git-dir <d>, ...) skip their value too — the old first-non-option break\n'
-    printf '# treated the VALUE as the subcommand, so `git -C . push` sailed through.\n'
-    printf '# (codex, panel r4.) A child calling the git binary by absolute path is out\n'
-    printf '# of any PATH shim reach — that boundary is the operator deny-profile.\n'
-    # ALLOWLIST, not a denylist. A denylist of subcommands cannot hold: git is
-    # user-extensible, so `git -c alias.ship='!git push ...' ship` runs a shell alias
-    # whose name is on no list, and publishing verbs like `send-pack`, or ref rewrites
-    # like `tag -f`, are not spelled `push`. Verified bypassable. (codex, round 6.)
-    # Config-injecting and exec-path globals are refused outright rather than skipped:
-    # they are how a caller defines an alias or redirects git to its own helpers, which
-    # turns ANY permitted verb into an arbitrary command.
+    # 1. SCRUB THE ENVIRONMENT. GIT_CONFIG_* injects arbitrary config with nothing on argv,
+    #    and config is how a read verb becomes an exec: core.sshCommand, diff.external,
+    #    core.pager. GIT_SSH_COMMAND / GIT_EXTERNAL_DIFF / GIT_PAGER do it without config.
+    printf 'unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG GIT_CONFIG_GLOBAL \\\n'
+    printf '      GIT_CONFIG_SYSTEM GIT_SSH GIT_SSH_COMMAND GIT_EXTERNAL_DIFF GIT_PAGER \\\n'
+    printf '      GIT_EDITOR GIT_SEQUENCE_EDITOR GIT_PROXY_COMMAND GIT_ASKPASS SSH_ASKPASS \\\n'
+    printf '      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_TEMPLATE_DIR GIT_NAMESPACE 2>/dev/null\n'
+    printf 'n=0\n'
+    printf 'while [ "$n" -lt 128 ]; do unset "GIT_CONFIG_KEY_$n" "GIT_CONFIG_VALUE_$n" 2>/dev/null; n=$((n+1)); done\n'
+    # 2. REFUSE DANGEROUS FLAGS ANYWHERE IN ARGV, not just before the verb. The old loop
+    #    broke at the verb, so `diff --ext-diff` and `--output=x` were never examined.
     printf 'for a in "$@"; do\n'
-    printf '  if [ "${skip:-0}" = 1 ]; then skip=0; continue; fi\n'
     printf '  case "$a" in\n'
-    printf '    -c|--config-env|--exec-path|--namespace|--super-prefix|\\\n'
-    printf '    --config-env=*|--exec-path=*|--namespace=*|--super-prefix=*)\n'
-    printf '      echo "agent-comms: refused \x27git $a\x27 — it can define an alias or redirect git helpers, turning any permitted verb into an arbitrary command" >&2\n'
+    printf '    -c|-c*|--config-env|--config-env=*|--exec-path|--exec-path=*|\\\n'
+    printf '    --namespace|--namespace=*|--super-prefix|--super-prefix=*|\\\n'
+    printf '    --output|--output=*|--upload-pack|--upload-pack=*|--receive-pack|--receive-pack=*|\\\n'
+    printf '    --ext-diff|--textconv|-O|-O*|--open-files-in-pager|--open-files-in-pager=*)\n'
+    printf '      echo "agent-comms: refused \x27git ... $a\x27 — that flag can inject config, write a file, or exec a program, which would turn a permitted read into an arbitrary command" >&2\n'
     printf '      exit 1 ;;\n'
+    printf '  esac\n'
+    printf 'done\n'
+    # 3. FIND THE SUBCOMMAND and require it on a read-only ALLOWLIST. Value-taking globals
+    #    skip their value so `-C <path> log` still reads. Unknown verbs are REFUSED: an
+    #    allowlist that falls through on an unrecognised verb is a denylist in costume.
+    printf 'skip=0\n'
+    printf 'for a in "$@"; do\n'
+    printf '  if [ "$skip" = 1 ]; then skip=0; continue; fi\n'
+    printf '  case "$a" in\n'
     printf '    -C|--git-dir|--work-tree) skip=1; continue ;;\n'
     printf '    --git-dir=*|--work-tree=*) continue ;;\n'
     printf '    -*) continue ;;\n'
     printf '  esac\n'
     printf '  case "$a" in\n'
+    # symbolic-ref writes and deletes refs (read HEAD with rev-parse instead).
+    # ls-remote reaches the network, spends stored credentials, and takes --upload-pack.
     printf '    log|show|diff|"diff-tree"|"diff-index"|status|"rev-parse"|"rev-list"|"cat-file"|\\\n'
-    printf '    "ls-files"|"ls-tree"|"ls-remote"|blame|annotate|describe|grep|shortlog|\\\n'
-    printf '    "for-each-ref"|"symbolic-ref"|"name-rev"|"merge-base"|"check-ignore"|\\\n'
-    printf '    "check-attr"|"count-objects"|"verify-pack"|whatchanged|version|help|var)\n'
+    printf '    "ls-files"|"ls-tree"|blame|annotate|describe|grep|shortlog|"for-each-ref"|\\\n'
+    printf '    "name-rev"|"merge-base"|"check-ignore"|"check-attr"|"count-objects"|\\\n'
+    printf '    "verify-pack"|whatchanged|version|help|var)\n'
     printf '      break ;;\n'
     printf '  esac\n'
     printf '  echo "agent-comms: refused \x27git $a\x27 — a review turn may read history but not write, publish, or rewrite it; only read-only verbs are permitted" >&2\n'
     printf '  exit 1\n'
     printf 'done\n'
-    printf 'exec %s "$@"\n' "$real_git"
-
+    # 4. --no-pager: the pager is configurable in-repo, so a permitted read could exec it.
+    printf 'exec %s --no-pager "$@"\n' "$real_git"
   } > "$acp_shim/git"
   chmod +x "$acp_shim/git"
-}
-
-unwrap_reply() {  # <file> — strip ONE well-formed fence wrapping the entire reply, in place
-  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/agent-comms-unwrap.XXXXXX")" || return 0
-  # Lives in the broker, which is the only code path both transports share. The rule is the
-  # shared lexer rule and nothing else: same character, closer at least as long as the
-  # opener, nothing but whitespace after it, and leading indent up to the lexer allowance.
-  # Keeping a second copy of "what is a wrap" in the streaming extractor is what made the
-  # two transports disagree about identical bytes.
-  awk '
-    { lines[NR] = $0 }
-    END {
-      if (NR < 2) { for (i = 1; i <= NR; i++) print lines[i]; exit }
-      first = lines[1]; last = lines[NR]
-      if (match(first, /^[ \t]*(```+|~~~+)[ \t]*$/) == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
-      f = first; sub(/^[ \t]*/, "", f); match(f, /^(`+|~+)/)
-      fch = substr(f, 1, 1); flen = RLENGTH
-      if (match(last, /^[ \t]*(```+|~~~+)[ \t]*$/) == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
-      l = last; sub(/^[ \t]*/, "", l); match(l, /^(`+|~+)/)
-      lch = substr(l, 1, 1); llen = RLENGTH
-      if (lch != fch || llen < flen) { for (i = 1; i <= NR; i++) print lines[i]; exit }
-      for (i = 2; i < NR; i++) print lines[i]
-    }
-  ' "$1" > "$tmp" 2>/dev/null && mv "$tmp" "$1" || rm -f "$tmp"
 }
 
 broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivered
   local msg="$1" run_dir="$2" peer="$3"
   [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="the child produced no reply text"; return 1; }
-  # Both transports land here, so both get the same normalisation and the same lexer.
-  unwrap_reply "$run_dir/reply-raw.md"
+  # NOTHING is normalised here either. unwrap_reply used to strip a whole-answer fence, but
+  # that made a model-authored delimiter authoritative BEFORE the shared lexer: a reply
+  # consisting solely of a fenced prior review was unwrapped, promoting that quote's verdict
+  # and findings to live structure -- which criterion 6 forbids. Both reviewers preferred
+  # agreement-by-deletion, so a whole-answer fence is now a fence on BOTH transports and the
+  # turn is refused as no-structure, consistently. (codex blocker 2, grok advisory, round 7.)
   # The child's output is VERDICT (reviews only) + body. The PARENT authors the
   # complete envelope from the captured inbound values — no model-authored
   # frontmatter is ever persisted, so type/from/thread/round/in-reply-to cannot
@@ -1180,9 +1177,17 @@ PROMPT
       # "the same as running this agent by hand in the repo" — it may read the tree and
       # the history, because that is what it is replacing. What it may NOT do is publish
       # or destroy: a linked worktree shares the main object store and the real remotes,
-      # so `git push` from inside a mount reaches production. A shim on PATH refuses the
-      # publishing and destructive verbs and passes everything else through, which keeps
-      # `git log`/`diff`/`show` — the reviewer's actual job — working.
+      # so a publish from inside a mount reaches production. A shim on PATH permits only
+      # read-only verbs, refuses everything else, scrubs the config/exec environment, and
+      # rejects flags that write or exec — which keeps `git log`/`diff`/`show`, the
+      # reviewer's actual job, working.
+      #
+      # It is DEFENCE IN DEPTH, not the boundary, and the difference matters: a child can
+      # call git by absolute path or simply write files with the shell, both of which are
+      # outside any PATH shim. The enforced boundary is the sandbox profile in
+      # docs/INTERNALS.md (COMMS_RUNPHASE_GROK_SANDBOX), which is operator-configured and
+      # NOT on by default. Round 7 rejected the claim that the shim alone makes a mount
+      # read-only, and that rejection was correct.
       acp_shim="$run_dir/shim"
       mkdir -p "$acp_shim"
       # Resolve the REAL git now and hardcode it: `exec git` would find this shim again
