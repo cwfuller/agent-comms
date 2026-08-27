@@ -4718,6 +4718,35 @@ fi
 # STDIN PRESERVATION (codex, impl r3): a piped client must still read its input.
 PW_PIPE="$(echo piped-hello | run_pw presence with-beat --name alpha --instance "$PW_I1" -- head -1)"
 [ "$PW_PIPE" = "piped-hello" ] && ok "with-beat preserves the wrapper's stdin for the child" || fail "stdin lost (got: $PW_PIPE)"
+# INT identity (codex, impl r4): an INT-interrupted wrapper reports the INT status.
+# Spawned under set -m: a background job of a NON-job-control shell inherits
+# SIGINT ignored, and POSIX forbids trapping a signal ignored at entry — the
+# first version of this test no-op'd its own kill and timed out to rc 0.
+set -m
+( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 30 ) & PW_IW=$!
+set +m
+sleep 2; kill -INT "$PW_IW" 2>/dev/null
+PW_IRC=0; wait "$PW_IW" 2>/dev/null || PW_IRC=$?
+[ "$PW_IRC" = 130 ] && ok "INT to the wrapper yields the child's INT status (130)" || fail "INT identity lost (rc=$PW_IRC)"
+# QUIESCENCE (codex, impl r4): a successful wrapper return means the child's whole
+# group is GONE — a TERM-ignoring descendant must be escalated to KILL, not left
+# straggling for integrate to trust a live tree.
+PW_QMARK="$WORK/wb-quiesce.$$"
+run_pw presence with-beat --name alpha --instance "$PW_I1" -- bash -c "trap '' TERM; sleep 30 & echo \$! > '$PW_QMARK'; exit 0" >/dev/null 2>&1; PW_QRC=$?
+PW_QPID="$(cat "$PW_QMARK" 2>/dev/null)"
+if [ -n "$PW_QPID" ] && kill -0 "$PW_QPID" 2>/dev/null; then
+  kill -KILL "$PW_QPID" 2>/dev/null; fail "a TERM-ignoring descendant survived a successful return"
+else
+  [ "$PW_QRC" = 0 ] && ok "successful return implies a quiescent child group (KILL escalation)" || fail "quiescence changed rc=$PW_QRC"
+fi
+# Unreadable tomb (grok, impl r4): the reader isolates, it never aborts mid-print.
+printf '#tomb x\n' > "$PW_SD/.reap/veil-77777777777777777777777777777777.tomb.beef7777"
+chmod 000 "$PW_SD/.reap/veil-77777777777777777777777777777777.tomb.beef7777" 2>/dev/null
+run_pw presence others --name alpha --instance "$PW_I1" >/dev/null 2>&1; PW_VRC=$?
+[ "$PW_VRC" = 3 ] || [ "$PW_VRC" = 4 ] \
+  && ok "an unreadable tomb fail-closes the reader (3/4, never abort)" || fail "unreadable tomb rc=$PW_VRC"
+chmod 644 "$PW_SD/.reap/veil-77777777777777777777777777777777.tomb.beef7777" 2>/dev/null
+rm -f "$PW_SD/.reap/veil"-* 2>/dev/null
 # Unreadable sessions dir: CLAIM must isolate, not report an empty field
 # (codex, impl r2 — validation now lives in the shared reader).
 chmod 300 "$PW_SD" 2>/dev/null

@@ -1952,9 +1952,11 @@ presence_peers() {  # <self-name> <self-instance> — prints peers; 0 none / 3 p
     # (codex, impl r2.)
     case "$counted" in *" $base "*) continue ;; esac
     [ "$base" = "$1-$2" ] && continue             # own reaped ghost is not a peer to self
-    tepoch="$(sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" 2>/dev/null | head -1)"
-    # A cover whose stamp cannot be read is AMBIGUOUS state, not an old cover:
-    # epoch-0 made corrupt covers silently invisible. Fail closed. (codex, impl r3.)
+    # Guarded read: an EACCES/unlinked tomb aborted the whole reader under
+    # pipefail (verified: a chmod-000 tomb made `others` exit 1 mid-print).
+    # Unreadable OR corrupt both fail closed as a YOUNG cover. (grok, impl r4;
+    # codex, impl r3.)
+    tepoch="$({ sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" 2>/dev/null || true; } | head -1)"
     case "$tepoch" in ''|*[!0-9]*) tepoch="$now" ;; esac
     covered=$((now - tepoch))
     if [ "$covered" -le $((PRESENCE_TTL_SECS * 2)) ]; then
@@ -2062,8 +2064,14 @@ cmd_presence() {
       # signal keeps its IDENTITY (INT forwards as INT, TERM as TERM). These
       # traps fire while the function is live, so deferred ${child:-} is safe —
       # unlike the EXIT-trap locals lesson from integrate.
-      trap 'kill -INT  -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' INT
-      trap 'kill -TERM -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' TERM
+      # The signal is LATCHED as well as forwarded: a signal landing in the gap
+      # between the two spawns used to kill only what existed and let the child
+      # launch afterwards and return 0 (codex modeled it empirically, impl r4).
+      # Each spawn re-checks the latch immediately and applies the latched
+      # identity to the newborn group.
+      local latched=""
+      trap 'latched=INT;  kill -INT  -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' INT
+      trap 'latched=TERM; kill -TERM -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' TERM
       set -m
       # EVERY command in the beater is errexit-immune: the subshell inherits
       # set -e, so a bare beat exiting 5 (heal) killed the beater before the
@@ -2078,18 +2086,39 @@ cmd_presence() {
           if [ "$brc" -eq 5 ]; then
             : > "$healmark" 2>/dev/null || true
           fi
-        done ) & beater=$!
+        done ) </dev/null & beater=$!
+      # (beater stdin from /dev/null — the dual of the piped-client fix: under
+      # set -m it inherited the wrapper's pipe and could steal input. grok, r4.)
+      [ -n "$latched" ] && kill "-$latched" -- "-$beater" 2>/dev/null || true
       # The child keeps the wrapper's stdin EXPLICITLY (<&0): a background job in
       # a non-job-control shell silently rebinds stdin to /dev/null and breaks
       # piped clients — a wrapped `head -1` read nothing. (codex, impl r3;
       # verified on bash 3.2.)
       "$@" <&0 & child=$!
+      [ -n "$latched" ] && kill "-$latched" -- "-$child" 2>/dev/null || true
       set +m
       rc=0; wait "$child" || rc=$?
-      # Sweep the child's whole group after it exits so no suite grandchild
-      # outlives the wrapper, then join the beater. All errexit-immune (the
-      # wait-143 lesson, impl r1).
-      kill -TERM -- "-$child" 2>/dev/null || true
+      # QUIESCENCE before return (codex, impl r4): the wrapper's success must mean
+      # the child's whole group is GONE — integrate trusts the tree state on
+      # return, and a straggling suite descendant made a same-shaped model return
+      # 0 two seconds early. Sweep with the latched identity (or TERM), then
+      # bounded escalation to KILL, then FAIL CLOSED if the group still breathes.
+      local sweep_sig="${latched:-TERM}" qn=0
+      kill -"$sweep_sig" -- "-$child" 2>/dev/null || true
+      while kill -0 -- "-$child" 2>/dev/null; do
+        qn=$((qn + 1)); [ "$qn" -ge 50 ] && break; sleep 0.1
+      done
+      if kill -0 -- "-$child" 2>/dev/null; then
+        kill -KILL -- "-$child" 2>/dev/null || true
+        qn=0
+        while kill -0 -- "-$child" 2>/dev/null; do
+          qn=$((qn + 1)); [ "$qn" -ge 20 ] && break; sleep 0.1
+        done
+      fi
+      if kill -0 -- "-$child" 2>/dev/null; then
+        echo "presence with-beat: the child's process group survived TERM and KILL — failing closed (result untrusted)" >&2
+        rc=125
+      fi
       kill -TERM -- "-$beater" 2>/dev/null || true
       wait "$beater" 2>/dev/null || true             # join-before-restore
       trap - INT TERM
@@ -2131,7 +2160,7 @@ presence_expire() {  # <dir> [force-name] — the ONLY verb that deletes OTHERS'
         && command mv -f "$reap/.tmp.$$" "$obs" 2>/dev/null
       continue                                    # pass 1: observe, touch nothing
     fi
-    oepoch="$(sed -n 's/^#obs \([0-9]*\).*/\1/p' "$obs" | head -1)"
+    oepoch="$({ sed -n 's/^#obs \([0-9]*\).*/\1/p' "$obs" 2>/dev/null || true; } | head -1)"
     case "$oepoch" in ''|*[!0-9]*) rm -f "$obs"; continue ;; esac
     [ $((now - oepoch)) -ge "$PRESENCE_TTL_SECS" ] || continue     # grace not served
     if ! tail -n +2 "$obs" | cmp -s - "$f"; then
@@ -2152,7 +2181,7 @@ presence_expire() {  # <dir> [force-name] — the ONLY verb that deletes OTHERS'
     [ -f "$tomb" ] || continue
     base="$(basename "$tomb")"; base="${base%%.tomb.*}"
     [ -f "$dir/$base.json" ] && continue          # record exists → cover stays, always
-    tepoch="$(sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" | head -1)"
+    tepoch="$({ sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" 2>/dev/null || true; } | head -1)"
     case "$tepoch" in ''|*[!0-9]*) continue ;; esac
     [ $(( $(date +%s) - tepoch )) -gt $((PRESENCE_TTL_SECS * 2)) ] || continue
     [ -f "$dir/$base.json" ] && continue          # re-check after age read
