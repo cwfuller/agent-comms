@@ -1595,7 +1595,9 @@ dv_count() { "$REPO/helpers/comms.sh" findings --raw "$1" 2>/dev/null \
 [ "$(dv_count "$DV/clean.md")" = "0" ] && ok "derivation does not count a 'None.' placeholder" || fail "derive count none"
 grep -q '^### Blocking' "$DV/no-structure.md" && fail "fixture has structure" \
   || ok "a reply with NO findings structure has nothing to derive from"
-grep -q 'DERIVED' "$REPO/helpers/runphase.sh" && ok "the broker records that a verdict was derived, not stated" || fail "derivation not recorded"
+# (Removed: a grep for the string DERIVED in runphase.sh. That assertion went green on a
+# comment and red on a reword, and said nothing about the broker. What it claimed is proven
+# live by the dup-verdict leg above, which stamps the DERIVED verdict into a real reply.)
 
 echo "== one placeholder rule: broker derivation and findings/compose cannot disagree =="
 # The bug this replaces: findings_extract and the broker were separate copies of
@@ -1768,8 +1770,8 @@ printf '### Blocking\n\n-\ta tab bullet\n1.\ta tab number\n' > "$CORP/tabs.md"
 printf '### Blocking\n\n1. a numbered finding\n2) a paren-numbered finding\n- a bulleted finding\n' > "$CORP/markers.md"
 [ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/markers.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "3" ] \
   && ok "verdict derivation counts numbered findings too" || fail "derivation missed a list marker shape"
-grep -q 'VERDICT line found at line' "$REPO/helpers/runphase.sh" \
-  && ok "a VERDICT line below preamble is still honoured" || fail "verdict must be on line 1"
+# (Removed: a grep for a log string. Proven live instead by the preamble and late-verdict
+# broker legs, which stamp a real reply whose only VERDICT sits below the preamble.)
 # A finding that merely ENDS in "None." is not a placeholder. The first filter matched the
 # end of the line, so `1. \`helper.sh\` can incorrectly return None.` derived zero blockers
 # and stamped APPROVE while findings_extract kept it — the same stamped-verdict-contradicts-
@@ -1801,8 +1803,8 @@ printf '### Blocking\n- a real bug\n- none\n' >| "$NB/mixed.md"
 [ "$(nb "$NB/mixed.md")" = "1" ] && ok "a placeholder beside a real finding does not hide it" || fail "mixed list miscounted"
 # Ambiguity must be caught even when line 1 is a verdict: the old code short-circuited
 # there and never reached the count.
-grep -q 'ambiguous, falling back to derivation' "$REPO/helpers/runphase.sh" \
-  && ok "multiple VERDICT lines fall back to derivation" || fail "ambiguous verdicts not caught"
+# (Removed: a grep for a log string. The dup-verdict broker leg proves the fallback by its
+# result — a stamped REQUEST_CHANGES over a line-1 APPROVE.)
 # Asserted by BEHAVIOUR: a line-1 verdict must still be COUNTED, not trusted on sight.
 # The old check grepped runphase.sh for the order of two statements, which said nothing
 # about what the scanner actually does and broke the moment the scanner moved.
@@ -1810,8 +1812,8 @@ printf 'VERDICT: APPROVE\nnarration\nVERDICT: REQUEST_CHANGES\n\n### Blocking\n\
 [ "$(probe_of "$CORP/dup1.md" verdicts)" = "2" ] \
   && ok "verdict lines are counted before any is trusted" || fail "a line-1 verdict short-circuits the count"
 # An explicit APPROVE over blocking findings is a contradiction, not a verdict.
-grep -q 'contradicts its own body' "$REPO/helpers/runphase.sh" \
-  && ok "an APPROVE that lists blocking findings is refused" || fail "no APPROVE/body cross-check"
+# (Removed: a grep for a refusal string in the SOURCE. The lie-approve legs already grep it
+# out of a real result.json, which is the broker refusing, not a comment existing.)
 
 echo "== stamped authorities: workspace pin (#3) + send-time git metadata (#6) =="
 SA_FIX="$WORK/stamped-auth"; mkdir -p "$SA_FIX"; SA_FIX="$(cd "$SA_FIX" && pwd -P)"
@@ -2317,6 +2319,9 @@ cat > "$AXB/npx" <<'AXSTUB'
 case " $* " in
   *" sessions ensure "*) echo "stub-session (created)"; exit 0 ;;
 esac
+if [ -n "${ACP_PARITY_PROBE:-}" ]; then
+  { printf 'git=%s\n' "$(command -v git)"; printf 'PATH=%s\n' "$PATH"; } > "$ACP_PARITY_PROBE"
+fi
 cat "$ACP_PARITY_PAYLOAD"
 exit 0
 AXSTUB
@@ -3952,11 +3957,33 @@ grep -q $'\r' "$TR_CRLF" && ok "stamping leaves CRLF line endings intact" || fai
 
 # The spawn guard must be ATOMIC: scan-then-create lets two concurrent deliveries both
 # spawn, which under panel fan-out is a phantom extra reviewer.
-grep -q 'ATOMIC claim' "$REPO/helpers/runphase.sh" && ok "spawn guard documents its atomicity" || fail "spawn guard comment"
-grep -q 'mkdir "\$claim"' "$REPO/helpers/runphase.sh" \
-  && ok "spawn claims the message with an atomic mkdir, not a scan" || fail "spawn guard is not atomic"
-grep -q 'rm -rf "\$claim"' "$REPO/helpers/runphase.sh" \
-  && ok "a stale claim from a dead holder is reclaimable" || fail "stale claim is not reclaimable"
+# Atomicity itself is proven live above ("re-delivery of an in-flight turn is guarded").
+# What had NO behavioural cover was the other half: a claim whose holder DIED must be
+# reclaimable, or one crashed runner wedges that message forever. Asserted by running it.
+SC_MSG="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T14-40-00_staleclaim-1.md"
+sed 's/round: 1/round: 7/' "$HL_WF" > "$SC_MSG"
+SC_MID="$(basename "$SC_MSG" .md)"
+SC_CLAIM="$REPO_FIX/.comms/logs/.spawn-$(printf '%s' "$SC_MID" | tr -c 'A-Za-z0-9._-' '_')"
+mkdir -p "$SC_CLAIM"
+# A pid that is guaranteed dead: start one and reap it. A hardcoded number can be recycled.
+( sleep 0 ) & SC_DEAD=$!; wait "$SC_DEAD" 2>/dev/null || true
+printf '%s' "$SC_DEAD" > "$SC_CLAIM/pid"
+SC_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless \
+    PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider codex --message "$SC_MSG") 2>&1 )"
+case "$SC_OUT" in
+  *"already running"*) fail "a claim held by a DEAD pid still wedges the message" ;;
+  *) ok "a stale claim from a dead holder is reclaimed, not honoured" ;;
+esac
+# NEGATIVE CONTROL: the same setup with a LIVE holder must be refused, or the check above
+# is just "spawn always spawns" and proves nothing about claims at all.
+rm -rf "$SC_CLAIM"; mkdir -p "$SC_CLAIM"; printf '%s' "$$" > "$SC_CLAIM/pid"
+SC_OUT2="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless \
+    PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider codex --message "$SC_MSG") 2>&1 )"
+case "$SC_OUT2" in
+  *"already running"*) ok "a claim held by a LIVE pid is honoured (the reclaim is selective)" ;;
+  *) fail "the claim is ignored outright — reclaim proves nothing (got: $SC_OUT2)" ;;
+esac
+rm -rf "$SC_CLAIM"
 
 echo "== panel: N parallel 2-party legs over ONE artifact =="
 PN_FIX="$WORK/panel-repo"; mkdir -p "$PN_FIX"; PN_FIX="$(cd "$PN_FIX" && pwd -P)"
@@ -4433,15 +4460,41 @@ gs -C . log --oneline -1 >/dev/null 2>&1 \
 # there are no longer two shapes to keep in sync. What IS worth asserting is that the shim
 # default-denies — an allowlist that falls through to exec on an unrecognised verb is a
 # denylist wearing a costume, and that distinction is the whole security property here.
-grep -q 'only read-only verbs are permitted' "$REPO/helpers/runphase.sh" \
-  && ok "the shim refuses by default rather than falling through to exec" || fail "shim lost its default-deny"
+# (Removed: a grep for the refusal comment in runphase.sh. The unknown-verb case below
+# refuses through the GENERATED shim, which is the property, not the prose.)
 [ "$("$GS/git" definitely-not-a-real-verb 2>&1 | grep -c 'agent-comms: refused')" = "1" ] \
   && ok "an unrecognised verb is refused, not executed" || fail "shim fell through on an unknown verb"
 # and the shim must not recurse into itself
-grep -q 'exec %s' "$REPO/helpers/runphase.sh" \
-  && ok "the shim execs the REAL git by absolute path, never itself" || fail "shim recursion guard"
-grep -q 'PATH="\${acp_shim:+\$acp_shim:}\$PATH"' "$REPO/helpers/runphase.sh" \
-  && ok "the shim is actually on the child's PATH" || fail "shim not wired to the child"
+# Asserted against the GENERATED shim, not the generator: what ships is this file, and an
+# exec target that resolved through PATH would find the shim again and spin forever.
+GS_EXEC="$(sed -n 's/^ *exec \(\/[^ ]*\).*/\1/p' "$GS/git" | head -1)"
+[ -n "$GS_EXEC" ] && [ "$GS_EXEC" != "$GS/git" ] && [ -x "$GS_EXEC" ] \
+  && ok "the shim execs the REAL git by absolute path, never itself" \
+  || fail "shim exec target is not an absolute non-self path (got: ${GS_EXEC:-<none>})"
+# The shim is worthless if it never reaches the child, and that wiring used to be asserted
+# by grepping runphase.sh for a literal PATH= expression — a string match that would have
+# stayed green through any refactor that dropped the export. Run a REAL mounted ACP turn
+# and let the child report what it actually resolves `git` to. (codex, round 10.)
+SW_ART="$(git -C "$MA_FIX" rev-parse HEAD 2>/dev/null)"
+SW_MSG="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-58-00_shimpath-1.md"
+{ head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+  printf 'artifact_id: %s\nhead_sha: %s\n' "$SW_ART" "$SW_ART"
+  tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" | sed -e 's/^thread: ma-arc-1$/thread: ma-arc-shimpath/'
+} > "$SW_MSG"
+SW_DIR="$WORK/ma-shimpath"; mkdir -p "$SW_DIR"
+printf 'x\n' > "$AXD/payload"
+rm -f "$AXD/childenv"
+( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$AXD/payload" \
+    ACP_PARITY_PROBE="$AXD/childenv" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+    "$RP" run --message "$SW_MSG" --dir "$SW_DIR" --provider grok --via acp --timeout-secs 20 ) \
+  >/dev/null 2>&1
+if [ ! -s "$AXD/childenv" ]; then
+  fail "the mounted ACP child never ran — the PATH check would be vacuous"
+elif grep -q "^git=$SW_DIR/shim/git\$" "$AXD/childenv"; then
+  ok "a mounted child resolves git to the shim (it is really on the child PATH)"
+else
+  fail "a mounted child resolves git elsewhere (got: $(grep '^git=' "$AXD/childenv" | head -1))"
+fi
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
