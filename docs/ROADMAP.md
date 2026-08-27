@@ -1011,6 +1011,14 @@ Candidate formalizations to weigh at the reflection (minimal-first):
   paragraph for foreign WIP (the one mitigation with observed field success).
 - [ ] Atomic writes for installed/shared helpers (write temp + `mv`) so concurrent
   readers never see a half-file.
+- [ ] Installed-copy lag detection: nothing warns when `~/.agent-comms` /
+  `~/.claude/commands` lag the repo they are reviewing. Bit twice on 2026-08-26:
+  stale panel-status logic produced a false "both answered", and the 10-round
+  default self-certified green in-repo while every installed run still budgeted 5 —
+  the dogfooding loop validating the change would have run at the old cap and
+  appeared to confirm it. Fix shape: a version stamp (content hash) written at
+  install and compared at dispatch/loop-entry; warn on mismatch, refuse on
+  `COMMS_STRICT_INSTALL=1`.
 - [ ] A durable claim ledger (thread/region → session), so ownership is declared in
   the repo instead of in chat; `sets.tsv` already models the shape. Refined
   2026-08-26 (user): the ledger should also carry a DECLARED ROLE per session —
