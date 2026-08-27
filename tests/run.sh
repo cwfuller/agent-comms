@@ -1760,6 +1760,11 @@ printf '%s\n' "$LF_MIX" | grep -q 'None' && fail "a bolded None. placeholder was
 # Asserted by BEHAVIOUR, not by grepping runphase.sh for a regex: the derivation now
 # delegates to this same parser, so there is no second regex left to grep for -- and a
 # source-grep would have passed happily while the two copies disagreed on case.
+# TAB after the marker is valid markdown too — the same class as the numbered-list miss that
+# started this thread, found again at round 10 after nine rounds of "list form is handled".
+printf '### Blocking\n\n-\ta tab bullet\n1.\ta tab number\n' > "$CORP/tabs.md"
+[ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/tabs.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "2" ] \
+  && ok "a tab after the list marker is still a finding" || fail "tab-delimited list items dropped"
 printf '### Blocking\n\n1. a numbered finding\n2) a paren-numbered finding\n- a bulleted finding\n' > "$CORP/markers.md"
 [ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/markers.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "3" ] \
   && ok "verdict derivation counts numbered findings too" || fail "derivation missed a list marker shape"
@@ -4127,7 +4132,14 @@ git -C "$GV" config core.fsmonitor "$GPAY" >/dev/null 2>&1
 GS_BEFORE="$(gs_files)"
 gs_attack "exec via repo-local diff.external config" "X=1" -- diff HEAD
 gs_attack "exec via repo-local core.fsmonitor config" "X=1" -- status
-gs_attack "exec via a late -p after our --no-pager"  "GIT_PAGER=$GPAY" -- log -p
+# -p AFTER the verb is --patch (log/diff) or --porcelain (blame) — the reviewer's own tools.
+# Refusing it everywhere broke `git log -p` and the refusal text was false for that case.
+( cd "$GV" && "$GS/git" log -p -1 ) >/dev/null 2>&1 \
+  && ok "git log -p still works: after the verb -p is --patch, not --paginate" || fail "shim broke git log -p"
+case "$( ( cd "$GV" && "$GS/git" -p log ) 2>&1 | head -1 )" in
+  *"agent-comms: refused"*) ok "a LEADING -p (--paginate) is still refused" ;;
+  *) fail "leading -p reached git" ;;
+esac
 git -C "$GV" config --unset diff.external >/dev/null 2>&1
 git -C "$GV" config --unset core.fsmonitor >/dev/null 2>&1
 GS_BEFORE="$(gs_files)"

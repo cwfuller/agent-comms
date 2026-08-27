@@ -965,8 +965,10 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
       while (substr(li, lind + 1, 1) == " ") lind++
       li = substr(li, lind + 1)
     }
-    lind <= 3 && li ~ /^[-*+] / { flush(); blane = lane; buf = substr(li, 3); next }
-    lind <= 3 && li ~ /^[0-9]+[.)] / { flush(); blane = lane; sub(/^[0-9]+[.)] +/, "", li); buf = li; next }
+    # A TAB after the marker is valid markdown and was silently dropped -- the same class as
+    # the numbered-list miss that started this whole thread, found again at round 10.
+    lind <= 3 && li ~ /^[-*+][ \t]/ { flush(); blane = lane; sub(/^[-*+][ \t]+/, "", li); buf = li; next }
+    lind <= 3 && li ~ /^[0-9]+[.)][ \t]/ { flush(); blane = lane; sub(/^[0-9]+[.)][ \t]+/, "", li); buf = li; next }
     buf != "" && /^[[:space:]]+[^[:space:]]/ { buf = buf " " trim($0); next }
     buf != "" && /^[[:space:]]*$/ { flush(); next }
     END {

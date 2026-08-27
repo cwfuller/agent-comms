@@ -547,8 +547,11 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
     # or core.sshCommand — every one an exec. Point them at /dev/null instead of unsetting.
     printf 'GIT_CONFIG_GLOBAL=/dev/null; GIT_CONFIG_SYSTEM=/dev/null; GIT_CONFIG_NOSYSTEM=1\n'
     printf 'export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM\n'
-    printf 'unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG GIT_CONFIG_GLOBAL \\\n'
-    printf '      GIT_CONFIG_SYSTEM GIT_SSH GIT_SSH_COMMAND GIT_EXTERNAL_DIFF GIT_PAGER \\\n'
+    # GIT_CONFIG_GLOBAL/SYSTEM are deliberately NOT in this list: they are pinned to
+    # /dev/null above, and unsetting them here restored ~/.gitconfig -- which made the
+    # claim "pointed at /dev/null rather than unset" false of the generated shim.
+    printf 'unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG \\\n'
+    printf '      GIT_SSH GIT_SSH_COMMAND GIT_EXTERNAL_DIFF GIT_PAGER \\\n'
     printf '      GIT_EDITOR GIT_SEQUENCE_EDITOR GIT_PROXY_COMMAND GIT_ASKPASS SSH_ASKPASS \\\n'
     printf '      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_TEMPLATE_DIR GIT_NAMESPACE 2>/dev/null\n'
     printf 'n=0\n'
@@ -559,7 +562,7 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
     printf '  case "$a" in\n'
     # -p/--paginate LATER in argv beats our leading --no-pager (git takes the last one),
     # and core.pager from ordinary file-backed config is not an env var at all.
-    printf '    -p|--paginate|\\\n'
+    printf '    --paginate|\\\n'
     printf '    -c|-c*|--config-env|--config-env=*|--exec-path|--exec-path=*|\\\n'
     printf '    --namespace|--namespace=*|--super-prefix|--super-prefix=*|\\\n'
     printf '    --output|--output=*|--upload-pack|--upload-pack=*|--receive-pack|--receive-pack=*|\\\n'
@@ -575,6 +578,9 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
     printf 'for a in "$@"; do\n'
     printf '  if [ "$skip" = 1 ]; then skip=0; continue; fi\n'
     printf '  case "$a" in\n'
+    printf '    -p)\n'
+    printf '      echo "agent-comms: refused a leading \x27git -p\x27 — before the subcommand it means --paginate, which execs the configured pager; after it, -p is --patch and is allowed" >&2\n'
+    printf '      exit 1 ;;\n'
     printf '    -C|--git-dir|--work-tree) skip=1; continue ;;\n'
     printf '    --git-dir=*|--work-tree=*) continue ;;\n'
     printf '    -*) continue ;;\n'
@@ -1190,9 +1196,13 @@ PROMPT
     # reviewer to run read-only git commands and compare head_sha — those are terminal
     # requests, not file reads, so --approve-reads denies them and the turn dies after
     # doing the work (observed: grok produced a 9,865-byte review, then exited 5).
-    # Inside a MOUNT the sandbox is the mount itself: a throwaway linked worktree with no
-    # .comms in it, whose reply the parent brokers, so the child can reach neither the
-    # real tree nor the mailbox. Outside one, stay narrow. (grok, collapse round 1.)
+    # Inside a MOUNT the child works in a throwaway linked worktree with no .comms in it and
+    # its reply is brokered by the parent, so it reaches neither the real tree nor the
+    # mailbox by the ordinary path. That is ISOLATION, not enforcement: --approve-all below
+    # grants a shell, and a linked worktree shares the main object store and the real
+    # remotes. There is NO enforced boundary here — COMMS_RUNPHASE_GROK_SANDBOX applies to
+    # the direct grok invocation only. See docs/ROADMAP.md, open security item.
+    # Outside a mount, stay narrow. (grok, collapse round 1; corrected round 10.)
     local -a acp_perm
     if [ -n "$mount_dir" ]; then
       acp_perm=(--approve-all)
