@@ -30,25 +30,42 @@ later presence verb requires `--name` *and* `--instance`, and `send` / `await` /
 
 ```bash
 export COMMS_PRESENCE_NAME=<descriptive-name>
-CLAIM="$(helpers/comms.sh presence claim --name "$COMMS_PRESENCE_NAME" --role "<what you're doing>")"; echo "$CLAIM"
+CLAIM="$(helpers/comms.sh presence claim --name "$COMMS_PRESENCE_NAME" --role "<what you're doing>")"
+RC=$?                                    # capture FIRST — see the warning below
 export COMMS_PRESENCE_INSTANCE="$(printf '%s' "$CLAIM" | sed -n 's/.*instance: //p')"
+echo "$CLAIM"; echo "presence rc=$RC"
 ```
 
-- **exit 0** — no live peers; the shared checkout is yours to work in.
-- **exit 3 or 4** — peers are present (or liveness is unverifiable, which counts as
+**`RC=$?` must be the very next line.** The claim's exit STATUS is the isolation decision,
+and any command in between — an `echo`, a check, anything — overwrites it with its own
+success. On exit 4 (unreadable sessions dir, fail-closed) stdout carries only the `claimed:`
+line with no peer rows, so a lost status looks exactly like a free shared checkout in the
+case the protocol exists to catch.
+
+- **`RC` 0** — no live peers; the shared checkout is yours to work in.
+- **`RC` 3 or 4** — peers are present (or liveness is unverifiable, which counts as
   present). Isolate: `helpers/comms.sh worktree new <slug>` and work in that worktree.
 
 Heartbeat while you work (`presence beat --name … --instance …`), and `presence release
 --name … --instance …` when done. Wrap long-running children in `presence with-beat --name
 … --instance … -- <cmd>` so the record stays fresh without a babysitter — the default TTL
-is 2700s and a panel round can outlast it, so an unbeaten claim expires mid-review and a
-peer may take the shared checkout.
+is 2700s and a panel round can outlast it. A record that goes unbeaten does not vanish;
+it goes **stale**, and staleness alone is never treated as death, so it lingers as an
+ambiguous peer that forces everyone else to isolate. Beating is how you avoid becoming
+that obstacle, not how you avoid disappearing.
 
 **Re-check after every wait.** Direct access is re-earned, never tenured: after a reviewer
-round, an `await`, or a session resume, run `presence others` again before your next write.
-A session that claimed exit 0, waited out a panel, and wrote without re-checking will
-collide with the peer that arrived during the wait. A `beat` returning exit 5 healed a
-vanished record and demands the same re-check.
+round, an `await`, or a session resume, run
+
+```bash
+helpers/comms.sh presence others --name "$COMMS_PRESENCE_NAME" --instance "$COMMS_PRESENCE_INSTANCE"
+```
+
+before your next write — `presence others` requires both flags and, unlike `send` /
+`await` / `integrate`, does *not* read them from the environment. A session that claimed
+`RC` 0, waited out a panel, and wrote without re-checking will collide with the peer that
+arrived during the wait. A `beat` returning exit 5 healed a vanished record and demands the
+same re-check.
 
 Task size is not the criterion. Peer presence is.
 
@@ -71,8 +88,12 @@ Task size is not the criterion. Peer presence is.
 
 ## The review loop (required for code changes)
 
-Measurement, profiling, and reading need no review. **Editing `helpers/`, `tests/`, or
-`templates/` does.**
+Measurement, profiling, and reading need no review. **Editing `helpers/`, `tests/`,
+`templates/`, or this file does** — `AGENTS.md` is the onboarding contract for sessions
+that have no slash commands, and a defect here misleads every future agent silently. (It
+earned its place in this list: review caught a lost exit status in these very
+instructions, which would have sent a fresh agent into the shared checkout while peers
+were live.)
 
 1. Make the change on your branch; get the suite green; **commit before dispatching**.
    The snapshot stages your working tree — tracked edits *and* untracked files — so a
@@ -80,8 +101,11 @@ Measurement, profiling, and reading need no review. **Editing `helpers/`, `tests
    snapshots as HEAD, which is the thing you actually want reviewed and later landed.
 2. Write a review-request file — YAML frontmatter (`type: review-request`, `from`
    [your own registered agent name], `timestamp` [**required**; validation refuses the
-   message without it], `workspace`, `thread`, `workflow: auto`, `phase`, `round`,
-   `max-rounds`; `message_id` is optional) and a body with **Intent**, **Prior review
+   message without it], `message_id` [**also required in practice**: dispatch only
+   *replaces* an existing line, so omitting it leaves the legs without an authoritative
+   id, replies carry no usable `in-reply-to`, and `compose` can never complete],
+   `workspace`, `thread`, `workflow: auto`, `phase`, `round`,
+   `max-rounds`) and a body with **Intent**, **Prior review
    context** (last round's findings — reviewers need continuity), **What was done this
    round**, and a **Review ask** naming the specific things you want attacked. Working
    models live in `.comms/archive/*panel-codex-*`.
@@ -89,16 +113,23 @@ Measurement, profiling, and reading need no review. **Editing `helpers/`, `tests
    (`panel dispatch` refuses a request whose `from:` appears in `--to`, so a literal
    `codex,grok` breaks the moment a non-claude agent drives):
    ```bash
-   ROSTER="$(helpers/comms.sh agents --others "$ME" | tr '\n' ',' | sed 's/,$//')"
+   ME=claude                                    # your registered agent name — must equal the request's `from:`
+   ROSTER="$(helpers/comms.sh agents --others "$ME")"    # already one comma-separated line
    COMMS_RUNPHASE_TIMEOUT_SECS=3600 helpers/comms.sh panel dispatch --to "$ROSTER" <request-file>
    ```
-   It prints an `await:` command per leg. Every leg reviews the same snapshot.
+   `ME` is the *registered agent* name (`claude`, `codex`, `grok`) — not the presence name
+   from the section above; they are unrelated. It prints an `await:` command per leg, and
+   every leg reviews the same snapshot.
 4. **Wait for every leg, then compose** — `helpers/comms.sh compose --set <id>` (the set
    id is printed by dispatch; `panel status --set <id>` shows who has answered). Compose
    refuses a partial panel and labels findings by corroboration. A lone approval is not
    the gate: landing while a leg is unanswered discards a review you paid for.
-5. Fix every blocking finding, and every advisory you agree with. If you disagree with a
-   finding, say so in the next round's request — argue it, never silently drop it.
+5. Address every blocking finding, and every advisory you agree with. "Address" is not
+   always "obey": composition gates on blockers that are **corroborated** or raised by the
+   **gating reviewer**; a lone uncorroborated blocker is meant to be cross-checked, not
+   automatically obeyed — that rule is what stops one noisy reviewer holding the loop
+   hostage. What you may never do is silently drop one. If you disagree, say so in the next
+   round's request and argue it.
 6. Repeat until the **gating reviewer** (first in the roster) approves *and* the panel is
    composed. Then `round-note` each reply, archive them, mark threads complete, and
    `integrate`.
@@ -112,10 +143,10 @@ the interleaving I think is safe — find one where it isn't" earns its tokens.
 bash tests/run.sh
 ```
 
-One umbrella suite. It is slow — measured at 505s for 932 assertions on an unloaded
-machine — and that is a known problem being worked; see the "Suite runtime" subsection of
-`docs/ROADMAP.md`. The cost is concentrated, not spread: ten of sixty sections account for
-~87% of it.
+One umbrella suite. It is slow — measured 2026-08-27 at 505s for 932 assertions on an
+unloaded machine — and that is a known problem being worked; see the "Suite runtime"
+subsection of `docs/ROADMAP.md`, which cites this same profile. The cost is concentrated,
+not spread: ten of the 59 sections account for ~87% of it.
 
 - A **fully green** run records an attestation for the exact commit it started on
   (`attest-green`), which lets `integrate` skip a redundant re-run of identical code when
