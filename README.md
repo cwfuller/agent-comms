@@ -97,6 +97,7 @@ Message format, loop semantics, and the state model: **[docs/PROTOCOL.md](docs/P
 | [docs/INSTALL.md](docs/INSTALL.md) | install scopes, local pinning, upgrading |
 | [docs/INTERNALS.md](docs/INTERNALS.md) | architecture, the template/helper split, test harness |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | decisions, field reports, what's next |
+| [AGENTS.md](AGENTS.md) | contributing to agent-comms itself — for AI agents working on this repo (`CLAUDE.md` symlinks here) |
 
 ## License
 
