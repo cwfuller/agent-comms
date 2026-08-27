@@ -2,3 +2,9 @@
 .comms/
 .codex/AGENTS.md
 .agent-comms/
+
+# Session worktrees created INSIDE the checkout. Snapshot-on-send captures untracked
+# files, so an un-ignored worktree puts an entire second copy of the repo into every
+# review artifact — reviewers then see two of every file and cannot tell which is under
+# review. Worktrees are ephemeral working state, never part of an artifact.
+.claude/worktrees/
