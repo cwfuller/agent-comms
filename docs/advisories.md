@@ -298,3 +298,25 @@ Un-actioned advisories carried out of the loop so they survive its end.
   test pointer per "What changed" line, and only when a round asserts a prior round's fix still
   holds. Both were proposed after two rounds in which a false prose claim of mine survived
   review; neither is built.
+
+## 2026-08-27 — field-report-9446 closed at max-rounds (10 of 10)
+
+Ten rounds, both legs REQUEST_CHANGES at the cap. Fixed at closure: tab-delimited list items,
+the config-pinning ordering bug, the `git log -p` regression, and the ACP call-site comments
+that still claimed an enforced boundary. **Left open, and the reason the loop stopped:**
+
+- **The shim attack fixtures cannot prove protection.** The round-9 self-tests show the
+  scanner detects a creation and a rewrite, but several attack controls (external-diff, SSH,
+  pager, config-injection, `grep -O`) produce no mutation against real git *even with the shim
+  removed*. They therefore cannot distinguish a working shim from a broken one. Also `comm -13`
+  misses deletions and receives hash-prefixed records that are not sorted the way `comm`
+  requires. Fixing this means running each control WITHOUT the shim first and asserting it
+  leaks, then with it and asserting it does not — a negative control per case.
+- **Criterion 8 is asserted against the streaming extractor only.** The test never invokes the
+  runphase ACP path, so an ACP-side normalisation regression stays green. Real byte equality
+  needs both paths driven with identical child output and their `reply-raw.md` compared.
+- **`diff.<driver>.command` and `cat-file --filters` smudge filters still execute.** The
+  exec-bearing config keys were neutralised by enumeration, which is the shape that has failed
+  repeatedly on this track. A non-enumerating approach is needed.
+- **The mounted path still has no enforced boundary** (tracked separately as the open security
+  item). `--approve-all` grants a shell; isolation is not enforcement.
