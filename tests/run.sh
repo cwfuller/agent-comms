@@ -4685,14 +4685,39 @@ run_pw presence with-beat --name alpha --instance "$PW_I1" -- false >/dev/null 2
 [ "$PW_WB1" != 0 ] && ok "with-beat returns the child's failure" || fail "with-beat false rc=0"
 # HEAL MID-RUN (codex+grok, impl r2: the set-e beater died on beat exit 5 before
 # the marker line — heal was eaten AND heartbeats stopped): delete the record
-# during with-beat; the warning must surface and a LATER beat must still land.
+# during with-beat; the warning must surface AND a beat LATER than the heal must
+# land (epoch strictly after start+3 proves post-heal ticks — reviewers noted the
+# heal write alone satisfied the old assertion).
 rm -f "$PW_SD/alpha-$PW_I1.json"
+PW_WBT0="$(date +%s)"
 PW_WBH="$( (cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 5) 2>&1 )"; PW_WBHRC=$?
 printf '%s\n' "$PW_WBH" | grep -q 'HEALED a vanished record' \
   && ok "a heal during with-beat surfaces the tenure warning" || fail "heal eaten by the beater"
 [ "$PW_WBHRC" = 0 ] && ok "the healing run still returns the child's status" || fail "heal perturbed rc=$PW_WBHRC"
 PW_HB2="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json" 2>/dev/null)"
-[ -n "$PW_HB2" ] && ok "the beater survived the heal and kept beating (record restored)" || fail "beater died after heal"
+[ -n "$PW_HB2" ] && [ "$PW_HB2" -ge $((PW_WBT0 + 3)) ] \
+  && ok "the beater survived the heal and kept beating (post-heal tick landed)" || fail "beater died after heal (epoch $PW_HB2 vs start $PW_WBT0)"
+# SIGNAL CONTRACT (codex, impl r3): TERM to the WRAPPER tears down the whole child
+# process tree (grandchildren included) and the wrapper's rc reflects the signal.
+PW_MARK="$WORK/wb-descendant.$$"
+# exec: the subshell BECOMES the wrapper, so the TERM lands on comms.sh itself —
+# killing the intermediate subshell instead just orphaned the real wrapper and
+# the first version of this test failed against a correct teardown.
+( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- bash -c "sleep 30 & echo \$! > '$PW_MARK'; wait" ) & PW_WRAP=$!
+sleep 2
+kill -TERM "$PW_WRAP" 2>/dev/null
+PW_SIGRC=0; wait "$PW_WRAP" 2>/dev/null || PW_SIGRC=$?
+[ "$PW_SIGRC" != 0 ] && ok "TERM to the wrapper terminates it with a signal status" || fail "wrapper ignored TERM"
+sleep 1
+PW_GRAND="$(cat "$PW_MARK" 2>/dev/null)"
+if [ -n "$PW_GRAND" ] && kill -0 "$PW_GRAND" 2>/dev/null; then
+  kill "$PW_GRAND" 2>/dev/null; fail "a grandchild survived the wrapper's teardown"
+else
+  ok "the child's whole process group is torn down (no surviving grandchild)"
+fi
+# STDIN PRESERVATION (codex, impl r3): a piped client must still read its input.
+PW_PIPE="$(echo piped-hello | run_pw presence with-beat --name alpha --instance "$PW_I1" -- head -1)"
+[ "$PW_PIPE" = "piped-hello" ] && ok "with-beat preserves the wrapper's stdin for the child" || fail "stdin lost (got: $PW_PIPE)"
 # Unreadable sessions dir: CLAIM must isolate, not report an empty field
 # (codex, impl r2 — validation now lives in the shared reader).
 chmod 300 "$PW_SD" 2>/dev/null

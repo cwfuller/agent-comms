@@ -1851,7 +1851,12 @@ presence_validate_ids() {  # <name> [instance] — strict grammar at EVERY entry
   return 0
 }
 presence_host() { hostname 2>/dev/null || echo unknown-host; }
-presence_field() { sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1; }
+presence_field() {
+  # Pipefail-tolerant: on bash 4.4+ set -e reaches command substitutions, and a
+  # record unlinked between a caller's [ -f ] and this read would abort the whole
+  # reader instead of fail-closing as ambiguity. (grok, impl r3.)
+  { sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" 2>/dev/null || true; } | head -1
+}
 
 presence_write() {  # <dest> <name> <instance> <role> <state> <pid> <pid_started> <started>
   # Whole-file temp+mv, temps OUT of the readers' record glob (.tmp/). A beat is a
@@ -1947,8 +1952,10 @@ presence_peers() {  # <self-name> <self-instance> — prints peers; 0 none / 3 p
     # (codex, impl r2.)
     case "$counted" in *" $base "*) continue ;; esac
     [ "$base" = "$1-$2" ] && continue             # own reaped ghost is not a peer to self
-    tepoch="$(sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" | head -1)"
-    case "$tepoch" in ''|*[!0-9]*) tepoch=0 ;; esac
+    tepoch="$(sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" 2>/dev/null | head -1)"
+    # A cover whose stamp cannot be read is AMBIGUOUS state, not an old cover:
+    # epoch-0 made corrupt covers silently invisible. Fail closed. (codex, impl r3.)
+    case "$tepoch" in ''|*[!0-9]*) tepoch="$now" ;; esac
     covered=$((now - tepoch))
     if [ "$covered" -le $((PRESENCE_TTL_SECS * 2)) ]; then
       found=1
@@ -2046,9 +2053,18 @@ cmd_presence() {
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence with-beat: --name and --instance required"
       presence_validate_ids "$name" "$instance" || usage_err "presence with-beat: invalid name/instance"
       [ $# -gt 0 ] || usage_err "presence with-beat: a command is required after --"
-      local parent=$$ beater child rc=0 healmark brc
+      local parent=$$ beater="" child="" rc=0 healmark brc
       healmark="$(presence_dir)/.tmp/healed-$name-$instance"
       rm -f "$healmark" 2>/dev/null || true
+      # Signal contract (codex, impl r3): traps are installed BEFORE any spawn
+      # (no unprotected window), each job gets its OWN PROCESS GROUP via set -m
+      # so teardown reaches grandchildren (a real suite spawns trees), and the
+      # signal keeps its IDENTITY (INT forwards as INT, TERM as TERM). These
+      # traps fire while the function is live, so deferred ${child:-} is safe —
+      # unlike the EXIT-trap locals lesson from integrate.
+      trap 'kill -INT  -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' INT
+      trap 'kill -TERM -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' TERM
+      set -m
       # EVERY command in the beater is errexit-immune: the subshell inherits
       # set -e, so a bare beat exiting 5 (heal) killed the beater before the
       # marker line — r1's "eats heal signals" survived the r2 fix as dead code,
@@ -2063,15 +2079,18 @@ cmd_presence() {
             : > "$healmark" 2>/dev/null || true
           fi
         done ) & beater=$!
-      # The child runs in background too so INT/TERM reach BOTH: a signal aimed
-      # at the wrapper alone used to kill only the beater and then return the
-      # surviving child's status as if nothing happened. (codex, impl r2 advisory.)
-      "$@" & child=$!
-      trap 'kill "$child" "$beater" 2>/dev/null || true' INT TERM
+      # The child keeps the wrapper's stdin EXPLICITLY (<&0): a background job in
+      # a non-job-control shell silently rebinds stdin to /dev/null and breaks
+      # piped clients — a wrapped `head -1` read nothing. (codex, impl r3;
+      # verified on bash 3.2.)
+      "$@" <&0 & child=$!
+      set +m
       rc=0; wait "$child" || rc=$?
-      # kill/wait errexit-immune: `wait` on a SIGTERM'd job returns 143 on bash
-      # 3.2 and aborted the wrapper before return. (grok, impl r1.)
-      kill "$beater" 2>/dev/null || true
+      # Sweep the child's whole group after it exits so no suite grandchild
+      # outlives the wrapper, then join the beater. All errexit-immune (the
+      # wait-143 lesson, impl r1).
+      kill -TERM -- "-$child" 2>/dev/null || true
+      kill -TERM -- "-$beater" 2>/dev/null || true
       wait "$beater" 2>/dev/null || true             # join-before-restore
       trap - INT TERM
       if [ -f "$healmark" ]; then
@@ -2190,9 +2209,14 @@ cmd_integrate() {
   local suite_cmd
   suite_cmd="$(sed -n 's/^suite-cmd *= *//p' "$root/.comms/config" 2>/dev/null | head -1)"
   [ -n "$suite_cmd" ] || die "integrate: no 'suite-cmd = ...' in .comms/config — refusing to land unverified (explicit configuration required)"
-  # Advisory lease: refuse while any OTHER live presence is integrating.
+  # Advisory lease: refuse while any OTHER live presence is integrating. The scan
+  # fails CLOSED on an unenumerable dir — a silent empty glob read as lease-free
+  # (CAS keeps correctness, but blind concurrent suites are waste). (codex+grok, impl r3.)
   local dir f
   dir="$(presence_dir)"
+  if [ -d "$dir" ] && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then
+    die "integrate: sessions dir unreadable — cannot verify the integrating lease; refusing"
+  fi
   if [ -d "$dir" ]; then
     for f in "$dir"/*.json; do
       [ -f "$f" ] || continue
@@ -2229,7 +2253,7 @@ cmd_integrate() {
   # if git still knows it, prune dangling metadata, then clear the directory.
   git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
   git -C "$root" worktree prune >/dev/null 2>&1 || true
-  rm -rf "$tw" 2>/dev/null
+  rm -rf "$tw" 2>/dev/null || true
   git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || die "integrate: could not materialize $cand"
   # Structured argv: whitespace split only, nothing shell-interpreted. An
   # empty/whitespace-only suite-cmd expanded to zero argv and SUCCEEDED as a
