@@ -17,27 +17,38 @@ to it, and any other agent runtime should be pointed here too.
 This repo builds autonomous review loops between AI agents, and it is developed the way it
 prescribes: **you implement, other agents review adversarially, and nothing lands until a
 reviewer approves.** That is not ceremony. On a recent eight-round arc, the gating reviewer
-found four blocking defects that a fully green 900-assertion suite had missed — twice
+found four blocking defects that the fully green suite had missed — twice
 because the tests exercised the safe path and the author concluded the unsafe one was
 covered. Expect review to find real things, and write the request so it can.
 
 ## Before you touch anything: check for other sessions
 
 Multiple agents work this repo concurrently. Claim presence first, then let the answer
-decide where you work:
+decide where you work. **Capture and export the instance token the claim prints** — every
+later presence verb requires `--name` *and* `--instance`, and `send` / `await` /
+`integrate` only heartbeat on your behalf when the environment carries them:
 
 ```bash
-helpers/comms.sh presence claim --name <descriptive-name> --role "<what you're doing>"
+export COMMS_PRESENCE_NAME=<descriptive-name>
+CLAIM="$(helpers/comms.sh presence claim --name "$COMMS_PRESENCE_NAME" --role "<what you're doing>")"; echo "$CLAIM"
+export COMMS_PRESENCE_INSTANCE="$(printf '%s' "$CLAIM" | sed -n 's/.*instance: //p')"
 ```
 
 - **exit 0** — no live peers; the shared checkout is yours to work in.
 - **exit 3 or 4** — peers are present (or liveness is unverifiable, which counts as
   present). Isolate: `helpers/comms.sh worktree new <slug>` and work in that worktree.
 
-Heartbeat while you work (`presence beat`), and `presence release` when done. Wrap
-long-running children in `presence with-beat -- <cmd>` so the record stays fresh without a
-babysitter. A `beat` that returns exit 5 healed a vanished record: re-check for peers
-before your next write, because the world moved while you were gone.
+Heartbeat while you work (`presence beat --name … --instance …`), and `presence release
+--name … --instance …` when done. Wrap long-running children in `presence with-beat --name
+… --instance … -- <cmd>` so the record stays fresh without a babysitter — the default TTL
+is 2700s and a panel round can outlast it, so an unbeaten claim expires mid-review and a
+peer may take the shared checkout.
+
+**Re-check after every wait.** Direct access is re-earned, never tenured: after a reviewer
+round, an `await`, or a session resume, run `presence others` again before your next write.
+A session that claimed exit 0, waited out a panel, and wrote without re-checking will
+collide with the peer that arrived during the wait. A `beat` returning exit 5 healed a
+vanished record and demands the same re-check.
 
 Task size is not the criterion. Peer presence is.
 
@@ -49,32 +60,48 @@ Task size is not the criterion. Peer presence is.
   candidate commit** in a throwaway worktree, and moves `main` by compare-and-swap. A race
   loses cleanly; `main` only ever points at a commit the suite passed at.
 - A single clean checkout idling on `main` is fine — `integrate` detaches it, lands, and
-  re-attaches it at the new tip. A checkout with uncommitted work on `main` refuses the
-  landing; move that work to a branch.
-- `.comms/config` must carry `suite-cmd = bash tests/run.sh`, or `integrate` refuses to
-  land unverified.
+  re-attaches it at the new tip. It refuses when that checkout has uncommitted work, when
+  its HEAD is not the current `main` tip, or when more than one worktree holds `main`. To
+  move a working checkout off `main`, run `helpers/comms.sh workspace set <name>` FIRST
+  (pins mailbox identity so the branch switch cannot flap message prefixes), then
+  `git checkout -b <branch>`.
+- `.comms/config` must carry a single non-empty `suite-cmd` line or `integrate` refuses to
+  land unverified; in this repo that value is `bash tests/run.sh`. Duplicate `suite-cmd`
+  or `suite-attest-secs` lines are refused outright rather than resolved by precedence.
 
 ## The review loop (required for code changes)
 
 Measurement, profiling, and reading need no review. **Editing `helpers/`, `tests/`, or
 `templates/` does.**
 
-1. Make the change on your branch; get the suite green; commit. Reviewers read a pinned
-   snapshot, so uncommitted work is invisible to them.
-2. Write a review-request file — YAML frontmatter (`type: review-request`, `from`,
-   `workspace`, `thread`, `workflow: auto`, `phase`, `round`, `max-rounds`) and a body
-   with **Intent**, **Prior review context** (last round's findings — reviewers need
-   continuity), **What was done this round**, and a **Review ask** naming the specific
-   things you want attacked. Working models live in `.comms/archive/*panel-codex-*`.
-3. Dispatch to every other agent as one panel:
+1. Make the change on your branch; get the suite green; **commit before dispatching**.
+   The snapshot stages your working tree — tracked edits *and* untracked files — so a
+   dirty dispatch pins half-finished work as the artifact under review. A clean tree
+   snapshots as HEAD, which is the thing you actually want reviewed and later landed.
+2. Write a review-request file — YAML frontmatter (`type: review-request`, `from`
+   [your own registered agent name], `timestamp` [**required**; validation refuses the
+   message without it], `workspace`, `thread`, `workflow: auto`, `phase`, `round`,
+   `max-rounds`; `message_id` is optional) and a body with **Intent**, **Prior review
+   context** (last round's findings — reviewers need continuity), **What was done this
+   round**, and a **Review ask** naming the specific things you want attacked. Working
+   models live in `.comms/archive/*panel-codex-*`.
+3. Dispatch to every other agent as one panel — build the roster, never hardcode it
+   (`panel dispatch` refuses a request whose `from:` appears in `--to`, so a literal
+   `codex,grok` breaks the moment a non-claude agent drives):
    ```bash
-   COMMS_RUNPHASE_TIMEOUT_SECS=3600 helpers/comms.sh panel dispatch --to codex,grok <request-file>
+   ROSTER="$(helpers/comms.sh agents --others "$ME" | tr '\n' ',' | sed 's/,$//')"
+   COMMS_RUNPHASE_TIMEOUT_SECS=3600 helpers/comms.sh panel dispatch --to "$ROSTER" <request-file>
    ```
-   It prints an `await:` command per leg. Both legs review the same snapshot.
-4. Fix every blocking finding, and every advisory you agree with. If you disagree with a
+   It prints an `await:` command per leg. Every leg reviews the same snapshot.
+4. **Wait for every leg, then compose** — `helpers/comms.sh compose --set <id>` (the set
+   id is printed by dispatch; `panel status --set <id>` shows who has answered). Compose
+   refuses a partial panel and labels findings by corroboration. A lone approval is not
+   the gate: landing while a leg is unanswered discards a review you paid for.
+5. Fix every blocking finding, and every advisory you agree with. If you disagree with a
    finding, say so in the next round's request — argue it, never silently drop it.
-5. Repeat until the **gating reviewer** (first in `--to`) approves. Then `round-note` each
-   reply, archive them, mark threads complete, and `integrate`.
+6. Repeat until the **gating reviewer** (first in the roster) approves *and* the panel is
+   composed. Then `round-note` each reply, archive them, mark threads complete, and
+   `integrate`.
 
 Write the review ask adversarially. "Confirm this looks right" wastes a round; "here is
 the interleaving I think is safe — find one where it isn't" earns its tokens.
@@ -85,8 +112,10 @@ the interleaving I think is safe — find one where it isn't" earns its tokens.
 bash tests/run.sh
 ```
 
-One umbrella suite (~930 assertions). It is slow (~8–12 minutes) and that is a known
-problem being worked; see the "Suite runtime" subsection of `docs/ROADMAP.md`.
+One umbrella suite. It is slow — measured at 505s for 932 assertions on an unloaded
+machine — and that is a known problem being worked; see the "Suite runtime" subsection of
+`docs/ROADMAP.md`. The cost is concentrated, not spread: ten of sixty sections account for
+~87% of it.
 
 - A **fully green** run records an attestation for the exact commit it started on
   (`attest-green`), which lets `integrate` skip a redundant re-run of identical code when
@@ -109,6 +138,10 @@ problem being worked; see the "Suite runtime" subsection of `docs/ROADMAP.md`.
   keeps rediscovering.
 - Record friction the moment you hit it: `helpers/comms.sh friction --severity N "<note>"`.
   It feeds the maintainer's inbox and costs nothing to file.
+- **Your session name is not your presence name.** Presence records are keyed by whatever
+  `--name` you claimed under, so a peer cannot map a record back to a session by looking.
+  Claim under a name that describes the work, and when a peer asks which record is yours,
+  answer explicitly — never let them infer it.
 
 ## Where things live
 
@@ -120,7 +153,7 @@ problem being worked; see the "Suite runtime" subsection of `docs/ROADMAP.md`.
 | `tests/run.sh` | the whole regression corpus |
 | `.comms/` | live mailboxes, thread state, presence records, archive — runtime, not source |
 | `docs/PROTOCOL.md` | message format, loop semantics, presence & worktree rules |
-| `docs/COMMANDS.md` | every verb and flag |
+| `docs/COMMANDS.md` | the command reference (not exhaustive — `panel`, `compose`, `friction`, `round-note` currently live only in `helpers/comms.sh`'s header banner, which is the real catalog) |
 | `docs/INTERNALS.md` | architecture and the rationale behind the load-bearing choices |
 | `docs/ROADMAP.md` | decisions, field reports, and what's next — read before proposing work |
 | `docs/advisories.md` | lessons carried out of finished loops |
