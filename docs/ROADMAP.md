@@ -1205,7 +1205,9 @@ Full narrative in the archived report
    resume command — takeover reads facts instead of doing transcript forensics.
 4. **No uncommitted WIP in the shared checkout across a turn boundary** — commit to
    `wip/<agent>` or agent-tagged stash first; ownerless working-tree changes caused
-   today's misattribution. (Interim practiced: `wip/01-orphan` parking.)
+   today's misattribution. (Interim practiced: `wip/01-orphan` parking.) The parking
+   worked twice and lost nothing, but it is a PRACTICE, not a mechanism: it held only
+   because a coordinator was awake to run it. Practices hold until the first freeze.
 5. **Awaits must drain the inbox while waiting** — the file-drop channel survives a
    wedged socket only if await loops poll it; add a sentinel-file interrupt.
 6. **Panel completion writes to the awaiting agent's inbox, not only the run dir** —
@@ -1243,7 +1245,13 @@ fix is to observe the thing itself.
   process pid, which equals the session's socket name
   (`/tmp/cc-socks/<pid>.sock`) — an independent second liveness check that does not
   trust the number in the file. Existing records predating this rule carry absent
-  or proxy pids and cannot be staleness-checked.
+  or proxy pids and cannot be staleness-checked. TWO independent instances, which is
+  the argument for mechanizing rather than documenting: the rule caught its own
+  author first (a7's own record), then caught agent-comms-be's on the next read —
+  and be's stated history ("both carried transient pids") was itself a rounding of
+  what was on disk, where one record carried a proxy and the other carried nothing.
+  A hand-written declaration drifts from the thing it declares in exactly the way an
+  inference does; only a generated one cannot.
 - [ ] **Run layer**: panel run dirs and leg filenames must EMBED the thread —
   three simultaneous `panel-codex-NNNNN` dirs were indistinguishable without opening
   messages, which enabled the 2026-08-27 wrong-kill (7b's r6 codex reviewer).
