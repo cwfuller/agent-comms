@@ -1223,7 +1223,10 @@ would have most shortened recovery; 7 is deployment guidance.
 
 Named by presence-worktrees-3a, endorsed by all drivers: **an inference that can
 drift must be replaced by a declaration that cannot.** One entry, everything
-cross-referenced; the individual filings fold in here.
+cross-referenced; the individual filings fold in here. agent-comms-01's test-layer
+corollary, from the same day's grep sweep: an assertion that names a property but
+observes a proxy is the suite's version of an undeclared writer — in both cases the
+fix is to observe the thing itself.
 
 - [x] **Message layer** — shipped as the stamped-authorities loop (field items #3/#6,
   a5b6bd0..8c084ba, five rounds, double APPROVE): workspace identity is a repo-scoped
