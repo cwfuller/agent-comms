@@ -1242,9 +1242,11 @@ runner waits only on that declaration. Both sides gate on ONE predicate,
 drift. The budget is retained and configurable
 (`COMMS_RUNPHASE_STATE_WAIT_SECS`, default 6 = prior behaviour) and now polls at
 0.1s instead of 2s, so the live race case returns as soon as the file lands
-instead of sitting out a fixed tick. **Measured: 504.8s → 327.4s (−35%), 941
-assertions green.** This also removes 6s from every non-`send` spawn in
-production, not only in tests.
+instead of sitting out a fixed tick. **Measured on identical trees: 504.8s →
+325.8s (−35%).** The branch as landed measures ~330–350s depending on machine
+load, because its 17 new assertions deliberately spend ~7s exercising the wait
+budget itself. Quote the −35% against the fix, not against the branch. This also
+removes 6s from every non-`send` spawn in production, not only in tests.
 
 Ranked work, foldable into the step-2 harness split:
 

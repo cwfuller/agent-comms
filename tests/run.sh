@@ -8,7 +8,12 @@ set -uo pipefail
 # headless peer turn (e.g. Codex reviewing this repo) inherits these and would
 # route the baseline cmux tests through headless delivery (observed live: 40
 # failures). The headless-specific sections set them explicitly per invocation.
-unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP COMMS_RUNPHASE_VIA 2>/dev/null || true
+# COMMS_RUNPHASE_EXPECT_STATE joins them for the same reason: inherited from an
+# outer send it makes every direct `runphase.sh run` below wait out the state-file
+# budget for a write that is not coming. COMMS_RUNPHASE_STATE_WAIT_SECS too, so an
+# operator's tuning cannot silently change what the timing assertions measure.
+unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP COMMS_RUNPHASE_VIA \
+      COMMS_RUNPHASE_EXPECT_STATE COMMS_RUNPHASE_STATE_WAIT_SECS 2>/dev/null || true
 
 # Loops became headless-first on 2026-08-25, so the pane path is now OPT-IN. The cmux
 # sections below exercise pane mechanics that still exist and still matter, so they ask
@@ -5020,6 +5025,26 @@ sw_run() {  # sw_run <rundir> [env assignments...] -- refuses, exits nonzero
 sw_elapsed() {  # prints whole seconds elapsed while running "$@"
   local t0 t1; t0=$(date +%s); "$@" >/dev/null 2>&1; t1=$(date +%s); echo $((t1 - t0))
 }
+SW_BIN="$WORK/sw-bin"; mkdir -p "$SW_BIN"
+# Records the env it was launched with, and optionally writes the thread-state file
+# from INSIDE the turn. That is the late write, without a sleep to race: the provider
+# runs after the runner started and before its exit trap, by construction.
+cat > "$SW_BIN/grok" <<'SWSTUB'
+#!/bin/bash
+env > "${SW_ENV_DUMP:-/dev/null}"
+if [ -n "${SW_LATE_STATE:-}" ]; then
+  printf '{\n  "workspace": "sw",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' > "$SW_LATE_STATE"
+fi
+exit 2
+SWSTUB
+chmod +x "$SW_BIN/grok"
+sw_turn() {  # sw_turn <rundir> [env assignments...] — a turn that REACHES the provider
+  local rd="$1"; shift
+  mkdir -p "$rd"
+  ( cd "$SW" && env -u CMUX_WORKSPACE_ID PATH="$SW_BIN:$PATH" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$@" \
+      "$RP" run --message "$SW_MSG" --dir "$rd" --provider grok ) 2>&1
+}
 
 # 1. No declaration -> no wait. This is the regression that mattered.
 SW_E1="$(sw_elapsed sw_run "$WORK/sw-r1")"
@@ -5041,17 +5066,38 @@ SW_E2="$(sw_elapsed sw_run "$WORK/sw-r2" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUN
 [ "$SW_E2" -ge 3 ] && ok "declared spawn waits out its budget when the write never lands (${SW_E2}s)" \
   || fail "declared spawn skipped its budget (${SW_E2}s, expected >=3)"
 
-# 3. Declared, file lands LATE -> the race window still works. This is the
-#    coverage the wait exists for; losing it is the real risk of this change.
-( sleep 1; printf '{\n  "workspace": "%s",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' "$SW_WS" > "$SW_SF" ) &
-SW_LATE=$!
-SW_O3="$(sw_run "$WORK/sw-r3" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=8 || true)"
+# 3. Declared, file lands DURING the turn -> the race window still works, and the
+#    state is actually MUTATED. Asserting only that the "missing file" note is absent
+#    would pass on a turn that found the file and then failed to write it. The stub
+#    creates the file from inside the turn, so there is no sleep to lose under load.
+SW_O3="$(SW_LATE_STATE="$SW_SF" sw_turn "$WORK/sw-r3" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=8 || true)"
 case "$SW_O3" in
-  *'no thread state file to update'*) fail "late state write was missed — the race window regressed" ;;
-  *) ok "declared spawn still catches a state file written after it starts" ;;
+  *'no thread state file to update'*) fail "state file written during the turn was missed — the race window regressed" ;;
+  *) ok "declared spawn picks up a state file written after it started" ;;
 esac
-wait "$SW_LATE" 2>/dev/null || true
+grep -q '"last_delivery": "failed"' "$SW_SF" 2>/dev/null \
+  && ok "the picked-up state file is actually mutated, not merely found" \
+  || fail "state file found but last_delivery not updated ($(cat "$SW_SF" 2>/dev/null | tr -d '\n'))"
 rm -f "$SW_SF"
+
+# 3b. The declaration is THIS turn's, and must not reach the provider child. A
+#     reviewer turn that runs this suite would otherwise inherit it and every direct
+#     runner call above would wait again — re-acquiring the stall, and only when the
+#     suite runs inside a headless turn. (codex, panel r1, blocking.)
+SW_ENV_DUMP="$WORK/sw-childenv.txt" sw_turn "$WORK/sw-r3b" COMMS_RUNPHASE_EXPECT_STATE=1 >/dev/null 2>&1 || true
+[ -s "$WORK/sw-childenv.txt" ] && ok "provider child env was captured" || fail "provider child env not captured"
+grep -q '^COMMS_RUNPHASE_EXPECT_STATE=' "$WORK/sw-childenv.txt" \
+  && fail "the state declaration leaked into the provider child" \
+  || ok "the state declaration does not reach the provider child"
+
+# 3c. A malformed budget must not abort the exit trap mid-teardown: it is
+#     interpolated into arithmetic, where `abc` or `08` kills the shell before the
+#     result write. (codex, panel r1, advisory.)
+SW_O3C="$(sw_run "$WORK/sw-r3c" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=abc || true)"
+case "$SW_O3C" in
+  *'no thread state file to update'*) ok "a non-integer budget falls back instead of aborting teardown" ;;
+  *) fail "non-integer budget aborted the exit trap (teardown output lost)" ;;
+esac
 
 # 4. Anti-drift, as a SOURCE contract: the writer's rule and the spawner's
 #    promise must be the same predicate, not two copies that agree today. If
@@ -5064,10 +5110,18 @@ grep -q 'state_write_expected "$thread" "$wf" || return 0' "$SWC" \
   && ok "state_update_from gates its write on the shared predicate" || fail "writer bypasses the shared predicate"
 grep -q 'if state_write_expected "$(frontmatter_field "$file" thread)" "$(frontmatter_field "$file" workflow)"; then' "$SWC" \
   && ok "cmd_send gates COMMS_RUNPHASE_EXPECT_STATE on the shared predicate" || fail "spawner bypasses the shared predicate"
-[ "$(grep -c 'COMMS_RUNPHASE_EXPECT_STATE' "$SWC")" = 1 ] \
-  && ok "only one site declares an expected state write" || fail "COMMS_RUNPHASE_EXPECT_STATE set in more than one place"
+[ "$(grep -c 'export COMMS_RUNPHASE_EXPECT_STATE=' "$SWC")" = 1 ] \
+  && ok "exactly one site declares an expected state write" || fail "COMMS_RUNPHASE_EXPECT_STATE exported in more than one place"
+[ "$(grep -c 'unset COMMS_RUNPHASE_EXPECT_STATE' "$SWC")" = 1 ] \
+  && ok "exactly one site withdraws the declaration" || fail "declaration withdrawn in more than one place"
+grep -q 'RP_EXPECT_STATE="\${COMMS_RUNPHASE_EXPECT_STATE:-}"' "$REPO/helpers/runphase.sh" \
+  && ok "the runner captures the declaration before any child can inherit it" || fail "runner does not capture the declaration"
 grep -q 'COMMS_RUNPHASE_EXPECT_STATE:-' "$REPO/helpers/runphase.sh" \
   && ok "the waiter reads the declaration set-u safely" || fail "waiter does not read the declaration safely"
+grep -q 'unset COMMS_RUNPHASE_EXPECT_STATE' "$REPO/helpers/runphase.sh" \
+  && ok "the runner clears the declaration before launching the provider" || fail "runner does not clear the declaration for the child"
+grep -A1 '^unset COMMS_DELIVERY' "$REPO/tests/run.sh" | grep -q 'COMMS_RUNPHASE_EXPECT_STATE' \
+  && ok "the harness scrubs an inherited declaration" || fail "harness no longer scrubs the inherited declaration"
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"

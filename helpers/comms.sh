@@ -3664,8 +3664,22 @@ cmd_send() {
   # `comms.sh deliver`, which is a public verb — has no send behind it and no
   # state file is ever coming, so it must not wait. Declared here, by the one
   # caller that knows, instead of inferred by a timer in the child.
+  # Set it EITHER WAY. An export that only ever sets is sticky: a nested send whose
+  # message earns no state write would leave an inherited `1` standing and its
+  # grandchild would wait for a file nobody is writing. (grok, panel r1.)
+  #
+  # KNOWN UNSUPPORTED: a runner already started by a bare `deliver` cannot be told
+  # anything — it is already running with no declaration — so if a later `send` finds
+  # it as "already running" and that runner exits before this function writes state,
+  # the state stays `spawned`. The old unconditional wait papered over that narrow
+  # retry race by accident. `deliver` is documented as not maintaining thread state
+  # (see the `held` RESULT text below); `send` is the supported entry point for a
+  # threaded turn, and mixing the two on one thread is not supported.
+  # (codex, panel r1, advisory — established rather than mechanised.)
   if state_write_expected "$(frontmatter_field "$file" thread)" "$(frontmatter_field "$file" workflow)"; then
     export COMMS_RUNPHASE_EXPECT_STATE=1
+  else
+    unset COMMS_RUNPHASE_EXPECT_STATE
   fi
   local del_out outcome=manual rundir=""
   del_out="$(cmd_deliver "$to" "$file")"

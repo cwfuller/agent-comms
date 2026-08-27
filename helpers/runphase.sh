@@ -39,8 +39,22 @@
 #            COMMS_RUNPHASE_SPAWN_DELAY_SECS (default 1 — see run()),
 #            COMMS_RUNPHASE_CLAUDE_PERMISSION_MODE (default acceptEdits),
 #            COMMS_RUNPHASE_CLAUDE_ALLOWED_TOOLS (default Bash),
-#            COMMS_RUNPHASE_CLAUDE_ARGS (extra claude flags; bypass flags refused).
+#            COMMS_RUNPHASE_CLAUDE_ARGS (extra claude flags; bypass flags refused),
+#            COMMS_RUNPHASE_STATE_WAIT_SECS (default 6; how long to wait for the
+#              thread-state file when a write was declared — non-integers fall back
+#              to the default rather than aborting the exit trap),
+#            COMMS_RUNPHASE_EXPECT_STATE (set by comms.sh send ONLY, never by hand:
+#              declares that a thread-state write is actually coming, so the runner
+#              waits for the race window instead of guessing with a timer. Cleared
+#              before the provider child launches — it describes THIS turn alone).
 set -euo pipefail
+
+# The state-write declaration is read ONCE, here, into a non-exported variable. The
+# runner needs it at teardown (the exit trap runs update_thread_state), but no child
+# may inherit it — so cmd_run unsets the exported form before launching a provider
+# and this copy is what the waiter consults. A detached `spawn` re-execs this script,
+# which re-reads the env var it legitimately still has. (codex, panel r1, blocking.)
+RP_EXPECT_STATE="${COMMS_RUNPHASE_EXPECT_STATE:-}"
 
 die() { echo "runphase.sh: $*" >&2; exit 1; }
 
@@ -213,12 +227,21 @@ update_thread_state() {
   # or any other non-send spawn, gets no state file ever, and waiting for one is
   # pure latency — 6s per turn, and it was invisible because every caller
   # redirects the note below into a variable or /dev/null.
-  if [ "${COMMS_RUNPHASE_EXPECT_STATE:-}" = 1 ]; then
-    local i tenths
+  if [ "${RP_EXPECT_STATE:-}" = 1 ]; then
+    local i tenths budget
     # Same default budget as the 3x2s loop this replaces; poll finely so the
     # common case (the file lands in milliseconds) returns immediately instead
     # of sitting out a fixed 2s tick.
-    tenths=$(( ${COMMS_RUNPHASE_STATE_WAIT_SECS:-6} * 10 ))
+    #
+    # VALIDATE before arithmetic. This runs from the EXIT trap, and `$(( abc * 10 ))`
+    # or a `08` octal error aborts the shell mid-teardown — killing the result
+    # write and state mirror that follow, despite the `|| true` around the call.
+    # A malformed value falls back to the default rather than taking the process
+    # down. (codex, panel r1, advisory.)
+    budget="${COMMS_RUNPHASE_STATE_WAIT_SECS:-6}"
+    case "$budget" in ''|*[!0-9]*) budget=6 ;; esac
+    budget="${budget#"${budget%%[!0]*}"}"; budget="${budget:-0}"   # strip leading zeros
+    tenths=$(( budget * 10 ))
     i=0
     while [ "$i" -lt "$tenths" ]; do
       [ -f "$sf" ] && break
@@ -1067,6 +1090,13 @@ PROMPT
     # main root, outside a write sandbox rooted at the worktree.
     extra_dirs=(--add-dir "$root" --add-dir "$main_root/.git")
   fi
+  # The state-write declaration belongs to THIS turn only. It must not reach the
+  # provider child: a reviewer turn that runs `bash tests/run.sh` would inherit it
+  # and every direct `runphase.sh run` in the suite would wait again for a file
+  # nothing is writing — re-acquiring the exact stall this declaration removes,
+  # and only when the suite runs inside a headless turn. (codex, panel r1, blocking.)
+  # Only the EXPORTED form is dropped; RP_EXPECT_STATE still carries it to teardown.
+  unset COMMS_RUNPHASE_EXPECT_STATE
   export COMMS_DELIVERY=headless          # the child's own sends stay headless
   # Replies TO the driver are picked up when this turn exits — the child's
   # deliver must no-op for that direction instead of spawning a counter-turn.
