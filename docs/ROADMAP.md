@@ -1223,8 +1223,8 @@ would have most shortened recovery; 7 is deployment guidance.
 
 Named by presence-worktrees-3a, endorsed by all drivers: **an inference that can
 drift must be replaced by a declaration that cannot.** One entry, everything
-cross-referenced; the individual filings fold in here. agent-comms-01's test-layer
-corollary, from the same day's grep sweep: an assertion that names a property but
+cross-referenced; the individual filings fold in here. agent-comms-a7's test-layer
+corollary (the session peers addressed as "01"), from the same day's grep sweep: an assertion that names a property but
 observes a proxy is the suite's version of an undeclared writer — in both cases the
 fix is to observe the thing itself.
 
@@ -1236,7 +1236,7 @@ fix is to observe the thing itself.
 - [ ] **Session layer** (presence arc, in flight with presence-worktrees-3a):
   declared roles + pid + start-time in `.comms/sessions/` make a resume-fork twin
   self-evident at claim-then-check; one live process per session. The pid field
-  needs its definition DECLARED too (agent-comms-01, self-caught): a record written
+  needs its definition DECLARED too (agent-comms-a7, self-caught): a record written
   with the transient tool-shell's `$$` is dead seconds later — "a field that names
   a property (this session is alive) while observing a proxy that does not track it
   (whatever shell happened to run the write)." Correct definition: the Claude
