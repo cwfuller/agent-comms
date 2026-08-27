@@ -1155,6 +1155,33 @@ behavioral regression test (the marginal risk of the shell version dropped each
 round), and that suite transfers to any reimplementation as its spec — the rounds
 bought a spec, whichever language executes it.
 
+### Suite runtime (2026-08-27, user: "that seems excessive") — extends step 2
+
+A full run is ~8–12 minutes wall-clock at ~912 assertions, and a landing costs
+TWO runs (the pre-flight plus integrate's re-run at the candidate OID). Cost
+profile, estimated not yet measured: per-assertion `comms.sh` spawns (fresh bash
++ several git subprocesses, likely the dominant term), deliberate real-time
+waits in the cancellation/quiescence/TTL sections (~2 min), per-section
+`git init` fixture churn, and fully serial execution.
+
+Ranked work, foldable into the step-2 harness split:
+
+1. [ ] **Profile before optimizing.** Per-section timers in `run.sh`; confirm or
+   refute the spawn-overhead estimate. If spawning dominates, the durable fix is
+   batching assertions per invocation, not trimming sleeps.
+2. [ ] **Tier the suite.** Fast default tier skips the stress probes (the
+   20-iteration cancellation loop and quiescence torture runs guard an invariant
+   5 iterations still catch); full stress tier reserved for integrate and CI.
+3. [ ] **Attested-green shortcut for integrate.** Record "suite green at
+   tree-OID X"; integrate accepts a recent same-OID attestation instead of
+   re-running — halves landing time. Opt-in via config; the paranoid re-run
+   stays the default.
+4. [ ] **Shard sections in parallel** with isolated TMPDIRs — except the
+   signal-timing presence section, which stays in its own unshared lane (machine
+   load provably flaked it during the presence arc).
+5. [ ] **Back-date instead of sleep** in the remaining age-based tests (most
+   already stamp epochs).
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing
