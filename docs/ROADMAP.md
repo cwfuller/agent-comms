@@ -1038,6 +1038,24 @@ multi-file changes now, ahead of the formal mechanism. Related user decision the
 same evening: the loop round limit moves to 10 (default `--rounds`), landed by the
 field-report driver — round-budget references in docs/templates follow that change.
 
+**Design settled later the same evening (user):**
+- **`main` IS the integration branch** — no named intermediate branch. Session
+  branches merge to `main` serially, suite run at the merge commit (the frozen-tree
+  property by construction). A review gate on merges can be added later only if
+  wanted; start minimal.
+- **Worktrees are CONDITIONAL on concrete peer detection, not on task size.** The
+  triviality carve-out was considered and superseded: the rule is presence-based.
+  Mechanism — a presence heartbeat in `.comms/sessions/<name>.json` (role, pid,
+  started, last-heartbeat; refreshed while working, removed on exit, stale after
+  ~10 min or dead pid). CLAIM-THEN-CHECK ordering: write your own presence FIRST,
+  then list others — shrinks the simultaneous-start race to seconds. Any live peer
+  presence → work in a worktree; none → edit the shared checkout directly.
+  Invariant this yields: **the shared checkout has at most one writer** (the first
+  arrival; later arrivals isolate). Driver-agnostic by design — any registered
+  agent writes the same file; the Claude session bus (ListAgents) is only a
+  supplementary cross-check. This is the same record the role ledger wants:
+  presence and declared role are one file.
+
 **Convergent recommendation (end of day, all three drivers independently):**
 per-session git worktrees with an integration branch. By close of day the staging
 rule had been violated by all three sessions — including its authors, including
