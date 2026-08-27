@@ -1092,6 +1092,45 @@ Candidate formalizations to weigh at the reflection (minimal-first):
   role → claimed threads/regions. Same declared-beats-inferred principle as the
   `workspace set` pin; anchors naturally to the per-session worktree.
 
+### Pid-less records are permanently ambiguous (2026-08-27, observed live)
+
+Found by the `suite-perf` session on its first claim — the first outside use of the
+presence system, which is exactly what it was supposed to surface.
+
+`presence_expire`'s reap loop is gated on `[ "$(presence_eval "$f")" = "dead" ]`, and
+`presence_eval` can only reach "dead" through a pid check. `--pid` is OPTIONAL at claim
+time, and a Claude session has no stable long-lived pid to give it (every Bash call is a
+fresh process), so its record carries `"pid": ""` and can never evaluate dead — **not
+"stale enough to reap eventually", but unreapable by construction, at any age.** Observed:
+a record 111 minutes past a 2700s TTL, still listed as an ambiguous peer.
+
+The design anticipated the case (`--force` is commented "explicit operator path for
+forever-ambiguous entries (foreign host, no pid)"), so this is an ERGONOMICS gap, not a
+correctness one. What it costs is the feature's whole point: abandoned pid-less records
+accumulate, every later claim sees peers, and isolation becomes permanent — deleting the
+"no overhead when you are alone" property the claim-then-check design exists to provide.
+
+Candidates, none decided:
+- [ ] Say it at the point of pain: when `others` reports a peer that is past TTL AND
+  pid-less, print the `expire --force <name>` line. The escape hatch exists and nobody
+  knows it does.
+- [ ] Make abandonment self-healing for the pid-less case only: the two-pass
+  byte-identical observation over a full TTL is itself evidence that nothing is writing
+  the record. Weigh against the founding rule that staleness never implies death — a
+  SUSPENDED session also stops beating, and reaping it is the failure this design refused
+  to risk. If adopted, it must be a distinct, narrower rule, not a loosening of the
+  general one.
+- [ ] Have long-lived drivers claim under `with-beat` so the record cannot go stale while
+  the session lives, making abandonment mean what it looks like.
+- [ ] Legacy records predating the instance scheme (`agent-comms-7b`, `-a2`, `-a7`, `-be`)
+  have no `instance` field, print malformed (`peer: name-  state=`), and are ambiguous by
+  the same rule. Force-clean them once their owners confirm — never unilaterally.
+
+Also observed: a session's harness NAME and its presence NAME are unrelated, so a peer
+cannot map a record to a session. The suite-perf session correctly refused to infer which
+record was mine and asked. That is the declared-beats-inferred principle earning its keep,
+and it is an argument for the role ledger above.
+
 ## Maintainability & implementation-language track (2026-08-26, user direction)
 
 The shell implementation has reached a real refactor threshold, but file size alone is
