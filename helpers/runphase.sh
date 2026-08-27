@@ -408,8 +408,9 @@ VERDICT line below: nothing whatsoever may precede that line.'
   cat > "$run_dir/prompt.md" <<PROMPT
 You are agent '$GROK_AGENT', a READ-ONLY reviewer in an agent-comms exchange. You cannot and
 must not write any file in the repository or the mailbox — a trusted parent process
-authors the message envelope and delivers your reply. Do not attempt file writes; the
-kernel sandbox will deny them.
+authors the message envelope and delivers your reply. Do not attempt file writes. Note
+that this is a CONTRACT, not a cage: on the mounted path nothing prevents a write, so
+your restraint is the mechanism. A write here corrupts a real repository.
 
 The message under review is reproduced in full below, along with any prior rounds of
 THIS thread. Everything you legitimately need from the exchange is inlined here by the
@@ -520,8 +521,10 @@ probe_field() {  # <probe output> <key>
 
 write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review turn sees
   # DEFENCE IN DEPTH, NOT A BOUNDARY. A PATH shim cannot be a security boundary: a child can
-  # call git by absolute path, or just write files with the shell. The enforced boundary is
-  # the sandbox profile (docs/INTERNALS.md). What this raises is the cost of an ACCIDENT and
+  # call git by absolute path, or just write files with the shell. There is NO enforced
+  # boundary on the mounted path — COMMS_RUNPHASE_GROK_SANDBOX applies to the direct grok
+  # invocation only, never here (see docs/ROADMAP.md, open security item). What this raises
+  # is the cost of an ACCIDENT and
   # of the easy deliberate paths. Round 7 found the previous version trivially defeated three
   # ways at once — env-injected config, exec-taking flags on permitted verbs, and a scan that
   # stopped at the verb so no later flag was ever examined. Claiming more than this comment
@@ -539,6 +542,11 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
     printf 'unset GIT_MAN_VIEWER MANPAGER PAGER LESS GIT_ATTR_NOSYSTEM 2>/dev/null\n'
     # `status` and other reads can refresh and rewrite the index; this makes reads truly read.
     printf 'GIT_OPTIONAL_LOCKS=0; export GIT_OPTIONAL_LOCKS\n'
+    # UNSETTING GIT_CONFIG_GLOBAL/SYSTEM only restores the DEFAULT lookup, so ~/.gitconfig
+    # and /etc/gitconfig still load and can carry diff.external, core.fsmonitor, core.pager
+    # or core.sshCommand — every one an exec. Point them at /dev/null instead of unsetting.
+    printf 'GIT_CONFIG_GLOBAL=/dev/null; GIT_CONFIG_SYSTEM=/dev/null; GIT_CONFIG_NOSYSTEM=1\n'
+    printf 'export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM\n'
     printf 'unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG GIT_CONFIG_GLOBAL \\\n'
     printf '      GIT_CONFIG_SYSTEM GIT_SSH GIT_SSH_COMMAND GIT_EXTERNAL_DIFF GIT_PAGER \\\n'
     printf '      GIT_EDITOR GIT_SEQUENCE_EDITOR GIT_PROXY_COMMAND GIT_ASKPASS SSH_ASKPASS \\\n'
@@ -549,6 +557,9 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
     #    broke at the verb, so `diff --ext-diff` and `--output=x` were never examined.
     printf 'for a in "$@"; do\n'
     printf '  case "$a" in\n'
+    # -p/--paginate LATER in argv beats our leading --no-pager (git takes the last one),
+    # and core.pager from ordinary file-backed config is not an env var at all.
+    printf '    -p|--paginate|\\\n'
     printf '    -c|-c*|--config-env|--config-env=*|--exec-path|--exec-path=*|\\\n'
     printf '    --namespace|--namespace=*|--super-prefix|--super-prefix=*|\\\n'
     printf '    --output|--output=*|--upload-pack|--upload-pack=*|--receive-pack|--receive-pack=*|\\\n'
@@ -581,7 +592,10 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
     printf '  exit 1\n'
     printf 'done\n'
     # 4. --no-pager: the pager is configurable in-repo, so a permitted read could exec it.
-    printf 'exec %s --no-pager --no-optional-locks "$@"\n' "$real_git"
+    printf 'exec %s --no-pager --no-optional-locks \\\n' "$real_git"
+    printf '  -c core.pager=cat -c core.fsmonitor= -c diff.external= -c core.sshCommand= \\\n'
+    printf '  -c core.hooksPath=/dev/null -c core.editor=false -c "sequence.editor=false" \\\n'
+    printf '  -c "protocol.ext.allow=never" -c "uploadpack.packObjectsHook=" "$@"\n'
   } > "$acp_shim/git"
   chmod +x "$acp_shim/git"
 }

@@ -4052,12 +4052,24 @@ GS="$WORK/gitshim"; mkdir -p "$GS"
 # for — a new trick fails this block without anyone naming it first.
 GV="$WORK/gitshim-victim"; mkdir -p "$GV"
 git -C "$GV" init -q . >/dev/null 2>&1
-git -C "$GV" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base >/dev/null 2>&1
-GPAY="$WORK/gitshim-payload"; GCAN="$WORK/gitshim-CANARY"; GOUT="$WORK/gitshim-WROTE"
+printf 'base\n' > "$GV/f.txt"
+git -C "$GV" add -A >/dev/null 2>&1
+git -C "$GV" -c user.email=t@t -c user.name=t commit -q -m base >/dev/null 2>&1
+# EVERY payload destination lives INSIDE the scanned root. The previous fixture put the
+# canary and the --output target in $WORK while the scan covered $GV and an unused
+# $WORK/gitshim-out, so eight of the twelve attacks could succeed and still read "clean".
+# An invariant that does not observe its own sentinels asserts nothing. (codex + grok, r9.)
+GPAY="$GV/.payload"; GCAN="$GV/CANARY"; GOUT="$GV/WROTE"
 printf '#!/bin/sh\ntouch "%s"\n' "$GCAN" > "$GPAY"; chmod +x "$GPAY"
 rm -f "$GCAN" "$GOUT"
-gs_files() { find "$GV" "$WORK/gitshim-out" -type f 2>/dev/null | LC_ALL=C sort; }
-mkdir -p "$WORK/gitshim-out"
+# CONTENT hashes, not a path listing: rewriting an existing file — .git/index is the one
+# that matters for "reads do not write" — changes no path and was invisible before.
+# The payload itself is excluded so its own presence is not mistaken for a change.
+gs_files() {
+  find "$GV" -type f ! -name '.payload' 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+    printf '%s  %s\n' "$(shasum "$f" 2>/dev/null | cut -d" " -f1)" "$f"
+  done
+}
 GS_BEFORE="$(gs_files)"
 gs_attack() {  # <label> <env-assignments...> -- <git args...>
   # THE INVARIANT, not a canary list: after the attack, no new file may exist ANYWHERE under
@@ -4066,17 +4078,35 @@ gs_attack() {  # <label> <env-assignments...> -- <git args...>
   local label="$1"; shift
   local envs=() ; while [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
   ( cd "$GV" && env "${envs[@]}" "$GS/git" "$@" ) >/dev/null 2>&1 || true
-  local now new
+  local now diff
   now="$(gs_files)"
-  new="$(comm -13 <(printf '%s\n' "$GS_BEFORE") <(printf '%s\n' "$now"))"
-  if [ -n "$new" ]; then
-    fail "shim let a review turn $label (wrote: $(printf '%s' "$new" | head -2 | tr '\n' ' '))"
-    printf '%s\n' "$new" | while IFS= read -r f; do [ -n "$f" ] && rm -f "$f"; done
+  diff="$(comm -13 <(printf '%s\n' "$GS_BEFORE") <(printf '%s\n' "$now"))"
+  if [ -n "$diff" ]; then
+    fail "shim let a review turn $label (changed: $(printf '%s' "$diff" | head -2 | awk '{print $2}' | tr '\n' ' '))"
+    ( cd "$GV" && git checkout -- . >/dev/null 2>&1 || true )
+    rm -f "$GCAN" "$GOUT"
     GS_BEFORE="$(gs_files)"
   else
     ok "a review turn cannot $label"
   fi
 }
+# Prove the harness can SEE a violation. A test that cannot fail is not evidence, and this
+# whole block previously could not fail for eight of its cases.
+touch "$GV/harness-selftest"
+if [ -n "$(comm -13 <(printf '%s\n' "$GS_BEFORE") <(printf '%s\n' "$(gs_files)"))" ]; then
+  ok "the shim harness detects a new file (it can fail)"
+else
+  fail "the shim harness is blind to new files — every result below is vacuous"
+fi
+rm -f "$GV/harness-selftest"
+printf 'mutate\n' >> "$GV/f.txt" 2>/dev/null || true
+if [ -n "$(comm -13 <(printf '%s\n' "$GS_BEFORE") <(printf '%s\n' "$(gs_files)"))" ]; then
+  ok "the shim harness detects an in-place rewrite"
+else
+  fail "the shim harness is blind to content changes"
+fi
+( cd "$GV" && git checkout -- . >/dev/null 2>&1 || true )
+GS_BEFORE="$(gs_files)"
 gs_attack "exec a program via GIT_EXTERNAL_DIFF" "GIT_EXTERNAL_DIFF=$GPAY" -- diff --ext-diff HEAD
 gs_attack "exec a program via GIT_SSH_COMMAND"  "GIT_SSH_COMMAND=$GPAY"  -- ls-remote origin
 gs_attack "exec a program via GIT_PAGER"        "GIT_PAGER=$GPAY"        -- -p log
@@ -4089,6 +4119,18 @@ gs_attack "write trace output via GIT_TRACE2_EVENT" "GIT_TRACE2_EVENT=$GV/trace.
 gs_attack "write trace output via GIT_TRACE"        "GIT_TRACE=$GV/trace2.txt"         -- log --oneline -1
 gs_attack "exec a viewer via GIT_MAN_VIEWER"        "GIT_MAN_VIEWER=$GPAY"             -- help log
 gs_attack "write the index through an unlocked read" "X=1"                             -- status
+# Repo-LOCAL config is the case env-scrubbing can never cover: .git/config is a file, not a
+# variable, and unsetting GIT_CONFIG_GLOBAL merely restores the default lookup. Re-baseline
+# after writing the config, or the setup write is mistaken for the attack. (codex, round 9.)
+git -C "$GV" config diff.external "$GPAY" >/dev/null 2>&1
+git -C "$GV" config core.fsmonitor "$GPAY" >/dev/null 2>&1
+GS_BEFORE="$(gs_files)"
+gs_attack "exec via repo-local diff.external config" "X=1" -- diff HEAD
+gs_attack "exec via repo-local core.fsmonitor config" "X=1" -- status
+gs_attack "exec via a late -p after our --no-pager"  "GIT_PAGER=$GPAY" -- log -p
+git -C "$GV" config --unset diff.external >/dev/null 2>&1
+git -C "$GV" config --unset core.fsmonitor >/dev/null 2>&1
+GS_BEFORE="$(gs_files)"
 
 gs() { PATH="$GS:$PATH" git "$@"; }
 # A DENYLIST of subcommands cannot hold: git is user-extensible, so an alias runs under a
