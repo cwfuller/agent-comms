@@ -75,6 +75,8 @@ fm() unbounded frontmatter scan) — both fixed with regression tests.
   `<repo>/.agent-comms/`): `root`, `workspace`, `list --as`, `validate`, `archive --as`
   (own-inbox, idempotent), `deliver claude|codex`, `send --to ... --archive-inbound ...`,
   `status`; fleet engine with status/dispatch/dispatch-all/harvest/clear.
+  *(fleet.sh and the fleet engine were since retired 2026-08-26 in the `/auto`
+  collapse, 80f472c; the installer now deletes them on upgrade, df96bb1.)*
 - [x] Port the **hardened** workspace block into the helper so the Claude and Codex sides
   provably cannot drift (both sides resolve via the same script).
 - [x] Shrink every template to helper calls (also kills the `$N` substitution class for
@@ -98,6 +100,7 @@ Token notes beyond the extraction:
   the rule — enforce it) and reference plan *files* by path instead of re-embedding full
   plan text when the plan lives in-repo.
 - `fleet.md` is loaded in full for `/fleet help` — cheap win: helper script prints usage.
+  *(Moot: `/fleet` retired 2026-08-26, 80f472c.)*
 
 ## PR 3 — protocol v2 (from the field reports + audit)
 
@@ -110,7 +113,8 @@ Token notes beyond the extraction:
 - [x] **State:** `.comms/state/<workspace>_<thread>.json` written automatically by
   `comms.sh send` for workflow messages (workflow/phase/round, awaiting_from,
   awaiting_since, last_sent, last_delivery); `state get|list|complete`; fleet status
-  surfaces `owes=<agent> <N>m` from it.
+  surfaces `owes=<agent> <N>m` from it. *(Fleet retired 2026-08-26; the owes/awaiting
+  readout now lives in `comms.sh status` and `stalled`.)*
 - [x] **Delivery ack + liveness:** deliver reports delivered / manual-pickup /
   **FAILED mid-sequence** explicitly (Codex r3 Process ask); outcome recorded in state;
   `comms.sh stalled [minutes]` lists threads awaiting a reply too long — the recovery
@@ -121,7 +125,9 @@ Token notes beyond the extraction:
   advisories to `docs/advisories.md` (date, thread, items) and `### Process` items to the
   friction log before closing the loop.
 - [x] **Verdict normalization:** `comms.sh verdict <file>` (trim/uppercase); fleet gates
-  on `norm_verdict` so `" approve"` still terminates a loop.
+  on `norm_verdict` so `" approve"` still terminates a loop. *(Gating moved to the
+  reader/broker when fleet retired 2026-08-26; the verdict scan is now the unified
+  whole-reply fence-skipping probe, e447e41 + 25d825c.)*
 - [x] **`comms.sh clean`** (deferred from PR 2): guarded delete with dry-run default,
   own-inbox `workspace` mode enforced in code; `/clean-comms` is now a thin wrapper.
 - [x] **Meta/process-feedback channel:** loop messages carry a standing `## Meta` section
@@ -152,6 +158,8 @@ Claude tabs.
   with the convention that the live agent is the FIRST tab. Delivery output names the
   surface and the selection reason.
 - [x] **Loud outcomes:** `send` ends with a `RESULT: delivered|manual|failed` line and
+  *(lane set since grew to delivered|spawned|held|blocked|manual|failed, `spawned` being
+  the default headless-loop lane, and every RESULT names its route — e447e41, 8c804ad)*
   every template instructs the agent to relay non-delivered results verbatim — a quiet
   manual outcome previously read as "sent".
 
@@ -320,15 +328,18 @@ watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
   `--via cmux` / `COMMS_DELIVERY=cmux`; `comms.sh transport` owns the routing and
   classifies from the message (`workflow:` present ⇒ loop). The soak threshold below was
   the original gate: 10 successful headless loops including ≥3 claude-resume/attach
-  exercises and ≥3 reverse-direction handoffs. The timeout idle/salvage fix should
-  land before the flip. Prerequisites: per-repo persistence for
-  the delivery mode (`.comms/config`, not env-var-only) with staged per-repo opt-in
-  (low-risk repos first, higher-risk repos last); cmux stays selectable as fallback for one
-  release after the flip.
-- [ ] **Retire fleet.sh after replacement orchestration is ready (step 5)** —
-  HARD-GATED on a trackerless local mode covering status/dispatch/dispatch-all/
-  harvest/concurrency caps/dirty-tree+push safety/stalled recovery. fleet.sh is live
-  orchestration until then (frozen, but kept correct — see the pass-synonym fix).
+  exercises and ≥3 reverse-direction handoffs. *(Post-flip debt, 2026-08-26: the
+  timeout idle/salvage fix remains OPEN — partially mitigated by 7455927, which names
+  a budget-killed ACP turn instead of reporting an empty reply. The `.comms/config`
+  delivery-persistence prerequisite never shipped: the registry accepts only `agents`
+  and `default-target`; delivery mode is still COMMS_DELIVERY/--via only.)* cmux stays
+  selectable as fallback.
+- [x] **Retire fleet.sh after replacement orchestration is ready (step 5)** —
+  *retired 2026-08-26 in the `/auto` command collapse (80f472c) rather than via the
+  trackerless-mode gate; the gate was consciously waived when `/auto` + panel dispatch
+  + `comms.sh status`/`stalled` absorbed the orchestration surface.* Original gate for
+  the record: trackerless local mode covering status/dispatch/dispatch-all/
+  harvest/concurrency caps/dirty-tree+push safety/stalled recovery.
 - [ ] **Delete cmux delivery (step 6)** — one release after the default flip with no
   fallback invocations; deletion audit must include every known dispatch consumer;
   keep optional log/tail viewing only if useful. Interop drill before declaring done.
@@ -348,6 +359,8 @@ Ordered by cost/value; the first three are template-only edits.
   auto-implement's round-1 body and auto-full's implement handoff (read-from-codex
   transition) carry a pinned `## Acceptance criteria` section; the reviewer skill
   judges later rounds against it instead of re-deriving the bar each holistic pass.
+  *(Commands collapsed into `/auto` on 2026-08-26, 80f472c; the pins now live in
+  auto.md and the read-from-codex handoff.)*
 - [x] **Scope ledger** (shipped 2026-08-20): a `### Scope additions` running list
   (review-driven additions + rough cost) copied forward verbatim each round in the
   reply spec, omitted only while empty.
@@ -369,7 +382,9 @@ Ordered by cost/value; the first three are template-only edits.
 - [ ] **Docs: stakes-tiering guidance**: prototype work → auto-implement or
   `max-rounds: 2-3`; pipelines/data-integrity/provenance work → full auto-full loop.
   ("Rounds 1–5 delivered the loop's value; 6–9 delivered thoroughness whose price was
-  never negotiated.")
+  never negotiated.") *(Superseded 2026-08-26 by the `/auto` collapse + 10-round
+  default, 80f472c + d668cd8 — auto.md now argues a low cap "is a wall, not a budget".
+  If short-budget tiering is still wanted, it becomes `/auto --rounds N` guidance.)*
 
 ## Informal consult: bare `/ask-codex` "thoughts?" mode (2026-08-20, user request)
 
@@ -379,9 +394,10 @@ typing "thoughts?" — has no shortcut. Decided (user-confirmed): repurpose bare
 question. **2026-08-20 update: the command shape is superseded by the `/ask` unification
 track below (single multi-agent `/ask`); the payload/behavior spec here still stands.**
 
-- [ ] **Bare `/ask-codex` = informal consult**: replace the current no-arg prompt-back
-  with: package the current discussion and ask for Codex's take. Template-only edit to
-  `ask-codex.md` step 1.
+- [x] **Bare `/ask-codex` = informal consult**: replace the current no-arg prompt-back
+  with: package the current discussion and ask for Codex's take. *(Superseded and
+  delivered: shipped 2026-08-20 as bare `/ask` thoughts mode; ask-codex.md itself was
+  deleted 2026-08-26, 80f472c.)*
 - [x] **Payload is a verbatim excerpt, not a summary** (user-confirmed; shipped
   2026-08-20 in ask.md): at MINIMUM the
   user's last question and the assistant message answering it — the question is what
@@ -429,12 +445,15 @@ ACP (~zero once the acpx backend exists).
 - [x] **Grok Build headless integration** (shipped 2026-08-20): read-only child +
   trusted-parent-broker leg in runphase (final shape: `--prompt-file` +
   streaming-messages-json result anchor — NOT `-p`/streaming-json, both live-refuted),
-  `/ask grok` via the registry, `--reviewer grok` on auto-* commands. Live compat
+  `/ask grok` via the registry, `--reviewer grok` on auto-* commands *(auto-* since
+  collapsed into `/auto --reviewers a,b` with panel-by-default, 2026-08-26)*. Live compat
   evidence: grok 1.0.5 loads installed Claude commands (observed in
   available_commands) and follows prompt-file instructions; managed AGENTS.md-block
   ingestion not separately verified — that sliver stays open.
 - [x] **Reviewer parameterization** (shipped 2026-08-20): auto-plan/auto-implement/
-  auto-full accept `--reviewer <agent>` (default = registry default); the reader
+  auto-full accept `--reviewer <agent>` (default = registry default) *(superseded
+  2026-08-26: `/auto --reviewers a,b`, default = a PANEL of every registered agent
+  except the driver via `agents --others`, 51b9ef3)*; the reader
   derives the reviewer mechanically from the inbound `from:` for every continuation
   (replies, error lane, plan→implement handoff). Addresses the single-reviewer
   serialization problem.
@@ -448,6 +467,9 @@ ACP (~zero once the acpx backend exists).
   session, exit codes → RESULT lanes, schemas unchanged; gate it on consult-path
   soak + the requirement that reviewers can EXECUTE things (acpx
   permission policy design). cmux and runphase stay; ACP is a third backend.
+  *(Shipped 2026-08-26 as the `transport`/`deliver` ACP route — `runphase spawn
+  --via acp` with warm per-thread sessions; cmux is now opt-in, not co-equal. The
+  surviving sliver is live end-to-end coverage.)*
 
 ## `/ask` unification (2026-08-20, supersedes the bare-`/ask-codex` decision above)
 
@@ -462,7 +484,8 @@ command shape evolves:
   (verbatim excerpt, floor = user's last question + the answering message) — shipped
   2026-08-20 (thread ask-unification-10480)
 - [x] `/ask-codex` becomes a thin deprecated alias for one transition release, then drops
-  — alias shipped 2026-08-20; the drop happens next release
+  — alias shipped 2026-08-20; dropped 2026-08-26 (80f472c; the installer removes
+  retired commands on upgrade)
 - [x] adding an agent touches ONLY the registry — the template reads names from it (DRY)
   — *fully delivered 2026-08-20 (`.comms/config` + `comms.sh agents`)*
 
@@ -540,7 +563,10 @@ of what the design and the critique both assumed:
   artifact materialized into it, index reset to base — so `HEAD` matches the request's
   `head_sha` and the reviewed change reads as an ordinary uncommitted diff. The GATING
   reviewer still reads the live tree, which is why a pair is a CANDIDATE pair and
-  `drift_status` is recorded explicitly. agent-comms-private: no SPEC edit, no fixture
+  `drift_status` is recorded explicitly. *(Superseded 2026-08-26, 1529b1f: `send` now
+  snapshots and stamps `artifact_id` on every workflow message and parent-brokered
+  gating turns read a pinned mount too — only self-sending cmux turns still read the
+  live tree.)* agent-comms-private: no SPEC edit, no fixture
   change, no pin bump.
 - [x] **Do NOT change the finding format before the baseline runs** *(held 2026-08-22 —
   no template edit shipped; extraction reports the anchored subset as a column instead)* *(corrected r2)*.
@@ -618,13 +644,17 @@ Remaining in this slice: install the corrected reviewer prompt (a NEW `prompt_ve
 construction — and note `prompt-version` hashes the INSTALLED surface, so the hash moves on
 `install.sh`, not on the edit), then run `shadow --to grok` on the next 8 loops, then
 adjudicate a sample of the pairwise symmetric difference. Nothing else is buildable until
-those exist.
+those exist. *(Shadow-on-8-loops superseded 2026-08-26 by panel-by-default: grok now
+reviews as a GATING leg on every loop via `panel dispatch` sharing one snapshot — see
+Panel & command collapse. Adjudicating the symmetric difference remains the open step.)*
 
 **Known scoped limitation, accepted by the reviewer:** the GATING reviewer is not bound to
 an artifact at dispatch, so every pair is a CANDIDATE pair and `drift_status` never asserts
 more than "no drift detected during the shadow window". Binding it means `send` taking a
 snapshot on every loop, shadowed or not — the next slice, deliberately not bolted onto this
-one.
+one. *(That slice shipped 2026-08-26, 1529b1f: `send` snapshots every loop dispatch and
+pins `artifact_id`; the limitation now applies only to self-sending cmux turns, which
+mounting cannot reach.)*
 
 ### Held as design constraints (free to keep, nothing to build)
 
@@ -700,20 +730,22 @@ one.
 
 ### Deferred (reason recorded, so it is not mistaken for oversight)
 
-- **Panels.** No comparative data exists yet. When they land: N parallel 2-party threads under
-  a `review_set_id` — the MESSAGE CONTRACT holds unchanged, but the driver, state layer, and
-  status surface do not. `comms.sh` `status` evaluates its ACTION NEEDED branch against only
-  the newest state file (`ls -t … | head -1`), so N-1 panel legs go invisible; `auto-implement`
-  binds a single `REVIEWER` variable across every write path; state is keyed
-  `<ws>_<thread>.json` with a singular `awaiting_from` and has no home for a composed verdict.
-  Condensation, when built, auto-collapses only high-confidence exact matches and retains every
-  source finding and reviewer.
+- **Panels.** *(SHIPPED 2026-08-26 — and made the DEFAULT. See "Panel & command
+  collapse": `panel dispatch` fans one snapshot to N parallel 2-party legs under one
+  `review_set`, `/auto` composes before fixing, compose clusters by corroboration and
+  is round-scoped with in-reply-to binding. The open residue is reciprocal
+  adjudication wiring, tracked in that section.)* Original deferral for the record:
+  no comparative data existed; driver/state/status were single-reviewer machines.
 - **The judge.** With one reviewer there are zero conflicts to adjudicate. The consult's
   correction stands for when there are more than one: conflict-only judging is structurally
   blind to correlated agreement — including agreement by both finding *nothing*, which no
-  conflict trigger can ever see.
+  conflict trigger can ever see. *(Resolved by design 2026-08-26: no separate judge
+  will exist — condense = RECIPROCAL ADJUDICATION; the corroboration gate shipped,
+  reciprocal adjudication remains the open half.)*
 - **Routing.** Needs a populated (agent × category) grid, which needs a category field, a
-  second reviewer, and a stable prompt version. None exist.
+  second reviewer, and a stable prompt version. None exist. *(Update 2026-08-26: the
+  second reviewer now exists — grok gates by default on every panel — still blocked
+  on a category field and a stable prompt_version.)*
 - **Adjudicated-severity composition and the dispute lane** — the adjudicator is the human
   and nobody has costed that time. (Escape attribution is no longer here; it is CUT — see
   Rejected.)
@@ -733,11 +765,16 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
 
 ### Decided
 
-- [ ] **One command.** `/auto [--plan] [--reviewers a,b] [--rounds N] [--via cmux] <task>`.
-  `/ask` stays a separate verb — a consult is not a loop.
-- [ ] **Kill `/auto-plan`, `/fleet`, `/ask-codex`.** `send-to-codex` / `read-from-codex`
-  become pure internals: `send --to $REVIEWER` / `read --as $SELF`, no agent in the name.
-- [ ] **KEEP a plan gate as `--plan`, opt-in** *(both consults disagreed with deleting it)*.
+- [x] **One command.** `/auto [--plan] [--reviewers a,b] [--rounds N] [--via cmux] <task>`.
+  `/ask` stays a separate verb — a consult is not a loop. *(Shipped 2026-08-26,
+  80f472c + b3cc535.)*
+- [x] **Kill `/auto-plan`, `/fleet`, `/ask-codex`.** *(Kills shipped 2026-08-26 —
+  80f472c, 90d258d, df96bb1.)* The second half stays open: `send-to-codex` /
+  `read-from-codex` becoming pure agent-neutral internals (`send --to $REVIEWER` /
+  `read --as $SELF`) is tracked under "Any agent drives".
+- [x] **KEEP a plan gate as `--plan`, opt-in** *(both consults disagreed with deleting it;
+  shipped 2026-08-26 in the collapse — the 2-round cap below was superseded the same
+  day by the 10-per-phase default, d668cd8)*.
   Evidence: the `token-efficiency-23269` loop spent 4 plan rounds before a line of product
   code, and what that bought was bouncing a wrong approach before it became 800 lines of
   locally-correct architecture. Shape it as grok specified: a real approach doc, **capped
@@ -754,7 +791,9 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
   reading the diff — so a default-all panel puts a non-executing reviewer on the gate.
   Plus operational tail (one live grok review took 9.5 min then broke the reply contract)
   and no comparison data yet.
-- [ ] **Corroboration gating** — neither any-blocks nor primary-only. A finding gates when
+- [x] **Corroboration gating** *(shipped 2026-08-26 — 50939e3 compose clustering,
+  bd7b792/fb157bc reader drives panel rounds and refuses any-blocks)* — neither
+  any-blocks nor primary-only. A finding gates when
   a second panelist supports it, or when it carries reproducible evidence against the
   retained artifact. A lone unsupported blocker is cross-checked, not obeyed; still split
   after one confirmation round → escalate to the human, same lane as max-rounds. This is
@@ -768,9 +807,11 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
   of cosmetic diagnostic wording, and nothing was dropped. That answers grok's objection
   that judgment erases unique findings; its second objection (a judged bundle is "nobody's
   review") does not apply, because every verdict stays attributed to a named agent.
-- [ ] **Naming.** `panel` = the collection (user-facing), `reviewer` = one agent (keep —
+- [x] **Naming.** `panel` = the collection (user-facing), `reviewer` = one agent (keep —
   the ledger column, `from:`, and round-notes are all per-agent). `review_set_id` stays the
   internal grouping key. Not "board": it implies voting, which the gate deliberately is not.
+  *(Adopted throughout the shipped panel code — `cmd_panel`, `review_set_id` columns,
+  per-agent reviewer rows in rounds.tsv.)*
 - [x] **`max-rounds` default 10 PER PHASE** *(owner decision 2026-08-26, superseding the
   5-per-phase decision below on the same day)*. field-report-9446 is why: it returned a real
   blocking finding in EVERY one of its first five rounds — including two rounds where a
@@ -808,7 +849,9 @@ owner on two points, with evidence** — recorded below so neither is re-litigat
 2. [x] **Command collapse + the kills** *(shipped 2026-08-26)*. 9 commands → 5; `/auto` is the
    one loop verb; `/auto-plan`, `/auto-full`, `/auto-implement`, `/fleet`, `/ask-codex` and
    `helpers/fleet.sh` are gone. `--rounds` defaults to 4; `--plan` is capped at 2 with a
-   direction-only bar; the plan→implement transition keys on `phase`, not a workflow name.
+   direction-only bar *(superseded same day by the 10-per-phase default, d668cd8 —
+   `--plan` now gets its own `--rounds` budget, no 2-round cap)*; the plan→implement
+   transition keys on `phase`, not a workflow name.
 3. [x] **`--reviewers a,b` fan-out** *(shipped 2026-08-26)* — `comms.sh panel dispatch`
    writes N parallel 2-party legs (`<thread>-<agent>`) sharing one `review_set` and **one
    snapshot**, validating the whole roster before sending any leg. The message contract
@@ -849,7 +892,10 @@ clearest evidence so far that a panel of two is not redundant.
   round-1 review arrived 80 minutes after the first, `in-reply-to` the same request and
   reviewing the same commit, after round 2 had superseded it. Nothing broke — it was
   archived unactioned — but a superseded or archived inbound was re-dispatched, and with a
-  PANEL that duplicate becomes a phantom extra vote. *(codex, transport-flip round 3.)*
+  PANEL that duplicate becomes a phantom extra vote. *(codex, transport-flip round 3.
+  The phantom-vote consequence was closed 2026-08-26 — compose accepts only replies
+  bound `in-reply-to` to THIS dispatch's request id, 21c0d82, and retry rebinds the
+  set row — but the dispatch-side refusal itself is still unbuilt.)*
 - [ ] **End-to-end coverage for the `deliver → acp → spawn --via acp` path.** The committed
   suite asserts the selector; the path itself is proven only by a live run. *(codex.)*
 
@@ -862,10 +908,10 @@ others — **and/or another instance of itself** — on the panel.
 Most of the plumbing is already agent-neutral: the registry, `inbox_for`, `transport`,
 `peer_of`, the verdict rule binding by TYPE not sender, and `panel dispatch`. What is not:
 
-- [ ] **The command surface is Claude-only.** `/auto`, `/ask` and the rest install into
-  `.claude/commands/`. A driving Codex or grok has no equivalent verb — the 2026-08-26
-  field report is exactly this ("Codex currently has to manually author frontmatter, send,
-  capture the run directory, await it, locate the response, and archive it"). The loop
+- [ ] **The LOOP surface is Claude-only.** `/auto` installs into `.claude/commands/`; a
+  driving Codex or grok has no equivalent loop verb. *(Narrowed 2026-08-26: the CONSULT
+  half shipped as driver-neutral `comms.sh ask --from X --to Y [--wait]`, d80c213 —
+  the quoted field-report complaint is fixed. What remains is the loop verb.)* The loop
   logic already lives in `comms.sh`; what is missing is a per-agent thin surface over it.
 - [ ] **`from:` is written by the template, not derived.** A driver-neutral flow has to
   learn its own identity rather than hardcode `from: claude`.
@@ -886,8 +932,8 @@ Sequencing note: this is cheaper AFTER the panel, not before — `panel dispatch
 
 ### Field report from a Codex session (2026-08-26) — codex tried to consult grok and could not
 
-Independently demonstrated, in the reporter's own priority order. Item 5 is fixed; the
-rest are open.
+Independently demonstrated, in the reporter's own priority order. All items were
+resolved 2026-08-26 (see the checkboxes below).
 
 - [x] **A first-class synchronous consult verb** *(shipped 2026-08-26 — `comms.sh ask --from X --to Y [--wait]`)*. Codex currently has to hand-author
   frontmatter, send, capture the run directory, await it, find the reply and archive it.
@@ -1045,6 +1091,9 @@ Candidate formalizations to weigh at the reflection (minimal-first):
    symmetric difference — the minimum third signal, since diversity alone is not quality.
    The event-sourced ledger is NOT built until those produce numbers: with 53/53 reviews from
    one agent there is nothing to compare, and `--reviewer grok` has shipped and never run.
+   *(Update 2026-08-26: grok has now run as gating AND shadow reviewer across three
+   loops — rounds.tsv, sets.tsv, and findings.tsv are accumulating the comparison
+   baseline, so "nothing to compare" is expiring.)*
    Escape attribution as a routing metric is cut, not deferred. Panels, routing, the judge,
    and adjudication-gated items stay deferred with reasons recorded in the track.
 6. Remaining scope-dial items (dispute lane and test-evidence contract — informed by the
