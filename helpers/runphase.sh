@@ -477,17 +477,11 @@ for line in open(sys.argv[1]):
     if e.get('type') == 'result' and not e.get('is_error') and isinstance(e.get('result'), str):
         final = e['result']
 text = (final or '').strip()
-lines = text.splitlines()
-# Unwrap ONLY a well-formed fence, by the same rule the shared lexer uses: closer is the
-# same character, at least as long as the opener, nothing after it. Matching any line that
-# merely starts with three backticks erased a 4-tick-open/3-tick-close wrapper before the
-# parser could report it unclosed -- so the streaming path accepted structure the ACP path
-# refuses. One delimiter rule, or the two transports disagree. (codex, round 5.)
-if len(lines) >= 2:
-    _o = re.match(r'^(`{3,}|~{3,})', lines[0])
-    _c = re.match(r'^(`{3,}|~{3,})[ \t]*$', lines[-1])
-    if _o and _c and _c.group(1)[0] == _o.group(1)[0] and len(_c.group(1)) >= len(_o.group(1)):
-        text = '\n'.join(lines[1:-1])
+# NO unwrapping here. Making this rule delimiter-aware (round 5) fixed the wrong half:
+# streaming still normalised the reply and ACP did not, so identical bytes were a review
+# on one transport and a quoted no-structure refusal on the other. Unwrapping now happens
+# once, in the broker, on the path BOTH transports share. A transport must never decide
+# what a reply says. (codex and grok independently, round 6.)
 sys.stdout.write(text + '\n')
 PYX
   then
@@ -517,9 +511,83 @@ probe_field() {  # <probe output> <key>
   printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k {print $2; exit}'
 }
 
+write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review turn sees
+  # A FUNCTION, so the suite can exercise the shipped generator instead of a copy of it.
+  # The old test hand-copied this block, which meant it could only ever confirm that the
+  # copy behaved like itself -- the same defect that let the placeholder rule and the
+  # fence rule each drift for a full round. (codex, round 6.)
+  local acp_shim="$1" real_git="$2"
+  {
+    printf '#!/bin/bash\n'
+    printf '# agent-comms guard: a review turn may inspect, never publish or destroy.\n'
+    printf '# The scan finds the SUBCOMMAND: value-taking globals (-C <path>, -c <kv>,\n'
+    printf '# --git-dir <d>, ...) skip their value too — the old first-non-option break\n'
+    printf '# treated the VALUE as the subcommand, so `git -C . push` sailed through.\n'
+    printf '# (codex, panel r4.) A child calling the git binary by absolute path is out\n'
+    printf '# of any PATH shim reach — that boundary is the operator deny-profile.\n'
+    # ALLOWLIST, not a denylist. A denylist of subcommands cannot hold: git is
+    # user-extensible, so `git -c alias.ship='!git push ...' ship` runs a shell alias
+    # whose name is on no list, and publishing verbs like `send-pack`, or ref rewrites
+    # like `tag -f`, are not spelled `push`. Verified bypassable. (codex, round 6.)
+    # Config-injecting and exec-path globals are refused outright rather than skipped:
+    # they are how a caller defines an alias or redirects git to its own helpers, which
+    # turns ANY permitted verb into an arbitrary command.
+    printf 'for a in "$@"; do\n'
+    printf '  if [ "${skip:-0}" = 1 ]; then skip=0; continue; fi\n'
+    printf '  case "$a" in\n'
+    printf '    -c|--config-env|--exec-path|--namespace|--super-prefix|\\\n'
+    printf '    --config-env=*|--exec-path=*|--namespace=*|--super-prefix=*)\n'
+    printf '      echo "agent-comms: refused \x27git $a\x27 — it can define an alias or redirect git helpers, turning any permitted verb into an arbitrary command" >&2\n'
+    printf '      exit 1 ;;\n'
+    printf '    -C|--git-dir|--work-tree) skip=1; continue ;;\n'
+    printf '    --git-dir=*|--work-tree=*) continue ;;\n'
+    printf '    -*) continue ;;\n'
+    printf '  esac\n'
+    printf '  case "$a" in\n'
+    printf '    log|show|diff|"diff-tree"|"diff-index"|status|"rev-parse"|"rev-list"|"cat-file"|\\\n'
+    printf '    "ls-files"|"ls-tree"|"ls-remote"|blame|annotate|describe|grep|shortlog|\\\n'
+    printf '    "for-each-ref"|"symbolic-ref"|"name-rev"|"merge-base"|"check-ignore"|\\\n'
+    printf '    "check-attr"|"count-objects"|"verify-pack"|whatchanged|version|help|var)\n'
+    printf '      break ;;\n'
+    printf '  esac\n'
+    printf '  echo "agent-comms: refused \x27git $a\x27 — a review turn may read history but not write, publish, or rewrite it; only read-only verbs are permitted" >&2\n'
+    printf '  exit 1\n'
+    printf 'done\n'
+    printf 'exec %s "$@"\n' "$real_git"
+
+  } > "$acp_shim/git"
+  chmod +x "$acp_shim/git"
+}
+
+unwrap_reply() {  # <file> — strip ONE well-formed fence wrapping the entire reply, in place
+  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/agent-comms-unwrap.XXXXXX")" || return 0
+  # Lives in the broker, which is the only code path both transports share. The rule is the
+  # shared lexer rule and nothing else: same character, closer at least as long as the
+  # opener, nothing but whitespace after it, and leading indent up to the lexer allowance.
+  # Keeping a second copy of "what is a wrap" in the streaming extractor is what made the
+  # two transports disagree about identical bytes.
+  awk '
+    { lines[NR] = $0 }
+    END {
+      if (NR < 2) { for (i = 1; i <= NR; i++) print lines[i]; exit }
+      first = lines[1]; last = lines[NR]
+      if (match(first, /^[ \t]*(```+|~~~+)[ \t]*$/) == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
+      f = first; sub(/^[ \t]*/, "", f); match(f, /^(`+|~+)/)
+      fch = substr(f, 1, 1); flen = RLENGTH
+      if (match(last, /^[ \t]*(```+|~~~+)[ \t]*$/) == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
+      l = last; sub(/^[ \t]*/, "", l); match(l, /^(`+|~+)/)
+      lch = substr(l, 1, 1); llen = RLENGTH
+      if (lch != fch || llen < flen) { for (i = 1; i <= NR; i++) print lines[i]; exit }
+      for (i = 2; i < NR; i++) print lines[i]
+    }
+  ' "$1" > "$tmp" 2>/dev/null && mv "$tmp" "$1" || rm -f "$tmp"
+}
+
 broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivered
   local msg="$1" run_dir="$2" peer="$3"
   [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="the child produced no reply text"; return 1; }
+  # Both transports land here, so both get the same normalisation and the same lexer.
+  unwrap_reply "$run_dir/reply-raw.md"
   # The child's output is VERDICT (reviews only) + body. The PARENT authors the
   # complete envelope from the captured inbound values — no model-authored
   # frontmatter is ever persisted, so type/from/thread/round/in-reply-to cannot
@@ -1120,32 +1188,7 @@ PROMPT
       # Resolve the REAL git now and hardcode it: `exec git` would find this shim again
       # through PATH and spin forever.
       local real_git; real_git="$(command -v git)"
-      {
-        printf '#!/bin/bash\n'
-        printf '# agent-comms guard: a review turn may inspect, never publish or destroy.\n'
-        printf '# The scan finds the SUBCOMMAND: value-taking globals (-C <path>, -c <kv>,\n'
-        printf '# --git-dir <d>, ...) skip their value too — the old first-non-option break\n'
-        printf '# treated the VALUE as the subcommand, so `git -C . push` sailed through.\n'
-        printf '# (codex, panel r4.) A child calling the git binary by absolute path is out\n'
-        printf '# of any PATH shim reach — that boundary is the operator deny-profile.\n'
-        printf 'skip=0\n'
-        printf 'for a in "$@"; do\n'
-        printf '  if [ "$skip" = 1 ]; then skip=0; continue; fi\n'
-        printf '  case "$a" in\n'
-        printf '    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--config-env)\n'
-        printf '      skip=1; continue ;;\n'
-        printf '    -*) continue ;;\n'
-        printf '  esac\n'
-        printf '  case "$a" in\n'
-        printf '    push|commit|am|rebase|reset|clean|gc|prune|"filter-branch"|"update-ref"|"remote")\n'
-        printf '      echo "agent-comms: refused \x27git $a\x27 — a review turn may read history but not publish or rewrite it" >&2\n'
-        printf '      exit 1 ;;\n'
-        printf '  esac\n'
-        printf '  break\n'
-        printf 'done\n'
-        printf 'exec %s "$@"\n' "$real_git"
-      } > "$acp_shim/git"
-      chmod +x "$acp_shim/git"
+      write_git_shim "$acp_shim" "$real_git"
     else
       acp_perm=(--approve-reads --non-interactive-permissions deny)
     fi
