@@ -324,18 +324,31 @@ Ten rounds, both legs REQUEST_CHANGES at the cap. Fixed at closure: tab-delimite
 the config-pinning ordering bug, the `git log -p` regression, and the ACP call-site comments
 that still claimed an enforced boundary. **Left open, and the reason the loop stopped:**
 
-- **The shim attack fixtures cannot prove protection.** The round-9 self-tests show the
-  scanner detects a creation and a rewrite, but several attack controls (external-diff, SSH,
-  pager, config-injection, `grep -O`) produce no mutation against real git *even with the shim
-  removed*. They therefore cannot distinguish a working shim from a broken one. Also `comm -13`
-  misses deletions and receives hash-prefixed records that are not sorted the way `comm`
-  requires. Fixing this means running each control WITHOUT the shim first and asserting it
-  leaks, then with it and asserting it does not — a negative control per case.
-- **Criterion 8 is asserted against the streaming extractor only.** The test never invokes the
-  runphase ACP path, so an ACP-side normalisation regression stays green. Real byte equality
-  needs both paths driven with identical child output and their `reply-raw.md` compared.
+- ~~**The shim attack fixtures cannot prove protection.**~~ **CLOSED 2026-08-27** (fb691c0).
+  Every case now runs twice — once against real git with no shim, which must leak, and once
+  through the shim, which must not — and a case whose control does not leak is reported as
+  UNPROVEN rather than counted as protection. `comm -13` was replaced by a both-direction diff
+  over path-first records, so deletions are visible; the baseline is deliberately dirty, so an
+  external diff driver actually fires. Five vectors turned out to be unprovable in a
+  non-interactive test (pager/`-p`, `grep -O`, `GIT_MAN_VIEWER`, the `status` index write, and
+  concatenated `-c`) and were REMOVED with the reason recorded, rather than left as decoration;
+  `--upload-pack` became provable by pointing `ls-remote` at a local bare peer. 11 proven, 0
+  unproven.
+- ~~**Criterion 8 is asserted against the streaming extractor only.**~~ **CLOSED 2026-08-27**
+  (323c811). A stubbed `npx` now drives the real ACP leg of `runphase.sh` and its `reply-raw.md`
+  is byte-compared against the streaming extractor for the same six cases, the whole-answer
+  fence included. A negative control feeds deliberately differing bytes first and requires the
+  comparison to notice, so the parity result cannot be vacuous.
 - **`diff.<driver>.command` and `cat-file --filters` smudge filters still execute.** The
   exec-bearing config keys were neutralised by enumeration, which is the shape that has failed
   repeatedly on this track. A non-enumerating approach is needed.
 - **The mounted path still has no enforced boundary** (tracked separately as the open security
   item). `--approve-all` grants a shell; isolation is not enforcement.
+
+**Status 2026-08-27, after the close-out.** The two test-credibility items above are closed and
+merged. The remaining two — the non-enumerating fix for exec-bearing config keys, and the
+enforced boundary on the mounted path — are open by an explicit decision, not by oversight: the
+mounted path has no real boundary anyway, so hardening a defence-in-depth shim was judged the
+wrong place to spend the next round. A related sweep (dd7a60c) removed six suite assertions that
+named a behaviour while observing a comment in the source, and converted four more to observe
+the behaviour; the assertion count fell while the proven surface grew.
