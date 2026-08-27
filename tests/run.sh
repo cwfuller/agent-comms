@@ -4548,9 +4548,15 @@ run_pw presence others --name alpha --instance "$PW_I1" >/dev/null 2>&1; PW_RF=$
 run_pw presence expire >/dev/null 2>&1; run_pw presence expire >/dev/null 2>&1
 [ -f "$PW_SD/far-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json" ] \
   && ok "expire never reaps a foreign-host record" || fail "foreign host reaped"
+# --force is EXACT-name (codex, impl r5: `--force alpha` glob-matched
+# `alpha-team-*` and erased an unrelated live session's records and covers).
+printf '{\n  "name": "far-team", "instance": "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2", "state": "working", "host": "%s", "last_heartbeat_epoch": "%s"\n}\n' "$(hostname)" "$(date +%s)" > "$PW_SD/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.json"
 run_pw presence expire --force far >/dev/null 2>&1
 [ ! -f "$PW_SD/far-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.json" ] \
   && ok "expire --force is the explicit operator path" || fail "force did not remove"
+[ -f "$PW_SD/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.json" ] \
+  && ok "--force far leaves far-team's records untouched (exact-name match)" || fail "force over-matched a hyphenated sibling"
+rm -f "$PW_SD/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.json"
 PW_MYPID=$$
 PW_MYSTART="$(ps -p $PW_MYPID -o lstart= 2>/dev/null)"
 printf '{\n  "name": "napper", "instance": "dddddddddddddddddddddddddddddddd", "state": "working", "host": "%s", "pid": "%s", "pid_started": "%s", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" "$PW_MYPID" "$PW_MYSTART" > "$PW_SD/napper-dddddddddddddddddddddddddddddddd.json"
@@ -4728,6 +4734,19 @@ set +m
 sleep 2; kill -INT "$PW_IW" 2>/dev/null
 PW_IRC=0; wait "$PW_IW" 2>/dev/null || PW_IRC=$?
 [ "$PW_IRC" = 130 ] && ok "INT to the wrapper yields the child's INT status (130)" || fail "INT identity lost (rc=$PW_IRC)"
+# CANCELLATION NEVER SUCCEEDS (codex, impl r5: a fast child exiting 0 before the
+# re-signal produced 225/2000 false successes — integrate would land them). Twenty
+# INT-at-spawn iterations with an instant child: no run may return 0.
+PW_FALSE0=0
+for pw_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  set -m
+  ( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- true ) & PW_FW=$!
+  set +m
+  kill -INT "$PW_FW" 2>/dev/null
+  PW_FRC=0; wait "$PW_FW" 2>/dev/null || PW_FRC=$?
+  [ "$PW_FRC" = 0 ] && PW_FALSE0=$((PW_FALSE0 + 1))
+done
+[ "$PW_FALSE0" = 0 ] && ok "a latched cancellation never returns success (20/20 nonzero)" || fail "$PW_FALSE0/20 cancelled runs returned 0"
 # QUIESCENCE (codex, impl r4): a successful wrapper return means the child's whole
 # group is GONE — a TERM-ignoring descendant must be escalated to KILL, not left
 # straggling for integrate to trust a live tree.

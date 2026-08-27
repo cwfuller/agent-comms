@@ -2098,6 +2098,14 @@ cmd_presence() {
       [ -n "$latched" ] && kill "-$latched" -- "-$child" 2>/dev/null || true
       set +m
       rc=0; wait "$child" || rc=$?
+      # A LATCHED CANCELLATION NEVER RETURNS SUCCESS: a fast child can exit 0
+      # before the re-signal lands (codex probed 2,000 runs and caught 225 false
+      # successes) — and integrate would land that "success". The child's own
+      # nonzero status is preserved; only a clean 0 under cancellation is forced
+      # to the signal's status. (codex, impl r5.)
+      if [ -n "$latched" ] && [ "$rc" -eq 0 ]; then
+        [ "$latched" = INT ] && rc=130 || rc=143
+      fi
       # QUIESCENCE before return (codex, impl r4): the wrapper's success must mean
       # the child's whole group is GONE — integrate trusts the tree state on
       # return, and a straggling suite descendant made a same-shaped model return
@@ -2106,15 +2114,17 @@ cmd_presence() {
       local sweep_sig="${latched:-TERM}" qn=0
       kill -"$sweep_sig" -- "-$child" 2>/dev/null || true
       while kill -0 -- "-$child" 2>/dev/null; do
-        qn=$((qn + 1)); [ "$qn" -ge 50 ] && break; sleep 0.1
+        qn=$((qn + 1)); [ "$qn" -ge 50 ] && break; sleep 0.1 || true
       done
       if kill -0 -- "-$child" 2>/dev/null; then
         kill -KILL -- "-$child" 2>/dev/null || true
         qn=0
         while kill -0 -- "-$child" 2>/dev/null; do
-          qn=$((qn + 1)); [ "$qn" -ge 20 ] && break; sleep 0.1
+          qn=$((qn + 1)); [ "$qn" -ge 20 ] && break; sleep 0.1 || true
         done
       fi
+      # (sleep || true — a group-INT during the poll aborted the wrapper before
+      # KILL escalation; could not land, could leak a descendant. grok, impl r5.)
       if kill -0 -- "-$child" 2>/dev/null; then
         echo "presence with-beat: the child's process group survived TERM and KILL — failing closed (result untrusted)" >&2
         rc=125
@@ -2146,7 +2156,22 @@ presence_expire() {  # <dir> [force-name] — the ONLY verb that deletes OTHERS'
   if [ -n "$force" ]; then
     presence_validate_ids "$force" || { echo "expire: invalid --force name" >&2; return 1; }
     # Explicit operator path for forever-ambiguous entries (foreign host, no pid).
-    rm -f "$dir/$force"-*.json "$reap/$force"-* 2>/dev/null || true
+    # EXACT name match: names may contain '-', so `alpha-*` also matched
+    # `alpha-team-<instance>` and erased an unrelated live session's records and
+    # covers. The instance token is the LAST '-'-segment and has a strict
+    # grammar — strip it and require the remainder to equal the name exactly.
+    # (codex, impl r5.)
+    local ff fbase fsuffix
+    for ff in "$dir/$force"-*.json "$reap/$force"-*; do
+      [ -e "$ff" ] || continue
+      fbase="$(basename "$ff")"
+      fbase="${fbase%.json}"; fbase="${fbase%.obs}"
+      case "$fbase" in *.tomb.*) fbase="${fbase%%.tomb.*}" ;; esac
+      fsuffix="${fbase##*-}"
+      [ "${fbase%-$fsuffix}" = "$force" ] || continue
+      printf '%s' "$fsuffix" | grep -qE '^[a-z0-9]{8,64}$' || continue
+      rm -f "$ff" 2>/dev/null || true
+    done
     echo "expire: forced removal of every '$force' record and artifact"
     return 0
   fi
