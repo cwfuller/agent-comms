@@ -2306,6 +2306,75 @@ GOT="$(bx "$FENCED"; printf X)"; GOT="${GOT%X}"
 [ "$GOT" = "$FENCED" ] && ok "a whole-answer fence reaches the lexer intact on streaming" \
   || fail "streaming still unwraps a whole-answer fence"
 
+# Criterion 8 was only HALF proven. Everything above exercises the STREAMING extractor and
+# then asserted parity with a transport it never ran — the ACP path was asserted about, not
+# invoked. ACP redirects acpx stdout straight into reply-raw.md, so the only way to know the
+# two agree is to run the real path with a stub that emits chosen bytes and compare what
+# lands on disk against what streaming emits for the same result string. (codex, round 10.)
+AXD="$WORK/acp-parity"; AXB="$AXD/bin"; mkdir -p "$AXB"
+cat > "$AXB/npx" <<'AXSTUB'
+#!/bin/bash
+case " $* " in
+  *" sessions ensure "*) echo "stub-session (created)"; exit 0 ;;
+esac
+cat "$ACP_PARITY_PAYLOAD"
+exit 0
+AXSTUB
+chmod +x "$AXB/npx"
+cat > "$AXB/node" <<'AXNODE'
+#!/bin/bash
+echo "v22.22.3"
+AXNODE
+chmod +x "$AXB/node"
+# Run the REAL ACP leg of runphase and hand back the reply-raw.md it produced.
+acp_raw() {  # <payload-file> <n> -> path to the reply-raw.md the ACP path wrote
+  local pay="$1" n="$2" msg dir
+  msg="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-56-00_parity-$n.md"
+  sed -e "s/^thread: ma-arc-1\$/thread: ma-arc-parity-$n/" \
+      "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$msg"
+  dir="$WORK/ma-parity-$n"; mkdir -p "$dir"
+  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$pay" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$msg" --dir "$dir" \
+      --provider grok --via acp --timeout-secs 20 ) >/dev/null 2>&1
+  printf '%s' "$dir/reply-raw.md"
+}
+# NEGATIVE CONTROL first: if the comparison cannot see a one-byte difference, every parity
+# result below is vacuous. Feed the ACP stub bytes that DIFFER from what streaming emits and
+# require the comparison to notice.
+printf 'parity-control' > "$AXD/payload"
+AXCTL="$(acp_raw "$AXD/payload" 0)"
+bx 'parity-control-DIFFERENT' > "$AXD/stream-ctl.out"
+if cmp -s "$AXCTL" "$AXD/stream-ctl.out"; then
+  fail "the transport parity comparison is blind — it calls differing bytes identical"
+else
+  ok "the transport parity comparison can see a difference (it can fail)"
+fi
+axn=0
+for CASE in "plain" "" "no-trailing-lf" "leading
+blank" "trailing
+"; do
+  axn=$(( axn + 1 ))
+  printf '%s' "$CASE" > "$AXD/payload"
+  AXRAW="$(acp_raw "$AXD/payload" "$axn")"
+  bx "$CASE" > "$AXD/stream.out"
+  if [ ! -e "$AXRAW" ]; then
+    fail "the ACP path wrote no reply-raw.md at all (${#CASE} bytes)"
+  elif cmp -s "$AXRAW" "$AXD/stream.out"; then
+    ok "ACP and streaming write byte-identical replies (${#CASE} bytes)"
+  else
+    fail "transports disagree on ${#CASE} bytes (acp $(wc -c <"$AXRAW" | tr -d " "), streaming $(wc -c <"$AXD/stream.out" | tr -d " "))"
+  fi
+done
+# The fence case is the one that broke criterion 8 in the field: streaming unwrapped a
+# whole-answer fence that ACP left alone, so identical bytes were a review on one transport
+# and a no-structure refusal on the other.
+printf '%s' "$FENCED" > "$AXD/payload"
+AXRAW="$(acp_raw "$AXD/payload" 9)"
+bx "$FENCED" > "$AXD/stream.out"
+cmp -s "$AXRAW" "$AXD/stream.out" \
+  && ok "a whole-answer fence survives identically on BOTH transports" \
+  || fail "the transports disagree on a whole-answer fence"
+
 echo "== acp.sh: consult transport (stubbed npx) =="
 ACP="$REPO/helpers/acp.sh"
 ACP_STUB="$WORK/acp-bin"; mkdir -p "$ACP_STUB"
