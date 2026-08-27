@@ -2068,6 +2068,42 @@ PF_OUT="$(run_sa list --as claude 2>&1)" || true
 echo "$PF_OUT" | grep -q 'foo_bar(1)' && echo "$PF_OUT" | grep -q 'other-workspace(1)' \
   && ok "prefix fallback names foo_bar and other-workspace correctly" || fail "prefix fallback shapes (got: $PF_OUT)"
 rm -f "$SA_FIX/.comms/to-claude/foo_bar_2026-08-26T15-40-00_x-1.md" "$SA_FIX/.comms/to-claude/other-workspace_pending.md"
+# ---- round 5: trailing-blank duplicates and blank-first presence ----
+# valid head_sha + TRAILING bare `head_sha:` — command substitution used to eat it
+SA_TB="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T16-20-00_trailblank-1.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T16-20-00_trailblank-1/' "$SA_RS" > "$SA_TB"
+awk '{print} /^head_sha:/ && !d {d=1}' "$SA_TB" > "$SA_TB.t" && mv "$SA_TB.t" "$SA_TB"
+awk -v done=0 '{print; if (!done && $0 ~ /^round:/) {print "head_sha:"; done=1}}' "$SA_TB" > "$SA_TB.t" && mv "$SA_TB.t" "$SA_TB"
+[ "$(grep -c '^head_sha' "$SA_TB")" = "2" ] || fail "trailing-blank fixture construction"
+TB_OUT="$(run_sa send --to codex "$SA_TB" 2>&1)" && tb_rc=0 || tb_rc=$?
+[ "$tb_rc" -ne 0 ] && echo "$TB_OUT" | grep -q 'mismatched pair' \
+  && ok "a trailing blank head_sha duplicate is seen and refused" || fail "trailing-blank head_sha (rc=$tb_rc)"
+# valid artifact_id + trailing bare `artifact_id:` — ambiguous pin
+SA_TA="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T16-22-00_trailaid-1.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T16-22-00_trailaid-1/' "$SA_RS" > "$SA_TA"
+awk -v done=0 '{print; if (!done && $0 ~ /^artifact_id: /) {print "artifact_id:"; done=1}}' "$SA_TA" > "$SA_TA.t" && mv "$SA_TA.t" "$SA_TA"
+TA_OUT="$(run_sa send --to codex "$SA_TA" 2>&1)" && ta_rc=0 || ta_rc=$?
+[ "$ta_rc" -ne 0 ] && echo "$TA_OUT" | grep -q 'ambiguous pin' \
+  && ok "a trailing blank artifact_id duplicate is seen and refused" || fail "trailing-blank artifact_id (rc=$ta_rc)"
+# SINGLE blank artifact_id line: presence is physical -> resend path -> grammar refusal,
+# and the live tree is NOT silently snapshotted over the (attempted) pin
+SA_BA="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T16-24-00_blankaid-1.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T16-24-00_blankaid-1/' \
+    -e 's/^artifact_id: .*/artifact_id:/' "$SA_RS" > "$SA_BA"
+BA_OUT="$(run_sa send --to codex "$SA_BA" 2>&1)" && ba_rc=0 || ba_rc=$?
+[ "$ba_rc" -ne 0 ] && echo "$BA_OUT" | grep -q 'not a full 40-hex' \
+  && ok "a single blank artifact_id line refuses instead of fresh-dispatching" || fail "blank artifact_id presence (rc=$ba_rc got: $BA_OUT)"
+grep -q '^artifact_id:$' "$SA_BA" \
+  && ok "the refused message was not silently re-stamped" || fail "blank-aid message mutated"
+# blank FIRST + valid second artifact_id: still the resend path, still refused
+SA_BF="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T16-26-00_blankfirst-1.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T16-26-00_blankfirst-1/' \
+    -e 's/^artifact_id: .*/artifact_id:/' "$SA_RS" > "$SA_BF"
+awk -v aid="$SA_AID" -v done=0 '{print; if (!done && $0 ~ /^artifact_id:$/) {print "artifact_id: " aid; done=1}}' "$SA_BF" > "$SA_BF.t" && mv "$SA_BF.t" "$SA_BF"
+BF_OUT="$(run_sa send --to codex "$SA_BF" 2>&1)" && bf_rc=0 || bf_rc=$?
+[ "$bf_rc" -ne 0 ] && echo "$BF_OUT" | grep -qE 'not a full 40-hex|ambiguous pin' \
+  && ok "blank-first artifact_id cannot smuggle a fresh dispatch past a supplied pin" || fail "blank-first artifact_id (rc=$bf_rc)"
+
 # ---- round 4: blank fields, artifact_id duplicates, parentless refusal ----
 # blank head_sha line on an ordinary resend: physically present, value empty -> mismatch
 SA_BL="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T16-00-00_blank-1.md"

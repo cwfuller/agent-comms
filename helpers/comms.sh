@@ -2810,6 +2810,14 @@ cmd_send() {
     ' "$sf" > "$stamped" && mv -f "$stamped" "$sf"
     rm -f "$stamped" 2>/dev/null || true
   }
+  # fm_field_lines <file> <field> — every value line of <field> in the frontmatter,
+  # blank values preserved as empty lines. Consumers must read this via PROCESS
+  # SUBSTITUTION, never $() into a heredoc: command substitution strips trailing
+  # newlines, which made a trailing blank duplicate line invisible to the
+  # validation loops. (codex, stamped-authorities round 4.)
+  fm_field_lines() {
+    LC_ALL=C awk -v f="$2" '{sub(/\r$/,"")} NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{exit} fm && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print}' "$1"
+  }
   # artifact_base <aid> — the commit the artifact's diff applies to, derived from
   # the OBJECT: a synthetic snapshot commit bases on its first parent; anything
   # else (a clean tree pinned as HEAD) is its own base.
@@ -2827,9 +2835,14 @@ cmd_send() {
     fi
   }
   if [ -n "$(frontmatter_field "$file" workflow)" ]; then
-    local send_aid send_base existing_aid existing_sha
-    existing_aid="$(frontmatter_field "$file" artifact_id)"
-    if [ -z "$existing_aid" ]; then
+    local send_aid send_base existing_aid existing_sha aid_ct
+    # Fresh-vs-resend is decided by PHYSICAL artifact_id lines: a blank first
+    # value made frontmatter_field return empty, sending a pinned message down
+    # the fresh path — snapshotting the live tree and silently overwriting the
+    # supplied pin. Presence is counted; values are judged after. (codex, round 4.)
+    aid_ct="$(fm_field_lines "$file" artifact_id | wc -l | tr -d ' ')"
+    existing_aid="$(fm_field_lines "$file" artifact_id | head -1)"
+    if [ "${aid_ct:-0}" -eq 0 ]; then
       # Fresh dispatch: retain the tree and stamp the WHOLE git identity from the
       # one snapshot operation — artifact_id names the content, head_sha the base
       # it applies to; same object, so they cannot desync, and any hand-typed
@@ -2873,10 +2886,7 @@ cmd_send() {
       # content: a blank `head_sha:` line has an empty value that command
       # substitution erases, which let it bypass both the uncheckable-pair
       # refusal and the per-value comparison. Values are checked PER LINE
-      # (including empties) — word-splitting skips blanks. (codex, round 3.)
-      fm_field_lines() {  # <file> <field> — every value line of <field> in the frontmatter, blanks preserved
-        LC_ALL=C awk -v f="$2" '{sub(/\r$/,"")} NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{exit} fm && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print}' "$1"
-      }
+      # (including empties). (codex, rounds 3-4.)
       local sha_ct one_sha
       sha_ct="$(fm_field_lines "$file" head_sha | wc -l | tr -d ' ')"
       if [ "${sha_ct:-0}" -gt 0 ] && [ -z "$send_base" ]; then
@@ -2886,9 +2896,7 @@ cmd_send() {
         while IFS= read -r one_sha; do
           [ "$one_sha" = "$send_base" ] \
             || die "send: head_sha '$(clip "$one_sha")' does not match artifact '$(clip "$existing_aid")' base '$(clip "$send_base")' — refusing to dispatch a mismatched pair"
-        done <<EOF_SHA
-$(fm_field_lines "$file" head_sha)
-EOF_SHA
+        done < <(fm_field_lines "$file" head_sha)
       fi
       # artifact_id gets the SAME all-values discipline — round 2 proved the
       # first-value-only shape bypassable for head_sha; the id field is not
@@ -2899,9 +2907,7 @@ EOF_SHA
       while IFS= read -r one_aid; do
         [ "$one_aid" = "$existing_aid" ] \
           || die "send: duplicate artifact_id '$(clip "$one_aid")' disagrees with '$(clip "$existing_aid")' — refusing an ambiguous pin"
-      done <<EOF_AID
-$(fm_field_lines "$file" artifact_id)
-EOF_AID
+      done < <(fm_field_lines "$file" artifact_id)
       # Normalize BOTH fields to exactly one canonical line each (re-stamping the
       # id collapses duplicate artifact_id lines; base may be empty for a
       # parentless artifact-only message, which stays artifact-only).
