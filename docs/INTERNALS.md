@@ -76,8 +76,10 @@ took ten review rounds to converge (thread `presence-worktrees-15135`):
 - **Only `expire` deletes others' records**, via two-pass byte-identical reap:
   observe (original timestamp never refreshed — `expire; expire` cannot shorten the
   grace), then reap only if bytes are identical, the grace is served, and confident
-  death still holds (same host, pid ESRCH-absent by `ps -p` — EPERM means alive —
-  and the recorded `pid_started` matches no live process; pid reuse cannot hold a
+  death still holds (same host, and the pid probe is THREE-VALUED: `ps -p` exit 0
+  with output = alive, exit 1 with empty output = ESRCH death, and ANY other
+  outcome — denied, unexecutable, truncated — is ambiguity, never death; the
+  recorded `pid_started` must match for alive to hold, so pid reuse cannot keep a
   dead claim). The nonce-named tombstone is written BEFORE the unlink and GC'd only
   when old AND recordless — never because a record exists, and only the exact nonce
   file observed (a paused GC cannot clobber a newer generation).

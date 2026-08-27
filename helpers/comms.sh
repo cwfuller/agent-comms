@@ -1887,8 +1887,12 @@ presence_eval() {  # <record> — prints live|dead|ambig. FAIL CLOSED: every unc
   # (exit 126) and a live stale session would have been reaped. Only exit 1 with
   # empty output is the-pid-does-not-exist; every other failure is ambiguous.
   # (codex, impl r1 — found running in exactly such a sandbox.)
+  # `var=$(failing-cmd); rc=$?` is not errexit-safe on bash 4.4+ (set -e is
+  # enforced inside command substitutions there): eval would abort with empty
+  # output, expire would never reap, and dead records would become permanent
+  # peers. Same shape as the lstart probe below. (grok, impl r2.)
   local psout psrc
-  psout="$(ps -p "$pid" -o pid= 2>/dev/null)"; psrc=$?
+  psout="$(ps -p "$pid" -o pid= 2>/dev/null)" && psrc=0 || psrc=$?
   if [ "$psrc" -eq 0 ] && [ -n "$psout" ]; then
     pstart="$(presence_field "$f" pid_started)"
     [ -n "$pstart" ] || { echo ambig; return 0; }   # live pid, no recorded identity → ambig
@@ -1906,19 +1910,28 @@ presence_eval() {  # <record> — prints live|dead|ambig. FAIL CLOSED: every unc
   fi
 }
 
-presence_peers() {  # <self-name> <self-instance> — prints peers; return 0 none / 3 peers.
+presence_peers() {  # <self-name> <self-instance> — prints peers; 0 none / 3 peers / 4 unreadable.
   # Reader protocol (plan r9): RECORDS first, then reap artifacts. The tombstone is
   # written BEFORE its record's unlink, so every expire interleaving shows a reader
   # at least one of the two until the cover legitimately ages out.
-  local dir self="$1-$2.json" found=0 f verdict base tomb tepoch now covered
+  local dir self="$1-$2.json" found=0 f verdict base tomb tepoch now covered counted=" "
   dir="$(presence_dir)"
   [ -d "$dir" ] || return 0
+  # Readability is validated HERE, in the shared reader, for records AND covers:
+  # `claim` used to skip this and return direct-safe from a directory it could
+  # write but not enumerate — silent empty globs read as an empty field.
+  # (codex, impl r2.)
+  { [ -r "$dir" ] && [ -x "$dir" ]; } || { echo "presence: sessions dir unreadable — ISOLATE" >&2; return 4; }
+  if [ -d "$dir/.reap" ]; then
+    { [ -r "$dir/.reap" ] && [ -x "$dir/.reap" ]; } || { echo "presence: reap dir unreadable — ISOLATE" >&2; return 4; }
+  fi
   for f in "$dir"/*.json; do
     [ -f "$f" ] || continue
     [ "$(basename "$f")" = "$self" ] && continue
     verdict="$(presence_eval "$f")"
     [ "$verdict" = "dead" ] && continue
     found=1
+    counted="$counted$(basename "$f" .json) "
     printf 'peer: %s  state=%s  role=%s  (%s)\n' \
       "$(presence_field "$f" name)-$(printf '%.8s' "$(presence_field "$f" instance)")" \
       "$(presence_field "$f" state)" "$(presence_field "$f" role)" "$verdict"
@@ -1927,13 +1940,12 @@ presence_peers() {  # <self-name> <self-instance> — prints peers; return 0 non
   for tomb in "$dir"/.reap/*.tomb.*; do
     [ -f "$tomb" ] || continue
     base="$(basename "$tomb")"; base="${base%%.tomb.*}"
-    # The cover is redundant only when the record was COUNTED above — i.e. it
-    # exists AND evaluates live/ambig. A record classified dead contributed
-    # nothing, so its young cover must still read as a peer, and this also closes
-    # the tomb-before-unlink read window. (codex + grok, impl r1.)
-    if [ -f "$dir/$base.json" ]; then
-      [ "$(presence_eval "$dir/$base.json")" = "dead" ] || continue
-    fi
+    # Skip a cover only when its record was ACTUALLY COUNTED in the first scan —
+    # tracked by basename, never re-read: re-evaluating live state here let a
+    # heal that landed between the two scans hide its own cover while `found`
+    # stayed zero (the newcomer returned direct-safe beside a live peer).
+    # (codex, impl r2.)
+    case "$counted" in *" $base "*) continue ;; esac
     [ "$base" = "$1-$2" ] && continue             # own reaped ghost is not a peer to self
     tepoch="$(sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" | head -1)"
     case "$tepoch" in ''|*[!0-9]*) tepoch=0 ;; esac
@@ -1980,7 +1992,9 @@ cmd_presence() {
       instance="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
       [ -n "$instance" ] || { echo "presence: could not mint an instance token — ISOLATE" >&2; return 4; }
       local pstart=""
-      [ -n "$pid" ] && pstart="$(ps -p "$pid" -o lstart= 2>/dev/null)"
+      # Guarded: a denied/failing ps must yield a pid-less (ambiguity-leaning)
+      # claim, not an errexit abort. (codex, impl r2 advisory.)
+      if [ -n "$pid" ]; then pstart="$(ps -p "$pid" -o lstart= 2>/dev/null)" || pstart=""; fi
       # CLAIM THEN CHECK: record own presence FIRST, evaluate peers second — the
       # ordering that shrinks the simultaneous-start race to seconds.
       if ! presence_write "$dir/$name-$instance.json" "$name" "$instance" "$role" "${state:-working}" "$pid" "$pstart" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; then
@@ -2032,23 +2046,31 @@ cmd_presence() {
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence with-beat: --name and --instance required"
       presence_validate_ids "$name" "$instance" || usage_err "presence with-beat: invalid name/instance"
       [ $# -gt 0 ] || usage_err "presence with-beat: a command is required after --"
-      local parent=$$ beater rc=0 healmark
+      local parent=$$ beater child rc=0 healmark brc
       healmark="$(presence_dir)/.tmp/healed-$name-$instance"
       rm -f "$healmark" 2>/dev/null || true
+      # EVERY command in the beater is errexit-immune: the subshell inherits
+      # set -e, so a bare beat exiting 5 (heal) killed the beater before the
+      # marker line — r1's "eats heal signals" survived the r2 fix as dead code,
+      # and heartbeats stopped for the rest of the child. (codex + grok, impl r2;
+      # grok: `( false; echo AFTER ) &` never prints AFTER.)
       ( while :; do
           sleep $((PRESENCE_TTL_SECS / 3))
           kill -0 "$parent" 2>/dev/null || exit 0   # orphan beater suicide (plan r5)
-          "$0" presence beat --name "$name" --instance "$instance" >/dev/null 2>&1
-          # A beat that HEALED a vanished record (exit 5) must not vanish into the
-          # beater: mark it so the wrapper can surface the re-check rule. (codex, impl r1.)
-          [ $? -eq 5 ] && { : > "$healmark"; } 2>/dev/null || true
+          brc=0
+          "$0" presence beat --name "$name" --instance "$instance" >/dev/null 2>&1 || brc=$?
+          if [ "$brc" -eq 5 ]; then
+            : > "$healmark" 2>/dev/null || true
+          fi
         done ) & beater=$!
-      trap 'kill "$beater" 2>/dev/null || true' INT TERM
-      "$@" || rc=$?
-      # kill/wait MUST be errexit-immune: on bash 3.2 `wait` on a SIGTERM'd job
-      # returns 143, and under set -e that aborted the wrapper BEFORE return — a
-      # green suite came back 143 and integrate refused to land it. Reproduced
-      # in-process by review. (grok, impl r1.)
+      # The child runs in background too so INT/TERM reach BOTH: a signal aimed
+      # at the wrapper alone used to kill only the beater and then return the
+      # surviving child's status as if nothing happened. (codex, impl r2 advisory.)
+      "$@" & child=$!
+      trap 'kill "$child" "$beater" 2>/dev/null || true' INT TERM
+      rc=0; wait "$child" || rc=$?
+      # kill/wait errexit-immune: `wait` on a SIGTERM'd job returns 143 on bash
+      # 3.2 and aborted the wrapper before return. (grok, impl r1.)
       kill "$beater" 2>/dev/null || true
       wait "$beater" 2>/dev/null || true             # join-before-restore
       trap - INT TERM
@@ -2187,19 +2209,26 @@ cmd_integrate() {
   # lease first and trapping later leaked a live integrating lease on every early
   # exit (invalid candidate, non-ff, worktree-add failure), blocking all other
   # integrators until an operator noticed. (codex, impl r1.)
-  local expected cand tw="" rc=0
+  local expected cand tw rc=0
+  # tw is computable BEFORE the trap, so its LITERAL value is baked into the trap
+  # string at set-time (like $root/$name): the previous deferred ${tw:-} expanded
+  # EMPTY when die fired the EXIT trap after function locals were gone, so every
+  # post-add failure leaked a REGISTERED worktree and the documented "fix and
+  # re-run" recovery died on 'missing but already registered worktree'.
+  # (grok, impl r2.)
+  tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
   # shellcheck disable=SC2064
-  # ${tw:-} — the trap fires at PROCESS exit, after this function's locals are
-  # gone; a bare $tw there dies under set -u AFTER a successful landing and turns
-  # a green integrate into rc 1. (found by the r2 suite itself.)
-  trap "if [ -n \"\${tw:-}\" ]; then git -C '$root' worktree remove --force \"\${tw:-}\" >/dev/null 2>&1 || true; fi; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
+  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
   [ -n "$name" ] && [ -n "$instance" ] && "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1
   expected="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" || die "integrate: no refs/heads/main"
   cand="$(git -C "$root" rev-parse --verify "$branch^{commit}" 2>/dev/null)" || die "integrate: cannot resolve '$branch'"
   echo "integrate: candidate $cand (from $branch), expected main $expected"
   git -C "$root" merge-base --is-ancestor "$expected" "$cand" \
     || die "integrate: $branch is not a descendant of main — rebase first (ff-only)"
-  tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
+  # Recover any prior crash's stale registration before adding: remove the entry
+  # if git still knows it, prune dangling metadata, then clear the directory.
+  git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
+  git -C "$root" worktree prune >/dev/null 2>&1 || true
   rm -rf "$tw" 2>/dev/null
   git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || die "integrate: could not materialize $cand"
   # Structured argv: whitespace split only, nothing shell-interpreted. An

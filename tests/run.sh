@@ -4657,6 +4657,20 @@ check_not "a suite that moves HEAD off the candidate is refused" run_pw integrat
 printf 'suite-cmd = \t \n' > "$PW/.comms/config"
 check_not "a whitespace-only suite-cmd is refused (no zero-argv no-op landing)" run_pw integrate worktree-nested
 printf '%s\n' "$PW_CFG2" > "$PW/.comms/config"
+# FAILED presence-wrapped integrate must be RETRYABLE (grok, impl r2: die's EXIT
+# trap fired after locals vanished, the registered worktree leaked, and the
+# documented fix-and-re-run recovery hit 'missing but already registered').
+PW_C6="$(run_pw presence claim --name retrier --role landing)"; PW_I6="$(printf '%s' "$PW_C6" | sed -n 's/.*instance: //p')"
+(cd "$PW/.claude/worktrees/nested" && git merge -q --ff-only "$(cd "$PW" && git rev-parse main)" 2>/dev/null; printf '#!/bin/bash\nexit 1\n' > suite.sh; git add suite.sh; git -c user.email=t@t -c user.name=t commit -qm "red suite")
+(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=retrier COMMS_PRESENCE_INSTANCE="$PW_I6" "$COMMS" integrate worktree-nested) >/dev/null 2>&1; PW_RED=$?
+[ "$PW_RED" != 0 ] && ok "the red presence-wrapped suite refuses to land" || fail "red suite landed"
+(cd "$PW/.claude/worktrees/nested" && printf '#!/bin/bash\ntest -f a.txt\n' > suite.sh && git add suite.sh && git -c user.email=t@t -c user.name=t commit -qm "green suite")
+(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=retrier COMMS_PRESENCE_INSTANCE="$PW_I6" "$COMMS" integrate worktree-nested) >/dev/null 2>&1; PW_RETRY=$?
+[ "$PW_RETRY" = 0 ] && [ "$(cd "$PW" && git rev-parse main)" = "$(cd "$PW" && git rev-parse worktree-nested)" ] \
+  && ok "the SAME instance retries and lands after a failure (no leaked registration)" || fail "retry after red suite rc=$PW_RETRY"
+grep -q '"state": "working"' "$PW_SD/retrier-$PW_I6.json" \
+  && ok "the lease is restored after both the failure and the landing" || fail "lease stuck after retry"
+run_pw presence release --name retrier --instance "$PW_I6"
 
 # with-beat: a beat lands DURING a blocked child (AC1).
 PW_HB_BEFORE="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
@@ -4669,6 +4683,22 @@ run_pw presence with-beat --name alpha --instance "$PW_I1" -- true >/dev/null 2>
 [ "$PW_WB0" = 0 ] && ok "with-beat returns the child's success (not the beater's 143)" || fail "with-beat true rc=$PW_WB0"
 run_pw presence with-beat --name alpha --instance "$PW_I1" -- false >/dev/null 2>&1; PW_WB1=$?
 [ "$PW_WB1" != 0 ] && ok "with-beat returns the child's failure" || fail "with-beat false rc=0"
+# HEAL MID-RUN (codex+grok, impl r2: the set-e beater died on beat exit 5 before
+# the marker line — heal was eaten AND heartbeats stopped): delete the record
+# during with-beat; the warning must surface and a LATER beat must still land.
+rm -f "$PW_SD/alpha-$PW_I1.json"
+PW_WBH="$( (cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 5) 2>&1 )"; PW_WBHRC=$?
+printf '%s\n' "$PW_WBH" | grep -q 'HEALED a vanished record' \
+  && ok "a heal during with-beat surfaces the tenure warning" || fail "heal eaten by the beater"
+[ "$PW_WBHRC" = 0 ] && ok "the healing run still returns the child's status" || fail "heal perturbed rc=$PW_WBHRC"
+PW_HB2="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json" 2>/dev/null)"
+[ -n "$PW_HB2" ] && ok "the beater survived the heal and kept beating (record restored)" || fail "beater died after heal"
+# Unreadable sessions dir: CLAIM must isolate, not report an empty field
+# (codex, impl r2 — validation now lives in the shared reader).
+chmod 300 "$PW_SD" 2>/dev/null
+run_pw presence claim --name reader --role x >/dev/null 2>&1; PW_UR=$?
+chmod 755 "$PW_SD" 2>/dev/null
+[ "$PW_UR" = 4 ] && ok "claim on an unenumerable sessions dir isolates (exit 4)" || fail "claim unreadable rc=$PW_UR"
 # Entry-point validation (codex advisory): a hostile instance is refused everywhere.
 check_not "beat refuses an invalid instance" run_pw presence beat --name alpha --instance '../../etc'
 check_not "release refuses an invalid instance" run_pw presence release --name alpha --instance '*'
