@@ -1092,6 +1092,44 @@ Candidate formalizations to weigh at the reflection (minimal-first):
   role → claimed threads/regions. Same declared-beats-inferred principle as the
   `workspace set` pin; anchors naturally to the per-session worktree.
 
+## Maintainability & implementation-language track (2026-08-26, user direction)
+
+The shell implementation has reached a real refactor threshold, but file size alone is
+not the decision. `comms.sh` is a command router and much of its size is explicit policy;
+`tests/run.sh` is a regression corpus. The stronger signals are responsibility and
+feedback-loop concentration: `runphase.sh`'s `cmd_run` owns argument policy, artifact
+mounting, prompt construction, provider invocation, ACP sessions, supervision, timeout,
+brokering, state, and cleanup; the single test script now carries roughly 800 assertions
+with no subsystem selector; and structured protocol logic (frontmatter, findings,
+verdicts, composition, JSON state) is implemented through repeated awk/sed boundaries.
+
+**DECIDED 2026-08-26 (user): do NOT pursue a wholesale language rewrite.** Bash remains
+the supported installer and orchestration layer for Git/worktrees, cmux, environment
+setup, and external CLI execution. Do not replace all helpers, change the wire protocol,
+or make a new runtime mandatory for non-ACP commands as part of a cleanup. A language
+extraction is evidence-gated, not the default destination.
+
+Sequence — begin only after the current concurrent work lands on a pinned, green tree:
+
+1. [ ] **Behavior-preserving Bash decomposition.** Break `cmd_run` into explicit seams for
+   artifact preparation/cleanup, provider command policy, ACP execution, ordinary process
+   execution, and result finalization. Start within the existing helper if that avoids
+   install and merge churn; smaller files are not themselves the goal.
+2. [ ] **Split the harness by subsystem.** Keep one umbrella `bash tests/run.sh` gate, but
+   move shared fixtures/stubs into test-only helpers, add focused section selection, and
+   separate protocol, runphase/provider, panel/grading, transport, and installer tests.
+   Update the documented assertion count so harness growth is visible rather than stale.
+3. [ ] **Reassess the pure protocol core after those two steps.** If parsing/state defects,
+   duplication, or test friction remain concrete, extract ONLY frontmatter validation,
+   findings/verdict parsing, composition, and JSON state serialization behind the current
+   CLI contract. Node is the preferred candidate because ACP already depends on it; use a
+   dependency-light JavaScript artifact (or compiled TypeScript) and keep shell at the
+   process boundary.
+4. [ ] **Stop if the evidence disappears.** If decomposition and focused tests make the
+   shell core safe to change, do not migrate languages for aesthetics. Any extraction
+   needs before/after protocol fixtures, installed-scope coverage, and byte-for-byte
+   compatibility for existing messages/state before it can ship.
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing
