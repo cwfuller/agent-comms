@@ -42,9 +42,16 @@ success. On exit 4 (unreadable sessions dir, fail-closed) stdout carries only th
 line with no peer rows, so a lost status looks exactly like a free shared checkout in the
 case the protocol exists to catch.
 
+**Only `RC` 0 permits working in the shared checkout.** Every other status isolates or
+stops — there is no "probably fine" branch:
+
 - **`RC` 0** — no live peers; the shared checkout is yours to work in.
 - **`RC` 3 or 4** — peers are present (or liveness is unverifiable, which counts as
   present). Isolate: `helpers/comms.sh worktree new <slug>` and work in that worktree.
+- **anything else** (e.g. 2, an invalid name; or a helper that failed outright) — the
+  claim did NOT succeed, `COMMS_PRESENCE_INSTANCE` is empty, and you have no record at
+  all. Stop, fix the cause, and re-claim. Do not proceed on an empty instance: every
+  later verb will usage-error, and you are invisible to peers while you work.
 
 Heartbeat while you work (`presence beat --name … --instance …`), and `presence release
 --name … --instance …` when done. Wrap long-running children in `presence with-beat --name
@@ -59,13 +66,19 @@ round, an `await`, or a session resume, run
 
 ```bash
 helpers/comms.sh presence others --name "$COMMS_PRESENCE_NAME" --instance "$COMMS_PRESENCE_INSTANCE"
+RC=$?          # same rule as the claim: the STATUS is the decision, not the output
 ```
 
-before your next write — `presence others` requires both flags and, unlike `send` /
-`await` / `integrate`, does *not* read them from the environment. A session that claimed
-`RC` 0, waited out a panel, and wrote without re-checking will collide with the peer that
-arrived during the wait. A `beat` returning exit 5 healed a vanished record and demands the
-same re-check.
+and branch on `RC` exactly as above — 0 keeps the shared checkout, anything else isolates
+or stops. **Do not read this off stdout.** Exit 3 prints `peer:` rows so the output looks
+conclusive, but exit 4 (unreadable sessions dir) prints its ISOLATE warning on *stderr*
+and leaves stdout empty — so "no peer lines" reads as "the field is free" in precisely the
+fail-closed case. `presence others` also requires both flags and, unlike `send` / `await` /
+`integrate`, does *not* read them from the environment.
+
+A session that claimed `RC` 0, waited out a panel, and wrote without re-checking will
+collide with the peer that arrived during the wait. A `beat` returning exit 5 healed a
+vanished record and demands the same re-check.
 
 Task size is not the criterion. Peer presence is.
 
@@ -113,13 +126,16 @@ were live.)
    (`panel dispatch` refuses a request whose `from:` appears in `--to`, so a literal
    `codex,grok` breaks the moment a non-claude agent drives):
    ```bash
-   ME=claude                                    # your registered agent name — must equal the request's `from:`
+   ME=<your-registered-agent-name>              # claude | codex | grok — must EQUAL the request's `from:`
    ROSTER="$(helpers/comms.sh agents --others "$ME")"    # already one comma-separated line
    COMMS_RUNPHASE_TIMEOUT_SECS=3600 helpers/comms.sh panel dispatch --to "$ROSTER" <request-file>
    ```
-   `ME` is the *registered agent* name (`claude`, `codex`, `grok`) — not the presence name
-   from the section above; they are unrelated. It prints an `await:` command per leg, and
-   every leg reviews the same snapshot.
+   Substitute your OWN agent name — do not copy a literal `claude` here, and do not copy
+   `from: claude` out of an example request either. Dispatch refuses a roster containing
+   the author, so impersonating another agent fails loudly; the quieter damage is a review
+   attributed to an agent that did not write it. `ME` is the *registered agent* name, not
+   the presence name from the section above; they are unrelated. Dispatch prints an
+   `await:` command per leg, and every leg reviews the same snapshot.
 4. **Wait for every leg, then compose** — `helpers/comms.sh compose --set <id>` (the set
    id is printed by dispatch; `panel status --set <id>` shows who has answered). Compose
    refuses a partial panel and labels findings by corroboration. A lone approval is not
@@ -144,9 +160,15 @@ bash tests/run.sh
 ```
 
 One umbrella suite. It is slow — measured 2026-08-27 at 505s for 932 assertions on an
-unloaded machine — and that is a known problem being worked; see the "Suite runtime"
-subsection of `docs/ROADMAP.md`, which cites this same profile. The cost is concentrated,
-not spread: ten of the 59 sections account for ~87% of it.
+unloaded machine — and that is a known problem being actively worked; see the "Suite
+runtime" subsection of `docs/ROADMAP.md`. The cost is concentrated, not spread: ten of the
+59 sections account for ~87% of it.
+
+> Note (2026-08-27): the ROADMAP subsection still carries the pre-measurement ESTIMATE
+> (~8–12 min at ~912 assertions, spawn overhead "likely dominant"). That estimate was
+> refuted by the profile above — spawns are ~5% of runtime — and the rewrite is owned by
+> the session that measured it. Where the two disagree today, the figures here are the
+> measured ones. Delete this note once ROADMAP lands the profile.
 
 - A **fully green** run records an attestation for the exact commit it started on
   (`attest-green`), which lets `integrate` skip a redundant re-run of identical code when
