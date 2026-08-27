@@ -11,9 +11,13 @@ cap, is what keeps a plan phase from becoming a document-nit loop.
 
 ## Instructions
 
-0. **Presence gate — before touching the tree.** Claim presence, then let the exit
-   code decide WHERE you work (never how much — task size is irrelevant by design):
+0. **Presence gate — before touching the tree.** Resolve the helper FIRST (this step
+   runs before step 2, so it cannot borrow that resolution), claim presence, then let
+   the exit code decide WHERE you work (never how much — task size is irrelevant by
+   design):
    ```bash
+   COMMS_SH="$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')/.agent-comms/comms.sh"
+   [ -x "$COMMS_SH" ] || COMMS_SH="$HOME/.agent-comms/comms.sh"
    CLAIM="$("$COMMS_SH" presence claim --name "<session-name>" --role "<one-line task>")"; RC=$?
    export COMMS_PRESENCE_NAME="<session-name>" COMMS_PRESENCE_INSTANCE="$(printf '%s' "$CLAIM" | sed -n 's/.*instance: //p')"
    ```

@@ -36,6 +36,14 @@
 #   reconcile <message-file|message-id>   record a successful external/direct nudge
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
+#   presence <claim|beat|others|release|expire|with-beat>
+#                               advisory multi-session coordination on .comms/sessions/
+#                               (claim-then-check: 0 direct-safe / 3 peers / 4 isolate;
+#                               beat exit 5 = healed, re-check before writing)
+#   worktree new [<slug>]       session worktree under the MAIN root, local-tip base
+#   integrate <branch>          land on main: lease + ff + suite at the candidate OID
+#                               in a detached worktree + CAS update-ref (suite-cmd
+#                               config required)
 #   bind <claude|codex> [surface:N]   pin which surface delivery targets (show with no arg)
 #   clean --as <agent> [workspace|all|archive|<file>] [--yes]
 #                               guarded delete; dry-run without --yes; own-inbox default
@@ -1835,6 +1843,13 @@ agent_version() {  # best-effort CLI identity — empty beats a guess
 PRESENCE_TTL_SECS="${COMMS_PRESENCE_TTL_SECS:-2700}"
 
 presence_dir() { printf '%s/.comms/sessions' "$(main_repo_root)"; }
+presence_validate_ids() {  # <name> [instance] — strict grammar at EVERY entry point:
+  # these values become record paths, glob deletions, an rm -rf target, and trap
+  # text. Validating only at claim left every later verb injectable. (codex, impl r1.)
+  printf '%s' "$1" | grep -qE '^[a-z0-9][a-z0-9._-]{0,40}$' || return 1
+  [ $# -lt 2 ] || [ -z "$2" ] || printf '%s' "$2" | grep -qE '^[a-z0-9]{8,64}$' || return 1
+  return 0
+}
 presence_host() { hostname 2>/dev/null || echo unknown-host; }
 presence_field() { sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1; }
 
@@ -1868,13 +1883,27 @@ presence_eval() {  # <record> — prints live|dead|ambig. FAIL CLOSED: every unc
   # start-time identity so a recycled pid cannot keep a dead claim alive.
   pid="$(presence_field "$f" pid)"
   case "$pid" in ''|*[!0-9]*) echo ambig; return 0 ;; esac  # stale + no pid → ambig
-  if ps -p "$pid" -o pid= >/dev/null 2>&1; then
+  # `ps` failing is NOT death: in a sandbox ps itself can be permission-denied
+  # (exit 126) and a live stale session would have been reaped. Only exit 1 with
+  # empty output is the-pid-does-not-exist; every other failure is ambiguous.
+  # (codex, impl r1 — found running in exactly such a sandbox.)
+  local psout psrc
+  psout="$(ps -p "$pid" -o pid= 2>/dev/null)"; psrc=$?
+  if [ "$psrc" -eq 0 ] && [ -n "$psout" ]; then
     pstart="$(presence_field "$f" pid_started)"
-    [ -n "$pstart" ] && [ "$(ps -p "$pid" -o lstart= 2>/dev/null)" = "$pstart" ] \
+    [ -n "$pstart" ] || { echo ambig; return 0; }   # live pid, no recorded identity → ambig
+    local nowstart
+    nowstart="$(ps -p "$pid" -o lstart= 2>/dev/null)" || { echo ambig; return 0; }
+    [ -n "$nowstart" ] || { echo ambig; return 0; } # identity uncheckable → ambig
+    # Whitespace-normalized compare: COLUMNS/ps padding must not flake liveness.
+    [ "$(echo $nowstart)" = "$(echo $pstart)" ] \
       && { echo live; return 0; }     # same process, just stale (suspend) → live
     echo dead; return 0               # pid recycled: the recorded process is gone
+  elif [ "$psrc" -eq 1 ] && [ -z "$psout" ]; then
+    echo dead                          # ESRCH-confirmed absent
+  else
+    echo ambig                         # ps could not answer — never death
   fi
-  echo dead                           # ESRCH-confirmed absent
 }
 
 presence_peers() {  # <self-name> <self-instance> — prints peers; return 0 none / 3 peers.
@@ -1898,7 +1927,13 @@ presence_peers() {  # <self-name> <self-instance> — prints peers; return 0 non
   for tomb in "$dir"/.reap/*.tomb.*; do
     [ -f "$tomb" ] || continue
     base="$(basename "$tomb")"; base="${base%%.tomb.*}"
-    [ -f "$dir/$base.json" ] && continue          # record back → cover is redundant
+    # The cover is redundant only when the record was COUNTED above — i.e. it
+    # exists AND evaluates live/ambig. A record classified dead contributed
+    # nothing, so its young cover must still read as a peer, and this also closes
+    # the tomb-before-unlink read window. (codex + grok, impl r1.)
+    if [ -f "$dir/$base.json" ]; then
+      [ "$(presence_eval "$dir/$base.json")" = "dead" ] || continue
+    fi
     [ "$base" = "$1-$2" ] && continue             # own reaped ghost is not a peer to self
     tepoch="$(sed -n 's/^#tomb \([0-9]*\).*/\1/p' "$tomb" | head -1)"
     case "$tepoch" in ''|*[!0-9]*) tepoch=0 ;; esac
@@ -1939,7 +1974,7 @@ cmd_presence() {
   case "$sub" in
     claim)
       [ -n "$name" ] || usage_err "presence claim: --name required"
-      printf '%s' "$name" | grep -qE '^[a-z0-9][a-z0-9._-]{0,40}$' \
+      presence_validate_ids "$name" \
         || usage_err "presence claim: invalid name '$(clip "$name")'"
       case "$pid" in *[!0-9]*) usage_err "presence claim: --pid must be numeric" ;; esac
       instance="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
@@ -1957,6 +1992,7 @@ cmd_presence() {
       ;;
     beat)
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence beat: --name and --instance required"
+      presence_validate_ids "$name" "$instance" || usage_err "presence beat: invalid name/instance"
       local rec="$dir/$name-$instance.json" healed=0 orole ostate opid opstart ostarted
       if [ -f "$rec" ]; then
         # Token match is implicit in the path: this file IS ours or it does not exist.
@@ -1977,12 +2013,14 @@ cmd_presence() {
       ;;
     others)
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence others: --name and --instance required"
+      presence_validate_ids "$name" "$instance" || usage_err "presence others: invalid name/instance"
       [ -d "$dir" ] || return 0
       [ -r "$dir" ] || { echo "presence: sessions dir unreadable — ISOLATE" >&2; return 4; }
       presence_peers "$name" "$instance"
       ;;
     release)
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence release: --name and --instance required"
+      presence_validate_ids "$name" "$instance" || usage_err "presence release: invalid name/instance"
       # Exact-self deletion only — the token is the path, so a same-name successor's
       # record is untouchable by construction. (Deletion invariant, plan r5.)
       rm -f "$dir/$name-$instance.json" 2>/dev/null || true
@@ -1992,17 +2030,32 @@ cmd_presence() {
       ;;
     with-beat)
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence with-beat: --name and --instance required"
+      presence_validate_ids "$name" "$instance" || usage_err "presence with-beat: invalid name/instance"
       [ $# -gt 0 ] || usage_err "presence with-beat: a command is required after --"
-      local parent=$$ beater rc=0
+      local parent=$$ beater rc=0 healmark
+      healmark="$(presence_dir)/.tmp/healed-$name-$instance"
+      rm -f "$healmark" 2>/dev/null || true
       ( while :; do
           sleep $((PRESENCE_TTL_SECS / 3))
           kill -0 "$parent" 2>/dev/null || exit 0   # orphan beater suicide (plan r5)
-          "$0" presence beat --name "$name" --instance "$instance" >/dev/null 2>&1 || true
+          "$0" presence beat --name "$name" --instance "$instance" >/dev/null 2>&1
+          # A beat that HEALED a vanished record (exit 5) must not vanish into the
+          # beater: mark it so the wrapper can surface the re-check rule. (codex, impl r1.)
+          [ $? -eq 5 ] && { : > "$healmark"; } 2>/dev/null || true
         done ) & beater=$!
-      trap 'kill "$beater" 2>/dev/null' INT TERM
+      trap 'kill "$beater" 2>/dev/null || true' INT TERM
       "$@" || rc=$?
-      kill "$beater" 2>/dev/null; wait "$beater" 2>/dev/null   # join-before-restore
+      # kill/wait MUST be errexit-immune: on bash 3.2 `wait` on a SIGTERM'd job
+      # returns 143, and under set -e that aborted the wrapper BEFORE return — a
+      # green suite came back 143 and integrate refused to land it. Reproduced
+      # in-process by review. (grok, impl r1.)
+      kill "$beater" 2>/dev/null || true
+      wait "$beater" 2>/dev/null || true             # join-before-restore
       trap - INT TERM
+      if [ -f "$healmark" ]; then
+        rm -f "$healmark" 2>/dev/null || true
+        echo "presence: a beat during this run HEALED a vanished record — tenure is NOT restored; re-run claim-then-check before the next shared-checkout write" >&2
+      fi
       return "$rc"
       ;;
     *) usage_err "presence: expected claim|beat|others|release|expire|with-beat" ;;
@@ -2021,6 +2074,7 @@ presence_expire() {  # <dir> [force-name] — the ONLY verb that deletes OTHERS'
   now="$(date +%s)"
   mkdir -p "$reap" 2>/dev/null || { echo "expire: cannot use $reap" >&2; return 1; }
   if [ -n "$force" ]; then
+    presence_validate_ids "$force" || { echo "expire: invalid --force name" >&2; return 1; }
     # Explicit operator path for forever-ambiguous entries (foreign host, no pid).
     rm -f "$dir/$force"-*.json "$reap/$force"-* 2>/dev/null || true
     echo "expire: forced removal of every '$force' record and artifact"
@@ -2126,8 +2180,20 @@ cmd_integrate() {
       die "integrate: $(presence_field "$f" name) holds a live integrating lease — serialize (advisory; re-run when it releases)"
     done
   fi
+  if [ -n "$name" ] || [ -n "$instance" ]; then
+    presence_validate_ids "$name" "$instance" || die "integrate: invalid presence name/instance"
+  fi
+  # The restoration trap is installed BEFORE the first state mutation: setting the
+  # lease first and trapping later leaked a live integrating lease on every early
+  # exit (invalid candidate, non-ff, worktree-add failure), blocking all other
+  # integrators until an operator noticed. (codex, impl r1.)
+  local expected cand tw="" rc=0
+  # shellcheck disable=SC2064
+  # ${tw:-} — the trap fires at PROCESS exit, after this function's locals are
+  # gone; a bare $tw there dies under set -u AFTER a successful landing and turns
+  # a green integrate into rc 1. (found by the r2 suite itself.)
+  trap "if [ -n \"\${tw:-}\" ]; then git -C '$root' worktree remove --force \"\${tw:-}\" >/dev/null 2>&1 || true; fi; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
   [ -n "$name" ] && [ -n "$instance" ] && "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1
-  local expected cand tw rc=0
   expected="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" || die "integrate: no refs/heads/main"
   cand="$(git -C "$root" rev-parse --verify "$branch^{commit}" 2>/dev/null)" || die "integrate: cannot resolve '$branch'"
   echo "integrate: candidate $cand (from $branch), expected main $expected"
@@ -2136,21 +2202,36 @@ cmd_integrate() {
   tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
   rm -rf "$tw" 2>/dev/null
   git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || die "integrate: could not materialize $cand"
-  # shellcheck disable=SC2064
-  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
-  # Structured argv: whitespace split only, nothing shell-interpreted.
+  # Structured argv: whitespace split only, nothing shell-interpreted. An
+  # empty/whitespace-only suite-cmd expanded to zero argv and SUCCEEDED as a
+  # no-op — the exact unverified landing the config gate exists to refuse.
+  # (codex, impl r1.)
   set -f; set -- $suite_cmd; set +f
+  [ $# -gt 0 ] || die "integrate: suite-cmd is empty after splitting — refusing to land unverified"
   if [ -n "$name" ] && [ -n "$instance" ]; then
     ( cd "$tw" && "$0" presence with-beat --name "$name" --instance "$instance" -- "$@" ) || rc=$?
   else
     ( cd "$tw" && "$@" ) || rc=$?
   fi
   [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; fix on the branch and re-run"
-  [ -z "$(git -C "$tw" status --porcelain 2>/dev/null)" ] || die "integrate: the suite dirtied the verification tree — refusing to trust the result"
-  git -C "$root" worktree list --porcelain | grep -qx 'branch refs/heads/main' \
+  # BIND the result to the candidate: a suite that checked out another OID and
+  # passed there proves nothing about $cand. Every verification below fails
+  # CLOSED — a command that cannot answer refuses the landing. (codex, impl r1.)
+  local tw_head tw_status wt_list
+  tw_head="$(git -C "$tw" rev-parse HEAD 2>/dev/null)" || die "integrate: cannot read the verification tree's HEAD — refusing"
+  [ "$tw_head" = "$cand" ] || die "integrate: the verification tree is at $tw_head, not the candidate $cand — the suite result is not about this landing; refusing"
+  tw_status="$(git -C "$tw" status --porcelain 2>/dev/null)" || die "integrate: cannot read the verification tree's status — refusing"
+  [ -z "$tw_status" ] || die "integrate: the suite dirtied the verification tree — refusing to trust the result"
+  wt_list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || die "integrate: cannot enumerate worktrees — refusing"
+  printf '%s\n' "$wt_list" | grep -qx 'branch refs/heads/main' \
     && die "integrate: main is checked out somewhere — refusing (never-occupy-main)"
   git -C "$root" update-ref refs/heads/main "$cand" "$expected" \
     || die "integrate: main moved (CAS refused) — nothing landed; re-run to re-verify against the new tip"
+  # Success path: clean up and clear the trap NOW, inside function scope, so the
+  # process-exit path has nothing deferred left to evaluate.
+  git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
+  [ -n "$name" ] && "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
+  trap - EXIT
   echo "integrate: LANDED $cand as main (was $expected); suite green at the landed OID"
 }
 
@@ -3325,6 +3406,14 @@ cmd_send() {
       noop)    echo "already archived or absent (no-op): $(basename "$archive_inbound")" ;;
       warn-no-owner) echo "warning: outbound has no registered 'from:' — inbound NOT archived; archive it manually" >&2 ;;
     esac
+  fi
+  # A send is a work checkpoint: beat presence here so a driver mid-loop never
+  # goes stale between rounds ("beats ride work" — user amendment, plan final
+  # round; the template's claim was false until this line — codex, impl r1).
+  # Advisory: a beat failure never touches the send outcome; a HEAL warning
+  # passes through on stderr for the driver to act on.
+  if [ -n "${COMMS_PRESENCE_NAME:-}" ] && [ -n "${COMMS_PRESENCE_INSTANCE:-}" ]; then
+    "$0" presence beat --name "$COMMS_PRESENCE_NAME" --instance "$COMMS_PRESENCE_INSTANCE" || true
   fi
   # Loud outcome — emitted LAST so `tail -1` of send is always the RESULT line
   # on every path, including --archive-inbound (the main autonomous path).

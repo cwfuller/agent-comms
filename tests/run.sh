@@ -4636,20 +4636,76 @@ check_not "a failed suite refuses to land" run_pw integrate worktree-featone
 PW_C4="$(run_pw presence claim --name landlord --role "landing" --state integrating)"; PW_I4="$(printf '%s' "$PW_C4" | sed -n 's/.*instance: //p')"
 check_not "a live integrating lease refuses a second integrator" run_pw integrate worktree-nested
 run_pw presence release --name landlord --instance "$PW_I4"
+# Lease restoration on EARLY exit (codex, impl r1: trap installed after the state
+# mutation leaked a live integrating lease on invalid candidates).
+PW_C5="$(run_pw presence claim --name lander --role "landing")"; PW_I5="$(printf '%s' "$PW_C5" | sed -n 's/.*instance: //p')"
+(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=lander COMMS_PRESENCE_INSTANCE="$PW_I5" "$COMMS" integrate no-such-branch) >/dev/null 2>&1
+grep -q '"state": "working"' "$PW_SD/lander-$PW_I5.json" \
+  && ok "an early integrate exit restores the lease (trap precedes mutation)" || fail "lease leaked on early exit: $(grep state "$PW_SD/lander-$PW_I5.json")"
+# Presence-wrapped landing actually lands (grok, impl r1: the 143 path refused
+# green suites; every earlier integrate test ran WITHOUT the presence env).
+(cd "$PW/.claude/worktrees/nested" && git merge -q --ff-only "$(cd "$PW" && git rev-parse main)" 2>/dev/null; echo e > e.txt; git add e.txt; git -c user.email=t@t -c user.name=t commit -qm "feat: e")
+(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=lander COMMS_PRESENCE_INSTANCE="$PW_I5" "$COMMS" integrate worktree-nested) >/dev/null 2>&1; PW_LAND=$?
+[ "$PW_LAND" = 0 ] && [ "$(cd "$PW" && git rev-parse main)" = "$(cd "$PW" && git rev-parse worktree-nested)" ] \
+  && ok "a presence-wrapped integrate lands a green suite (the 143 regression)" || fail "presence-wrapped landing rc=$PW_LAND"
+run_pw presence release --name lander --instance "$PW_I5"
+# Suite result must be BOUND to the candidate (codex, impl r1): a suite that moves
+# HEAD passes elsewhere and must be refused.
+PW_CFG2="$(cat "$PW/.comms/config")"
+printf 'suite-cmd = git checkout --detach HEAD~1\n' > "$PW/.comms/config"
+check_not "a suite that moves HEAD off the candidate is refused" run_pw integrate worktree-nested
+printf 'suite-cmd = \t \n' > "$PW/.comms/config"
+check_not "a whitespace-only suite-cmd is refused (no zero-argv no-op landing)" run_pw integrate worktree-nested
+printf '%s\n' "$PW_CFG2" > "$PW/.comms/config"
 
 # with-beat: a beat lands DURING a blocked child (AC1).
 PW_HB_BEFORE="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
 (cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 4) >/dev/null 2>&1
 PW_HB_AFTER="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
 [ "$PW_HB_AFTER" != "$PW_HB_BEFORE" ] && ok "with-beat lands a heartbeat DURING a blocked child" || fail "no beat during block"
+# with-beat rc contract (grok, impl r1: wait-on-SIGTERM'd-beater returned 143 under
+# errexit and green suites refused to land — the timestamp test alone missed it).
+run_pw presence with-beat --name alpha --instance "$PW_I1" -- true >/dev/null 2>&1; PW_WB0=$?
+[ "$PW_WB0" = 0 ] && ok "with-beat returns the child's success (not the beater's 143)" || fail "with-beat true rc=$PW_WB0"
+run_pw presence with-beat --name alpha --instance "$PW_I1" -- false >/dev/null 2>&1; PW_WB1=$?
+[ "$PW_WB1" != 0 ] && ok "with-beat returns the child's failure" || fail "with-beat false rc=0"
+# Entry-point validation (codex advisory): a hostile instance is refused everywhere.
+check_not "beat refuses an invalid instance" run_pw presence beat --name alpha --instance '../../etc'
+check_not "release refuses an invalid instance" run_pw presence release --name alpha --instance '*'
+# ps-failure ambiguity (codex, impl r1: a sandboxed ps exits 126 and a live stale
+# session was read as dead and reaped).
+PW_PSBIN="$WORK/psfail"; mkdir -p "$PW_PSBIN"
+printf '#!/bin/bash\nexit 126\n' > "$PW_PSBIN/ps"; chmod +x "$PW_PSBIN/ps"
+printf '{\n  "name": "sandboxed", "instance": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "state": "working", "host": "%s", "pid": "12345", "pid_started": "x", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" > "$PW_SD/sandboxed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+PW_PSO="$( (cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 PATH="$PW_PSBIN:$PATH" "$COMMS" presence others --name alpha --instance "$PW_I1") || true)"
+printf '%s\n' "$PW_PSO" | grep -q 'sandboxed' \
+  && ok "a ps that cannot answer keeps the record ambiguous (peer, not dead)" || fail "ps failure read as death"
+(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 PATH="$PW_PSBIN:$PATH" "$COMMS" presence expire) >/dev/null 2>&1
+(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 PATH="$PW_PSBIN:$PATH" "$COMMS" presence expire) >/dev/null 2>&1
+[ -f "$PW_SD/sandboxed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json" ] \
+  && ok "expire never reaps under a failing ps" || fail "reaped on ps failure"
+rm -f "$PW_SD/sandboxed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json" "$PW_SD/.reap/sandboxed"-* 2>/dev/null
+# Young cover beside a DEAD record still reads as a peer (codex+grok, impl r1).
+printf '{\n  "name": "shade", "instance": "99999999999999999999999999999999", "state": "working", "host": "%s", "pid": "99999999", "pid_started": "gone", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" > "$PW_SD/shade-99999999999999999999999999999999.json"
+printf '#tomb %s\n' "$(date +%s)" > "$PW_SD/.reap/shade-99999999999999999999999999999999.tomb.cafe1234"
+PW_SHO="$(run_pw presence others --name alpha --instance "$PW_I1" || true)"
+printf '%s\n' "$PW_SHO" | grep -q 'shade.*reaped-cover' \
+  && ok "a young cover beside a DEAD record is still a peer" || fail "dead record hid its cover"
+rm -f "$PW_SD/shade-99999999999999999999999999999999.json" "$PW_SD/.reap/shade"-* 2>/dev/null
 run_pw presence release --name alpha --instance "$PW_I1"
 
 # Template wiring (AC4): the gate and the re-check rule are in the always-loaded surfaces.
 grep -q 'presence claim' "$REPO/templates/claude-commands/auto.md" \
   && grep -qi 'After EVERY wait' "$REPO/templates/claude-commands/auto.md" \
   && ok "auto.md carries the presence gate and the post-wait re-check" || fail "auto.md presence wiring"
-grep -qi 'Presence re-check after the wait' "$REPO/templates/claude-commands/read-from-codex.md" \
-  && ok "the reader re-checks presence after reviewer waits" || fail "reader presence wiring"
+# Step 0 runs before the helper-resolution step, so it must resolve COMMS_SH itself
+# (codex, impl r1: the gate invoked an unset variable on every fresh session).
+awk '/^0\. \*\*Presence gate/,/^1\. \*\*Parse/' "$REPO/templates/claude-commands/auto.md" | grep -q 'COMMS_SH="\$(git worktree list' \
+  && ok "the gate resolves its own helper before claiming" || fail "gate uses unresolved COMMS_SH"
+grep -qi 'Presence re-check after the wait — single-reviewer and panel alike' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "the reader re-checks presence on the COMMON autonomous path" || fail "reader presence wiring"
+grep -qi 'presence <claim|beat' "$REPO/helpers/comms.sh" \
+  && ok "comms.sh help names the presence/worktree/integrate verbs" || fail "help drift"
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"

@@ -159,12 +159,6 @@ never a re-derived one.
   Never reply to one leg and leave the others on the old artifact: `compose` is
   round-scoped, so a half-advanced set reports incomplete forever.
 - Record a `round-note` per leg, not one for the panel — performance is per reviewer.
-- **Presence re-check after the wait.** A read happens after a reviewer wait by
-  definition: if this session works DIRECT in the shared checkout, re-run
-  `"$COMMS_SH" presence others --name "$COMMS_PRESENCE_NAME" --instance
-  "$COMMS_PRESENCE_INSTANCE"` BEFORE the next write there — a peer that arrived
-  during the wait means finish this loop from a worktree. Direct is a state you
-  re-earn at every checkpoint, never tenure.
 
 ### Autonomous flow — `workflow` field present
 
@@ -187,6 +181,13 @@ ROSTER="$(awk -F'\t' -v s="$SET" 'NR>1 && $(1)==s {print $(10)}' "$SETS" | paste
 ```
 (Only the error lane stays per-leg: a malformed reply is one leg's problem and its
 error reply routes to that leg's reviewer alone.)
+
+**Presence re-check after the wait — single-reviewer and panel alike.** A read
+happens after a reviewer wait by definition: if this session works DIRECT in the
+shared checkout, re-run `"$COMMS_SH" presence others --name "$COMMS_PRESENCE_NAME"
+--instance "$COMMS_PRESENCE_INSTANCE"` BEFORE the next write there — a peer that
+arrived during the wait means finish this loop from a worktree. Direct is a state
+you re-earn at every checkpoint, never tenure.
 
 **Check termination conditions first:**
 

@@ -1381,6 +1381,17 @@ cmd_await() {
       echo "await: timed out after ${timeout}s — the turn may still be running (run dir: $run_dir)" >&2
       return 1
     fi
+    # An await IS the long wait presence beats exist for: refresh at TTL/3 cadence
+    # while blocked so a reviewer round cannot stale the driver's claim. Advisory —
+    # a beat failure never perturbs the await; heal warnings pass through stderr.
+    # ("beats ride waits" — plan §4; the template claimed this before it was true.)
+    if [ -n "${COMMS_PRESENCE_NAME:-}" ] && [ -n "${COMMS_PRESENCE_INSTANCE:-}" ]; then
+      _pnow="$(date +%s)"
+      if [ $(( _pnow - ${_plast_beat:-0} )) -ge $(( ${COMMS_PRESENCE_TTL_SECS:-2700} / 3 )) ]; then
+        _plast_beat="$_pnow"
+        "$COMMS" presence beat --name "$COMMS_PRESENCE_NAME" --instance "$COMMS_PRESENCE_INSTANCE" || true
+      fi
+    fi
     sleep 2
   done
 }
