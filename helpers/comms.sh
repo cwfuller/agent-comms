@@ -2841,7 +2841,9 @@ cmd_send() {
     # the fresh path — snapshotting the live tree and silently overwriting the
     # supplied pin. Presence is counted; values are judged after. (codex, round 4.)
     aid_ct="$(fm_field_lines "$file" artifact_id | wc -l | tr -d ' ')"
-    existing_aid="$(fm_field_lines "$file" artifact_id | head -1)"
+    # No `head` in a $() pipeline under pipefail (latent SIGPIPE kill — this
+    # file already avoids that shape in cmd_list); read the first line directly.
+    IFS= read -r existing_aid < <(fm_field_lines "$file" artifact_id) || existing_aid=""
     if [ "${aid_ct:-0}" -eq 0 ]; then
       # Fresh dispatch: retain the tree and stamp the WHOLE git identity from the
       # one snapshot operation — artifact_id names the content, head_sha the base

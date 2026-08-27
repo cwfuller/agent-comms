@@ -8,6 +8,25 @@ emits whole `## ` sections up to a byte budget, ordered by the date in each head
 physical order here may be mixed and writers may append or prepend freely. A section
 whose heading carries no `YYYY-MM-DD` sorts last (but is never dropped).
 
+## 2026-08-27 — thread `stamped-authorities-19085` (auto panel codex+grok, implement r5/5, double APPROVE)
+
+Field items #3 (workspace identity pinning) + #6 (helper-stamped git metadata) shipped
+across five review rounds (a5b6bd0..8c084ba). Carry-over:
+
+- **Both final advisories fixed post-approve in the closing commit** (cheap, exact
+  shapes supplied): the head_sha trailing-blank fixture now inserts after the valued
+  line (it was actually blank-first) and first-value extraction reads via process
+  substitution instead of `head` in a pipefail pipeline (latent SIGPIPE).
+- **`shadow` still pairs a fresh `snapshot create` with the request's head_sha**
+  (DEFERRED, flagged rounds 2-5, out of the loop's declared scope): it should use
+  `snapshot create --with-base` like send/dispatch so its ledger base is
+  object-derived too.
+- **Positive signal worth keeping**: the loop's five REQUEST_CHANGES rounds each
+  found a bypass in the previous round's own fix (symbolic ids, first-value-only
+  reads, subject-only object tests, command-substitution stripping) — the
+  declared-beats-inferred principle held every time: each fix replaced an inference
+  with a declaration derived from the object itself.
+
 ## 2026-08-22 — thread `grading-pilot-14076` (auto-implement, APPROVED round 4)
 
 The grading pilot's first slice, reviewed by codex over four rounds: ten blocking findings,

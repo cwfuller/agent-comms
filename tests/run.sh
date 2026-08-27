@@ -2074,8 +2074,7 @@ rm -f "$SA_FIX/.comms/to-claude/foo_bar_2026-08-26T15-40-00_x-1.md" "$SA_FIX/.co
 # valid head_sha + TRAILING bare `head_sha:` — command substitution used to eat it
 SA_TB="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T16-20-00_trailblank-1.md"
 sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T16-20-00_trailblank-1/' "$SA_RS" > "$SA_TB"
-awk '{print} /^head_sha:/ && !d {d=1}' "$SA_TB" > "$SA_TB.t" && mv "$SA_TB.t" "$SA_TB"
-awk -v done=0 '{print; if (!done && $0 ~ /^round:/) {print "head_sha:"; done=1}}' "$SA_TB" > "$SA_TB.t" && mv "$SA_TB.t" "$SA_TB"
+awk -v done=0 '{print; if (!done && $0 ~ /^head_sha: /) {print "head_sha:"; done=1}}' "$SA_TB" > "$SA_TB.t" && mv "$SA_TB.t" "$SA_TB"
 [ "$(grep -c '^head_sha' "$SA_TB")" = "2" ] || fail "trailing-blank fixture construction"
 TB_OUT="$(run_sa send --to codex "$SA_TB" 2>&1)" && tb_rc=0 || tb_rc=$?
 [ "$tb_rc" -ne 0 ] && echo "$TB_OUT" | grep -q 'mismatched pair' \

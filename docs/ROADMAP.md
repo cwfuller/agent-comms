@@ -1217,3 +1217,35 @@ Full narrative in the archived report
 
 Priority per the coordinator: 1–4 small with this incident as their test case; 5–6
 would have most shortened recovery; 7 is deployment guidance.
+
+
+## Declared-beats-inferred (2026-08-27 — the day's unifying invariant)
+
+Named by presence-worktrees-3a, endorsed by all drivers: **an inference that can
+drift must be replaced by a declaration that cannot.** One entry, everything
+cross-referenced; the individual filings fold in here.
+
+- [x] **Message layer** — shipped as the stamped-authorities loop (field items #3/#6,
+  a5b6bd0..8c084ba, five rounds, double APPROVE): workspace identity is a repo-scoped
+  PIN, not a title inference; artifact_id/head_sha are stamped from one snapshot
+  object, never hand-typed or live-derived; field presence is physical lines, never
+  value truthiness; every value is checked, unstripped, then normalized.
+- [ ] **Session layer** (presence arc, in flight with presence-worktrees-3a):
+  declared roles + pid + start-time in `.comms/sessions/` make a resume-fork twin
+  self-evident at claim-then-check; one live process per session.
+- [ ] **Run layer**: panel run dirs and leg filenames must EMBED the thread —
+  three simultaneous `panel-codex-NNNNN` dirs were indistinguishable without opening
+  messages, which enabled the 2026-08-27 wrong-kill (7b's r6 codex reviewer).
+  Corollary rule, effective immediately: **killing a reviewer pid requires a
+  mechanical leg-thread check first** (open the leg, match the thread), same lane as
+  takeover-parking.
+- [ ] **Relay layer**: coordination relays get the verify-from-source discipline
+  reviews already get — two same-day relay-attribution errors (the misattributed
+  tests/run.sh WIP; the 89343-as-r5 misattribution) were both resolved by opening
+  the artifact instead of trusting timing/pid heuristics.
+- [ ] **Arrival layer**: under acp/headless the only finished-panel signal is the
+  driver's own await, and awaits die with their process (all of them died in the
+  2026-08-27 freeze; verdicts became silent stalls until a human relayed them).
+  Needed: a durable, re-armable driver-side arrival signal — `panel status
+  --notify`, a harness-owned inbox watcher that re-arms on resume, or a
+  deliver-to-driver nudge for cmux-hosted drivers.
