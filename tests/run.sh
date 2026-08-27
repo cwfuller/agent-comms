@@ -4606,6 +4606,7 @@ run_pw presence expire >/dev/null 2>&1
 
 # worktree new (AC4/AC6): grammar, ignore-gate, local tip, main-root anchoring.
 check_not "worktree new refuses a bad slug" run_pw worktree new 'Bad/Slug'
+check_not "worktree new refuses a multiline slug (whole-scalar, not per-line)" run_pw worktree new "$(printf 'feat\n../../tmp')"
 (cd "$PW" && git checkout -q -b session-primary)   # never-occupy-main migration
 run_pw worktree new featone >/dev/null 2>&1 && [ -d "$PW/.claude/worktrees/featone" ] \
   && ok "worktree new creates under .claude/worktrees on its own branch" || fail "worktree new"
@@ -4764,6 +4765,31 @@ PW_CANCEL_OUT="$(bash -c '
     fi
     rm -f /tmp/pwcancel.$$.err
   done
+  # Instant-exit child: the child can finish with rc 0 BEFORE the INT lands, so
+  # only the status coercion keeps a latched cancellation nonzero — the sleeping
+  # child above never samples that path (grok, impl r8 advisory). A bare
+  # kill-then-wait is FLAKY here: kill succeeds on a zombie too, and a wrapper
+  # that finished uncancelled legitimately returns 0 (the r5 lesson). So each
+  # iteration is STOP-gated: freeze the wrapper, confirm it is stopped and not a
+  # zombie, queue the INT, thaw — a counted INT is provably delivered alive.
+  fastn=0
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    set -m
+    ( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- true ) 2>/tmp/pwcancel.$$.err & p=$!
+    set +m
+    kill -STOP "$p" 2>/dev/null || true
+    st="$(ps -p "$p" -o stat= 2>/dev/null || true)"
+    case "$st" in
+      *Z*|"") kill -CONT "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true ;;
+      *) kill -INT "$p" 2>/dev/null || true
+         kill -CONT "$p" 2>/dev/null || true
+         fastn=$((fastn + 1)); delivered=$((delivered + 1))
+         rc=0; wait "$p" 2>/dev/null || rc=$?
+         if [ "$rc" -eq 0 ]; then false0=$((false0 + 1)); echo "ZERO at fast-iter $i:"; cat /tmp/pwcancel.$$.err; fi ;;
+    esac
+    rm -f /tmp/pwcancel.$$.err
+  done
+  [ "$fastn" -ge 5 ] || echo "WARN: only $fastn/10 fast-exit iterations were live at INT"
   echo "delivered=$delivered false0=$false0"
 ' cancel-probe "$COMMS" "$PW" "$PW_I1")"
 PW_DELIVERED="$(printf '%s\n' "$PW_CANCEL_OUT" | sed -n 's/.*delivered=\([0-9]*\).*/\1/p')"
@@ -4792,6 +4818,9 @@ check_not "a multiline instance is refused at release" run_pw presence release -
 check_not "a multiline instance is refused at beat" run_pw presence beat --name alpha --instance "$PW_NL"
 check_not "a multiline name is refused at expire --force" run_pw presence expire --force "$PW_NL"
 check_not "a multiline instance is refused at integrate" run_pw integrate worktree-featone --name alpha --instance "$PW_NL"
+PW_CR="$(printf 'alpha\r../../tmp')"
+check_not "a CR-bearing name is refused at claim" run_pw presence claim --name "$PW_CR" --role x
+check_not "a CR-bearing instance is refused at release" run_pw presence release --name alpha --instance "$PW_CR"
 # QUIESCENCE (codex, impl r4): a successful wrapper return means the child's whole
 # group is GONE — a TERM-ignoring descendant must be escalated to KILL, not left
 # straggling for integrate to trust a live tree.

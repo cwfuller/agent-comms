@@ -2065,11 +2065,12 @@ cmd_presence() {
       presence_expire "$dir" "$force"
       ;;
     with-beat)
-      # Traps FIRST — before validation, before any command substitution: the
-      # pre-trap stretch ran presence_dir's git call, and a signal absorbed
-      # anywhere in that window is neither death nor latch. With the traps at
-      # the arm's first line, the only unlatchable window left is bash's own
-      # startup parse, where default-disposition death is the correct outcome.
+      # Traps FIRST — the first statements of the arm, before validation and
+      # before any substitution the ARM runs. Two windows remain outside the
+      # traps' reach: bash's startup parse, and cmd_presence's shared
+      # dir="$(presence_dir)" resolution before the case dispatch. Both are
+      # fail-safe — a signal there is default-disposition DEATH (probed: 130 on
+      # every delivered INT), never a latched-then-lost success.
       local parent=$$ beater="" child="" rc=0 healmark brc latched=""
       trap 'latched=INT;  kill -INT  -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' INT
       trap 'latched=TERM; kill -TERM -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' TERM
@@ -2235,6 +2236,11 @@ cmd_worktree() {
   local sub="${1:-new}"; shift 2>/dev/null || true
   [ "$sub" = "new" ] || usage_err "worktree: expected 'new'"
   local slug="${1:-session-$$-$RANDOM}"
+  # Whole-scalar check before grep, same rule as presence_validate_ids: grep
+  # validates LINES, and the slug becomes a path and a branch name. Git happens
+  # to refuse newline-bearing refs today, but the validator must not lean on it.
+  # (codex, impl r8 advisory.)
+  case "$slug" in *$'\n'*|*$'\r'*) usage_err "worktree new: invalid slug '$(clip "$slug")'" ;; esac
   printf '%s' "$slug" | grep -qE '^[a-z0-9][a-z0-9._-]{0,40}$' \
     || usage_err "worktree new: invalid slug '$(clip "$slug")'"
   local root tip path branch
