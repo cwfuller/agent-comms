@@ -48,8 +48,12 @@
 #                               suite-attest-secs = N config accepts a fresh
 #                               attest-green record for the candidate OID in place
 #                               of the re-run
-#   attest-green [--passed N]   record "suite green at this exact HEAD" (clean
-#                               tracked tree required) for integrate's opt-in skip
+#   attest-green [--passed N] [--expect <oid>]
+#                               record "suite green at this exact HEAD" (clean
+#                               tracked tree required) for integrate's opt-in skip.
+#                               --expect binds the record to the commit the CALLER
+#                               verified: HEAD moving mid-run refuses instead of
+#                               attesting a commit the run was not about
 #   bind <claude|codex> [surface:N]   pin which surface delivery targets (show with no arg)
 #   clean --as <agent> [workspace|all|archive|<file>] [--yes]
 #                               guarded delete; dry-run without --yes; own-inbox default
@@ -353,15 +357,15 @@ registry_parse() {
   default_ct="$(grep -c '^[[:space:]]*default-target[[:space:]]*=' "$f" 2>/dev/null || true)"
   [ "${agents_ct:-0}" -le 1 ] || die "config: duplicate 'agents' key in $f"
   [ "${default_ct:-0}" -le 1 ] || die "config: duplicate 'default-target' key in $f"
-  # Single-occurrence keys are enforced HERE, at the one full-config validation
-  # path: the consumers read the FIRST match, so a later `suite-attest-secs = 0`
-  # appended to disable the skip would leave the earlier enabling value
-  # authoritative — the failure mode points the unsafe way. (codex, r1.)
-  local attest_ct suite_ct
-  attest_ct="$(grep -c '^[[:space:]]*suite-attest-secs[[:space:]]*=' "$f" 2>/dev/null || true)"
-  suite_ct="$(grep -c '^[[:space:]]*suite-cmd[[:space:]]*=' "$f" 2>/dev/null || true)"
-  [ "${attest_ct:-0}" -le 1 ] || die "config: duplicate 'suite-attest-secs' key in $f"
-  [ "${suite_ct:-0}" -le 1 ] || die "config: duplicate 'suite-cmd' key in $f"
+  # The suite keys are validated through the SAME accessor their consumers use
+  # (config_scalar dies on duplicates), so this path and integrate's can never
+  # disagree about what the config says. (codex, ergonomics r1-r2.)
+  local cfg_root
+  cfg_root="$(main_repo_root)"
+  if [ -n "$cfg_root" ]; then
+    config_scalar "$cfg_root" suite-cmd >/dev/null
+    config_scalar "$cfg_root" suite-attest-secs >/dev/null
+  fi
   grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|suite-cmd[[:space:]]*=|suite-attest-secs[[:space:]]*=)' "$f" \
     | head -3 | sed 's/^/warning: config: unknown line: /' >&2 || true
   if [ "${agents_ct:-0}" -eq 1 ]; then
@@ -2278,6 +2282,19 @@ cmd_worktree() {
   echo "branch:   $branch (from $(git -C "$root" rev-parse --short "$tip"))"
 }
 
+config_scalar() {  # <root> <key> — the ONE way any consumer reads a config scalar.
+  # Duplicate rejection has to live at the READ, not in a validator the caller
+  # may never invoke: `registry_parse` refused duplicates but `integrate` never
+  # calls it, so an appended `suite-attest-secs = 0` meant to DISABLE the skip
+  # still lost to the earlier enabling value on the one command where safety
+  # matters. Every consumer now fails the same way. (codex, ergonomics r2.)
+  local f="$1/.comms/config" key="$2" ct
+  [ -f "$f" ] || return 0
+  ct="$(grep -c "^[[:space:]]*$key[[:space:]]*=" "$f" 2>/dev/null || true)"
+  [ "${ct:-0}" -le 1 ] || die "config: duplicate '$key' key in $f — refusing to guess which value is authoritative"
+  { sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*//p" "$f" 2>/dev/null || true; } | head -1
+}
+
 cmd_attest_green() {
   # attest-green [--passed N] — record "the suite ran green at this exact commit".
   # The record lets integrate skip its re-verification when the SAME OID was
@@ -2341,7 +2358,7 @@ cmd_integrate() {
   done
   local root; root="$(main_repo_root)"; [ -n "$root" ] || die "integrate: no main repo root"
   local suite_cmd
-  suite_cmd="$(sed -n 's/^suite-cmd *= *//p' "$root/.comms/config" 2>/dev/null | head -1)"
+  suite_cmd="$(config_scalar "$root" suite-cmd)"
   [ -n "$suite_cmd" ] || die "integrate: no 'suite-cmd = ...' in .comms/config — refusing to land unverified (explicit configuration required)"
   # Advisory lease: refuse while any OTHER live presence is integrating. The scan
   # fails CLOSED on an unenumerable dir — a silent empty glob read as lease-free
@@ -2410,7 +2427,7 @@ cmd_integrate() {
     # tip this run never verified is not the promise "unmoved main" made.
     # (codex, r1.) Leaving it detached is the safe residual; the message says so.
     # shellcheck disable=SC2064
-    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null) — main or the checkout moved during the attempt\" >&2; fi; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
+    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
     echo "integrate: healed — detached clean main occupant $occ for the landing"
   fi
   # ATTESTED GREEN: when .comms/config opts in (suite-attest-secs = N), a fresh
@@ -2419,7 +2436,7 @@ cmd_integrate() {
   # proves nothing the first did not. Absent, stale, or wrong-OID attestations
   # fall through to the full suite; with no config the behavior is unchanged.
   local attest_secs attest_age="" skip_suite=""
-  attest_secs="$({ sed -n 's/^suite-attest-secs *= *//p' "$root/.comms/config" 2>/dev/null || true; } | head -1)"
+  attest_secs="$(config_scalar "$root" suite-attest-secs)"
   case "$attest_secs" in ''|*[!0-9]*) attest_secs=0 ;; esac
   if [ "$attest_secs" -gt 0 ] && [ -f "$root/.comms/cache/suite-attest.log" ]; then
     local att_epoch

@@ -4737,6 +4737,15 @@ printf '%s' "$PW_CFGWARN" | grep -q 'unknown line' \
   && fail "suite-attest-secs warns as an unknown config key" || ok "suite-attest-secs is a known config key"
 printf 'suite-cmd = bash ./suite.sh\nsuite-attest-secs = 600\nsuite-attest-secs = 0\n' > "$PW/.comms/config"
 check_not "a duplicate suite-attest-secs is refused (the disabling line must win)" bash -c "cd '$PW' && env -u CMUX_WORKSPACE_ID '$COMMS' agents"
+# The refusal must hold on the CONSUMER that matters: integrate reads the config
+# directly and never calls registry_parse, so validating only there left the
+# landing command consuming the first (enabling) value. (codex, r2 blocking.)
+PW_DUPMAIN="$(cd "$PW" && git rev-parse main)"
+check_not "integrate itself refuses a duplicate suite-attest-secs" run_pw integrate worktree-nested
+[ "$(cd "$PW" && git rev-parse main)" = "$PW_DUPMAIN" ] \
+  && ok "the duplicate-config refusal lands nothing" || fail "main moved on a duplicate-key config"
+printf 'suite-cmd = bash ./suite.sh\nsuite-cmd = bash ./other.sh\n' > "$PW/.comms/config"
+check_not "integrate refuses a duplicate suite-cmd (the permissive one must not win)" run_pw integrate worktree-nested
 printf 'suite-cmd = bash ./suite.sh\n' > "$PW/.comms/config"
 
 # Attested green (2026-08-27): a fresh attest-green record for EXACTLY the
