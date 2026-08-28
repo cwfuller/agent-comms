@@ -66,7 +66,23 @@ if [ -f "$EXPECT_FILE" ] && ! git -C "$REPO" diff --quiet HEAD -- tests/expected
   echo "COVERAGE: commit it to change the expected counts." >&2
 fi
 
-ok()   { PASS=$((PASS+1)); echo "  ok: $1"; }
+SEC_N=0; SEC_NAME=""; SEC_PASS=0; SEC_SKIP=0; SECTION_VECTOR=""
+_flush_section() {
+  [ -n "$SEC_NAME" ] || return 0
+  [ -n "$SECTION_VECTOR" ] || return 0
+  printf '%s\t%s\t%s\t%s\n' "$SEC_N" "$SEC_PASS" "$SEC_SKIP" "$SEC_NAME" >> "$SECTION_VECTOR"
+}
+# PER-SECTION ACCOUNTING. The total count proves the corpus did not SHRINK; it cannot see
+# assertions MOVING between sections, which is exactly what a section-function wrap or a
+# lane split has to preserve. Every banner goes through here, so the vector cannot drift
+# from what actually ran.
+section() {
+  _flush_section
+  SEC_N=$((SEC_N + 1)); SEC_NAME="$1"; SEC_PASS=0; SEC_SKIP=0
+  echo "== $1 =="
+}
+
+ok()   { PASS=$((PASS+1)); SEC_PASS=$((SEC_PASS+1)); echo "  ok: $1"; }
 # A capability this machine lacks is NOT a passing assertion. Say so visibly and count
 # nothing, so a platform that silently skips coverage never reads as a full green run.
 emit_note() { echo "  note: $1"; }
@@ -111,7 +127,7 @@ skip() { # skip <id> <desc> — permitted, CONDITION-BOUND, and single-use
     *) fail "$2 (skip id '$1' has no registered condition)"; return ;;
   esac
   SKIP_USED="$SKIP_USED$1 "
-  SKIP=$((SKIP+1)); echo "  skip[$1]: $2"
+  SKIP=$((SKIP+1)); SEC_SKIP=$((SEC_SKIP+1)); echo "  skip[$1]: $2"
 }
 # THE GATE ITSELF, as a function, so the suite can execute the real thing against
 # adversarial inputs instead of asserting on a reimplementation of one branch.
@@ -196,6 +212,7 @@ _suite_exit() {
   _suite_gate_guard "$rc"
   exit $?
 }
+SECTION_VECTOR="$WORK/section-vector.tsv"; : > "$SECTION_VECTOR"
 trap '_suite_exit' EXIT
 
 # Fake repo with a deterministic branch name.
@@ -251,7 +268,7 @@ TREE
 # inherit a real cmux workspace and "deliver" sends keystrokes to REAL panes.
 run_comms() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
 
-echo "== comms.sh: root/workspace =="
+section "comms.sh: root/workspace"
 [ "$(run_comms root)" = "$REPO_FIX/.comms" ] && ok "root resolves main repo .comms" || fail "root resolves main repo .comms"
 [ "$(run_comms workspace)" = "feature-helper-tests" ] && ok "workspace falls back to branch (no cmux)" || fail "workspace falls back to branch (got $(run_comms workspace))"
 WS_CMUX="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" workspace)"
@@ -290,7 +307,7 @@ else
   skip zsh-absent "helper is caller-shell agnostic (zsh) — zsh not installed"
 fi
 
-echo "== comms.sh: Codex cmux permission preflight =="
+section "comms.sh: Codex cmux permission preflight"
 printf '%s\n' 'workspace:10 Test Project' > "$CMUX_STUB_DIR/list.txt"
 DOC_OK="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" "$COMMS" doctor)"
 [ "$DOC_OK" = "cmux socket: reachable" ] \
@@ -313,7 +330,7 @@ echo "$PERM_OUT" | grep -q '"/Users/example/.local/state/cmux/cmux.sock" = "allo
 echo "$PERM_OUT" | grep -q 'Do not launch it with --sandbox' \
   && ok "codex-permissions warns that launch overrides defeat the global default" || fail "codex-permissions launch override warning"
 
-echo "== comms.sh: validate =="
+section "comms.sh: validate"
 GOOD="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T12-00-00_test-1.md"
 cat > "$GOOD" <<'MSG'
 ---
@@ -349,7 +366,7 @@ BAD_EMPTY="$WORK/empty-body.md"
 awk '/^## /{exit} {print}' "$GOOD" > "$BAD_EMPTY"
 check_not "empty body is rejected" run_comms validate "$BAD_EMPTY"
 
-echo "== comms.sh: archive (idempotent, own inbox only) =="
+section "comms.sh: archive (idempotent, own inbox only)"
 IN1="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T12-01-00_reply-1.md"
 sed 's/from: claude/from: codex/; s/^---$/---/; ' "$GOOD" > "$IN1"
 echo "verdict: APPROVE" >> /dev/null # (verdict not needed for archive test)
@@ -358,7 +375,7 @@ check "archive own inbox file" run_comms archive --as claude "$IN1"
 check "re-archive is a no-op (idempotent)" run_comms archive --as claude "$IN1"
 check_not "archiving a file from the OTHER inbox is refused" run_comms archive --as claude "$GOOD"
 
-echo "== comms.sh: list =="
+section "comms.sh: list"
 check_not "list exits non-zero on empty inbox" run_comms list --as claude
 LIST_ERR="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as claude) 2>&1 1>/dev/null || true)"
 echo "$LIST_ERR" | grep -q "latest archived" && ok "empty inbox reports latest archived (late-nudge UX)" || fail "empty inbox reports latest archived (got: $LIST_ERR)"
@@ -369,7 +386,7 @@ echo "$LIST_MISMATCH" | grep -q "OTHER workspace identities" && echo "$LIST_MISM
   && ok "empty scoped list NAMES the unmatched identities" || fail "unmatched inbox warning (got: $LIST_MISMATCH)"
 rm -f "$UNMATCHED"
 
-echo "== comms.sh: latest archive is direction/thread/time aware =="
+section "comms.sh: latest archive is direction/thread/time aware"
 ARCH_OLD="$REPO_FIX/.comms/archive/feature-helper-tests_z-round-6.md"
 ARCH_NEW="$REPO_FIX/.comms/archive/feature-helper-tests_a-round-7.md"
 ARCH_WRONG_DIRECTION="$REPO_FIX/.comms/archive/feature-helper-tests_zz-wrong-direction.md"
@@ -430,7 +447,7 @@ echo "$ARCH_HINT3" | grep -q "$(basename "$ARCH_NEW")" \
 echo "$ARCH_HINT3" | grep -q "$(basename "$ARCH_WRONG_DIRECTION")" \
   && fail "3-agent hint crossed reader direction" || ok "3-agent hint excludes the reader's own messages"
 
-echo "== comms.sh: deliver via stubbed cmux =="
+section "comms.sh: deliver via stubbed cmux"
 : > "$CMUX_STUB_LOG"
 OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver codex)"
 echo "$OUT" | grep -q "delivered to surface:22" && ok "picker chose other-pane surface (not ◀ here)" || fail "picker chose other-pane surface (got: $OUT)"
@@ -442,7 +459,7 @@ grep -q 'send --surface surface:22 --workspace workspace:10 /read-from-codex' "$
 OUT="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" deliver codex)"
 echo "$OUT" | grep -q "manual pickup" && ok "deliver without cmux degrades to manual pickup" || fail "deliver without cmux degrades to manual pickup"
 
-echo "== comms.sh: send (atomicity guard) =="
+section "comms.sh: send (atomicity guard)"
 IN2="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T12-02-00_reply-2.md"
 cp "$REPO_FIX/.comms/archive/$(basename "$IN1")" "$IN2"
 BADOUT="$WORK/malformed-out.md"
@@ -452,7 +469,7 @@ check_not "send refuses malformed outbound" run_comms send --to codex "$BADOUT" 
 check "send valid outbound (manual pickup) archives inbound" run_comms send --to codex "$GOOD" --archive-inbound "$IN2"
 [ ! -f "$IN2" ] && ok "inbound archived after successful send" || fail "inbound archived after successful send"
 
-echo "== install.sh: scopes =="
+section "install.sh: scopes"
 INST_FIX="$WORK/install-repo"
 mkdir -p "$INST_FIX"
 git -C "$INST_FIX" init -q -b main
@@ -483,13 +500,13 @@ touch "$INST_FIX/.claude/commands/auto-plan.md" "$INST_FIX/.agent-comms/fleet.sh
 [ ! -f "$INST_FIX/.agent-comms/fleet.sh" ] \
   && ok "an upgrade DELETES a pre-existing retired local-pin helper" || fail "retired fleet.sh survived the local upgrade"
 
-echo "== comms.sh: status smoke =="
+section "comms.sh: status smoke"
 ST="$(run_comms status)"
 echo "$ST" | grep -q "workspace: feature-helper-tests" && ok "status prints workspace" || fail "status prints workspace"
 echo "$ST" | grep -q "latest archived:" && ok "status prints latest archived" || fail "status prints latest archived"
 echo "$ST" | grep -q "pending in to-claude:" && ok "status prints pending counts" || fail "status prints pending counts"
 
-echo "== install.sh: local pin gitignored + global scope (overridden HOME dirs) =="
+section "install.sh: local pin gitignored + global scope (overridden HOME dirs)"
 grep -qxF '.agent-comms/' "$INST_FIX/.gitignore" && ok "local install gitignores .agent-comms/" || fail "local install gitignores .agent-comms/"
 GHOME="$WORK/ghome"
 GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global 2>&1)"
@@ -766,7 +783,7 @@ else
   skip acl-xattr-only "extended attributes alone are not reported as an ACL — ACLs unsupported here"
 fi
 
-echo "== comms.sh v2: thread filter + verdict normalization + error lane =="
+section "comms.sh v2: thread filter + verdict normalization + error lane"
 TA="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-00_alpha-1.md"
 TB="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-01_beta-1.md"
 cat > "$TA" <<'MSG'
@@ -799,7 +816,7 @@ grep -v '^thread:' "$TA" > "$NOTHREAD"
 WARN="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" validate "$NOTHREAD") 2>&1 1>/dev/null )"
 echo "$WARN" | grep -q "no thread field" && ok "workflow message without thread warns (soft, non-fatal)" || fail "thread soft warning (got: $WARN)"
 
-echo "== comms.sh v2: state lifecycle =="
+section "comms.sh v2: state lifecycle"
 OUT_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-05-00_round-2-777.md"
 cat > "$OUT_WF" <<'MSG'
 ---
@@ -847,7 +864,7 @@ check "state complete marks thread done" run_comms state complete loop-alpha
 grep -q '"status": "complete"' "$SF" && ok "state complete persists" || fail "state complete persists"
 run_comms stalled 15 | grep -q 'no stalled' && ok "completed thread is not stalled" || fail "completed thread is not stalled"
 
-echo "== comms.sh v2: delivery failure is explicit and recorded =="
+section "comms.sh v2: delivery failure is explicit and recorded"
 DELIV_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_FAIL=1 "$COMMS" deliver codex)"
 echo "$DELIV_OUT" | grep -q "FAILED mid-sequence" && ok "mid-sequence cmux failure reported explicitly" || fail "delivery failure report (got: $DELIV_OUT)"
 # Under stub cmux the RESOLVED workspace (test-project) keys the state file —
@@ -856,7 +873,7 @@ echo "$DELIV_OUT" | grep -q "FAILED mid-sequence" && ok "mid-sequence cmux failu
 SF_CMUX="$REPO_FIX/.comms/state/test-project_loop-alpha.json"
 grep -q '"last_delivery": "failed"' "$SF_CMUX" && ok "failed delivery recorded in state (resolved-ws key)" || fail "failed delivery recorded in state (state dir: $(ls "$REPO_FIX/.comms/state/" 2>/dev/null))"
 
-echo "== comms.sh v2: state hardening (slash thread, garbage epoch, quotes) =="
+section "comms.sh v2: state hardening (slash thread, garbage epoch, quotes)"
 SLASH_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-10-00_slash-1.md"
 SLASH_IN="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-09-00_slashin.md"
 sed 's/thread: loop-alpha/thread: fix-auth\/login-99/; s/round: 2/round: 3/' "$OUT_WF" > "$SLASH_WF"
@@ -872,7 +889,7 @@ sed 's/phase: implement/phase: fix "login" bug/' "$OUT_WF" > "$QUOTE_WF"
 (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$QUOTE_WF") >/dev/null 2>&1
 grep -q '\\"login\\"' "$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json" && ok "embedded quotes escaped in state JSON" || fail "embedded quotes escaped (got: $(grep phase "$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json"))"
 
-echo "== comms.sh v2: state dir blocked as a FILE must not break send/archive =="
+section "comms.sh v2: state dir blocked as a FILE must not break send/archive"
 mv "$REPO_FIX/.comms/state" "$REPO_FIX/.comms/state.bak"
 touch "$REPO_FIX/.comms/state"
 BLOCK_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-20-00_blocked-1.md"
@@ -887,7 +904,7 @@ echo "$BLOCK_OUT" | grep -q "cannot create state dir" && ok "blocked state dir p
 rm -f "$REPO_FIX/.comms/state"
 mv "$REPO_FIX/.comms/state.bak" "$REPO_FIX/.comms/state"
 
-echo "== comms.sh v2.1: workspace resilience (empty cmux tree must not abort or flap) =="
+section "comms.sh v2.1: workspace resilience (empty cmux tree must not abort or flap)"
 rm -f "$REPO_FIX/.comms/.cache/ws-workspace_10"
 WS_EMPTY="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" workspace) 2>/dev/null )"
 WS_EMPTY_RC=$?
@@ -905,7 +922,7 @@ WS_REPAIRED="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$PO
 [ "$WS_REPAIRED" = "feature-helper-tests" ] && ok "decorated cache is rejected and repaired from repo identity" || fail "decorated cache repair (got: $WS_REPAIRED)"
 [ "$(cat "$REPO_FIX/.comms/.cache/ws-workspace_spinner-poison")" = "feature-helper-tests" ] && ok "repaired identity replaces poisoned cache" || fail "poisoned cache not replaced"
 
-echo "== comms.sh v2.1: surface binding =="
+section "comms.sh v2.1: surface binding"
 check "bind sets an explicit surface" env -u X bash -c "cd '$REPO_FIX' && PATH='$STUB_BIN:$PATH' CMUX_WORKSPACE_ID=workspace:10 '$COMMS' bind claude surface:11"
 : > "$CMUX_STUB_LOG"
 BOUND_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver claude)"
@@ -915,7 +932,7 @@ BOUND_GONE="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspa
 echo "$BOUND_GONE" | grep -q "delivered to surface:22" && ok "absent bound surface falls back to picker" || fail "absent binding falls back (got: $BOUND_GONE)"
 grep -q "delivered to surface:22" <<<"$BOUND_GONE" && [ "$(cd "$REPO_FIX" && cat .comms/.cache/surface-claude-workspace_10)" = "surface:22" ] && ok "successful delivery refreshes the surface cache" || fail "delivery refreshes surface cache"
 
-echo "== comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery) =="
+section "comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery)"
 (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:22) >/dev/null
 : > "$CMUX_STUB_LOG"
 OPT_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" deliver claude)"
@@ -927,7 +944,7 @@ DIAG="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:1
 echo "$DIAG" | grep -q "manual pickup" && ok "no binding + no tree degrades to manual" || fail "no binding + no tree (got: $DIAG)"
 echo "$DIAG" | grep -q "tree unavailable after retries" && ok "empty-tree manual outcome carries a diagnostic" || fail "empty-tree diagnostic (got: $DIAG)"
 
-echo "== comms.sh v2.2: sandbox block emits direct recovery + state reconciliation =="
+section "comms.sh v2.2: sandbox block emits direct recovery + state reconciliation"
 (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:22) >/dev/null
 SBX="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" deliver claude) 2>&1 )"
 echo "$SBX" | grep -q "nested helper cannot access cmux" && ok "socket failure is classified as nested-helper sandboxing" || fail "sandbox recognition (got: $SBX)"
@@ -951,7 +968,7 @@ echo "$REC_OUT" | grep -q "^RESULT: delivered" && ok "exact RECOVER command nudg
 grep -q 'send --surface surface:22' "$CMUX_STUB_LOG" && grep -q 'send-key --surface surface:22' "$CMUX_STUB_LOG" && ok "RECOVER uses direct cmux commands" || fail "RECOVER direct cmux log (got: $(cat "$CMUX_STUB_LOG"))"
 grep -q '"last_delivery": "delivered"' "$SF_CMUX" && grep -q '"last_notified_at":' "$SF_CMUX" && ok "reconcile repairs delivery state with timestamp" || fail "reconciled state (got: $(cat "$SF_CMUX"))"
 
-echo "== comms.sh v2.1.1: status shouts when a loop stalled undelivered =="
+section "comms.sh v2.1.1: status shouts when a loop stalled undelivered"
 perl -pi -e 's/"last_delivery": "[^"]*"/"last_delivery": "manual"/; s/"status": "[^"]*"/"status": "in-progress"/' "$SF"
 ST_OUT="$(run_comms status)"
 echo "$ST_OUT" | grep -q "ACTION NEEDED" && ok "status prints ACTION NEEDED on undelivered last send" || fail "status ACTION line (got: $(echo "$ST_OUT" | tail -2))"
@@ -959,7 +976,7 @@ perl -pi -e 's/"status": "in-progress"/"status": "complete"/' "$SF"
 ST_OUT="$(run_comms status)"
 echo "$ST_OUT" | grep -q "ACTION NEEDED" && fail "completed thread must not shout" || ok "completed thread does not shout"
 
-echo "== comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line =="
+section "comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line"
 RES_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUT_WF") 2>/dev/null )"
 echo "$RES_OUT" | grep -q "^RESULT: manual" && ok "manual outcome includes RESULT: manual" || fail "RESULT line (got: $(echo "$RES_OUT" | tail -1))"
 # The autonomous path (--archive-inbound) must ALSO end with RESULT, not "archived:".
@@ -969,7 +986,7 @@ RES_TAIL="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to code
 case "$RES_TAIL" in RESULT:*) ok "tail -1 of send --archive-inbound is the RESULT line" ;; *) fail "final line on archive path (got: $RES_TAIL)" ;; esac
 [ ! -f "$RES_IN" ] && ok "inbound still archived on the RESULT-last path" || fail "inbound archived on RESULT-last path"
 
-echo "== runphase v0: headless delivery via stubbed codex =="
+section "runphase v0: headless delivery via stubbed codex"
 RUNPHASE="$REPO/helpers/runphase.sh"
 # codex stub: logs argv + the child's COMMS_DELIVERY, consumes the stdin prompt,
 # emits canned JSONL, honors -o. Behavior toggles: CODEX_STUB_FAIL, CODEX_STUB_HANG.
@@ -1185,7 +1202,7 @@ NODIR_RC=$?
 [ "$NODIR_RC" -eq 0 ] && ok "headless deliver survives a repo with no .comms (rc=0)" || fail "no-.comms headless deliver rc=$NODIR_RC"
 echo "$NODIR_OUT" | grep -q "nothing spawned" && ok "no-.comms headless deliver says nothing spawned" || fail "no-.comms output (got: $NODIR_OUT)"
 
-echo "== runphase step 2: claude backend, direction pickup, hold, watchdog =="
+section "runphase step 2: claude backend, direction pickup, hold, watchdog"
 # claude stub: mirrors the codex stub — init event carries session_id, result
 # event ends the turn. Toggles: CLAUDE_STUB_FAIL, CLAUDE_STUB_HANG.
 cat > "$STUB_BIN/claude" <<'STUB'
@@ -1320,14 +1337,14 @@ BP_DIR="$(rundir_of "$BP_OUT")"
 run_rp await "$BP_DIR" --timeout-secs 30 >/dev/null 2>&1 && fail "bypass-flag turn must not complete" || ok "bypass-flag turn refused (await non-zero)"
 grep -q "bypass/danger permission flags are refused" "$BP_DIR/runner.log" && ok "refusal names the policy in runner.log" || fail "bypass refusal message (log: $(tail -2 "$BP_DIR/runner.log" 2>/dev/null))"
 
-echo "== loopspec: conformance fixtures =="
+section "loopspec: conformance fixtures"
 if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then
   ok "loopspec conformance: $(tail -1 "$WORK/loopspec.out")"
 else
   fail "loopspec conformance failed: $(grep '^FAIL' "$WORK/loopspec.out" | head -5 | tr '\n' ' ')"
 fi
 
-echo "== multi-agent: registry contract =="
+section "multi-agent: registry contract"
 MA_FIX="$WORK/ma-repo"; mkdir -p "$MA_FIX"; MA_FIX="$(cd "$MA_FIX" && pwd -P)"
 git -C "$MA_FIX" init -q -b feature/ma-tests
 git -C "$MA_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
@@ -1363,7 +1380,7 @@ check_not "malformed default-target propagates through list" run_ma list --as cl
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$MA_FIX/.comms/config"
 check_not "unknown agent dies on inbox use" run_ma list --as gemini
 
-echo "== multi-agent: sender enforcement + grok inbox round-trip =="
+section "multi-agent: sender enforcement + grok inbox round-trip"
 MA_TS="2026-08-20T09-00-00"
 MA_MSG="$MA_FIX/.comms/to-grok/${MA_WS}_${MA_TS}_review-req-1.md"
 mkdir -p "$MA_FIX/.comms/to-grok"
@@ -1390,7 +1407,7 @@ sed 's/^from: claude$/from: gemini/' "$MA_MSG" > "$BAD_FROM"
 check_not "validate rejects unregistered from:" run_ma validate "$BAD_FROM"
 rm -f "$BAD_FROM"
 
-echo "== multi-agent: grok stub + full-arc runphase legs =="
+section "multi-agent: grok stub + full-arc runphase legs"
 export GROK_STUB_LOG="$WORK/grok.log"
 cat > "$STUB_BIN/grok" <<'GSTUB'
 #!/bin/bash
@@ -2053,7 +2070,7 @@ grep -q '^in-reply-to: '"${MA_WS}"'_2026-08-20T09-00-00_review-req-1$' "$REPLY1"
   && grep -q '^workflow: auto-full$' "$REPLY1" && grep -q '^round: 1$' "$REPLY1" \
   && ok "stamped envelope binds the reply to the inbound turn" || fail "envelope-binding assertion"
 
-echo "== multi-agent: grok arg refusals =="
+section "multi-agent: grok arg refusals"
 R5="$WORK/ma-leg5"; mkdir -p "$R5"
 for bad in "COMMS_RUNPHASE_GROK_ARGS=--sandbox workspace" "COMMS_RUNPHASE_GROK_ARGS=--sandbox off" \
            "COMMS_RUNPHASE_GROK_ARGS=--sandbox devbox" "COMMS_RUNPHASE_GROK_ARGS=--sandbox=off" \
@@ -2072,7 +2089,7 @@ for bad in "COMMS_RUNPHASE_GROK_ARGS=--sandbox workspace" "COMMS_RUNPHASE_GROK_A
   fi
 done
 
-echo "== multi-agent: archive-owner authority (comms.sh send) =="
+section "multi-agent: archive-owner authority (comms.sh send)"
 # Retry idempotency: inbound already archived -> no-op success
 OUTB="$MA_FIX/.comms/to-codex/${MA_WS}_2026-08-20T09-40-00_r2-1.md"
 cat > "$OUTB" <<MAEOF
@@ -2109,7 +2126,7 @@ echo "$MISMATCH_OUT" | grep -q 'delivered to' && fail "mismatch must refuse BEFO
   && ok "mismatch refusal mutates no thread state" || fail "mismatch state atomicity"
 rm -f "$STRAY" "$OUTB"
 
-echo "== multi-agent: template source contracts =="
+section "multi-agent: template source contracts"
 grep -qF '"$COMMS_SH" agents' "$REPO/templates/claude-commands/ask.md" \
   && ok "ask.md reads known agents from the registry helper" || fail "ask.md registry hookup"
 # One loop command now. `--reviewers` is PLURAL and held as a list: a singular name
@@ -2152,7 +2169,7 @@ grep -q 'auto.md:\$HOME/.claude/commands/auto.md' "$COMMS" \
 grep -q 'auto-implement.md:\$HOME' "$COMMS" && fail "prompt surface still hashes a deleted template" \
   || ok "prompt surface no longer hashes deleted templates"
 
-echo "== broker: a missing VERDICT line is DERIVED, not discarded =="
+section "broker: a missing VERDICT line is DERIVED, not discarded"
 # Three live reviews were thrown away over a missing first line while carrying thousands
 # of bytes of real findings. loopspec already defines the equivalence, so the structure
 # states the verdict even when the line does not.
@@ -2195,7 +2212,7 @@ grep -q '^### Blocking' "$DV/no-structure.md" && fail "fixture has structure" \
 # comment and red on a reword, and said nothing about the broker. What it claimed is proven
 # live by the dup-verdict leg above, which stamps the DERIVED verdict into a real reply.)
 
-echo "== one placeholder rule: broker derivation and findings/compose cannot disagree =="
+section "one placeholder rule: broker derivation and findings/compose cannot disagree"
 # The bug this replaces: findings_extract and the broker were separate copies of
 # "what is a placeholder". They drifted on list form, were mirrored by hand, then
 # drifted again on CASE and emphasis -- so `NONE`, `` `none` `` and `_None_` were
@@ -2374,7 +2391,7 @@ printf '### Blocking\n\n````\n```\n### Blocking\n- quoted inner\n```\n````\n\n- 
 grep -q 'skipping an invalid or non-review message' "$COMMS" \
   && ok "compose ignores non-review messages on a leg" || fail "compose leg validation"
 
-echo "== findings are LIST ITEMS in any markdown form (field bug, 2026-08-26) =="
+section "findings are LIST ITEMS in any markdown form (field bug, 2026-08-26)"
 # A real loop produced numbered findings. The extractor matched only "- ", so it pulled
 # ZERO findings; the verdict is derived from the same count, so a review with real
 # blocking bugs was stamped APPROVE and composed as a clean panel. A false all-clear is
@@ -2507,7 +2524,7 @@ printf 'VERDICT: APPROVE\nnarration\nVERDICT: REQUEST_CHANGES\n\n### Blocking\n\
 # (Removed: a grep for a refusal string in the SOURCE. The lie-approve legs already grep it
 # out of a real result.json, which is the broker refusing, not a comment existing.)
 
-echo "== stamped authorities: workspace pin (#3) + send-time git metadata (#6) =="
+section "stamped authorities: workspace pin (#3) + send-time git metadata (#6)"
 SA_FIX="$WORK/stamped-auth"; mkdir -p "$SA_FIX"; SA_FIX="$(cd "$SA_FIX" && pwd -P)"
 git -C "$SA_FIX" init -q -b main
 git -C "$SA_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
@@ -2867,7 +2884,7 @@ grep -q 'MOUNTED, pinned artifact' "$REPO/helpers/runphase.sh" \
   && grep -q 'compare it with "git rev-parse HEAD"' "$REPO/helpers/runphase.sh" \
   && ok "review prompt carries both SHA notes (mounted vs live tree)" || fail "conditional sha_note"
 
-echo "== friction: a one-line seam for reporting harness problems =="
+section "friction: a one-line seam for reporting harness problems"
 FR="$WORK/friction-repo"; mkdir -p "$FR"; FR="$(cd "$FR" && pwd -P)"
 git -C "$FR" init -q -b main
 git -C "$FR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
@@ -2960,7 +2977,7 @@ GOT3="$(eval "${EXTRACT_LINE/\"<message file>\"/\"$DUPFROM\"}"; printf '%s' "$RE
 grep -qF 'send --to "$REVIEWER" "<your reply file>"' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader continuations send to the derived reviewer" || fail "reader continuation target"
 
-echo "== transports emit the child\'s bytes, verbatim and identically =="
+section "transports emit the child\'s bytes, verbatim and identically"
 # Criterion 8 by construction. The streaming extractor is a python block inside runphase.sh;
 # ACP redirects acpx stdout with no transformation at all. So the extractor must be a pure
 # pass-through of the result string — a single appended LF made an empty reply a one-byte file
@@ -3071,7 +3088,7 @@ cmp -s "$AXRAW" "$AXD/stream.out" \
   && ok "a whole-answer fence survives identically on BOTH transports" \
   || fail "the transports disagree on a whole-answer fence"
 
-echo "== acp.sh: consult transport (stubbed npx) =="
+section "acp.sh: consult transport (stubbed npx)"
 ACP="$REPO/helpers/acp.sh"
 ACP_STUB="$WORK/acp-bin"; mkdir -p "$ACP_STUB"
 export ACP_STUB_LOG="$WORK/acp.log"
@@ -3174,7 +3191,7 @@ grep -q 'Parse BOTH transport modifiers out' "$REPO/templates/claude-commands/as
   && ok "ask.md parses and conditionally forwards --oneshot" || fail "ask.md oneshot forwarding contract"
 grep -q 'acp.sh' "$REPO/install.sh" && ok "installer ships acp.sh" || fail "installer acp.sh"
 
-echo "== scope-dial template source contract =="
+section "scope-dial template source contract"
 # Scope-dial trio: the load-bearing new prose, pinned mechanically.
 FRAGVD="$REPO/docs/loopspec/fragments/verdict-discipline.md"
 grep -q 'Pre-existing defects in code the change did not touch are Advisory by default' "$FRAGVD" \
@@ -3197,7 +3214,7 @@ grep -q 'Judge against the pinned' "$RFCL" && grep -q 'does not move with each' 
 grep -q 'amendment proposal alone is non-blocking' "$RFCL" \
   && ok "reviewer treats amendment proposals as non-blocking" || fail "read-from-claude amendment non-blocking"
 
-echo "== templates: bare dollar-digit/dollar-star hygiene =="
+section "templates: bare dollar-digit/dollar-star hygiene"
 # INTERNALS editing rule made mechanical: Claude Code substitutes bare dollar-digit
 # tokens (and dollar-star) into command markdown at render time with no escape syntax.
 # dollar-paren, dollar-brace, and named variables are fine and must pass.
@@ -3208,7 +3225,7 @@ else
   fail "bare dollar token(s) under templates/: $(echo "$HYG_HITS" | head -3 | tr '\n' ' ')"
 fi
 
-echo "== /ask canonical template source contract =="
+section "/ask canonical template source contract"
 # Prompt templates ARE the executable surface — these pin the load-bearing rules.
 ASKF="$REPO/templates/claude-commands/ask.md"
 [ -f "$ASKF" ] && ok "ask.md exists" || fail "ask.md exists"
@@ -3230,7 +3247,7 @@ grep -q 'loopspec:fragment result-spawned-exception' "$ASKF" \
   && ok "ask.md embeds the result-spawned-exception fragment" || fail "ask.md fragment embed present"
 
 
-echo "== loopspec: prompt fragments do not drift from docs/loopspec/fragments/ =="
+section "loopspec: prompt fragments do not drift from docs/loopspec/fragments/"
 # Every marked region in a template must match its fragment file byte-for-byte
 # after per-line leading-whitespace normalization (templates embed at varying
 # list indents). Drift is a failing check, not a habit.
@@ -3306,7 +3323,7 @@ truly ship-stopping|verdict-discipline
 blank checklist|holistic-rereview
 SIGS
 
-echo "== comms.sh: bounded reads (lessons) =="
+section "comms.sh: bounded reads (lessons)"
 # The whole point of these subcommands is a cap that holds no matter how large
 # the log grows OR how hostile the arguments are, so the invariant is asserted
 # as a byte measurement of stdout AND stderr together — tools return both.
@@ -3401,7 +3418,7 @@ WT_ROOT="$(cd "$WORK/wt-linked" && env -u CMUX_WORKSPACE_ID "$COMMS" root)"
 [ "$WT_ROOT" = "$WT_MAIN/.comms" ] \
   && ok "comms root stays anchored to the MAIN repo from a linked worktree" || fail "root stays main-anchored (got: $WT_ROOT)"
 
-echo "== comms.sh: bounded reads (archive-search) =="
+section "comms.sh: bounded reads (archive-search)"
 # Ordering across workspaces is the trap: filenames are <workspace>_<ISO>_<slug>,
 # so any lexical shortcut sorts by WORKSPACE first and returns the wrong "newest"
 # exactly in the multi-workspace case fleet.sh ships.
@@ -3455,12 +3472,12 @@ ars; [ $? = 2 ] && ok "archive-search requires a pattern" || fail "archive-searc
 ars widget --limit 0; [ $? = 2 ] && ok "archive-search rejects --limit 0" || fail "archive-search --limit 0"
 rm -f "$AS_ARCH/zzz-workspace_2026-01-01T00-00-00_old.md" "$AS_ARCH/aaa-workspace_2026-12-31T00-00-00_new.md"
 
-echo "== comms.sh: help prints its whole header =="
+section "comms.sh: help prints its whole header"
 HELP_OUT="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" help)"
 echo "$HELP_OUT" | grep -q 'archive-search' \
   && ok "help lists the last subcommand (no fixed-range truncation)" || fail "help truncates its own header"
 
-echo "== install.sh: .codex/AGENTS.md managed block =="
+section "install.sh: .codex/AGENTS.md managed block"
 # Rewriting a file the user may have hand-edited is the risk, so ownership is
 # proven rather than assumed. The load-bearing case is the hand-edited one.
 AG="$WORK/agents"; mkdir -p "$AG"
@@ -3648,7 +3665,7 @@ else
   fail "migration lost unrelated AGENTS.md content"
 fi
 
-echo "== grading pilot: findings extraction (the single-reviewer baseline) =="
+section "grading pilot: findings extraction (the single-reviewer baseline)"
 GR_FIX="$WORK/grading-repo"
 mkdir -p "$GR_FIX"
 GR_FIX="$(cd "$GR_FIX" && pwd -P)"
@@ -3765,7 +3782,7 @@ printf '%s\n' "$GR_ROWS" | awk -F'\t' '$4!="" || $10!="" || $11!=""' | grep -q .
   && ok "finding_id is unique per finding" || fail "finding_id collision"
 printf '%s\n' "$GR_ROWS" | cut -f12 | sort -u | grep -qx gating && ok "role defaults to gating" || fail "role default"
 
-echo "== grading pilot: --out ledger is append-only and idempotent =="
+section "grading pilot: --out ledger is append-only and idempotent"
 GR_LED="$GR_FIX/.comms/grades/findings.tsv"
 run_gr findings --out "$GR_LED" >/dev/null
 [ "$(tail -n +2 "$GR_LED" | grep -c .)" = "3" ] && ok "ledger seeded with 3 rows" || fail "ledger seed"
@@ -3791,7 +3808,7 @@ run_gr findings --out "$GR_LED" >/dev/null
 [ "$(tail -n +2 "$GR_LED" | grep -c .)" = "4" ] && ok "a new review appends only its new row" || fail "incremental append"
 [ "$(head -1 "$GR_LED" | grep -c '^schema_version')" = "1" ] && ok "header written exactly once" || fail "header duplicated"
 
-echo "== grading pilot: shadow role + run identity are stamped, not inferred =="
+section "grading pilot: shadow role + run identity are stamped, not inferred"
 GR_SHADOW="$(run_gr findings --role shadow --review-set rs-1 --artifact art-abc \
   --reviewer-version 'grok/1.0.5' --prompt-version 'pv-deadbeef' \
   "$GR_FIX/.comms/archive/gr_2026-08-04T10-00-00_fb-3.md" 2>/dev/null | tail -n +2)"
@@ -3800,7 +3817,7 @@ printf '%s\n' "$GR_SHADOW" | awk -F'\t' '$12=="shadow" && $3=="rs-1" && $4=="art
 check_not "findings rejects an unknown role" run_gr findings --role primary
 check_not "findings rejects an unknown option" run_gr findings --bogus
 
-echo "== grading pilot: snapshot RETAINS the reviewed tree (a hash alone cannot) =="
+section "grading pilot: snapshot RETAINS the reviewed tree (a hash alone cannot)"
 echo "worktree edit" > "$GR_FIX/dirty.txt"
 git -C "$GR_FIX" add -A >/dev/null 2>&1
 echo "untracked too" > "$GR_FIX/loose.txt"
@@ -3825,7 +3842,7 @@ GR_CLEAN_SNAP="$(run_gr snapshot)"
   && ok "a clean tree snapshots to HEAD rather than failing" || fail "clean-tree snapshot"
 check_not "snapshot rejects an unknown argument" run_gr snapshot bogus
 
-echo "== grading pilot: prompt-version partitions grades across an instruction edit =="
+section "grading pilot: prompt-version partitions grades across an instruction edit"
 GR_HOME="$WORK/grading-home"
 mkdir -p "$GR_HOME"
 mkdir -p "$GR_FIX/.agent-comms" "$GR_FIX/.claude/commands"
@@ -3850,7 +3867,7 @@ printf '%s\n' "$PV_LIST" | grep -q 'auto.md' && ok "prompt-version --list names 
 printf '%s\n' "$PV_LIST" | grep -q '^MISSING ' && ok "--list marks surfaces this install does not have" || fail "prompt-version missing marker"
 check_not "prompt-version rejects an unknown option" run_gr_h prompt-version --bogus
 
-echo "== grading pilot: shadow reviewer is a MEASUREMENT, structurally unable to gate =="
+section "grading pilot: shadow reviewer is a MEASUREMENT, structurally unable to gate"
 SH_FIX="$WORK/shadow-repo"
 mkdir -p "$SH_FIX"; SH_FIX="$(cd "$SH_FIX" && pwd -P)"
 git -C "$SH_FIX" init -q -b main
@@ -4131,7 +4148,7 @@ grep -q '^VERDICT: REQUEST_CHANGES$' "$SH_LATEV_DIR/grok.md" 2>/dev/null \
   && fail "the raw VERDICT line leaked into the stamped body" \
   || ok "only the verdict LINE is excised from the body"
 
-echo "== grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims) =="
+section "grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims)"
 GR2="$WORK/shadow-repo2"
 mkdir -p "$GR2"; GR2="$(cd "$GR2" && pwd -P)"
 git -C "$GR2" init -q -b main
@@ -4416,7 +4433,7 @@ G2_RP="$( (cd "$GR2" && env -u CMUX_WORKSPACE_ID "$REPO/helpers/runphase.sh" run
 printf '%s\n' "$G2_RP" | grep -q 'authors and sends its own reply' \
   && ok "the runphase refusal explains why" || fail "runphase refusal message"
 
-echo "== comms.sh: transport selection (no pane must not strand a consult) =="
+section "comms.sh: transport selection (no pane must not strand a consult)"
 TR_FIX="$WORK/transport-repo"; mkdir -p "$TR_FIX"; TR_FIX="$(cd "$TR_FIX" && pwd -P)"
 git -C "$TR_FIX" init -q -b main
 git -C "$TR_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
@@ -4711,7 +4728,7 @@ case "$SC_OUT2" in
 esac
 rm -rf "$SC_CLAIM"
 
-echo "== panel: N parallel 2-party legs over ONE artifact =="
+section "panel: N parallel 2-party legs over ONE artifact"
 PN_FIX="$WORK/panel-repo"; mkdir -p "$PN_FIX"; PN_FIX="$(cd "$PN_FIX" && pwd -P)"
 git -C "$PN_FIX" init -q -b main
 printf '.comms/\n' > "$PN_FIX/.gitignore"
@@ -5082,7 +5099,7 @@ printf 'truncated-set\tonly-two-fields\n' >> "$PN_FIX/.comms/grades/sets.tsv"
 run_pn panel status 2>/dev/null | awk -F'\t' 'NR>1 && $1=="truncated-set"' | grep -q . \
   && fail "the listing counted a truncated row as a set" || ok "the listing ignores a truncated sets.tsv row"
 
-echo "== ask: the driver-neutral consult verb =="
+section "ask: the driver-neutral consult verb"
 AK="$WORK/ask-repo"; mkdir -p "$AK"; AK="$(cd "$AK" && pwd -P)"
 git -C "$AK" init -q -b main
 git -C "$AK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
@@ -5129,7 +5146,7 @@ grep -q 'npm_config_cache' "$REPO/helpers/acp.sh" \
 grep -q 'synthesized by await' "$REPO/helpers/runphase.sh" \
   && ok "a pid that dies without a result gets a synthetic one" || fail "synthetic failed result"
 
-echo "== review turns may read history, never publish or rewrite it =="
+section "review turns may read history, never publish or rewrite it"
 # The threat model is deliberately "the same as running the agent by hand in the repo":
 # it may read the tree and the history. What it may not do is publish or destroy — a
 # linked worktree shares the main object store and the REAL remotes, so a `git push` from
@@ -5380,7 +5397,7 @@ fi
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 
-echo "== presence & worktrees: advisory coordination (plan presence-worktrees-15135) =="
+section "presence & worktrees: advisory coordination (plan presence-worktrees-15135)"
 # Self-contained section (maintainability track: pre-split, local fixtures).
 PW="$WORK/presence-repo"; mkdir -p "$PW"; PW="$(cd "$PW" && pwd -P)"
 git -C "$PW" init -q -b main
@@ -5854,7 +5871,7 @@ grep -qi 'Presence re-check after the wait — single-reviewer and panel alike' 
 grep -qi 'presence <claim|beat' "$REPO/helpers/comms.sh" \
   && ok "comms.sh help names the presence/worktree/integrate verbs" || fail "help drift"
 
-echo "== runphase: the state-file wait is DECLARED by the spawner, never guessed =="
+section "runphase: the state-file wait is DECLARED by the spawner, never guessed"
 # The runner may wait for the thread-state file that `send` writes just after it
 # spawns us. It must wait ONLY when a send is actually behind it. A bare
 # `comms.sh deliver` (a public verb) spawns a runner with no send following, so
@@ -6038,7 +6055,7 @@ grep -q 'unset COMMS_RUNPHASE_EXPECT_STATE' "$REPO/helpers/runphase.sh" \
 grep -A1 '^unset COMMS_DELIVERY' "$REPO/tests/run.sh" | grep -q 'COMMS_RUNPHASE_EXPECT_STATE' \
   && ok "the harness scrubs an inherited declaration" || fail "harness no longer scrubs the inherited declaration"
 
-echo "== harness: a partial run is never a verdict =="
+section "harness: a partial run is never a verdict"
 # The corpus gates integrate. These assertions guard the gate itself.
 [ "$(grep -rl 'attest-green' "$REPO/tests/" | wc -l | tr -d ' ')" = 1 ] \
   && ok "exactly one file in tests/ can mint an attestation" || fail "more than one attestation mint site under tests/"
@@ -6155,7 +6172,7 @@ case "$TP_OUT" in
   *)              fail "index enumeration listed nothing (got: $TP_OUT)" ;;
 esac
 
-echo "== integrate: an exit status is not proof the suite ran =="
+section "integrate: an exit status is not proof the suite ran"
 # Source greps proved the scrub EXISTS; these prove it WORKS. The attack: a shell-startup
 # hook is sourced by non-interactive bash BEFORE the script's first line, so every guard
 # the suite installs is too late. A hook that exits only for the zero-argument suite
@@ -6470,7 +6487,7 @@ GK_OK="$( (FAIL=0; SKIP=0; SKIP_USED=" "; GRP_PRESERVE_OK=1; skip group-no-secon
 GK_NO="$( (FAIL=0; SKIP=0; SKIP_USED=" "; GRP_PRESERVE_OK=0; skip group-no-secondary "failed" >/dev/null 2>&1; echo "$SKIP") )"
 [ "$GK_NO" = 1 ] && ok "the group skip is permitted on a confirmed failed probe" || fail "a confirmed failed group probe refused its skip"
 
-echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
+section "comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture"
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
 DRY="$(run_comms clean --as claude workspace)"
 echo "$DRY" | grep -q "would delete" && ok "clean dry-runs without --yes" || fail "clean dry-run (got: $DRY)"
@@ -6489,8 +6506,24 @@ echo "passed: $PASS  failed: $FAIL  skipped: $SKIP"
 # exit status (which integrate reads as its primary gate) and the attestation
 # (which lets integrate SKIP its re-run) hang off this -- gating only the mint
 # would leave the louder signal, the exit status, still lying about a partial run.
+_flush_section
 COVERAGE_OK=0
 coverage_verdict "$PASS" "$FAIL" "$SKIP" "${EXPECT_TOTAL:-}" && COVERAGE_OK=1
+# PER-SECTION EQUALITY, read from the commit under test for the same reason the total is.
+# This is the invariant that makes the coming section-function wrap and lane split
+# VERIFIABLE rather than hopeful: a wrap that silently moved assertions between sections
+# keeps the total intact and fails here.
+SECTION_GOLDEN="$(git -C "$REPO" show "${TESTED_OID:-missing}:tests/section-counts.tsv" 2>/dev/null || true)"
+if [ -z "$SECTION_GOLDEN" ]; then
+  COVERAGE_OK=0
+  echo "COVERAGE: tests/section-counts.tsv is not readable at the commit under test — refusing" >&2
+elif ! printf '%s\n' "$SECTION_GOLDEN" | diff -q - "$SECTION_VECTOR" >/dev/null 2>&1; then
+  COVERAGE_OK=0
+  echo "COVERAGE: the per-section vector does not match the committed one." >&2
+  echo "COVERAGE: assertions moved between sections, or a section was added/removed/reordered." >&2
+  printf '%s\n' "$SECTION_GOLDEN" | diff - "$SECTION_VECTOR" 2>&1 | head -12 >&2
+  echo "COVERAGE: if that change is intended, update tests/section-counts.tsv in the SAME commit." >&2
+fi
 GATE_REACHED=1
 # A fully green run attests itself so integrate can skip its re-verification of
 # the SAME commit (opt-in via suite-attest-secs). The attestation is bound to
