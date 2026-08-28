@@ -159,7 +159,7 @@ the interleaving I think is safe — find one where it isn't" earns its tokens.
 bash tests/run.sh
 ```
 
-One umbrella suite. It is still slow — measured 2026-08-28 at **~360s for 1056 assertions**
+One umbrella suite. It is still slow — measured 2026-08-28 at **~400s for 1123 assertions**
 on an unloaded machine, down from 505s once an unconditional 6s wait per spawned turn was
 removed (505s → 326s on identical trees; the rest of the difference is new assertions that
 deliberately spend ~25s exercising that wait) — and reducing it further is active work; see
@@ -190,6 +190,17 @@ overhead is ~5%, not the dominant term it was once estimated to be.
   reduced total, and it is read from the COMMITTED BLOB at the commit under test — not from
   the working tree — so deleting the contract and recreating it untracked with a smaller total
   reads as ABSENT and fails closed. Changing the counts therefore means committing the contract.
+- `tests/section-counts.tsv` pins the counts **per section**, and it is checked the same way.
+  The total proves the corpus did not SHRINK; only the per-section vector proves assertions did
+  not MOVE between sections — which is what a section-function wrap or a lane split has to
+  preserve, and what a total alone is blind to. Verified by control: moving one assertion across
+  a section boundary leaves `passed:` identical and is caught by the vector.
+- **Pin a DELTA, never an absolute, when you plan test-count changes.** In a repo with concurrent
+  landings an absolute like "1109 → 1137" is a hidden dependency on nobody else shipping: it goes
+  stale the moment another session lands, and the resulting red gate reads as a defect in your
+  change rather than as stale arithmetic. Compute `+N` against the contract committed **at the
+  commit under test**. (Found by a peer whose plan had pinned an absolute that a landing
+  invalidated mid-review.)
 - The gate is the `coverage_verdict` function, and the suite runs it against adversarial inputs
   as part of its own corpus (short run, absent/non-numeric/out-of-range contract, unpermitted
   skip). An `EXIT` sentinel refuses any exit-0 that never reached the gate, so the invariant is
