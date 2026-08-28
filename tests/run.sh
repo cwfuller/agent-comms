@@ -6270,9 +6270,49 @@ IH2_CLAIM="$( (cd "$IH2" && env -u CMUX_WORKSPACE_ID "$COMMS" presence claim --n
 IH2_INST="$(printf '%s' "$IH2_CLAIM" | sed -n 's/.*instance: //p')"
 (cd "$IH2" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_NAME=resident COMMS_PRESENCE_INSTANCE="$IH2_INST" \
     "$COMMS" integrate worktree-healtwo) >/dev/null 2>&1 || true
+# Assert the landing FIRST: without it a no-op or early failure would "preserve" the
+# record vacuously and this would pass for the wrong reason. (grok, panel r2.)
+[ "$(cd "$IH2" && git rev-parse main)" = "$(cd "$IH2" && git rev-parse worktree-healtwo)" ] \
+  && ok "the pre-existing-record fixture actually landed" || fail "IH2 did not land — its record check would be vacuous"
 [ -f "$IH2/.comms/sessions/resident-$IH2_INST.json" ] \
   && ok "a pre-existing presence record survives an integrate that used it" \
   || fail "integrate released a record it did not create"
+
+# An INHERITED flag value must not make a real-record run release that record. This is the
+# blocking case: the global was never initialised, so an ambient value erased a live peer.
+IH3_CLAIM="$( (cd "$IH2" && env -u CMUX_WORKSPACE_ID "$COMMS" presence claim --name resident2 --role holder) 2>&1 || true )"
+IH3_INST="$(printf '%s' "$IH3_CLAIM" | sed -n 's/.*instance: //p')"
+(cd "$IH2/.claude/worktrees/healtwo" && echo w > g.txt && git add g.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: g") >/dev/null 2>&1
+(cd "$IH2" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_NAME=resident2 COMMS_PRESENCE_INSTANCE="$IH3_INST" \
+    INTEGRATE_HEALED_RECORD=1 "$COMMS" integrate worktree-healtwo) >/dev/null 2>&1 || true
+[ -f "$IH2/.comms/sessions/resident2-$IH3_INST.json" ] \
+  && ok "an inherited heal flag does not release a pre-existing record" \
+  || fail "an ambient INTEGRATE_HEALED_RECORD erased a live peer's record"
+
+# The EXIT-trap cleanup path needs its own cover: the success path clears the trap, so the
+# regressions above never exercise the trap strings. A failing suite takes the die path.
+IH4="$WORK/int-heal4"; mkdir -p "$IH4"; IH4="$(cd "$IH4" && pwd -P)"
+git -C "$IH4" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IH4/.gitignore"
+mkdir -p "$IH4/tests" "$IH4/.comms"
+printf 'total\t3\n' > "$IH4/tests/expected-counts.tsv"
+printf '#!/bin/bash\nprintf "passed: 1  failed: 2  skipped: 0\\n"\nexit 1\n' > "$IH4/tests/red.sh"
+chmod +x "$IH4/tests/red.sh"
+printf 'suite-cmd = bash tests/red.sh\n' > "$IH4/.comms/config"
+(cd "$IH4" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IH4" && git checkout -q -b session-primary)
+(cd "$IH4" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new redone) >/dev/null 2>&1
+(cd "$IH4/.claude/worktrees/redone" && echo r > h.txt && git add h.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: h") >/dev/null 2>&1
+(cd "$IH4" && env -u CMUX_WORKSPACE_ID \
+    COMMS_PRESENCE_NAME=ghost4 COMMS_PRESENCE_INSTANCE=44444444444444444444444444444444 \
+    "$COMMS" integrate worktree-redone) >/dev/null 2>&1 || true
+[ "$(cd "$IH4" && git rev-parse main)" != "$(cd "$IH4" && git rev-parse worktree-redone)" ] \
+  && ok "a red suite does not land" || fail "a red suite landed"
+[ "$(find "$IH4/.comms/sessions" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
+  && ok "the EXIT-trap path also releases a record it healed" \
+  || fail "a failed landing left a pid-less record behind"
 
 # A hook that INTERPOSES on the scrub command itself: `env` as a shell function takes
 # precedence over the builtin and PATH, so an unpinned scrub would call the forgery

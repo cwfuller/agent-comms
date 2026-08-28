@@ -2581,7 +2581,7 @@ cmd_integrate() {
   # (grok, impl r2.)
   tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
   # shellcheck disable=SC2064
-  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ -n \"\${INTEGRATE_HEALED_RECORD:-}\" ]; then '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; elif [ -n '$name' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
+  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ -n \"\${INTEGRATE_HEALED_RECORD:-}\" ]; then '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; elif [ -n '$name' ]; then _brc=0; '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || _brc=\$?; [ \"\$_brc\" = 5 ] && { '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; }; fi" EXIT
   # `|| true` is load-bearing, and its absence was a silent-death bug: `presence beat`
   # exits 5 when it HEALED a vanished record, which happens on every integrate run whose
   # inherited COMMS_PRESENCE_NAME/INSTANCE has no record in THIS repo — i.e. every nested
@@ -2601,6 +2601,12 @@ cmd_integrate() {
   # INTEGRATE_HEALED_RECORD is deliberately GLOBAL: the EXIT traps fire after this
   # function's locals are gone, which is why they pre-expand every other value.
   # (codex, panel r1, blocking.)
+  # Cleared at entry. The flag is global so the pre-expanded EXIT traps can read it after
+  # this function's locals are gone — but a global that is never initialised is INHERITED,
+  # and an inherited value here makes cleanup release a record this run did NOT create,
+  # deleting a live peer's presence and making its owner invisible. (codex, panel r2,
+  # blocking.)
+  unset INTEGRATE_HEALED_RECORD
   local beat_rc=0
   if [ -n "$name" ] && [ -n "$instance" ]; then
     "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1 || beat_rc=$?
@@ -2638,7 +2644,7 @@ cmd_integrate() {
     # tip this run never verified is not the promise "unmoved main" made.
     # (codex, r1.) Leaving it detached is the safe residual; the message says so.
     # shellcheck disable=SC2064
-    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; if [ -n \"\${INTEGRATE_HEALED_RECORD:-}\" ]; then '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; elif [ -n '$name' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
+    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; if [ -n \"\${INTEGRATE_HEALED_RECORD:-}\" ]; then '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; elif [ -n '$name' ]; then _brc=0; '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || _brc=\$?; [ \"\$_brc\" = 5 ] && { '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; }; fi" EXIT
     echo "integrate: healed — detached clean main occupant $occ for the landing"
   fi
   # ATTESTED GREEN: when .comms/config opts in (suite-attest-secs = N), a fresh
@@ -2725,6 +2731,13 @@ cmd_integrate() {
       rc=${PIPESTATUS[0]}
     fi
     set -e
+    # A beat DURING the suite can heal a record that vanished mid-run. `with-beat` returns
+    # the CHILD's status by design, so the exit code cannot carry that fact — but it prints
+    # it, and this function now captures the output. Claim ownership of that heal too, or
+    # the newly pid-less record outlives the run and can never be reaped. (codex, r2.)
+    if grep -q 'HEALED a vanished record' "$suite_log" 2>/dev/null; then
+      INTEGRATE_HEALED_RECORD=1
+    fi
     [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log"
     # POSITIVE PROOF, not merely an absence of failure. A scrub is a blocklist and the
     # next startup hook will not be on it, so require evidence the suite actually RAN:
@@ -2793,8 +2806,12 @@ cmd_integrate() {
   # most, the one that lands. (Found by the regression, not by reading.)
   if [ -n "${INTEGRATE_HEALED_RECORD:-}" ]; then
     "$0" presence release --name "$name" --instance "$instance" >/dev/null 2>&1 || true
-  else
-    [ -n "$name" ] && "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
+  elif [ -n "$name" ]; then
+    # The restoration beat can itself heal — the record may have vanished during the
+    # landing — and whatever IT creates is also ours to remove. (codex, panel r2.)
+    local restore_rc=0
+    "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || restore_rc=$?
+    [ "$restore_rc" = 5 ] && { "$0" presence release --name "$name" --instance "$instance" >/dev/null 2>&1 || true; }
   fi
   trap - EXIT
   if [ -n "$skip_suite" ]; then
