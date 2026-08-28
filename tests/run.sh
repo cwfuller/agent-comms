@@ -1774,8 +1774,10 @@ case "$(note_of "$R22")" in
   *"killed mid-work"*) fail "a permission failure (exit 5) was relabelled a budget kill" ;;
   *) ok "a permission failure past the budget is still not a kill" ;;
 esac
-# An overrun WITH output keeps the budget as the headline but stops asserting the cause: a
-# stamped reply whose send then failed lands here too. (grok, panel r2.)
+# R23 is the rc=3 DEFINITE-kill case: acpx itself reported the timeout, so the broker never
+# ran and there is no send-failure alternative to hedge toward. The hedge belongs to rc=0
+# (leg 17), asserted just below. Do not "fix" this back to expecting a hedge.
+# (grok, panel r2; codex narrowed it to rc=0, panel r3.)
 R23="$WORK/ma-leg23"; mkdir -p "$R23"
 TO_STUB_RC=3 TO_STUB_OUT="partial text that will not broker" run_to_leg 3 "$R23" 1
 case "$(note_of "$R23")" in
@@ -1796,7 +1798,7 @@ esac
 # effective argv, or any implementation that merely utters the words passes.
 # (grok, panel r2 — the tautological-assertion catch.)
 BBN=0
-for bbcase in "0:1800" "08:8" "9999999999999999999:1800" "notanumber:1800" "3600:3600"; do
+for bbcase in "0:1800" "08:8" "9999999999999999999:1800" "notanumber:1800" "3600:3600" "01800:1800"; do
   BBN=$((BBN+1))
   badbudget="${bbcase%%:*}"; wantbudget="${bbcase##*:}"
   RB="$WORK/ma-badbudget-$BBN"; mkdir -p "$RB"
@@ -1806,6 +1808,14 @@ for bbcase in "0:1800" "08:8" "9999999999999999999:1800" "notanumber:1800" "3600
     *"integer expression expected"*) fail "budget '$badbudget' leaked a bash arithmetic error" ;;
     *) ok "budget '$badbudget' produced no bash arithmetic error" ;;
   esac
+  # A value that stripping made LEGAL must never be called unusable, or the message
+  # contradicts the budget it then honours. (codex + grok, panel r4.)
+  if [ "$wantbudget" = "8" ]; then
+    case "$BB_ERR" in
+      *"not a usable budget"*) fail "a normalised budget '$badbudget' was called unusable" ;;
+      *) ok "a normalised budget '$badbudget' is reported as read, not as unusable" ;;
+    esac
+  fi
   grep -q -- "--timeout $wantbudget " "$ARGVLOG" 2>/dev/null \
     && ok "budget '$badbudget' reached acpx as ${wantbudget}s" \
     || fail "budget '$badbudget' should reach acpx as ${wantbudget}s (argv: $(head -1 "$ARGVLOG" 2>/dev/null))"

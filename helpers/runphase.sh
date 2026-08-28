@@ -67,11 +67,16 @@ die() { echo "runphase.sh: $*" >&2; exit 1; }
 # digits-only check claimed to have removed. Bound by DIGIT COUNT before any arithmetic
 # touches the value. Six digits keeps every real budget (the default is 1800; AGENTS.md
 # dispatches panels at 3600) while staying far below the wrap. (codex + grok, panel r2.)
+# Returns EMPTY when the value is rejected, so callers can tell "rejected" from "merely
+# normalised" instead of inferring it from equality with the default. That inference was
+# wrong for any legal padded value whose stripped form happens to BE the default -- e.g.
+# `--timeout-secs 01800` against 1800 -- which then got the self-contradicting "is not a
+# usable budget" warning while being honoured. (codex + grok, panel r4.)
 sane_secs() {
-  local v="${1:-}" d="$2"
-  case "$v" in ''|*[!0-9]*) v="$d" ;; esac
+  local v="${1:-}"
+  case "$v" in ''|*[!0-9]*) return 0 ;; esac
   v="${v#"${v%%[!0]*}"}"; v="${v:-0}"          # strip leading zeros; "000" -> "0"
-  if [ "${#v}" -gt 6 ] || [ "$v" = "0" ]; then v="$d"; fi
+  if [ "${#v}" -gt 6 ] || [ "$v" = "0" ]; then return 0; fi
   printf '%s' "$v"
 }
 
@@ -924,15 +929,19 @@ cmd_run() {
   # Report the EFFECTIVE budget, not the one that was rejected: naming the malformed
   # environment value while silently selecting 1800 is a warning that misinforms.
   # (codex, panel r2.)
-  local timeout_raw="$timeout" timeout_default
-  timeout_default="$(sane_secs "${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}" 1800)"
-  timeout="$(sane_secs "$timeout" "$timeout_default")"
-  if [ "$timeout" = "$timeout_default" ] && [ "$timeout_raw" != "$timeout_default" ]; then
+  local timeout_raw="$timeout" timeout_default timeout_norm
+  timeout_default="$(sane_secs "${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}")"
+  [ -n "$timeout_default" ] || timeout_default=1800
+  timeout_norm="$(sane_secs "$timeout_raw")"
+  if [ -z "$timeout_norm" ]; then
+    timeout="$timeout_default"
     echo "warning: timeout '$timeout_raw' is not a usable budget (whole seconds, 1-999999) — using ${timeout}s" >&2
-  elif [ "$timeout" != "$timeout_raw" ]; then
+  else
+    timeout="$timeout_norm"
     # Stripping a leading zero makes the value LEGAL, not unusable — saying otherwise while
-    # honouring it is a warning that contradicts itself. (grok, panel r3.)
-    echo "note: timeout '$timeout_raw' read as ${timeout}s" >&2
+    # honouring it is a warning that contradicts itself. Classify on whether the value was
+    # REJECTED, never on whether it happens to equal the default. (grok, panel r3 and r4.)
+    [ "$timeout_norm" = "$timeout_raw" ] || echo "note: timeout '$timeout_raw' read as ${timeout}s" >&2
   fi
   # --no-deliver suppresses the TRUSTED-PARENT broker and thread-state writes. It
   # cannot suppress a child that is told to run `comms.sh send --archive-inbound`
