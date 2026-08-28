@@ -66,11 +66,14 @@ if [ -f "$EXPECT_FILE" ] && ! git -C "$REPO" diff --quiet HEAD -- tests/expected
   echo "COVERAGE: commit it to change the expected counts." >&2
 fi
 
-SEC_N=0; SEC_NAME=""; SEC_PASS=0; SEC_SKIP=0; SECTION_VECTOR=""
+SEC_NAME=""; SEC_PASS=0; SEC_FAIL=0; SEC_SKIP=0; SECTION_VECTOR=""
 _flush_section() {
   [ -n "$SEC_NAME" ] || return 0
   [ -n "$SECTION_VECTOR" ] || return 0
-  # COVERED = pass + skip. A permitted skip REPLACES a pass, so pinning the two columns
+  # COVERED = every assertion that RAN here: pass + fail + skip. Omitting fail made a
+  # red assertion shorten its section and report a move that never happened — a false
+  # diagnostic on the run where you least want one. (grok, suite-lanes r2.)
+  # A permitted skip REPLACES a pass, so pinning pass and skip as separate columns
   # separately would make every host that legitimately cashes a ticket red — the ACL and
   # secondary-group tickets do exactly that on Linux. Coverage is what this vector is
   # for; which side of the pass/skip line a covered assertion fell on is the total gate's
@@ -79,7 +82,7 @@ _flush_section() {
   # Keyed on the BANNER, not the execution ordinal: a lane running a subset renumbers from
   # 1 and could never match a 62-row ordinal golden even when every count is right.
   # (codex + grok, suite-lanes r1, advisory — and a prerequisite for the dispatcher.)
-  printf '%s\t%s\n' "$SEC_NAME" "$((SEC_PASS + SEC_SKIP))" >> "$SECTION_VECTOR"
+  printf '%s\t%s\n' "$SEC_NAME" "$((SEC_PASS + SEC_FAIL + SEC_SKIP))" >> "$SECTION_VECTOR"
 }
 # The vector check as a FUNCTION, so the suite can execute the real thing against
 # adversarial inputs instead of asserting on a reimplementation — the same lesson the
@@ -103,7 +106,7 @@ section_vector_verdict() { # <golden-text-file> <observed-file>
 # from what actually ran.
 section() {
   _flush_section
-  SEC_N=$((SEC_N + 1)); SEC_NAME="$1"; SEC_PASS=0; SEC_SKIP=0
+  SEC_NAME="$1"; SEC_PASS=0; SEC_FAIL=0; SEC_SKIP=0
   echo "== $1 =="
 }
 
@@ -111,7 +114,7 @@ ok()   { PASS=$((PASS+1)); SEC_PASS=$((SEC_PASS+1)); echo "  ok: $1"; }
 # A capability this machine lacks is NOT a passing assertion. Say so visibly and count
 # nothing, so a platform that silently skips coverage never reads as a full green run.
 emit_note() { echo "  note: $1"; }
-fail() { FAIL=$((FAIL+1)); echo "FAIL: $1" >&2; }
+fail() { FAIL=$((FAIL+1)); SEC_FAIL=$((SEC_FAIL+1)); echo "FAIL: $1" >&2; }
 # An assertion the ENVIRONMENT cannot run (no zsh installed, say). It still counts
 # toward coverage, so a skipped machine-conditional check can never look like a
 # check that ran — but skips are separately capped, so quieting a flaky assertion
@@ -6102,6 +6105,19 @@ grep -q '^section_vector_verdict "\$SECTION_GOLDEN_F" "\$SECTION_VECTOR" || COVE
   && ok "the coverage gate calls the per-section verdict function" || fail "the gate does not call section_vector_verdict"
 grep -q 'SECTION_GOLDEN="\$(git' "$REPO/tests/run.sh" \
   && fail "the superseded inline per-section comparison is back" || ok "no inline per-section comparison remains"
+# The vector is KEYED on the banner and compared sorted, so two sections sharing a banner
+# collide silently — swap their counts and it still sorts identically. The dispatcher will
+# key on this too. None today; assert it before that becomes load-bearing. (codex + grok.)
+SEC_DUPS="$(grep '^section "' "$REPO/tests/run.sh" | sort | uniq -d | head -3)"
+[ -z "$SEC_DUPS" ] && ok "every section banner is unique" || fail "duplicate section banners: $SEC_DUPS"
+[ "$(cut -f1 "$REPO/tests/section-counts.tsv" | sort -u | wc -l | tr -d ' ')" = "$(wc -l < "$REPO/tests/section-counts.tsv" | tr -d ' ')" ] \
+  && ok "the committed vector has no duplicate keys" || fail "the per-section vector has duplicate banner keys"
+# A failing assertion must keep its section's covered count whole, or the vector reports a
+# phantom move on top of the real failure. (grok, suite-lanes r2.)
+( SEC_NAME="probe-f"; SEC_PASS=6; SEC_FAIL=2; SEC_SKIP=0; SECTION_VECTOR="$WORK/fv-fail"; _flush_section )
+[ "$(cat "$WORK/fv-fail" 2>/dev/null)" = "$(printf 'probe-f\t8')" ] \
+  && ok "a failed assertion still counts toward its section's covered total" \
+  || fail "fail() is missing from the section row: [$(cat "$WORK/fv-fail" 2>/dev/null)]"
 # The per-section verdict, run for real. A permitted skip REPLACES a pass, so a section
 # whose pass/skip split changes but whose COVERED count does not must still match — that
 # is the Linux-host case (four ACL tickets) the first shape wrongly refused.
