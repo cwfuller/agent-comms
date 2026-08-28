@@ -924,10 +924,15 @@ cmd_run() {
   # Report the EFFECTIVE budget, not the one that was rejected: naming the malformed
   # environment value while silently selecting 1800 is a warning that misinforms.
   # (codex, panel r2.)
-  local timeout_raw="$timeout"
-  timeout="$(sane_secs "$timeout" "$(sane_secs "${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}" 1800)")"
-  if [ "$timeout" != "$timeout_raw" ]; then
+  local timeout_raw="$timeout" timeout_default
+  timeout_default="$(sane_secs "${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}" 1800)"
+  timeout="$(sane_secs "$timeout" "$timeout_default")"
+  if [ "$timeout" = "$timeout_default" ] && [ "$timeout_raw" != "$timeout_default" ]; then
     echo "warning: timeout '$timeout_raw' is not a usable budget (whole seconds, 1-999999) — using ${timeout}s" >&2
+  elif [ "$timeout" != "$timeout_raw" ]; then
+    # Stripping a leading zero makes the value LEGAL, not unusable — saying otherwise while
+    # honouring it is a warning that contradicts itself. (grok, panel r3.)
+    echo "note: timeout '$timeout_raw' read as ${timeout}s" >&2
   fi
   # --no-deliver suppresses the TRUSTED-PARENT broker and thread-state writes. It
   # cannot suppress a child that is told to run `comms.sh send --archive-inbound`
@@ -1364,13 +1369,24 @@ PROMPT
       # secondary detail. Reversing those two sent an operator hunting prompt-format bugs for
       # half an hour on 2026-08-26 — which is the misdiagnosis this whole path exists to stop.
       acp_status=failed
+      # HEDGE when there IS output AND the broker was actually attempted. A reply that was
+      # stamped and validated and then failed to SEND also lands here if the wall clock
+      # overran, and calling that "killed mid-work" is the same confident-wrong-diagnosis
+      # fault one level down. With no output, or on rc=3 where acpx itself reported the
+      # timeout and the broker never ran, the plain claim is correct.
+      # (grok, panel r2; codex refined it to rc=0 only, panel r3.)
+      #
+      # The rc test MUST read the acpx exit code, so it is captured before the 124 overwrite
+      # below — testing it afterwards compared 124 against 0 and the hedge could never fire.
+      local acp_broker_ran=0
+      [ "$acp_rc" -eq 0 ] && acp_broker_ran=1
       acp_rc=124
-      # HEDGE when there IS output. A reply that was stamped and validated and then failed
-      # to SEND also lands here if the wall clock overran, and calling that "killed
-      # mid-work" is the same confident-wrong-diagnosis fault one level down. With no
-      # output at all the claim is safe. (grok, panel r2 — the residual it named.)
-      if [ -s "$run_dir/reply-raw.md" ]; then
-        acp_note="turn exceeded its ${timeout}s budget after ${acp_elapsed}s and was probably killed mid-work — it did produce output, so a stamped reply that merely failed to send is also possible; raise COMMS_RUNPHASE_TIMEOUT_SECS or narrow the request"
+      if [ -s "$run_dir/reply-raw.md" ] && [ "$acp_broker_ran" = 1 ]; then
+        # Only rc=0 reached the broker (the `&&` above short-circuits), so only here can the
+        # output be a complete reply whose stamping or delivery failed. On rc=3 acpx itself
+        # reported the timeout and the broker never ran, so no such alternative exists and
+        # hedging toward it would be misinformation. (codex, panel r3.)
+        acp_note="turn exceeded its ${timeout}s budget after ${acp_elapsed}s and was probably killed mid-work — it did produce output, so a reply that failed to stamp or send is also possible; raise COMMS_RUNPHASE_TIMEOUT_SECS or narrow the request"
       else
         acp_note="turn exceeded its ${timeout}s budget after ${acp_elapsed}s and was killed mid-work — raise COMMS_RUNPHASE_TIMEOUT_SECS or narrow the request; this is NOT an empty or refused reply"
       fi

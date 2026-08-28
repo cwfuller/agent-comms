@@ -300,7 +300,10 @@ lives here), `result.json` (provider, status, exit code, session id), `pid`,
 `completed`/`failed`/`timeout`), records `last_run_dir` (the `stalled` watchdog's pid
 target), and records the provider session id (`codex_thread_id` /
 `claude_session_id`) for attach/resume. Env knobs: `COMMS_RUNPHASE_SANDBOX` (codex,
-default `workspace-write`), `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800),
+default `workspace-write`), `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800; a turn budget is
+whole seconds in `1-999999`, leading zeros are stripped so `08` means 8, and anything
+outside that — including `0` and a non-number — falls back to the default with a warning
+naming the budget actually used),
 `COMMS_RUNPHASE_CLAUDE_PERMISSION_MODE` (default `acceptEdits`),
 `COMMS_RUNPHASE_CLAUDE_ALLOWED_TOOLS` (default `Bash`), `COMMS_RUNPHASE_CLAUDE_ARGS`
 (extra flags; bypass/danger permission flags are refused),

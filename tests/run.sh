@@ -13,7 +13,8 @@ set -uo pipefail
 # budget for a write that is not coming. COMMS_RUNPHASE_STATE_WAIT_SECS too, so an
 # operator's tuning cannot silently change what the timing assertions measure.
 unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP COMMS_RUNPHASE_VIA \
-      COMMS_RUNPHASE_EXPECT_STATE COMMS_RUNPHASE_STATE_WAIT_SECS 2>/dev/null || true
+      COMMS_RUNPHASE_EXPECT_STATE COMMS_RUNPHASE_STATE_WAIT_SECS \
+      COMMS_RUNPHASE_TIMEOUT_SECS 2>/dev/null || true
 # Probe-result flags gate condition-bound skips, so an inherited value would let a skip be
 # cashed before its probe ran. Same class as the scrub above. (grok, panel r7.)
 unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
@@ -1782,8 +1783,14 @@ case "$(note_of "$R23")" in
   *) fail "budget stopped being the headline (got: $(note_of "$R23"))" ;;
 esac
 case "$(note_of "$R23")" in
-  *"probably killed"*) ok "...but the cause is hedged rather than asserted" ;;
-  *) fail "overrun-with-output asserted a definite kill" ;;
+  *"probably killed"*) fail "an rc=3 timeout hedged toward a send failure that cannot have happened" ;;
+  *) ok "an rc=3 timeout states the kill plainly — the broker never ran, so there is no alternative" ;;
+esac
+# ...and the hedge applies where it IS possible: rc=0 with output, where the broker was
+# attempted and could have failed to stamp or send. Leg 17 is that shape. (codex, panel r3.)
+case "$(note_of "$R17")" in
+  *"probably killed"*) ok "an rc=0 overrun WITH output hedges, because the broker did run" ;;
+  *) fail "rc=0 overrun-with-output did not hedge (got: $(note_of "$R17"))" ;;
 esac
 # BUDGET VALIDATION is about what reaches acpx, not about what the warning says. Assert the
 # effective argv, or any implementation that merely utters the words passes.
