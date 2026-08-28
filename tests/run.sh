@@ -57,7 +57,7 @@ EXPECT_TOTAL="$(printf '%s\n' "$EXPECT_SRC" | awk -F'\t' '$1=="total"{print $2}'
 SKIP_ALLOWED=" $(printf '%s\n' "$EXPECT_SRC" | awk -F'\t' '$1=="skip_ok"{printf "%s ", $2}')"
 # A working-tree edit to the contract is NOT authoritative — say so, or a developer who
 # bumps the count and sees the old number will think the gate is broken.
-if [ -f "$EXPECT_FILE" ] && ! git -C "$REPO" diff --quiet -- tests/expected-counts.tsv 2>/dev/null; then
+if [ -f "$EXPECT_FILE" ] && ! git -C "$REPO" diff --quiet HEAD -- tests/expected-counts.tsv 2>/dev/null; then
   echo "COVERAGE: tests/expected-counts.tsv is modified; the COMMITTED contract is authoritative." >&2
   echo "COVERAGE: commit it to change the expected counts." >&2
 fi
@@ -5738,14 +5738,28 @@ SK_NOCOND="$( (FAIL=0; SKIP=0; SKIP_USED=" "; SKIP_ALLOWED=" no-such-condition "
 # Each production loop asserted BY ITSELF. A count-based tripwire did not lock: the
 # grep line and a no-op literal contributed their own matches, so deleting one real loop
 # still satisfied it. (codex + grok, panel r3, corroborated advisory.)
-grep -q "for tf in .(tracked_paths 'templates/claude-commands" "$REPO/tests/run.sh" \
+# ANCHORED at line start, which is what actually breaks the self-match: every assertion
+# below begins with `grep`, never with `for`. The two `for tf` loops differ only by
+# indentation, so the anchors also tell them apart. (codex + grok, panel r4, corroborated
+# -- they gave the exact self-matching line numbers.)
+grep -q "^for tf in .(tracked_paths 'templates/claude-commands" "$REPO/tests/run.sh" \
   && ok "the template loop enumerates tracked paths" || fail "the template loop no longer enumerates tracked paths"
-grep -q "for frag in .(tracked_paths 'docs/loopspec/fragments" "$REPO/tests/run.sh" \
+grep -q "^for frag in .(tracked_paths 'docs/loopspec/fragments" "$REPO/tests/run.sh" \
   && ok "the fragment loop enumerates tracked paths" || fail "the fragment loop no longer enumerates tracked paths"
-grep -q "for tf in .(tracked_paths 'templates/claude-commands/\*\.md' 'templates/codex-skills" "$REPO/tests/run.sh" \
+grep -q "^  for tf in .(tracked_paths 'templates/claude-commands" "$REPO/tests/run.sh" \
   && ok "the signature-scan loop enumerates tracked paths" || fail "the signature-scan loop no longer enumerates tracked paths"
-grep -qE 'for (tf|frag) in "\$REPO"/(templates|docs)' "$REPO/tests/run.sh" \
+# Negative side widened: a filesystem walk can also arrive as find, or via "$REPO"/./x.
+grep -qE '^ *for [a-z_]+ in .*"\$REPO"/\.?/?(templates|docs)' "$REPO/tests/run.sh" \
   && fail "a corpus loop still enumerates the filesystem" || ok "no corpus loop enumerates the filesystem"
+grep -qE '^ *for [a-z_]+ in .*find "\$REPO"/(templates|docs)' "$REPO/tests/run.sh" \
+  && fail "a corpus loop walks the filesystem with find" || ok "no corpus loop walks the filesystem with find"
+# integrate must not accept a suite that never ran, and must keep the evidence.
+grep -q 'env -u BASH_ENV -u ENV -u SHELLOPTS' "$REPO/helpers/comms.sh" \
+  && ok "integrate scrubs shell-startup hooks before the suite" || fail "integrate does not scrub shell-startup hooks"
+grep -q 'emitted no completion line' "$REPO/helpers/comms.sh" \
+  && ok "integrate requires positive proof the suite ran to the end" || fail "integrate accepts an exit status alone"
+grep -q 'tee "\$suite_log"' "$REPO/helpers/comms.sh" \
+  && ok "integrate keeps the output of the run it judges" || fail "integrate discards the suite output"
 # The contract must come from the commit under test, not from a file on disk.
 grep -q 'git -C "\$REPO" show "\${TESTED_OID:-missing}:tests/expected-counts.tsv"' "$REPO/tests/run.sh" \
   && ok "the coverage contract is read from the commit under test" || fail "the contract is not bound to TESTED_OID"

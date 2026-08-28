@@ -2525,12 +2525,49 @@ cmd_integrate() {
     # (codex, impl r1.)
     set -f; set -- $suite_cmd; set +f
     [ $# -gt 0 ] || die "integrate: suite-cmd is empty after splitting — refusing to land unverified"
+    # SHELL-STARTUP SCRUB. Non-interactive bash sources $BASH_ENV *before* the script
+    # runs, so a suite's own guards are installed too late to matter: `BASH_ENV` naming
+    # a file that says `exit 0` makes `bash tests/run.sh` return 0 with no output and no
+    # assertions, and integrate would land on it. ENV/SHELLOPTS/BASHOPTS are the same
+    # class. (codex, panel r4, blocking — demonstrated with BASH_ENV=/dev/stdin.)
+    local -a clean_env
+    clean_env=(env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD)
+    # Keep the output of the run we are judging. A refusal whose evidence was discarded
+    # cannot be diagnosed, which cost a full investigation earlier in this arc.
+    local suite_log; suite_log="$root/.comms/logs/integrate-${cand}.suite.log"
+    mkdir -p "$root/.comms/logs" 2>/dev/null || true
     if [ -n "$name" ] && [ -n "$instance" ]; then
-      ( cd "$tw" && "$0" presence with-beat --name "$name" --instance "$instance" -- "$@" ) || rc=$?
+      ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log"
+      rc=${PIPESTATUS[0]}
     else
-      ( cd "$tw" && "$@" ) || rc=$?
+      ( cd "$tw" && "${clean_env[@]}" "$@" ) 2>&1 | tee "$suite_log"
+      rc=${PIPESTATUS[0]}
     fi
-    [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; fix on the branch and re-run"
+    [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log"
+    # POSITIVE PROOF, not merely an absence of failure. A scrub is a blocklist and the
+    # next startup hook will not be on it, so require evidence the suite actually RAN:
+    # its completion line, with counts matching the contract committed AT THE CANDIDATE.
+    # Only enforced when the candidate carries a contract, so other projects' suite-cmds
+    # are unaffected. (codex, panel r4.)
+    local exp_total proof_pass proof_fail proof_skip
+    # `|| exp_total=""` is load-bearing: under `set -e` + `pipefail`, a candidate with no
+    # contract makes `git show` exit 128 and the ASSIGNMENT takes the whole function down
+    # -- the var=$(cmd) errexit trap this repo has hit before. A project without a
+    # contract must simply skip the proof, not fail its landing.
+    exp_total="$(git -C "$root" show "$cand:tests/expected-counts.tsv" 2>/dev/null \
+                 | awk -F'\t' '$1=="total"{print $2}')" || exp_total=""
+    case "$exp_total" in ''|*[!0-9]*) exp_total="" ;; esac
+    if [ -n "$exp_total" ]; then
+      proof_pass="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\1/p' "$suite_log" | tail -1)" || proof_pass=""
+      proof_fail="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\2/p' "$suite_log" | tail -1)" || proof_fail=""
+      proof_skip="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\3/p' "$suite_log" | tail -1)" || proof_skip=""
+      [ -n "$proof_pass" ] \
+        || die "integrate: the suite exited 0 but emitted no completion line — it did not run to the end (a shell-startup hook can pre-empt it); refusing. Output: $suite_log"
+      [ "$proof_fail" = 0 ] \
+        || die "integrate: the suite reported $proof_fail failures despite exit 0 — refusing. Output: $suite_log"
+      [ "$((proof_pass + proof_skip))" = "$exp_total" ] \
+        || die "integrate: the suite ran $((proof_pass + proof_skip)) of $exp_total assertions the candidate declares — refusing a partial run. Output: $suite_log"
+    fi
     # BIND the result to the candidate: a suite that checked out another OID and
     # passed there proves nothing about $cand. Every verification below fails
     # CLOSED — a command that cannot answer refuses the landing. (codex, impl r1.)
