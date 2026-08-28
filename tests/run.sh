@@ -1645,6 +1645,7 @@ cat > "$TO_STUB/npx" <<'TSTUB'
 case " $* " in
   *" sessions ensure "*) echo "stub-session (created)"; exit 0 ;;
 esac
+printf '%s\n' "$*" >> "${TO_STUB_ARGV:-/dev/null}"
 [ "${TO_STUB_SLEEP:-2}" != "0" ] && sleep "${TO_STUB_SLEEP:-2}"   # outlive the 1s budget below
 # Default prints NOTHING -- exactly acpx --format quiet on a kill. TO_STUB_OUT makes the
 # kill PARTIAL instead, which is the case the original guard could not see.
@@ -1735,8 +1736,8 @@ esac
 # ...and it must FALL BACK rather than reach acpx: the value is handed to acpx on its own
 # --timeout flag, so validating it at the point of the arithmetic was already too late.
 case "$TO_ERR" in
-  *"falling back"*) ok "a malformed budget falls back to the default instead of being passed through" ;;
-  *) fail "a malformed budget was not reported as falling back (got: $(printf '%.90s' "$TO_ERR"))" ;;
+  *"not a usable budget"*) ok "a malformed budget is reported as unusable" ;;
+  *) fail "a malformed budget was not reported (got: $(printf '%.120s' "$TO_ERR"))" ;;
 esac
 # A SLOW FAILURE IS NOT A KILL. Any failure that happened to outlast the budget was being
 # relabelled "killed mid-work" with exit 124 — acpx usage, session and permission errors,
@@ -1754,6 +1755,54 @@ case "$(note_of "$R20")" in
   *"budget"*) ok "...but the elapsed-vs-budget context is still reported" ;;
   *) fail "budget context lost on a non-zero acpx exit" ;;
 esac
+# THE REAL TIMEOUT EXIT CODE. Pinned acpx times the prompt then salvages: a salvaged reply
+# returns 0, and a failed salvage rethrows and exits 3 — which helpers/acp.sh already
+# documents as TIMEOUT. Treating rc=0 as the whole signature meant a genuine rc=3 timeout
+# fell to the generic branch and was never named as a kill.
+# (codex + grok, corroborated, panel r2.)
+R21="$WORK/ma-leg21"; mkdir -p "$R21"
+TO_STUB_RC=3 run_to_leg 1 "$R21" 1
+case "$(note_of "$R21")" in
+  *"killed mid-work"*) ok "an acpx exit-3 timeout is named as a budget kill" ;;
+  *) fail "rc=3 timeout was not recognised (got: $(note_of "$R21"))" ;;
+esac
+# ...while codes that are NOT timeouts stay out of the pair.
+R22="$WORK/ma-leg22"; mkdir -p "$R22"
+TO_STUB_RC=5 run_to_leg 2 "$R22" 1
+case "$(note_of "$R22")" in
+  *"killed mid-work"*) fail "a permission failure (exit 5) was relabelled a budget kill" ;;
+  *) ok "a permission failure past the budget is still not a kill" ;;
+esac
+# An overrun WITH output keeps the budget as the headline but stops asserting the cause: a
+# stamped reply whose send then failed lands here too. (grok, panel r2.)
+R23="$WORK/ma-leg23"; mkdir -p "$R23"
+TO_STUB_RC=3 TO_STUB_OUT="partial text that will not broker" run_to_leg 3 "$R23" 1
+case "$(note_of "$R23")" in
+  "turn exceeded its"*) ok "an overrun with output still leads with the budget" ;;
+  *) fail "budget stopped being the headline (got: $(note_of "$R23"))" ;;
+esac
+case "$(note_of "$R23")" in
+  *"probably killed"*) ok "...but the cause is hedged rather than asserted" ;;
+  *) fail "overrun-with-output asserted a definite kill" ;;
+esac
+# BUDGET VALIDATION is about what reaches acpx, not about what the warning says. Assert the
+# effective argv, or any implementation that merely utters the words passes.
+# (grok, panel r2 — the tautological-assertion catch.)
+BBN=0
+for bbcase in "0:1800" "08:8" "9999999999999999999:1800" "notanumber:1800" "3600:3600"; do
+  BBN=$((BBN+1))
+  badbudget="${bbcase%%:*}"; wantbudget="${bbcase##*:}"
+  RB="$WORK/ma-badbudget-$BBN"; mkdir -p "$RB"
+  ARGVLOG="$RB/argv.txt"; : > "$ARGVLOG"
+  BB_ERR="$( { TO_STUB_ARGV="$ARGVLOG" TO_STUB_SLEEP=0 run_to_leg "b$BBN" "$RB" "$badbudget"; } 2>&1 || true)"
+  case "$BB_ERR" in
+    *"integer expression expected"*) fail "budget '$badbudget' leaked a bash arithmetic error" ;;
+    *) ok "budget '$badbudget' produced no bash arithmetic error" ;;
+  esac
+  grep -q -- "--timeout $wantbudget " "$ARGVLOG" 2>/dev/null \
+    && ok "budget '$badbudget' reached acpx as ${wantbudget}s" \
+    || fail "budget '$badbudget' should reach acpx as ${wantbudget}s (argv: $(head -1 "$ARGVLOG" 2>/dev/null))"
+done
 
 # Question leg (/ask grok path): the stub STILL emits a leading canonical
 # VERDICT line — for a consult that line must become body text, never metadata.

@@ -58,6 +58,23 @@ RP_EXPECT_STATE="${COMMS_RUNPHASE_EXPECT_STATE:-}"
 
 die() { echo "runphase.sh: $*" >&2; exit 1; }
 
+# sane_secs <value> <default> — a usable whole number of seconds, or the default.
+#
+# Digits-only is NOT enough, which is the lesson 0fe39ac already paid for on the state-wait
+# budget: `0` is not a legal acpx timeout, `08` is an octal error the moment it reaches
+# arithmetic, and bash 3.2 wraps at 2^63 so an oversized digit string either wraps in
+# `$(( ))` or makes `[ x -ge y ]` print "integer expression expected" -- the very error a
+# digits-only check claimed to have removed. Bound by DIGIT COUNT before any arithmetic
+# touches the value. Six digits keeps every real budget (the default is 1800; AGENTS.md
+# dispatches panels at 3600) while staying far below the wrap. (codex + grok, panel r2.)
+sane_secs() {
+  local v="${1:-}" d="$2"
+  case "$v" in ''|*[!0-9]*) v="$d" ;; esac
+  v="${v#"${v%%[!0]*}"}"; v="${v:-0}"          # strip leading zeros; "000" -> "0"
+  if [ "${#v}" -gt 6 ] || [ "$v" = "0" ]; then v="$d"; fi
+  printf '%s' "$v"
+}
+
 case "$0" in
   /*) SELF="$0" ;;
   *)  SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")" ;;
@@ -904,13 +921,14 @@ cmd_run() {
   # reject the input. Falling back to the default rather than dying matches the state-wait
   # budget rule (0fe39ac) — a malformed knob must not take down a turn that would otherwise
   # run. (codex, panel round 1.)
-  case "$timeout" in
-    ''|*[!0-9]*)
-      echo "warning: --timeout-secs '$timeout' is not a whole number of seconds — falling back to ${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}" >&2
-      timeout="${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}"
-      case "$timeout" in ''|*[!0-9]*) timeout=1800 ;; esac
-      ;;
-  esac
+  # Report the EFFECTIVE budget, not the one that was rejected: naming the malformed
+  # environment value while silently selecting 1800 is a warning that misinforms.
+  # (codex, panel r2.)
+  local timeout_raw="$timeout"
+  timeout="$(sane_secs "$timeout" "$(sane_secs "${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}" 1800)")"
+  if [ "$timeout" != "$timeout_raw" ]; then
+    echo "warning: timeout '$timeout_raw' is not a usable budget (whole seconds, 1-999999) — using ${timeout}s" >&2
+  fi
   # --no-deliver suppresses the TRUSTED-PARENT broker and thread-state writes. It
   # cannot suppress a child that is told to run `comms.sh send --archive-inbound`
   # itself — so for a self-sending provider the flag would deliver and archive while
@@ -1332,20 +1350,30 @@ PROMPT
       if [ "$acp_overran" = 1 ]; then
         acp_note="WARNING: the turn ran ${acp_elapsed}s against a ${timeout}s budget, so acpx may have cut it off mid-answer — this reply may be TRUNCATED; re-read it before trusting the verdict"
       fi
-    elif [ "$acp_rc" -eq 0 ] && [ "$acp_overran" = 1 ]; then
-      # A budget kill has a SIGNATURE, and "the turn was slow" is not it. Under
-      # `--format quiet` acpx exits 0 having printed nothing usable — so a kill is
-      # rc==0 AND over the wall clock. Treating every failure past the budget as a kill
-      # relabelled acpx usage, session and permission errors, and broker validation and
-      # delivery failures, as "killed mid-work" with exit 124 — a confident wrong
-      # diagnosis, which is the exact fault this whole path exists to remove.
-      # (codex, panel round 1.)
+    elif { [ "$acp_rc" -eq 0 ] || [ "$acp_rc" -eq 3 ]; } && [ "$acp_overran" = 1 ]; then
+      # A budget kill has a SIGNATURE, and "the turn was slow" is not it — but the
+      # signature is a PAIR, not rc 0 alone. Pinned acpx times the prompt and then
+      # salvages: if a reply exists it returns 0 (the empty-stdout field report), and if
+      # salvage finds nothing it rethrows and the CLI exits 3, which this repo already
+      # documents as TIMEOUT in helpers/acp.sh. Round 2 named only the first, so a real
+      # rc=3 timeout fell to the generic branch and its partial output was never brokered.
+      # Usage (2), no-session (4) and permission (5) failures stay out of the pair, which
+      # is what keeps a permission error from being relabelled a kill.
+      # (codex + grok, corroborated, panel round 2.)
       # The budget is the HEADLINE, and the broker's complaint about the fragment becomes the
       # secondary detail. Reversing those two sent an operator hunting prompt-format bugs for
       # half an hour on 2026-08-26 — which is the misdiagnosis this whole path exists to stop.
       acp_status=failed
       acp_rc=124
-      acp_note="turn exceeded its ${timeout}s budget after ${acp_elapsed}s and was killed mid-work — raise COMMS_RUNPHASE_TIMEOUT_SECS or narrow the request; this is NOT an empty or refused reply"
+      # HEDGE when there IS output. A reply that was stamped and validated and then failed
+      # to SEND also lands here if the wall clock overran, and calling that "killed
+      # mid-work" is the same confident-wrong-diagnosis fault one level down. With no
+      # output at all the claim is safe. (grok, panel r2 — the residual it named.)
+      if [ -s "$run_dir/reply-raw.md" ]; then
+        acp_note="turn exceeded its ${timeout}s budget after ${acp_elapsed}s and was probably killed mid-work — it did produce output, so a stamped reply that merely failed to send is also possible; raise COMMS_RUNPHASE_TIMEOUT_SECS or narrow the request"
+      else
+        acp_note="turn exceeded its ${timeout}s budget after ${acp_elapsed}s and was killed mid-work — raise COMMS_RUNPHASE_TIMEOUT_SECS or narrow the request; this is NOT an empty or refused reply"
+      fi
       # Carry the broker complaint ONLY when the child actually produced something. On a
       # silent kill its complaint is "the child produced no reply text", which is precisely
       # the misdiagnosis this path exists to delete — appending it there would re-import the
