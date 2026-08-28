@@ -6225,14 +6225,54 @@ grep -rq 'passed: 3  failed: 0  skipped: 0' "$IP/.comms/logs" 2>/dev/null \
 # operator whose record lives in a different checkout. It is what made an integrate-hosted
 # suite run fail three of its own integrate tests while direct runs of the same commit
 # passed repeatedly. Presence bookkeeping is advisory; it must never decide a landing.
-IP_HEAL="$( (cd "$IP" && env -u CMUX_WORKSPACE_ID \
+# Its own fixture with a REAL (loud) suite, so the landing actually completes and the
+# success path — which clears the trap and does its own cleanup — is the one exercised.
+# Asserting only that some output appeared would be satisfied by moving the candidate
+# print above a still-fatal beat. (codex, panel r1.)
+IH="$WORK/int-heal"; mkdir -p "$IH"; IH="$(cd "$IH" && pwd -P)"
+git -C "$IH" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IH/.gitignore"
+mkdir -p "$IH/tests" "$IH/.comms"
+printf 'total\t3\n' > "$IH/tests/expected-counts.tsv"
+printf '#!/bin/bash\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IH/tests/loud.sh"
+chmod +x "$IH/tests/loud.sh"
+printf 'suite-cmd = bash tests/loud.sh\n' > "$IH/.comms/config"
+(cd "$IH" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IH" && git checkout -q -b session-primary)
+(cd "$IH" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new healone) >/dev/null 2>&1
+(cd "$IH/.claude/worktrees/healone" && echo z > e.txt && git add e.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: e") >/dev/null 2>&1
+IH_OUT="$( (cd "$IH" && env -u CMUX_WORKSPACE_ID \
     COMMS_PRESENCE_NAME=no-such-session COMMS_PRESENCE_INSTANCE=00000000000000000000000000000000 \
-    "$COMMS" integrate worktree-proofone) 2>&1 || true )"
-case "$IP_HEAL" in
-  "") fail "integrate died silently under an inherited presence identity with no local record" ;;
-  *"integrate: candidate"*) ok "an inherited presence identity with no local record does not kill the landing" ;;
-  *) fail "integrate produced unexpected output under a healed presence record: $(printf '%s' "$IP_HEAL" | head -1)" ;;
-esac
+    "$COMMS" integrate worktree-healone) 2>&1 || true )"
+[ -n "$IH_OUT" ] || fail "integrate died silently under an inherited presence identity with no local record"
+[ "$(cd "$IH" && git rev-parse main)" = "$(cd "$IH" && git rev-parse worktree-healone)" ] \
+  && ok "an inherited presence identity with no local record still lands" \
+  || fail "the landing did not happen (got: $(printf '%s' "$IH_OUT" | tail -1))"
+# ...and the record it HEALED into being must not outlive the run. A healed record has no
+# pid, and a pid-less record can never be classified dead, so leaving one behind forces
+# every future session in that repo to isolate permanently. (codex, panel r1, blocking.)
+[ "$(find "$IH/.comms/sessions" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
+  && ok "a presence record healed by integrate is released, not left as a permanent peer" \
+  || fail "integrate left a pid-less presence record behind: $(find "$IH/.comms/sessions" -name '*.json' -type f 2>/dev/null | head -1)"
+# A PRE-EXISTING record must survive — the release must remove only what this run created.
+IH2="$WORK/int-heal2"; mkdir -p "$IH2"; IH2="$(cd "$IH2" && pwd -P)"
+cp -R "$IH/tests" "$IH2/tests"; mkdir -p "$IH2/.comms"
+printf '.comms/\n.claude/worktrees/\n' > "$IH2/.gitignore"
+printf 'suite-cmd = bash tests/loud.sh\n' > "$IH2/.comms/config"
+git -C "$IH2" init -q -b main
+(cd "$IH2" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IH2" && git checkout -q -b session-primary)
+(cd "$IH2" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new healtwo) >/dev/null 2>&1
+(cd "$IH2/.claude/worktrees/healtwo" && echo z > f.txt && git add f.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: f") >/dev/null 2>&1
+IH2_CLAIM="$( (cd "$IH2" && env -u CMUX_WORKSPACE_ID "$COMMS" presence claim --name resident --role holder) 2>&1 || true )"
+IH2_INST="$(printf '%s' "$IH2_CLAIM" | sed -n 's/.*instance: //p')"
+(cd "$IH2" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_NAME=resident COMMS_PRESENCE_INSTANCE="$IH2_INST" \
+    "$COMMS" integrate worktree-healtwo) >/dev/null 2>&1 || true
+[ -f "$IH2/.comms/sessions/resident-$IH2_INST.json" ] \
+  && ok "a pre-existing presence record survives an integrate that used it" \
+  || fail "integrate released a record it did not create"
 
 # A hook that INTERPOSES on the scrub command itself: `env` as a shell function takes
 # precedence over the builtin and PATH, so an unpinned scrub would call the forgery

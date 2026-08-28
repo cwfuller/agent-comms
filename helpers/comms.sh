@@ -2581,7 +2581,7 @@ cmd_integrate() {
   # (grok, impl r2.)
   tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
   # shellcheck disable=SC2064
-  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
+  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ -n \"\${INTEGRATE_HEALED_RECORD:-}\" ]; then '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; elif [ -n '$name' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
   # `|| true` is load-bearing, and its absence was a silent-death bug: `presence beat`
   # exits 5 when it HEALED a vanished record, which happens on every integrate run whose
   # inherited COMMS_PRESENCE_NAME/INSTANCE has no record in THIS repo — i.e. every nested
@@ -2592,7 +2592,20 @@ cmd_integrate() {
   # while seven direct runs of the same commit passed. The sibling call at the end of this
   # function already guards the same way; this one did not. Presence bookkeeping is
   # advisory and must never decide a landing.
-  { [ -n "$name" ] && [ -n "$instance" ] && "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1; } || true
+  # Exit 5 means the record did NOT exist and this beat HEALED it into being -- so the
+  # record is OURS, and it must not outlive the run. A healed record carries no pid, and a
+  # pid-less record can never be classified dead, so `presence expire` can never reap it:
+  # left behind, it forces every future session in this repo to isolate, permanently,
+  # until a human force-expires it. Swallowing exit 5 with a bare `|| true` fixed the
+  # silent death and created that pollution instead. Tracked here, released in the traps.
+  # INTEGRATE_HEALED_RECORD is deliberately GLOBAL: the EXIT traps fire after this
+  # function's locals are gone, which is why they pre-expand every other value.
+  # (codex, panel r1, blocking.)
+  local beat_rc=0
+  if [ -n "$name" ] && [ -n "$instance" ]; then
+    "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1 || beat_rc=$?
+    [ "$beat_rc" = 5 ] && INTEGRATE_HEALED_RECORD=1
+  fi
   expected="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" || die "integrate: no refs/heads/main"
   cand="$(git -C "$root" rev-parse --verify "$branch^{commit}" 2>/dev/null)" || die "integrate: cannot resolve '$branch'"
   echo "integrate: candidate $cand (from $branch), expected main $expected"
@@ -2625,7 +2638,7 @@ cmd_integrate() {
     # tip this run never verified is not the promise "unmoved main" made.
     # (codex, r1.) Leaving it detached is the safe residual; the message says so.
     # shellcheck disable=SC2064
-    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
+    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; if [ -n \"\${INTEGRATE_HEALED_RECORD:-}\" ]; then '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; elif [ -n '$name' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
     echo "integrate: healed — detached clean main occupant $occ for the landing"
   fi
   # ATTESTED GREEN: when .comms/config opts in (suite-attest-secs = N), a fresh
@@ -2774,7 +2787,15 @@ cmd_integrate() {
       echo "integrate: warning — could not re-attach $healed to main; it is parked detached at $expected"
     fi
   fi
-  [ -n "$name" ] && "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
+  # Same rule as the traps: a record this run HEALED into being is ours and must not
+  # outlive it. This is the SUCCESS path, which clears the trap and therefore does its own
+  # cleanup — patching only the traps left the pollution on exactly the path that matters
+  # most, the one that lands. (Found by the regression, not by reading.)
+  if [ -n "${INTEGRATE_HEALED_RECORD:-}" ]; then
+    "$0" presence release --name "$name" --instance "$instance" >/dev/null 2>&1 || true
+  else
+    [ -n "$name" ] && "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
+  fi
   trap - EXIT
   if [ -n "$skip_suite" ]; then
     echo "integrate: LANDED $cand as main (was $expected); green by attestation (${attest_age}s old)"
