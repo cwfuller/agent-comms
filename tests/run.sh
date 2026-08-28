@@ -1,10 +1,3 @@
-SECTION_GOLDEN_F="$WORK/section-golden.tsv"
-git -C "$REPO" show "${TESTED_OID:-missing}:tests/section-counts.tsv" > "$SECTION_GOLDEN_F" 2>/dev/null || : > "$SECTION_GOLDEN_F"
-section_vector_verdict "$SECTION_GOLDEN_F" "$SECTION_VECTOR" || COVERAGE_OK=0
-# A working-tree edit is not authoritative here either — same rule, same reason.
-if [ -f "$REPO/tests/section-counts.tsv" ] && ! git -C "$REPO" diff --quiet HEAD -- tests/section-counts.tsv 2>/dev/null; then
-  echo "COVERAGE: tests/section-counts.tsv is modified; the COMMITTED vector is authoritative." >&2
-fi
 #!/bin/bash
 # agent-comms test harness — repeatable checks for the shared helpers and installer.
 # Stubs cmux with a fake binary (canned tree output + call log) so picker/delivery
@@ -6099,6 +6092,16 @@ grep -q 'if \[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \] && \[ -n "${TESTED
   && ok "the expected-coverage contract is committed" || fail "tests/expected-counts.tsv missing"
 [ -s "$REPO/tests/section-counts.tsv" ] \
   && ok "the per-section vector is committed" || fail "tests/section-counts.tsv missing"
+# STRUCTURAL. An edit landed the gate block ABOVE the shebang: the file stopped being a
+# script, top-level code ran with WORK and REPO unset, and it called a function that did
+# not exist yet — all of it silent, because stray top-level failures are uncounted and the
+# suite still reported green. Cheap to assert, invisible otherwise. (codex + grok, r2.)
+[ "$(head -1 "$REPO/tests/run.sh")" = '#!/bin/bash' ] \
+  && ok "the harness begins with its shebang (no code above it)" || fail "something precedes the shebang"
+grep -q '^section_vector_verdict "\$SECTION_GOLDEN_F" "\$SECTION_VECTOR" || COVERAGE_OK=0$' "$REPO/tests/run.sh" \
+  && ok "the coverage gate calls the per-section verdict function" || fail "the gate does not call section_vector_verdict"
+grep -q 'SECTION_GOLDEN="\$(git' "$REPO/tests/run.sh" \
+  && fail "the superseded inline per-section comparison is back" || ok "no inline per-section comparison remains"
 # The per-section verdict, run for real. A permitted skip REPLACES a pass, so a section
 # whose pass/skip split changes but whose COVERED count does not must still match — that
 # is the Linux-host case (four ACL tickets) the first shape wrongly refused.
@@ -6577,16 +6580,14 @@ coverage_verdict "$PASS" "$FAIL" "$SKIP" "${EXPECT_TOTAL:-}" && COVERAGE_OK=1
 # This is the invariant that makes the coming section-function wrap and lane split
 # VERIFIABLE rather than hopeful: a wrap that silently moved assertions between sections
 # keeps the total intact and fails here.
-SECTION_GOLDEN="$(git -C "$REPO" show "${TESTED_OID:-missing}:tests/section-counts.tsv" 2>/dev/null || true)"
-if [ -z "$SECTION_GOLDEN" ]; then
-  COVERAGE_OK=0
-  echo "COVERAGE: tests/section-counts.tsv is not readable at the commit under test — refusing" >&2
-elif ! printf '%s\n' "$SECTION_GOLDEN" | diff -q - "$SECTION_VECTOR" >/dev/null 2>&1; then
-  COVERAGE_OK=0
-  echo "COVERAGE: the per-section vector does not match the committed one." >&2
-  echo "COVERAGE: assertions moved between sections, or a section was added/removed/reordered." >&2
-  printf '%s\n' "$SECTION_GOLDEN" | diff - "$SECTION_VECTOR" 2>&1 | head -12 >&2
-  echo "COVERAGE: if that change is intended, update tests/section-counts.tsv in the SAME commit." >&2
+SECTION_GOLDEN_F="$WORK/section-golden.tsv"
+git -C "$REPO" show "${TESTED_OID:-missing}:tests/section-counts.tsv" > "$SECTION_GOLDEN_F" 2>/dev/null \
+  || : > "$SECTION_GOLDEN_F"
+section_vector_verdict "$SECTION_GOLDEN_F" "$SECTION_VECTOR" || COVERAGE_OK=0
+# A working-tree edit is not authoritative here either — same rule as the total contract.
+if [ -f "$REPO/tests/section-counts.tsv" ] && ! git -C "$REPO" diff --quiet HEAD -- tests/section-counts.tsv 2>/dev/null; then
+  echo "COVERAGE: tests/section-counts.tsv is modified; the COMMITTED vector is authoritative." >&2
+  echo "COVERAGE: commit it to change the expected per-section counts." >&2
 fi
 GATE_REACHED=1
 # A fully green run attests itself so integrate can skip its re-verification of
