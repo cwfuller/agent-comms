@@ -1489,3 +1489,23 @@ fix is to observe the thing itself.
   come back and look. Build it on the driver-neutral readers above — a notifier written
   against the old `to-claude` scan would have been silent for exactly the drivers that
   most need it.
+  Carried out of that loop's advisories, none blocking, all recorded so they are not lost:
+  - [ ] The `result-spawned-exception` loopspec fragment and the four generated templates
+    still tell an agent to report any non-zero await instead of checking for a reply that
+    may already have arrived. `docs/PROTOCOL.md` now says otherwise in both the paragraph
+    and the outcome table, so the fragment is the surface that disagrees — and changing it
+    is a fragment edit plus a pin sync for every vendoring consumer, which is why it was
+    not folded into a docs round. (codex.)
+  - [ ] `sorted_message_files` treats a MISSING inbox directory as a failing `find` under
+    `pipefail`. `cmd_status` already papers over it with `|| true`; the panel scan now
+    walks every registered inbox, and `install.sh` creates only `to-claude` and `to-codex`
+    while the zero-config registry is `claude codex grok`. bash 3.2 hides it inside
+    `$(...)`; bash 4.4+ would abort the substitution mid-list, and a registry listing a
+    never-created inbox FIRST would hide every inbox after it. One line at the top of the
+    accessor (`[ -d "$dir" ] || return 0`) makes every caller match what `cmd_status`
+    already assumes. Pre-existing, not introduced by the panel scan, but the scan is what
+    made it reachable on a default layout. (grok.)
+  - [ ] The malformed-registry regression tests cannot distinguish the caller-reads-once
+    fix from the older `inbox_for` version — both fail at the caller's initial read. A test
+    that invalidates the config AFTER that snapshot would cover the swallowed inner
+    revalidation directly. (codex.)
