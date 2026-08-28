@@ -1461,10 +1461,15 @@ fix is to observe the thing itself.
   --notify`, a harness-owned inbox watcher that re-arms on resume, or a
   deliver-to-driver nudge for cmux-hosted drivers.
   **Corrected and half-shipped 2026-08-27.** The premise above is wrong on DURABILITY
-  and was hiding a real defect underneath it. Every route already writes the reply into
-  the driver's inbox — the self-sending peer sends it (`runphase.sh:1085`), the broker
-  copies and sends it for grok and for ACP (`runphase.sh:793-796`, `:1299`) — from a
-  `nohup`-detached runner, and `result.json` is deliberately written LAST. So a dead
+  and was hiding a real defect underneath it. Where a conforming reply exists it is
+  already written into the driver's inbox — the self-sending peer sends it
+  (`runphase.sh:1085`), the broker copies and sends it for grok and for ACP
+  (`runphase.sh:793-796`, `:1299`) — from a `nohup`-detached runner, and `result.json` is
+  deliberately written LAST. One route is weaker than that and it is worth naming: the
+  self-sending arm marks a turn `completed` from the child's exit code alone
+  (`runphase.sh:1361-1368`) without checking that anything landed, so a child exiting 0
+  without sending produces a completed result and an empty inbox. Parent-brokered routes
+  do not have that hole because the parent performs the write. (grok, panel r1.) So a dead
   await loses a notification, never a verdict; field item #6 ("panel completion writes
   to the awaiting agent's inbox, not only the run dir") asks for a write that already
   happens on every route. Field item #5 ("awaits must drain the inbox") also loses its

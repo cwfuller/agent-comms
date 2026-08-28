@@ -594,13 +594,18 @@ sorted_message_files() {
 # `in-reply-to` + `type` + `validate` chain both callers apply to every candidate, and
 # that chain is unchanged here; widening the scan only makes a bound reply REACHABLE.
 #
-# Archive stays first so ordering semantics are identical for the common case, and the
-# registry read uses the capture-then-check idiom: `for a in $(registry_agents)`
-# swallows a failing substitution, which would silently narrow the scan back to
-# archive-only — a quieter version of the bug this exists to fix.
-leg_reply_candidates() {
-  local root="$1" ws="$2" ag="$3" th="$4" a reg
-  reg="$(registry_agents)" || exit 2
+# Archive stays first so ordering semantics are identical for the common case.
+#
+# The agent list is a PARAMETER, resolved once by the caller in its own shell, and that is
+# load-bearing rather than tidy. Reading the registry in here — even with the
+# capture-then-check idiom — cannot fail the command: this function is only ever called
+# inside `$(...)`, so `exit 2` terminates the substitution subshell, the expansion comes
+# back empty, and `for cand in <empty>` succeeds. A malformed config would then report
+# every leg unanswered and exit 0, which is a worse version of the bug this exists to fix.
+# The caller reads the registry where a failure can still abort. (codex, panel round 1 —
+# it is the exact hazard I asked about, and my answer was wrong.)
+leg_reply_candidates() {  # <root> <workspace> <from-agent> <thread> <registered-agents>
+  local root="$1" ws="$2" ag="$3" th="$4" reg="$5" a
   sorted_message_files "$root/.comms/archive" "$ws" "$ag" "$th" newest
   for a in $reg; do
     sorted_message_files "$root/.comms/$(inbox_for "$a")" "$ws" "$ag" "$th" newest
@@ -1308,7 +1313,9 @@ cmd_panel() {
     # file, so it is walked backwards rather than by parsing timestamps.
     if [ -z "$set_id" ]; then
       printf 'set\tphase\tround\tlegs\tcreated\n'
-      awk -F'\t' 'NR>1 && $1!="" {
+      # NF>=13: a truncated row would otherwise be counted as a leg and printed with
+      # blank metadata, which is the listing lying about durable state. (codex, r1.)
+      awk -F'\t' 'NR>1 && NF>=13 && $1!="" {
         if (!($1 in seen)) { seen[$1]=1; order[++n]=$1; ph[$1]=$5; rd[$1]=$4; cr[$1]=$13 }
         legs[$1]++
       }
@@ -1319,6 +1326,11 @@ cmd_panel() {
     # Resolve the workspace ONCE — per-candidate calls also re-emit the resolver's
     # stderr warning per leg, which interleaves into 2>&1 captures of this table.
     local status_ws; status_ws="$(cmd_workspace)"
+    # Read the registry HERE, in cmd_panel's own shell, where a malformed config can still
+    # abort the command. Inside the per-leg scan it is a substitution subshell and the
+    # failure is unobservable. The `local` is split from the assignment on purpose:
+    # `local x="$(cmd)"` reports the status of `local`, not of the command.
+    local status_reg; status_reg="$(registry_agents)" || exit 2
     printf 'reviewer\tthread\tanswered\tverdict\n'
     # Same binding as compose: a leg is answered by the reply to THIS set's request,
     # never by whatever the newest same-agent same-thread message happens to be. A
@@ -1327,7 +1339,7 @@ cmd_panel() {
     awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4 "\t" $2}' "$idx" | while IFS=$'\t' read -r ag th rnd req_mid; do
       [ -n "$ag" ] || continue
       local reply="" verdict="" answered=no cand
-      for cand in $(leg_reply_candidates "$root" "$status_ws" "$ag" "$th"); do
+      for cand in $(leg_reply_candidates "$root" "$status_ws" "$ag" "$th" "$status_reg"); do
         [ -f "$cand" ] || continue
         [ -z "$rnd" ] || [ "$(frontmatter_field "$cand" round)" = "$rnd" ] || continue
         [ -z "$req_mid" ] || [ "$(frontmatter_field "$cand" in-reply-to)" = "$req_mid" ] || continue
@@ -1474,6 +1486,8 @@ cmd_compose() {
   [ -f "$idx" ] || usage_err "compose: no review sets recorded"
 
   local ws; ws="$(cmd_workspace)"
+  # Same reason as panel status: the registry has to be read where a failure can abort.
+  local reg; reg="$(registry_agents)" || exit 2
   # The ROUND is part of a leg's identity. Finding replies by reviewer+thread alone
   # makes round 2 compose round 1's replies and report "all answered" — the panel would
   # gate on findings about an artifact it is no longer reviewing. (grok, panel r1.)
@@ -1485,7 +1499,7 @@ cmd_compose() {
     [ -n "$ag" ] || continue
     n_legs=$((n_legs + 1))
     reply=""
-    for cand in $(leg_reply_candidates "$root" "$ws" "$ag" "$th"); do
+    for cand in $(leg_reply_candidates "$root" "$ws" "$ag" "$th" "$reg"); do
       [ -f "$cand" ] || continue
       # Same round, or nothing. A reply from an earlier round answers an earlier
       # question.

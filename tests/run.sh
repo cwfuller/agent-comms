@@ -4528,6 +4528,30 @@ printf '%s\n' "$PN_LIST" | awk -F'\t' -v s="$PN_CXSET" 'NR>1 && $1==s' | grep -q
   || fail "leg count wrong (got: $(printf '%s\n' "$PN_LIST" | awk -F'\t' -v s="$PN_CXSET" 'NR>1 && $1==s {print $4}'))"
 [ "$(printf '%s\n' "$PN_LIST" | awk -F'\t' 'NR>1' | grep -c .)" = "$(awk -F'\t' 'NR>1 && $1!="" {print $1}' "$PN_FIX/.comms/grades/sets.tsv" | sort -u | grep -c .)" ] \
   && ok "the listing has exactly one row per review set" || fail "set listing is not deduplicated"
+# A MALFORMED REGISTRY must fail both readers loudly. `leg_reply_candidates` runs inside a
+# command substitution, so a registry read in there can only kill the subshell: the
+# expansion comes back empty, `for cand in <empty>` succeeds, and the panel reports every
+# leg unanswered while exiting 0. The registry is therefore read by the caller, where the
+# failure can still abort — and this is the assertion that proves it. (codex, panel r1.)
+cp "$PN_FIX/.comms/config" "$WORK/pn-config.bak"
+printf 'agents =\ndefault-target = codex\n' > "$PN_FIX/.comms/config"
+run_pn panel status --set "$PN_CXSET" >/dev/null 2>&1 \
+  && fail "panel status exited 0 on a malformed registry" || ok "panel status fails loudly on a malformed registry"
+run_pn compose --set "$PN_CXSET" >/dev/null 2>&1 \
+  && fail "compose exited 0 on a malformed registry" || ok "compose fails loudly on a malformed registry"
+# ...and specifically NOT with the answers-look-missing shape, which is the failure the
+# subshell swallow produced: an empty scan reporting a complete panel as incomplete.
+PN_BADC="$(run_pn compose --set "$PN_CXSET" 2>&1 || true)"
+printf '%s\n' "$PN_BADC" | grep -q 'INCOMPLETE' \
+  && fail "a config error was reported as an unanswered panel" || ok "a config error is not disguised as an unanswered leg"
+command cp -f "$WORK/pn-config.bak" "$PN_FIX/.comms/config"
+run_pn panel status --set "$PN_CXSET" >/dev/null 2>&1 \
+  && ok "the fixture recovers once the registry is valid again" || fail "fixture did not recover"
+# A TRUNCATED sets.tsv row is not a leg. Counting it would make the listing report durable
+# state that is not there. (codex advisory r1.)
+printf 'truncated-set\tonly-two-fields\n' >> "$PN_FIX/.comms/grades/sets.tsv"
+run_pn panel status 2>/dev/null | awk -F'\t' 'NR>1 && $1=="truncated-set"' | grep -q . \
+  && fail "the listing counted a truncated row as a set" || ok "the listing ignores a truncated sets.tsv row"
 
 echo "== ask: the driver-neutral consult verb =="
 AK="$WORK/ask-repo"; mkdir -p "$AK"; AK="$(cd "$AK" && pwd -P)"
