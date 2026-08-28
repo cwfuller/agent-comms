@@ -394,7 +394,10 @@ ls -A "$INST_FIX/.agent-comms" | grep -q '^\.agent-comms-install\.' \
 # Replacing a file by rename is not the same operation as writing through it, so the
 # three things `cp` did incidentally are now reproduced on purpose. Each was found by
 # review, not by the round-1 tests, which only checked that the file was executable.
-mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
+# %Mp%Lp, not %Lp: Darwin's %Lp drops setuid/setgid/sticky, so a preservation bug in the
+# special nibble would be invisible to every assertion below. The leading 0 of an ordinary
+# file is trimmed so both platforms read as three digits. (grok, panel r2.)
+mode_of() { local m; m="$(stat -f '%Mp%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null)"; printf '%s' "${m#0}"; }
 gh_install() { # gh_install <home> [extra-env...]  — a global install into an arbitrary home
   local gh="$1"; shift
   (cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$gh/commands" CODEX_SKILLS_DIR="$gh/skills" \
@@ -405,7 +408,9 @@ gh_install() { # gh_install <home> [extra-env...]  — a global install into an 
 # they tightened. (codex blocking r1; grok r1 named the exact 700 -> 711 transition.)
 chmod 640 "$GHOME/commands/auto.md"
 chmod 700 "$GHOME/agent-comms/comms.sh"
-gh_install "$GHOME" >/dev/null 2>&1
+# umask is pinned: `chmod +x` is masked by it, so 700 becomes 711 under 022 but 700 under
+# 077 — an unpinned expectation fails on a hardened box while the code is correct.
+(umask 022; gh_install "$GHOME" >/dev/null 2>&1)
 [ "$(mode_of "$GHOME/commands/auto.md")" = "640" ] \
   && ok "an upgrade preserves a command's tightened mode" \
   || fail "command mode reset to $(mode_of "$GHOME/commands/auto.md") (want 640)"
@@ -465,6 +470,57 @@ printf '%s\n' "$RO_OUT" | grep -q 'not writable' \
   && ok "a read-only destination is refused loudly, not silently replaced" || fail "read-only dest not refused (got: $RO_OUT)"
 [ "$RO_BEFORE" = "$(command ls -di "$GH_RO/commands/auto.md" | awk '{print $1}')" ] \
   && ok "the pinned file is still the same file" || fail "the read-only destination was replaced anyway"
+# The refusals must also FAIL the install the way the old `cp` did — printing a warning
+# and exiting 0 would let a scripted upgrade march on. (codex advisory r2.)
+gh_install "$GH_RO" >/dev/null 2>&1 && fail "a read-only destination did not fail the install" \
+  || ok "a refused destination exits non-zero"
+gh_install "$GH_SD" >/dev/null 2>&1 && fail "a directory destination did not fail the install" \
+  || ok "a directory destination exits non-zero"
+# SPECIAL MODE BITS survive an upgrade: Darwin's %Lp would silently drop them, so this
+# fails if either the installer or mode_of stops carrying the nibble. (grok r2.)
+chmod 1640 "$GHOME/commands/ask.md"
+(umask 022; gh_install "$GHOME" >/dev/null 2>&1)
+[ "$(mode_of "$GHOME/commands/ask.md")" = "1640" ] \
+  && ok "an upgrade preserves setuid/setgid/sticky bits" \
+  || fail "special bits lost: $(mode_of "$GHOME/commands/ask.md") (want 1640)"
+# OWNER AND GROUP: writing through the old inode kept them; a fresh temp inherits the
+# parent directory's group on BSD. The group is the half a non-root user can actually
+# assert, so it is the half asserted here. (codex blocking r2.)
+GRP_BEFORE="$(stat -f '%g' "$GHOME/agent-comms/comms.sh" 2>/dev/null || stat -c '%g' "$GHOME/agent-comms/comms.sh")"
+OWN_BEFORE="$(stat -f '%u' "$GHOME/agent-comms/comms.sh" 2>/dev/null || stat -c '%u' "$GHOME/agent-comms/comms.sh")"
+(umask 022; gh_install "$GHOME" >/dev/null 2>&1)
+[ "$GRP_BEFORE" = "$(stat -f '%g' "$GHOME/agent-comms/comms.sh" 2>/dev/null || stat -c '%g' "$GHOME/agent-comms/comms.sh")" ] \
+  && ok "an upgrade preserves the destination's group" || fail "group changed across the upgrade"
+[ "$OWN_BEFORE" = "$(stat -f '%u' "$GHOME/agent-comms/comms.sh" 2>/dev/null || stat -c '%u' "$GHOME/agent-comms/comms.sh")" ] \
+  && ok "an upgrade preserves the destination's owner" || fail "owner changed across the upgrade"
+# SYMLINK CHAINS: a relative link to a relative link, resolved by concatenating dirname at
+# each hop. Round 2 only covered a single absolute hop. (codex advisory r2.)
+GH_SC="$WORK/ghome-symchain"
+gh_install "$GH_SC" >/dev/null 2>&1
+SC_REAL="$WORK/symchain-target"; mkdir -p "$SC_REAL"
+mv "$GH_SC/commands/auto.md" "$SC_REAL/final.md"
+ln -s "../../symchain-target/final.md" "$GH_SC/commands/hop1.md"
+ln -s "hop1.md" "$GH_SC/commands/auto.md"
+printf '\n' >> "$SC_REAL/final.md"
+SC_INO1="$(command ls -di "$SC_REAL/final.md" | awk '{print $1}')"
+gh_install "$GH_SC" >/dev/null 2>&1
+[ -L "$GH_SC/commands/auto.md" ] && [ -L "$GH_SC/commands/hop1.md" ] \
+  && ok "a relative symlink CHAIN is followed, not replaced" || fail "a link in the chain was replaced"
+[ "$SC_INO1" != "$(command ls -di "$SC_REAL/final.md" | awk '{print $1}')" ] \
+  && cmp -s "$SC_REAL/final.md" "$REPO/templates/claude-commands/auto.md" \
+  && ok "the chain's final target is the file that gets replaced" || fail "chain target not replaced"
+# A DANGLING link is -L true / -e false. `cp` wrote through it and created the target;
+# the resolver must do the same rather than replacing the link or refusing.
+GH_DL="$WORK/ghome-dangling"
+gh_install "$GH_DL" >/dev/null 2>&1
+DL_REAL="$WORK/dangling-target"; mkdir -p "$DL_REAL"
+rm -f "$GH_DL/commands/auto.md"
+ln -s "$DL_REAL/not-there-yet.md" "$GH_DL/commands/auto.md"
+gh_install "$GH_DL" >/dev/null 2>&1
+[ -L "$GH_DL/commands/auto.md" ] && [ -f "$DL_REAL/not-there-yet.md" ] \
+  && cmp -s "$DL_REAL/not-there-yet.md" "$REPO/templates/claude-commands/auto.md" \
+  && ok "a dangling symlink is written through, creating its target" \
+  || fail "dangling symlink not written through"
 
 echo "== comms.sh v2: thread filter + verdict normalization + error lane =="
 TA="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-00_alpha-1.md"

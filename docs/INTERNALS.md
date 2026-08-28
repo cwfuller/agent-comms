@@ -328,9 +328,18 @@ testing:
   a courtesy: `mv` follows a symlink pointing at a *directory* and moves the temp inside
   it while reporting success — and across devices that is the copy-in-place the whole
   design exists to avoid. A directory destination is refused loudly.
+- **Owner and group** are carried over best-effort for the same reason as mode — the old
+  inode kept them and a fresh temp does not, inheriting the parent directory's group on
+  BSD. **An ACL cannot follow a new inode at all**; that is inherent to replacing a file
+  rather than writing through one, so an ACL on the destination is reported loudly instead
+  of being dropped in silence. Extended attributes (`@`) are routine here and not reported.
 - **An unwritable destination** is refused rather than replaced. `cp` failed with EACCES
   and aborted the install, which is the only way a user can pin a customized file;
   `rename` unlinks the directory entry regardless, so the refusal has to be explicit.
+
+Mode is read as `%Mp%Lp` on Darwin rather than `%Lp`, which drops setuid/setgid/sticky —
+`stat -c '%a'` already carries them on GNU. Every refusal exits non-zero, so a scripted
+upgrade stops rather than continuing past a warning.
 
 ## Contributing checklist
 

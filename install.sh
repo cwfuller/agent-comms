@@ -200,9 +200,18 @@ needs_templates() {
 #   copy-in-place this function exists to prevent. The link is resolved first, so the
 #   file it names is what gets replaced.
 #
+#   OWNER AND GROUP. Same reason as mode: the old inode kept them, a fresh temp does not,
+#   and on BSD it inherits the parent directory's group instead. They are carried over
+#   best-effort. An ACL is the one thing that genuinely cannot follow a new inode, so it
+#   is reported rather than silently dropped.
+#
 #   AN UNWRITABLE DESTINATION. `cp` failed with EACCES and aborted the install under
 #   `set -e`, which is the only way a user can pin a customized file. `mv` unlinks the
 #   directory entry instead and would overwrite it, so the refusal has to be explicit.
+#
+# The symlink walk is bounded at 16 hops. That is a loop guard, not a supported depth:
+# real installs are one hop or none, and a chain deeper than 16 is a configuration error
+# worth stopping on.
 #
 # (codex + grok, panel round 1 — every case above was found in review, not in testing.)
 install_file() { # install_file <src> <dest> [exec]
@@ -230,9 +239,32 @@ install_file() { # install_file <src> <dest> [exec]
   tmp="$(dirname "$dest")/.agent-comms-install.$$.$(basename "$dest")"
   cp "$src" "$tmp" || { rm -f "$tmp"; return 1; }
   if [ -e "$dest" ]; then
-    destmode="$(stat -f '%Lp' "$dest" 2>/dev/null || stat -c '%a' "$dest" 2>/dev/null || true)"
-    if [ -n "$destmode" ]; then
-      chmod "$destmode" "$tmp" || { rm -f "$tmp"; return 1; }
+    # %Mp%Lp, not %Lp: Darwin's %Lp drops the special nibble, so a 4755 destination would
+    # come back 755 and quietly lose setuid/setgid/sticky. GNU's %a already carries it.
+    destmode="$(stat -f '%Mp%Lp' "$dest" 2>/dev/null || stat -c '%a' "$dest" 2>/dev/null || true)"
+    if [ -z "$destmode" ]; then
+      # Preservation is the entire point of this branch. Widening the file to the temp's
+      # umask-derived mode because a stat failed is the silent regression, not a fallback.
+      echo "install: cannot read the mode of $dest — refusing to replace it" >&2
+      rm -f "$tmp"; return 1
+    fi
+    chmod "$destmode" "$tmp" || { rm -f "$tmp"; return 1; }
+    # Writing THROUGH the old inode kept its owner and group; renaming a fresh temp does
+    # not, and on BSD the temp inherits the parent directory's group. Carry them over
+    # where the running user is permitted to. (codex, panel round 2 — reproduced live:
+    # group `admin` became the directory's group.)
+    destown="$(stat -f '%u:%g' "$dest" 2>/dev/null || stat -c '%u:%g' "$dest" 2>/dev/null || true)"
+    if [ -n "$destown" ]; then
+      chown "$destown" "$tmp" 2>/dev/null \
+        || echo "install: could not preserve owner/group $destown on $dest" >&2
+    fi
+    # An ACL cannot ride along to a new inode — that is inherent to replacing a file
+    # rather than writing through it, and it is the one loss with security meaning
+    # (codex's repro had an `everyone deny read` entry). Losing it LOUDLY is the most
+    # this design can honestly offer. `+` in the mode column is an ACL on both Darwin and
+    # Linux; `@` is extended attributes, which are routine here and not warned about.
+    if [ "$(ls -ld "$dest" 2>/dev/null | cut -c11)" = "+" ]; then
+      echo "install: $dest carries an ACL, which a replaced file cannot keep — re-apply it after installing" >&2
     fi
   fi
   if [ -n "$want_exec" ]; then
