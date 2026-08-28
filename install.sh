@@ -201,9 +201,14 @@ needs_templates() {
 #   file it names is what gets replaced.
 #
 #   OWNER AND GROUP. Same reason as mode: the old inode kept them, a fresh temp does not,
-#   and on BSD it inherits the parent directory's group instead. They are carried over
-#   best-effort. An ACL is the one thing that genuinely cannot follow a new inode, so it
-#   is reported rather than silently dropped.
+#   and on BSD it inherits the parent directory's group instead. Restoring them is
+#   REQUIRED, not best-effort — a `chown` that cannot be applied REFUSES the replacement,
+#   because publishing the file under the directory's group instead of its own is a silent
+#   permission change. The trade that buys: a destination you can write but cannot `chown`
+#   (a coworker-owned group-writable file, or a `wheel`-group dest you are not in) now
+#   fails where `cp` succeeded by writing through. That is deliberate — the alternative is
+#   widening access quietly. An ACL is the one thing that genuinely cannot follow a new
+#   inode, so it is reported rather than silently dropped.
 #
 #   AN UNWRITABLE DESTINATION. `cp` failed with EACCES and aborted the install under
 #   `set -e`, which is the only way a user can pin a customized file. `mv` unlinks the

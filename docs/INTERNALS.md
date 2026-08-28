@@ -328,9 +328,14 @@ testing:
   a courtesy: `mv` follows a symlink pointing at a *directory* and moves the temp inside
   it while reporting success — and across devices that is the copy-in-place the whole
   design exists to avoid. A directory destination is refused loudly.
-- **Owner and group** are carried over best-effort for the same reason as mode — the old
-  inode kept them and a fresh temp does not, inheriting the parent directory's group on
-  BSD. **An ACL cannot follow a new inode at all**; that is inherent to replacing a file
+- **Owner and group** are restored for the same reason as mode — the old inode kept them
+  and a fresh temp does not, inheriting the parent directory's group on BSD. This is a
+  requirement, not a best effort: a `chown` that cannot be applied **refuses** the
+  replacement, because publishing the file under the directory's group is a silent
+  permission change. The trade is explicit — a destination you can write but cannot
+  `chown` (a coworker-owned group-writable file, a `wheel` dest you are not in) now fails
+  where `cp` succeeded by writing through, and widening access quietly is the worse of the
+  two. **An ACL cannot follow a new inode at all**; that is inherent to replacing a file
   rather than writing through one, so an ACL on the destination is reported loudly instead
   of being dropped in silence. Extended attributes (`@`) are routine here and not reported.
 - **An unwritable destination** is refused rather than replaced. `cp` failed with EACCES

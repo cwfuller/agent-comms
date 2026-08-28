@@ -553,15 +553,23 @@ fi
 # file under the wrong group and exit 0. A privileged group cannot be created hermetically,
 # so `chown` is stubbed to fail, which is the same branch. (codex r3: warn-and-exit-0 left
 # criterion 9 unmet while the install looked successful.)
+# Read the install order from install.sh rather than restating it here: a second copy of
+# that list is a thing that silently stops matching.
+CLAUDE_COMMANDS_LIST="$(sed -n 's/^CLAUDE_COMMANDS="\(.*\)"$/\1/p' "$REPO/install.sh" | head -1)"
+[ -n "$CLAUDE_COMMANDS_LIST" ] || fail "could not read CLAUDE_COMMANDS from install.sh"
 FAILBIN="$WORK/failbin"; mkdir -p "$FAILBIN"
 printf '#!/bin/sh\nexit 1\n' > "$FAILBIN/chown"; chmod +x "$FAILBIN/chown"
-CHOWN_INO1="$(command ls -di "$GH_GRP/commands/auto.md" | awk '{print $1}')"
+# The installer aborts on the FIRST destination it processes, so the unchanged-destination
+# assertion has to name that one. Anchoring it on a later file examined something the run
+# never reached, which made the assertion vacuous. (codex, panel round 4.)
+CHOWN_FIRST="$GH_GRP/commands/$(printf '%s\n' $CLAUDE_COMMANDS_LIST | head -1)"
+CHOWN_INO1="$(command ls -di "$CHOWN_FIRST" | awk '{print $1}')"
 CHOWN_OUT="$( (cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GH_GRP/commands" CODEX_SKILLS_DIR="$GH_GRP/skills" \
    AGENT_COMMS_HOME="$GH_GRP/agent-comms" PATH="$FAILBIN:$PATH" bash "$REPO/install.sh" --scope=global 2>&1) || true)"
 printf '%s\n' "$CHOWN_OUT" | grep -q 'cannot restore owner/group' \
   && ok "an unrestorable owner/group refuses the replacement loudly" || fail "chown failure was not fatal (got: $(printf '%s' "$CHOWN_OUT" | tail -2))"
-[ "$CHOWN_INO1" = "$(command ls -di "$GH_GRP/commands/auto.md" | awk '{print $1}')" ] \
-  && ok "the destination is untouched when ownership cannot be restored" || fail "destination replaced despite a failed chown"
+[ "$CHOWN_INO1" = "$(command ls -di "$CHOWN_FIRST" | awk '{print $1}')" ] \
+  && ok "the first destination is untouched when ownership cannot be restored" || fail "destination replaced despite a failed chown"
 ls -A "$GH_GRP/commands" | grep -q '^\.agent-comms-install\.' \
   && fail "the failed-chown path left its temp behind" || ok "the failed-chown path cleans up its temp"
 # ACL DETECTION must not rely on the mode column: Darwin prints `@` INSTEAD of `+` when
