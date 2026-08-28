@@ -352,3 +352,44 @@ mounted path has no real boundary anyway, so hardening a defence-in-depth shim w
 wrong place to spend the next round. A related sweep (dd7a60c) removed six suite assertions that
 named a behaviour while observing a comment in the source, and converted four more to observe
 the behaviour; the assertion count fell while the proven surface grew.
+
+## 2026-08-28 — thread `warm-acp-mount-32182` (auto-plan, 10 rounds, double APPROVE)
+
+The stable per-`(thread, agent)` ACP mount. Ten plan rounds and no production code until the
+last, which is itself the finding: **rounds 2–5 each fixed a real defect that existed only
+because round 1 optimised for the wrong invariant.** What generalizes:
+
+- **When consecutive rounds fault the previous round's own amendment, re-derive the premise
+  rather than iterate the mechanism.** Round 1 set out to preserve acpx *process* reuse, and
+  every later mechanism inherited that constraint. It was disproved by reading the real
+  `~/.acpx` store, not by another design pass: records resume warm across 15.6 hours and 5
+  days with the agent respawned each time (6,579 fresh input against 201,472 cache reads).
+  **Warmth is record resume through the prompt cache, not a live process.** The 300s queue-owner
+  TTL is shorter than a panel round, so every warm round in this repo's history already paid a
+  respawn.
+- **Every fix that held was a deletion.** Remove the process-reuse premise; remove the step that
+  poisoned a child-controlled `.git`; remove the kill. Each round that *added* a mechanism
+  produced the next round's blocker. A panel's value here was less in catching bugs than in
+  making each addition expensive enough that removal became the obvious move.
+- **When two reviewers' pins cannot both be satisfied, that contradiction is evidence of a
+  missing structural option, not a conflict to split.** "Drop `--force`" and "do not trust a
+  parent-written record to name our admin dir" looked jointly unsatisfiable until the admin id
+  was read from `rev-parse` after an `add` at an mktemp-unique path — which satisfied both and
+  deleted two blockers at once.
+- **Normalization is still not identity, one layer up.** The lesson from `grading-pilot-14076`
+  was applied to the mount *path* and initially missed on the session *name*: `safe_name` maps
+  `a/b` and `a_b` to one token, and under a stable cwd that collapse merges two threads into one
+  warm session. Anything keyed on a rendered id needs the raw hash — including the second thing
+  derived from it.
+- **A tripwire is not a lock, and saying so is part of the design.** A survivor that re-resolves
+  the stable path after restage is detected by tree identity before the prompt and again before
+  stamping; it is not prevented. Prevention needs the enforced boundary, and a gate that only
+  looks like one is worse than a named residual.
+- **`status --porcelain` is not a content check.** It reports status codes and paths: a survivor
+  rewriting an already-modified tracked file still prints ` M path`, a rewritten expected-untracked
+  file still prints `?? path`, a mode-only change is invisible, and ignored residue is hidden by
+  default. All four measured blind. Compare tree identity and enumerate ignored paths.
+- **A fixture that establishes a precondition by overwriting a file must prove the overwrite
+  took.** Three test scripts in this arc silently failed to contaminate anything because the
+  shell had `noclobber`, and each still printed a verdict — twice a falsely reassuring one. That
+  is the same class as a vacuous negative control.

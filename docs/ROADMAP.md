@@ -1241,12 +1241,35 @@ cache-mode INVARIANT (frozen prefix, byte-identical history, only the live zone 
 never the product (proxy/ML compressors are the wrong layer for hand-authored markdown,
 and lossy rewriting of inter-agent instructions is the `$N`-corruption class). Ranked:
 
-- [ ] **Warm ACP sessions are silently COLD on panel legs** (grok, consult): runphase
-  mounts `artifact_id` at `$run_dir/tree` and cd's there, but acpx keys session identity
-  on `(agent, cwd, name)` — run_dir is per-message, so every mounted turn is a new cwd
-  and a fresh ~115k context while the session NAME looks stable. Fix: stable mount path
-  per `(thread, agent)`, replace contents per round, keep cwd. This gates everything
-  below — without it the 127x warm number is a single-reviewer footnote.
+- [x] **Warm ACP sessions are silently COLD on panel legs** (grok, consult): runphase
+  mounted `artifact_id` at `$run_dir/tree` and cd'd there, but acpx keys session identity
+  on `(agent, cwd, name)` — run_dir is per-message, so every mounted turn was a new cwd
+  and a fresh ~115k context while the session NAME looked stable.
+  **LANDED 2026-08-28** (thread `warm-acp-mount-32182`, 10 plan rounds, double APPROVE).
+  The mount is now `$root/mounts/<slug>-<hash12>-<agent>/tree`, keyed on a hash of the
+  RAW thread (`safe_name` maps `a/b` and `a_b` onto one token, and under a stable cwd that
+  collapse would merge two threads into one warm session), scoped to `--via acp` because
+  `shadow` runs a non-ACP grok turn on the same thread concurrently by design.
+  **The premise the item was written on was wrong, and the correction is the useful part:**
+  warmth is not process reuse. acpx's queue owner is spawned with no `cwd` in its spawn
+  options, so it holds an inode, and its idle TTL is 300s — shorter than a panel round.
+  Warmth is RECORD resume through the provider's prompt cache, measured on this repo's own
+  store at 6,579 fresh input tokens against 201,472 cache reads on a record spanning 15.6
+  hours whose agent had been respawned. So the mount is REBUILT every round rather than
+  reused: renamed aside (a live cwd holder follows the rename, so its writes land in the
+  aside), re-created at an mktemp-unique path whose admin id is therefore generation-unique,
+  then `mv` + `worktree repair` back to the stable path. Nothing the child controls is
+  dereferenced, written through, or validated — it is moved away and abandoned. The owner
+  is retired by a short `--ttl` and observed self-exit, never by a signal: its pid cannot be
+  authenticated (the lease records `createdAt`, not a start time), and since it is detached,
+  a mistaken signal would hit an unrelated process group.
+  Cost accepted: one checkout per (thread, agent) persists under `.comms/mounts`, plus one
+  aside per round until reaped — as is already true of `.comms/logs`, which nothing prunes.
+  Residual, tracked against the enforced-boundary item below and NOT closed here: a survivor
+  that re-resolves the stable path after restage is *detected* by a tree-identity check
+  before the prompt and again before stamping, not prevented. Full containment needs the
+  enforced boundary, and enumerating hostile shapes is the pattern `docs/advisories.md`
+  records as repeatedly failing on this track.
 - [ ] **Skip re-dispatch of legs that already APPROVEd the artifact** — a driver rule,
   not compression; reserve full-panel holistic re-dispatch for the final round.
 - [ ] **Live-zone delta prompts on warm legs**: round N+1 over a warm session sends only

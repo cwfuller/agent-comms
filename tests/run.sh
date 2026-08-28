@@ -3052,11 +3052,32 @@ GOT="$(bx "$FENCED"; printf X)"; GOT="${GOT%X}"
 AXD="$WORK/acp-parity"; AXB="$AXD/bin"; mkdir -p "$AXB"
 cat > "$AXB/npx" <<'AXSTUB'
 #!/bin/bash
+# The acpx surface runphase's --via acp branch actually calls. `sessions show` MUST emit a
+# cwd line: a mounted turn asserts that the bound record's cwd is the mount, and a stub
+# that stays silent fails that assert closed on every mounted suite turn. cwd is reported
+# as `pwd -P`, because acpx records process.cwd() (physical) and $WORK is a logical
+# mktemp path -- a $PWD stub would refuse every legitimate turn on macOS.
+# AX_CWD_LOG records every invocation's cwd so a test can observe the CHILD's directory
+# rather than grepping runphase.sh for a path expression.
+if [ -n "${AX_CWD_LOG:-}" ]; then
+  printf '%s\t%s\n' "$(pwd -P)" "$*" >> "$AX_CWD_LOG"
+fi
 case " $* " in
-  *" sessions ensure "*) echo "stub-session (created)"; exit 0 ;;
+  *" sessions ensure "*)
+    printf '%s\t(%s)\n' "${AX_RECORD_ID:-stub-record-1}" "${AX_ENSURE_STATE:-created}"; exit 0 ;;
+  *" sessions show "*)
+    printf 'name: stub\n'
+    printf 'cwd: %s\n' "${AX_LIE_CWD:-$(pwd -P)}"
+    exit 0 ;;
 esac
 if [ -n "${ACP_PARITY_PROBE:-}" ]; then
   { printf 'git=%s\n' "$(command -v git)"; printf 'PATH=%s\n' "$PATH"; } > "$ACP_PARITY_PROBE"
+fi
+# A mounted --approve-all child can write. AX_CHILD_WRITE plants residue at an untracked
+# AND an ignored path, so a restage can be shown to clear both.
+if [ -n "${AX_CHILD_WRITE:-}" ]; then
+  printf '%s' "$AX_CHILD_WRITE" > ./child-residue.txt 2>/dev/null || true
+  mkdir -p ./.comms 2>/dev/null && printf '%s' "$AX_CHILD_WRITE" > ./.comms/child-ignored.txt 2>/dev/null || true
 fi
 cat "$ACP_PARITY_PAYLOAD"
 exit 0
@@ -5421,6 +5442,184 @@ elif grep -q "^git=$SW_DIR/shim/git\$" "$AXD/childenv"; then
 else
   fail "a mounted child resolves git elsewhere (got: $(grep '^git=' "$AXD/childenv" | head -1))"
 fi
+
+echo "== runphase: warm ACP mounts live at a stable per-(thread,agent) path =="
+# The defect: run_dir is per-message, so mounting at $run_dir/tree gave acpx a NEW cwd
+# every round. acpx keys session identity on (agent, cwd, name) and compares cwd as a
+# string, so every mounted panel leg was a fresh session while the session NAME looked
+# stable -- 210 such records on the development machine, none ever reused.
+#
+# Every cwd claim below is read from a file the CHILD wrote from inside its own working
+# directory. Nothing here greps runphase.sh for a path expression: that is a string match
+# that would stay green through any refactor which dropped the behaviour.
+WM="$WORK/warm-mount"; mkdir -p "$WM"
+# The stable path is gated on `.comms` being ignore-covered, because a durable mount that
+# snapshot-on-send could capture would put a second checkout into every artifact.
+printf '.comms/\n' > "$MA_FIX/.gitignore"
+# Two DISTINCT pinned artifacts, so "which round's tree did the child see" is answerable.
+# They are dangling commits off the fixture HEAD; the live tree carries neither marker,
+# which is what makes "the child saw a marker" mean "the child was inside a mount".
+wm_artifact() { # <marker> -> commit sha
+  local marker="$1" t
+  printf '%s\n' "$marker" > "$MA_FIX/mount-marker.txt"
+  t="$(cd "$MA_FIX" && GIT_INDEX_FILE="$WM/idx.$marker" git add -A -- . >/dev/null 2>&1; \
+       GIT_INDEX_FILE="$WM/idx.$marker" git -C "$MA_FIX" write-tree 2>/dev/null)"
+  rm -f "$MA_FIX/mount-marker.txt"
+  git -C "$MA_FIX" -c user.email=t@t -c user.name=t commit-tree "$t" -p HEAD -m "artifact $marker" 2>/dev/null
+}
+WM_A1="$(wm_artifact round-1)"; WM_A2="$(wm_artifact round-2)"
+WM_HEAD="$(git -C "$MA_FIX" rev-parse HEAD)"
+WM_ROOT="$(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" root)"
+if [ -n "$WM_A1" ] && [ -n "$WM_A2" ] && [ "$WM_A1" != "$WM_A2" ] \
+   && git -C "$MA_FIX" cat-file -e "${WM_A1}^{commit}" 2>/dev/null \
+   && [ ! -e "$MA_FIX/mount-marker.txt" ]; then
+  ok "warm-mount fixture: two distinct artifacts resolve and the live tree carries no marker"
+else
+  fail "warm-mount fixture is not usable (a1=$WM_A1 a2=$WM_A2)"
+fi
+
+# Run one real mounted ACP turn. Returns the run dir it used.
+wm_turn() { # <thread> <tag> <artifact> [extra env assignments...]
+  local thread="$1" tag="$2" art="$3"; shift 3
+  local msg dir
+  msg="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T10-00-00_wm-$tag.md"
+  { head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+    printf 'artifact_id: %s\nhead_sha: %s\n' "$art" "$WM_HEAD"
+    tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" \
+      | sed -e "s|^thread: ma-arc-1\$|thread: $thread|"
+  } > "$msg"
+  dir="$WM/run-$tag"; mkdir -p "$dir"
+  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" \
+      ACP_PARITY_PAYLOAD="$AXD/payload" AX_CWD_LOG="$WM/cwd.log" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_RUNPHASE_OWNER_WAIT_SECS=3 \
+      "$@" "$RP" run --message "$msg" --dir "$dir" \
+      --provider grok --via acp --timeout-secs 20 ) >/dev/null 2>&1
+  printf '%s' "$dir"
+}
+wm_prompt_cwds() { # cwds of the PROMPT invocations only (not `sessions ensure`/`show`)
+  awk -F'\t' '$2 !~ /sessions (ensure|show)/ {print $1}' "$WM/cwd.log" 2>/dev/null
+}
+wm_status() { sed -n 's/.*"status": "\([a-z]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
+
+printf 'VERDICT: APPROVE\n\n## Summary\nstub\n\n### Blocking\n- None.\n' > "$AXD/payload"
+: > "$WM/cwd.log"
+WM_D1="$(wm_turn wm-seq wm1 "$WM_A1" AX_CHILD_WRITE=round-1-was-here)"
+WM_D2="$(wm_turn wm-seq wm2 "$WM_A2")"
+WM_C1="$(wm_prompt_cwds | sed -n 1p)"; WM_C2="$(wm_prompt_cwds | sed -n 2p)"
+
+# NON-VACUITY GATES. Without these, every assertion below can pass by never running.
+[ "$(wm_prompt_cwds | awk 'END{print NR+0}')" -ge 2 ] \
+  && ok "two mounted ACP turns really invoked the child" \
+  || fail "the mounted child never ran — every warm-mount assertion below would be vacuous"
+[ -n "$WM_D1" ] && [ -n "$WM_D2" ] && [ "$WM_D1" != "$WM_D2" ] \
+  && ok "the two rounds really used different per-message run dirs" \
+  || fail "run dirs did not differ, so a shared cwd proves nothing"
+
+# AC1 — and this is the assertion that FAILS under the old $run_dir/tree scheme, because
+# there the two cwds would be $WM_D1/tree and $WM_D2/tree.
+[ -n "$WM_C1" ] && [ "$WM_C1" = "$WM_C2" ] \
+  && ok "two sequential mounted rounds invoke acpx from the SAME cwd" \
+  || fail "mounted rounds used different cwds (r1=$WM_C1 r2=$WM_C2)"
+case "$WM_C1" in
+  "$(cd "$WM_D1" && pwd -P)"/*|"$(cd "$WM_D2" && pwd -P)"/*)
+    fail "the mount is still inside a per-message run dir ($WM_C1)" ;;
+  *) ok "the mount is not inside either per-message run dir" ;;
+esac
+case "$WM_C1" in
+  "$WM_ROOT"/mounts/*) ok "the mount lives under the mailbox root's mounts/ directory" ;;
+  *) fail "the mount is somewhere unexpected ($WM_C1)" ;;
+esac
+# A function of (thread, agent) only: neither message id may appear in the path.
+case "$WM_C1" in
+  *wm-wm1*|*wm-wm2*) fail "the mount path carries a message id ($WM_C1)" ;;
+  *) ok "the mount path is a function of (thread, agent), not of the message" ;;
+esac
+
+# Each round must have restaged ITS OWN artifact, not kept round 1's.
+[ "$(cat "$WM_D2/tree-marker" 2>/dev/null || true)" = "" ] && true
+WM_M2="$(cd "$WM_C1" 2>/dev/null && cat mount-marker.txt 2>/dev/null || true)"
+[ "$WM_M2" = "round-2" ] \
+  && ok "the mount holds round 2's artifact after round 2 restaged it" \
+  || fail "the mount does not hold round 2's artifact (marker=${WM_M2:-<none>})"
+# Round 1's child wrote into its own mount, so the turn must be REFUSED rather than
+# stamped: a verdict over a tree that is no longer the pinned artifact is exactly the
+# silent-wrong-review this whole arc exists to prevent.
+if [ "$(wm_status "$WM_D1")" = "failed" ] \
+   && grep -q 'stopped matching artifact' "$WM_D1/result.json" 2>/dev/null; then
+  ok "a child that contaminates its mount during the turn is refused, not stamped"
+else
+  fail "a contaminated mount was stamped anyway (status=$(wm_status "$WM_D1"))"
+fi
+[ "$(wm_status "$WM_D2")" = "completed" ] \
+  && ok "a clean warm-mounted round completes and brokers a reply" \
+  || fail "the clean warm-mounted round did not complete (status=$(wm_status "$WM_D2"))"
+
+# AC3 — a previous --approve-all child's writes must not survive into the next round, at
+# an untracked path OR an ignored one (the class a plain `git clean -fd` misses).
+[ ! -e "$WM_C1/child-residue.txt" ] \
+  && ok "round N+1's mount carries no untracked residue from round N" \
+  || fail "round N's untracked write survived into round N+1"
+[ ! -e "$WM_C1/.comms/child-ignored.txt" ] \
+  && ok "round N+1's mount carries no IGNORED-path residue from round N" \
+  || fail "round N's ignored-path write survived into round N+1"
+
+# AC4 — a different leg thread is a different mount, and they do not collide.
+: > "$WM/cwd.log"; WM_D3="$(wm_turn wm-seq-other wm3 "$WM_A1")"
+WM_C3="$(wm_prompt_cwds | sed -n 1p)"
+[ -n "$WM_C3" ] && [ "$WM_C3" != "$WM_C1" ] \
+  && ok "a different leg thread gets its own mount" \
+  || fail "two leg threads shared a mount ($WM_C3)"
+
+# `safe_name` maps `a/b` and `a_b` onto one token, and the path is derived from the thread.
+# Under a stable cwd that collapse would put two threads in one warm session.
+: > "$WM/cwd.log"; wm_turn 'wm/collide' wm4 "$WM_A1" >/dev/null
+WM_C4="$(wm_prompt_cwds | sed -n 1p)"
+: > "$WM/cwd.log"; wm_turn 'wm_collide' wm5 "$WM_A1" >/dev/null
+WM_C5="$(wm_prompt_cwds | sed -n 1p)"
+[ -n "$WM_C4" ] && [ -n "$WM_C5" ] && [ "$WM_C4" != "$WM_C5" ] \
+  && ok "threads that safe_name collapses still get separate mounts" \
+  || fail "a safe_name collision put two threads in one mount ($WM_C4)"
+
+# AC6 — a tree that carries its own acpx project config would choose the reviewer.
+WM_A_RC="$( printf 'x\n' > "$MA_FIX/.acpxrc.json"; \
+  t="$(cd "$MA_FIX" && GIT_INDEX_FILE="$WM/idx.rc" git add -A -- . >/dev/null 2>&1; \
+       GIT_INDEX_FILE="$WM/idx.rc" git -C "$MA_FIX" write-tree)"; \
+  rm -f "$MA_FIX/.acpxrc.json"; \
+  git -C "$MA_FIX" -c user.email=t@t -c user.name=t commit-tree "$t" -p HEAD -m rc )"
+: > "$WM/cwd.log"; WM_D6="$(wm_turn wm-rc wm6 "$WM_A_RC")"
+if [ "$(wm_status "$WM_D6")" = "failed" ] && [ "$(wm_prompt_cwds | awk 'END{print NR+0}')" = "0" ]; then
+  ok "a mounted tree carrying .acpxrc.json is refused before the agent is spawned"
+else
+  fail "a tree with .acpxrc.json was reviewed anyway (status=$(wm_status "$WM_D6"))"
+fi
+
+# AC5 — the bound record's cwd must BE the mount. acpx resolves a session by walking from
+# cwd up to the git root, and a linked worktree's .git is a FILE, so the walk escapes the
+# mount and can bind an ancestor record whose cwd is the live tree.
+: > "$WM/cwd.log"; WM_D7="$(wm_turn wm-lie wm7 "$WM_A1" AX_LIE_CWD="$MA_FIX")"
+if [ "$(wm_status "$WM_D7")" = "failed" ] && [ "$(wm_prompt_cwds | awk 'END{print NR+0}')" = "0" ]; then
+  ok "a session bound outside the mount refuses the turn BEFORE the prompt"
+else
+  fail "a session bound at the live tree was prompted anyway (status=$(wm_status "$WM_D7"))"
+fi
+
+# AC2 — a crashed child can leave the mount path as a symlink at the main checkout.
+# `find`-style emptying is a no-op through a symlink and `worktree add` writes through it,
+# so the restage must move the LINK aside without ever dereferencing it.
+WM_MAIN_BEFORE="$(git -C "$MA_FIX" status --porcelain)"
+rm -rf "$WM_C1"; ln -s "$MA_FIX" "$WM_C1"
+: > "$WM/cwd.log"; WM_D8="$(wm_turn wm-seq wm8 "$WM_A1")"
+WM_C8="$(wm_prompt_cwds | sed -n 1p)"
+if [ "$(git -C "$MA_FIX" status --porcelain)" = "$WM_MAIN_BEFORE" ] && [ -n "$WM_C8" ]; then
+  ok "a mount vandalised into a symlink at the live tree restages without touching it"
+else
+  fail "restaging through a symlinked mount disturbed the main checkout"
+fi
+
+# Per-message state must stay per-message: only the TREE moved to a stable path.
+[ -x "$WM_D1/shim/git" ] && [ -s "$WM_D1/result.json" ] && [ -s "$WM_D2/result.json" ] \
+  && ok "the git shim, prompt and result.json stay per-message under the run dir" \
+  || fail "per-message run-dir state went missing"
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus

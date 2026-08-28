@@ -930,6 +930,235 @@ cmd_spawn() {
   echo "  await:   \"$SELF\" await \"$run_dir\""
 }
 
+# ---------- mounted-artifact worktrees ----------
+#
+# A mounted ACP turn must run from a cwd that is STABLE across rounds. acpx keys session
+# identity on (agent, cwd, name) and compares cwd by string, so the per-message
+# $run_dir/tree used before this made every panel round a fresh session while the session
+# NAME looked stable: 210 mounted session records on the development machine, none ever
+# reused. Warmth itself is RECORD resume through the provider's prompt cache, not process
+# reuse — measured on records spanning 15.6 hours and 5 days whose agent had been
+# respawned, at 6,579 fresh input tokens against 201,472 cache reads. That is why
+# recycling the queue owner below costs nothing.
+#
+# The mount is REBUILT every round rather than reused in place: a mounted turn runs
+# --approve-all, so whatever the previous child left must not become part of the next
+# round's "pinned" artifact. The directory is renamed aside (which a live cwd holder
+# follows, so its writes land in the aside and never in the new mount) and a fresh
+# worktree is created at the same path string. Nothing the child controls is ever
+# dereferenced, written through, or validated — it is moved away and abandoned.
+
+acp_hash12() {  # short content hash; whichever digest this box actually has
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-12
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-12
+  else cksum | tr -d ' ' | cut -c1-12
+  fi
+}
+
+# The identity of a mount, and of the acpx session that reads it. The thread is hashed
+# RAW: safe_name() NORMALIZES (`a/b` and `a_b` both become `a_b`) and normalization is not
+# identity — that collapse already put two review sets in one directory once
+# (docs/advisories.md, thread grading-pilot-14076). Under the old per-message path it was
+# harmless because every turn had its own cwd; a stable cwd removes that accidental
+# separation, so this hash is the only thing keeping two safe_name-equal threads apart.
+# main_root is in the digest because the acpx session store is global to $HOME, so two
+# clones reviewing one thread would otherwise mint one session name at two directories.
+# The agent is in it because two providers cannot share a git worktree.
+acp_mount_ident() {  # <main_root> <raw thread|message id> <agent> -> <slug>-<hash>-<agent>
+  local root="$1" raw="$2" agent="$3" slug h
+  [ -n "$raw" ] && [ -n "$agent" ] || return 1
+  slug="$(safe_name "$raw" | cut -c1-40)"
+  case "$slug" in ''|.|..|-*) slug="x$slug" ;; esac
+  h="$(printf 'm\0%s\0%s\0%s' "$root" "$raw" "$agent" | acp_hash12)"
+  [ -n "$h" ] || return 1
+  printf '%s-%s-%s' "$slug" "$h" "$agent"
+}
+
+# Parent git NEVER runs with the child's hooks or fsmonitor. Verified with a negative
+# control: without core.hooksPath=/dev/null a `worktree add` fires a post-checkout hook
+# from the shared .git/hooks, which an --approve-all child can write; with it, suppressed.
+mount_git() { git -c core.hooksPath=/dev/null -c core.fsmonitor= "$@"; }
+
+# Generation bookkeeping lives BESIDE the mount, never inside it: the identity check below
+# would otherwise see the bookkeeping as contamination, and the rename would carry it away.
+mount_state_put() {  # <kdir> <key> <value>
+  local kdir="$1" key="$2" val="$3"
+  printf '%s\n' "$val" > "$kdir/.state.$key.tmp.$$" 2>/dev/null || return 1
+  mv -f "$kdir/.state.$key.tmp.$$" "$kdir/.state.$key" 2>/dev/null || return 1
+}
+mount_state_get() {  # <kdir> <key>
+  cat "$1/.state.$2" 2>/dev/null || true
+}
+
+# Runner-vs-runner exclusion ONLY. This says nothing about whether a queue owner still
+# holds the directory — conflating the two is what made an earlier revision unsafe.
+# `ln` is the atomic primitive rather than mkdir+write: it creates-or-fails-EEXIST AND
+# publishes a complete record in one step, so a peer never reads a half-written claim and
+# treats a live runner as stale.
+MOUNT_HOLDER=""; MOUNT_CLAIM_NOTE=""
+mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
+  local kdir="$1" rd="$2" stage="$1/.claim.stage.$$" held hp hs
+  MOUNT_HOLDER=""; MOUNT_CLAIM_NOTE=""
+  { printf 'pid=%s\n' "$$"
+    printf 'start=%s\n' "$(LC_TIME=C ps -p "$$" -o lstart= 2>/dev/null | tr -s ' ')"
+    printf 'run=%s\n' "$rd"
+  } > "$stage" 2>/dev/null || { MOUNT_CLAIM_NOTE="cannot write a claim beside $kdir"; return 1; }
+  if ln "$stage" "$kdir/.claim" 2>/dev/null; then
+    rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$kdir/.claim"; return 0
+  fi
+  held="$kdir/.claim"
+  hp="$(sed -n 's/^pid=//p' "$held" 2>/dev/null | head -1)"
+  hs="$(sed -n 's/^start=//p' "$held" 2>/dev/null | head -1)"
+  # A holder is DEAD only on positive proof of absence. `ps -p` exiting 1 with empty
+  # stdout is that proof; a denied or broken ps is ambiguous and must not license a
+  # reclaim. A live pid whose start time differs from the record is a recycled number.
+  local now rc=0
+  now="$(LC_TIME=C ps -p "${hp:-0}" -o lstart= 2>/dev/null | tr -s ' ')" || rc=$?
+  if [ -n "$hp" ] && [ "$rc" -eq 1 ] && [ -z "$now" ]; then
+    rm -f "$held" 2>/dev/null || true
+    if ln "$stage" "$held" 2>/dev/null; then
+      rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$held"; return 0
+    fi
+  fi
+  rm -f "$stage" 2>/dev/null || true
+  MOUNT_CLAIM_NOTE="the mount at $kdir is held by runner pid ${hp:-<unknown>} (run $(sed -n 's/^run=//p' "$held" 2>/dev/null | head -1)); if no runner is really alive, clear it with: rm -f '$held'"
+  return 1
+}
+mount_claim_release() {
+  [ -n "${MOUNT_HOLDER:-}" ] || return 0
+  grep -qx "pid=$$" "$MOUNT_HOLDER" 2>/dev/null && rm -f "$MOUNT_HOLDER" 2>/dev/null
+  MOUNT_HOLDER=""; return 0
+}
+
+# Wait for the previous round's queue owner to SELF-EXIT. No signal is ever sent: the
+# owner's pid cannot be authenticated (the lease records createdAt, not a process start
+# time, and Darwin `ps lstart` is whole-second), so an external kill can land on a reused
+# pid — and since the owner is spawned detached, that would mean signalling an unrelated
+# process group. Mounted prompts therefore carry a short --ttl and the owner is left to
+# exit on its own; the lease lock and socket disappearing is the observable.
+# Never `acpx status` (it SIGTERMs a live pid whose heartbeat is stale) and never
+# `sessions close` (it sets closed:true, which makes the record invisible to ensure and
+# prompt — a permanent cold start).
+mount_owner_wait() {  # <acpx record id> <deadline secs> -> 0 gone | 1 still held
+  local id="$1" secs="${2:-45}" lock sock hh deadline
+  [ -n "$id" ] || return 0                      # nothing ran here yet
+  hh="$(printf '%s' "$id" | acp_hash12)"        # 12 chars; the lease uses 24
+  hh="$(printf '%s' "$id" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-24
+        elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-24; else printf ''; fi; })"
+  [ -n "$hh" ] || return 0                      # no sha256 on this box: cannot address the lease
+  lock="${HOME:-}/.acpx/queues/$hh.lock"
+  sock="/tmp/acpx-$(printf '%s' "${HOME:-}" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-10
+        elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-10; else printf ''; fi; })/$hh.sock"
+  deadline=$(( $(date +%s) + secs ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    [ -e "$lock" ] || [ -e "$sock" ] || return 0
+    sleep 1
+  done
+  [ -e "$lock" ] || [ -e "$sock" ] || return 0
+  return 1
+}
+
+# Rebuild the mount at a STABLE path. Every step is a defect found in review:
+#   - the dirent is moved aside WHATEVER it is (directory, file, symlink, FIFO, socket).
+#     `mv` never follows, so a symlink is relocated and its target untouched; writing or
+#     testing through it first would clobber whatever it names.
+#   - the worktree is created at an mktemp-UNIQUE path, so its admin id is unique per
+#     generation. Creating it at the stable path would make git reuse
+#     .git/worktrees/<basename>, and the aside's gitfile would resolve again — an orphan's
+#     `git add` then stages into the NEW mount.
+#   - the PREVIOUS generation's admin dir is deleted, so the aside's absolute gitfile
+#     dangles and its git is inert.
+#   - `mv` + `worktree repair` rather than `worktree move`, which git documents as
+#     refusing worktrees that contain submodules.
+mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1 refuse | 2 error
+  local mr="$1" kdir="$2" mount="$3" base="$4" art="$5" log="$6"
+  local aside tmp adm prev
+  [ -n "$mount" ] && [ -n "$kdir" ] || return 2
+  mkdir -p "$kdir" 2>/dev/null || return 2
+  if [ -e "$mount" ] || [ -L "$mount" ]; then
+    aside="$(mktemp -d "$kdir/.aside.XXXXXX" 2>/dev/null)" || return 2
+    mv -- "$mount" "$aside/held" 2>>"$log" || {
+      echo "mount: cannot move the previous mount aside" >>"$log"; return 2; }
+  fi
+  prev="$(mount_state_get "$kdir" admin)"
+  if [ -n "$prev" ]; then
+    case "$prev" in
+      "$mr"/.git/worktrees/*)
+        # Delete only what THIS parent recorded, and only if it still names this mount.
+        # The back-pointer is a veto, never a reason: a peer's gitdir can be rewritten to
+        # our path, so a match alone must not license a delete of something we did not
+        # create.
+        if [ -d "$prev" ] && [ ! -L "$prev" ] && [ "$(cd "$prev" 2>/dev/null && pwd -P)" = "$prev" ] \
+           && [ "$(cat "$prev/gitdir" 2>/dev/null)" = "$mount/.git" ]; then
+          rm -rf -- "$prev" 2>>"$log" || true
+        elif [ -d "$prev" ]; then
+          echo "mount: refusing — a live admin dir at $prev names this mount but is not safely ours" >>"$log"
+          return 1
+        fi ;;
+      *) : ;;
+    esac
+  fi
+  rm -f "$kdir/.state.admin" 2>/dev/null || true
+  tmp="$(mktemp -d "$kdir/.new.XXXXXX" 2>/dev/null)" || return 2
+  rm -rf -- "$tmp" 2>/dev/null || true          # `worktree add` wants a free path
+  mount_state_put "$kdir" pending "$tmp" || return 2
+  mount_git -C "$mr" worktree add --detach --quiet "$tmp" "$base" 2>>"$log" || return 2
+  adm="$(mount_git -C "$tmp" rev-parse --absolute-git-dir 2>/dev/null)" || {
+    mount_git -C "$mr" worktree remove --force "$tmp" 2>/dev/null || true; return 2; }
+  mount_state_put "$kdir" admin "$adm" || true
+  if ! mv -- "$tmp" "$mount" 2>>"$log"; then
+    mount_git -C "$mr" worktree remove --force "$tmp" 2>/dev/null || true; return 2
+  fi
+  mount_git -C "$mr" worktree repair "$mount" >>"$log" 2>&1 || true
+  rm -f "$kdir/.state.pending" 2>/dev/null || true
+  mount_git -C "$mount" read-tree -u --reset "$art" 2>>"$log" || return 2
+  mount_git -C "$mount" reset -q --mixed "$base" 2>>"$log" || return 2
+  # Tripwire, not a lock: it cannot close the window, it makes a breach loud.
+  [ -d "$mount" ] && [ ! -L "$mount" ] || { echo "mount: not a real directory after restage" >>"$log"; return 2; }
+  [ -f "$mount/.git" ] && [ ! -L "$mount/.git" ] || { echo "mount: .git is not a regular file" >>"$log"; return 2; }
+  [ "$(cat "$mount/.git" 2>/dev/null)" = "gitdir: $adm" ] || { echo "mount: .git does not name our admin dir" >>"$log"; return 2; }
+  [ "$(mount_git -C "$mr" worktree list --porcelain 2>/dev/null | grep -cxF "worktree $(cd "$mount" && pwd -P)")" = 1 ] \
+    || { echo "mount: not registered exactly once" >>"$log"; return 2; }
+  return 0
+}
+
+# Is the mount EXACTLY the pinned artifact? `status --porcelain` cannot answer this: it
+# reports status codes and paths, not bytes, so a survivor rewriting an already-modified
+# tracked file still prints ` M path`, a rewritten expected-untracked file still prints
+# `?? path`, a mode-only change is invisible, and ignored residue is hidden by default.
+# All four measured blind. Compare TREE IDENTITY instead, and enumerate ignored paths.
+# The index is seeded from the artifact so that ignored-but-tracked files do not vanish.
+mount_tree_matches() {  # <mount> <artifact> <log> -> 0 identical
+  local mount="$1" art="$2" log="$3" idxd idx have want extra
+  idxd="$(mktemp -d 2>/dev/null)" || return 1
+  idx="$idxd/index"
+  want="$(mount_git -C "$mount" rev-parse "${art}^{tree}" 2>/dev/null)"
+  GIT_INDEX_FILE="$idx" mount_git -C "$mount" read-tree "$art" 2>/dev/null || true
+  GIT_INDEX_FILE="$idx" mount_git -C "$mount" add -A -- . >/dev/null 2>&1
+  have="$(GIT_INDEX_FILE="$idx" mount_git -C "$mount" write-tree 2>/dev/null)"
+  extra="$(mount_git -C "$mount" status --porcelain --ignored=matching 2>/dev/null | grep -cE '^!!' || true)"
+  rm -rf "$idxd" 2>/dev/null || true
+  [ -n "$want" ] && [ "$have" = "$want" ] && [ "${extra:-0}" = "0" ] && return 0
+  echo "mount: tree identity mismatch (have ${have:-<none>} want ${want:-<none>} ignored-residue ${extra:-?})" >>"$log"
+  return 1
+}
+
+# Hoisted to FILE SCOPE: the EXIT trap installed at the top of cmd_run names this, and a
+# nested definition does not exist until execution reaches it — so a TERM raised inside
+# the mount block would fire a trap whose unmount_artifact is "command not found",
+# swallowed by `2>/dev/null || true`, stranding the claim every later round needs.
+# A DURABLE mount is deliberately left registered and on disk: removing it would unlink an
+# inode a queue owner may still hold, and the next round rebuilds it anyway. An EPHEMERAL
+# mount ($run_dir/tree, used by non-ACP parent-brokered turns) is still removed, or every
+# direct grok turn would leak an admin dir.
+unmount_artifact() {
+  if [ -n "${mount_dir:-}" ] && [ -n "${main_root:-}" ] && [ -z "${mount_durable:-}" ]; then
+    mount_git -C "$main_root" worktree remove --force "$mount_dir" 2>/dev/null || true
+    mount_dir=""
+  fi
+  mount_claim_release
+}
+
 # ---------- run (spawn's detached child) ----------
 
 cmd_run() {
@@ -1014,7 +1243,7 @@ cmd_run() {
   # state BEFORE send's write and get clobbered back to "spawned".
   sleep "${COMMS_RUNPHASE_SPAWN_DELAY_SECS:-1}"
 
-  local root main_root workdir msg_cwd msg_artifact mount_dir=""
+  local root main_root workdir msg_cwd msg_artifact mount_dir="" mount_durable="" mount_kdir="" mount_ident=""
   root="$("$COMMS" root)"
   main_root="${root%/.comms}"
   msg_cwd="$(frontmatter_field "$msg" cwd)"
@@ -1054,28 +1283,71 @@ cmd_run() {
     local mount_base
     mount_base="$(frontmatter_field "$msg" head_sha)"
     [ -n "$mount_base" ] || mount_base="$(git -C "$main_root" rev-parse -q --verify "${msg_artifact}^" 2>/dev/null || printf '%s' "$msg_artifact")"
-    mount_dir="$run_dir/tree"
-    if git -C "$main_root" worktree add --detach --quiet "$mount_dir" "$mount_base" 2>>"$run_dir/runner.log" \
-       && git -C "$mount_dir" read-tree -u --reset "$msg_artifact" 2>>"$run_dir/runner.log" \
-       && git -C "$mount_dir" reset -q --mixed "$mount_base" 2>>"$run_dir/runner.log"; then
-      workdir="$mount_dir"
+    # STABLE MOUNT PATH for ACP turns, per (thread, agent). run_dir is per-message, so
+    # $run_dir/tree handed acpx a new cwd every round and paid a cold session while the
+    # session NAME looked stable. Scoped to `--via acp` because only an ACP turn has a
+    # warm session to keep: `comms.sh shadow` runs a NON-acp grok turn that also mounts,
+    # on the SAME thread as the gating leg and concurrently with it by design, and it
+    # must keep its disposable per-run path.
+    #
+    # $kdir lives under the mailbox root, which install.sh already seeds into .gitignore.
+    # Coverage is VERIFIED, not assumed: a durable mount outlives the turn, and in a repo
+    # whose .comms is not ignored, snapshot-on-send would fold an entire second checkout
+    # into every review artifact. We DEGRADE to the per-message path rather than refuse,
+    # so a working setup is never broken by this change.
+    if [ "$via" = "acp" ] \
+       && mount_ident="$(acp_mount_ident "$main_root" "${msg_thread:-$(frontmatter_field "$msg" message_id)}" "$provider")" \
+       && [ -n "$mount_ident" ] \
+       && git -C "$main_root" check-ignore -q ".comms" 2>/dev/null \
+       && mkdir -p "$root/mounts/$mount_ident" 2>/dev/null; then
+      mount_kdir="$(cd "$root/mounts/$mount_ident" && pwd -P)"
+      mount_dir="$mount_kdir/tree"
+      mount_durable=1
+      if ! mount_claim_take "$mount_kdir" "$run_dir"; then
+        mount_dir=""; mount_durable=""; mount_kdir=""
+        update_thread_state "$msg_thread" failed "" "$sfield" || true
+        write_result "$run_dir" failed 1 "" "$msg" "could not claim the mount for artifact $msg_artifact — $MOUNT_CLAIM_NOTE"
+        trap - EXIT
+        exit 1
+      fi
+      # The previous round's queue owner must be gone before its directory is rebuilt;
+      # it exits on its own --ttl and we only observe the lease and socket vanishing.
+      if ! mount_owner_wait "$(mount_state_get "$mount_kdir" record)" "${COMMS_RUNPHASE_OWNER_WAIT_SECS:-45}"; then
+        update_thread_state "$msg_thread" failed "" "$sfield" || true
+        write_result "$run_dir" failed 1 "" "$msg" "the previous ACP queue owner for this mount has not exited — refusing to restage under a live owner"
+        unmount_artifact
+        trap - EXIT
+        exit 1
+      fi
     else
-      # FAIL CLOSED. The message names a pinned artifact; reviewing the live tree
-      # instead produces a review of something nobody asked about, and nothing
-      # downstream can tell. (grok, collapse round 1.)
-      git -C "$main_root" worktree remove --force "$mount_dir" 2>/dev/null || true
-      mount_dir=""
+      mount_kdir="$run_dir"
+      mount_dir="$run_dir/tree"
+      mount_durable=""
+    fi
+    mount_restage "$main_root" "$mount_kdir" "$mount_dir" "$mount_base" "$msg_artifact" "$run_dir/runner.log"
+    case "$?" in
+      0) workdir="$mount_dir" ;;
+      *)
+        # FAIL CLOSED. The message names a pinned artifact; reviewing the live tree
+        # instead produces a review of something nobody asked about, and nothing
+        # downstream can tell. (grok, collapse round 1.)
+        update_thread_state "$msg_thread" failed "" "$sfield" || true
+        write_result "$run_dir" failed 1 "" "$msg" "could not mount artifact $msg_artifact — refusing to review the live tree in its place"
+        unmount_artifact
+        trap - EXIT
+        exit 1 ;;
+    esac
+    # A mounted tree that carries its own acpx project config would choose the reviewer:
+    # acpx resolves .acpxrc.json from the cwd, and its `agents` entry overrides the
+    # profile acp.sh selected by name, before any later assert can run.
+    if [ -e "$mount_dir/.acpxrc.json" ] || [ -L "$mount_dir/.acpxrc.json" ]; then
       update_thread_state "$msg_thread" failed "" "$sfield" || true
-      write_result "$run_dir" failed 1 "" "$msg" "could not mount artifact $msg_artifact — refusing to review the live tree in its place"
+      write_result "$run_dir" failed 1 "" "$msg" "the reviewed tree contains .acpxrc.json, which would override the reviewer agent — refusing"
+      unmount_artifact
       trap - EXIT
       exit 1
     fi
   fi
-  unmount_artifact() {
-    [ -n "$mount_dir" ] || return 0
-    git -C "$main_root" worktree remove --force "$mount_dir" 2>/dev/null || true
-    mount_dir=""
-  }
 
   # ----- prompt -----
   # Which discipline text the peer follows and where its reply goes, per provider.
@@ -1303,23 +1575,71 @@ PROMPT
     # `agent-comms-loop` would mix unrelated consults into one warm context, leaking
     # earlier questions into later answers. Fall back to the message id, which is unique
     # per dispatch. (Field report from a codex session, 2026-08-26.)
-    if [ -n "$msg_thread" ]; then
+    # A MOUNTED turn takes a namespace the unmounted formula cannot reach. acpx resolves a
+    # session by walking from cwd up to the git ROOT, and its root detector requires .git
+    # to be a DIRECTORY — a linked worktree's .git is a FILE, so the walk escapes the
+    # mount and can bind a same-named record at an ancestor whose cwd is the live tree.
+    # '+' is outside safe_name's output alphabet (`tr -c 'A-Za-z0-9._-' '_'`), so the two
+    # namespaces are disjoint by construction rather than by luck, and the ident carries
+    # the same raw-thread hash as the mount path so the two cannot disagree.
+    if [ -n "${mount_ident:-}" ] && [ -n "$mount_dir" ]; then
+      acp_session="agent-comms+mount+$mount_ident"
+    elif [ -n "$msg_thread" ]; then
       acp_session="agent-comms-$(safe_name "$msg_thread")"
     else
       acp_session="agent-comms-oneoff-$(safe_name "$(frontmatter_field "$msg" message_id)")"
     fi
     # acpx GLOBAL options must precede the profile; only subcommand flags follow it.
     # (`--cwd` after the profile is rejected outright — caught live.) The turn runs
-    # IN $workdir because acpx keys session identity on (agent, cwd, name), so the
-    # warm session only stays warm if the directory is stable across rounds.
+    # IN $workdir because acpx keys session identity on (agent, cwd, name) and compares
+    # cwd as a STRING. The mount path is therefore stable per (thread, agent), and the
+    # directory at it is rebuilt each round rather than reused. Warmth survives that
+    # rebuild because it comes from RECORD resume through the provider's prompt cache,
+    # not from reusing the agent process: records on the development machine stayed warm
+    # across 15.6 hours and 5 days with the agent respawned every time.
     # Ask acp.sh HOW to launch — it owns ACPX_BIN and the npm-cache fallback, and a
     # second copy of that recipe here is a second place to get it wrong.
     local -a acp_launch
     # shellcheck disable=SC2206
     acp_launch=($("$acp_sh" launcher 2>/dev/null))
     [ "${#acp_launch[@]}" -gt 0 ] || acp_launch=(npx -y "acpx@$("$acp_sh" version)")
-    ( cd "$workdir" && "${acp_launch[@]}" "$acp_profile" sessions ensure --name "$acp_session" ) \
-      >>"$run_dir/runner.log" 2>&1 || true
+    # --format text is PINNED: `format` is a config scalar, so the ambient default is
+    # branch-controllable. Field 1 of the first line is the record id in both the created
+    # and the already-existing case.
+    local acp_ensure_out="" acp_record_id=""
+    acp_ensure_out="$( cd "$workdir" && "${acp_launch[@]}" --format text "$acp_profile" \
+        sessions ensure --name "$acp_session" 2>>"$run_dir/runner.log" )" || true
+    printf 'sessions ensure: %s\n' "$acp_ensure_out" >>"$run_dir/runner.log"
+    acp_record_id="$(printf '%s' "$acp_ensure_out" | head -1 | cut -f1)"
+    if [ -n "$mount_dir" ]; then
+      # The record id is persisted BESIDE the mount because the next round needs it to
+      # address this owner's lease, and by then the mount may have been vandalised into
+      # something `sessions show` cannot run in.
+      [ -n "${mount_kdir:-}" ] && [ -n "$acp_record_id" ] \
+        && mount_state_put "$mount_kdir" record "$acp_record_id" || true
+      # THE BOUND RECORD MUST BE THE MOUNT'S. Read it from `sessions show`, not from the
+      # ensure output: quiet prints only the id and the warm path prints neither. acpx
+      # records process.cwd(), which is physical, so compare against `pwd -P`.
+      local acp_bound_cwd="" acp_phys=""
+      acp_phys="$( cd "$mount_dir" && pwd -P )"
+      acp_bound_cwd="$( cd "$workdir" && "${acp_launch[@]}" --format text "$acp_profile" \
+          sessions show "$acp_session" 2>>"$run_dir/runner.log" | sed -n 's/^[[:space:]]*cwd:[[:space:]]*//p' | head -1 )" || true
+      if [ -z "$acp_bound_cwd" ] || [ "$acp_bound_cwd" != "$acp_phys" ]; then
+        update_thread_state "$msg_thread" failed "" "$sfield" || true
+        write_result "$run_dir" failed 1 "" "$msg" "the ACP session bound cwd '${acp_bound_cwd:-<unreadable>}' is not the mount '$acp_phys' — the turn would have reviewed a tree outside the pinned artifact"
+        unmount_artifact
+        trap - EXIT
+        exit 1
+      fi
+      # And the mount must still BE the artifact at the moment the prompt goes out.
+      if ! mount_tree_matches "$mount_dir" "$msg_artifact" "$run_dir/runner.log"; then
+        update_thread_state "$msg_thread" failed "" "$sfield" || true
+        write_result "$run_dir" failed 1 "" "$msg" "the mount no longer matches artifact $msg_artifact at prompt time — refusing to review a contaminated tree"
+        unmount_artifact
+        trap - EXIT
+        exit 1
+      fi
+    fi
     # Permission profile depends on WHERE the turn runs. A review prompt tells the
     # reviewer to run read-only git commands and compare head_sha — those are terminal
     # requests, not file reads, so --approve-reads denies them and the turn dies after
@@ -1361,8 +1681,18 @@ PROMPT
     fi
     local acp_t0 acp_elapsed
     acp_t0="$(date +%s)"
+    # A MOUNTED turn asks the queue owner to retire quickly. The next round rebuilds this
+    # directory and must not do so under a live owner, and the only safe way to know it is
+    # gone is to let it exit ITSELF — its pid cannot be authenticated well enough to
+    # signal (the lease records createdAt, not a start time, and Darwin `ps lstart` is
+    # whole-second, so a reused pid reads as the owner; and since the owner is detached,
+    # a mistaken signal would hit an unrelated process group). --ttl is a GLOBAL option,
+    # so it precedes the profile. Retiring costs nothing: the next turn's session/load
+    # replays through the prompt cache, which is where the saving actually comes from.
+    local -a acp_ttl=()
+    [ -n "$mount_dir" ] && acp_ttl=(--ttl "${COMMS_RUNPHASE_OWNER_TTL_SECS:-20}")
     ( cd "$workdir" && PATH="${acp_shim:+$acp_shim:}$PATH" "${acp_launch[@]}" \
-        "${acp_perm[@]}" \
+        "${acp_perm[@]}" "${acp_ttl[@]+"${acp_ttl[@]}"}" \
         --timeout "$timeout" --format quiet \
         "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
       > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" || acp_rc=$?
@@ -1381,6 +1711,17 @@ PROMPT
     # value on its own `--timeout` flag.
     local acp_overran=0
     if [ "$acp_elapsed" -ge "$timeout" ]; then acp_overran=1; fi
+    # Contamination introduced DURING the review must not be stamped. This cannot close a
+    # transient or post-check race; it refuses the persistent case, which is the one that
+    # would otherwise become an authoritative verdict over a tree nobody pinned.
+    if [ "$acp_rc" -eq 0 ] && [ -n "$mount_dir" ] \
+       && ! mount_tree_matches "$mount_dir" "$msg_artifact" "$run_dir/runner.log"; then
+      update_thread_state "$msg_thread" failed "" "$sfield" || true
+      write_result "$run_dir" failed 1 "" "$msg" "the mount stopped matching artifact $msg_artifact during the turn — refusing to stamp a verdict over a contaminated tree"
+      unmount_artifact
+      trap - EXIT
+      exit 1
+    fi
     if [ "$acp_rc" -eq 0 ] && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then
       acp_status=completed
       # WARN, do not refuse. A turn killed at its budget can still have emitted a fragment
