@@ -5621,6 +5621,106 @@ fi
   && ok "the git shim, prompt and result.json stay per-message under the run dir" \
   || fail "per-message run-dir state went missing"
 
+# --- the fail-closed and recovery paths, which the first pass asserted about but never ran.
+
+# AC2 in full: a peer worktree must survive a restage, and the restaged tree must BE the
+# artifact -- the first pass only compared the main checkout's `status --porcelain`.
+git -C "$MA_FIX" worktree add --detach --quiet "$WM/peer" "$WM_HEAD" 2>/dev/null
+WM_PEER_GITFILE="$(cat "$WM/peer/.git" 2>/dev/null)"
+: > "$WM/cwd.log"; WM_D9="$(wm_turn wm-seq wm9 "$WM_A2")"
+WM_C9="$(wm_prompt_cwds | sed -n 1p)"
+if [ "$(cat "$WM/peer/.git" 2>/dev/null)" = "$WM_PEER_GITFILE" ] \
+   && git -C "$WM/peer" rev-parse HEAD >/dev/null 2>&1; then
+  ok "a restage leaves a peer worktree registered and usable"
+else
+  fail "a restage disturbed a peer worktree"
+fi
+# The mount IS the artifact, compared by tree identity rather than by status shape.
+WM_WANT="$(git -C "$MA_FIX" rev-parse "${WM_A2}^{tree}")"
+WM_HAVE="$( GIT_INDEX_FILE="$WM/vidx" git -C "$WM_C9" read-tree "$WM_A2" >/dev/null 2>&1; \
+            GIT_INDEX_FILE="$WM/vidx" git -C "$WM_C9" add -A -- . >/dev/null 2>&1; \
+            GIT_INDEX_FILE="$WM/vidx" git -C "$WM_C9" write-tree 2>/dev/null )"
+[ -n "$WM_WANT" ] && [ "$WM_HAVE" = "$WM_WANT" ] \
+  && ok "the restaged mount is byte-identical to the pinned artifact tree" \
+  || fail "the restaged mount is not the artifact (have=$WM_HAVE want=$WM_WANT)"
+
+# AC4 properly: two panelists CONCURRENTLY, on different leg threads, must not collide.
+: > "$WM/cwd.log"
+( wm_turn wm-par-a wmA "$WM_A1" >"$WM/pa.out" 2>&1 ) &
+( wm_turn wm-par-b wmB "$WM_A1" >"$WM/pb.out" 2>&1 ) &
+wait
+WM_PA="$(cat "$WM/pa.out" 2>/dev/null)"; WM_PB="$(cat "$WM/pb.out" 2>/dev/null)"
+if [ "$(wm_status "$WM_PA")" = "completed" ] && [ "$(wm_status "$WM_PB")" = "completed" ] \
+   && [ "$(awk -F'\t' '$2 !~ /sessions (ensure|show)/ {print $1}' "$WM/cwd.log" | sort -u | wc -l | tr -d ' ')" = 2 ]; then
+  ok "two CONCURRENT panelists get two distinct mounts and both complete"
+else
+  fail "concurrent panelists collided (a=$(wm_status "$WM_PA") b=$(wm_status "$WM_PB"))"
+fi
+
+# The ident includes the AGENT, so one thread reviewed by two providers cannot share a
+# worktree. `shadow` does exactly this, concurrently, by design.
+WM_IDENT_G="$(basename "$(dirname "$WM_C9")")"
+case "$WM_IDENT_G" in
+  *-grok) ok "the mount ident carries the reviewing agent, so two providers cannot share one" ;;
+  *) fail "the mount ident does not name the agent ($WM_IDENT_G)" ;;
+esac
+
+# CRASH WINDOW 1 — interrupted after `worktree add`, before the admin id was recorded.
+# `.state.pending` names a registered temp worktree; without recovery it leaks forever.
+WM_KDIR="$(dirname "$WM_C9")"
+git -C "$MA_FIX" worktree add --detach --quiet "$WM_KDIR/.new.crash1" "$WM_HEAD" 2>/dev/null
+printf '%s\n' "$WM_KDIR/.new.crash1" > "$WM_KDIR/.state.pending"
+: > "$WM/cwd.log"; WM_D10="$(wm_turn wm-seq wm10 "$WM_A1")"
+if [ "$(wm_status "$WM_D10")" = "completed" ] && [ ! -e "$WM_KDIR/.new.crash1" ] \
+   && ! git -C "$MA_FIX" worktree list --porcelain | grep -qxF "worktree $WM_KDIR/.new.crash1"; then
+  ok "a pending generation left by a crash is reclaimed, not leaked"
+else
+  fail "a crashed pending generation survived the next restage"
+fi
+
+# CRASH WINDOW 2 — interrupted between `mv` and `worktree repair`: the recorded admin's
+# back-pointer still names the temp path. The strict gitdir test alone would refuse this
+# FOREVER, so the recipe repairs first and only then applies the test.
+WM_ADM="$(cat "$WM_KDIR/.state.admin" 2>/dev/null)"
+if [ -n "$WM_ADM" ] && [ -d "$WM_ADM" ]; then
+  printf '%s\n' "$WM_KDIR/.new.stale/.git" > "$WM_ADM/gitdir"
+  : > "$WM/cwd.log"; WM_D11="$(wm_turn wm-seq wm11 "$WM_A1")"
+  [ "$(wm_status "$WM_D11")" = "completed" ] \
+    && ok "an admin back-pointer left naming the temp path is repaired, not wedged" \
+    || fail "a half-moved generation wedged the mount permanently (status=$(wm_status "$WM_D11"))"
+else
+  fail "could not stage the half-moved-generation fixture"
+fi
+
+# The mount CONTAINER is as attackable as the mount. A symlinked container must refuse
+# outright rather than be followed, adopted, and written through.
+WM_IDENT_DIR="$WM_KDIR"
+rm -rf "$WM_IDENT_DIR"; ln -s "$MA_FIX" "$WM_IDENT_DIR"
+WM_MAIN_B4="$(git -C "$MA_FIX" status --porcelain)"
+: > "$WM/cwd.log"; WM_D12="$(wm_turn wm-seq wm12 "$WM_A1")"
+if [ "$(git -C "$MA_FIX" status --porcelain)" = "$WM_MAIN_B4" ] && [ -L "$WM_IDENT_DIR" ]; then
+  ok "a symlinked mount container is never followed or written through"
+else
+  fail "a symlinked mount container was adopted and written through"
+fi
+rm -f "$WM_IDENT_DIR"
+
+# The ephemeral (non-ACP) path must still clean up: a trap that merely stopped unmounting
+# would leak one admin dir per direct grok turn.
+WM_ADM_BEFORE="$(ls "$MA_FIX/.git/worktrees" 2>/dev/null | wc -l | tr -d ' ')"
+WM_MSG13="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T10-00-00_wm-13.md"
+{ head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+  printf 'artifact_id: %s\nhead_sha: %s\n' "$WM_A1" "$WM_HEAD"
+  tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" | sed -e 's|^thread: ma-arc-1$|thread: wm-ephemeral|'
+} > "$WM_MSG13"
+mkdir -p "$WM/run-wm13"
+( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$AXD/payload" \
+    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$WM_MSG13" --dir "$WM/run-wm13" \
+    --provider grok --timeout-secs 20 ) >/dev/null 2>&1
+[ "$(ls "$MA_FIX/.git/worktrees" 2>/dev/null | wc -l | tr -d ' ')" = "$WM_ADM_BEFORE" ] \
+  && ok "a non-ACP grok turn still unmounts and leaves no admin dir behind" \
+  || fail "the ephemeral mount path leaked an admin dir"
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 
