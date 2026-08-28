@@ -1317,7 +1317,28 @@ Ranked work, foldable into the step-2 harness split:
 5. [ ] **Back-date instead of sleep** in the remaining age-based tests (most
    already stamp epochs). Worth ~27s at the absolute most — do it for
    determinism under load, not for speed.
-6. [ ] **Make silent stalls visible.** This defect survived because a
+6. [x] **Make silent stalls visible.** DONE 2026-08-28 as the coverage-gate arc
+   (48506fe, eight review rounds, double APPROVE). The suite could not tell a
+   partial run from a full one — exit status AND attestation were both
+   `[ "$FAIL" -eq 0 ]` with no coverage conjunct — so a run of 300 of 954
+   assertions was byte-identical to a green one for every consumer, with
+   `suite-attest-secs = 1800` live. Now `tests/expected-counts.tsv` is read from
+   the COMMITTED BLOB at the tested commit, both the exit status and the mint
+   require the full count, skips are named/condition-bound/single-use, the
+   dynamic corpus enumerates the git index, and `integrate` scrubs shell-startup
+   hooks and demands the suite's own completion line rather than trusting an
+   exit code. Seven distinct routes to a green partial run were found by review
+   and closed; `integrate` now also keeps the output of runs it rejects.
+
+7. [ ] **Remaining defence-in-depth on the suite proof** (codex, coverage-gate r8,
+   advisory, explicitly NON-blocking). A `BASH_ENV` hook defining `command()` can
+   still forge the completion line. This sits outside the stated boundary — such a
+   hook already runs code as the user and could move refs directly — so it was not
+   fixed before landing. Cheap option if ever wanted: a subshell that sets
+   `POSIXLY_CORRECT=1`, unsets a `command` function, then invokes
+   `command /usr/bin/env`. Strictly stronger, still not containment.
+
+8. [ ] **Make silent stalls visible.** This defect survived because a
    six-second wait announced itself only on stderr, into `/dev/null`. Consider
    whether the runner should record waits it actually served somewhere a human
    or the suite reads. A stall nobody can see is the shape of the next one.
