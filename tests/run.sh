@@ -6336,6 +6336,52 @@ printf 'suite-cmd = bash tests/slow.sh\n' > "$IH7/.comms/config"
   && ok "a suite outlasting the beat interval creates no record for an absent identity" \
   || fail "the beater manufactured a pid-less record during a long suite"
 
+# ...and dropping the heartbeat must NOT drop the SUPERVISION. `with-beat` is also the
+# whole-process-group quiescence boundary: without it a suite can print its completion
+# line, launch a stdio-detached descendant and exit 0, leaving that descendant alive to
+# mutate the tree after integrate validates it and advances main. The absent-record path
+# must still wait for the group. (codex, integrate-beat r6, blocking.)
+IH8="$WORK/int-heal8"; mkdir -p "$IH8"; IH8="$(cd "$IH8" && pwd -P)"
+git -C "$IH8" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IH8/.gitignore"
+mkdir -p "$IH8/tests" "$IH8/.comms"
+printf 'total\t3\n' > "$IH8/tests/expected-counts.tsv"
+# Completion line first, then a detached descendant, then exit 0 — the shape that walks
+# past a supervisor which only waits on the direct child.
+printf '#!/bin/bash\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n( sleep 3; : > "$IH8_MARK" ) </dev/null >/dev/null 2>&1 &\nexit 0\n' > "$IH8/tests/detach.sh"
+chmod +x "$IH8/tests/detach.sh"
+printf 'suite-cmd = bash tests/detach.sh\n' > "$IH8/.comms/config"
+(cd "$IH8" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IH8" && git checkout -q -b session-primary)
+(cd "$IH8" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new detachone) >/dev/null 2>&1
+(cd "$IH8/.claude/worktrees/detachone" && echo d > m.txt && git add m.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: m") >/dev/null 2>&1
+# The property is NOT that the run waits for the descendant — supervision TERMs the whole
+# group and escalates to KILL. So the observable is that the descendant never gets to act:
+# its post-sleep marker must never appear. (A first draft asserted elapsed >= 3s and failed
+# against BOTH modes, because waiting is not what quiescence does.)
+IH8_MARKF="$WORK/ih8-descendant-ran"
+rm -f "$IH8_MARKF"
+(cd "$IH8" && env -u CMUX_WORKSPACE_ID IH8_MARK="$IH8_MARKF" \
+    COMMS_PRESENCE_NAME=detachghost COMMS_PRESENCE_INSTANCE=66666666666666666666666666666666 \
+    "$COMMS" integrate worktree-detachone) >/dev/null 2>&1 || true
+[ "$(cd "$IH8" && git rev-parse main)" = "$(cd "$IH8" && git rev-parse worktree-detachone)" ] \
+  && ok "the detached-descendant fixture lands" || fail "the detach fixture did not land"
+sleep 4   # outlive the descendant's own sleep, so a SURVIVING one would have marked by now
+[ ! -f "$IH8_MARKF" ] \
+  && ok "an absent-record run still reaps its process group (the descendant never acted)" \
+  || fail "a detached descendant outlived the landing — supervision was lost on the absent-record path"
+# CONTROL: unsupervised, that descendant DOES act — otherwise the assertion above is vacuous.
+rm -f "$IH8_MARKF"
+( cd "$IH8" && IH8_MARK="$IH8_MARKF" bash tests/detach.sh ) >/dev/null 2>&1 || true
+sleep 4
+[ -f "$IH8_MARKF" ] \
+  && ok "unsupervised, the same descendant does act (control)" \
+  || fail "the control did not reproduce a surviving descendant — the assertion above proves nothing"
+rm -f "$IH8_MARKF"
+[ "$(find "$IH8/.comms/sessions" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
+  && ok "supervision without a heartbeat still creates no record" || fail "the supervised absent-record path manufactured one"
+
 # The EXIT-trap cleanup path needs its own cover: the success path clears the trap, so the
 # regressions above never exercise the trap strings. A failing suite takes the die path.
 IH4="$WORK/int-heal4"; mkdir -p "$IH4"; IH4="$(cd "$IH4" && pwd -P)"

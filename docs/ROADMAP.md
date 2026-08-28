@@ -1416,7 +1416,7 @@ Ranked work, foldable into the step-2 harness split:
    belongs in presence, not in its callers. Candidates: `with-beat` refuses to heal and
    reports instead; or records carry their creator so a healed one is distinguishable.
 
-9. [ ] **Remaining defence-in-depth on the suite proof** (codex, coverage-gate r8,
+8. [ ] **Remaining defence-in-depth on the suite proof** (codex, coverage-gate r8,
    advisory, explicitly NON-blocking). A `BASH_ENV` hook defining `command()` can
    still forge the completion line. This sits outside the stated boundary — such a
    hook already runs code as the user and could move refs directly — so it was not
@@ -1424,7 +1424,7 @@ Ranked work, foldable into the step-2 harness split:
    `POSIXLY_CORRECT=1`, unsets a `command` function, then invokes
    `command /usr/bin/env`. Strictly stronger, still not containment.
 
-10. [ ] **Make silent stalls visible.** This defect survived because a
+9. [ ] **Make silent stalls visible.** This defect survived because a
    six-second wait announced itself only on stderr, into `/dev/null`. Consider
    whether the runner should record waits it actually served somewhere a human
    or the suite reads. A stall nobody can see is the shape of the next one.

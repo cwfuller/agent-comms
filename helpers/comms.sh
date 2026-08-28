@@ -2196,7 +2196,7 @@ cmd_presence() {
   # presence is restored but DIRECT tenure is not — re-run claim-then-check before
   # the next shared-checkout write.
   local sub="${1:-}"; shift 2>/dev/null || true
-  local name="" instance="" role="" state="" pid="" force=""
+  local name="" instance="" role="" state="" pid="" force="" presence_no_heartbeat=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --name)     shift; name="${1:-}" ;;
@@ -2205,6 +2205,7 @@ cmd_presence() {
       --state)    shift; state="${1:-}" ;;
       --pid)      shift; pid="${1:-}" ;;
       --force)    shift; force="${1:-}" ;;
+      --no-heartbeat) presence_no_heartbeat=1 ;;
       --) shift; break ;;
       -?*) usage_err "presence $sub: unknown option '$(clip "$1")'" ;;
       *) break ;;
@@ -2278,7 +2279,7 @@ cmd_presence() {
       # dir="$(presence_dir)" resolution before the case dispatch. Both are
       # fail-safe — a signal there is default-disposition DEATH (probed: 130 on
       # every delivered INT), never a latched-then-lost success.
-      local parent=$$ beater="" child="" rc=0 healmark brc latched=""
+      local parent=$$ beater="" child="" rc=0 healmark brc latched="" no_heartbeat="${presence_no_heartbeat:-}"
       trap 'latched=INT;  kill -INT  -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' INT
       trap 'latched=TERM; kill -TERM -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' TERM
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence with-beat: --name and --instance required"
@@ -2298,6 +2299,15 @@ cmd_presence() {
       # marker line — r1's "eats heal signals" survived the r2 fix as dead code,
       # and heartbeats stopped for the rest of the child. (codex + grok, impl r2;
       # grok: `( false; echo AFTER ) &` never prints AFTER.)
+      # --no-heartbeat keeps everything below and skips only the beater. Supervision
+      # (own process group per job, signal identity, the latch, and whole-group
+      # quiescence) and heartbeating were fused in one verb, but a caller with NO record
+      # to refresh still needs the supervision: without it a suite can print its
+      # completion line, launch a stdio-detached descendant and exit 0, leaving that
+      # descendant free to mutate the verification tree after the landing. Beating there
+      # is not an option either — a beat HEALS an absent record into a pid-less one.
+      # (codex, integrate-beat r6, blocking.)
+      if [ -z "$no_heartbeat" ]; then
       ( while :; do
           sleep $((PRESENCE_TTL_SECS / 3))
           kill -0 "$parent" 2>/dev/null || exit 0   # orphan beater suicide (plan r5)
@@ -2307,6 +2317,7 @@ cmd_presence() {
             : > "$healmark" 2>/dev/null || true
           fi
         done ) </dev/null & beater=$!
+      fi
       # (beater stdin from /dev/null — the dual of the piped-client fix: under
       # set -m it inherited the wrapper's pipe and could steal input. grok, r4.)
       [ -n "$latched" ] && kill "-$latched" -- "-$beater" 2>/dev/null || true
@@ -2584,16 +2595,20 @@ cmd_integrate() {
   tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
   # shellcheck disable=SC2064
   trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
-  # The guard is load-bearing, and its absence was a silent-death bug: `presence beat`
-  # exits 5 when it HEALED a vanished record, which happens on every integrate run whose
+  # HISTORY, past tense on purpose: the guard is load-bearing, and its absence WAS a
+  # silent-death bug. `presence beat` exits 5 when it heals a vanished record, which USED
+  # TO happen on every integrate run whose
   # inherited COMMS_PRESENCE_NAME/INSTANCE has no record in THIS repo — i.e. every nested
   # integrate in the test fixtures, and any operator whose presence record lives in a
   # different checkout. Under `set -e` that aborted integrate before its first line of
   # output, so the failure had no diagnostic at all and read as "integrate did nothing".
   # This is what made an integrate-hosted suite run fail three of its own integrate tests
   # while seven direct runs of the same commit passed. The sibling call at the end of this
-  # function already guards the same way; this one did not. Presence bookkeeping is
-  # advisory and must never decide a landing.
+  # function already guarded the same way; this one did not. Both ends now check for the
+  # record BEFORE beating, so the absent-identity beat no longer happens at all and the
+  # guard covers only the residual race. Presence bookkeeping is advisory and must never
+  # decide a landing. (grok, integrate-beat r6 — a stale present-tense comment in this
+  # function becomes the next round's spec.)
   # CHECK, THEN BEAT. `presence beat` HEALS a vanished record by design, so beating an
   # identity that has no record in THIS repo manufactures one — pid-less, therefore never
   # reapable, therefore a permanent ambiguous peer for every future session. Three rounds
@@ -2725,8 +2740,17 @@ cmd_integrate() {
     # pid-less, unreapable record the two explicit gates prevent — just fifteen minutes in,
     # where every fixture had already finished. A suite with no lease to refresh simply
     # runs unwrapped. (codex + grok, integrate-beat r5, corroborated.)
-    if [ -n "$name" ] && [ -n "$instance" ] && [ -f "$presence_record" ]; then
-      ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log"
+    if [ -n "$name" ] && [ -n "$instance" ]; then
+      # SUPERVISION ALWAYS; heartbeat only when there is a record to refresh. Running the
+      # suite unwrapped to avoid the healing beat gave up whole-process-group quiescence,
+      # and that is load-bearing: a suite can print its completion line, launch a
+      # stdio-detached descendant and exit 0, leaving it alive to mutate the verification
+      # tree after integrate validates and advances main. `--no-heartbeat` keeps the
+      # supervision and drops only the beater. (codex, integrate-beat r6, blocking.)
+      local hb=""
+      [ -f "$presence_record" ] || hb="--no-heartbeat"
+      # shellcheck disable=SC2086
+      ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat $hb --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log"
       rc=${PIPESTATUS[0]}
     else
       ( cd "$tw" && "${clean_env[@]}" "$@" ) 2>&1 | tee "$suite_log"
