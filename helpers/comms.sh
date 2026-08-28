@@ -2530,21 +2530,35 @@ cmd_integrate() {
     # a file that says `exit 0` makes `bash tests/run.sh` return 0 with no output and no
     # assertions, and integrate would land on it. ENV/SHELLOPTS/BASHOPTS are the same
     # class. (codex, panel r4, blocking — demonstrated with BASH_ENV=/dev/stdin.)
-    # ABSOLUTE PATH, deliberately. `BASH_ENV` is sourced by THIS helper before the scrub
-    # runs, so a hook can define a shell function named `env` -- which takes precedence
-    # over both the builtin and PATH -- and have it print a well-formed
-    # `passed: N  failed: 0  skipped: 0` line and return 0. tee records the forgery,
+    # `command` PREFIX, and no fallback. `BASH_ENV` is sourced by THIS helper before the
+    # scrub runs, so a hook can define a function that prints a well-formed
+    # `passed: N  failed: 0  skipped: 0` line and returns 0 -- tee records the forgery,
     # PIPESTATUS[0] is 0, the positive proof passes, and a candidate lands with the suite
-    # never having run. Verified as a working exploit. A function cannot shadow an
-    # absolute path. (codex, panel r6, blocking.)
+    # never having run.
     #
-    # HONEST LIMIT: this defends the accidental case and the cheap forgery. Anything that
-    # can inject BASH_ENV into this helper already runs code as the user and could replace
-    # `bash` or `git` on PATH; no in-process check survives that. The proof is a tripwire,
-    # not a containment boundary.
-    local -a clean_env; local envbin=/usr/bin/env
-    [ -x "$envbin" ] || envbin=env
-    clean_env=("$envbin" -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD)
+    # An absolute path is NOT enough: bash 3.2 accepts `function /usr/bin/env { ...; }`
+    # and dispatches it ahead of the executable (verified on this runtime -- an earlier
+    # version of this comment claimed otherwise and was wrong). `command` suppresses
+    # function lookup, which is what actually forces the executable to run.
+    # (codex, panel r6 then r7, blocking twice.)
+    #
+    # The fallback that used to sit here reassigned the scrub command to a bare, lookup-
+    # dispatched name whenever the absolute path was not executable -- which undid the pin
+    # on every host, not just an unusual layout. It is gone: a missing /usr/bin/env now
+    # REFUSES rather than silently running unpinned. (grok, panel r7.)
+    # (Deliberately worded without the literal assignment, because the regression that
+    # forbids it greps this file and would otherwise match its own description.)
+    #
+    # HONEST LIMIT, stated rather than implied: this defeats the demonstrated forgeries.
+    # It is not a containment boundary. Anything that can inject BASH_ENV into this helper
+    # already runs code as the user -- it could shadow `command` itself, or replace `bash`
+    # or `git` on PATH. The proof is a tripwire against silent pre-emption and cheap
+    # impersonation, and a shell whose function table is attacker-controlled is out of
+    # scope for any in-process check.
+    command test -x /usr/bin/env \
+      || die "integrate: /usr/bin/env is missing — refusing to run the suite unpinned"
+    local -a clean_env
+    clean_env=(command /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD)
     # Keep the output of the run we are judging. A refusal whose evidence was discarded
     # cannot be diagnosed, which cost a full investigation earlier in this arc.
     local suite_log; suite_log="$root/.comms/logs/integrate-${cand}.suite.log"

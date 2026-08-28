@@ -14,6 +14,9 @@ set -uo pipefail
 # operator's tuning cannot silently change what the timing assertions measure.
 unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP COMMS_RUNPHASE_VIA \
       COMMS_RUNPHASE_EXPECT_STATE COMMS_RUNPHASE_STATE_WAIT_SECS 2>/dev/null || true
+# Probe-result flags gate condition-bound skips, so an inherited value would let a skip be
+# cashed before its probe ran. Same class as the scrub above. (grok, panel r7.)
+unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
 
 # Loops became headless-first on 2026-08-25, so the pane path is now OPT-IN. The cmux
 # sections below exercise pane mechanics that still exist and still matter, so they ask
@@ -5781,10 +5784,13 @@ grep -qE '^ *for [a-z_]+ in .*"\$REPO"/\.?/?(templates|docs)' "$REPO/tests/run.s
 grep -qE '^ *for [a-z_]+ in .*find "\$REPO"/(templates|docs)' "$REPO/tests/run.sh" \
   && fail "a corpus loop walks the filesystem with find" || ok "no corpus loop walks the filesystem with find"
 # integrate must not accept a suite that never ran, and must keep the evidence.
-grep -q '"\$envbin" -u BASH_ENV -u ENV -u SHELLOPTS' "$REPO/helpers/comms.sh" \
+grep -q 'clean_env=(command /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS' "$REPO/helpers/comms.sh" \
   && ok "integrate scrubs shell-startup hooks before the suite" || fail "integrate does not scrub shell-startup hooks"
-grep -q 'envbin=/usr/bin/env' "$REPO/helpers/comms.sh" \
-  && ok "the scrub command is an absolute path a shell function cannot shadow" || fail "the scrub command is shadowable"
+grep -q 'command /usr/bin/env' "$REPO/helpers/comms.sh" \
+  && ok "the scrub runs outside function dispatch" || fail "the scrub is function-dispatchable"
+grep -q 'envbin=env' "$REPO/helpers/comms.sh" \
+  && fail "the unpinned fallback is back — it undoes the pin on every host" \
+  || ok "there is no unpinned fallback for the scrub command"
 grep -q 'emitted no completion line' "$REPO/helpers/comms.sh" \
   && ok "integrate requires positive proof the suite ran to the end" || fail "integrate accepts an exit status alone"
 grep -q 'tee "\$suite_log"' "$REPO/helpers/comms.sh" \
@@ -5901,7 +5907,16 @@ printf 'suite-cmd = bash tests/quiet.sh\n' > "$IP2/.comms/config"
 (cd "$IP2/.claude/worktrees/forgeone" && echo y > d.txt && git add d.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: d") >/dev/null 2>&1
 # The forgery prints a line that WOULD satisfy the proof, and never runs the suite.
-printf 'env() { printf "passed: 3  failed: 0  skipped: 0\\n"; return 0; }\n' > "$WORK/forge-bashenv.sh"
+# Two shapes: a plain `env` function, and a function whose NAME IS THE ABSOLUTE PATH —
+# bash 3.2 accepts the latter and dispatches it ahead of the executable, which is exactly
+# what defeated the absolute-path-only fix. (codex, panel r7, blocking.)
+printf 'env() { printf "passed: 3  failed: 0  skipped: 0\\n"; return 0; }\nfunction /usr/bin/env { printf "passed: 3  failed: 0  skipped: 0\\n"; return 0; }\n' > "$WORK/forge-bashenv.sh"
+printf 'function /usr/bin/env { printf "passed: 3  failed: 0  skipped: 0\\n"; return 0; }\n' > "$WORK/forge-abs-bashenv.sh"
+FORGE_ABS_CTL="$(BASH_ENV="$WORK/forge-abs-bashenv.sh" bash -c 'e=(/usr/bin/env -u BASH_ENV); "${e[@]}" bash -c "echo REAL"' 2>&1 || true)"
+case "$FORGE_ABS_CTL" in
+  *"passed: 3"*) ok "an absolute-path function does shadow the executable on this bash (control)" ;;
+  *) fail "the absolute-path forgery control did not interpose (got: $FORGE_ABS_CTL)" ;;
+esac
 # CONTROL: prove the interposition actually works on an unpinned call, or the assertion
 # below only proves that integrate happens to land.
 FORGE_CTL="$(BASH_ENV="$WORK/forge-bashenv.sh" bash -c 'e=(env -u BASH_ENV); "${e[@]}" bash -c "echo REAL"' 2>&1 || true)"
@@ -5913,6 +5928,10 @@ FORGE_OUT="$( (cd "$IP2" && env -u CMUX_WORKSPACE_ID BASH_ENV="$WORK/forge-bashe
 [ "$(cd "$IP2" && git rev-parse main)" != "$(cd "$IP2" && git rev-parse worktree-forgeone)" ] \
   && ok "a forged completion line from an interposed scrub does not land" \
   || fail "an env-function forgery landed a candidate whose suite never ran"
+FORGE_ABS_OUT="$( (cd "$IP2" && env -u CMUX_WORKSPACE_ID BASH_ENV="$WORK/forge-abs-bashenv.sh" "$COMMS" integrate worktree-forgeone) 2>&1 || true )"
+[ "$(cd "$IP2" && git rev-parse main)" != "$(cd "$IP2" && git rev-parse worktree-forgeone)" ] \
+  && ok "an absolute-path function forgery does not land either" \
+  || fail "a /usr/bin/env function forgery landed a candidate whose suite never ran"
 
 # The probe-bound skips must refuse an UNRUN probe, not just a successful one.
 SK_UNRUN="$( (FAIL=0; SKIP=0; SKIP_USED=" "; unset ACL_PROBE_OK; skip acl-report "probe never ran" >/dev/null 2>&1; echo "$FAIL") )"
@@ -5921,6 +5940,14 @@ SK_RAN_OK="$( (FAIL=0; SKIP=0; SKIP_USED=" "; ACL_PROBE_OK=1; skip acl-report "p
 [ "$SK_RAN_OK" = 1 ] && ok "a probe-bound skip is refused when the probe succeeded" || fail "a successful probe permitted its skip (FAIL=$SK_RAN_OK)"
 SK_RAN_NO="$( (FAIL=0; SKIP=0; SKIP_USED=" "; ACL_PROBE_OK=0; skip acl-report "probe failed" >/dev/null 2>&1; echo "$SKIP") )"
 [ "$SK_RAN_NO" = 1 ] && ok "a probe-bound skip is permitted on a confirmed failed probe" || fail "a confirmed failed probe refused its skip (SKIP=$SK_RAN_NO)"
+# The group flag uses the same pattern on a different variable and was only exercised by
+# the live installer branch. (grok, panel r7, advisory.)
+GK_UNRUN="$( (FAIL=0; SKIP=0; SKIP_USED=" "; unset GRP_PRESERVE_OK; skip group-no-secondary "unrun" >/dev/null 2>&1; echo "$FAIL") )"
+[ "$GK_UNRUN" = 1 ] && ok "the group skip is refused before its probe has run" || fail "an unrun group probe permitted its skip"
+GK_OK="$( (FAIL=0; SKIP=0; SKIP_USED=" "; GRP_PRESERVE_OK=1; skip group-no-secondary "succeeded" >/dev/null 2>&1; echo "$FAIL") )"
+[ "$GK_OK" = 1 ] && ok "the group skip is refused when its probe succeeded" || fail "a successful group probe permitted its skip"
+GK_NO="$( (FAIL=0; SKIP=0; SKIP_USED=" "; GRP_PRESERVE_OK=0; skip group-no-secondary "failed" >/dev/null 2>&1; echo "$SKIP") )"
+[ "$GK_NO" = 1 ] && ok "the group skip is permitted on a confirmed failed probe" || fail "a confirmed failed group probe refused its skip"
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
