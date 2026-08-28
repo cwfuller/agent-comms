@@ -33,11 +33,13 @@ PASS=0; FAIL=0; SKIP=0
 # conjunct at all. Both now also require that the expected number of assertions
 # actually RAN. The two numbers live in a committed file so that changing what
 # the corpus covers is a reviewable diff and never a silent drift.
-EXPECT_FILE="$REPO/tests/expected-counts.tsv"
+EXPECT_FILE="${EXPECT_FILE:-$REPO/tests/expected-counts.tsv}"
 EXPECT_TOTAL="$(awk -F'\t' '$1=="total"{print $2}' "$EXPECT_FILE" 2>/dev/null)"
-EXPECT_MAX_SKIP="$(awk -F'\t' '$1=="max_skip"{print $2}' "$EXPECT_FILE" 2>/dev/null)"
-case "${EXPECT_TOTAL:-}" in ''|*[!0-9]*) EXPECT_TOTAL="" ;; esac
-case "${EXPECT_MAX_SKIP:-}" in ''|*[!0-9]*) EXPECT_MAX_SKIP="" ;; esac
+# Skips are IDENTIFIED, not merely counted. A bare numeric cap leaves spare capacity:
+# with the cap at 1 and zsh installed, any passing assertion could be swapped for a
+# skip and the totals would still balance, so coverage could be reduced silently.
+# Each permitted skip now names itself, and an unlisted id is a FAILURE.
+SKIP_ALLOWED=" $(awk -F'\t' '$1=="skip_ok"{printf "%s ", $2}' "$EXPECT_FILE" 2>/dev/null)"
 
 ok()   { PASS=$((PASS+1)); echo "  ok: $1"; }
 # A capability this machine lacks is NOT a passing assertion. Say so visibly and count
@@ -48,7 +50,35 @@ fail() { FAIL=$((FAIL+1)); echo "FAIL: $1" >&2; }
 # toward coverage, so a skipped machine-conditional check can never look like a
 # check that ran — but skips are separately capped, so quieting a flaky assertion
 # by wrapping it in skip() turns the suite red until the cap is raised on purpose.
-skip() { SKIP=$((SKIP+1)); echo "  skip: $1"; }
+skip() { # skip <id> <desc> — <id> must be listed as skip_ok in the contract
+  case "$SKIP_ALLOWED" in
+    *" $1 "*) SKIP=$((SKIP+1)); echo "  skip[$1]: $2" ;;
+    *) fail "$2 (skip id '$1' is not permitted by $EXPECT_FILE)" ;;
+  esac
+}
+# THE GATE ITSELF, as a function, so the suite can execute the real thing against
+# adversarial inputs instead of asserting on a reimplementation of one branch.
+# Returns 0 only when the whole corpus demonstrably ran.
+coverage_verdict() { # <pass> <fail> <skip> <total>
+  local p="$1" f="$2" s="$3" t="$4"
+  case "$t" in ''|*[!0-9]*)
+    echo "COVERAGE: contract total is missing or not a number — refusing a verdict" >&2; return 1 ;;
+  esac
+  # Length-bound BEFORE any numeric comparison. An all-digit but out-of-range value
+  # passes the digit check, and then `[ x -ne y ]` exits 2 ("integer expression
+  # expected"), which an elif chain reads as FALSE — so the gate would fail OPEN on
+  # exactly the input a corrupted contract file produces. (codex, panel r1, blocking.)
+  if [ "${#t}" -gt 6 ]; then
+    echo "COVERAGE: contract total '$t' is out of range — refusing a verdict" >&2; return 1
+  fi
+  if [ "$((p + f + s))" -ne "$t" ]; then
+    echo "COVERAGE: PARTIAL RUN — $((p + f + s)) of $t assertions ran." >&2
+    echo "COVERAGE: this is NOT a suite verdict. If the corpus legitimately changed size," >&2
+    echo "COVERAGE: update tests/expected-counts.tsv in the SAME commit." >&2
+    return 1
+  fi
+  return 0
+}
 check() { # check <desc> <expr...>
   local desc="$1"; shift
   if "$@" >/dev/null 2>&1; then ok "$desc"; else fail "$desc"; fi
@@ -74,7 +104,20 @@ WORK="$(mktemp -d)"
 # exists to collect. Suite-wide default; individual tests still override it explicitly.
 export AGENT_COMMS_HOME="$WORK/global-home"
 mkdir -p "$AGENT_COMMS_HOME"
-trap 'rm -rf "$WORK"' EXIT
+# The gate only protects runs that REACH it. An `exit 0` added above it later would
+# bypass the invariant entirely, so the exit path itself refuses an unexamined
+# success. (codex, panel r1, advisory — makes "a partial run is never a verdict"
+# durable rather than positional.)
+_suite_exit() {
+  local rc=$?
+  rm -rf "$WORK" 2>/dev/null || true
+  if [ "${GATE_REACHED:-0}" != 1 ] && [ "$rc" -eq 0 ]; then
+    echo "COVERAGE: the suite exited 0 without reaching its coverage gate — refusing." >&2
+    exit 1
+  fi
+  exit "$rc"
+}
+trap '_suite_exit' EXIT
 
 # Fake repo with a deterministic branch name.
 # Canonicalize (pwd -P) so comparisons survive macOS /var -> /private/var.
@@ -165,7 +208,7 @@ if command -v zsh >/dev/null 2>&1; then
 else
   # Recorded, not dropped: without this the suite silently reports 953 of 954 on a
   # box with no zsh and still attests as a full green run.
-  skip "helper is caller-shell agnostic (zsh) — zsh not installed"
+  skip zsh-absent "helper is caller-shell agnostic (zsh) — zsh not installed"
 fi
 
 echo "== comms.sh: Codex cmux permission preflight =="
@@ -5569,13 +5612,27 @@ grep -q 'if \[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \] && \[ -n "${TESTED
   && ok "the attestation requires coverage too" || fail "attestation mint has no coverage conjunct"
 [ -s "$REPO/tests/expected-counts.tsv" ] \
   && ok "the expected-coverage contract is committed" || fail "tests/expected-counts.tsv missing"
-# The gate must FAIL CLOSED: an unreadable/absent contract refuses a verdict rather
-# than defaulting to "fine". Proven by running the real thing with the file hidden.
-PR_OUT="$( (cd "$REPO" && EXPECT_FILE=/nonexistent bash -c '
-  EXPECT_TOTAL=""; EXPECT_MAX_SKIP=""; PASS=1; FAIL=0; SKIP=0; COVERAGE_OK=1
-  if [ -z "$EXPECT_TOTAL" ] || [ -z "$EXPECT_MAX_SKIP" ]; then COVERAGE_OK=0; fi
-  echo "$COVERAGE_OK"') 2>&1 )"
-[ "$PR_OUT" = 0 ] && ok "a missing coverage contract fails closed" || fail "missing coverage contract did not fail closed (got: $PR_OUT)"
+# Exercise the REAL gate function against adversarial inputs. An earlier version of
+# this block reimplemented one branch inline and hardcoded its variables, so it could
+# not have caught the out-of-range case below. (codex, panel r1.)
+coverage_verdict 300 0 0 960 2>/dev/null && fail "a short run was accepted" || ok "a short run is refused"
+coverage_verdict 960 0 0 "" 2>/dev/null && fail "an absent contract was accepted" || ok "an absent contract total is refused"
+coverage_verdict 960 0 0 abc 2>/dev/null && fail "a non-numeric contract was accepted" || ok "a non-numeric contract total is refused"
+# All digits, but past what bash can compare: `[ x -ne y ]` exits 2, which an elif
+# chain reads as false. This is the input that made the gate fail OPEN.
+coverage_verdict 960 0 0 99999999999999999999 2>/dev/null && fail "an out-of-range contract was accepted" || ok "an out-of-range contract total is refused"
+coverage_verdict 960 0 0 960 && ok "an exact full run is accepted" || fail "a full run was refused"
+coverage_verdict 959 0 1 960 && ok "a permitted skip still counts toward coverage" || fail "a permitted skip broke the count"
+# A genuine miscount: 960+1+0 = 961 against a contract of 960. (An earlier version of
+# this assertion passed 961 as the contract, which the gate correctly ACCEPTS -- the
+# counts agreed. The failure conjunct lives on the exit line, not in this function.)
+coverage_verdict 960 1 0 960 2>/dev/null && fail "a miscounted run was accepted" || ok "a run whose total disagrees with the contract is refused"
+# A skip must be NAMED in the contract. Probed in a subshell so the probe's own
+# failure cannot pollute this run's counters.
+SK_PROBE="$( (FAIL=0; skip definitely-not-a-permitted-id "probe" >/dev/null 2>&1; echo "$FAIL") )"
+[ "$SK_PROBE" = 1 ] && ok "an unpermitted skip is a failure, not free capacity" || fail "an unpermitted skip was accepted (FAIL=$SK_PROBE)"
+grep -q '_suite_exit' "$REPO/tests/run.sh" \
+  && ok "the exit path refuses a success that never reached the gate" || fail "no exit sentinel"
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
@@ -5596,20 +5653,9 @@ echo "passed: $PASS  failed: $FAIL  skipped: $SKIP"
 # exit status (which integrate reads as its primary gate) and the attestation
 # (which lets integrate SKIP its re-run) hang off this -- gating only the mint
 # would leave the louder signal, the exit status, still lying about a partial run.
-COVERAGE_OK=1
-if [ -z "$EXPECT_TOTAL" ] || [ -z "$EXPECT_MAX_SKIP" ]; then
-  COVERAGE_OK=0
-  echo "COVERAGE: $EXPECT_FILE is missing or malformed — refusing to report a verdict" >&2
-elif [ "$((PASS + FAIL + SKIP))" -ne "$EXPECT_TOTAL" ]; then
-  COVERAGE_OK=0
-  echo "COVERAGE: PARTIAL RUN — $((PASS + FAIL + SKIP)) of $EXPECT_TOTAL assertions ran." >&2
-  echo "COVERAGE: this is NOT a suite verdict. If the corpus legitimately changed size," >&2
-  echo "COVERAGE: update tests/expected-counts.tsv in the SAME commit." >&2
-elif [ "$SKIP" -gt "$EXPECT_MAX_SKIP" ]; then
-  COVERAGE_OK=0
-  echo "COVERAGE: $SKIP assertions were skipped, cap is $EXPECT_MAX_SKIP — refusing." >&2
-  echo "COVERAGE: raising the cap is how you retire an assertion, and it is a reviewable diff." >&2
-fi
+COVERAGE_OK=0
+coverage_verdict "$PASS" "$FAIL" "$SKIP" "${EXPECT_TOTAL:-}" && COVERAGE_OK=1
+GATE_REACHED=1
 # A fully green run attests itself so integrate can skip its re-verification of
 # the SAME commit (opt-in via suite-attest-secs). The attestation is bound to
 # TESTED_OID — the commit captured BEFORE the first assertion — so a checkout or
