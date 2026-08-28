@@ -361,12 +361,15 @@ that this is expected — the driving session picks the reply up when the turn e
 reply is produced at all, it is written into the DRIVER's inbox by the detached runner
 before `result.json` exists — a self-sending peer sends it itself, a parent-brokered one
 has the broker copy and send it — so a driver that dies mid-turn loses its await, never the
-reply. Two limits on that guarantee, both by design: a `failed`, `timeout` or aborted turn
-writes `result.json` with no reply because there is no verdict to persist; and on the
-**self-sending** route the runner marks a turn `completed` from the child's exit status
-alone, so a child that exits 0 without sending yields a completed result and an empty
-inbox. Parent-brokered routes (grok, ACP) do not have that hole — the broker performs the
-write itself. Recovery is
+reply. Two limits on that guarantee, both by design. A `failed`, `timeout` or aborted turn **may**
+have no reply, because there may be no verdict to persist — but "failed" does not imply
+"nothing arrived": the broker writes the reply into the inbox *before* it sends, so a send
+that fails afterwards records `failed` with the reply already there, and a self-sending
+child can send successfully and then exit non-zero. **Check `panel status` before
+re-sending a failed turn**, or a round is paid for twice. Second, on the **self-sending**
+route the runner marks a turn `completed` from the child's exit status alone, so a child
+that exits 0 without sending yields a completed result and an empty inbox; parent-brokered
+routes (grok, ACP) do not have that hole, because the parent performs the write itself. Recovery is
 therefore a read, not a re-run: `comms.sh panel status` with no `--set` lists the review
 sets from the durable append-only index, `panel status --set <id>` shows each leg's reply
 and verdict, and `compose --set <id>` gates. Both readers scan the archive and **every

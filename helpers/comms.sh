@@ -78,7 +78,9 @@
 #   panel dispatch --to a,b <review-request> [--set ID]
 #                               fan ONE artifact out to N reviewers as N parallel 2-party
 #                               legs sharing a review_set. One snapshot for the whole set.
-#   panel status --set <id>     which legs have answered, and with what verdict
+#   panel status [--set <id>]   with --set: which legs have answered, and with what
+#                               verdict. Bare: every recorded review set, newest first —
+#                               the recovery surface after an await dies with its session.
 #   compose --set <id> [--out F]
 #                               cluster every leg's findings and label them by SUPPORT:
 #                               corroborated (gates), uncorroborated (cross-check first),
@@ -608,7 +610,11 @@ leg_reply_candidates() {  # <root> <workspace> <from-agent> <thread> <registered
   local root="$1" ws="$2" ag="$3" th="$4" reg="$5" a
   sorted_message_files "$root/.comms/archive" "$ws" "$ag" "$th" newest
   for a in $reg; do
-    sorted_message_files "$root/.comms/$(inbox_for "$a")" "$ws" "$ag" "$th" newest
+    # `to-$a` rather than `inbox_for "$a"`: inbox_for revalidates through registry_parse,
+    # which puts a registry read back INSIDE this substitution — where a failure is
+    # swallowed exactly as before. $reg was already validated by the caller, so the
+    # validation would buy nothing and reopen the hole. (codex, panel round 2.)
+    sorted_message_files "$root/.comms/to-$a" "$ws" "$ag" "$th" newest
   done
 }
 
