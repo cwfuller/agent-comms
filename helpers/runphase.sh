@@ -898,6 +898,19 @@ cmd_run() {
     esac
     shift
   done
+  # Validate the budget HERE, before anything consumes it. Validating at the point of the
+  # arithmetic was too late twice over: acpx had already been handed the raw value on its
+  # own `--timeout` flag, and the check could then only disable classification rather than
+  # reject the input. Falling back to the default rather than dying matches the state-wait
+  # budget rule (0fe39ac) — a malformed knob must not take down a turn that would otherwise
+  # run. (codex, panel round 1.)
+  case "$timeout" in
+    ''|*[!0-9]*)
+      echo "warning: --timeout-secs '$timeout' is not a whole number of seconds — falling back to ${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}" >&2
+      timeout="${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}"
+      case "$timeout" in ''|*[!0-9]*) timeout=1800 ;; esac
+      ;;
+  esac
   # --no-deliver suppresses the TRUSTED-PARENT broker and thread-state writes. It
   # cannot suppress a child that is told to run `comms.sh send --archive-inbound`
   # itself — so for a self-sending provider the flag would deliver and archive while
@@ -1302,15 +1315,11 @@ PROMPT
     # child had printed NOTHING and the turn had already failed, which left the expensive
     # case silent: a budget-killed turn that got partial bytes out.
     #
-    # The budget is also caller-supplied and was never validated, so `--timeout-secs cat`
-    # leaked `[: cat: integer expression expected` to stderr and silently reverted the whole
-    # diagnosis to its pre-fix behaviour — the same shape as the state-wait budget bug fixed
-    # in 0fe39ac.
+    # `$timeout` is already known to be digits — it is validated once at argument-parse
+    # time, which is the only place early enough to matter, since acpx is handed the same
+    # value on its own `--timeout` flag.
     local acp_overran=0
-    case "$timeout" in
-      ''|*[!0-9]*) echo "note: timeout '$timeout' is not an integer — cannot judge the budget" >>"$run_dir/runner.log" ;;
-      *) [ "$acp_elapsed" -ge "$timeout" ] && acp_overran=1 ;;
-    esac
+    if [ "$acp_elapsed" -ge "$timeout" ]; then acp_overran=1; fi
     if [ "$acp_rc" -eq 0 ] && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then
       acp_status=completed
       # WARN, do not refuse. A turn killed at its budget can still have emitted a fragment
@@ -1323,7 +1332,14 @@ PROMPT
       if [ "$acp_overran" = 1 ]; then
         acp_note="WARNING: the turn ran ${acp_elapsed}s against a ${timeout}s budget, so acpx may have cut it off mid-answer — this reply may be TRUNCATED; re-read it before trusting the verdict"
       fi
-    elif [ "$acp_overran" = 1 ]; then
+    elif [ "$acp_rc" -eq 0 ] && [ "$acp_overran" = 1 ]; then
+      # A budget kill has a SIGNATURE, and "the turn was slow" is not it. Under
+      # `--format quiet` acpx exits 0 having printed nothing usable — so a kill is
+      # rc==0 AND over the wall clock. Treating every failure past the budget as a kill
+      # relabelled acpx usage, session and permission errors, and broker validation and
+      # delivery failures, as "killed mid-work" with exit 124 — a confident wrong
+      # diagnosis, which is the exact fault this whole path exists to remove.
+      # (codex, panel round 1.)
       # The budget is the HEADLINE, and the broker's complaint about the fragment becomes the
       # secondary detail. Reversing those two sent an operator hunting prompt-format bugs for
       # half an hour on 2026-08-26 — which is the misdiagnosis this whole path exists to stop.
@@ -1340,6 +1356,8 @@ PROMPT
       fi
     else
       acp_status=failed
+      # Still carries the elapsed/budget tail: a non-zero acpx exit near the budget is
+      # worth seeing, it just is not evidence of a kill.
       acp_note="${GROK_BROKER_NOTE:-acpx exited $acp_rc — see runner.log} (after ${acp_elapsed}s of a ${timeout}s budget)"
     fi
     update_thread_state "$msg_thread" "$acp_status" "acp:$acp_session" "$sfield" || true

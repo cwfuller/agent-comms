@@ -1649,7 +1649,7 @@ esac
 # Default prints NOTHING -- exactly acpx --format quiet on a kill. TO_STUB_OUT makes the
 # kill PARTIAL instead, which is the case the original guard could not see.
 [ -n "${TO_STUB_OUT:-}" ] && printf '%s' "$TO_STUB_OUT"
-exit 0
+exit "${TO_STUB_RC:-0}"
 TSTUB
 chmod +x "$TO_STUB/npx"
 cat > "$TO_STUB/node" <<'TNODE'
@@ -1731,6 +1731,28 @@ TO_ERR="$( { ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$TO_STUB:$PATH" \
 case "$TO_ERR" in
   *"integer expression expected"*) fail "a malformed budget leaks a bash arithmetic error" ;;
   *) ok "a malformed timeout budget is handled without a bash error" ;;
+esac
+# ...and it must FALL BACK rather than reach acpx: the value is handed to acpx on its own
+# --timeout flag, so validating it at the point of the arithmetic was already too late.
+case "$TO_ERR" in
+  *"falling back"*) ok "a malformed budget falls back to the default instead of being passed through" ;;
+  *) fail "a malformed budget was not reported as falling back (got: $(printf '%.90s' "$TO_ERR"))" ;;
+esac
+# A SLOW FAILURE IS NOT A KILL. Any failure that happened to outlast the budget was being
+# relabelled "killed mid-work" with exit 124 — acpx usage, session and permission errors,
+# and broker validation failures alike. A budget kill has a signature: under --format quiet
+# acpx exits 0 having produced nothing usable. A non-zero exit is acpx failing, not a kill.
+# (codex, panel r1.)
+R20="$WORK/ma-leg20"; mkdir -p "$R20"
+TO_STUB_RC=2 TO_STUB_OUT="acpx: unknown profile" run_to_leg 9 "$R20" 1
+[ "$(status_of "$R20")" = "failed" ] && ok "a non-zero acpx exit still fails the turn" || fail "non-zero acpx exit not failed"
+case "$(note_of "$R20")" in
+  *"killed mid-work"*) fail "a non-zero acpx exit past the budget was mislabelled as a budget kill" ;;
+  *) ok "a slow FAILURE is not relabelled as a budget kill" ;;
+esac
+case "$(note_of "$R20")" in
+  *"budget"*) ok "...but the elapsed-vs-budget context is still reported" ;;
+  *) fail "budget context lost on a non-zero acpx exit" ;;
 esac
 
 # Question leg (/ask grok path): the stub STILL emits a leading canonical
