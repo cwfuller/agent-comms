@@ -29,6 +29,9 @@ TESTED_OID="$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || true)"
 PASS=0; FAIL=0
 
 ok()   { PASS=$((PASS+1)); echo "  ok: $1"; }
+# A capability this machine lacks is NOT a passing assertion. Say so visibly and count
+# nothing, so a platform that silently skips coverage never reads as a full green run.
+emit_note() { echo "  note: $1"; }
 fail() { FAIL=$((FAIL+1)); echo "FAIL: $1" >&2; }
 check() { # check <desc> <expr...>
   local desc="$1"; shift
@@ -478,11 +481,19 @@ gh_install "$GH_SD" >/dev/null 2>&1 && fail "a directory destination did not fai
   || ok "a directory destination exits non-zero"
 # SPECIAL MODE BITS survive an upgrade: Darwin's %Lp would silently drop them, so this
 # fails if either the installer or mode_of stops carrying the nibble. (grok r2.)
+# SETUID specifically, not just sticky: `chown` clears setuid/setgid and leaves sticky
+# alone, so a sticky-only assertion cannot see the chown-after-chmod ordering bug at all.
+# (grok r3: `chown` of the SAME uid:gid turned 4755 into 0755.)
+chmod 4750 "$GHOME/commands/ask.md"
+(umask 022; gh_install "$GHOME" >/dev/null 2>&1)
+[ "$(mode_of "$GHOME/commands/ask.md")" = "4750" ] \
+  && ok "an upgrade preserves the setuid bit through the ownership step" \
+  || fail "setuid lost: $(mode_of "$GHOME/commands/ask.md") (want 4750)"
 chmod 1640 "$GHOME/commands/ask.md"
 (umask 022; gh_install "$GHOME" >/dev/null 2>&1)
 [ "$(mode_of "$GHOME/commands/ask.md")" = "1640" ] \
-  && ok "an upgrade preserves setuid/setgid/sticky bits" \
-  || fail "special bits lost: $(mode_of "$GHOME/commands/ask.md") (want 1640)"
+  && ok "an upgrade preserves the sticky bit" \
+  || fail "sticky lost: $(mode_of "$GHOME/commands/ask.md") (want 1640)"
 # OWNER AND GROUP: writing through the old inode kept them; a fresh temp inherits the
 # parent directory's group on BSD. The group is the half a non-root user can actually
 # assert, so it is the half asserted here. (codex blocking r2.)
@@ -521,6 +532,68 @@ gh_install "$GH_DL" >/dev/null 2>&1
   && cmp -s "$DL_REAL/not-there-yet.md" "$REPO/templates/claude-commands/auto.md" \
   && ok "a dangling symlink is written through, creating its target" \
   || fail "dangling symlink not written through"
+# A GROUP THE TEMP CANNOT INHERIT. The round-3 assertions compared the destination's group
+# to itself in a directory of the same group, so they passed against an implementation
+# that preserved nothing. Give the destination a secondary group of this user that differs
+# from its parent directory's, which a fresh temp provably cannot pick up. (codex r3.)
+GH_GRP="$WORK/ghome-group"
+gh_install "$GH_GRP" >/dev/null 2>&1
+grp_of() { stat -f '%g' "$1" 2>/dev/null || stat -c '%g' "$1" 2>/dev/null; }
+PARENT_G="$(grp_of "$GH_GRP/commands")"
+ALT_G="$(id -G | tr ' ' '\n' | grep -v "^${PARENT_G}$" | head -1)"
+if [ -n "$ALT_G" ] && chgrp "$ALT_G" "$GH_GRP/commands/auto.md" 2>/dev/null; then
+  (umask 022; gh_install "$GH_GRP" >/dev/null 2>&1)
+  [ "$(grp_of "$GH_GRP/commands/auto.md")" = "$ALT_G" ] \
+    && ok "an upgrade preserves a group the temp could not have inherited" \
+    || fail "group fell back to the directory's ($(grp_of "$GH_GRP/commands/auto.md"), want $ALT_G)"
+else
+  emit_note "install: no usable secondary group — group-preservation assertion skipped"
+fi
+# ...and when ownership CANNOT be restored, the install must FAIL rather than publish the
+# file under the wrong group and exit 0. A privileged group cannot be created hermetically,
+# so `chown` is stubbed to fail, which is the same branch. (codex r3: warn-and-exit-0 left
+# criterion 9 unmet while the install looked successful.)
+FAILBIN="$WORK/failbin"; mkdir -p "$FAILBIN"
+printf '#!/bin/sh\nexit 1\n' > "$FAILBIN/chown"; chmod +x "$FAILBIN/chown"
+CHOWN_INO1="$(command ls -di "$GH_GRP/commands/auto.md" | awk '{print $1}')"
+CHOWN_OUT="$( (cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GH_GRP/commands" CODEX_SKILLS_DIR="$GH_GRP/skills" \
+   AGENT_COMMS_HOME="$GH_GRP/agent-comms" PATH="$FAILBIN:$PATH" bash "$REPO/install.sh" --scope=global 2>&1) || true)"
+printf '%s\n' "$CHOWN_OUT" | grep -q 'cannot restore owner/group' \
+  && ok "an unrestorable owner/group refuses the replacement loudly" || fail "chown failure was not fatal (got: $(printf '%s' "$CHOWN_OUT" | tail -2))"
+[ "$CHOWN_INO1" = "$(command ls -di "$GH_GRP/commands/auto.md" | awk '{print $1}')" ] \
+  && ok "the destination is untouched when ownership cannot be restored" || fail "destination replaced despite a failed chown"
+ls -A "$GH_GRP/commands" | grep -q '^\.agent-comms-install\.' \
+  && fail "the failed-chown path left its temp behind" || ok "the failed-chown path cleans up its temp"
+# ACL DETECTION must not rely on the mode column: Darwin prints `@` INSTEAD of `+` when
+# extended attributes are present, and they are routine here, so a file with BOTH shows
+# `@` and the old probe stayed silent for exactly the case it was written to catch.
+# (codex + grok, corroborated r3.)
+GH_ACL="$WORK/ghome-acl"
+gh_install "$GH_ACL" >/dev/null 2>&1
+if chmod +a "everyone deny read" "$GH_ACL/commands/auto.md" 2>/dev/null; then
+  ACL_OUT="$(gh_install "$GH_ACL" 2>&1 || true)"
+  printf '%s\n' "$ACL_OUT" | grep -q 'carries an ACL' \
+    && ok "an ACL-only destination is reported" || fail "ACL not reported (got: $(printf '%s' "$ACL_OUT" | tail -2))"
+  chmod +a "everyone deny read" "$GH_ACL/commands/ask.md" 2>/dev/null
+  xattr -w com.agent-comms.test 1 "$GH_ACL/commands/ask.md" 2>/dev/null
+  # This is the regression: with an xattr present the mode column reads `@`, so a
+  # column-11 probe reports no ACL.
+  [ "$(/bin/ls -ld "$GH_ACL/commands/ask.md" | cut -c11)" = "@" ] \
+    && ok "the xattr+ACL destination really does mask the + marker" \
+    || fail "fixture did not reproduce the @-masks-+ case"
+  ACL2_OUT="$(gh_install "$GH_ACL" 2>&1 || true)"
+  printf '%s\n' "$ACL2_OUT" | grep -q "ask.md carries an ACL" \
+    && ok "an ACL is still reported when extended attributes mask the marker" \
+    || fail "ACL missed behind an xattr (got: $(printf '%s' "$ACL2_OUT" | tail -2))"
+  # ...and a file with xattrs but NO ACL must stay quiet, or the warning is noise.
+  xattr -w com.agent-comms.test 1 "$GH_ACL/commands/clean-comms.md" 2>/dev/null
+  ACL3_OUT="$(gh_install "$GH_ACL" 2>&1 || true)"
+  printf '%s\n' "$ACL3_OUT" | grep -q "clean-comms.md carries an ACL" \
+    && fail "extended attributes alone were reported as an ACL" \
+    || ok "extended attributes alone are not reported as an ACL"
+else
+  emit_note "install: ACLs unsupported here — ACL-detection assertions skipped"
+fi
 
 echo "== comms.sh v2: thread filter + verdict normalization + error lane =="
 TA="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-00_alpha-1.md"

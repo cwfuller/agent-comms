@@ -214,8 +214,29 @@ needs_templates() {
 # worth stopping on.
 #
 # (codex + grok, panel round 1 — every case above was found in review, not in testing.)
+# install_has_acl <path> — does this file carry an access control list?
+#
+# The obvious probe, `+` in the mode column, CANNOT answer this on Darwin: `ls(1)` prints
+# `@` when extended attributes are present and `+` only *otherwise*, so a file with both
+# shows `@`. Extended attributes are routine here, which makes the marker useless for the
+# exact case the warning exists to catch — verified live on a destination whose mode line
+# read `-rw-r--r--@` while it carried an `everyone deny read` entry. (codex + grok,
+# corroborated, panel round 3.)
+#
+# So ask for the ACL entries themselves. `ls -lde` prints them as numbered lines on
+# Darwin; on Linux `-e` is not an option, the command fails, and there the `+` marker IS
+# reliable. The SYSTEM ls is used deliberately: an `ls` replacement earlier on PATH has
+# different flags and a different column layout, and would be answering for the wrong
+# tool — on the machine this was written, `ls` resolved to `eza`, which rejects `-e`.
+install_has_acl() {
+  local ls_bin=/bin/ls
+  [ -x "$ls_bin" ] || ls_bin=ls
+  "$ls_bin" -lde "$1" 2>/dev/null | grep -q '^[[:space:]]*[0-9][0-9]*:' && return 0
+  [ "$("$ls_bin" -ld "$1" 2>/dev/null | cut -c11)" = "+" ]
+}
+
 install_file() { # install_file <src> <dest> [exec]
-  local src="$1" dest="$2" want_exec="${3:-}" tmp link hops=0 destmode
+  local src="$1" dest="$2" want_exec="${3:-}" tmp link hops=0 destmode destown
   while [ -L "$dest" ]; do
     hops=$((hops + 1))
     if [ "$hops" -gt 16 ]; then
@@ -239,6 +260,25 @@ install_file() { # install_file <src> <dest> [exec]
   tmp="$(dirname "$dest")/.agent-comms-install.$$.$(basename "$dest")"
   cp "$src" "$tmp" || { rm -f "$tmp"; return 1; }
   if [ -e "$dest" ]; then
+    # OWNERSHIP FIRST. `chown` clears setuid/setgid on both Darwin and Linux — even when
+    # it is a no-op chown to the values already there — so applying it after the mode
+    # silently undid the special bits this block had just restored. Verified live:
+    # `chown $(stat -f '%u:%g' f) f` turned 4755 into 0755. (codex + grok, panel round 3.)
+    destown="$(stat -f '%u:%g' "$dest" 2>/dev/null || stat -c '%u:%g' "$dest" 2>/dev/null || true)"
+    if [ -z "$destown" ]; then
+      echo "install: cannot read the owner of $dest — refusing to replace it" >&2
+      rm -f "$tmp"; return 1
+    fi
+    # FATAL, not best-effort. Publishing the file under the directory's group instead of
+    # its own is a silent permission change, and it is exactly what happens by default:
+    # a fresh temp inherits the parent directory's group on BSD. Warning and exiting 0
+    # left the criterion unmet while the install looked successful. (codex, round 3 —
+    # reproduced: a 501:0 destination was republished as 501:20.)
+    if ! chown "$destown" "$tmp" 2>/dev/null; then
+      echo "install: cannot restore owner/group $destown on $dest — refusing to replace it" >&2
+      echo "         (a replaced file would be published under this directory's group instead)" >&2
+      rm -f "$tmp"; return 1
+    fi
     # %Mp%Lp, not %Lp: Darwin's %Lp drops the special nibble, so a 4755 destination would
     # come back 755 and quietly lose setuid/setgid/sticky. GNU's %a already carries it.
     destmode="$(stat -f '%Mp%Lp' "$dest" 2>/dev/null || stat -c '%a' "$dest" 2>/dev/null || true)"
@@ -249,21 +289,10 @@ install_file() { # install_file <src> <dest> [exec]
       rm -f "$tmp"; return 1
     fi
     chmod "$destmode" "$tmp" || { rm -f "$tmp"; return 1; }
-    # Writing THROUGH the old inode kept its owner and group; renaming a fresh temp does
-    # not, and on BSD the temp inherits the parent directory's group. Carry them over
-    # where the running user is permitted to. (codex, panel round 2 — reproduced live:
-    # group `admin` became the directory's group.)
-    destown="$(stat -f '%u:%g' "$dest" 2>/dev/null || stat -c '%u:%g' "$dest" 2>/dev/null || true)"
-    if [ -n "$destown" ]; then
-      chown "$destown" "$tmp" 2>/dev/null \
-        || echo "install: could not preserve owner/group $destown on $dest" >&2
-    fi
-    # An ACL cannot ride along to a new inode — that is inherent to replacing a file
-    # rather than writing through it, and it is the one loss with security meaning
-    # (codex's repro had an `everyone deny read` entry). Losing it LOUDLY is the most
-    # this design can honestly offer. `+` in the mode column is an ACL on both Darwin and
-    # Linux; `@` is extended attributes, which are routine here and not warned about.
-    if [ "$(ls -ld "$dest" 2>/dev/null | cut -c11)" = "+" ]; then
+    # An ACL cannot ride along to a new inode — inherent to replacing a file rather than
+    # writing through it, and the one loss with security meaning. Losing it LOUDLY is the
+    # most this design can honestly offer.
+    if install_has_acl "$dest"; then
       echo "install: $dest carries an ACL, which a replaced file cannot keep — re-apply it after installing" >&2
     fi
   fi
