@@ -180,17 +180,63 @@ needs_templates() {
 #
 # A sibling temp plus rename fixes it by construction: rename(2) unlinks the old NAME
 # while readers already inside the old inode keep it alive and finish on the file they
-# started with. Two details are load-bearing. The temp must be a SIBLING of the
-# destination — rename(2) is atomic only within one filesystem, and a cross-device
-# `mv` degrades to a copy-in-place that silently reintroduces this bug. And the mode
-# is set on the TEMP, so the destination is never observable at the wrong mode (the
-# old cp-then-chmod left a first install briefly non-executable).
-install_file() { # install_file <src> <dest> [mode]
-  local src="$1" dest="$2" mode="${3:-}" tmp
+# started with. The temp must be a SIBLING of the destination — rename(2) is atomic only
+# within one filesystem, and a cross-device `mv` degrades to a copy-in-place that
+# silently reintroduces this bug.
+#
+# Replacing a file by rename is NOT the same operation as writing through it, so three
+# things `cp` used to do are reproduced deliberately rather than by accident:
+#
+#   MODE. `cp` preserved an existing destination's mode and gave a new one the source
+#   mode masked by umask. Hardcoding 755 published helpers world-executable on a
+#   umask-077 box (700 -> 755) and reset a command a user had tightened on purpose.
+#   So: keep the destination's mode when it exists, leave `cp`'s umask-masked mode when
+#   it does not, and add execute with `chmod +x` — which umask masks exactly as the old
+#   call did — instead of a literal 755.
+#
+#   SYMLINKS. `cp` wrote THROUGH a symlink; rename replaces it, silently disconnecting a
+#   dotfile-managed install. Worse, `mv` follows a symlink that points at a DIRECTORY and
+#   moves the temp inside it, reporting success — and cross-device that is the
+#   copy-in-place this function exists to prevent. The link is resolved first, so the
+#   file it names is what gets replaced.
+#
+#   AN UNWRITABLE DESTINATION. `cp` failed with EACCES and aborted the install under
+#   `set -e`, which is the only way a user can pin a customized file. `mv` unlinks the
+#   directory entry instead and would overwrite it, so the refusal has to be explicit.
+#
+# (codex + grok, panel round 1 — every case above was found in review, not in testing.)
+install_file() { # install_file <src> <dest> [exec]
+  local src="$1" dest="$2" want_exec="${3:-}" tmp link hops=0 destmode
+  while [ -L "$dest" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 16 ]; then
+      echo "install: too many symlink hops resolving $dest — refusing" >&2
+      return 1
+    fi
+    link="$(readlink "$dest")"
+    case "$link" in
+      /*) dest="$link" ;;
+      *)  dest="$(dirname "$dest")/$link" ;;
+    esac
+  done
+  if [ -d "$dest" ]; then
+    echo "install: $dest is a directory — refusing to install over it" >&2
+    return 1
+  fi
+  if [ -e "$dest" ] && [ ! -w "$dest" ]; then
+    echo "install: $dest is not writable — refusing to replace it" >&2
+    return 1
+  fi
   tmp="$(dirname "$dest")/.agent-comms-install.$$.$(basename "$dest")"
   cp "$src" "$tmp" || { rm -f "$tmp"; return 1; }
-  if [ -n "$mode" ]; then
-    chmod "$mode" "$tmp" || { rm -f "$tmp"; return 1; }
+  if [ -e "$dest" ]; then
+    destmode="$(stat -f '%Lp' "$dest" 2>/dev/null || stat -c '%a' "$dest" 2>/dev/null || true)"
+    if [ -n "$destmode" ]; then
+      chmod "$destmode" "$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+  fi
+  if [ -n "$want_exec" ]; then
+    chmod +x "$tmp" || { rm -f "$tmp"; return 1; }
   fi
   mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
 }
@@ -215,7 +261,7 @@ install_global_assets() {
   echo "  installing shared helpers to $AGENT_COMMS_HOME..."
   mkdir -p "$AGENT_COMMS_HOME"
   for h in $HELPERS; do
-    install_file "$HELPER_SRC/$h" "$AGENT_COMMS_HOME/$h" 755
+    install_file "$HELPER_SRC/$h" "$AGENT_COMMS_HOME/$h" exec
   done
   for h in $RETIRED_HELPERS; do
     [ -f "$AGENT_COMMS_HOME/$h" ] && { rm -f "$AGENT_COMMS_HOME/$h"; echo "  removed retired helper $h"; }
@@ -246,7 +292,7 @@ install_local_assets() {
   echo "  installing project-local shared helpers..."
   mkdir -p "$PROJECT_ROOT/.agent-comms"
   for h in $HELPERS; do
-    install_file "$HELPER_SRC/$h" "$PROJECT_ROOT/.agent-comms/$h" 755
+    install_file "$HELPER_SRC/$h" "$PROJECT_ROOT/.agent-comms/$h" exec
   done
   # A local pin outranks the global install, so a retired helper surviving HERE
   # shadows its own removal everywhere else. The explicit return keeps a missing

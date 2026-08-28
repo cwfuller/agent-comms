@@ -315,6 +315,23 @@ a copy in place), and the mode is set on the temp before the rename, so the dest
 never observable at the wrong mode. The suite asserts this by inode identity, with a
 negative control proving a plain `cp` keeps the inode.
 
+Replacing a file by rename is not the same operation as writing through it, so three
+things `cp` did incidentally are reproduced on purpose — each found in review, not in
+testing:
+
+- **Mode.** An existing destination keeps its own mode; a new one keeps the source mode
+  masked by umask (what `cp` gives the temp); execute is added with `chmod +x`, which
+  umask masks exactly as the old call did. A literal `755` published helpers
+  world-executable under `umask 077` and reset files a user had tightened.
+- **Symlinks.** A symlinked destination is resolved first, so its TARGET is replaced and
+  a dotfile-managed install stays connected. This is also a correctness requirement, not
+  a courtesy: `mv` follows a symlink pointing at a *directory* and moves the temp inside
+  it while reporting success — and across devices that is the copy-in-place the whole
+  design exists to avoid. A directory destination is refused loudly.
+- **An unwritable destination** is refused rather than replaced. `cp` failed with EACCES
+  and aborted the install, which is the only way a user can pin a customized file;
+  `rename` unlinks the directory entry regardless, so the refusal has to be explicit.
+
 ## Contributing checklist
 
 1. `bash tests/run.sh` — green, from a clean shell

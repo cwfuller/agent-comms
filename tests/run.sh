@@ -380,14 +380,91 @@ XINO2="$(command ls -di "$ICTL/dst" | awk '{print $1}')"
 [ "$XINO1" = "$XINO2" ] \
   && ok "control: plain cp keeps the inode, so the assertion can fail" || fail "control: plain cp keeps the inode"
 # The temp is a sibling of the destination (a cross-device temp would make `mv` a
-# non-atomic copy) and must never survive the install: a stray file in the helper or
-# command dir is install surface that nothing owns.
+# non-atomic copy) and must not survive a SUCCESSFUL install: a stray file in the helper
+# or command dir is install surface that nothing owns. This is deliberately not a claim
+# about every failure path — a hard kill between the copy and the rename leaves the
+# predictable dot-temp behind, and no trap can be relied on for that. (codex advisory r1.)
 ls -A "$GHOME/agent-comms" | grep -q '^\.agent-comms-install\.' \
   && fail "install left a temp beside the helpers" || ok "install leaves no temp litter beside the helpers"
 ls -A "$GHOME/commands" | grep -q '^\.agent-comms-install\.' \
   && fail "install left a temp in the commands dir" || ok "install leaves no temp litter in the commands dir"
 ls -A "$INST_FIX/.agent-comms" | grep -q '^\.agent-comms-install\.' \
   && fail "local install left a temp beside the pinned helpers" || ok "local install leaves no temp litter"
+
+# Replacing a file by rename is not the same operation as writing through it, so the
+# three things `cp` did incidentally are now reproduced on purpose. Each was found by
+# review, not by the round-1 tests, which only checked that the file was executable.
+mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
+gh_install() { # gh_install <home> [extra-env...]  — a global install into an arbitrary home
+  local gh="$1"; shift
+  (cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$gh/commands" CODEX_SKILLS_DIR="$gh/skills" \
+     AGENT_COMMS_HOME="$gh/agent-comms" "$@" bash "$REPO/install.sh" --scope=global 2>&1)
+}
+# MODE, UPGRADE: an existing destination kept its own mode under `cp`. A literal 755
+# would reset a helper a user tightened, and a fresh-temp mode would reset a command
+# they tightened. (codex blocking r1; grok r1 named the exact 700 -> 711 transition.)
+chmod 640 "$GHOME/commands/auto.md"
+chmod 700 "$GHOME/agent-comms/comms.sh"
+gh_install "$GHOME" >/dev/null 2>&1
+[ "$(mode_of "$GHOME/commands/auto.md")" = "640" ] \
+  && ok "an upgrade preserves a command's tightened mode" \
+  || fail "command mode reset to $(mode_of "$GHOME/commands/auto.md") (want 640)"
+[ "$(mode_of "$GHOME/agent-comms/comms.sh")" = "711" ] \
+  && ok "an upgrade keeps a helper's mode and only adds +x (700 -> 711)" \
+  || fail "helper mode became $(mode_of "$GHOME/agent-comms/comms.sh") (want 711)"
+# MODE, FRESH INSTALL under a restrictive umask: `cp` masked the SOURCE mode by umask and
+# `chmod +x` was masked too, so a umask-077 box never published a world-executable
+# helper. A hardcoded 755 did exactly that.
+GH_UM="$WORK/ghome-umask"
+(umask 077; gh_install "$GH_UM" >/dev/null 2>&1)
+[ "$(mode_of "$GH_UM/agent-comms/comms.sh")" = "700" ] \
+  && ok "a fresh install under umask 077 leaves the helper private (700)" \
+  || fail "umask-077 helper installed as $(mode_of "$GH_UM/agent-comms/comms.sh") (want 700)"
+[ "$(mode_of "$GH_UM/commands/auto.md")" = "600" ] \
+  && ok "a fresh install under umask 077 leaves the command private (600)" \
+  || fail "umask-077 command installed as $(mode_of "$GH_UM/commands/auto.md") (want 600)"
+# SYMLINK to a regular file: `cp` wrote THROUGH it. A bare rename would replace the link
+# and silently disconnect a dotfile-managed install, so the link is resolved and its
+# TARGET is what gets atomically replaced.
+GH_SL="$WORK/ghome-symlink"
+gh_install "$GH_SL" >/dev/null 2>&1
+SL_REAL="$WORK/symlink-target"; mkdir -p "$SL_REAL"
+mv "$GH_SL/commands/auto.md" "$SL_REAL/real-auto.md"
+ln -s "$SL_REAL/real-auto.md" "$GH_SL/commands/auto.md"
+printf '\n' >> "$SL_REAL/real-auto.md"
+SL_INO1="$(command ls -di "$SL_REAL/real-auto.md" | awk '{print $1}')"
+gh_install "$GH_SL" >/dev/null 2>&1
+[ -L "$GH_SL/commands/auto.md" ] \
+  && ok "a symlinked destination survives the install as a symlink" || fail "install replaced the symlink itself"
+SL_INO2="$(command ls -di "$SL_REAL/real-auto.md" | awk '{print $1}')"
+[ "$SL_INO1" != "$SL_INO2" ] && cmp -s "$SL_REAL/real-auto.md" "$REPO/templates/claude-commands/auto.md" \
+  && ok "the symlink's TARGET is replaced, atomically" \
+  || fail "symlink target not atomically replaced (ino $SL_INO1 -> $SL_INO2)"
+# SYMLINK to a DIRECTORY is the silently non-atomic case: macOS `mv` follows it and moves
+# the temp INSIDE the directory, reporting success — and cross-device that is a
+# copy-in-place. Refuse loudly instead. (codex blocking r1.)
+GH_SD="$WORK/ghome-symdir"
+gh_install "$GH_SD" >/dev/null 2>&1
+SD_DIR="$WORK/symlink-dir"; mkdir -p "$SD_DIR"
+rm -f "$GH_SD/commands/ask.md"; ln -s "$SD_DIR" "$GH_SD/commands/ask.md"
+SD_OUT="$(gh_install "$GH_SD" 2>&1 || true)"
+[ -z "$(ls -A "$SD_DIR" 2>/dev/null)" ] \
+  && ok "a symlink-to-directory destination never swallows the installed file" \
+  || fail "install moved a file inside the linked directory ($(ls -A "$SD_DIR"))"
+printf '%s\n' "$SD_OUT" | grep -q 'is a directory' \
+  && ok "the directory destination is refused LOUDLY" || fail "directory refusal was silent (got: $SD_OUT)"
+# AN UNWRITABLE DESTINATION used to make `cp` fail and abort the install — the only way a
+# user can pin a customized file. `mv -f` unlinks the entry regardless, so the refusal
+# has to be explicit or the pin silently stops working. (grok r1.)
+GH_RO="$WORK/ghome-readonly"
+gh_install "$GH_RO" >/dev/null 2>&1
+chmod 444 "$GH_RO/commands/auto.md"
+RO_BEFORE="$(command ls -di "$GH_RO/commands/auto.md" | awk '{print $1}')"
+RO_OUT="$(gh_install "$GH_RO" 2>&1 || true)"
+printf '%s\n' "$RO_OUT" | grep -q 'not writable' \
+  && ok "a read-only destination is refused loudly, not silently replaced" || fail "read-only dest not refused (got: $RO_OUT)"
+[ "$RO_BEFORE" = "$(command ls -di "$GH_RO/commands/auto.md" | awk '{print $1}')" ] \
+  && ok "the pinned file is still the same file" || fail "the read-only destination was replaced anyway"
 
 echo "== comms.sh v2: thread filter + verdict normalization + error lane =="
 TA="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-00_alpha-1.md"
