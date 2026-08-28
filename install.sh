@@ -172,12 +172,35 @@ needs_templates() {
   esac
 }
 
+# Installing over a helper another session is RUNNING is not hypothetical: bash reads
+# an executing script LAZILY, by byte offset, so a plain `cp` — which truncates and
+# rewrites the SAME inode — shifts the bytes under a live reader, and it resumes
+# mid-token. Seen three times on 2026-08-27, once as a parked `runphase.sh await`
+# dying with `line 1326: l: command not found`.
+#
+# A sibling temp plus rename fixes it by construction: rename(2) unlinks the old NAME
+# while readers already inside the old inode keep it alive and finish on the file they
+# started with. Two details are load-bearing. The temp must be a SIBLING of the
+# destination — rename(2) is atomic only within one filesystem, and a cross-device
+# `mv` degrades to a copy-in-place that silently reintroduces this bug. And the mode
+# is set on the TEMP, so the destination is never observable at the wrong mode (the
+# old cp-then-chmod left a first install briefly non-executable).
+install_file() { # install_file <src> <dest> [mode]
+  local src="$1" dest="$2" mode="${3:-}" tmp
+  tmp="$(dirname "$dest")/.agent-comms-install.$$.$(basename "$dest")"
+  cp "$src" "$tmp" || { rm -f "$tmp"; return 1; }
+  if [ -n "$mode" ]; then
+    chmod "$mode" "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+}
+
 install_global_assets() {
   echo ""
   echo "  installing global Claude commands..."
   mkdir -p "$CLAUDE_COMMANDS_DIR"
   for f in $CLAUDE_COMMANDS; do
-    cp "$TEMPLATE_DIR/claude-commands/$f" "$CLAUDE_COMMANDS_DIR/$f"
+    install_file "$TEMPLATE_DIR/claude-commands/$f" "$CLAUDE_COMMANDS_DIR/$f"
   done
   for f in $RETIRED_COMMANDS; do
     [ -f "$CLAUDE_COMMANDS_DIR/$f" ] && { rm -f "$CLAUDE_COMMANDS_DIR/$f"; echo "  removed retired command /${f%.md}"; }
@@ -186,14 +209,13 @@ install_global_assets() {
   echo "  installing global Codex skills..."
   for skill in $CODEX_SKILLS; do
     mkdir -p "$CODEX_SKILLS_DIR/$skill"
-    cp "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md" "$CODEX_SKILLS_DIR/$skill/SKILL.md"
+    install_file "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md" "$CODEX_SKILLS_DIR/$skill/SKILL.md"
   done
 
   echo "  installing shared helpers to $AGENT_COMMS_HOME..."
   mkdir -p "$AGENT_COMMS_HOME"
   for h in $HELPERS; do
-    cp "$HELPER_SRC/$h" "$AGENT_COMMS_HOME/$h"
-    chmod +x "$AGENT_COMMS_HOME/$h"
+    install_file "$HELPER_SRC/$h" "$AGENT_COMMS_HOME/$h" 755
   done
   for h in $RETIRED_HELPERS; do
     [ -f "$AGENT_COMMS_HOME/$h" ] && { rm -f "$AGENT_COMMS_HOME/$h"; echo "  removed retired helper $h"; }
@@ -209,7 +231,7 @@ install_local_assets() {
   echo "  installing project-local Claude commands..."
   mkdir -p "$PROJECT_ROOT/.claude/commands"
   for f in $CLAUDE_COMMANDS; do
-    cp "$TEMPLATE_DIR/claude-commands/$f" "$PROJECT_ROOT/.claude/commands/$f"
+    install_file "$TEMPLATE_DIR/claude-commands/$f" "$PROJECT_ROOT/.claude/commands/$f"
   done
   for f in $RETIRED_COMMANDS; do
     [ -f "$PROJECT_ROOT/.claude/commands/$f" ] && { rm -f "$PROJECT_ROOT/.claude/commands/$f"; echo "  removed retired command /${f%.md}"; }
@@ -218,14 +240,13 @@ install_local_assets() {
   echo "  installing project-local Codex skills..."
   for skill in $CODEX_SKILLS; do
     mkdir -p "$PROJECT_ROOT/.agents/skills/$skill"
-    cp "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md" "$PROJECT_ROOT/.agents/skills/$skill/SKILL.md"
+    install_file "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md" "$PROJECT_ROOT/.agents/skills/$skill/SKILL.md"
   done
 
   echo "  installing project-local shared helpers..."
   mkdir -p "$PROJECT_ROOT/.agent-comms"
   for h in $HELPERS; do
-    cp "$HELPER_SRC/$h" "$PROJECT_ROOT/.agent-comms/$h"
-    chmod +x "$PROJECT_ROOT/.agent-comms/$h"
+    install_file "$HELPER_SRC/$h" "$PROJECT_ROOT/.agent-comms/$h" 755
   done
   # A local pin outranks the global install, so a retired helper surviving HERE
   # shadows its own removal everywhere else. The explicit return keeps a missing

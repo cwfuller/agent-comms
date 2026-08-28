@@ -302,6 +302,19 @@ update in place, local pins don't (see [INSTALL.md](INSTALL.md)). Protocol chang
 be backward-tolerant mid-loop: new required fields start as soft warnings (the
 protocol-v2 `thread`/`message_id` rollout is the precedent).
 
+**Every installed file is written temp-then-rename (`install_file` in `install.sh`), never
+`cp` in place.** "Update in place" describes the destination path, not the inode: bash reads
+an executing script lazily by byte offset, so overwriting a helper that a peer session is
+mid-way through shifts the bytes under it and the running shell resumes mid-token. That is
+not theoretical — it killed a parked `runphase.sh await` three times on 2026-08-27, once as
+`line 1326: l: command not found`. `rename(2)` unlinks only the NAME; a reader already
+inside the old inode keeps it alive and finishes on the file it started with. Two
+consequences bind any future edit here: the temp must be a SIBLING of the destination
+(rename is atomic only within one filesystem, and a cross-device `mv` silently degrades to
+a copy in place), and the mode is set on the temp before the rename, so the destination is
+never observable at the wrong mode. The suite asserts this by inode identity, with a
+negative control proving a plain `cp` keeps the inode.
+
 ## Contributing checklist
 
 1. `bash tests/run.sh` — green, from a clean shell

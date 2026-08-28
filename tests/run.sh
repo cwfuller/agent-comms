@@ -348,6 +348,47 @@ GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_D
 echo "$GH_OUT" | grep -q "codex-permissions" \
   && ok "global install names the one-time default Codex socket setup" || fail "global install Codex socket setup hint"
 
+# ATOMIC INSTALL. A plain `cp` over an installed helper truncates and rewrites the SAME
+# inode, and bash reads an executing script lazily by byte offset — which is how three
+# separate sessions on 2026-08-27 killed a parked `runphase.sh await` mid-run by
+# reinstalling under it. The observable is inode identity: temp+rename gives the
+# destination a NEW inode, so a reader already inside the old one finishes on it.
+INO1="$(command ls -di "$GHOME/agent-comms/comms.sh" | awk '{print $1}')"
+printf '#x\n' >> "$GHOME/agent-comms/comms.sh"   # differ from source, so no content-skip can hide the write
+(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
+INO2="$(command ls -di "$GHOME/agent-comms/comms.sh" | awk '{print $1}')"
+[ "$INO1" != "$INO2" ] \
+  && ok "reinstall replaces the helper inode (a running reader survives)" || fail "reinstall replaces the helper inode"
+# A new inode alone is not enough — the content and mode must actually land.
+cmp -s "$GHOME/agent-comms/comms.sh" "$REPO/helpers/comms.sh" \
+  && ok "reinstalled helper matches its source" || fail "reinstalled helper matches its source"
+[ -x "$GHOME/agent-comms/comms.sh" ] && ok "reinstalled helper stays executable" || fail "reinstalled helper stays executable"
+# Commands are rewritten the same way; a stale command file is the same failure class.
+CINO1="$(command ls -di "$GHOME/commands/auto.md" | awk '{print $1}')"
+printf '\n' >> "$GHOME/commands/auto.md"
+(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
+CINO2="$(command ls -di "$GHOME/commands/auto.md" | awk '{print $1}')"
+[ "$CINO1" != "$CINO2" ] && ok "reinstall replaces the command inode too" || fail "reinstall replaces the command inode too"
+# NEGATIVE CONTROL: the inode assertions above are evidence only if they CAN fail.
+# Prove that a plain cp keeps the inode on this filesystem, so a regression back to
+# `cp` would be observed rather than passing vacuously.
+ICTL="$WORK/inode-control"; mkdir -p "$ICTL"
+printf 'a\n' > "$ICTL/src"; printf 'bb\n' > "$ICTL/dst"
+XINO1="$(command ls -di "$ICTL/dst" | awk '{print $1}')"
+cp "$ICTL/src" "$ICTL/dst"
+XINO2="$(command ls -di "$ICTL/dst" | awk '{print $1}')"
+[ "$XINO1" = "$XINO2" ] \
+  && ok "control: plain cp keeps the inode, so the assertion can fail" || fail "control: plain cp keeps the inode"
+# The temp is a sibling of the destination (a cross-device temp would make `mv` a
+# non-atomic copy) and must never survive the install: a stray file in the helper or
+# command dir is install surface that nothing owns.
+ls -A "$GHOME/agent-comms" | grep -q '^\.agent-comms-install\.' \
+  && fail "install left a temp beside the helpers" || ok "install leaves no temp litter beside the helpers"
+ls -A "$GHOME/commands" | grep -q '^\.agent-comms-install\.' \
+  && fail "install left a temp in the commands dir" || ok "install leaves no temp litter in the commands dir"
+ls -A "$INST_FIX/.agent-comms" | grep -q '^\.agent-comms-install\.' \
+  && fail "local install left a temp beside the pinned helpers" || ok "local install leaves no temp litter"
+
 echo "== comms.sh v2: thread filter + verdict normalization + error lane =="
 TA="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-00_alpha-1.md"
 TB="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-00-01_beta-1.md"

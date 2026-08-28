@@ -1073,8 +1073,22 @@ Candidate formalizations to weigh at the reflection (minimal-first):
 - [ ] Snapshot guard: `snapshot create`/`panel dispatch` warns or refuses when the
   dirty diff exists, or requires the request to carry an explicit out-of-scope
   paragraph for foreign WIP (the one mitigation with observed field success).
-- [ ] Atomic writes for installed/shared helpers (write temp + `mv`) so concurrent
-  readers never see a half-file.
+- [x] Atomic writes for installed/shared helpers (write temp + `mv`) so concurrent
+  readers never see a half-file. *(Shipped 2026-08-27 — `install_file` in `install.sh`;
+  all six copy sites go through it.)* The framing in this bullet understated it: the
+  hazard is not a reader seeing a half-file at one instant, it is that **bash reads an
+  executing script lazily by byte offset**, so a `cp` over a running helper shifts the
+  bytes under a reader that is minutes into it and the shell resumes mid-token. The
+  field log records three strikes in one day (`.comms/friction.tsv`), the loudest a
+  parked `runphase.sh await` dying with `line 1326: l: command not found`. The window is
+  as long as an await: `cmd_await`'s default timeout is 7200s. Two details are
+  load-bearing and are pinned by test: the temp is a SIBLING of the destination (a
+  cross-device `mv` degrades to a copy in place and silently reintroduces the bug), and
+  the mode is set on the temp before the rename. Asserted by inode identity, with a
+  negative control proving a plain `cp` keeps the inode — otherwise the assertion could
+  never fail. **This unblocks installed-copy lag detection below**, which was self-blocked:
+  lag detection exists to prompt a mid-run reinstall, and until now that prompt was an
+  invitation to crash a peer.
 - [ ] Installed-copy lag detection: nothing warns when `~/.agent-comms` /
   `~/.claude/commands` lag the repo they are reviewing. Bit twice on 2026-08-26:
   stale panel-status logic produced a false "both answered", and the 10-round
