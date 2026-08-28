@@ -1416,7 +1416,14 @@ Ranked work, foldable into the step-2 harness split:
    belongs in presence, not in its callers. Candidates: `with-beat` refuses to heal and
    reports instead; or records carry their creator so a healed one is distinguishable.
 
-8. [ ] **Remaining defence-in-depth on the suite proof** (codex, coverage-gate r8,
+8. [ ] **A suite with no presence identity runs unsupervised** (codex,
+   integrate-advisory-beat r7, advisory, pre-existing). When `COMMS_PRESENCE_NAME`/
+   `INSTANCE` are unset, `integrate` runs the suite without `with-beat`, so the
+   detached-descendant escape it now closes for the absent-record case remains open on
+   that supported path. `--no-heartbeat` makes the fix available without a record; it
+   needs a synthetic identity or a supervision-only verb.
+
+9. [ ] **Remaining defence-in-depth on the suite proof** (codex, coverage-gate r8,
    advisory, explicitly NON-blocking). A `BASH_ENV` hook defining `command()` can
    still forge the completion line. This sits outside the stated boundary — such a
    hook already runs code as the user and could move refs directly — so it was not
@@ -1424,7 +1431,7 @@ Ranked work, foldable into the step-2 harness split:
    `POSIXLY_CORRECT=1`, unsets a `command` function, then invokes
    `command /usr/bin/env`. Strictly stronger, still not containment.
 
-9. [ ] **Make silent stalls visible.** This defect survived because a
+10. [ ] **Make silent stalls visible.** This defect survived because a
    six-second wait announced itself only on stderr, into `/dev/null`. Consider
    whether the runner should record waits it actually served somewhere a human
    or the suite reads. A stall nobody can see is the shape of the next one.

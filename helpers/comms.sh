@@ -2285,8 +2285,12 @@ cmd_presence() {
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence with-beat: --name and --instance required"
       presence_validate_ids "$name" "$instance" || usage_err "presence with-beat: invalid name/instance"
       [ $# -gt 0 ] || usage_err "presence with-beat: a command is required after --"
+      # The heal marker belongs to the beater: with --no-heartbeat there is no beater, so
+      # nothing to report — and the marker path is shared per identity, so initialising or
+      # consuming it here could swallow a CONCURRENT wrapper's heal warning. Touch it only
+      # when we actually own a beater. (codex, integrate-beat r7.)
       healmark="$(presence_dir)/.tmp/healed-$name-$instance"
-      rm -f "$healmark" 2>/dev/null || true
+      [ -n "$no_heartbeat" ] || rm -f "$healmark" 2>/dev/null || true
       # Signal contract (codex, impl r3/r4): traps live at the arm's top; each
       # job gets its OWN PROCESS GROUP via set -m so teardown reaches
       # grandchildren; identity is preserved (INT as INT, TERM as TERM); the
@@ -2352,8 +2356,10 @@ cmd_presence() {
         echo "presence with-beat: the child's process group survived TERM and KILL — failing closed (result untrusted)" >&2
         rc=125
       fi
-      kill -TERM -- "-$beater" 2>/dev/null || true
-      wait "$beater" 2>/dev/null || true             # join-before-restore
+      # ${beater:+-$beater} matches the form the INT/TERM traps already use, so a skipped
+      # beater is a real no-op rather than a swallowed usage error. (grok, r7.)
+      kill -TERM -- ${beater:+-$beater} 2>/dev/null || true
+      { [ -n "$beater" ] && wait "$beater" 2>/dev/null; } || true             # join-before-restore
       trap - INT TERM
       # A LATCHED CANCELLATION NEVER RETURNS SUCCESS — applied AFTER teardown and
       # trap restoration, because the traps stay live through the quiescence
@@ -2364,7 +2370,7 @@ cmd_presence() {
       if [ -n "$latched" ] && [ "$rc" -eq 0 ]; then
         [ "$latched" = INT ] && rc=130 || rc=143
       fi
-      if [ -f "$healmark" ]; then
+      if [ -z "$no_heartbeat" ] && [ -f "$healmark" ]; then
         rm -f "$healmark" 2>/dev/null || true
         echo "presence: a beat during this run HEALED a vanished record — tenure is NOT restored; re-run claim-then-check before the next shared-checkout write" >&2
       fi
@@ -2734,12 +2740,10 @@ cmd_integrate() {
     # path it describes. Landing stayed fail-closed, but the operator lost the message.
     # (codex, panel r5, advisory — the same errexit class as the assignment above.)
     set +e
-    # CHECK, THEN BEAT — third site, and the one a short test cannot reach. `with-beat`'s
-    # beater sleeps TTL/3 (default 900s) and then beats, which HEALS an absent record. So
-    # wrapping a suite in it for an identity with no record here manufactures the same
-    # pid-less, unreapable record the two explicit gates prevent — just fifteen minutes in,
-    # where every fixture had already finished. A suite with no lease to refresh simply
-    # runs unwrapped. (codex + grok, integrate-beat r5, corroborated.)
+    # THIRD SITE, and the one no short test could reach: `with-beat`'s beater sleeps TTL/3
+    # (default 900s) and then beats, which HEALS an absent record — manufacturing the same
+    # pid-less, unreapable record the two explicit gates prevent, fifteen minutes in, long
+    # after every fixture had finished. (codex + grok, integrate-beat r5.)
     if [ -n "$name" ] && [ -n "$instance" ]; then
       # SUPERVISION ALWAYS; heartbeat only when there is a record to refresh. Running the
       # suite unwrapped to avoid the healing beat gave up whole-process-group quiescence,
