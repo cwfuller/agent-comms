@@ -794,6 +794,14 @@ refuses **zero** historical replies; the derivation gate refuses the seven true 
 The reviewers were also never actually told the rule — the ACP review prompt asked only for
 the subsections — so the prompt now states it.
 
+- [ ] **A live `### Blocking` whose findings sit inside a CLOSED fence still probes 0/0.**
+  The fence lexer `next`s those lines before any residue rule sees them, so a heading
+  outside with the findings quoted inside — no live list item, no placeholder — is still a
+  zero-count consent path. Deliberately NOT fixed with the residue counter: counting every
+  fenced line as residue would refuse the legitimate "quote the prior round, then `- None.`"
+  shape that clean approvals use. Needs its own item and its own rule. (grok, parser-residue
+  r2.)
+
 ## Panel & command collapse (2026-08-26)
 
 **North star, stated by the owner:** the highest-quality code output with the least human
