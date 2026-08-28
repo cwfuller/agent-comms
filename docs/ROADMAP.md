@@ -1089,6 +1089,29 @@ Candidate formalizations to weigh at the reflection (minimal-first):
   never fail. **This unblocks installed-copy lag detection below**, which was self-blocked:
   lag detection exists to prompt a mid-run reinstall, and until now that prompt was an
   invitation to crash a peer.
+  Four review rounds, closing on a double APPROVE. The last three were entirely about one
+  fact: **replacing a file is not the same operation as writing through it**, so every
+  incidental property of `cp` had to be reproduced deliberately — mode (including the
+  special nibble Darwin's `%Lp` silently drops), owner and group (restoration is REQUIRED;
+  a `chown` that cannot be applied refuses the replacement, because publishing under the
+  directory's group widens access silently), symlink write-through, and the abort a
+  read-only destination used to produce. Two reviewer findings are worth carrying as
+  general lessons: an ACL cannot be detected by the `+` mode marker on Darwin, because
+  `ls` prints `@` INSTEAD of `+` when extended attributes are present — and they are
+  routine — so the probe reads the ACL entries themselves, through `/bin/ls` rather than
+  whatever `ls` is on PATH (locally, `eza`). And `chown` clears setuid/setgid even as a
+  no-op, so ownership must be applied BEFORE the mode. Two carried advisories, neither
+  blocking:
+  - [ ] `emit_note` (a capability this machine lacks) prints a visible note and counts
+    nothing, but it does not mechanically make the run PARTIAL — `FAIL` stays 0 and
+    `attest-green` still records an attestation. Acceptable while platform skips are
+    intended, but it sits against the attestation invariant and belongs with the
+    suite-coverage-gate work rather than bolted on here. The Linux `+`-marker branch of
+    the ACL probe is also unexercised, the fixture being Darwin-only. (codex.)
+  - [ ] The ACL probe greps `ls -lde` output for numbered entry lines, so a resolved
+    symlink target containing an embedded newline followed by `0:` could match the
+    filename. The consequence is a spurious warning on a fixed set of install names, so it
+    is recorded rather than defended against. (codex.)
 - [ ] Installed-copy lag detection: nothing warns when `~/.agent-comms` /
   `~/.claude/commands` lag the repo they are reviewing. Bit twice on 2026-08-26:
   stale panel-status logic produced a false "both answered", and the 10-round
