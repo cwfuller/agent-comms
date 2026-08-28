@@ -2530,8 +2530,21 @@ cmd_integrate() {
     # a file that says `exit 0` makes `bash tests/run.sh` return 0 with no output and no
     # assertions, and integrate would land on it. ENV/SHELLOPTS/BASHOPTS are the same
     # class. (codex, panel r4, blocking — demonstrated with BASH_ENV=/dev/stdin.)
-    local -a clean_env
-    clean_env=(env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD)
+    # ABSOLUTE PATH, deliberately. `BASH_ENV` is sourced by THIS helper before the scrub
+    # runs, so a hook can define a shell function named `env` -- which takes precedence
+    # over both the builtin and PATH -- and have it print a well-formed
+    # `passed: N  failed: 0  skipped: 0` line and return 0. tee records the forgery,
+    # PIPESTATUS[0] is 0, the positive proof passes, and a candidate lands with the suite
+    # never having run. Verified as a working exploit. A function cannot shadow an
+    # absolute path. (codex, panel r6, blocking.)
+    #
+    # HONEST LIMIT: this defends the accidental case and the cheap forgery. Anything that
+    # can inject BASH_ENV into this helper already runs code as the user and could replace
+    # `bash` or `git` on PATH; no in-process check survives that. The proof is a tripwire,
+    # not a containment boundary.
+    local -a clean_env; local envbin=/usr/bin/env
+    [ -x "$envbin" ] || envbin=env
+    clean_env=("$envbin" -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD)
     # Keep the output of the run we are judging. A refusal whose evidence was discarded
     # cannot be diagnosed, which cost a full investigation earlier in this arc.
     local suite_log; suite_log="$root/.comms/logs/integrate-${cand}.suite.log"

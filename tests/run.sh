@@ -91,14 +91,19 @@ skip() { # skip <id> <desc> — permitted, CONDITION-BOUND, and single-use
       if command -v zsh >/dev/null 2>&1; then
         fail "$2 (skip id 'zsh-absent' claimed, but zsh IS installed)"; return
       fi ;;
+    # TRI-STATE. Defaulting an unset flag to 0 meant "probe failed", so these skips were
+    # cashable BEFORE their probe ran — spare capacity again, in a new place. Only a
+    # recorded, confirmed failure permits the skip. (codex + grok, panel r6, blocking.)
     group-no-secondary)
-      if [ "${GRP_PRESERVE_OK:-0}" = 1 ]; then
-        fail "$2 (skip id 'group-no-secondary' claimed, but the group probe SUCCEEDED)"; return
-      fi ;;
+      case "${GRP_PRESERVE_OK:-unrun}" in
+        0) ;;
+        *) fail "$2 (skip id 'group-no-secondary': probe state is '${GRP_PRESERVE_OK:-unrun}', not a confirmed failure)"; return ;;
+      esac ;;
     acl-*)
-      if [ "${ACL_PROBE_OK:-0}" = 1 ]; then
-        fail "$2 (skip id '$1' claimed, but the ACL probe SUCCEEDED)"; return
-      fi ;;
+      case "${ACL_PROBE_OK:-unrun}" in
+        0) ;;
+        *) fail "$2 (skip id '$1': probe state is '${ACL_PROBE_OK:-unrun}', not a confirmed failure)"; return ;;
+      esac ;;
     *) fail "$2 (skip id '$1' has no registered condition)"; return ;;
   esac
   SKIP_USED="$SKIP_USED$1 "
@@ -5776,8 +5781,10 @@ grep -qE '^ *for [a-z_]+ in .*"\$REPO"/\.?/?(templates|docs)' "$REPO/tests/run.s
 grep -qE '^ *for [a-z_]+ in .*find "\$REPO"/(templates|docs)' "$REPO/tests/run.sh" \
   && fail "a corpus loop walks the filesystem with find" || ok "no corpus loop walks the filesystem with find"
 # integrate must not accept a suite that never ran, and must keep the evidence.
-grep -q 'env -u BASH_ENV -u ENV -u SHELLOPTS' "$REPO/helpers/comms.sh" \
+grep -q '"\$envbin" -u BASH_ENV -u ENV -u SHELLOPTS' "$REPO/helpers/comms.sh" \
   && ok "integrate scrubs shell-startup hooks before the suite" || fail "integrate does not scrub shell-startup hooks"
+grep -q 'envbin=/usr/bin/env' "$REPO/helpers/comms.sh" \
+  && ok "the scrub command is an absolute path a shell function cannot shadow" || fail "the scrub command is shadowable"
 grep -q 'emitted no completion line' "$REPO/helpers/comms.sh" \
   && ok "integrate requires positive proof the suite ran to the end" || fail "integrate accepts an exit status alone"
 grep -q 'tee "\$suite_log"' "$REPO/helpers/comms.sh" \
@@ -5866,8 +5873,54 @@ IP_OUT2="$( (cd "$IP" && env -u CMUX_WORKSPACE_ID BASH_ENV="$WORK/hostile-bashen
 [ "$(cd "$IP" && git rev-parse main)" = "$(cd "$IP" && git rev-parse worktree-proofone)" ] \
   && ok "an inherited startup hook is scrubbed and the real suite still runs" \
   || fail "the startup hook defeated the landing (got: $(printf '%s' "$IP_OUT2" | tail -2))"
-[ -n "$(find "$IP/.comms/logs" -name 'integrate-*.suite.log' -type f 2>/dev/null | head -1)" ] \
-  && ok "integrate kept the output of the run it judged" || fail "integrate discarded the suite output"
+# Match the CONTENT, not merely the existence of some log: the refused silent run above
+# tees a file at the same candidate path, so a leftover would satisfy an existence check.
+# (grok, panel r6, advisory.)
+grep -rq 'passed: 3  failed: 0  skipped: 0' "$IP/.comms/logs" 2>/dev/null \
+  && ok "integrate kept the output of the run it judged" || fail "the kept log is not the run that landed"
+
+# A hook that INTERPOSES on the scrub command itself: `env` as a shell function takes
+# precedence over the builtin and PATH, so an unpinned scrub would call the forgery
+# instead of scrubbing, and the forged completion line would satisfy the positive proof.
+# Verified as a working exploit before it was fixed. (codex, panel r6, blocking.)
+IP2="$WORK/int-forge"; mkdir -p "$IP2"; IP2="$(cd "$IP2" && pwd -P)"
+git -C "$IP2" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IP2/.gitignore"
+mkdir -p "$IP2/tests" "$IP2/.comms"
+printf 'total\t3\n' > "$IP2/tests/expected-counts.tsv"
+# The REAL suite here is silent: it exits 0 and prints nothing, so it can never satisfy
+# the positive proof on its own. Landing is therefore possible ONLY if the forged line
+# reaches the log — which makes this assertion discriminating. (With a passing real suite
+# the candidate lands either way and the test proves nothing; that was the first draft.)
+printf '#!/bin/bash\nexit 0\n' > "$IP2/tests/quiet.sh"
+chmod +x "$IP2/tests/quiet.sh"
+printf 'suite-cmd = bash tests/quiet.sh\n' > "$IP2/.comms/config"
+(cd "$IP2" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IP2" && git checkout -q -b session-primary)
+(cd "$IP2" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new forgeone) >/dev/null 2>&1
+(cd "$IP2/.claude/worktrees/forgeone" && echo y > d.txt && git add d.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: d") >/dev/null 2>&1
+# The forgery prints a line that WOULD satisfy the proof, and never runs the suite.
+printf 'env() { printf "passed: 3  failed: 0  skipped: 0\\n"; return 0; }\n' > "$WORK/forge-bashenv.sh"
+# CONTROL: prove the interposition actually works on an unpinned call, or the assertion
+# below only proves that integrate happens to land.
+FORGE_CTL="$(BASH_ENV="$WORK/forge-bashenv.sh" bash -c 'e=(env -u BASH_ENV); "${e[@]}" bash -c "echo REAL"' 2>&1 || true)"
+case "$FORGE_CTL" in
+  *"passed: 3"*) ok "an env-function hook does interpose on an unpinned scrub (control)" ;;
+  *) fail "the forgery control did not interpose (got: $FORGE_CTL)" ;;
+esac
+FORGE_OUT="$( (cd "$IP2" && env -u CMUX_WORKSPACE_ID BASH_ENV="$WORK/forge-bashenv.sh" "$COMMS" integrate worktree-forgeone) 2>&1 || true )"
+[ "$(cd "$IP2" && git rev-parse main)" != "$(cd "$IP2" && git rev-parse worktree-forgeone)" ] \
+  && ok "a forged completion line from an interposed scrub does not land" \
+  || fail "an env-function forgery landed a candidate whose suite never ran"
+
+# The probe-bound skips must refuse an UNRUN probe, not just a successful one.
+SK_UNRUN="$( (FAIL=0; SKIP=0; SKIP_USED=" "; unset ACL_PROBE_OK; skip acl-report "probe never ran" >/dev/null 2>&1; echo "$FAIL") )"
+[ "$SK_UNRUN" = 1 ] && ok "a probe-bound skip is refused before its probe has run" || fail "an unrun probe permitted its skip (FAIL=$SK_UNRUN)"
+SK_RAN_OK="$( (FAIL=0; SKIP=0; SKIP_USED=" "; ACL_PROBE_OK=1; skip acl-report "probe succeeded" >/dev/null 2>&1; echo "$FAIL") )"
+[ "$SK_RAN_OK" = 1 ] && ok "a probe-bound skip is refused when the probe succeeded" || fail "a successful probe permitted its skip (FAIL=$SK_RAN_OK)"
+SK_RAN_NO="$( (FAIL=0; SKIP=0; SKIP_USED=" "; ACL_PROBE_OK=0; skip acl-report "probe failed" >/dev/null 2>&1; echo "$SKIP") )"
+[ "$SK_RAN_NO" = 1 ] && ok "a probe-bound skip is permitted on a confirmed failed probe" || fail "a confirmed failed probe refused its skip (SKIP=$SK_RAN_NO)"
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
