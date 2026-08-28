@@ -1401,7 +1401,20 @@ Ranked work, foldable into the step-2 harness split:
    exit code. Seven distinct routes to a green partial run were found by review
    and closed; `integrate` now also keeps the output of runs it rejects.
 
-7. [ ] **Remaining defence-in-depth on the suite proof** (codex, coverage-gate r8,
+7. [ ] **`presence with-beat` heals records it does not own** (integrate-advisory-beat
+   r1-r4, 2026-08-28). `with-beat`'s beater calls `presence beat`, which HEALS a vanished
+   record by design — so a record unlinked mid-run is recreated **pid-less**, and a
+   pid-less record can never be classified dead, so `presence expire` can never reap it.
+   `integrate` used to trigger this on every run under a foreign identity; that is fixed
+   by checking before beating (never manufacture a record you do not own). The residual
+   case — a record that vanishes DURING a long child — is not fixed and is deliberately
+   not claimed by `integrate`: three review rounds establishing ownership across signals,
+   nested arms and repositories produced a cross-repo identity collision, a shared
+   healmark race, and a non-atomic ownership handoff, each found by review. The fix
+   belongs in presence, not in its callers. Candidates: `with-beat` refuses to heal and
+   reports instead; or records carry their creator so a healed one is distinguishable.
+
+8. [ ] **Remaining defence-in-depth on the suite proof** (codex, coverage-gate r8,
    advisory, explicitly NON-blocking). A `BASH_ENV` hook defining `command()` can
    still forge the completion line. This sits outside the stated boundary — such a
    hook already runs code as the user and could move refs directly — so it was not
