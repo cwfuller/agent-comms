@@ -507,6 +507,13 @@ preamble, acknowledgement, or head_sha note — must be exactly
 ## Summary, then ## Findings with ### Blocking / ### Advisory / ### Process
 subsections. No frontmatter, no code fences around it.
 
+Write every finding as a MARKDOWN LIST ITEM — '- ', '* ' or '1. ' — one item per
+finding, and put nothing else in those subsections but list items (a bare 'None.' is
+fine when a subsection is empty). This is not cosmetic: the pipeline reads findings as
+list items, so a finding written as a lead-token line or as a bold-lead paragraph is
+content the reader cannot classify. It will now REFUSE your reply rather than count it
+as zero findings, which costs you the whole round.
+
 Review discipline:
 $vtext
 PROMPT
@@ -739,10 +746,23 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
       # equivalence — `blocking_findings > 0` IS `REQUEST_CHANGES` — so a reply
       # carrying the mandated structure states its verdict in substance even when it
       # omits the line. Only STRUCTURE is trusted; nothing is inferred from prose.
-      local nblock
+      local nblock nresid
       pstruct="$(probe_field "$probe" blocking_section)"
       if [ "$pstruct" = "yes" ]; then
         nblock="$(probe_field "$probe" blocking)"
+        nresid="$(probe_field "$probe" blocking_unparsed)"
+        # FAIL CLOSED on residue, in the same shape as the unclosed fence above. Deriving
+        # APPROVE from zero findings is only sound when zero means "the reviewer found
+        # nothing" — it must never mean "I could not read what the reviewer wrote". A
+        # `### Blocking` lane holding lines the parser cannot classify is the second
+        # statement wearing the clothes of the first, and it has stamped APPROVE over real
+        # blocking findings seven times in this archive. Deriving REQUEST_CHANGES instead
+        # was considered and rejected: it invents a verdict the reviewer did not write,
+        # which is what the fence check above already refuses to do.
+        if [ "${nblock:-0}" -eq 0 ] && [ "${nresid:-0}" -gt 0 ]; then
+          GROK_BROKER_NOTE="the '### Blocking' section carries ${nresid} line(s) the findings parser could not read as findings, so its zero-finding count is a failed read rather than a clean review — refusing to derive APPROVE from a body that was not understood (findings must be markdown list items: '- ', '* ' or '1. ')"
+          return 1
+        fi
         if [ "${nblock:-0}" -gt 0 ]; then verdict="REQUEST_CHANGES"; else verdict="APPROVE"; fi
         body_start=1
         echo "note: reply carried no VERDICT line; DERIVED '$verdict' from ${nblock:-0} blocking finding(s) per the loopspec equivalence" >>"$run_dir/runner.log"
@@ -771,6 +791,15 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
       xblock="$(probe_field "$probe" blocking)"
       if [ "${xblock:-0}" -gt 0 ]; then
         GROK_BROKER_NOTE="reply says 'VERDICT: APPROVE' but lists ${xblock} blocking finding(s) — refusing to stamp a verdict that contradicts its own body"
+        return 1
+      fi
+      # An explicit APPROVE over an UNREADABLE blocking lane is the same contradiction one
+      # step further out: the count that clears it is a failed read. Measured against this
+      # archive, adding this conjunct refuses nothing that is genuinely clean.
+      local xresid
+      xresid="$(probe_field "$probe" blocking_unparsed)"
+      if [ "${xresid:-0}" -gt 0 ]; then
+        GROK_BROKER_NOTE="reply says 'VERDICT: APPROVE' but its '### Blocking' section carries ${xresid} line(s) the findings parser could not read — refusing to stamp an approval over a body that was not understood (findings must be markdown list items: '- ', '* ' or '1. ')"
         return 1
       fi
     fi

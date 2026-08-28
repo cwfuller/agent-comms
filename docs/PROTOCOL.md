@@ -170,6 +170,15 @@ of the contract:
 - On final `APPROVE`: un-actioned advisories append to `docs/advisories.md` and
   `### Process` feedback to the friction log; `comms.sh state complete <thread>`
   closes the loop's state.
+- **Findings are markdown list items** (`- `, `* `, `1. `), one per finding, and a
+  `### Blocking` / `### Advisory` subsection holds nothing else (a bare `None.` is the
+  empty form). This is load-bearing, not style: when a reply omits its `VERDICT:` line the
+  parent DERIVES the verdict from the blocking count, so a finding written any other way
+  extracts as zero and the derivation reads that zero as consent. A lane carrying lines the
+  parser cannot classify is now COUNTED as unread — the broker refuses to derive or stamp
+  an `APPROVE` over it, and `compose` prints a warning naming the leg whose counts are
+  short. Silence and consent are different statements; the pipeline can finally tell them
+  apart.
 
 ## Threading
 

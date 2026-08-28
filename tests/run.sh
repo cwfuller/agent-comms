@@ -1401,7 +1401,7 @@ for a in "$@"; do [ "$prev" = "--prompt-file" ] && pf="$a"; prev="$a"; done
 # streaming-messages-json shape (live 1.0.5): init event carries session_id and
 # the final result event carries the COMPLETE reply text. Under the
 # parent-stamped envelope the child emits ONLY a VERDICT line (reviews) + body.
-esc() { printf '%s' "$1" | awk '{printf "%s\\n", $0}'; }
+esc() { printf '%s' "$1" | awk '{gsub(/\t/, "\\t"); printf "%s\\n", $0}'; }
 printf '{"type":"system","subtype":"init","session_id":"stub-grok-session-1"}\n'
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"narration to ignore"}]}}\n'
 if [ -n "${GROK_STUB_NO_VERDICT:-}" ]; then
@@ -1413,6 +1413,11 @@ elif [ -n "${GROK_STUB_EMPTY_BODY:-}" ]; then
 elif [ -n "${GROK_STUB_DUP_VERDICT:-}" ]; then
   # line-1 APPROVE + a later REQUEST_CHANGES: ambiguous, derivation must decide
   REPLY="$(printf -- 'VERDICT: APPROVE\nnarration\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.')"
+elif [ -n "${GROK_STUB_LEAD_TOKEN:-}" ]; then
+  # No VERDICT line, and a Blocking section whose finding is a lead-token line rather than a
+  # list item — byte-for-byte the shape of the real codex reply that DERIVED APPROVE over a
+  # genuine attestation defect on 2026-08-27.
+  REPLY="$(printf -- '## Summary\nreview with an unreadable blocking section\n\n## Findings\n### Blocking\n\nblocking\ttests/run.sh:4948\tattestation is not bound to the tested commit\n\n### Advisory\n- None.')"
 elif [ -n "${GROK_STUB_LIE_APPROVE:-}" ]; then
   # unique explicit APPROVE that contradicts its own findings
   REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Findings\n### Blocking\n1. a real blocking finding the verdict ignores\n\n### Advisory\n- None.')"
@@ -1546,6 +1551,22 @@ GROK_STUB_NO_VERDICT=1 run_grok_leg "$MA_MSG4" "$R4" >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R4/result.json" | head -1)" = "failed" ] \
   && grep -q 'no unquoted .### Blocking. section' "$R4/result.json" && [ -f "$MA_MSG4" ] \
   && ok "a reply with neither a VERDICT line nor findings structure fails closed" || fail "missing-verdict broker path"
+# A Blocking section the parser cannot read must NOT derive APPROVE. This is the end-to-end
+# half of the residue counter: seven real replies in .comms/logs derived APPROVE this way,
+# one of them over a genuine attestation defect. The leg must fail closed and leave the
+# inbound un-archived, exactly like the unclosed-fence and no-structure paths above.
+MA_MSG4B="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-32-00_leadtoken-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-3b/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG4B"
+R4B="$WORK/ma-leg4b"; mkdir -p "$R4B"
+GROK_STUB_LEAD_TOKEN=1 run_grok_leg "$MA_MSG4B" "$R4B" >/dev/null 2>&1
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R4B/result.json" | head -1)" = "failed" ] \
+  && ok "an unreadable Blocking section fails closed instead of deriving APPROVE" \
+  || fail "a lead-token blocking section still derived a verdict"
+grep -q 'could not read as findings' "$R4B/result.json" \
+  && ok "the refusal names the unread lines so the driver can act on it" || fail "refusal note missing"
+[ -z "$(find "$MA_FIX/.comms/to-claude" -name '*ma-arc-3b*' -type f 2>/dev/null)" ] \
+  && ok "no APPROVE envelope was persisted for an unread review" || fail "an envelope was stamped over unread content"
+[ -f "$MA_MSG4B" ] && ok "the inbound survives a residue refusal, so the round is retryable" || fail "inbound lost on residue refusal"
 MA_MSG5="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-35-00_badverdict-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-4/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG5"
 R6="$WORK/ma-leg6"; mkdir -p "$R6"
@@ -2244,6 +2265,39 @@ printf 'no verdict of my own\n\n## Prior round\n```\nVERDICT: REQUEST_CHANGES\n#
 printf '### Blocking\n\n```\n- swallowed by an unclosed fence\n' > "$CORP/unclosed.md"
 [ "$(probe_of "$CORP/unclosed.md" unclosed_fence)" = "yes" ] \
   && ok "an unclosed fence is reported so the broker can fail closed" || fail "unclosed fence not reported"
+
+# RESIDUE: the parser must be able to say "I could not read this". Every rule above answers
+# "how many findings did I parse?"; the broker derives a verdict from that number while
+# believing it asked whether the reviewer found anything. Measured on 123 raw replies in
+# .comms/logs, SEVEN derived APPROVE over a Blocking section they had failed to read -- the
+# clearest being a codex reply whose real finding ("attestation is not bound to the commit
+# actually tested") was written as `blocking<TAB>tests/run.sh:4948<TAB>...` and produced
+# `DERIVED 'APPROVE' from 0 blocking finding(s)`.
+printf '### Blocking\n\nblocking\ttests/run.sh:4948\tattestation is not bound to the tested commit\n' > "$CORP/leadtoken.md"
+[ "$(probe_of "$CORP/leadtoken.md" blocking)" = "0" ] \
+  && ok "a lead-token finding still extracts as zero findings (the grammar is unchanged)" || fail "lead-token unexpectedly parsed"
+[ "$(probe_of "$CORP/leadtoken.md" blocking_unparsed)" -gt 0 ] \
+  && ok "...but it is now COUNTED as unread rather than silently discarded" \
+  || fail "a lead-token finding vanished with no trace — the false all-clear"
+printf '### Blocking\n\n**Takeover parking can advance main.** The landing invariant is broken.\n' > "$CORP/boldlead.md"
+[ "$(probe_of "$CORP/boldlead.md" blocking_unparsed)" -gt 0 ] \
+  && ok "a bold-lead paragraph is counted as unread too" || fail "bold-lead finding vanished silently"
+# The two guards that keep the counter from turning real reviews red. Each was verified to
+# go RED when its guard is removed from the rule, so neither assertion is one that cannot fail.
+printf '### Blocking\n\nNone.\n' > "$CORP/bareplaceholder.md"
+[ "$(probe_of "$CORP/bareplaceholder.md" blocking_unparsed)" = "0" ] \
+  && ok "an unbulleted None. placeholder is not unread residue" || fail "placeholder counted as residue"
+printf '### Blocking\n\n- a real bug\n  continued on the next line\n' > "$CORP/continuation.md"
+[ "$(probe_of "$CORP/continuation.md" blocking_unparsed)" = "0" ] \
+  && ok "a list item and its indented continuation leave no residue" || fail "continuation counted as residue"
+# The counter must not change WHAT is extracted: verified byte-identical across all 348
+# archived messages, so no finding_id renumbers and .comms/grades/findings.tsv needs no rebuild.
+[ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/continuation.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "1" ] \
+  && ok "the residue counter changes no extracted row" || fail "residue counter altered extraction"
+# Residue in the ADVISORY lane is counted separately and must never gate anything.
+printf '### Blocking\n\n- a real blocker\n\n### Advisory\n\nADVISORY\tx.sh:1\tunreadable advisory\n' > "$CORP/advresid.md"
+[ "$(probe_of "$CORP/advresid.md" advisory_unparsed)" -gt 0 ] && [ "$(probe_of "$CORP/advresid.md" blocking_unparsed)" = "0" ] \
+  && ok "advisory residue is counted in its own lane, not the blocking one" || fail "lane residue leaked across sections"
 printf '### blocking\n\n- a lowercase-heading blocker\n' > "$CORP/lowerhead.md"
 [ "$(probe_of "$CORP/lowerhead.md" blocking)" = "1" ] \
   && ok "a lowercase ### blocking heading is still a section" || fail "lowercase heading dropped the section"

@@ -762,6 +762,38 @@ mounting cannot reach.)*
   and nobody has costed that time. (Escape attribution is no longer here; it is CUT — see
   Rejected.)
 
+## The parser could not say "I could not read this" (2026-08-28)
+
+Closed the class behind the friction log's only severity-5 entry ("compose reported 0
+findings — false all-clear over real blocking findings"). The entry as written was fixed by
+3f12bd7, which added numbered lists; the CLASS was not, and it fired seven more times after
+that commit.
+
+**The structural fault.** `findings_extract` answers "how many findings did I parse?" and
+the broker derives a verdict from that number while believing it asked "did the reviewer
+find anything?". Those differ exactly when the parser fails, and a `### Blocking` lane whose
+content is not a list item extracts zero. Measured over the 123 raw replies in `.comms/logs`:
+**seven derived `APPROVE` over a blocking section they had failed to read.** The clearest is a
+codex reply whose real finding — *attestation is not bound to the commit actually tested* —
+was written as `blocking<TAB>tests/run.sh:4948<TAB>…` and produced
+`DERIVED 'APPROVE' from 0 blocking finding(s)`.
+
+**Why widening the grammar again would not have worked.** This was the fourth widening
+(column-0 `- `, then numbered, then indented/tabbed, now lead-token and bold-lead). Each one
+left the same hole, because the gate kept measuring what it understood instead of what
+defeated it. The fix counts the RESIDUE: any non-blank, non-placeholder line in a findings
+lane that no rule claimed. The broker then fails closed on it in the shape `unclosed_fence`
+already established, and `compose` warns when a leg's counts are short.
+
+Deriving `REQUEST_CHANGES` from residue was considered and rejected — it invents a verdict
+the reviewer did not write, which the fence check already refuses to do.
+
+Measured cost before shipping: extraction is byte-identical across all 348 archived messages
+(no `finding_id` renumbers, no `findings.tsv` rebuild); the explicit-`APPROVE` cross-check
+refuses **zero** historical replies; the derivation gate refuses the seven true positives.
+The reviewers were also never actually told the rule — the ACP review prompt asked only for
+the subsections — so the prompt now states it.
+
 ## Panel & command collapse (2026-08-26)
 
 **North star, stated by the owner:** the highest-quality code output with the least human

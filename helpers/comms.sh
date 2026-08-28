@@ -1034,14 +1034,32 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
     lind <= 3 && li ~ /^[0-9]+[.)][ \t]/ { flush(); blane = lane; sub(/^[0-9]+[.)][ \t]+/, "", li); buf = li; next }
     buf != "" && /^[[:space:]]+[^[:space:]]/ { buf = buf " " trim($0); next }
     buf != "" && /^[[:space:]]*$/ { flush(); next }
+    # RESIDUE. Every rule above answers "how many findings did I parse?". Nothing has ever
+    # been able to answer "was there anything I FAILED to parse?" -- and the broker derives
+    # a verdict from the first question while believing it asked the second. A `### Blocking`
+    # lane whose content is not a list item extracts zero, and zero is then read as consent:
+    # seven real replies in the archive here were stamped APPROVE that way, one of them over
+    # a defect that got fixed twelve minutes later.
+    #
+    # This is the FOURTH widening of the list-item grammar (column-0 `- `, then numbered,
+    # then indented/tabbed, now lead-token and bold-lead paragraphs). Each widening left the
+    # same structural hole, because the gate kept asking how much it parsed instead of
+    # whether anything defeated it. Counting the residue is what ends the sequence: a fifth
+    # grammar would not.
+    #
+    # `buf == ""` keeps a legitimately un-indented continuation of a list item out of the
+    # count; `isplaceholder` keeps a bare `None.` out of it. Both guards are load-bearing --
+    # dropping either one turns real approvals red.
+    lane != "" && buf == "" && /[^[:space:]]/ { if (!isplaceholder($0)) unparsed[lane]++; next }
     END {
       flush()
       if (probe == "1") {
         # An unclosed fence fails CLOSED: everything after it was skipped, so the
         # counts below describe a truncated read and must not be trusted as a verdict.
-        printf "verdicts\t%d\nverdict_line\t%d\nverdict\t%s\nblocking_section\t%s\nunclosed_fence\t%s\nblocking\t%d\nadvisory\t%d\n", \
+        printf "verdicts\t%d\nverdict_line\t%d\nverdict\t%s\nblocking_section\t%s\nunclosed_fence\t%s\nblocking\t%d\nadvisory\t%d\nblocking_unparsed\t%d\nadvisory_unparsed\t%d\n", \
           vn + 0, vline + 0, vval, (hasblocking ? "yes" : "no"), (fence ? "yes" : "no"), \
-          nblock["blocking"] + 0, nblock["advisory"] + 0
+          nblock["blocking"] + 0, nblock["advisory"] + 0, \
+          unparsed["blocking"] + 0, unparsed["advisory"] + 0
       }
     }
   ' "$f"
@@ -1500,7 +1518,7 @@ cmd_compose() {
   local legs; legs="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4 "\t" $2}' "$idx")"
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
-  local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending=""
+  local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread=""
   while IFS=$'\t' read -r ag th rnd req_mid; do
     [ -n "$ag" ] || continue
     n_legs=$((n_legs + 1))
@@ -1531,6 +1549,20 @@ cmd_compose() {
     done
     if [ -z "$reply" ]; then pending="$pending $ag"; continue; fi
     n_answered=$((n_answered + 1))
+    # A panel must never print a finding count over content it could not read. The broker
+    # refuses to STAMP such a reply, but a leg can reach compose by other routes (a
+    # self-sending agent authors its own envelope), and a partially-unreadable lane is not
+    # refusable — it has real findings AND residue, so it under-reports rather than
+    # blocking. This is the only surface that tells the driver the counts below are short.
+    # A note, never a gate: measured against this archive it would fire on roughly a third
+    # of replies that carry real findings.
+    local leg_resid
+    leg_resid="$(FINDINGS_PROBE=1 findings_extract "$reply" gating "$set_id" "" "" "" "" 2>/dev/null \
+      | awk -F'\t' '$1=="blocking_unparsed"{print $2; exit}')"
+    if [ "${leg_resid:-0}" -gt 0 ]; then
+      unread="$unread
+compose: WARNING — the Blocking section on ${ag}s leg carries ${leg_resid} line(s) this parser could not read as findings; the counts below UNDERSTATE that leg"
+    fi
     rows="$rows
 $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   done <<< "$legs"
@@ -1556,6 +1588,9 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   {
     printf '# Panel composition — review set %s\n\n' "$set_id"
     printf '%s legs, all answered. %s findings (%s blocking).\n' "$n_legs" "${total:-0}" "${blocking:-0}"
+    # Printed WITH the counts, not above them: the warning qualifies these numbers, and a
+    # reader who takes the count without the caveat is the failure being prevented.
+    [ -n "$unread" ] && printf '%s\n' "${unread# }"
     printf 'Anchored blocking findings supported by MORE THAN ONE reviewer: %s\n\n' "${corroborated:-0}"
     printf '## Gates (corroborated — an anchor two reviewers independently flagged)\n\n'
     awk -F'\t' '$13=="blocking" && $14!=""{k[$14]=k[$14] "\n- [" $9 "] " $15; who[$14]=who[$14] " " $9}
