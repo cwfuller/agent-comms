@@ -2579,19 +2579,12 @@ cmd_integrate() {
   # post-add failure leaked a REGISTERED worktree and the documented "fix and
   # re-run" recovery died on 'missing but already registered worktree'.
   # (grok, impl r2.)
-  # Cleared BEFORE the first trap is armed. The flag is global so the pre-expanded EXIT
-  # traps can read it after this function's locals are gone — but a global that is never
-  # initialised is INHERITED, and an inherited value makes cleanup release a record this
-  # run did NOT create, deleting a live peer's presence. Clearing it AFTER the trap left a
-  # window where a signal in between fired cleanup on the stale value; no uninterrupted
-  # test can see that window, which is why it is an ordering rule and not a test.
-  # (codex, panel r2 then r3, blocking twice.)
   local presence_record=""
   [ -n "$name" ] && [ -n "$instance" ] && presence_record="$(presence_dir)/$name-$instance.json"
   tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
   # shellcheck disable=SC2064
   trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
-  # `|| true` is load-bearing, and its absence was a silent-death bug: `presence beat`
+  # The guard is load-bearing, and its absence was a silent-death bug: `presence beat`
   # exits 5 when it HEALED a vanished record, which happens on every integrate run whose
   # inherited COMMS_PRESENCE_NAME/INSTANCE has no record in THIS repo — i.e. every nested
   # integrate in the test fixtures, and any operator whose presence record lives in a
@@ -2601,12 +2594,6 @@ cmd_integrate() {
   # while seven direct runs of the same commit passed. The sibling call at the end of this
   # function already guards the same way; this one did not. Presence bookkeeping is
   # advisory and must never decide a landing.
-  # Exit 5 means the record did NOT exist and this beat HEALED it into being -- so the
-  # record is OURS, and it must not outlive the run. A healed record carries no pid, and a
-  # pid-less record can never be classified dead, so `presence expire` can never reap it:
-  # left behind, it forces every future session in this repo to isolate, permanently,
-  # until a human force-expires it. Swallowing exit 5 with a bare `|| true` fixed the
-  # silent death and created that pollution instead. Tracked here, released in the traps.
   # CHECK, THEN BEAT. `presence beat` HEALS a vanished record by design, so beating an
   # identity that has no record in THIS repo manufactures one — pid-less, therefore never
   # reapable, therefore a permanent ambiguous peer for every future session. Three rounds
@@ -2732,7 +2719,13 @@ cmd_integrate() {
     # path it describes. Landing stayed fail-closed, but the operator lost the message.
     # (codex, panel r5, advisory — the same errexit class as the assignment above.)
     set +e
-    if [ -n "$name" ] && [ -n "$instance" ]; then
+    # CHECK, THEN BEAT — third site, and the one a short test cannot reach. `with-beat`'s
+    # beater sleeps TTL/3 (default 900s) and then beats, which HEALS an absent record. So
+    # wrapping a suite in it for an identity with no record here manufactures the same
+    # pid-less, unreapable record the two explicit gates prevent — just fifteen minutes in,
+    # where every fixture had already finished. A suite with no lease to refresh simply
+    # runs unwrapped. (codex + grok, integrate-beat r5, corroborated.)
+    if [ -n "$name" ] && [ -n "$instance" ] && [ -f "$presence_record" ]; then
       ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log"
       rc=${PIPESTATUS[0]}
     else
@@ -2802,10 +2795,6 @@ cmd_integrate() {
       echo "integrate: warning — could not re-attach $healed to main; it is parked detached at $expected"
     fi
   fi
-  # Same rule as the traps: a record this run HEALED into being is ours and must not
-  # outlive it. This is the SUCCESS path, which clears the trap and therefore does its own
-  # cleanup — patching only the traps left the pollution on exactly the path that matters
-  # most, the one that lands. (Found by the regression, not by reading.)
   # Same rule: only refresh a record that exists. Nothing here manufactures one.
   if [ -n "$name" ] && [ -n "$instance" ] && [ -f "$(presence_dir)/$name-$instance.json" ]; then
     "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true

@@ -6310,6 +6310,32 @@ IH5_INST="$(printf '%s' "$IH5_CLAIM" | sed -n 's/.*instance: //p')"
   && ok "a suite that merely PRINTS the heal sentence cannot make integrate release a live record" \
   || fail "spoofed suite output released a pre-existing presence record"
 
+# A LONG suite outlives the beater interval, which is where the previous fixtures could
+# not reach: `with-beat`'s beater sleeps TTL/3 and then beats, and a beat HEALS an absent
+# record. Every fixture above finishes in well under a second, so none of them could ever
+# observe it. TTL 3 makes the interval 1s; the suite runs for 4. (codex, r5, blocking.)
+IH7="$WORK/int-heal7"; mkdir -p "$IH7"; IH7="$(cd "$IH7" && pwd -P)"
+git -C "$IH7" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IH7/.gitignore"
+mkdir -p "$IH7/tests" "$IH7/.comms"
+printf 'total\t3\n' > "$IH7/tests/expected-counts.tsv"
+printf '#!/bin/bash\nsleep 4\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IH7/tests/slow.sh"
+chmod +x "$IH7/tests/slow.sh"
+printf 'suite-cmd = bash tests/slow.sh\n' > "$IH7/.comms/config"
+(cd "$IH7" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IH7" && git checkout -q -b session-primary)
+(cd "$IH7" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new slowone) >/dev/null 2>&1
+(cd "$IH7/.claude/worktrees/slowone" && echo l > k.txt && git add k.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: k") >/dev/null 2>&1
+(cd "$IH7" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 \
+    COMMS_PRESENCE_NAME=slowghost COMMS_PRESENCE_INSTANCE=77777777777777777777777777777777 \
+    "$COMMS" integrate worktree-slowone) >/dev/null 2>&1 || true
+[ "$(cd "$IH7" && git rev-parse main)" = "$(cd "$IH7" && git rev-parse worktree-slowone)" ] \
+  && ok "a suite outlasting the beat interval still lands" || fail "the slow fixture did not land"
+[ "$(find "$IH7/.comms/sessions" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
+  && ok "a suite outlasting the beat interval creates no record for an absent identity" \
+  || fail "the beater manufactured a pid-less record during a long suite"
+
 # The EXIT-trap cleanup path needs its own cover: the success path clears the trap, so the
 # regressions above never exercise the trap strings. A failing suite takes the die path.
 IH4="$WORK/int-heal4"; mkdir -p "$IH4"; IH4="$(cd "$IH4" && pwd -P)"
