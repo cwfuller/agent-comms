@@ -2345,6 +2345,15 @@ printf '### Blocking\n\n##not-a-heading but a real finding\n' > "$CORP/noboundar
 [ "$(probe_of "$CORP/noboundary.md" blocking)" = "0" ] && [ "$(probe_of "$CORP/noboundary.md" blocking_unparsed)" -gt 0 ] \
   && ok "a hash-run with no boundary is residue, not a lane closer" \
   || fail "##text closed the lane and produced a clean read"
+# A TAB is as valid an ATX boundary as a space, and the two recognizers must agree on that.
+# The lane rule matched a literal space only, so `###<TAB>Blocking` opened no lane and then
+# the generic recognizer — which DID accept the tab — closed the absent lane and discarded
+# the heading and every finding under it. Probe: blocking_section=no, no residue, explicit
+# APPROVE survives. (codex, panel r4.)
+printf '###\tBlocking\n\n- a real bug\n' > "$CORP/tabhead.md"
+[ "$(probe_of "$CORP/tabhead.md" blocking_section)" = "yes" ] && [ "$(probe_of "$CORP/tabhead.md" blocking)" = "1" ] \
+  && ok "a TAB-separated lane heading opens the lane and its findings are seen" \
+  || fail "a tab-separated ### Blocking was discarded"
 # The counter must not change WHAT is extracted: verified byte-identical across all 348
 # archived messages, so no finding_id renumbers and .comms/grades/findings.tsv needs no rebuild.
 [ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/continuation.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "1" ] \
@@ -4977,6 +4986,27 @@ printf '%s\n' "$PN_BLCOMP" | grep -q 'could not read' \
   && ok "the refusal says the count was a failed read, not a clean review" || fail "blind refusal not explained"
 printf '%s\n' "$PN_BLCOMP" | grep -q '0 blocking' \
   && fail "compose still printed a clean finding count for a blind leg" || ok "no clean count is printed for a blind leg"
+# The broker refuses an unclosed fence before it will stamp anything, because parsing STOPS
+# there and every count after it describes a truncated read. compose sees self-authored
+# envelopes the broker never touched, so it has to refuse on the same signal or the gate has
+# simply moved. (codex, panel r4.)
+PN_FNREQ="$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T17-00-00_fencereq.md"
+sed -e 's|^message_id: .*|message_id: pn-fence-req|' -e 's|^thread: .*|thread: pn-fence-thread|' \
+    "$PN_CXREQ" > "$PN_FNREQ"
+PN_FNOUT="$(run_pn panel dispatch --to claude --set pn-fence "$PN_FNREQ" 2>&1 || true)"
+PN_FNSET="$(printf '%s\n' "$PN_FNOUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+pn_fnleg="$(find "$PN_FIX/.comms/to-claude" -name '*panel-claude*' -type f | sort | tail -1)"
+pn_fnmid="$(grep -m1 '^message_id:' "$pn_fnleg" | sed 's/^message_id: //')"
+pn_fnth="$(grep -m1 '^thread:' "$pn_fnleg" | sed 's/^thread: //')"
+{ printf -- '---\ntype: review-feedback\nfrom: claude\ntimestamp: 2026-08-26T17:10:00Z\nworkspace: %s\nmessage_id: pn-fence-reply\nthread: %s\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Summary\n\n```\nan unclosed fence swallows everything after it\n\n### Blocking\n\n- a real defect nobody will ever read\n' \
+    "$PN_WS" "$pn_fnth" "$pn_fnmid"
+} > "$PN_FIX/.comms/to-codex/${PN_WS}_2026-08-26T17-10-00_fence-reply.md"
+PN_FNCOMP="$(run_pn compose --set "$PN_FNSET" 2>&1)" && PN_FNRC=0 || PN_FNRC=$?
+[ "$PN_FNRC" = "3" ] \
+  && ok "compose REFUSES a self-authored APPROVE whose body was truncated by an unclosed fence" \
+  || fail "compose gated on a truncated read (rc=$PN_FNRC)"
+printf '%s\n' "$PN_FNCOMP" | grep -q 'truncated read' \
+  && ok "the fence refusal says the read was truncated" || fail "fence refusal not explained"
 # The widened scan must still be gated by the BINDING, not by the directory: an
 # unbound reply sitting in yet another inbox is not an answer.
 PN_UBREQ="$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T15-00-00_ubreq.md"

@@ -1018,8 +1018,14 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
     # (codex, panel r3.)
     { hline = $0; hsp = 0
       while (hsp < 3 && substr(hline, 1, 1) == " ") { hline = substr(hline, 2); hsp++ } }
-    tolower(hline) ~ /^### blocking/ { flush(); lane = "blocking"; hasblocking = 1; next }
-    tolower(hline) ~ /^### advisory/ { flush(); lane = "advisory"; next }
+    # A TAB is as valid an ATX boundary as a space. Matching only a literal space meant
+    # `###<TAB>Blocking` opened no lane, then fell to the generic recognizer, which DID
+    # accept the tab as a boundary and closed the (absent) lane -- so the heading and every
+    # finding under it were discarded, probing `blocking_section=no` with no residue, and an
+    # explicit APPROVE survived. The two recognizers must agree on what a boundary is.
+    # (codex, panel r4.)
+    tolower(hline) ~ /^###[ \t]+blocking/ { flush(); lane = "blocking"; hasblocking = 1; next }
+    tolower(hline) ~ /^###[ \t]+advisory/ { flush(); lane = "advisory"; next }
     # Any other heading at the SAME level or shallower closes the lane -- `### Process`
     # never gates a verdict and is not a code finding, so it is not a graded observation.
     #
@@ -1601,11 +1607,20 @@ cmd_compose() {
     # blocking. This is the only surface that tells the driver the counts below are short.
     # A note, never a gate: measured against this archive it would fire on roughly a third
     # of replies that carry real findings.
-    local leg_probe leg_resid leg_block
+    local leg_probe leg_resid leg_block leg_fence
     leg_probe="$(FINDINGS_PROBE=1 findings_extract "$reply" gating "$set_id" "" "" "" "" 2>/dev/null)"
     leg_resid="$(printf '%s\n' "$leg_probe" | awk -F'\t' '$1=="blocking_unparsed"{print $2; exit}')"
     leg_block="$(printf '%s\n' "$leg_probe" | awk -F'\t' '$1=="blocking"{print $2; exit}')"
-    if [ "${leg_resid:-0}" -gt 0 ] && [ "${leg_block:-0}" -eq 0 ]; then
+    leg_fence="$(printf '%s\n' "$leg_probe" | awk -F'\t' '$1=="unclosed_fence"{print $2; exit}')"
+    # The broker refuses an unclosed fence and an unreadable probe before it will stamp
+    # anything; compose sees replies the broker never touched (a self-sending agent authors
+    # its own envelope), so it has to refuse on the SAME signals or the gate simply moves.
+    # An unclosed fence means parsing STOPPED there: zero blockers and zero residue describe
+    # a truncated read, not a clean review. (codex, panel r4.)
+    if [ -z "$leg_probe" ] || [ "$leg_fence" = "yes" ]; then
+      blind="$blind
+compose: ${ag}s leg could not be read to the end (${leg_fence:+unclosed code fence}${leg_fence:+; }the counts below would describe a truncated read, not a clean review): $reply"
+    elif [ "${leg_resid:-0}" -gt 0 ] && [ "${leg_block:-0}" -eq 0 ]; then
       # REFUSE, not warn. The broker applies this same rule before stamping, but a leg can
       # reach compose without passing through it — a self-sending agent authors its own
       # envelope, and a `verdict: APPROVE` over an unreadable Blocking lane passes
