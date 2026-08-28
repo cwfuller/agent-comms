@@ -783,7 +783,12 @@ was written as `blocking<TAB>tests/run.sh:4948<TAB>…` and produced
 left the same hole, because the gate kept measuring what it understood instead of what
 defeated it. The fix counts the RESIDUE: any non-blank, non-placeholder line in a findings
 lane that no rule claimed. The broker then fails closed on it in the shape `unclosed_fence`
-already established, and `compose` warns when a leg's counts are short.
+already established. `compose` applies the same rule to legs the broker never touched — a
+self-authored envelope is validated but never brokered — and the two cases differ on purpose:
+a lane with NO parsed findings plus residue, or a body truncated by an unclosed fence, is a
+failed read and REFUSES (exit 3, no count printed); a MIXED lane with real findings *and*
+residue only warns, because that leg is already REQUEST_CHANGES and refusing would block a
+correct change request over an unreadable nit.
 
 Deriving `REQUEST_CHANGES` from residue was considered and rejected — it invents a verdict
 the reviewer did not write, which the fence check already refuses to do.
@@ -794,6 +799,11 @@ refuses **zero** historical replies; the derivation gate refuses the seven true 
 The reviewers were also never actually told the rule — the ACP review prompt asked only for
 the subsections — so the prompt now states it.
 
+- [ ] **`panel status` and `compose` disagree about a leg compose refuses.** Status reports
+  the envelope verdict (`APPROVE`) for a self-authored reply whose body compose now refuses
+  as a failed read. The disagreement predates this work — status reads the stamped verdict,
+  compose reads the body — but there are now two more shapes where a driver glancing at
+  status sees a clean panel that will not compose. (grok, parser-residue r5.)
 - [ ] **A heading-shaped finding at the SAME level or shallower still probes 0/0.**
   `### The attestation is not bound…` under a live `### Blocking` closes the lane before the
   residue rule runs, exactly as `### Process` legitimately does. Depth cannot separate the

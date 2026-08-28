@@ -5007,6 +5007,26 @@ PN_FNCOMP="$(run_pn compose --set "$PN_FNSET" 2>&1)" && PN_FNRC=0 || PN_FNRC=$?
   || fail "compose gated on a truncated read (rc=$PN_FNRC)"
 printf '%s\n' "$PN_FNCOMP" | grep -q 'truncated read' \
   && ok "the fence refusal says the read was truncated" || fail "fence refusal not explained"
+printf '%s\n' "$PN_FNCOMP" | grep -q 'close the code fence' \
+  && ok "the fence refusal names the fix that matches its reason" || fail "fence refusal gave list-item advice"
+# THE TWIN: a CLOSED fence quoting a prior round is legitimate and must still compose, or the
+# refusal is over-broad and every round-2 reply that quotes round 1 stops gating.
+# (grok, panel r5 — asked for as a lock, not because a hole was found.)
+PN_CFREQ="$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T18-00-00_closedfence.md"
+sed -e 's|^message_id: .*|message_id: pn-cfence-req|' -e 's|^thread: .*|thread: pn-cfence-thread|' \
+    "$PN_CXREQ" > "$PN_CFREQ"
+PN_CFOUT="$(run_pn panel dispatch --to claude --set pn-cfence "$PN_CFREQ" 2>&1 || true)"
+PN_CFSET="$(printf '%s\n' "$PN_CFOUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+pn_cfleg="$(find "$PN_FIX/.comms/to-claude" -name '*panel-claude*' -type f | sort | tail -1)"
+pn_cfmid="$(grep -m1 '^message_id:' "$pn_cfleg" | sed 's/^message_id: //')"
+pn_cfth="$(grep -m1 '^thread:' "$pn_cfleg" | sed 's/^thread: //')"
+{ printf -- '---\ntype: review-feedback\nfrom: claude\ntimestamp: 2026-08-26T18:10:00Z\nworkspace: %s\nmessage_id: pn-cfence-reply\nthread: %s\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Summary\n\nQuoting last round:\n\n```\n### Blocking\n- an OLD blocker from round 1\n```\n\n## Findings\n\n### Blocking\n\n- None.\n\n### Advisory\n\n- None.\n' \
+    "$PN_WS" "$pn_cfth" "$pn_cfmid"
+} > "$PN_FIX/.comms/to-codex/${PN_WS}_2026-08-26T18-10-00_cfence-reply.md"
+PN_CFCOMP="$(run_pn compose --set "$PN_CFSET" 2>&1)" && PN_CFRC=0 || PN_CFRC=$?
+[ "$PN_CFRC" = "0" ] \
+  && ok "a CLOSED fence quoting a prior round still composes cleanly" \
+  || fail "the fence refusal over-fires on a legitimate quote (rc=$PN_CFRC)"
 # The widened scan must still be gated by the BINDING, not by the directory: an
 # unbound reply sitting in yet another inbox is not an answer.
 PN_UBREQ="$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T15-00-00_ubreq.md"

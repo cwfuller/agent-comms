@@ -1605,8 +1605,9 @@ cmd_compose() {
     # self-sending agent authors its own envelope), and a partially-unreadable lane is not
     # refusable — it has real findings AND residue, so it under-reports rather than
     # blocking. This is the only surface that tells the driver the counts below are short.
-    # A note, never a gate: measured against this archive it would fire on roughly a third
-    # of replies that carry real findings.
+    # Residue-only and truncated legs REFUSE (below); a MIXED lane — real findings plus
+    # residue — is the note-never-a-gate case, and it fires on roughly a third of the
+    # replies in this archive that carry real findings.
     local leg_probe leg_resid leg_block leg_fence
     leg_probe="$(FINDINGS_PROBE=1 findings_extract "$reply" gating "$set_id" "" "" "" "" 2>/dev/null)"
     leg_resid="$(printf '%s\n' "$leg_probe" | awk -F'\t' '$1=="blocking_unparsed"{print $2; exit}')"
@@ -1652,7 +1653,15 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   # reason a missing leg is not: the panel would report a clean review it never read.
   if [ -n "$blind" ]; then
     printf '%s\n' "${blind# }"
-    echo "compose: refusing to gate on a review this parser could not read; findings must be markdown list items ('- ', '* ' or '1. ')"
+    echo "compose: refusing to gate on a review this parser could not read"
+    # The remedy depends on WHY it could not be read: telling someone whose reply was cut
+    # off by a stray fence to use list items sends them at the wrong fix. (grok, panel r5.)
+    case "$blind" in
+      *"unclosed code fence"*) echo "compose: close the code fence in the named reply, or re-run that leg" ;;
+    esac
+    case "$blind" in
+      *"could not read as findings"*) echo "compose: findings must be markdown list items ('- ', '* ' or '1. ')" ;;
+    esac
     return 3
   fi
 
