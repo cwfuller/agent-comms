@@ -1460,3 +1460,27 @@ fix is to observe the thing itself.
   Needed: a durable, re-armable driver-side arrival signal — `panel status
   --notify`, a harness-owned inbox watcher that re-arms on resume, or a
   deliver-to-driver nudge for cmux-hosted drivers.
+  **Corrected and half-shipped 2026-08-27.** The premise above is wrong on DURABILITY
+  and was hiding a real defect underneath it. Every route already writes the reply into
+  the driver's inbox — the self-sending peer sends it (`runphase.sh:1085`), the broker
+  copies and sends it for grok and for ACP (`runphase.sh:793-796`, `:1299`) — from a
+  `nohup`-detached runner, and `result.json` is deliberately written LAST. So a dead
+  await loses a notification, never a verdict; field item #6 ("panel completion writes
+  to the awaiting agent's inbox, not only the run dir") asks for a write that already
+  happens on every route. Field item #5 ("awaits must drain the inbox") also loses its
+  stated justification: `cmd_await` polls `result.json` and the runner pid and has no
+  socket in the path — it is already a file-drop poller.
+  What was actually broken, and is now fixed: `panel status` and `compose` scanned the
+  archive and a **hardcoded `to-claude`**, so any panel a non-claude agent drove was
+  invisible to its own gate — replies land in the driver's inbox, both readers saw
+  nothing, and compose refused a COMPLETE panel as INCOMPLETE. One accessor
+  (`leg_reply_candidates`) now yields the archive plus every registered inbox; the
+  binding chain that decides answeredness is untouched, so the widened scan only makes a
+  bound reply reachable. Every pre-existing panel test used `from: claude`, which is why
+  it survived. And the durable record is now DISCOVERABLE: bare `panel status` lists the
+  review sets instead of usage-erroring, so a resumed session can ask what it was waiting
+  for rather than needing the set id its dead await printed.
+  Remaining, and genuinely open: **notification**. Nothing watches; a driver still has to
+  come back and look. Build it on the driver-neutral readers above — a notifier written
+  against the old `to-claude` scan would have been silent for exactly the drivers that
+  most need it.

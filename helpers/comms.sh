@@ -582,6 +582,31 @@ sorted_message_files() {
     | sort_paths_by_timestamp "$order" "$sender" "$thread"
 }
 
+# leg_reply_candidates <root> <workspace> <from-agent> <thread>
+# Every place a panel leg's reply can be sitting, archive first.
+#
+# `panel status` and `compose` both used to scan the archive and a hardcoded
+# `to-claude`, which quietly made "claude drives the loop" load-bearing in the one
+# layer that is supposed to be agent-neutral: a codex- or grok-driven panel's replies
+# land in `to-codex` / `to-grok`, so status reported `answered no` and compose refused
+# a COMPLETE panel as INCOMPLETE — a reviewer's whole turn discarded because of the
+# directory it arrived in. The directory is not identity. Identity is the round +
+# `in-reply-to` + `type` + `validate` chain both callers apply to every candidate, and
+# that chain is unchanged here; widening the scan only makes a bound reply REACHABLE.
+#
+# Archive stays first so ordering semantics are identical for the common case, and the
+# registry read uses the capture-then-check idiom: `for a in $(registry_agents)`
+# swallows a failing substitution, which would silently narrow the scan back to
+# archive-only — a quieter version of the bug this exists to fix.
+leg_reply_candidates() {
+  local root="$1" ws="$2" ag="$3" th="$4" a reg
+  reg="$(registry_agents)" || exit 2
+  sorted_message_files "$root/.comms/archive" "$ws" "$ag" "$th" newest
+  for a in $reg; do
+    sorted_message_files "$root/.comms/$(inbox_for "$a")" "$ws" "$ag" "$th" newest
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Bounded reads — `lessons` and `archive-search`
 #
@@ -1268,9 +1293,29 @@ cmd_panel() {
       case "$1" in --set) shift; set_id="${1:-}" ;; -?*) usage_err "panel status: unknown option '$(clip "$1")'" ;; esac
       shift
     done
-    [ -n "$set_id" ] || usage_err "panel status: --set <id> is required"
     local idx; idx="$(findings_set_index "$root")"
     [ -f "$idx" ] || { emit_diagnostic "panel: no review sets recorded yet"; return 0; }
+    # Bare `panel status` LISTS the sets. The durable record already survives the
+    # driver's death — every route writes the reply into the driver's inbox before
+    # result.json, and sets.tsv is append-only — but until now nothing could enumerate
+    # it, so a resumed session had to already know the set id it was waiting for. That
+    # made a recoverable panel unrecoverable in practice: an await dies with its
+    # process, and the id it printed died with the scrollback.
+    #
+    # This is a pure read of sets.tsv — no message is opened and no leg is resolved, so
+    # the listing cannot be wrong about state it did not inspect. `--set <id>` answers
+    # who has replied; this answers which sets exist. Newest last in an append-only
+    # file, so it is walked backwards rather than by parsing timestamps.
+    if [ -z "$set_id" ]; then
+      printf 'set\tphase\tround\tlegs\tcreated\n'
+      awk -F'\t' 'NR>1 && $1!="" {
+        if (!($1 in seen)) { seen[$1]=1; order[++n]=$1; ph[$1]=$5; rd[$1]=$4; cr[$1]=$13 }
+        legs[$1]++
+      }
+      END { for (i=n; i>=1; i--) { k=order[i]; printf "%s\t%s\t%s\t%s\t%s\n", k, ph[k], rd[k], legs[k], cr[k] } }' "$idx"
+      emit_diagnostic "panel: 'panel status --set <id>' shows each leg's reply and verdict"
+      return 0
+    fi
     # Resolve the workspace ONCE — per-candidate calls also re-emit the resolver's
     # stderr warning per leg, which interleaves into 2>&1 captures of this table.
     local status_ws; status_ws="$(cmd_workspace)"
@@ -1282,8 +1327,7 @@ cmd_panel() {
     awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4 "\t" $2}' "$idx" | while IFS=$'\t' read -r ag th rnd req_mid; do
       [ -n "$ag" ] || continue
       local reply="" verdict="" answered=no cand
-      for cand in $(sorted_message_files "$root/.comms/archive" "$status_ws" "$ag" "$th" newest) \
-                  $(sorted_message_files "$root/.comms/to-claude" "$status_ws" "$ag" "$th" newest); do
+      for cand in $(leg_reply_candidates "$root" "$status_ws" "$ag" "$th"); do
         [ -f "$cand" ] || continue
         [ -z "$rnd" ] || [ "$(frontmatter_field "$cand" round)" = "$rnd" ] || continue
         [ -z "$req_mid" ] || [ "$(frontmatter_field "$cand" in-reply-to)" = "$req_mid" ] || continue
@@ -1441,8 +1485,7 @@ cmd_compose() {
     [ -n "$ag" ] || continue
     n_legs=$((n_legs + 1))
     reply=""
-    for cand in $(sorted_message_files "$root/.comms/archive" "$ws" "$ag" "$th" newest) \
-                $(sorted_message_files "$root/.comms/to-claude" "$ws" "$ag" "$th" newest); do
+    for cand in $(leg_reply_candidates "$root" "$ws" "$ag" "$th"); do
       [ -f "$cand" ] || continue
       # Same round, or nothing. A reply from an earlier round answers an earlier
       # question.

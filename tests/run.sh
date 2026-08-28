@@ -4463,6 +4463,72 @@ printf '%s\n' "$PN_STAT2" | awk -F'\t' 'NR>1 && $3=="yes"' | grep -q . \
   && fail "panel status counted another request's reply as answered" \
   || ok "panel status never reports a stale or unbound reply as answered"
 
+# DRIVER-NEUTRAL ARRIVAL. `panel status` and `compose` scanned the archive and a
+# HARDCODED to-claude, so every panel a non-claude agent drove was invisible to its own
+# gate: the replies land in the DRIVER's inbox (to-codex here), both readers saw an
+# empty leg, and compose refused a complete panel as INCOMPLETE — a paid-for review
+# discarded over the directory it arrived in. Every existing panel test uses
+# `from: claude`, which is exactly why this survived.
+PN_CXREQ="$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T14-00-00_cxreq.md"
+sed -e 's|^from: claude|from: codex|' -e 's|^message_id: .*|message_id: pn-cx-req|' \
+    -e 's|^thread: .*|thread: pn-cx-thread|' "$PN_REQ" > "$PN_CXREQ"
+PN_CXOUT="$(run_pn panel dispatch --to claude,grok --set pn-cxdriver "$PN_CXREQ" 2>&1 || true)"
+PN_CXSET="$(printf '%s\n' "$PN_CXOUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ -n "$PN_CXSET" ] && ok "a codex-driven panel dispatches" || fail "codex-driven dispatch (got: $PN_CXOUT)"
+# Answer both legs into the DRIVER's inbox, bound exactly as a real reply is.
+PN_CX_ANSWERED=0
+for pn_ag in claude grok; do
+  # Earlier sections already dispatched grok legs into this fixture, so take the
+  # NEWEST leg (filenames are timestamp-sorted) — head -1 binds the reply to a
+  # stale request and the leg then correctly reads unanswered.
+  pn_leg="$(find "$PN_FIX/.comms/to-$pn_ag" -name "*panel-$pn_ag*" -type f | sort | tail -1)"
+  [ -n "$pn_leg" ] || { fail "no $pn_ag leg for the codex-driven panel"; continue; }
+  pn_mid="$(grep -m1 '^message_id:' "$pn_leg" | sed 's/^message_id: //')"
+  pn_th="$(grep -m1 '^thread:' "$pn_leg" | sed 's/^thread: //')"
+  { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T14:10:00Z\nworkspace: %s\nmessage_id: pn-cx-reply-%s\nthread: %s\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' \
+      "$pn_ag" "$PN_WS" "$pn_ag" "$pn_th" "$pn_mid"
+  } > "$PN_FIX/.comms/to-codex/${PN_WS}_2026-08-26T14-10-0${PN_CX_ANSWERED}_${pn_ag}-cxreply.md"
+  PN_CX_ANSWERED=$((PN_CX_ANSWERED + 1))
+done
+PN_CXSTAT="$(run_pn panel status --set "$PN_CXSET" 2>&1)"
+[ "$(printf '%s\n' "$PN_CXSTAT" | awk -F'\t' 'NR>1 && $3=="yes"' | grep -c .)" = "2" ] \
+  && ok "panel status sees replies in a NON-claude driver's inbox" \
+  || fail "status missed a codex-driven panel's replies (got: $PN_CXSTAT)"
+PN_CXCOMP="$(run_pn compose --set "$PN_CXSET" 2>&1)" && PN_CXRC=0 || PN_CXRC=$?
+[ "$PN_CXRC" = "0" ] && printf '%s\n' "$PN_CXCOMP" | grep -q 'all answered' \
+  && ok "compose completes a codex-driven panel" \
+  || fail "compose refused a complete codex-driven panel (rc=$PN_CXRC, got: $(printf '%s' "$PN_CXCOMP" | head -2))"
+# The widened scan must still be gated by the BINDING, not by the directory: an
+# unbound reply sitting in yet another inbox is not an answer.
+PN_UBREQ="$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T15-00-00_ubreq.md"
+sed -e 's|^message_id: .*|message_id: pn-ub-req|' -e 's|^thread: .*|thread: pn-ub-thread|' \
+    "$PN_CXREQ" > "$PN_UBREQ"
+PN_UBOUT="$(run_pn panel dispatch --to claude --set pn-unbound "$PN_UBREQ" 2>&1 || true)"
+PN_UBSET="$(printf '%s\n' "$PN_UBOUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ -n "$PN_UBSET" ] && ok "the unbound-reply fixture dispatched" || fail "unbound fixture dispatch (got: $PN_UBOUT)"
+pn_ubleg="$(find "$PN_FIX/.comms/to-claude" -name '*panel-claude*' -type f | sort | tail -1)"
+pn_ubth="$(grep -m1 '^thread:' "$pn_ubleg" | sed 's/^thread: //')"
+{ printf -- '---\ntype: review-feedback\nfrom: claude\ntimestamp: 2026-08-26T15:10:00Z\nworkspace: %s\nmessage_id: pn-ub-reply\nthread: %s\nin-reply-to: some-other-request\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' \
+    "$PN_WS" "$pn_ubth"
+} > "$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T15-10-00_claude-ubreply.md"
+PN_UBSTAT="$(run_pn panel status --set "$PN_UBSET" 2>&1)"
+printf '%s\n' "$PN_UBSTAT" | awk -F'\t' 'NR>1 && $3=="yes"' | grep -q . \
+  && fail "an unbound reply in another inbox counted as an answer" \
+  || ok "the widened scan still refuses an unbound reply (binding, not directory)"
+
+# DISCOVERABILITY: an await dies with its session and takes the printed set id with it.
+# sets.tsv is durable, so bare `panel status` enumerates it instead of usage-erroring.
+PN_LIST="$(run_pn panel status 2>/dev/null)"
+printf '%s\n' "$PN_LIST" | head -1 | grep -q '^set' \
+  && ok "bare panel status prints a set listing header" || fail "bare panel status header (got: $(printf '%s' "$PN_LIST" | head -1))"
+printf '%s\n' "$PN_LIST" | awk -F'\t' -v s="$PN_CXSET" 'NR>1 && $1==s' | grep -q . \
+  && ok "bare panel status lists a dispatched set by id" || fail "set $PN_CXSET missing from the listing"
+[ "$(printf '%s\n' "$PN_LIST" | awk -F'\t' -v s="$PN_CXSET" 'NR>1 && $1==s {print $4}')" = "2" ] \
+  && ok "the listing counts both legs of the set" \
+  || fail "leg count wrong (got: $(printf '%s\n' "$PN_LIST" | awk -F'\t' -v s="$PN_CXSET" 'NR>1 && $1==s {print $4}'))"
+[ "$(printf '%s\n' "$PN_LIST" | awk -F'\t' 'NR>1' | grep -c .)" = "$(awk -F'\t' 'NR>1 && $1!="" {print $1}' "$PN_FIX/.comms/grades/sets.tsv" | sort -u | grep -c .)" ] \
+  && ok "the listing has exactly one row per review set" || fail "set listing is not deduplicated"
+
 echo "== ask: the driver-neutral consult verb =="
 AK="$WORK/ask-repo"; mkdir -p "$AK"; AK="$(cd "$AK" && pwd -P)"
 git -C "$AK" init -q -b main

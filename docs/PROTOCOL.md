@@ -357,6 +357,17 @@ shadows retries for other threads, so pass an explicit file to retry a specific 
 The spawned peer is pre-briefed that its reply `send` will report `RESULT: manual` and
 that this is expected — the driving session picks the reply up when the turn ends.
 
+**The inbox is the system of record; an await is only a convenience.** On every route the
+reply is written into the DRIVER's inbox by the detached runner before `result.json`
+exists — a self-sending peer sends it itself, a parent-brokered one has the broker copy
+and send it — so a driver that dies mid-turn loses its await, never the reply. Recovery is
+therefore a read, not a re-run: `comms.sh panel status` with no `--set` lists the review
+sets from the durable append-only index, `panel status --set <id>` shows each leg's reply
+and verdict, and `compose --set <id>` gates. Both readers scan the archive and **every
+registered agent's inbox**, so which agent drove the panel does not change what they can
+see; a leg is answered by the round + `in-reply-to` + `type` + validation binding, never by
+the directory a message arrived in.
+
 Sandbox: a Codex turn runs `codex exec -s workspace-write` from the message's `cwd` (or
 the main repo root); a Claude turn relies on its permission policy. For worktree turns,
 `.comms/` and the main `.git/` are added via `--add-dir` so the reply and branch
