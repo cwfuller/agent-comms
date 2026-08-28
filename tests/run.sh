@@ -1,3 +1,10 @@
+SECTION_GOLDEN_F="$WORK/section-golden.tsv"
+git -C "$REPO" show "${TESTED_OID:-missing}:tests/section-counts.tsv" > "$SECTION_GOLDEN_F" 2>/dev/null || : > "$SECTION_GOLDEN_F"
+section_vector_verdict "$SECTION_GOLDEN_F" "$SECTION_VECTOR" || COVERAGE_OK=0
+# A working-tree edit is not authoritative here either — same rule, same reason.
+if [ -f "$REPO/tests/section-counts.tsv" ] && ! git -C "$REPO" diff --quiet HEAD -- tests/section-counts.tsv 2>/dev/null; then
+  echo "COVERAGE: tests/section-counts.tsv is modified; the COMMITTED vector is authoritative." >&2
+fi
 #!/bin/bash
 # agent-comms test harness — repeatable checks for the shared helpers and installer.
 # Stubs cmux with a fake binary (canned tree output + call log) so picker/delivery
@@ -70,7 +77,32 @@ SEC_N=0; SEC_NAME=""; SEC_PASS=0; SEC_SKIP=0; SECTION_VECTOR=""
 _flush_section() {
   [ -n "$SEC_NAME" ] || return 0
   [ -n "$SECTION_VECTOR" ] || return 0
-  printf '%s\t%s\t%s\t%s\n' "$SEC_N" "$SEC_PASS" "$SEC_SKIP" "$SEC_NAME" >> "$SECTION_VECTOR"
+  # COVERED = pass + skip. A permitted skip REPLACES a pass, so pinning the two columns
+  # separately would make every host that legitimately cashes a ticket red — the ACL and
+  # secondary-group tickets do exactly that on Linux. Coverage is what this vector is
+  # for; which side of the pass/skip line a covered assertion fell on is the total gate's
+  # business, and the skip contract's. (codex + grok, suite-lanes r1, blocking.)
+  #
+  # Keyed on the BANNER, not the execution ordinal: a lane running a subset renumbers from
+  # 1 and could never match a 62-row ordinal golden even when every count is right.
+  # (codex + grok, suite-lanes r1, advisory — and a prerequisite for the dispatcher.)
+  printf '%s\t%s\n' "$SEC_NAME" "$((SEC_PASS + SEC_SKIP))" >> "$SECTION_VECTOR"
+}
+# The vector check as a FUNCTION, so the suite can execute the real thing against
+# adversarial inputs instead of asserting on a reimplementation — the same lesson the
+# total gate learned. Returns 0 only when every section's covered count matches.
+section_vector_verdict() { # <golden-text-file> <observed-file>
+  local g="$1" o="$2"
+  [ -s "$g" ] || { echo "COVERAGE: the per-section golden is empty or missing — refusing" >&2; return 1; }
+  [ -s "$o" ] || { echo "COVERAGE: no per-section vector was produced — refusing" >&2; return 1; }
+  if ! diff -q <(sort "$g") <(sort "$o") >/dev/null 2>&1; then
+    echo "COVERAGE: the per-section covered counts do not match the committed vector." >&2
+    echo "COVERAGE: assertions moved between sections, or a section was added or removed." >&2
+    diff <(sort "$g") <(sort "$o") 2>&1 | head -12 >&2
+    echo "COVERAGE: if that change is intended, update tests/section-counts.tsv in the SAME commit." >&2
+    return 1
+  fi
+  return 0
 }
 # PER-SECTION ACCOUNTING. The total count proves the corpus did not SHRINK; it cannot see
 # assertions MOVING between sections, which is exactly what a section-function wrap or a
@@ -6065,6 +6097,25 @@ grep -q 'if \[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \] && \[ -n "${TESTED
   && ok "the attestation requires coverage too" || fail "attestation mint has no coverage conjunct"
 [ -s "$REPO/tests/expected-counts.tsv" ] \
   && ok "the expected-coverage contract is committed" || fail "tests/expected-counts.tsv missing"
+[ -s "$REPO/tests/section-counts.tsv" ] \
+  && ok "the per-section vector is committed" || fail "tests/section-counts.tsv missing"
+# The per-section verdict, run for real. A permitted skip REPLACES a pass, so a section
+# whose pass/skip split changes but whose COVERED count does not must still match — that
+# is the Linux-host case (four ACL tickets) the first shape wrongly refused.
+SV_G="$WORK/sv-golden"; SV_O="$WORK/sv-observed"
+printf 'alpha\t8\nbeta\t41\n' > "$SV_G"
+printf 'alpha\t8\nbeta\t41\n' > "$SV_O"
+section_vector_verdict "$SV_G" "$SV_O" && ok "an identical vector is accepted" || fail "an identical vector was refused"
+printf 'beta\t41\nalpha\t8\n' > "$SV_O"
+section_vector_verdict "$SV_G" "$SV_O" && ok "the vector is keyed on the banner, not on run order" || fail "reordering broke the banner-keyed compare"
+printf 'alpha\t7\nbeta\t42\n' > "$SV_O"
+section_vector_verdict "$SV_G" "$SV_O" 2>/dev/null && fail "an assertion moved between sections was accepted" || ok "an assertion moved between sections is refused"
+printf 'alpha\t8\n' > "$SV_O"
+section_vector_verdict "$SV_G" "$SV_O" 2>/dev/null && fail "a missing section was accepted" || ok "a missing section is refused"
+: > "$SV_O"
+section_vector_verdict "$SV_G" "$SV_O" 2>/dev/null && fail "an empty vector was accepted" || ok "an empty vector is refused"
+: > "$SV_G"
+section_vector_verdict "$SV_G" "$SV_O" 2>/dev/null && fail "an absent golden was accepted" || ok "an absent per-section golden is refused"
 # Exercise the REAL gate function against adversarial inputs. An earlier version of
 # this block reimplemented one branch inline and hardcoded its variables, so it could
 # not have caught the out-of-range case below. (codex, panel r1.)

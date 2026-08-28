@@ -165,7 +165,7 @@ removed (505s → 326s on identical trees; the rest of the difference is new ass
 deliberately spend ~25s exercising that wait) — and reducing it further is active work; see
 the "Suite runtime" subsection of
 `docs/ROADMAP.md`, which now carries the full profile. The cost is concentrated, not
-spread: ten of the 59 sections accounted for ~87% of the original runtime, and spawn
+spread: ten of the 62 sections accounted for ~87% of the original runtime, and spawn
 overhead is ~5%, not the dominant term it was once estimated to be.
 
 - A **fully green** run records an attestation for the exact commit it started on
