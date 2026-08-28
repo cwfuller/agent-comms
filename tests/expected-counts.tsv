@@ -1,2 +1,7 @@
-total	1035
+total	1041
 skip_ok	zsh-absent
+skip_ok	group-no-secondary
+skip_ok	acl-report
+skip_ok	acl-xattr-fixture
+skip_ok	acl-behind-xattr
+skip_ok	acl-xattr-only

@@ -2536,6 +2536,12 @@ cmd_integrate() {
     # cannot be diagnosed, which cost a full investigation earlier in this arc.
     local suite_log; suite_log="$root/.comms/logs/integrate-${cand}.suite.log"
     mkdir -p "$root/.comms/logs" 2>/dev/null || true
+    # errexit is suspended ACROSS the pipeline: with `set -e -o pipefail` a red suite
+    # terminates the helper AT the pipeline, so `rc=${PIPESTATUS[0]}` never runs and the
+    # "suite FAILED ... output kept at ..." diagnostic below is unreachable on exactly the
+    # path it describes. Landing stayed fail-closed, but the operator lost the message.
+    # (codex, panel r5, advisory — the same errexit class as the assignment above.)
+    set +e
     if [ -n "$name" ] && [ -n "$instance" ]; then
       ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log"
       rc=${PIPESTATUS[0]}
@@ -2543,6 +2549,7 @@ cmd_integrate() {
       ( cd "$tw" && "${clean_env[@]}" "$@" ) 2>&1 | tee "$suite_log"
       rc=${PIPESTATUS[0]}
     fi
+    set -e
     [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log"
     # POSITIVE PROOF, not merely an absence of failure. A scrub is a blocklist and the
     # next startup hook will not be on it, so require evidence the suite actually RAN:

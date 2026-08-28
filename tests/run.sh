@@ -91,6 +91,14 @@ skip() { # skip <id> <desc> — permitted, CONDITION-BOUND, and single-use
       if command -v zsh >/dev/null 2>&1; then
         fail "$2 (skip id 'zsh-absent' claimed, but zsh IS installed)"; return
       fi ;;
+    group-no-secondary)
+      if [ "${GRP_PRESERVE_OK:-0}" = 1 ]; then
+        fail "$2 (skip id 'group-no-secondary' claimed, but the group probe SUCCEEDED)"; return
+      fi ;;
+    acl-*)
+      if [ "${ACL_PROBE_OK:-0}" = 1 ]; then
+        fail "$2 (skip id '$1' claimed, but the ACL probe SUCCEEDED)"; return
+      fi ;;
     *) fail "$2 (skip id '$1' has no registered condition)"; return ;;
   esac
   SKIP_USED="$SKIP_USED$1 "
@@ -674,12 +682,17 @@ grp_of() { stat -f '%g' "$1" 2>/dev/null || stat -c '%g' "$1" 2>/dev/null; }
 PARENT_G="$(grp_of "$GH_GRP/commands")"
 ALT_G="$(id -G | tr ' ' '\n' | grep -v "^${PARENT_G}$" | head -1)"
 if [ -n "$ALT_G" ] && chgrp "$ALT_G" "$GH_GRP/commands/auto.md" 2>/dev/null; then
+  GRP_PRESERVE_OK=1
   (umask 022; gh_install "$GH_GRP" >/dev/null 2>&1)
   [ "$(grp_of "$GH_GRP/commands/auto.md")" = "$ALT_G" ] \
     && ok "an upgrade preserves a group the temp could not have inherited" \
     || fail "group fell back to the directory's ($(grp_of "$GH_GRP/commands/auto.md"), want $ALT_G)"
 else
-  emit_note "install: no usable secondary group — group-preservation assertion skipped"
+  # An uncounted `note` here made the corpus size machine-dependent, so a fixed contract
+  # would refuse forever on any host without a usable secondary group. Accounted, not
+  # narrated. (codex, panel r5, blocking.)
+  GRP_PRESERVE_OK=0
+  skip group-no-secondary "an upgrade preserves a group the temp could not have inherited — no usable secondary group here"
 fi
 # ...and when ownership CANNOT be restored, the install must FAIL rather than publish the
 # file under the wrong group and exit 0. A privileged group cannot be created hermetically,
@@ -711,6 +724,7 @@ ls -A "$GH_GRP/commands" | grep -q '^\.agent-comms-install\.' \
 GH_ACL="$WORK/ghome-acl"
 gh_install "$GH_ACL" >/dev/null 2>&1
 if chmod +a "everyone deny read" "$GH_ACL/commands/auto.md" 2>/dev/null; then
+  ACL_PROBE_OK=1
   ACL_OUT="$(gh_install "$GH_ACL" 2>&1 || true)"
   printf '%s\n' "$ACL_OUT" | grep -q 'carries an ACL' \
     && ok "an ACL-only destination is reported" || fail "ACL not reported (got: $(printf '%s' "$ACL_OUT" | tail -2))"
@@ -732,7 +746,15 @@ if chmod +a "everyone deny read" "$GH_ACL/commands/auto.md" 2>/dev/null; then
     && fail "extended attributes alone were reported as an ACL" \
     || ok "extended attributes alone are not reported as an ACL"
 else
-  emit_note "install: ACLs unsupported here — ACL-detection assertions skipped"
+  # Four assertions live in the branch above. On a host without Darwin-style `chmod +a`
+  # (every Linux box) an uncounted note dropped all four, and the fixed contract would
+  # then refuse every run there. One named skip per omitted assertion.
+  # (codex, panel r5, blocking.)
+  ACL_PROBE_OK=0
+  skip acl-report "an ACL-only destination is reported — ACLs unsupported here"
+  skip acl-xattr-fixture "the xattr+ACL destination really does mask the + marker — ACLs unsupported here"
+  skip acl-behind-xattr "an ACL is still reported when extended attributes mask the marker — ACLs unsupported here"
+  skip acl-xattr-only "extended attributes alone are not reported as an ACL — ACLs unsupported here"
 fi
 
 echo "== comms.sh v2: thread filter + verdict normalization + error lane =="
@@ -5787,6 +5809,65 @@ case "$TP_OUT" in
   *kept.md*)      ok "index enumeration lists tracked files and ignores untracked ones" ;;
   *)              fail "index enumeration listed nothing (got: $TP_OUT)" ;;
 esac
+
+echo "== integrate: an exit status is not proof the suite ran =="
+# Source greps proved the scrub EXISTS; these prove it WORKS. The attack: a shell-startup
+# hook is sourced by non-interactive bash BEFORE the script's first line, so every guard
+# the suite installs is too late. A hook that exits only for the zero-argument suite
+# invocation leaves the argument-bearing helper untouched, so integrate sees exit 0 and
+# an unchanged tree. (codex, panel r4/r5, blocking then advisory.)
+IP="$WORK/int-proof"; mkdir -p "$IP"; IP="$(cd "$IP" && pwd -P)"
+git -C "$IP" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IP/.gitignore"
+mkdir -p "$IP/tests" "$IP/.comms"
+printf 'total\t3\n' > "$IP/tests/expected-counts.tsv"
+printf '#!/bin/bash\nexit 0\n' > "$IP/tests/silent.sh"
+printf '#!/bin/bash\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IP/tests/loud.sh"
+chmod +x "$IP/tests/silent.sh" "$IP/tests/loud.sh"
+(cd "$IP" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IP" && git checkout -q -b session-primary)
+run_ip() { (cd "$IP" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_ip worktree new proofone >/dev/null 2>&1
+(cd "$IP/.claude/worktrees/proofone" && echo x > c.txt && git add c.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: c") >/dev/null 2>&1
+
+# A suite that exits 0 having printed nothing is not evidence of anything.
+printf 'suite-cmd = bash tests/silent.sh\n' > "$IP/.comms/config"
+IP_OUT="$(run_ip integrate worktree-proofone 2>&1 || true)"
+case "$IP_OUT" in
+  *"emitted no completion line"*) ok "integrate refuses a suite that exited 0 without running" ;;
+  *) fail "integrate accepted a silent exit-0 suite (got: $(printf '%s' "$IP_OUT" | tail -1))" ;;
+esac
+[ "$(cd "$IP" && git rev-parse main)" != "$(cd "$IP" && git rev-parse worktree-proofone)" ] \
+  && ok "the silent suite did not land" || fail "the silent suite landed"
+
+# CONTROL: the hook must actually be capable of silencing the suite, or the scrub test
+# below proves nothing. NOTE the discriminator: a BASH_ENV hook sees $0=bash, $#=0 and no
+# argv no matter what script is about to run (probed), so it CANNOT select the suite by
+# its arguments. It can select by CWD — integrate runs the suite inside its throwaway
+# `.claude/worktrees/.integrate-*` worktree while the helper runs from the repo root —
+# which targets exactly the suite invocation and leaves comms.sh itself working.
+printf 'case "$PWD" in *"/.claude/worktrees/.integrate-"*) exit 0 ;; esac\n' > "$WORK/hostile-bashenv.sh"
+mkdir -p "$IP/.claude/worktrees/.integrate-probe"
+HOSTILE_OUT="$( (cd "$IP/.claude/worktrees/.integrate-probe" && BASH_ENV="$WORK/hostile-bashenv.sh" bash "$IP/tests/loud.sh") 2>&1 || true )"
+[ -z "$HOSTILE_OUT" ] \
+  && ok "the startup hook does silence an unscrubbed suite (control)" \
+  || fail "the hook did not silence the suite — the scrub test below would prove nothing"
+HOSTILE_OK="$( (cd "$IP" && BASH_ENV="$WORK/hostile-bashenv.sh" bash "$IP/tests/loud.sh") 2>&1 || true )"
+case "$HOSTILE_OK" in
+  *"passed: 3"*) ok "the same hook leaves invocations outside the verification tree alone" ;;
+  *) fail "the hook is indiscriminate — it would break the helper too, not just the suite" ;;
+esac
+rmdir "$IP/.claude/worktrees/.integrate-probe" 2>/dev/null || true
+
+# ...and with the hook inherited, integrate scrubs it, the real suite runs, and it lands.
+printf 'suite-cmd = bash tests/loud.sh\n' > "$IP/.comms/config"
+IP_OUT2="$( (cd "$IP" && env -u CMUX_WORKSPACE_ID BASH_ENV="$WORK/hostile-bashenv.sh" "$COMMS" integrate worktree-proofone) 2>&1 || true )"
+[ "$(cd "$IP" && git rev-parse main)" = "$(cd "$IP" && git rev-parse worktree-proofone)" ] \
+  && ok "an inherited startup hook is scrubbed and the real suite still runs" \
+  || fail "the startup hook defeated the landing (got: $(printf '%s' "$IP_OUT2" | tail -2))"
+[ -n "$(find "$IP/.comms/logs" -name 'integrate-*.suite.log' -type f 2>/dev/null | head -1)" ] \
+  && ok "integrate kept the output of the run it judged" || fail "integrate discarded the suite output"
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
