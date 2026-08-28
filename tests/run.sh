@@ -6217,6 +6217,23 @@ IP_OUT2="$( (cd "$IP" && env -u CMUX_WORKSPACE_ID BASH_ENV="$WORK/hostile-bashen
 grep -rq 'passed: 3  failed: 0  skipped: 0' "$IP/.comms/logs" 2>/dev/null \
   && ok "integrate kept the output of the run it judged" || fail "the kept log is not the run that landed"
 
+# An inherited presence identity whose record does not exist in THIS repo must not kill
+# the landing. `presence beat` exits 5 when it HEALS a vanished record, and under `set -e`
+# an unguarded advisory beat aborted integrate before its FIRST LINE of output — no
+# diagnostic, no candidate line, nothing. AGENTS.md tells every session to export
+# COMMS_PRESENCE_NAME/INSTANCE, so this fired for every nested integrate here and for any
+# operator whose record lives in a different checkout. It is what made an integrate-hosted
+# suite run fail three of its own integrate tests while direct runs of the same commit
+# passed repeatedly. Presence bookkeeping is advisory; it must never decide a landing.
+IP_HEAL="$( (cd "$IP" && env -u CMUX_WORKSPACE_ID \
+    COMMS_PRESENCE_NAME=no-such-session COMMS_PRESENCE_INSTANCE=00000000000000000000000000000000 \
+    "$COMMS" integrate worktree-proofone) 2>&1 || true )"
+case "$IP_HEAL" in
+  "") fail "integrate died silently under an inherited presence identity with no local record" ;;
+  *"integrate: candidate"*) ok "an inherited presence identity with no local record does not kill the landing" ;;
+  *) fail "integrate produced unexpected output under a healed presence record: $(printf '%s' "$IP_HEAL" | head -1)" ;;
+esac
+
 # A hook that INTERPOSES on the scrub command itself: `env` as a shell function takes
 # precedence over the builtin and PATH, so an unpinned scrub would call the forgery
 # instead of scrubbing, and the forged completion line would satisfy the positive proof.

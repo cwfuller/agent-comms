@@ -2582,7 +2582,17 @@ cmd_integrate() {
   tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
   # shellcheck disable=SC2064
   trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; [ -n '$name' ] && '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true" EXIT
-  [ -n "$name" ] && [ -n "$instance" ] && "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1
+  # `|| true` is load-bearing, and its absence was a silent-death bug: `presence beat`
+  # exits 5 when it HEALED a vanished record, which happens on every integrate run whose
+  # inherited COMMS_PRESENCE_NAME/INSTANCE has no record in THIS repo — i.e. every nested
+  # integrate in the test fixtures, and any operator whose presence record lives in a
+  # different checkout. Under `set -e` that aborted integrate before its first line of
+  # output, so the failure had no diagnostic at all and read as "integrate did nothing".
+  # This is what made an integrate-hosted suite run fail three of its own integrate tests
+  # while seven direct runs of the same commit passed. The sibling call at the end of this
+  # function already guards the same way; this one did not. Presence bookkeeping is
+  # advisory and must never decide a landing.
+  { [ -n "$name" ] && [ -n "$instance" ] && "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1; } || true
   expected="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" || die "integrate: no refs/heads/main"
   cand="$(git -C "$root" rev-parse --verify "$branch^{commit}" 2>/dev/null)" || die "integrate: cannot resolve '$branch'"
   echo "integrate: candidate $cand (from $branch), expected main $expected"
