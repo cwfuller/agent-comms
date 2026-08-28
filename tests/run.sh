@@ -2332,6 +2332,19 @@ printf '### Blocking\n\n- a real bug\nan unindented gap line\n  an indented tail
   || fail "claim text drifted: $("$REPO/helpers/comms.sh" findings --raw "$CORP/sandwich.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{print $15}')"
 [ "$(probe_of "$CORP/sandwich.md" blocking_unparsed)" = "2" ] \
   && ok "both stray lines are counted as residue" || fail "sandwich residue count wrong ($(probe_of "$CORP/sandwich.md" blocking_unparsed))"
+# ATX headings may carry up to three leading spaces. Requiring column zero meant an indented
+# `### Blocking` opened no lane at all — its findings were invisible and an explicit APPROVE
+# passed the cross-check over them. (codex, panel r3.)
+printf 'VERDICT: APPROVE\n\n   ### Blocking\n\n   - a real bug\n' > "$CORP/indenthead.md"
+[ "$(probe_of "$CORP/indenthead.md" blocking_section)" = "yes" ] && [ "$(probe_of "$CORP/indenthead.md" blocking)" = "1" ] \
+  && ok "an indented ### Blocking still opens the lane and its findings are seen" \
+  || fail "an indented heading hid a real finding"
+# ...and a run of hashes with no boundary is NOT a heading: ATX requires a space or end of
+# line after them. Treating `##text` as one closed a live lane — another 0/0 consent path.
+printf '### Blocking\n\n##not-a-heading but a real finding\n' > "$CORP/noboundary.md"
+[ "$(probe_of "$CORP/noboundary.md" blocking)" = "0" ] && [ "$(probe_of "$CORP/noboundary.md" blocking_unparsed)" -gt 0 ] \
+  && ok "a hash-run with no boundary is residue, not a lane closer" \
+  || fail "##text closed the lane and produced a clean read"
 # The counter must not change WHAT is extracted: verified byte-identical across all 348
 # archived messages, so no finding_id renumbers and .comms/grades/findings.tsv needs no rebuild.
 [ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/continuation.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "1" ] \
@@ -4940,6 +4953,30 @@ PN_CXCOMP="$(run_pn compose --set "$PN_CXSET" 2>&1)" && PN_CXRC=0 || PN_CXRC=$?
 [ "$PN_CXRC" = "0" ] && printf '%s\n' "$PN_CXCOMP" | grep -q 'all answered' \
   && ok "compose completes a codex-driven panel" \
   || fail "compose refused a complete codex-driven panel (rc=$PN_CXRC, got: $(printf '%s' "$PN_CXCOMP" | head -2))"
+# COMPOSE MUST REFUSE A BLIND LEG. The broker applies the residue rule before stamping, but
+# a self-sending agent authors its own envelope, so a `verdict: APPROVE` over an unreadable
+# Blocking lane reaches compose unchecked, passes cmd_validate, and composes as
+# "0 findings (0 blocking)" with empty gates — the same false all-clear one layer out.
+# (codex, panel r3.)
+PN_BLREQ="$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T16-00-00_blindreq.md"
+sed -e 's|^message_id: .*|message_id: pn-blind-req|' -e 's|^thread: .*|thread: pn-blind-thread|' \
+    "$PN_CXREQ" > "$PN_BLREQ"
+PN_BLOUT="$(run_pn panel dispatch --to claude --set pn-blind "$PN_BLREQ" 2>&1 || true)"
+PN_BLSET="$(printf '%s\n' "$PN_BLOUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+pn_blleg="$(find "$PN_FIX/.comms/to-claude" -name '*panel-claude*' -type f | sort | tail -1)"
+pn_blmid="$(grep -m1 '^message_id:' "$pn_blleg" | sed 's/^message_id: //')"
+pn_blth="$(grep -m1 '^thread:' "$pn_blleg" | sed 's/^thread: //')"
+{ printf -- '---\ntype: review-feedback\nfrom: claude\ntimestamp: 2026-08-26T16:10:00Z\nworkspace: %s\nmessage_id: pn-blind-reply\nthread: %s\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n\nBLOCKING\tinstall.sh:195\ta real defect written as a lead-token line\n\n### Advisory\n- None.\n' \
+    "$PN_WS" "$pn_blth" "$pn_blmid"
+} > "$PN_FIX/.comms/to-codex/${PN_WS}_2026-08-26T16-10-00_blind-reply.md"
+PN_BLCOMP="$(run_pn compose --set "$PN_BLSET" 2>&1)" && PN_BLRC=0 || PN_BLRC=$?
+[ "$PN_BLRC" = "3" ] \
+  && ok "compose REFUSES a self-authored APPROVE over an unreadable Blocking lane" \
+  || fail "compose gated on a blind leg (rc=$PN_BLRC)"
+printf '%s\n' "$PN_BLCOMP" | grep -q 'could not read' \
+  && ok "the refusal says the count was a failed read, not a clean review" || fail "blind refusal not explained"
+printf '%s\n' "$PN_BLCOMP" | grep -q '0 blocking' \
+  && fail "compose still printed a clean finding count for a blind leg" || ok "no clean count is printed for a blind leg"
 # The widened scan must still be gated by the BINDING, not by the directory: an
 # unbound reply sitting in yet another inbox is not an answer.
 PN_UBREQ="$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T15-00-00_ubreq.md"

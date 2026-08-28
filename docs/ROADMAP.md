@@ -794,6 +794,11 @@ refuses **zero** historical replies; the derivation gate refuses the seven true 
 The reviewers were also never actually told the rule — the ACP review prompt asked only for
 the subsections — so the prompt now states it.
 
+- [ ] **A heading-shaped finding at the SAME level or shallower still probes 0/0.**
+  `### The attestation is not bound…` under a live `### Blocking` closes the lane before the
+  residue rule runs, exactly as `### Process` legitimately does. Depth cannot separate the
+  two — only policy can — so this is the same shape as the fenced-findings item below and
+  wants the same kind of rule, not a deeper heuristic. (grok, parser-residue r3.)
 - [ ] **A live `### Blocking` whose findings sit inside a CLOSED fence still probes 0/0.**
   The fence lexer `next`s those lines before any residue rule sees them, so a heading
   outside with the findings quoted inside — no live list item, no placeholder — is still a

@@ -175,10 +175,17 @@ of the contract:
   empty form). This is load-bearing, not style: when a reply omits its `VERDICT:` line the
   parent DERIVES the verdict from the blocking count, so a finding written any other way
   extracts as zero and the derivation reads that zero as consent. A lane carrying lines the
-  parser cannot classify is now COUNTED as unread — the broker refuses to derive or stamp
-  an `APPROVE` over it, and `compose` prints a warning naming the leg whose counts are
-  short. Silence and consent are different statements; the pipeline can finally tell them
-  apart.
+  parser cannot classify is now COUNTED as unread. A lane with **no** parsed findings and
+  unread residue is a failed read, not a clean review: the broker refuses to derive or stamp
+  an `APPROVE` over it, and `compose` refuses to gate on it — including for a self-authored
+  envelope, which never passes through the broker. A lane with real findings *and* residue
+  only warns, naming the leg whose counts are short. Silence and consent are different
+  statements; the pipeline can finally tell them apart.
+- **Lazy continuation is deliberately not supported.** In CommonMark an unindented line can
+  continue the preceding list item; here it is counted as residue instead. That is a
+  narrowing on purpose — honouring lazy continuation would fold a real finding written after
+  a `- None.` placeholder into that placeholder as one claim, which is the false all-clear
+  this rule exists to prevent. Indent a continuation line, or make it its own list item.
 
 ## Threading
 

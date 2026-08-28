@@ -1011,8 +1011,15 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
     # Headings are case-tolerant for the same reason placeholders are: a model that
     # writes "### blocking" has still written the section, and treating it as absent
     # skipped the APPROVE cross-check entirely. (grok, round 4.)
-    tolower($0) ~ /^### blocking/ { flush(); lane = "blocking"; hasblocking = 1; next }
-    tolower($0) ~ /^### advisory/ { flush(); lane = "advisory"; next }
+    # ATX headings may carry up to three leading spaces and STILL be headings, so the
+    # heading rules below read a left-trimmed copy. Requiring column zero meant an indented
+    # `   ### Blocking` opened no lane at all: its findings were invisible, the probe said
+    # `blocking_section=no`, and an explicit APPROVE sailed through the cross-check.
+    # (codex, panel r3.)
+    { hline = $0; hsp = 0
+      while (hsp < 3 && substr(hline, 1, 1) == " ") { hline = substr(hline, 2); hsp++ } }
+    tolower(hline) ~ /^### blocking/ { flush(); lane = "blocking"; hasblocking = 1; next }
+    tolower(hline) ~ /^### advisory/ { flush(); lane = "advisory"; next }
     # Any other heading at the SAME level or shallower closes the lane -- `### Process`
     # never gates a verdict and is not a code finding, so it is not a graded observation.
     #
@@ -1023,14 +1030,22 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
     # blocking_unparsed=0` -- a derived APPROVE over a heading-shaped finding. Counting the
     # depth is what distinguishes "this section ended" from "someone wrote their finding as
     # a sub-heading". (codex blocking + grok, panel r2.)
-    /^#/ {
+    hline ~ /^#/ {
       hlev = 0
-      while (substr($0, hlev + 1, 1) == "#") hlev++
-      if (lane == "" || hlev <= 3) { flush(); lane = ""; next }
-      # Deeper than `### Blocking`: content inside the lane. It is not a list item, so it
-      # is unread residue by the same rule as any other unclassifiable line.
-      flush()
-      if (!isplaceholder($0)) unparsed[lane]++
+      while (substr(hline, hlev + 1, 1) == "#") hlev++
+      hb = substr(hline, hlev + 1, 1)
+      if (hb == "" || hb == " " || hb == "\t") {
+        # A real ATX heading. Same level or shallower ends the lane; DEEPER is content
+        # inside it, so it is unread residue like any other unclassifiable line.
+        if (lane == "" || hlev <= 3) { flush(); lane = ""; next }
+        flush()
+        if (!isplaceholder($0)) unparsed[lane]++
+        next
+      }
+      # `##text` is NOT a heading -- ATX requires a space or end of line after the run of
+      # hashes. Treating it as one closed a live lane and produced another 0/0 consent
+      # path, which is the same fail-open shape by a different door. (codex, panel r3.)
+      if (lane != "") { flush(); if (!isplaceholder($0)) unparsed[lane]++ }
       next
     }
     lane == "" { next }
@@ -1548,7 +1563,7 @@ cmd_compose() {
   local legs; legs="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4 "\t" $2}' "$idx")"
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
-  local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread=""
+  local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread="" blind=""
   while IFS=$'\t' read -r ag th rnd req_mid; do
     [ -n "$ag" ] || continue
     n_legs=$((n_legs + 1))
@@ -1586,10 +1601,23 @@ cmd_compose() {
     # blocking. This is the only surface that tells the driver the counts below are short.
     # A note, never a gate: measured against this archive it would fire on roughly a third
     # of replies that carry real findings.
-    local leg_resid
-    leg_resid="$(FINDINGS_PROBE=1 findings_extract "$reply" gating "$set_id" "" "" "" "" 2>/dev/null \
-      | awk -F'\t' '$1=="blocking_unparsed"{print $2; exit}')"
-    if [ "${leg_resid:-0}" -gt 0 ]; then
+    local leg_probe leg_resid leg_block
+    leg_probe="$(FINDINGS_PROBE=1 findings_extract "$reply" gating "$set_id" "" "" "" "" 2>/dev/null)"
+    leg_resid="$(printf '%s\n' "$leg_probe" | awk -F'\t' '$1=="blocking_unparsed"{print $2; exit}')"
+    leg_block="$(printf '%s\n' "$leg_probe" | awk -F'\t' '$1=="blocking"{print $2; exit}')"
+    if [ "${leg_resid:-0}" -gt 0 ] && [ "${leg_block:-0}" -eq 0 ]; then
+      # REFUSE, not warn. The broker applies this same rule before stamping, but a leg can
+      # reach compose without passing through it — a self-sending agent authors its own
+      # envelope, and a `verdict: APPROVE` over an unreadable Blocking lane passes
+      # cmd_validate. Composing it prints "0 findings (0 blocking)" and empty gates, and the
+      # loop treats a successful composition as actionable: the same false all-clear, one
+      # layer out. (codex, panel r3.)
+      blind="$blind
+compose: ${ag}s leg reports NO blocking findings, but its Blocking section carries ${leg_resid} line(s) this parser could not read — that zero is a failed read, not a clean review: $reply"
+    elif [ "${leg_resid:-0}" -gt 0 ]; then
+      # Mixed lane: real findings AND residue. Warning only, deliberately — the leg is
+      # already REQUEST_CHANGES, so the verdict is safe and refusing would block a correct
+      # change request over an unreadable nit.
       unread="$unread
 compose: WARNING — the Blocking section on ${ag}s leg carries ${leg_resid} line(s) this parser could not read as findings; the counts below UNDERSTATE that leg. Open it and read that section yourself before acting on this composition: $reply"
     fi
@@ -1602,6 +1630,14 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   if [ -n "$pending" ]; then
     echo "compose: INCOMPLETE — no reply yet from:$pending ($n_answered of $n_legs legs answered)"
     echo "compose: refusing to gate on a partial panel; re-run when the set is complete"
+    return 3
+  fi
+
+  # A leg whose zero-blocking count is a FAILED READ is not an answer either, for the same
+  # reason a missing leg is not: the panel would report a clean review it never read.
+  if [ -n "$blind" ]; then
+    printf '%s\n' "${blind# }"
+    echo "compose: refusing to gate on a review this parser could not read; findings must be markdown list items ('- ', '* ' or '1. ')"
     return 3
   fi
 
