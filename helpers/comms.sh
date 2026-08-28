@@ -1047,10 +1047,23 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
     # whether anything defeated it. Counting the residue is what ends the sequence: a fifth
     # grammar would not.
     #
-    # `buf == ""` keeps a legitimately un-indented continuation of a list item out of the
-    # count; `isplaceholder` keeps a bare `None.` out of it. Both guards are load-bearing --
-    # dropping either one turns real approvals red.
-    lane != "" && buf == "" && /[^[:space:]]/ { if (!isplaceholder($0)) unparsed[lane]++; next }
+    # FLUSH FIRST, then count. The earlier version guarded on `buf == ""` to protect a
+    # lazily-continued list item, and that guard was itself a false all-clear: `- None.`
+    # leaves buf set, so an unindented finding on the NEXT line matched no rule at all --
+    # not the continuation rule (it wants leading whitespace), not the blank flush, and not
+    # this one. It was dropped with no trace, END discarded the placeholder, and the probe
+    # reported `blocking=0 blocking_unparsed=0`: a derived APPROVE over a real finding,
+    # which is the precise defect this counter exists to end. Both reviewers found it
+    # independently, on the question this round asked them to attack.
+    #
+    # Flushing here means a genuinely un-indented second paragraph of a finding is counted
+    # as residue too. That is the honest reading -- the parser did not attach it to
+    # anything -- and it does not refuse: a lane with a parsed finding is already
+    # REQUEST_CHANGES, so residue there only raises the compose warning. Measured across
+    # 134 raw replies: zero occurrences either way.
+    #
+    # `isplaceholder` still keeps a bare `None.` from counting.
+    lane != "" && /[^[:space:]]/ { flush(); if (!isplaceholder($0)) unparsed[lane]++; next }
     END {
       flush()
       if (probe == "1") {
@@ -1561,7 +1574,7 @@ cmd_compose() {
       | awk -F'\t' '$1=="blocking_unparsed"{print $2; exit}')"
     if [ "${leg_resid:-0}" -gt 0 ]; then
       unread="$unread
-compose: WARNING — the Blocking section on ${ag}s leg carries ${leg_resid} line(s) this parser could not read as findings; the counts below UNDERSTATE that leg"
+compose: WARNING — the Blocking section on ${ag}s leg carries ${leg_resid} line(s) this parser could not read as findings; the counts below UNDERSTATE that leg. Open it and read that section yourself before acting on this composition: $reply"
     fi
     rows="$rows
 $(findings_extract "$reply" gating "$set_id" "" "" "" "")"

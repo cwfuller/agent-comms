@@ -1558,13 +1558,14 @@ GROK_STUB_NO_VERDICT=1 run_grok_leg "$MA_MSG4" "$R4" >/dev/null 2>&1
 MA_MSG4B="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-32-00_leadtoken-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-3b/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG4B"
 R4B="$WORK/ma-leg4b"; mkdir -p "$R4B"
+PRE_RESID_CT="$(find "$MA_FIX/.comms/to-claude" -type f 2>/dev/null | grep -c . || true)"
 GROK_STUB_LEAD_TOKEN=1 run_grok_leg "$MA_MSG4B" "$R4B" >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$R4B/result.json" | head -1)" = "failed" ] \
   && ok "an unreadable Blocking section fails closed instead of deriving APPROVE" \
   || fail "a lead-token blocking section still derived a verdict"
 grep -q 'could not read as findings' "$R4B/result.json" \
   && ok "the refusal names the unread lines so the driver can act on it" || fail "refusal note missing"
-[ -z "$(find "$MA_FIX/.comms/to-claude" -name '*ma-arc-3b*' -type f 2>/dev/null)" ] \
+[ "$PRE_RESID_CT" = "$(find "$MA_FIX/.comms/to-claude" -type f 2>/dev/null | grep -c . || true)" ] \
   && ok "no APPROVE envelope was persisted for an unread review" || fail "an envelope was stamped over unread content"
 [ -f "$MA_MSG4B" ] && ok "the inbound survives a residue refusal, so the round is retryable" || fail "inbound lost on residue refusal"
 MA_MSG5="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-35-00_badverdict-1.md"
@@ -2290,6 +2291,22 @@ printf '### Blocking\n\nNone.\n' > "$CORP/bareplaceholder.md"
 printf '### Blocking\n\n- a real bug\n  continued on the next line\n' > "$CORP/continuation.md"
 [ "$(probe_of "$CORP/continuation.md" blocking_unparsed)" = "0" ] \
   && ok "a list item and its indented continuation leave no residue" || fail "continuation counted as residue"
+# THE MASKED FINDING. A list-form `- None.` leaves the buffer set, so an UNINDENTED finding
+# on the next line matched no rule at all — not the continuation rule (it wants leading
+# whitespace), not the blank flush, not the residue rule while it still guarded on an empty
+# buffer. END discarded the placeholder and the probe reported 0/0: a derived APPROVE over a
+# real finding, inside the very counter meant to prevent one. Both reviewers found this
+# independently. (codex + grok, panel r1.)
+printf '### Blocking\n\n- None.\nThe attestation is not bound to the tested commit\n' > "$CORP/masked.md"
+[ "$(probe_of "$CORP/masked.md" blocking)" = "0" ] && [ "$(probe_of "$CORP/masked.md" blocking_unparsed)" -gt 0 ] \
+  && ok "a finding masked behind a list-form None. is counted, not swallowed" \
+  || fail "a masked finding still reads as a clean review (blocking=$(probe_of "$CORP/masked.md" blocking) unparsed=$(probe_of "$CORP/masked.md" blocking_unparsed))"
+# The same swallow made a MIXED lane silent when no blank line separated the two, so compose
+# printed a count with no warning attached.
+printf '### Blocking\n\n- a wording nit\nThe attestation is not bound to the tested commit\n' > "$CORP/mixedsilent.md"
+[ "$(probe_of "$CORP/mixedsilent.md" blocking)" = "1" ] && [ "$(probe_of "$CORP/mixedsilent.md" blocking_unparsed)" -gt 0 ] \
+  && ok "a parsed finding plus unindented prose reports BOTH the finding and the residue" \
+  || fail "mixed lane went silent again"
 # The counter must not change WHAT is extracted: verified byte-identical across all 348
 # archived messages, so no finding_id renumbers and .comms/grades/findings.tsv needs no rebuild.
 [ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/continuation.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "1" ] \
