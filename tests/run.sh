@@ -40,12 +40,27 @@ PASS=0; FAIL=0; SKIP=0
 # (codex, panel r2, blocking.)
 EXPECT_FILE="$REPO/tests/expected-counts.tsv"
 GATE_REACHED=0
-EXPECT_TOTAL="$(awk -F'\t' '$1=="total"{print $2}' "$EXPECT_FILE" 2>/dev/null)"
+# Read the contract from the COMMITTED BLOB at the commit under test, never from the
+# filesystem. Reading the file left the last hole open: commit the removal of some
+# assertions AND of this file, then recreate it untracked with a reduced total — the
+# suite reads the untracked copy, `attest-green` deliberately ignores untracked files
+# so it mints anyway, and integrate skips its clean re-run and lands a tree that has no
+# contract at all. Binding to TESTED_OID makes the contract part of the artifact.
+# A missing OID or a missing blob yields an empty total, which fails closed.
+# (codex, panel r3, blocking.)
+EXPECT_SRC="$(git -C "$REPO" show "${TESTED_OID:-missing}:tests/expected-counts.tsv" 2>/dev/null || true)"
+EXPECT_TOTAL="$(printf '%s\n' "$EXPECT_SRC" | awk -F'\t' '$1=="total"{print $2}')"
 # Skips are IDENTIFIED, not merely counted. A bare numeric cap leaves spare capacity:
 # with the cap at 1 and zsh installed, any passing assertion could be swapped for a
 # skip and the totals would still balance, so coverage could be reduced silently.
 # Each permitted skip now names itself, and an unlisted id is a FAILURE.
-SKIP_ALLOWED=" $(awk -F'\t' '$1=="skip_ok"{printf "%s ", $2}' "$EXPECT_FILE" 2>/dev/null)"
+SKIP_ALLOWED=" $(printf '%s\n' "$EXPECT_SRC" | awk -F'\t' '$1=="skip_ok"{printf "%s ", $2}')"
+# A working-tree edit to the contract is NOT authoritative — say so, or a developer who
+# bumps the count and sees the old number will think the gate is broken.
+if [ -f "$EXPECT_FILE" ] && ! git -C "$REPO" diff --quiet -- tests/expected-counts.tsv 2>/dev/null; then
+  echo "COVERAGE: tests/expected-counts.tsv is modified; the COMMITTED contract is authoritative." >&2
+  echo "COVERAGE: commit it to change the expected counts." >&2
+fi
 
 ok()   { PASS=$((PASS+1)); echo "  ok: $1"; }
 # A capability this machine lacks is NOT a passing assertion. Say so visibly and count
@@ -5720,11 +5735,33 @@ SK_NOCOND="$( (FAIL=0; SKIP=0; SKIP_USED=" "; SKIP_ALLOWED=" no-such-condition "
 [ "$SK_NOCOND" = 1 ] && ok "a permitted id with no registered condition is refused" || fail "an id without a condition was accepted"
 
 # The dynamic corpus must be enumerated from the INDEX, not the filesystem.
-for _l in "for tf in \$(tracked_paths 'templates/claude-commands/*.md'" "for frag in \$(tracked_paths 'docs/loopspec/fragments/*.md')"; do :; done
-[ "$(grep -c 'tracked_paths ' "$REPO/tests/run.sh")" -ge 4 ] \
-  && ok "the dynamic corpus loops enumerate tracked paths" || fail "a corpus loop still globs the filesystem"
-grep -q 'for tf in "\$REPO"/templates/claude-commands/\*\.md' "$REPO/tests/run.sh" \
-  && fail "a template loop still enumerates the filesystem" || ok "no template loop enumerates the filesystem"
+# Each production loop asserted BY ITSELF. A count-based tripwire did not lock: the
+# grep line and a no-op literal contributed their own matches, so deleting one real loop
+# still satisfied it. (codex + grok, panel r3, corroborated advisory.)
+grep -q "for tf in .(tracked_paths 'templates/claude-commands" "$REPO/tests/run.sh" \
+  && ok "the template loop enumerates tracked paths" || fail "the template loop no longer enumerates tracked paths"
+grep -q "for frag in .(tracked_paths 'docs/loopspec/fragments" "$REPO/tests/run.sh" \
+  && ok "the fragment loop enumerates tracked paths" || fail "the fragment loop no longer enumerates tracked paths"
+grep -q "for tf in .(tracked_paths 'templates/claude-commands/\*\.md' 'templates/codex-skills" "$REPO/tests/run.sh" \
+  && ok "the signature-scan loop enumerates tracked paths" || fail "the signature-scan loop no longer enumerates tracked paths"
+grep -qE 'for (tf|frag) in "\$REPO"/(templates|docs)' "$REPO/tests/run.sh" \
+  && fail "a corpus loop still enumerates the filesystem" || ok "no corpus loop enumerates the filesystem"
+# The contract must come from the commit under test, not from a file on disk.
+grep -q 'git -C "\$REPO" show "\${TESTED_OID:-missing}:tests/expected-counts.tsv"' "$REPO/tests/run.sh" \
+  && ok "the coverage contract is read from the commit under test" || fail "the contract is not bound to TESTED_OID"
+# Behavioural: an untracked recreation of a deleted contract must NOT be readable as the
+# contract. Proven in a throwaway repo with the same command shape the gate uses.
+CT_FIX="$WORK/contractprobe"; mkdir -p "$CT_FIX"
+git -C "$CT_FIX" init -q -b main
+printf 'total\t100\n' > "$CT_FIX/expected-counts.tsv"
+git -C "$CT_FIX" add expected-counts.tsv && git -C "$CT_FIX" -c user.email=t@t -c user.name=t commit -q -m seed
+CT_OID="$(git -C "$CT_FIX" rev-parse HEAD)"
+git -C "$CT_FIX" rm -q --cached expected-counts.tsv && git -C "$CT_FIX" -c user.email=t@t -c user.name=t commit -q -m drop
+CT_OID2="$(git -C "$CT_FIX" rev-parse HEAD)"
+printf 'total\t1\n' > "$CT_FIX/expected-counts.tsv"   # untracked recreation, reduced total
+CT_READ="$(git -C "$CT_FIX" show "$CT_OID2:expected-counts.tsv" 2>/dev/null || true)"
+[ -z "$CT_READ" ] && ok "a deleted contract recreated untracked reads as ABSENT, not as its reduced total" \
+  || fail "an untracked contract was readable from the commit (got: $CT_READ)"
 # And the mechanism itself: an untracked file must not be enumerated.
 TP_FIX="$WORK/trackedprobe"; mkdir -p "$TP_FIX"
 git -C "$TP_FIX" init -q -b main

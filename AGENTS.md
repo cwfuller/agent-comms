@@ -159,7 +159,7 @@ the interleaving I think is safe — find one where it isn't" earns its tokens.
 bash tests/run.sh
 ```
 
-One umbrella suite. It is still slow — measured 2026-08-27 at **~360s for 978 assertions**
+One umbrella suite. It is still slow — measured 2026-08-27 at **~360s for 982 assertions**
 on an unloaded machine, down from 505s once an unconditional 6s wait per spawned turn was
 removed (505s → 326s on identical trees; the rest of the difference is new assertions that
 deliberately spend ~25s exercising that wait) — and reducing it further is active work; see
@@ -187,7 +187,9 @@ overhead is ~5%, not the dominant term it was once estimated to be.
   already been used. A named-but-unused skip ticket would otherwise be spare capacity on any
   machine where its condition is false. The contract path is NOT settable from the environment:
   `integrate` inherits the caller's env, so an override would let a branch attest against a
-  reduced total.
+  reduced total, and it is read from the COMMITTED BLOB at the commit under test — not from
+  the working tree — so deleting the contract and recreating it untracked with a smaller total
+  reads as ABSENT and fails closed. Changing the counts therefore means committing the contract.
 - The gate is the `coverage_verdict` function, and the suite runs it against adversarial inputs
   as part of its own corpus (short run, absent/non-numeric/out-of-range contract, unpermitted
   skip). An `EXIT` sentinel refuses any exit-0 that never reached the gate, so the invariant is
