@@ -6102,6 +6102,19 @@ grep -q 'if \[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \] && \[ -n "${TESTED
 # The per-section verdict, run for real. A permitted skip REPLACES a pass, so a section
 # whose pass/skip split changes but whose COVERED count does not must still match — that
 # is the Linux-host case (four ACL tickets) the first shape wrongly refused.
+# THE LINUX CASE, pinned directly on the accounting function: a permitted skip REPLACES a
+# pass, so a section that cashes one must emit the SAME row as one that did not. Pinning
+# pass and skip as separate columns made every such host red at full coverage — which is
+# precisely the machine-dependence the skip contract exists to prevent, rebuilt one layer
+# down. (codex + grok, suite-lanes r1, blocking.)
+( SEC_NAME="probe-sec"; SEC_PASS=7; SEC_SKIP=1; SECTION_VECTOR="$WORK/fv-skip"; _flush_section )
+( SEC_NAME="probe-sec"; SEC_PASS=8; SEC_SKIP=0; SECTION_VECTOR="$WORK/fv-pass"; _flush_section )
+[ "$(cat "$WORK/fv-skip" 2>/dev/null)" = "$(cat "$WORK/fv-pass" 2>/dev/null)" ] \
+  && ok "a permitted skip and the pass it replaced produce the same vector row" \
+  || fail "pass/skip split leaks into the vector: [$(cat "$WORK/fv-skip" 2>/dev/null)] vs [$(cat "$WORK/fv-pass" 2>/dev/null)]"
+[ "$(cat "$WORK/fv-skip" 2>/dev/null)" = "$(printf 'probe-sec\t8')" ] \
+  && ok "the vector row records COVERED, not passes" || fail "vector row is not a covered count: [$(cat "$WORK/fv-skip" 2>/dev/null)]"
+
 SV_G="$WORK/sv-golden"; SV_O="$WORK/sv-observed"
 printf 'alpha\t8\nbeta\t41\n' > "$SV_G"
 printf 'alpha\t8\nbeta\t41\n' > "$SV_O"

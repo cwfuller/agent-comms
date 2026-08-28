@@ -57,6 +57,6 @@ ask: the driver-neutral consult verb	23
 review turns may read history, never publish or rewrite it	46
 presence & worktrees: advisory coordination (plan presence-worktrees-15135)	91
 runphase: the state-file wait is DECLARED by the spawner, never guessed	22
-harness: a partial run is never a verdict	40
+harness: a partial run is never a verdict	42
 integrate: an exit status is not proof the suite ran	30
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5
