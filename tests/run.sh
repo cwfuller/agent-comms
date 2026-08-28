@@ -33,7 +33,13 @@ PASS=0; FAIL=0; SKIP=0
 # conjunct at all. Both now also require that the expected number of assertions
 # actually RAN. The two numbers live in a committed file so that changing what
 # the corpus covers is a reviewable diff and never a silent drift.
-EXPECT_FILE="${EXPECT_FILE:-$REPO/tests/expected-counts.tsv}"
+# NOT overridable from the environment. `integrate` inherits the caller's env, so an
+# env-settable contract path lets a branch point the gate at a reduced total and attest
+# without touching the committed file (proven: EXPECT_FILE=/dev/stdin loaded total=1).
+# This is the same class as lane selection via env, and it was my own regression.
+# (codex, panel r2, blocking.)
+EXPECT_FILE="$REPO/tests/expected-counts.tsv"
+GATE_REACHED=0
 EXPECT_TOTAL="$(awk -F'\t' '$1=="total"{print $2}' "$EXPECT_FILE" 2>/dev/null)"
 # Skips are IDENTIFIED, not merely counted. A bare numeric cap leaves spare capacity:
 # with the cap at 1 and zsh installed, any passing assertion could be swapped for a
@@ -50,17 +56,47 @@ fail() { FAIL=$((FAIL+1)); echo "FAIL: $1" >&2; }
 # toward coverage, so a skipped machine-conditional check can never look like a
 # check that ran — but skips are separately capped, so quieting a flaky assertion
 # by wrapping it in skip() turns the suite red until the cap is raised on purpose.
-skip() { # skip <id> <desc> — <id> must be listed as skip_ok in the contract
+SKIP_USED=" "
+skip() { # skip <id> <desc> — permitted, CONDITION-BOUND, and single-use
+  # Naming a skip is not enough. On a machine where the named condition does not
+  # hold, the ticket is unused, so any passing assertion could be converted to
+  # `skip <that id>` and the totals would still balance. Two extra locks: the id's
+  # CONDITION must actually hold, and each id may be cashed at most ONCE.
+  # (codex + grok, panel r2, blocking — both found it independently.)
   case "$SKIP_ALLOWED" in
-    *" $1 "*) SKIP=$((SKIP+1)); echo "  skip[$1]: $2" ;;
-    *) fail "$2 (skip id '$1' is not permitted by $EXPECT_FILE)" ;;
+    *" $1 "*) ;;
+    *) fail "$2 (skip id '$1' is not permitted by $EXPECT_FILE)"; return ;;
   esac
+  case "$SKIP_USED" in
+    *" $1 "*) fail "$2 (skip id '$1' was already used — each permitted skip is single-use)"; return ;;
+  esac
+  # Condition binding lives in code, where it is reviewable, not in the data file.
+  case "$1" in
+    zsh-absent)
+      if command -v zsh >/dev/null 2>&1; then
+        fail "$2 (skip id 'zsh-absent' claimed, but zsh IS installed)"; return
+      fi ;;
+    *) fail "$2 (skip id '$1' has no registered condition)"; return ;;
+  esac
+  SKIP_USED="$SKIP_USED$1 "
+  SKIP=$((SKIP+1)); echo "  skip[$1]: $2"
 }
 # THE GATE ITSELF, as a function, so the suite can execute the real thing against
 # adversarial inputs instead of asserting on a reimplementation of one branch.
 # Returns 0 only when the whole corpus demonstrably ran.
 coverage_verdict() { # <pass> <fail> <skip> <total>
-  local p="$1" f="$2" s="$3" t="$4"
+  local p="$1" f="$2" s="$3" t="$4" a
+  # Validate ALL FOUR. The counters are internally bounded today, so only `t` is
+  # reachable from data — but a function whose advertised contract is "these are
+  # numbers" should not accept `p='1+967'`. (codex, panel r2, advisory.)
+  for a in "$p" "$f" "$s"; do
+    case "$a" in ''|*[!0-9]*)
+      echo "COVERAGE: counter '$a' is not a number — refusing a verdict" >&2; return 1 ;;
+    esac
+    if [ "${#a}" -gt 6 ]; then
+      echo "COVERAGE: counter '$a' is out of range — refusing a verdict" >&2; return 1
+    fi
+  done
   case "$t" in ''|*[!0-9]*)
     echo "COVERAGE: contract total is missing or not a number — refusing a verdict" >&2; return 1 ;;
   esac
@@ -92,7 +128,15 @@ check_not() {
   if ! declare -F "$1" >/dev/null 2>&1 && ! command -v "$1" >/dev/null 2>&1; then
     fail "$desc (precondition: '$1' is not a defined function or command)"; return
   fi
-  if "$@" >/dev/null 2>&1; then fail "$desc (expected failure)"; else ok "$desc"; fi
+  local rc=0
+  "$@" >/dev/null 2>&1 || rc=$?
+  # 126/127 mean "could not execute", not "correctly refused" — a wrapper whose inner
+  # binary vanished would otherwise still score a pass. (codex, panel r2, advisory.)
+  case "$rc" in
+    0)     fail "$desc (expected failure)" ;;
+    126|127) fail "$desc (precondition: command exited $rc — not executable/not found)" ;;
+    *)     ok "$desc" ;;
+  esac
 }
 
 # ---------- fixtures ----------
@@ -108,14 +152,17 @@ mkdir -p "$AGENT_COMMS_HOME"
 # bypass the invariant entirely, so the exit path itself refuses an unexamined
 # success. (codex, panel r1, advisory — makes "a partial run is never a verdict"
 # durable rather than positional.)
+_suite_gate_guard() { # <rc> — the sentinel's DECISION, side-effect free so it is testable
+  [ "${GATE_REACHED:-0}" = 1 ] && return "$1"
+  [ "$1" -eq 0 ] || return "$1"
+  echo "COVERAGE: the suite exited 0 without reaching its coverage gate — refusing." >&2
+  return 1
+}
 _suite_exit() {
   local rc=$?
   rm -rf "$WORK" 2>/dev/null || true
-  if [ "${GATE_REACHED:-0}" != 1 ] && [ "$rc" -eq 0 ]; then
-    echo "COVERAGE: the suite exited 0 without reaching its coverage gate — refusing." >&2
-    exit 1
-  fi
-  exit "$rc"
+  _suite_gate_guard "$rc"
+  exit $?
 }
 trap '_suite_exit' EXIT
 
@@ -2875,9 +2922,21 @@ echo "== loopspec: prompt fragments do not drift from docs/loopspec/fragments/ =
 # Every marked region in a template must match its fragment file byte-for-byte
 # after per-line leading-whitespace normalization (templates embed at varying
 # list indents). Drift is a failing check, not a habit.
+# TRACKED-ONLY enumeration. These loops drive assertion COUNTS, and the coverage gate
+# turns those counts into a landing decision, so they must reflect the COMMITTED tree.
+# A filesystem glob does not: delete a tracked template in the candidate, recreate the
+# path untracked before the pre-flight run, and the count stays put while `attest-green`
+# (which only refuses TRACKED dirtiness) mints anyway — integrate then skips its clean
+# re-run and lands a commit missing the file. (codex, panel r2, blocking.)
+tracked_paths() { # <pathspec...> -> absolute paths of tracked files, one per line
+  git -C "$REPO" ls-files -- "$@" 2>/dev/null | while IFS= read -r _tp; do
+    printf '%s/%s\n' "$REPO" "$_tp"
+  done
+}
+
 FRAG_SEEN="$WORK/fragments-seen"
 : > "$FRAG_SEEN"
-for tf in "$REPO"/templates/claude-commands/*.md "$REPO"/templates/codex-skills/*/SKILL.md; do
+for tf in $(tracked_paths 'templates/claude-commands/*.md' 'templates/codex-skills/*/SKILL.md'); do
   for name in $(sed -n 's/.*<!-- loopspec:fragment \([a-z0-9-]*\) -->.*/\1/p' "$tf" | sort -u); do
     echo "$name" >> "$FRAG_SEEN"
     frag="$REPO/docs/loopspec/fragments/$name.md"
@@ -2904,7 +2963,7 @@ for tf in "$REPO"/templates/claude-commands/*.md "$REPO"/templates/codex-skills/
     done
   done
 done
-for frag in "$REPO"/docs/loopspec/fragments/*.md; do
+for frag in $(tracked_paths 'docs/loopspec/fragments/*.md'); do
   n="$(basename "$frag" .md)"
   grep -q "^$n$" "$FRAG_SEEN" && ok "fragment $n is embedded by at least one template" || fail "orphan fragment (no template embeds it): $n"
 done
@@ -2914,7 +2973,7 @@ done
 # substrings of each fragment; extend this list when adding fragments.
 sig_outside_markers() {  # <signature> — prints template:line for hits outside markers
   local sig="$1" tf
-  for tf in "$REPO"/templates/claude-commands/*.md "$REPO"/templates/codex-skills/*/SKILL.md; do
+  for tf in $(tracked_paths 'templates/claude-commands/*.md' 'templates/codex-skills/*/SKILL.md'); do
     awk -v sig="$sig" -v f="$(basename "$tf")" '
       /<!-- loopspec:fragment / {inm=1}
       /<!-- \/loopspec:fragment -->/ {inm=0; next}
@@ -5631,8 +5690,52 @@ coverage_verdict 960 1 0 960 2>/dev/null && fail "a miscounted run was accepted"
 # failure cannot pollute this run's counters.
 SK_PROBE="$( (FAIL=0; skip definitely-not-a-permitted-id "probe" >/dev/null 2>&1; echo "$FAIL") )"
 [ "$SK_PROBE" = 1 ] && ok "an unpermitted skip is a failure, not free capacity" || fail "an unpermitted skip was accepted (FAIL=$SK_PROBE)"
-grep -q '_suite_exit' "$REPO/tests/run.sh" \
-  && ok "the exit path refuses a success that never reached the gate" || fail "no exit sentinel"
+# The sentinel's DECISION, executed for real (a grep for its name proved nothing).
+( GATE_REACHED=0; _suite_gate_guard 0 ) >/dev/null 2>&1 \
+  && fail "an ungated success was allowed" || ok "the exit path refuses a success that never reached the gate"
+( GATE_REACHED=1; _suite_gate_guard 0 ) >/dev/null 2>&1 \
+  && ok "a gated success stays a success" || fail "the sentinel broke a legitimate pass"
+( GATE_REACHED=0; _suite_gate_guard 3 ) >/dev/null 2>&1; [ "$?" = 3 ] \
+  && ok "the sentinel preserves a genuine failure status" || fail "the sentinel altered a failure status"
+
+# The contract path must not be reachable from the environment: integrate inherits the
+# caller's env, so an override would let a branch attest against a reduced total.
+grep -q 'EXPECT_FILE="\$REPO/tests/expected-counts.tsv"' "$REPO/tests/run.sh" \
+  && ok "the coverage contract path is committed, not configurable" || fail "contract path is not pinned"
+grep -q '\${EXPECT''_FILE:-' "$REPO/tests/run.sh" \
+  && fail "the coverage contract path is overridable from the environment" \
+  || ok "no environment override for the coverage contract"
+
+# A permitted skip is single-use and condition-bound. Probed in subshells so the probes'
+# own failures cannot pollute this run's counters.
+SK_TWICE="$( (FAIL=0; SKIP=0; SKIP_USED=" zsh-absent "; skip zsh-absent "second use" >/dev/null 2>&1; echo "$FAIL") )"
+[ "$SK_TWICE" = 1 ] && ok "a permitted skip cannot be cashed twice" || fail "a skip id was reusable (FAIL=$SK_TWICE)"
+if command -v zsh >/dev/null 2>&1; then
+  SK_COND="$( (FAIL=0; SKIP=0; SKIP_USED=" "; skip zsh-absent "claimed while zsh exists" >/dev/null 2>&1; echo "$FAIL") )"
+  [ "$SK_COND" = 1 ] && ok "a skip whose condition does not hold is refused" || fail "an unused skip ticket was cashable (FAIL=$SK_COND)"
+else
+  ok "a skip whose condition does not hold is refused (vacuous: zsh absent, ticket is legitimately live)"
+fi
+SK_NOCOND="$( (FAIL=0; SKIP=0; SKIP_USED=" "; SKIP_ALLOWED=" no-such-condition "; skip no-such-condition "x" >/dev/null 2>&1; echo "$FAIL") )"
+[ "$SK_NOCOND" = 1 ] && ok "a permitted id with no registered condition is refused" || fail "an id without a condition was accepted"
+
+# The dynamic corpus must be enumerated from the INDEX, not the filesystem.
+for _l in "for tf in \$(tracked_paths 'templates/claude-commands/*.md'" "for frag in \$(tracked_paths 'docs/loopspec/fragments/*.md')"; do :; done
+[ "$(grep -c 'tracked_paths ' "$REPO/tests/run.sh")" -ge 4 ] \
+  && ok "the dynamic corpus loops enumerate tracked paths" || fail "a corpus loop still globs the filesystem"
+grep -q 'for tf in "\$REPO"/templates/claude-commands/\*\.md' "$REPO/tests/run.sh" \
+  && fail "a template loop still enumerates the filesystem" || ok "no template loop enumerates the filesystem"
+# And the mechanism itself: an untracked file must not be enumerated.
+TP_FIX="$WORK/trackedprobe"; mkdir -p "$TP_FIX"
+git -C "$TP_FIX" init -q -b main
+printf 'x\n' > "$TP_FIX/kept.md"; printf 'x\n' > "$TP_FIX/untracked.md"
+git -C "$TP_FIX" add kept.md && git -C "$TP_FIX" -c user.email=t@t -c user.name=t commit -q -m seed
+TP_OUT="$(git -C "$TP_FIX" ls-files -- '*.md')"
+case "$TP_OUT" in
+  *untracked.md*) fail "index enumeration listed an untracked file" ;;
+  *kept.md*)      ok "index enumeration lists tracked files and ignores untracked ones" ;;
+  *)              fail "index enumeration listed nothing (got: $TP_OUT)" ;;
+esac
 
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
