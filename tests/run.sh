@@ -5721,6 +5721,33 @@ mkdir -p "$WM/run-wm13"
   && ok "a non-ACP grok turn still unmounts and leaves no admin dir behind" \
   || fail "the ephemeral mount path leaked an admin dir"
 
+# The quiescence boundary itself. Both legs flagged it as untested: the npx stub never
+# creates a lease, so `mount_owner_wait` always returned immediately and its fail-closed
+# behaviour was asserted about rather than exercised. Point HOME at a throwaway store and
+# plant a lease at the path the runner derives, so the wait actually has something to see.
+# (The real ~/.acpx is never touched.)
+WM_HOME="$WM/fakehome"; mkdir -p "$WM_HOME/.acpx/queues"
+WM_LEASE_HASH="$(printf '%s' "stub-record-1" | shasum -a 256 | cut -c1-24)"
+printf '{ "pid": 1, "sessionId": "stub-record-1" }\n' > "$WM_HOME/.acpx/queues/$WM_LEASE_HASH.lock"
+: > "$WM/cwd.log"; WM_D14="$(wm_turn wm-lease wm14 "$WM_A1" HOME="$WM_HOME")"
+# First turn on this ident records no id, so the wait is skipped; the SECOND turn reads it
+# back and must find the planted lease still there.
+: > "$WM/cwd.log"; WM_D15="$(wm_turn wm-lease wm15 "$WM_A1" HOME="$WM_HOME")"
+if [ "$(wm_status "$WM_D15")" = "failed" ] \
+   && grep -q 'refusing to restage under a live owner' "$WM_D15/result.json" 2>/dev/null \
+   && [ "$(wm_prompt_cwds | awk 'END{print NR+0}')" = "0" ]; then
+  ok "a queue lease that never disappears refuses the next turn instead of restaging under it"
+else
+  fail "a mount was restaged while its queue lease was still present (status=$(wm_status "$WM_D15"))"
+fi
+# ...and the same turn succeeds once the lease is gone, so the refusal above is not just
+# "this path always fails".
+rm -f "$WM_HOME/.acpx/queues/$WM_LEASE_HASH.lock"
+: > "$WM/cwd.log"; WM_D16="$(wm_turn wm-lease wm16 "$WM_A1" HOME="$WM_HOME")"
+[ "$(wm_status "$WM_D16")" = "completed" ] \
+  && ok "the same mount restages normally once the queue lease has gone" \
+  || fail "the lease check refuses even with no lease present (status=$(wm_status "$WM_D16"))"
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 
