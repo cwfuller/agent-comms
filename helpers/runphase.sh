@@ -1296,22 +1296,51 @@ PROMPT
     echo "acp turn finished after ${acp_elapsed}s (budget ${timeout}s)" >>"$run_dir/runner.log"
     # acpx hands back the answer as TEXT, so the streaming extractor is skipped
     # entirely and only the stamping half of the broker applies.
+    # Whether the turn OUTRAN ITS BUDGET is a fact about the turn, not about how many bytes
+    # it managed to print before being killed — so decide it once, before the success/failure
+    # fork, and let both branches speak. The previous guard asked the question only when the
+    # child had printed NOTHING and the turn had already failed, which left the expensive
+    # case silent: a budget-killed turn that got partial bytes out.
+    #
+    # The budget is also caller-supplied and was never validated, so `--timeout-secs cat`
+    # leaked `[: cat: integer expression expected` to stderr and silently reverted the whole
+    # diagnosis to its pre-fix behaviour — the same shape as the state-wait budget bug fixed
+    # in 0fe39ac.
+    local acp_overran=0
+    case "$timeout" in
+      ''|*[!0-9]*) echo "note: timeout '$timeout' is not an integer — cannot judge the budget" >>"$run_dir/runner.log" ;;
+      *) [ "$acp_elapsed" -ge "$timeout" ] && acp_overran=1 ;;
+    esac
     if [ "$acp_rc" -eq 0 ] && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then
       acp_status=completed
+      # WARN, do not refuse. A turn killed at its budget can still have emitted a fragment
+      # that parses — a review opens with `VERDICT:` and `### Blocking / - None.`, so a turn
+      # cut off while writing its advisories yields exactly that — and the parent then stamps
+      # an authoritative APPROVE from a reviewer that never finished reading the diff. But
+      # `elapsed >= timeout` is genuinely ambiguous (date +%s floors, and the wall clock also
+      # carries npx spawn while acpx's --timeout may not), so refusing here would sometimes
+      # DISCARD a complete, expensive review. A note costs nothing and cmd_await prints it.
+      if [ "$acp_overran" = 1 ]; then
+        acp_note="WARNING: the turn ran ${acp_elapsed}s against a ${timeout}s budget, so acpx may have cut it off mid-answer — this reply may be TRUNCATED; re-read it before trusting the verdict"
+      fi
+    elif [ "$acp_overran" = 1 ]; then
+      # The budget is the HEADLINE, and the broker's complaint about the fragment becomes the
+      # secondary detail. Reversing those two sent an operator hunting prompt-format bugs for
+      # half an hour on 2026-08-26 — which is the misdiagnosis this whole path exists to stop.
+      acp_status=failed
+      acp_rc=124
+      acp_note="turn exceeded its ${timeout}s budget after ${acp_elapsed}s and was killed mid-work — raise COMMS_RUNPHASE_TIMEOUT_SECS or narrow the request; this is NOT an empty or refused reply"
+      # Carry the broker complaint ONLY when the child actually produced something. On a
+      # silent kill its complaint is "the child produced no reply text", which is precisely
+      # the misdiagnosis this path exists to delete — appending it there would re-import the
+      # wrong hunt as a parenthetical. When there IS partial output the complaint describes
+      # real content and is worth keeping as the secondary detail.
+      if [ -s "$run_dir/reply-raw.md" ] && [ -n "${GROK_BROKER_NOTE:-}" ]; then
+        acp_note="$acp_note (the broker also said: $GROK_BROKER_NOTE)"
+      fi
     else
       acp_status=failed
-      acp_note="${GROK_BROKER_NOTE:-acpx exited $acp_rc — see runner.log}"
-      # A timeout under `--format quiet` is INDISTINGUISHABLE from a real empty reply:
-      # acpx exits 0 having printed nothing, so the broker honestly reports "the child
-      # produced no reply text" and the operator goes hunting for permission or provider
-      # faults. Observed twice on 2026-08-26 — a 31-minute turn against the 1800s default
-      # that was working the whole time. Name the budget instead. (agent-comms-7b.)
-      if [ ! -s "$run_dir/reply-raw.md" ] && [ "$acp_elapsed" -ge "$timeout" ]; then
-        acp_note="turn exceeded its ${timeout}s budget after ${acp_elapsed}s and was killed mid-work — raise COMMS_RUNPHASE_TIMEOUT_SECS or narrow the request; this is NOT an empty or refused reply"
-        acp_rc=124
-      else
-        acp_note="$acp_note (after ${acp_elapsed}s of a ${timeout}s budget)"
-      fi
+      acp_note="${GROK_BROKER_NOTE:-acpx exited $acp_rc — see runner.log} (after ${acp_elapsed}s of a ${timeout}s budget)"
     fi
     update_thread_state "$msg_thread" "$acp_status" "acp:$acp_session" "$sfield" || true
     write_result "$run_dir" "$acp_status" "$acp_rc" "acp:$acp_session" "$msg" "$acp_note"

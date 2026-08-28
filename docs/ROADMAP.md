@@ -329,8 +329,20 @@ watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
   classifies from the message (`workflow:` present ⇒ loop). The soak threshold below was
   the original gate: 10 successful headless loops including ≥3 claude-resume/attach
   exercises and ≥3 reverse-direction handoffs. *(Post-flip debt, 2026-08-26: the
-  timeout idle/salvage fix remains OPEN — partially mitigated by 7455927, which names
-  a budget-killed ACP turn instead of reporting an empty reply. The `.comms/config`
+  timeout idle/salvage fix is CLOSED as of 2026-08-28. 7455927 named a budget-killed ACP
+  turn instead of reporting an empty reply, but only when the child had printed NOTHING
+  and the turn had already failed — so the expensive case stayed silent: a turn killed at
+  its budget that got PARTIAL bytes out. A review opens with its verdict and an empty
+  blocking list, so a turn cut off while writing its advisories emits exactly the fragment
+  that parses, and the parent stamped an authoritative `verdict: APPROVE` from a reviewer
+  that never finished reading the diff, delivered as `completed` with an empty note. The
+  overrun is now decided ONCE, before the success/failure fork: the failure path leads with
+  the budget (the broker complaint demoted to a parenthetical, since leading with it is
+  what sent an operator hunting prompt-format bugs), and the success path carries a
+  TRUNCATED warning rather than a refusal — `elapsed >= timeout` is genuinely ambiguous, so
+  refusing would sometimes discard a complete, expensive review. The budget is also
+  validated as an integer now; `--timeout-secs notanumber` used to leak a bash arithmetic
+  error and silently revert to the pre-fix note. The `.comms/config`
   delivery-persistence prerequisite never shipped: the registry accepts only `agents`
   and `default-target`; delivery mode is still COMMS_DELIVERY/--via only.)* cmux stays
   selectable as fallback.
@@ -898,6 +910,10 @@ clearest evidence so far that a panel of two is not redundant.
   set row — but the dispatch-side refusal itself is still unbuilt.)*
 - [ ] **End-to-end coverage for the `deliver → acp → spawn --via acp` path.** The committed
   suite asserts the selector; the path itself is proven only by a live run. *(codex.)*
+- [ ] **`helpers/acp.sh cmd_consult` has the same class of hole, unfixed.** The `/ask --via
+  acp` transport passes NO `--timeout` and never inspects its own output — acpx stdout goes
+  straight to the caller, so rc=0 with zero bytes returns success silently. Same shape as
+  the runphase timeout misdiagnosis, different helper, and deliberately not bundled with it.
 
 ### Any agent drives (2026-08-26, owner direction)
 

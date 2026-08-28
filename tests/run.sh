@@ -1645,7 +1645,10 @@ cat > "$TO_STUB/npx" <<'TSTUB'
 case " $* " in
   *" sessions ensure "*) echo "stub-session (created)"; exit 0 ;;
 esac
-sleep 2   # outlive the 1s budget below, and print NOTHING -- exactly acpx --format quiet
+[ "${TO_STUB_SLEEP:-2}" != "0" ] && sleep "${TO_STUB_SLEEP:-2}"   # outlive the 1s budget below
+# Default prints NOTHING -- exactly acpx --format quiet on a kill. TO_STUB_OUT makes the
+# kill PARTIAL instead, which is the case the original guard could not see.
+[ -n "${TO_STUB_OUT:-}" ] && printf '%s' "$TO_STUB_OUT"
 exit 0
 TSTUB
 chmod +x "$TO_STUB/npx"
@@ -1671,6 +1674,64 @@ case "$TO_NOTE" in
 esac
 grep -q 'budget' "$R15/runner.log" 2>/dev/null \
   && ok "elapsed and budget are recorded in runner.log either way" || fail "no elapsed/budget line in runner.log"
+
+# THE EXPENSIVE CASE: a budget-killed turn that got PARTIAL bytes out. A review opens with
+# its verdict and an empty Blocking list, so a turn cut off while writing its advisories
+# emits exactly this — and the parent stamps an authoritative APPROVE from a reviewer that
+# never finished reading the diff. The old guard asked about the budget only when the child
+# had printed nothing, so this shipped as `completed` with an EMPTY note.
+run_to_leg() { # <thread-suffix> <run-dir-var> <timeout> [env already exported by caller]
+  local msg="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-5${1}-00_to-${1}.md"
+  sed -e "s/^thread: ma-arc-1\$/thread: ma-arc-to${1}/" "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$msg"
+  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$TO_STUB:$PATH" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$msg" --dir "$2" \
+      --provider grok --via acp --timeout-secs "$3" ) >/dev/null 2>&1
+}
+note_of() { sed -n 's/.*"note": "\(.*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
+status_of() { sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
+
+R16="$WORK/ma-leg16"; mkdir -p "$R16"
+TO_STUB_OUT="$(printf 'VERDICT: APPROVE\n\n## Summary\nlooks fine so far\n\n## Findings\n### Blocking\n- None.\n\n### Advisory\n- I was still writing when the bud')" \
+  run_to_leg 6 "$R16" 1
+[ "$(status_of "$R16")" = "completed" ] \
+  && ok "a truncated-but-parseable turn is still delivered (the review is not discarded)" \
+  || fail "partial reply was discarded (status $(status_of "$R16"))"
+case "$(note_of "$R16")" in
+  *TRUNCATED*) ok "...but it is flagged as possibly TRUNCATED rather than shipped silently" ;;
+  *) fail "a budget-killed partial reply shipped with note: $(note_of "$R16")" ;;
+esac
+
+# UNSTRUCTURED partial output: the budget must be the HEADLINE, not a parenthetical tail,
+# or the operator reads a formatting complaint and goes hunting the wrong bug again.
+R17="$WORK/ma-leg17"; mkdir -p "$R17"
+TO_STUB_OUT="I am partway through reviewing and was cut o" run_to_leg 7 "$R17" 1
+case "$(note_of "$R17")" in
+  "turn exceeded its"*) ok "an overrun leads with the budget, not with a parser complaint" ;;
+  *) fail "budget was not the headline (got: $(note_of "$R17"))" ;;
+esac
+case "$(note_of "$R17")" in
+  *"broker also said"*) ok "the broker's own complaint survives as the secondary detail" ;;
+  *) fail "the broker detail was dropped from the overrun note" ;;
+esac
+
+# CONTROL: a turn that finishes WELL inside its budget must stay silent, or the warning is
+# noise on every ACP turn and the operator learns to ignore it.
+R18="$WORK/ma-leg18"; mkdir -p "$R18"
+TO_STUB_SLEEP=0 TO_STUB_OUT="$(printf 'VERDICT: APPROVE\n\n## Summary\na complete review\n\n## Findings\n### Blocking\n- None.\n\n### Advisory\n- None.')" \
+  run_to_leg 8 "$R18" 5
+[ "$(status_of "$R18")" = "completed" ] && [ -z "$(note_of "$R18")" ] \
+  && ok "control: a turn inside its budget carries no truncation warning" \
+  || fail "the warning fires on a turn that did not overrun (note: $(note_of "$R18"))"
+
+# A MALFORMED budget must not leak a bash error and must not silently revert the diagnosis.
+R19="$WORK/ma-leg19"; mkdir -p "$R19"
+TO_ERR="$( { ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$TO_STUB:$PATH" \
+    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$MA_MSG15" --dir "$R19" \
+    --provider grok --via acp --timeout-secs notanumber ) >/dev/null; } 2>&1 || true)"
+case "$TO_ERR" in
+  *"integer expression expected"*) fail "a malformed budget leaks a bash arithmetic error" ;;
+  *) ok "a malformed timeout budget is handled without a bash error" ;;
+esac
 
 # Question leg (/ask grok path): the stub STILL emits a leading canonical
 # VERDICT line — for a consult that line must become body text, never metadata.
