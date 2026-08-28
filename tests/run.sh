@@ -6286,9 +6286,65 @@ IH3_INST="$(printf '%s' "$IH3_CLAIM" | sed -n 's/.*instance: //p')"
   && git -c user.email=t@t -c user.name=t commit -qm "feat: g") >/dev/null 2>&1
 (cd "$IH2" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_NAME=resident2 COMMS_PRESENCE_INSTANCE="$IH3_INST" \
     INTEGRATE_HEALED_RECORD=1 "$COMMS" integrate worktree-healtwo) >/dev/null 2>&1 || true
+# Assert the landing first, or a run that failed early would "preserve" the record and
+# this would pass for the wrong reason — the same hole grok found in IH2. (grok, r3.)
+[ "$(cd "$IH2" && git rev-parse main)" = "$(cd "$IH2" && git rev-parse worktree-healtwo)" ] \
+  && ok "the inherited-flag fixture actually landed" || fail "IH3 did not land — its record check would be vacuous"
 [ -f "$IH2/.comms/sessions/resident2-$IH3_INST.json" ] \
   && ok "an inherited heal flag does not release a pre-existing record" \
   || fail "an ambient INTEGRATE_HEALED_RECORD erased a live peer's record"
+
+# SPOOFED OUTPUT must not be believed. The previous ownership channel was a grep of the
+# captured suite log, so a suite that merely PRINTED the heal sentence would make cleanup
+# release a live record. This fixture prints exactly that sentence from its suite and
+# asserts the pre-existing record survives. (codex, panel r3, blocking.)
+IH5="$WORK/int-heal5"; mkdir -p "$IH5"; IH5="$(cd "$IH5" && pwd -P)"
+git -C "$IH5" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IH5/.gitignore"
+mkdir -p "$IH5/tests" "$IH5/.comms"
+printf 'total\t3\n' > "$IH5/tests/expected-counts.tsv"
+printf '#!/bin/bash\necho "presence: a beat during this run HEALED a vanished record" >&2\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IH5/tests/spoof.sh"
+chmod +x "$IH5/tests/spoof.sh"
+printf 'suite-cmd = bash tests/spoof.sh\n' > "$IH5/.comms/config"
+(cd "$IH5" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IH5" && git checkout -q -b session-primary)
+(cd "$IH5" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new spoofone) >/dev/null 2>&1
+(cd "$IH5/.claude/worktrees/spoofone" && echo s > i.txt && git add i.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: i") >/dev/null 2>&1
+IH5_CLAIM="$( (cd "$IH5" && env -u CMUX_WORKSPACE_ID "$COMMS" presence claim --name liveone --role holder) 2>&1 || true )"
+IH5_INST="$(printf '%s' "$IH5_CLAIM" | sed -n 's/.*instance: //p')"
+(cd "$IH5" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_NAME=liveone COMMS_PRESENCE_INSTANCE="$IH5_INST" \
+    "$COMMS" integrate worktree-spoofone) >/dev/null 2>&1 || true
+[ "$(cd "$IH5" && git rev-parse main)" = "$(cd "$IH5" && git rev-parse worktree-spoofone)" ] \
+  && ok "the spoof fixture actually landed" || fail "IH5 did not land — its record check would be vacuous"
+[ -f "$IH5/.comms/sessions/liveone-$IH5_INST.json" ] \
+  && ok "a suite that merely PRINTS the heal sentence cannot make integrate release a live record" \
+  || fail "spoofed suite output released a pre-existing presence record"
+
+# ...and the real channel still works: unlink the record mid-suite so a beat heals it, and
+# assert the resulting pid-less record is released rather than left behind. (grok, r3.)
+IH6="$WORK/int-heal6"; mkdir -p "$IH6"; IH6="$(cd "$IH6" && pwd -P)"
+git -C "$IH6" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IH6/.gitignore"
+mkdir -p "$IH6/tests" "$IH6/.comms"
+printf 'total\t3\n' > "$IH6/tests/expected-counts.tsv"
+# The suite deletes the presence record, then outlives one beat interval (TTL/3).
+printf '#!/bin/bash\nrm -f "$IH6_SESSIONS"/*.json 2>/dev/null || true\nsleep 3\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IH6/tests/unlink.sh"
+chmod +x "$IH6/tests/unlink.sh"
+printf 'suite-cmd = bash tests/unlink.sh\n' > "$IH6/.comms/config"
+(cd "$IH6" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IH6" && git checkout -q -b session-primary)
+(cd "$IH6" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new unlinkone) >/dev/null 2>&1
+(cd "$IH6/.claude/worktrees/unlinkone" && echo u > j.txt && git add j.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: j") >/dev/null 2>&1
+IH6_CLAIM="$( (cd "$IH6" && env -u CMUX_WORKSPACE_ID "$COMMS" presence claim --name midrun --role holder) 2>&1 || true )"
+IH6_INST="$(printf '%s' "$IH6_CLAIM" | sed -n 's/.*instance: //p')"
+(cd "$IH6" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_NAME=midrun COMMS_PRESENCE_INSTANCE="$IH6_INST" \
+    COMMS_PRESENCE_TTL_SECS=3 IH6_SESSIONS="$IH6/.comms/sessions" \
+    "$COMMS" integrate worktree-unlinkone) >/dev/null 2>&1 || true
+[ "$(find "$IH6/.comms/sessions" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
+  && ok "a record healed mid-suite is released, not left pid-less" \
+  || fail "a mid-suite heal left a pid-less record behind"
 
 # The EXIT-trap cleanup path needs its own cover: the success path clears the trap, so the
 # regressions above never exercise the trap strings. A failing suite takes the die path.

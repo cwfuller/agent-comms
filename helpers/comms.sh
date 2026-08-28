@@ -2355,6 +2355,13 @@ cmd_presence() {
       fi
       if [ -f "$healmark" ]; then
         rm -f "$healmark" 2>/dev/null || true
+        # PROVENANCE CHANNEL. A caller that must know whether THIS arm healed cannot learn
+        # it from the log: stdout/stderr carry arbitrary child output, so any suite that
+        # prints the sentence below would be believed. Write the fact, with the identity it
+        # applies to, where only this arm writes. (codex + grok, integrate-beat r3.)
+        if [ -n "${COMMS_PRESENCE_HEAL_REPORT:-}" ]; then
+          printf '%s %s\n' "$name" "$instance" >> "$COMMS_PRESENCE_HEAL_REPORT" 2>/dev/null || true
+        fi
         echo "presence: a beat during this run HEALED a vanished record — tenure is NOT restored; re-run claim-then-check before the next shared-checkout write" >&2
       fi
       return "$rc"
@@ -2579,6 +2586,14 @@ cmd_integrate() {
   # post-add failure leaked a REGISTERED worktree and the documented "fix and
   # re-run" recovery died on 'missing but already registered worktree'.
   # (grok, impl r2.)
+  # Cleared BEFORE the first trap is armed. The flag is global so the pre-expanded EXIT
+  # traps can read it after this function's locals are gone — but a global that is never
+  # initialised is INHERITED, and an inherited value makes cleanup release a record this
+  # run did NOT create, deleting a live peer's presence. Clearing it AFTER the trap left a
+  # window where a signal in between fired cleanup on the stale value; no uninterrupted
+  # test can see that window, which is why it is an ordering rule and not a test.
+  # (codex, panel r2 then r3, blocking twice.)
+  unset INTEGRATE_HEALED_RECORD
   tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
   # shellcheck disable=SC2064
   trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ -n \"\${INTEGRATE_HEALED_RECORD:-}\" ]; then '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; elif [ -n '$name' ]; then _brc=0; '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || _brc=\$?; [ \"\$_brc\" = 5 ] && { '$0' presence release --name '$name' --instance '$instance' >/dev/null 2>&1 || true; }; fi" EXIT
@@ -2601,12 +2616,6 @@ cmd_integrate() {
   # INTEGRATE_HEALED_RECORD is deliberately GLOBAL: the EXIT traps fire after this
   # function's locals are gone, which is why they pre-expand every other value.
   # (codex, panel r1, blocking.)
-  # Cleared at entry. The flag is global so the pre-expanded EXIT traps can read it after
-  # this function's locals are gone — but a global that is never initialised is INHERITED,
-  # and an inherited value here makes cleanup release a record this run did NOT create,
-  # deleting a live peer's presence and making its owner invisible. (codex, panel r2,
-  # blocking.)
-  unset INTEGRATE_HEALED_RECORD
   local beat_rc=0
   if [ -n "$name" ] && [ -n "$instance" ]; then
     "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1 || beat_rc=$?
@@ -2717,6 +2726,9 @@ cmd_integrate() {
     # cannot be diagnosed, which cost a full investigation earlier in this arc.
     local suite_log; suite_log="$root/.comms/logs/integrate-${cand}.suite.log"
     mkdir -p "$root/.comms/logs" 2>/dev/null || true
+    local heal_report; heal_report="$root/.comms/logs/integrate-${cand}.heal"
+    rm -f "$heal_report" 2>/dev/null || true
+    export COMMS_PRESENCE_HEAL_REPORT="$heal_report"
     # errexit is suspended ACROSS the pipeline: with `set -e -o pipefail` a red suite
     # terminates the helper AT the pipeline, so `rc=${PIPESTATUS[0]}` never runs and the
     # "suite FAILED ... output kept at ..." diagnostic below is unreachable on exactly the
@@ -2732,12 +2744,15 @@ cmd_integrate() {
     fi
     set -e
     # A beat DURING the suite can heal a record that vanished mid-run. `with-beat` returns
-    # the CHILD's status by design, so the exit code cannot carry that fact — but it prints
-    # it, and this function now captures the output. Claim ownership of that heal too, or
-    # the newly pid-less record outlives the run and can never be reaped. (codex, r2.)
-    if grep -q 'HEALED a vanished record' "$suite_log" 2>/dev/null; then
+    # the CHILD's status by design, so the exit code cannot carry that fact. An earlier
+    # version grepped the captured suite output for the heal sentence — which is NOT an
+    # ownership signal: the log holds arbitrary child output, so any suite printing that
+    # string would make cleanup release a live record. Read the provenance channel, and
+    # require the identity to be OURS. (codex, r3, blocking; grok corroborated.)
+    if [ -s "$heal_report" ] && grep -qxF "$name $instance" "$heal_report" 2>/dev/null; then
       INTEGRATE_HEALED_RECORD=1
     fi
+    rm -f "$heal_report" 2>/dev/null || true
     [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log"
     # POSITIVE PROOF, not merely an absence of failure. A scrub is a blocklist and the
     # next startup hook will not be on it, so require evidence the suite actually RAN:
