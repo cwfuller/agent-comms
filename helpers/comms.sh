@@ -1013,9 +1013,26 @@ findings_extract() {  # <file> <role> <set> <artifact> <reviewer_version> <promp
     # skipped the APPROVE cross-check entirely. (grok, round 4.)
     tolower($0) ~ /^### blocking/ { flush(); lane = "blocking"; hasblocking = 1; next }
     tolower($0) ~ /^### advisory/ { flush(); lane = "advisory"; next }
-    # Any other heading closes the lane — `### Process` never gates a verdict and
-    # is not a code finding, so it is not a graded observation either.
-    /^#/ { flush(); lane = ""; next }
+    # Any other heading at the SAME level or shallower closes the lane -- `### Process`
+    # never gates a verdict and is not a code finding, so it is not a graded observation.
+    #
+    # But a DEEPER heading is structurally inside the lane, not a sibling that ends it, and
+    # treating every `^#` as a terminator was a fail-open path: `### Blocking` followed by
+    # `#### the attestation is not bound to the tested commit` cleared the lane before any
+    # residue rule could see it, probing `blocking_section=yes blocking=0
+    # blocking_unparsed=0` -- a derived APPROVE over a heading-shaped finding. Counting the
+    # depth is what distinguishes "this section ended" from "someone wrote their finding as
+    # a sub-heading". (codex blocking + grok, panel r2.)
+    /^#/ {
+      hlev = 0
+      while (substr($0, hlev + 1, 1) == "#") hlev++
+      if (lane == "" || hlev <= 3) { flush(); lane = ""; next }
+      # Deeper than `### Blocking`: content inside the lane. It is not a list item, so it
+      # is unread residue by the same rule as any other unclassifiable line.
+      flush()
+      if (!isplaceholder($0)) unparsed[lane]++
+      next
+    }
     lane == "" { next }
     # A finding is a LIST ITEM, in any markdown list form, indented 0-3 spaces (4+ is a
     # code block, not a list). Matching only column-0 "- " silently extracted nothing

@@ -2307,6 +2307,31 @@ printf '### Blocking\n\n- a wording nit\nThe attestation is not bound to the tes
 [ "$(probe_of "$CORP/mixedsilent.md" blocking)" = "1" ] && [ "$(probe_of "$CORP/mixedsilent.md" blocking_unparsed)" -gt 0 ] \
   && ok "a parsed finding plus unindented prose reports BOTH the finding and the residue" \
   || fail "mixed lane went silent again"
+# HEADING DEPTH decides whether a lane ended or someone wrote their finding as a sub-heading.
+# Treating every `^#` as a terminator cleared the lane before any residue rule could see it,
+# so `### Blocking` + `#### the attestation is not bound...` probed 0/0 and derived APPROVE.
+# (codex blocking + grok, panel r2.)
+printf '### Blocking\n\n#### The attestation is not bound to the tested commit\n' > "$CORP/deephead.md"
+[ "$(probe_of "$CORP/deephead.md" blocking)" = "0" ] && [ "$(probe_of "$CORP/deephead.md" blocking_unparsed)" -gt 0 ] \
+  && ok "a finding written as a DEEPER heading is residue, not a closed lane" \
+  || fail "a sub-heading finding still reads as a clean review"
+# ...and a sibling or shallower heading must still CLOSE the lane, or every Process section
+# and every trailing summary becomes residue and clean approvals start refusing.
+printf '### Blocking\n\n- None.\n\n### Advisory\n\n- None.\n\n### Process\n\nplain prose about the loop\n' > "$CORP/procclose.md"
+[ "$(probe_of "$CORP/procclose.md" blocking_unparsed)" = "0" ] && [ "$(probe_of "$CORP/procclose.md" advisory_unparsed)" = "0" ] \
+  && ok "a sibling ### heading still closes the lane (a clean approval stays clean)" \
+  || fail "### Process prose leaked into a lane as residue"
+printf '### Blocking\n\n- a real finding\n\n## Summary\n\nprose after\n' > "$CORP/shallowclose.md"
+[ "$(probe_of "$CORP/shallowclose.md" blocking)" = "1" ] && [ "$(probe_of "$CORP/shallowclose.md" blocking_unparsed)" = "0" ] \
+  && ok "a shallower ## heading closes the lane too" || fail "shallow heading did not close the lane"
+# codex advisory: flush-first CAN change extracted claim text on a shape the archive does not
+# contain, and the row-count assertion cannot see it. Pin the claim text itself.
+printf '### Blocking\n\n- a real bug\nan unindented gap line\n  an indented tail\n' > "$CORP/sandwich.md"
+[ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/sandwich.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{print $15}')" = "a real bug" ] \
+  && ok "flush-first pins the claim to the list item, with the stray lines as residue" \
+  || fail "claim text drifted: $("$REPO/helpers/comms.sh" findings --raw "$CORP/sandwich.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{print $15}')"
+[ "$(probe_of "$CORP/sandwich.md" blocking_unparsed)" = "2" ] \
+  && ok "both stray lines are counted as residue" || fail "sandwich residue count wrong ($(probe_of "$CORP/sandwich.md" blocking_unparsed))"
 # The counter must not change WHAT is extracted: verified byte-identical across all 348
 # archived messages, so no finding_id renumbers and .comms/grades/findings.tsv needs no rebuild.
 [ "$("$REPO/helpers/comms.sh" findings --raw "$CORP/continuation.md" 2>/dev/null | awk -F'\t' '$13=="blocking"{n++} END{print n+0}')" = "1" ] \
