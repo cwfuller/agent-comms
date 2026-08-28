@@ -159,7 +159,7 @@ the interleaving I think is safe — find one where it isn't" earns its tokens.
 bash tests/run.sh
 ```
 
-One umbrella suite. It is still slow — measured 2026-08-27 at **~340s for 954 assertions**
+One umbrella suite. It is still slow — measured 2026-08-27 at **~335s for 960 assertions**
 on an unloaded machine, down from 505s once an unconditional 6s wait per spawned turn was
 removed (505s → 326s on identical trees; the rest of the difference is new assertions that
 deliberately spend ~25s exercising that wait) — and reducing it further is active work; see
@@ -173,6 +173,17 @@ overhead is ~5%, not the dominant term it was once estimated to be.
   `suite-attest-secs = N` is configured. **Only a complete run may attest.** If you tier,
   shard, or subset the suite, a partial green must never mint an attestation — that would
   let `integrate` land code the deep tests never touched.
+- That rule is now MECHANICAL, not procedural. `tests/expected-counts.tsv` records how many
+  assertions the corpus contains (`total`) and how many may be environment-skipped
+  (`max_skip`). Both the suite's **exit status** and the attestation mint require the
+  expected number of assertions to have actually run — gating only the mint would leave the
+  exit status, which `integrate` reads as its PRIMARY gate, still reporting a partial run as
+  a pass. Until this landed, a run that executed 300 of 954 assertions with no failures was
+  byte-identical to a full green run for every consumer.
+- **Changing what the corpus covers is therefore a reviewable diff**: add or remove an
+  assertion and the suite goes red until `tests/expected-counts.tsv` is updated in the same
+  commit. Retiring an assertion by wrapping it in `skip()` raises the skip count and trips
+  the cap, so coverage can only be reduced on purpose and in the open.
 - The presence/signal section is timing-sensitive and demonstrably flakes under machine
   load. Keep it serial; never shard it.
 - Check `uptime` before long runs. This suite has been killed mid-flight by machine

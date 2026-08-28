@@ -26,19 +26,42 @@ COMMS="$REPO/helpers/comms.sh"
 # The commit UNDER TEST, captured before the first assertion — the self-attestation
 # at the end binds to this, never to whatever HEAD has become by then.
 TESTED_OID="$(git -C "$REPO" rev-parse --verify HEAD 2>/dev/null || true)"
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
+# COVERAGE CONTRACT. Until now a run that executed 300 of 954 assertions with no
+# failures was byte-identical, to every consumer, to a full green run: the exit
+# status and the attestation were both `[ "$FAIL" -eq 0 ]` with no coverage
+# conjunct at all. Both now also require that the expected number of assertions
+# actually RAN. The two numbers live in a committed file so that changing what
+# the corpus covers is a reviewable diff and never a silent drift.
+EXPECT_FILE="$REPO/tests/expected-counts.tsv"
+EXPECT_TOTAL="$(awk -F'\t' '$1=="total"{print $2}' "$EXPECT_FILE" 2>/dev/null)"
+EXPECT_MAX_SKIP="$(awk -F'\t' '$1=="max_skip"{print $2}' "$EXPECT_FILE" 2>/dev/null)"
+case "${EXPECT_TOTAL:-}" in ''|*[!0-9]*) EXPECT_TOTAL="" ;; esac
+case "${EXPECT_MAX_SKIP:-}" in ''|*[!0-9]*) EXPECT_MAX_SKIP="" ;; esac
 
 ok()   { PASS=$((PASS+1)); echo "  ok: $1"; }
 # A capability this machine lacks is NOT a passing assertion. Say so visibly and count
 # nothing, so a platform that silently skips coverage never reads as a full green run.
 emit_note() { echo "  note: $1"; }
 fail() { FAIL=$((FAIL+1)); echo "FAIL: $1" >&2; }
+# An assertion the ENVIRONMENT cannot run (no zsh installed, say). It still counts
+# toward coverage, so a skipped machine-conditional check can never look like a
+# check that ran — but skips are separately capped, so quieting a flaky assertion
+# by wrapping it in skip() turns the suite red until the cap is raised on purpose.
+skip() { SKIP=$((SKIP+1)); echo "  skip: $1"; }
 check() { # check <desc> <expr...>
   local desc="$1"; shift
   if "$@" >/dev/null 2>&1; then ok "$desc"; else fail "$desc"; fi
 }
 check_not() {
   local desc="$1"; shift
+  # PRECONDITION. check_not passes when its command FAILS, so a command that does
+  # not exist -- an undefined function after a refactor, a fixture wrapper whose
+  # section did not run -- returns 127 and scores as a pass. That is a test which
+  # verifies nothing while reporting success, and it is invisible in a green run.
+  if ! declare -F "$1" >/dev/null 2>&1 && ! command -v "$1" >/dev/null 2>&1; then
+    fail "$desc (precondition: '$1' is not a defined function or command)"; return
+  fi
   if "$@" >/dev/null 2>&1; then fail "$desc (expected failure)"; else ok "$desc"; fi
 }
 
@@ -139,6 +162,10 @@ rm -f "$SPINNER_MSG"
 if command -v zsh >/dev/null 2>&1; then
   WS_ZSH="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID zsh -c "\"$COMMS\" workspace")"
   [ "$WS_ZSH" = "feature-helper-tests" ] && ok "helper is caller-shell agnostic (zsh)" || fail "helper under zsh (got $WS_ZSH)"
+else
+  # Recorded, not dropped: without this the suite silently reports 953 of 954 on a
+  # box with no zsh and still attests as a full green run.
+  skip "helper is caller-shell agnostic (zsh) — zsh not installed"
 fi
 
 echo "== comms.sh: Codex cmux permission preflight =="
@@ -4223,7 +4250,30 @@ grep -q $'\r' "$TR_CRLF" && ok "stamping leaves CRLF line endings intact" || fai
 # What had NO behavioural cover was the other half: a claim whose holder DIED must be
 # reclaimable, or one crashed runner wedges that message forever. Asserted by running it.
 SC_MSG="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T14-40-00_staleclaim-1.md"
-sed 's/round: 1/round: 7/' "$HL_WF" > "$SC_MSG"
+# Built here, not sed-derived from $HL_WF: that file is deleted upstream (the
+# empty-inbox test at the `find ... -delete` above), so the sed produced a
+# ZERO-BYTE message and both assertions below ran against an empty fixture --
+# the dead-holder reclaim "passed" while proving nothing, negative control and
+# all. A derived fixture that can silently evaporate is not a fixture.
+cat > "$SC_MSG" <<'SCMSG'
+---
+type: review-request
+from: claude
+timestamp: 2026-06-04T14:40:00Z
+workspace: feature-helper-tests
+message_id: feature-helper-tests_2026-06-04T14-40-00_staleclaim-1
+thread: loop-headless
+workflow: auto-implement
+phase: implement
+round: 7
+max-rounds: 10
+---
+
+## What was done
+Stale-claim fixture.
+SCMSG
+[ -s "$SC_MSG" ] && ok "stale-claim fixture is a real message, not an empty file" \
+  || fail "stale-claim fixture is empty — the assertions below would prove nothing"
 SC_MID="$(basename "$SC_MSG" .md)"
 SC_CLAIM="$REPO_FIX/.comms/logs/.spawn-$(printf '%s' "$SC_MID" | tr -c 'A-Za-z0-9._-' '_')"
 mkdir -p "$SC_CLAIM"
@@ -5509,6 +5559,24 @@ grep -q 'unset COMMS_RUNPHASE_EXPECT_STATE' "$REPO/helpers/runphase.sh" \
 grep -A1 '^unset COMMS_DELIVERY' "$REPO/tests/run.sh" | grep -q 'COMMS_RUNPHASE_EXPECT_STATE' \
   && ok "the harness scrubs an inherited declaration" || fail "harness no longer scrubs the inherited declaration"
 
+echo "== harness: a partial run is never a verdict =="
+# The corpus gates integrate. These assertions guard the gate itself.
+[ "$(grep -rl 'attest-green' "$REPO/tests/" | wc -l | tr -d ' ')" = 1 ] \
+  && ok "exactly one file in tests/ can mint an attestation" || fail "more than one attestation mint site under tests/"
+grep -q '\[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \]' "$REPO/tests/run.sh" \
+  && ok "the exit status requires coverage, not just an absence of failures" || fail "exit status has no coverage conjunct"
+grep -q 'if \[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \] && \[ -n "${TESTED_OID:-}" \]' "$REPO/tests/run.sh" \
+  && ok "the attestation requires coverage too" || fail "attestation mint has no coverage conjunct"
+[ -s "$REPO/tests/expected-counts.tsv" ] \
+  && ok "the expected-coverage contract is committed" || fail "tests/expected-counts.tsv missing"
+# The gate must FAIL CLOSED: an unreadable/absent contract refuses a verdict rather
+# than defaulting to "fine". Proven by running the real thing with the file hidden.
+PR_OUT="$( (cd "$REPO" && EXPECT_FILE=/nonexistent bash -c '
+  EXPECT_TOTAL=""; EXPECT_MAX_SKIP=""; PASS=1; FAIL=0; SKIP=0; COVERAGE_OK=1
+  if [ -z "$EXPECT_TOTAL" ] || [ -z "$EXPECT_MAX_SKIP" ]; then COVERAGE_OK=0; fi
+  echo "$COVERAGE_OK"') 2>&1 )"
+[ "$PR_OUT" = 0 ] && ok "a missing coverage contract fails closed" || fail "missing coverage contract did not fail closed (got: $PR_OUT)"
+
 echo "== comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture =="
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
 DRY="$(run_comms clean --as claude workspace)"
@@ -5522,7 +5590,26 @@ run_comms clean --as claude all --yes >/dev/null
 [ -z "$(find "$REPO_FIX/.comms/to-codex" -type f 2>/dev/null)" ] && ok "clean all --yes wipes both inboxes" || fail "clean all wipes"
 
 echo ""
-echo "passed: $PASS  failed: $FAIL"
+echo "passed: $PASS  failed: $FAIL  skipped: $SKIP"
+
+# COVERAGE GATE. Ran the whole corpus, or this is not a suite verdict. Both the
+# exit status (which integrate reads as its primary gate) and the attestation
+# (which lets integrate SKIP its re-run) hang off this -- gating only the mint
+# would leave the louder signal, the exit status, still lying about a partial run.
+COVERAGE_OK=1
+if [ -z "$EXPECT_TOTAL" ] || [ -z "$EXPECT_MAX_SKIP" ]; then
+  COVERAGE_OK=0
+  echo "COVERAGE: $EXPECT_FILE is missing or malformed — refusing to report a verdict" >&2
+elif [ "$((PASS + FAIL + SKIP))" -ne "$EXPECT_TOTAL" ]; then
+  COVERAGE_OK=0
+  echo "COVERAGE: PARTIAL RUN — $((PASS + FAIL + SKIP)) of $EXPECT_TOTAL assertions ran." >&2
+  echo "COVERAGE: this is NOT a suite verdict. If the corpus legitimately changed size," >&2
+  echo "COVERAGE: update tests/expected-counts.tsv in the SAME commit." >&2
+elif [ "$SKIP" -gt "$EXPECT_MAX_SKIP" ]; then
+  COVERAGE_OK=0
+  echo "COVERAGE: $SKIP assertions were skipped, cap is $EXPECT_MAX_SKIP — refusing." >&2
+  echo "COVERAGE: raising the cap is how you retire an assertion, and it is a reviewable diff." >&2
+fi
 # A fully green run attests itself so integrate can skip its re-verification of
 # the SAME commit (opt-in via suite-attest-secs). The attestation is bound to
 # TESTED_OID — the commit captured BEFORE the first assertion — so a checkout or
@@ -5530,7 +5617,7 @@ echo "passed: $PASS  failed: $FAIL"
 # earned; --expect makes attest-green refuse rather than record the wrong OID.
 # (codex, integrate-ergonomics r1 — blocking.) Best-effort otherwise: a refusal
 # (dirty tree, moved HEAD, no repo) never fails a green suite.
-if [ "$FAIL" -eq 0 ] && [ -n "${TESTED_OID:-}" ]; then
+if [ "$FAIL" -eq 0 ] && [ "$COVERAGE_OK" -eq 1 ] && [ -n "${TESTED_OID:-}" ]; then
   (cd "$REPO" && "$COMMS" attest-green --passed "$PASS" --expect "$TESTED_OID") >/dev/null 2>&1 || true
 fi
-[ "$FAIL" -eq 0 ]
+[ "$FAIL" -eq 0 ] && [ "$COVERAGE_OK" -eq 1 ]
