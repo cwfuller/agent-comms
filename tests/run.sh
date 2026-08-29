@@ -7431,6 +7431,11 @@ git -C "$EV8" init -q -b main; git -C "$EV8" -c user.email=t@t -c user.name=t co
 EV_NODIR="$( (cd "$EV8" && env -u CMUX_WORKSPACE_ID "$COMMS" events append --kind turn-started --thread d) 2>&1 || true )"
 rm -f "$EV8/.comms"
 printf '%s\n' "$EV_NODIR" | grep -q 'cannot create' && ok "an uncreatable events directory is reported, not a bash error" || fail "uncreatable dir (got: $EV_NODIR)"
+# If the channel that reports skipped rows cannot be created, the evidence of a torn log
+# would vanish and every consumer would trust a file nothing validated. (codex, r4.)
+EV_NOTMP="$( (cd "$EV" && env -u CMUX_WORKSPACE_ID TMPDIR=/nonexistent-tmpdir-for-tests "$COMMS" events --limit 1) 2>&1 >/dev/null || true )"
+printf '%s\n' "$EV_NOTMP" | grep -q 'could not be counted' \
+  && ok "a reader that cannot record what it skipped refuses to read at all" || fail "reader degraded silently (got: $EV_NOTMP)"
 [ ! -f "$EV7/.comms/events.tsv" ] && ok "the refusal leaves no headerless log behind" || fail "a headerless log was created"
 
 # The filesystem constraint is ENFORCED, not diagnosed: an NFS append can be LOST whole,
@@ -7525,6 +7530,17 @@ fi
 run_ev events --set ev-race --limit 1 2>/dev/null | tail -1 | grep -q 'racer-' && ok "--limit applies AFTER the filter, never as a global tail" || fail "--limit filter ordering"
 run_ev events --set ev-race 2>/dev/null | head -1 | grep -q '^ts' && ok "a filtered read still prints the header" || fail "filtered header"
 check_not "--limit rejects a non-numeric budget" run_ev events --limit nine
+# Identity columns are exact-match join keys. A plain clip breaks the join SILENTLY: the row
+# is written, and then nothing can ever find it again. Writer and reader share one transform
+# — a readable head plus a digest of the whole. (codex, implement r4, blocking.)
+EV_LONGID="m-$(awk 'BEGIN{while(i++<200)printf "x"}')"
+run_ev events append --kind reply-accepted --thread ev-longid --message-id "$EV_LONGID" --status APPROVE >/dev/null
+[ "$(run_ev events --kind reply-accepted --message-id "$EV_LONGID" 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] \
+  && ok "an identity longer than its column is still found by its full value" || fail "a long identity could not find itself"
+[ "$(run_ev events --kind reply-accepted --message-id "${EV_LONGID}zzz" 2>/dev/null | tail -n +2 | grep -c .)" = "0" ] \
+  && ok "a DIFFERENT long identity sharing the same prefix does not match" || fail "the identity transform collides on a shared prefix"
+[ "$(awk -F'\t' -v c="$C_MID" -v t="$C_TH" '$t=="ev-longid"{print length($c)}' "$EV_LOG")" -le 72 ] \
+  && ok "the stored identity still respects its column budget" || fail "identity exceeded its column"
 # A shadow turn shares its gating leg's thread and dispatch, so a recovery read has to be
 # able to drop it or a measurement looks like the leg that gates. (grok, implement r1.)
 run_ev events append --kind turn-started --set ev-roles --thread ev-roles --role shadow --status running >/dev/null
@@ -7723,6 +7739,21 @@ printf 'legacy-set\tlm-1\tlegacy-codex\t1\timplement\taid\tpv\tbase\tcodex\tcode
 [ "$(run_evrf panel status --set legacy-set 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] \
   && ok "a set recorded before attempts existed still binds" || fail "a legacy set stopped binding"
 cp "$WORK/rf-events-clean.tsv" "$EV_RF/.comms/events.tsv"
+# A torn row BEFORE the plan must not block anything. Refusing on a malformed row anywhere
+# bricked this repo the moment the schema grew: rows and a header from the older shape sit
+# at the top of the live log, so every compose and status refused. What can hide the current
+# plan is a torn row AFTER it. (grok, implement r4, blocking — and hit live.)
+EV_RFCLEAN="$(cat "$EV_RF/.comms/events.tsv")"
+{ printf 'an ancient torn row\n'; printf '%s\n' "$EV_RFCLEAN"; } > "$EV_RF/.comms/events.tsv"
+run_evrf panel status --set "$EV_RFSET" >/dev/null 2>&1 \
+  && ok "a torn row that PRECEDES the plan does not block binding" || fail "an old torn row still bricks binding"
+cp "$WORK/rf-events-clean.tsv" "$EV_RF/.comms/events.tsv"
+# The bare listing keeps its pinned header and counts the CURRENT attempt.
+run_evrf panel dispatch --to codex,grok "$EV_RFREQ" >/dev/null 2>&1 || true
+run_evrf panel status 2>/dev/null | head -1 | grep -q 'legs' \
+  && ok "the bare listing keeps its pinned header" || fail "bare listing header changed"
+[ "$(run_evrf panel status 2>/dev/null | awk -F'\t' -v s="$EV_RFSET" '$1==s{print $4}')" = "2" ] \
+  && ok "the bare listing counts the current attempt, not every attempt ever recorded" || fail "bare listing counted historical rows"
 
 # The PLAN event is the authority, not the last row: append a stale leg row for the OLD
 # attempt after the new one and the binding must not follow it.
@@ -7878,6 +7909,32 @@ awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v rq="$C_REQ" -v m="$C_MID" '$t=="ev-losta
   && ok "the fixture planted an earlier EXECUTION of the same request and attempt" || fail "the collision fixture planted nothing"
 [ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-lostaccept" && $e=="turn-finished"{print $st}' "$EV_LOG")" = "log-incomplete" ] \
   && ok "a lost acceptance is detected even when an earlier execution of the SAME request accepted" || fail "the acceptance lookup adopted another execution's row"
+
+# A row truncated mid-write still carries fields 3 and 12, which a raw TSV match accepted
+# while the reader rejected the very same row — two rules for one question. The lookup goes
+# through the reader now. (codex, implement r4, blocking.)
+EV_SHIM4="$WORK/ev-shim4"; mkdir -p "$EV_SHIM4"
+cp "$RUNPHASE" "$EV_SHIM4/runphase.sh"; chmod +x "$EV_SHIM4/runphase.sh"
+cat > "$EV_SHIM4/comms.sh" <<SHIM
+#!/bin/bash
+if [ "\$1" = send ]; then
+  "$COMMS" "\$@"; rc=\$?
+  T="\$(mktemp)"
+  awk -F'\t' 'BEGIN{OFS="\t"} \$3=="reply-accepted" { NF=12; print; next } { print }' "$EV_LOG" > "\$T" 2>/dev/null \
+    && cat "\$T" > "$EV_LOG"
+  rm -f "\$T"
+  exit \$rc
+fi
+exec "$COMMS" "\$@"
+SHIM
+chmod +x "$EV_SHIM4/comms.sh"
+EV_GMSG7="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-37-00_ev-grok7.md"
+sed 's/message_id: ev-req-1/message_id: ev-grok-7/; s/thread: ev-loop/thread: ev-partialrow/' "$EV_REQ" > "$EV_GMSG7"
+EV_GDIR7="$WORK/ev-grok-leg7"; mkdir -p "$EV_GDIR7"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   "$EV_SHIM4/runphase.sh" run --message "$EV_GMSG7" --dir "$EV_GDIR7" --provider grok) >/dev/null 2>&1 || true
+[ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-partialrow" && $e=="turn-finished"{print $st}' "$EV_LOG")" = "log-incomplete" ] \
+  && ok "a truncated acceptance row does not satisfy the lookup" || fail "a partial row passed as an acceptance"
 
 EV_GMSG3="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-32-00_ev-grok3.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-3/; s/thread: ev-loop/thread: ev-shadow/' "$EV_REQ" > "$EV_GMSG3"

@@ -955,10 +955,16 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
   # The joined column is subject to the writer's per-column clip: an id long enough to be
   # clipped fails to match and yields a CONSERVATIVE `log-incomplete`, never a false clean
   # bill, which is the only direction that would matter.
-  local evf; evf="$("$COMMS" root 2>/dev/null)/events.tsv"
-  awk -F'\t' -v rid="${GROK_REPLY_ID:-}" \
-      '$3=="reply-accepted" && rid != "" && $12==rid' "$evf" 2>/dev/null | grep -q . \
-    || LOG_INCOMPLETE=1
+  # Asks the READER, not the raw file. A partial append that reached field 12 satisfied a
+  # bare `$3`/`$12` match while `events` rejected the very same row — two rules for one
+  # question, and the looser one decided whether a turn could sign off clean. The reader
+  # also applies the writer's identity transform, so a long reply id still matches.
+  # (codex, implement r4, blocking.)
+  [ -n "${GROK_REPLY_ID:-}" ] || LOG_INCOMPLETE=1
+  if [ -n "${GROK_REPLY_ID:-}" ]; then
+    "$COMMS" events --kind reply-accepted --message-id "$GROK_REPLY_ID" --limit 1 2>/dev/null \
+      | tail -n +2 | grep -q . || LOG_INCOMPLETE=1
+  fi
   return 0
 }
 

@@ -85,7 +85,8 @@
 #                               cluster every leg's findings and label them by SUPPORT:
 #                               corroborated (gates), uncorroborated (cross-check first),
 #                               unanchored, advisory. Drops nothing; no model arbitrates.
-#   events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R] [--limit N]
+#   events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R]
+#          [--request-id Q] [--message-id M] [--limit N]
 #           events append --kind <kind> [--set|--thread|--round|--agent|--role|--artifact|
 #                                        --request-id|--message-id|--run-dir|--status|--note]
 #                               the coordinator's append-only log of what IT did: roster
@@ -1289,34 +1290,44 @@ findings_set_header() {
 # did. (codex, implement r1, blocking.)
 set_current_dispatch() {
   # THE PLAN EVENT IS THE AUTHORITY. `panel-planned` is written once per fan-out, before any
-  # leg goes out, so the last one for a set names the attempt in progress. Reading the last
-  # LEG row instead let an interleaving pick an attempt whose roster was never complete.
-  # (codex, implement r2, blocking.)
+  # leg goes out, so the last one for a set names the attempt in progress.
   #
-  # Exit 2 means REFUSE, and it is not the same as "no attempt". Treating every empty answer
-  # as legacy was the hole: a torn `panel-planned` row is SKIPPED by the reader, so the
-  # answer silently became the PRECEDING attempt, and a missing log fell back to last-row-
-  # wins — the exact binding this replaced. The only case that may degrade is a set with no
-  # attempt anywhere, which is what a pre-column set looks like. (codex, implement r3.)
-  local d errf err
-  errf="$(mktemp "${TMPDIR:-/tmp}/agent-comms-setdisp.XXXXXX" 2>/dev/null || true)"
-  [ -n "$errf" ] || errf=/dev/null
-  d="$(cmd_events --set "$2" --kind panel-planned --limit 1 2>"$errf" | awk -F'\t' 'NR>1{print $5}')"
-  err="$(cat "$errf" 2>/dev/null || true)"
-  [ "$errf" = /dev/null ] || rm -f "$errf" 2>/dev/null || true
-  case "$err" in
-    *malformed*)
-      # The log has a torn row. The plan we would read may be the one that tore.
-      emit_diagnostic "panel: the coordinator log has malformed rows — refusing to guess which dispatch attempt of '$(clip "$2")' is current"
-      return 2 ;;
-  esac
-  if [ -n "$d" ]; then printf '%s\n' "$d"; return 0; fi
+  # Exit 2 means REFUSE. Scoping matters twice over:
+  #
+  #   * refusing on a malformed row ANYWHERE was wrong, and wrong in a way that bricked this
+  #     very repo: the log still carries rows and a header from an older schema, so one
+  #     schema change made every compose and status refuse forever. What can hide the
+  #     current plan is a torn row AFTER it — that row could BE a newer plan — so that, and
+  #     only that, refuses. (grok, implement r4, blocking; hit live before the reply landed.)
+  #   * a set whose legs name an attempt but whose plan is unreadable or absent still
+  #     refuses, because binding to the last leg row is the guess this design removed.
+  #
+  # Only a set with no attempt anywhere may degrade to the index, which is what a set
+  # recorded before the column existed looks like. (codex, implement r3.)
+  local evf out
+  evf="$(events_file)"
+  if [ -f "$evf" ]; then
+    out="$(awk -F'\t' -v s="$(event_identity "$2" "$EVENT_W_SET")" -v hdr="$EVENTS_HEADER" \
+        -v ev_kinds="$EVENT_KINDS" -v ev_roles="$EVENT_ROLES" "$EVENTS_AWK_LIB"'
+      BEGIN { ev_ncols = split(hdr, H, "\t") }
+      $0 == hdr { next }
+      !ev_wellformed() { if (NF) lastbad = NR; next }
+      $3 == "panel-planned" && $4 == s { lastplan = NR; d = $5 }
+      END {
+        if (lastplan == 0) { print "noplan"; exit 0 }
+        if (lastbad > lastplan) { print "torn"; exit 0 }
+        printf "ok\t%s\n", d
+      }' "$evf" 2>/dev/null)"
+    case "$out" in
+      ok*)   printf '%s\n' "${out#ok	}"; return 0 ;;
+      torn)  emit_diagnostic "panel: the coordinator log has a malformed row AFTER the last panel-planned for '$(clip "$2")' — refusing to bind an attempt that a torn row may supersede"
+             return 2 ;;
+    esac
+  fi
   if awk -F'\t' -v s="$2" 'NR>1 && $1==s && $14!="" {found=1} END {exit !found}' "$1"; then
     emit_diagnostic "panel: '$(clip "$2")' has legs recorded under a dispatch attempt but no panel-planned event to say which is current — refusing to bind (is .comms/events.tsv missing?)"
     return 2
   fi
-  # No attempt anywhere: a set recorded before this column existed, or a `shadow` row. The
-  # empty current attempt selects exactly those rows.
   printf '\n'
 }
 
@@ -1453,17 +1464,39 @@ cmd_panel() {
     # who has replied; this answers which sets exist. Newest last in an append-only
     # file, so it is walked backwards rather than by parsing timestamps.
     if [ -z "$set_id" ]; then
-      # `rows`, not `legs`: preserved attempts mean a two-leg set dispatched twice has four
-      # rows here. `panel status --set <id>` is the attempt-aware view. (codex, r3, advisory.)
-      printf 'set\tphase\tround\trows\tcreated\n'
+      # The header is printed by the SAME awk as the rows. From the shell it sat in the
+      # stdio buffer bash uses whenever stdout is a pipe, so `panel status | head -1` could
+      # see a row before the header — the identical defect the events reader had, one level
+      # up, and the reason the pinned header could not be asserted positionally.
+      # `legs` counts the CURRENT attempt, not every attempt ever recorded. Preserving a
+      # retry's rows (which is what makes attempt isolation possible) would otherwise make a
+      # two-leg set dispatched twice report four legs — and the header is a pinned output
+      # contract, so the count is what had to change, not its name. (codex, implement r4.)
+      local curf; curf="$(mktemp "${TMPDIR:-/tmp}/agent-comms-cur.XXXXXX" 2>/dev/null || true)"
+      if [ -n "$curf" ] && [ -f "$(events_file)" ]; then
+        awk -F'\t' -v hdr="$EVENTS_HEADER" -v ev_kinds="$EVENT_KINDS" -v ev_roles="$EVENT_ROLES" \
+          "$EVENTS_AWK_LIB"'
+          BEGIN { ev_ncols = split(hdr, H, "\t") }
+          $0 == hdr { next }
+          !ev_wellformed() { next }
+          $3 == "panel-planned" { cur[$4] = $5 }
+          END { for (k in cur) printf "%s\t%s\n", k, cur[k] }' "$(events_file)" > "$curf" 2>/dev/null
+      fi
       # NF>=13: a truncated row would otherwise be counted as a leg and printed with
       # blank metadata, which is the listing lying about durable state. (codex, r1.)
-      awk -F'\t' 'NR>1 && NF>=13 && $1!="" {
-        if (!($1 in seen)) { seen[$1]=1; order[++n]=$1; ph[$1]=$5; rd[$1]=$4; cr[$1]=$13 }
-        legs[$1]++
+      awk -F'\t' -v curf="${curf:-/dev/null}" '
+      BEGIN {
+        print "set\tphase\tround\tlegs\tcreated"
+        while ((getline line < curf) > 0) { split(line, P, "\t"); cur[P[1]] = P[2] }
       }
-      END { for (i=n; i>=1; i--) { k=order[i]; printf "%s\t%s\t%s\t%s\t%s\n", k, ph[k], rd[k], legs[k], cr[k] } }' "$idx"
-      emit_diagnostic "panel: 'panel status --set <id>' shows the CURRENT attempt's legs and verdicts; 'rows' here counts every attempt ever recorded"
+      NR>1 && NF>=13 && $1!="" {
+        if (!($1 in seen)) { seen[$1]=1; order[++n]=$1; ph[$1]=$5; rd[$1]=$4; cr[$1]=$13 }
+        want = ($1 in cur) ? cur[$1] : ""
+        if ($14 == want) legs[$1]++
+      }
+      END { for (i=n; i>=1; i--) { k=order[i]; printf "%s\t%s\t%s\t%s\t%s\n", k, ph[k], rd[k], legs[k]+0, cr[k] } }' "$idx"
+      [ -z "$curf" ] || rm -f "$curf" 2>/dev/null || true
+      emit_diagnostic "panel: 'panel status --set <id>' shows each leg's reply and verdict"
       return 0
     fi
     # Resolve the workspace ONCE — per-candidate calls also re-emit the resolver's
@@ -1858,6 +1891,29 @@ EVENTS_HEADER="ts	workspace	event	review_set	dispatch	thread	round	agent	role	ar
 
 events_file() { printf '%s/events.tsv\n' "$(cmd_root)"; }
 
+# ONE definition of "this row is a well-formed event", as an awk function every consumer
+# concatenates into its own program. The reader had it inline and the runner's acceptance
+# lookup had its own raw-TSV match — two rules for one question, so a partial append that
+# reached field 12 satisfied the lookup while the reader rejected the same row.
+# (codex, implement r4, blocking.)
+EVENTS_AWK_LIB='function ev_wellformed() { return ($1 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/ && NF == ev_ncols && index(ev_kinds, " " $3 " ") > 0 && index(ev_roles, " " $9 " ") > 0) }'
+
+# event_identity <value> <max-bytes> — the value as it is STORED, and as it must be QUERIED.
+#
+# Identity columns are exact-match join keys, and a plain clip breaks the join silently: a
+# set id longer than its column dispatches fine and then can never find its own plan row, so
+# status and compose refuse forever. An over-long value keeps a readable head plus a digest
+# of the whole, which is stable and collision-resistant — and because writer and reader both
+# call this, still an exact match. (codex, implement r4, blocking.)
+event_identity() {
+  local v="$1" max="${2:-48}" h
+  local LC_ALL=C
+  v="$(printf '%s' "$v" | tr '\t\n\r' '   ')"
+  if [ "${#v}" -le "$max" ]; then printf '%s' "$v"; return 0; fi
+  h="$(printf '%s' "$v" | hash_stdin | cut -c1-12)"
+  printf '%s~%s' "$(printf '%s' "$v" | cut -b1-$(( max - 13 )))" "$h"
+}
+
 event_field() {  # event_field <value> <max-bytes> — never a delimiter, never a line break
   local v; v="$(printf '%s' "${1:-}" | tr '\t\n\r' '   ')"
   clip "$v" "${2:-48}"
@@ -1968,31 +2024,43 @@ cmd_events() {
     # event nobody wrote. There is no lock (a dead holder is a deadlock the presence work
     # already taught us), so detection is the guarantee. Filtering happens BEFORE the cap,
     # or a global tail would answer a --set question with other sets' rows. (grok, plan r1.)
+    # No /dev/null fallback: if the channel that reports skipped rows cannot be created, the
+    # evidence of a torn log silently vanishes and every consumer then trusts a file nothing
+    # validated. Refuse instead. (codex, implement r4, blocking.)
     local tornf; tornf="$(mktemp "${TMPDIR:-/tmp}/agent-comms-events.XXXXXX" 2>/dev/null || true)"
-    [ -n "$tornf" ] || tornf=/dev/null
-    awk -F'\t' -v s="$set_id" -v d="$dispatch" -v t="$thread" -v k="$kind" -v a="$agent" \
-        -v hdr="$EVENTS_HEADER" -v kinds="$EVENT_KINDS" -v roles="$EVENT_ROLES" \
-        -v tornf="$tornf" -v lim="$limit" -v r="$role" '
+    if [ -z "$tornf" ]; then
+      emit_diagnostic "events: cannot create a temporary file to record skipped rows — refusing to read a log whose malformed rows could not be counted"
+      return 1
+    fi
+    # Identity filters go through the SAME transform the writer used, or a value long enough
+    # to be reshaped on the way in could never match itself on the way out. One transform,
+    # both directions. (codex, implement r4, blocking.)
+    awk -F'\t' -v s="$(event_identity "$set_id" "$EVENT_W_SET")" \
+        -v d="$(event_identity "$dispatch" "$EVENT_W_DISPATCH")" \
+        -v t="$(event_identity "$thread" "$EVENT_W_THREAD")" \
+        -v m="$(event_identity "$mid" "$EVENT_W_MID")" \
+        -v q="$(event_identity "$reqid" "$EVENT_W_REQID")" \
+        -v k="$kind" -v a="$agent" \
+        -v hdr="$EVENTS_HEADER" -v ev_kinds="$EVENT_KINDS" -v ev_roles="$EVENT_ROLES" \
+        -v tornf="$tornf" -v lim="$limit" -v r="$role" "$EVENTS_AWK_LIB"'
       # The header is printed HERE, by the same process as the rows. Emitted from the shell
       # it sat in the stdio buffer bash uses whenever stdout is a pipe, so a piped read
       # (events --set X | head) could see the rows arrive first, or lose the header
       # entirely to SIGPIPE. One writer, one stream, one order. Found by the suite.
-      BEGIN { print hdr; ncols = split(hdr, H, "\t") }
+      BEGIN { print hdr; ev_ncols = split(hdr, H, "\t") }
       # EXACT match. Skipping anything whose first field is "ts" would drop a real row that
       # merely began with that token, and would swallow a foreign header from an older
       # schema instead of naming it. Anything else header-shaped falls through to the
       # malformed count, where it is reported. (codex, implement r1, blocking.)
       $0 == hdr { next }
-      # WHOLE-FIELD checks, not "looks like it contains a timestamp": two concatenated rows
-      # would pass a loose prefix test and be read as one event nobody wrote. The kind must
-      # also be in the closed vocabulary. (codex + grok, plan r2.)
-      $1 !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/ \
-        || NF != ncols || index(kinds, " " $3 " ") == 0 \
-        || index(roles, " " $9 " ") == 0 { if (NF) torn++; next }
+      # Whole-field checks against every closed vocabulary. ev_wellformed() is the single
+      # definition, shared with the acceptance lookup in the runner.
+      !ev_wellformed() { if (NF) torn++; next }
       # The cap applies to the ROWS, never to the header, so it is a bounded ring buffer
       # here rather than a `tail` on the whole stream.
       (s == "" || $4 == s) && (d == "" || $5 == d) && (t == "" || $6 == t) \
-        && (k == "" || $3 == k) && (a == "" || $8 == a) && (r == "" || $9 == r) {
+        && (k == "" || $3 == k) && (a == "" || $8 == a) && (r == "" || $9 == r) \
+        && (m == "" || $12 == m) && (q == "" || $11 == q) {
         buf[++n] = $0
         if (n > lim) delete buf[n - lim]
       }
@@ -2003,7 +2071,7 @@ cmd_events() {
       }
     ' "$f"
     local torn; torn="$(cat "$tornf" 2>/dev/null || true)"
-    [ "$tornf" = /dev/null ] || rm -f "$tornf" 2>/dev/null || true
+    rm -f "$tornf" 2>/dev/null || true
     [ -z "$torn" ] || emit_diagnostic "events: skipped ${torn} malformed row(s) — the log holds a torn or hand-edited line; inspect $f"
     return 0
   fi
@@ -2052,8 +2120,14 @@ cmd_events() {
     # The seed lives in the log's OWN directory so `ln` cannot fail with EXDEV. (grok, r2.)
     local seed; seed="$(mktemp "$dir/.events.XXXXXX" 2>/dev/null || true)"
     if [ -n "$seed" ]; then
-      printf '%s\n' "$EVENTS_HEADER" > "$seed"
-      ln "$seed" "$f" 2>/dev/null || true
+      # Linked only after the seed is verified to HOLD the header. A partial write or ENOSPC
+      # would otherwise link an empty or truncated file as the permanent log, which passes
+      # the -f postcondition and then collects rows under a header that is not there.
+      # (codex, implement r4, blocking.)
+      if printf '%s\n' "$EVENTS_HEADER" > "$seed" 2>/dev/null \
+         && [ "$(cat "$seed" 2>/dev/null)" = "$EVENTS_HEADER" ]; then
+        ln "$seed" "$f" 2>/dev/null || true
+      fi
       rm -f "$seed" 2>/dev/null || true
     fi
     # POSTCONDITION. Without it a failed mktemp or link left the first append to create a
@@ -2069,12 +2143,12 @@ cmd_events() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(event_field "$(cmd_workspace 2>/dev/null || true)" "$EVENT_W_WS")" \
     "$kind" \
-    "$(event_field "$set_id" "$EVENT_W_SET")" "$(event_field "$dispatch" "$EVENT_W_DISPATCH")" \
-    "$(event_field "$thread" "$EVENT_W_THREAD")" \
+    "$(event_identity "$set_id" "$EVENT_W_SET")" "$(event_identity "$dispatch" "$EVENT_W_DISPATCH")" \
+    "$(event_identity "$thread" "$EVENT_W_THREAD")" \
     "$(event_field "$round" "$EVENT_W_ROUND")" "$(event_field "$agent" "$EVENT_W_AGENT")" \
     "$role" \
-    "$(event_field "$artifact" "$EVENT_W_ARTIFACT")" "$(event_field "$reqid" "$EVENT_W_REQID")" \
-    "$(event_field "$mid" "$EVENT_W_MID")" "$(event_field "$run_dir" "$EVENT_W_RUNDIR")" \
+    "$(event_field "$artifact" "$EVENT_W_ARTIFACT")" "$(event_identity "$reqid" "$EVENT_W_REQID")" \
+    "$(event_identity "$mid" "$EVENT_W_MID")" "$(event_field "$run_dir" "$EVENT_W_RUNDIR")" \
     "$(event_field "$status" "$EVENT_W_STATUS")")"
   # One `printf` of one small row: on a local filesystem that is one flushed write at the
   # append offset, which is what keeps concurrent runners from tearing each other's rows.
