@@ -7259,6 +7259,345 @@ GK_OK="$( (FAIL=0; SKIP=0; SKIP_USED=" "; GRP_PRESERVE_OK=1; skip group-no-secon
 GK_NO="$( (FAIL=0; SKIP=0; SKIP_USED=" "; GRP_PRESERVE_OK=0; skip group-no-secondary "failed" >/dev/null 2>&1; echo "$SKIP") )"
 [ "$GK_NO" = 1 ] && ok "the group skip is permitted on a confirmed failed probe" || fail "a confirmed failed group probe refused its skip"
 
+section "the coordinator's event log: a durable record that is not the mailbox"
+# Contraction step 3, criteria 1 and 4. The log's value is that it SURVIVES things — a
+# driver that dies mid-panel, a broker that refuses, N runners appending at once — so it is
+# exercised here, never asserted about. Columns are resolved BY NAME from the header, so
+# adding one cannot silently repoint an assertion at the wrong field.
+EV="$WORK/events-repo"; mkdir -p "$EV"; EV="$(cd "$EV" && pwd -P)"
+git -C "$EV" init -q -b main
+printf '.comms/\n' > "$EV/.gitignore"
+echo "subject" > "$EV/s.txt"
+git -C "$EV" add -A >/dev/null 2>&1
+git -C "$EV" -c user.email=t@t -c user.name=t commit -q -m init
+mkdir -p "$EV/.comms/to-codex" "$EV/.comms/to-grok" "$EV/.comms/to-claude" "$EV/.comms/archive"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV/.comms/config"
+run_ev() { (cd "$EV" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+EV_LOG="$EV/.comms/events.tsv"
+EV_ROWS() { tail -n +2 "$EV_LOG" 2>/dev/null | grep -c . || true; }
+EV_COL() { awk -F'\t' -v n="$1" 'NR==1{for(i=1;i<=NF;i++) if ($i==n) {print i; exit}}' "$EV_LOG"; }
+
+EV_EMPTY="$(run_ev events 2>&1)" && EV_ERC=0 || EV_ERC=$?
+[ "${EV_ERC:-0}" = "0" ] && printf '%s\n' "$EV_EMPTY" | grep -q 'no coordinator log yet' \
+  && ok "an absent log reports itself instead of failing" || fail "absent-log read (rc=$EV_ERC: $EV_EMPTY)"
+[ ! -f "$EV_LOG" ] && ok "reading does not create the log" || fail "the reader created the log"
+
+run_ev events append --kind turn-started --set ev-set-1 --dispatch d-1 --thread ev-thread \
+  --round 2 --agent codex --status running --note "first note" >/dev/null
+[ -s "$EV_LOG" ] && ok "append creates the log" || fail "append created no log"
+C_TS=$(EV_COL ts); C_EV=$(EV_COL event); C_SET=$(EV_COL review_set); C_DSP=$(EV_COL dispatch)
+C_TH=$(EV_COL thread); C_AG=$(EV_COL agent); C_ROLE=$(EV_COL role); C_ART=$(EV_COL artifact_id)
+C_REQ=$(EV_COL request_id); C_MID=$(EV_COL message_id); C_ST=$(EV_COL status); C_NOTE=$(EV_COL note)
+C_NF=$(head -1 "$EV_LOG" | awk -F'\t' '{print NF}')
+[ -n "$C_TS$C_EV$C_SET$C_DSP$C_TH$C_AG$C_ROLE$C_ART$C_REQ$C_MID$C_ST$C_NOTE" ] && [ "$C_TS" = "1" ] \
+  && ok "the header names every column its readers index by" || fail "log header (got: $(head -1 "$EV_LOG"))"
+EV_ROW="$(tail -1 "$EV_LOG")"
+evf() { printf '%s' "$EV_ROW" | cut -f"$1"; }
+[ "$(evf "$C_EV")" = "turn-started" ] && ok "the kind lands in the event column" || fail "event column (got: $EV_ROW)"
+[ "$(evf "$C_SET")" = "ev-set-1" ] && ok "the review set is recorded" || fail "set column (got: $EV_ROW)"
+[ "$(evf "$C_DSP")" = "d-1" ] && ok "the dispatch attempt is recorded" || fail "dispatch column (got: $EV_ROW)"
+[ "$(evf "$C_TH")" = "ev-thread" ] && ok "the thread is recorded" || fail "thread column (got: $EV_ROW)"
+[ "$(evf "$C_AG")" = "codex" ] && ok "the agent is recorded" || fail "agent column (got: $EV_ROW)"
+[ "$(evf "$C_ROLE")" = "gating" ] && ok "a turn gates unless it says otherwise" || fail "role column (got: $EV_ROW)"
+[ "$(evf "$C_ST")" = "running" ] && ok "the status is recorded" || fail "status column (got: $EV_ROW)"
+run_ev events append --kind provider-result --set ev-set-1 --thread ev-thread --agent codex --status completed >/dev/null
+[ "$(EV_ROWS)" = "2" ] && ok "the log appends rather than rewrites" || fail "append count (got: $(EV_ROWS))"
+
+check_not "an unknown event kind is refused" run_ev events append --kind turnstarted
+check_not "an event with no kind is refused" run_ev events append --thread ev-thread
+check_not "an unknown role is refused" run_ev events append --kind turn-started --role auditor
+[ "$(EV_ROWS)" = "2" ] && ok "a refused append writes nothing" || fail "a refused append still wrote (got: $(EV_ROWS))"
+
+run_ev events append --kind reply-refused --thread ev-thread --status refused \
+  --note "$(printf 'tab\there\nand a newline')" >/dev/null
+[ "$(EV_ROWS)" = "3" ] && ok "a note with a tab and a newline stays ONE row" || fail "sanitisation split the row (got: $(EV_ROWS))"
+[ "$(tail -1 "$EV_LOG" | awk -F'\t' '{print NF}')" = "$C_NF" ] && ok "the sanitised row keeps every column" || fail "column count after sanitisation"
+EV_BIG="$(awk 'BEGIN{while(i++<4000)printf "x"}')"
+run_ev events append --kind reply-validated --thread ev-thread --status APPROVE --note "$EV_BIG" >/dev/null
+[ "$(tail -1 "$EV_LOG" | LC_ALL=C wc -c | tr -d ' ')" -le 1025 ] && ok "an oversized note is clipped to the row cap" || fail "row cap on a long note"
+# The cap is a property of the COLUMNS. Clipping the assembled row instead would cut
+# trailing delimiters off and break the fixed-column contract. (codex, plan r1.)
+run_ev events append --kind turn-started --set "$EV_BIG" --dispatch "$EV_BIG" --thread "$EV_BIG" \
+  --round "$EV_BIG" --agent "$EV_BIG" --artifact "$EV_BIG" --request-id "$EV_BIG" \
+  --message-id "$EV_BIG" --run-dir "$EV_BIG" --status "$EV_BIG" --note "$EV_BIG" >/dev/null
+[ "$(tail -1 "$EV_LOG" | LC_ALL=C wc -c | tr -d ' ')" -le 1025 ] && ok "every column at its maximum still fits the row cap" || fail "row cap with all columns maxed"
+[ "$(tail -1 "$EV_LOG" | awk -F'\t' '{print NF}')" = "$C_NF" ] && ok "a maxed row keeps every column" || fail "maxed row lost columns"
+
+# A torn row is NAMED, not parsed: there is no lock (a dead holder is a deadlock), so
+# detection is the guarantee. Whole-field checks, or two concatenated rows pass. (codex r2.)
+printf 'this row has no columns and no timestamp\n' >> "$EV_LOG"
+EV_TORN="$(run_ev events 2>&1 >/dev/null)"
+printf '%s\n' "$EV_TORN" | grep -q 'malformed' && ok "a malformed row is reported on stderr" || fail "torn row not reported (got: $EV_TORN)"
+run_ev events 2>/dev/null | grep -q 'this row has no columns' && fail "a malformed row was printed as an event" || ok "a malformed row is never printed as an event"
+EV_GOOD="$(awk -F'\t' 'NR==2' "$EV_LOG")"
+printf '%s%s\n' "$EV_GOOD" "$EV_GOOD" >> "$EV_LOG"
+[ "$(run_ev events --kind turn-started 2>/dev/null | grep -c 'ev-set-1')" = "1" ] \
+  && ok "two rows concatenated into one line are refused, not read as an event" || fail "concatenated row passed the check"
+EV_BADKIND="$(printf '%s' "$EV_GOOD" | awk -F'\t' -v c="$C_EV" 'BEGIN{OFS="\t"}{$c="turn-invented"; print}')"
+printf '%s\n' "$EV_BADKIND" >> "$EV_LOG"
+run_ev events 2>/dev/null | grep -q 'turn-invented' && fail "a row with an unknown kind was read as an event" || ok "a row naming a kind outside the vocabulary is refused"
+
+EV_N=20
+i=1; while [ "$i" -le "$EV_N" ]; do
+  run_ev events append --kind turn-started --set ev-race --thread "race-$i" --status running --note "racer-$i" >/dev/null &
+  i=$((i+1))
+done
+wait
+[ "$(awk -F'\t' -v c="$C_SET" '$c=="ev-race"' "$EV_LOG" | grep -c .)" = "$EV_N" ] && ok "every concurrent append lands" || fail "concurrent appends lost rows"
+[ "$(awk -F'\t' -v c="$C_SET" -v n="$C_NF" '$c=="ev-race" && NF!=n' "$EV_LOG" | grep -c . || true)" = "0" ] \
+  && ok "no concurrent append tore another's row" || fail "a concurrent row was torn"
+[ "$(awk -F'\t' -v c="$C_SET" -v n="$C_NOTE" '$c=="ev-race"{print $n}' "$EV_LOG" | sort -u | grep -c .)" = "$EV_N" ] \
+  && ok "every racer's own note survived intact" || fail "a racing note was lost or merged"
+
+EV2="$WORK/events-repo-2"; mkdir -p "$EV2"; EV2="$(cd "$EV2" && pwd -P)"
+git -C "$EV2" init -q -b main
+git -C "$EV2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+i=1; while [ "$i" -le 8 ]; do
+  (cd "$EV2" && env -u CMUX_WORKSPACE_ID "$COMMS" events append --kind turn-started --thread "h-$i" >/dev/null 2>&1) &
+  i=$((i+1))
+done
+wait
+[ "$(grep -c '^ts	workspace	event' "$EV2/.comms/events.tsv" 2>/dev/null || true)" = "1" ] \
+  && ok "racing first writers create exactly one header" || fail "header raced"
+[ "$(tail -n +2 "$EV2/.comms/events.tsv" | grep -c .)" = "8" ] && ok "no racing first write was lost to the header" || fail "a first write was lost"
+
+# The filesystem constraint is ENFORCED, not diagnosed: an NFS append can be LOST whole,
+# leaving a well-formed file with an event missing — which no reader can detect. So the log
+# refuses to exist there rather than warning and continuing. (codex, plan r2, blocking.)
+EV_DFB="$WORK/df-stub"; mkdir -p "$EV_DFB"
+cat > "$EV_DFB/df" <<'DFS'
+#!/bin/bash
+printf 'Filesystem 512-blocks Used Available Capacity Mounted on\n'
+# No device configured models a df that cannot answer — the unclassifiable case.
+[ -n "${DF_STUB_FS:-}" ] || exit 1
+printf '%s 1 1 1 1%% /mnt\n' "$DF_STUB_FS"
+DFS
+chmod +x "$EV_DFB/df"
+ev_fs_try() { # <df-device> <repo-dir>
+  mkdir -p "$2"; git -C "$2" init -q -b main
+  git -C "$2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  (cd "$2" && env -u CMUX_WORKSPACE_ID DF_STUB_FS="$1" PATH="$EV_DFB:$PATH" "$COMMS" events append --kind turn-started --thread fs-1) 2>&1
+}
+EV_NFS="$(ev_fs_try 'fileserver:/export/home' "$WORK/events-repo-3" || true)"
+printf '%s\n' "$EV_NFS" | grep -q 'refusing to create' && ok "an NFS mount refuses the log outright" || fail "network fs not refused (got: $EV_NFS)"
+[ ! -f "$WORK/events-repo-3/.comms/events.tsv" ] && ok "a refused filesystem leaves no half-made log" || fail "a log was created on a refused filesystem"
+EV_SMB="$(ev_fs_try '//server/share' "$WORK/events-repo-5" || true)"
+printf '%s\n' "$EV_SMB" | grep -q 'refusing to create' && ok "an SMB mount refuses the log outright" || fail "smb fs not refused (got: $EV_SMB)"
+EV_UNK="$(ev_fs_try '' "$WORK/events-repo-6" || true)"
+printf '%s\n' "$EV_UNK" | grep -q 'refusing to create' && ok "a filesystem that cannot be classified fails closed" || fail "unclassified fs allowed (got: $EV_UNK)"
+EV_LOCAL="$(ev_fs_try '/dev/disk1s5' "$WORK/events-repo-4" || true)"
+printf '%s\n' "$EV_LOCAL" | grep -q 'refusing to create' && fail "a local filesystem was refused" || ok "a local filesystem is accepted"
+
+[ "$(run_ev events --set ev-race 2>/dev/null | tail -n +2 | grep -c .)" = "$EV_N" ] && ok "--set selects one review set" || fail "--set filter"
+[ "$(run_ev events --thread race-3 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] && ok "--thread selects one leg" || fail "--thread filter"
+[ "$(run_ev events --kind provider-result 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] && ok "--kind selects one lifecycle point" || fail "--kind filter"
+[ "$(run_ev events --agent codex 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] && ok "--agent selects one reviewer" || fail "--agent filter"
+[ "$(run_ev events --dispatch d-1 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] && ok "--dispatch selects one attempt" || fail "--dispatch filter"
+[ "$(run_ev events --limit 3 2>/dev/null | tail -n +2 | grep -c .)" = "3" ] && ok "--limit caps what is printed" || fail "--limit cap"
+run_ev events --set ev-race --limit 1 2>/dev/null | tail -1 | grep -q 'racer-' && ok "--limit applies AFTER the filter, never as a global tail" || fail "--limit filter ordering"
+run_ev events --set ev-race 2>/dev/null | head -1 | grep -q '^ts' && ok "a filtered read still prints the header" || fail "filtered header"
+check_not "--limit rejects a non-numeric budget" run_ev events --limit nine
+
+EV_REQ="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-00-00_ev-req.md"
+cat > "$EV_REQ" <<EVEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-29T09:00:00Z
+workspace: $(basename "$EV")
+message_id: ev-req-1
+thread: ev-loop
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## What was done
+A change worth reviewing.
+EVEOF
+run_ev send --to codex "$EV_REQ" >/dev/null 2>&1 || true
+EV_SEQ="$(awk -F'\t' -v c="$C_MID" -v e="$C_EV" '$c=="ev-req-1"{printf "%s ", $e}' "$EV_LOG")"
+[ "$EV_SEQ" = "request-persisted request-dispatched " ] \
+  && ok "a dispatch records persistence BEFORE delivery, then its outcome" || fail "send event pair (got: $EV_SEQ)"
+awk -F'\t' -v c="$C_MID" -v e="$C_EV" -v a="$C_ART" '$c=="ev-req-1" && $e=="request-persisted" && $a ~ /^[0-9a-f]{40}$/' "$EV_LOG" | grep -q . \
+  && ok "the request event carries the artifact send pinned" || fail "request event artifact_id"
+awk -F'\t' -v c="$C_MID" -v e="$C_EV" -v st="$C_ST" '$c=="ev-req-1" && $e=="request-dispatched" && $st!=""' "$EV_LOG" | grep -q . \
+  && ok "the dispatch event carries the delivery outcome" || fail "dispatch outcome status"
+
+EV_REPLY="$EV/.comms/to-claude/$(basename "$EV")_2026-08-29T09-05-00_ev-reply.md"
+cat > "$EV_REPLY" <<EVEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-29T09:05:00Z
+workspace: $(basename "$EV")
+message_id: ev-reply-1
+thread: ev-loop
+in-reply-to: ev-req-1
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 4
+verdict: APPROVE
+---
+
+## Findings
+
+### Blocking
+- None.
+EVEOF
+run_ev send --to claude "$EV_REPLY" >/dev/null 2>&1 || true
+ev_reply_field() { awk -F'\t' -v c="$C_MID" -v f="$1" '$c=="ev-reply-1"{v=$f} END{print v}' "$EV_LOG"; }
+[ "$(ev_reply_field "$C_EV")" = "reply-accepted" ] \
+  && ok "a reply is recorded as accepted, not as another request" || fail "reply event kind"
+[ "$(ev_reply_field "$C_ST")" = "APPROVE" ] \
+  && ok "the accepted reply carries its VERDICT as the status" || fail "reply verdict status"
+[ "$(ev_reply_field "$C_AG")" = "codex" ] \
+  && ok "a reply is attributed to its author, never to the send target" || fail "reply agent attribution"
+[ "$(ev_reply_field "$C_REQ")" = "ev-req-1" ] \
+  && ok "a reply carries the request id it answers" || fail "reply request_id binding"
+
+EV_Q="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-06-00_ev-q.md"
+printf -- '---\ntype: question\nfrom: claude\ntimestamp: 2026-08-29T09:06:00Z\nworkspace: %s\nmessage_id: ev-q-1\n---\n\n## Question\n\nWhat?\n' "$(basename "$EV")" > "$EV_Q"
+run_ev send --to codex "$EV_Q" >/dev/null 2>&1 || true
+[ "$(awk -F'\t' -v c="$C_MID" -v e="$C_EV" '$c=="ev-q-1"{v=$e} END{print v}' "$EV_LOG")" = "message-dispatched" ] \
+  && ok "a consult is logged as itself, never as a review request" || fail "consult event kind"
+[ "$(awk -F'\t' -v c="$C_MID" -v e="$C_EV" '$c=="ev-q-1" && $e=="request-persisted"' "$EV_LOG" | grep -c .)" = "0" ] \
+  && ok "a consult never enters the request lifecycle it can never complete" || fail "consult wrote request events"
+
+# The roster is persisted BEFORE any leg: legs go out sequentially, so a crash after leg 1
+# of 2 is otherwise indistinguishable from a legitimate one-leg panel, and compose would
+# gate on it. (codex, plan r1/r2, blocking.)
+EV_PREQ="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-20-00_ev-panel.md"
+sed 's/message_id: ev-req-1/message_id: ev-panel-1/; s/thread: ev-loop/thread: ev-panel/' "$EV_REQ" > "$EV_PREQ"
+EV_POUT="$(run_ev panel dispatch --to codex,grok "$EV_PREQ" 2>&1 || true)"
+EV_SET="$(printf '%s\n' "$EV_POUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ -n "$EV_SET" ] && ok "the panel dispatch named a review set" || fail "no set id (got: $EV_POUT)"
+[ "$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v s="$EV_SET" '$c==s{print $e}' "$EV_LOG" | head -1)" = "panel-planned" ] \
+  && ok "the expected roster is persisted before the first leg goes out" || fail "panel-planned ordering"
+awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v n="$C_NOTE" -v s="$EV_SET" '$e=="panel-planned" && $c==s && $n ~ /codex/ && $n ~ /grok/' "$EV_LOG" | grep -q . \
+  && ok "the roster event names every reviewer the panel expects" || fail "panel-planned roster contents"
+[ "$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v s="$EV_SET" '$c==s && $e=="request-persisted"' "$EV_LOG" | grep -c .)" = "2" ] \
+  && ok "each leg of the panel records its own request" || fail "per-leg request events"
+# One ATTEMPT id ties the roster to the legs it planned: a set id is deterministic and a
+# retry rebinds it, so two concurrent attempts interleave in one file. (codex, plan r2.)
+EV_DID="$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v d="$C_DSP" -v s="$EV_SET" '$c==s && $e=="panel-planned"{print $d}' "$EV_LOG" | tail -1)"
+[ -n "$EV_DID" ] && ok "the roster event names its dispatch attempt" || fail "panel-planned dispatch id"
+[ "$(awk -F'\t' -v d="$C_DSP" -v e="$C_EV" -v id="$EV_DID" '$d==id && $e=="request-persisted"' "$EV_LOG" | grep -c .)" = "2" ] \
+  && ok "every leg of an attempt carries that attempt's id" || fail "legs not bound to the dispatch id"
+
+run_ev compose --set "$EV_SET" >/dev/null 2>&1 || true
+awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v st="$C_ST" -v s="$EV_SET" '$c==s && $e=="composition-refused" && $st=="partial"' "$EV_LOG" | grep -q . \
+  && ok "a refused partial panel is recorded, not just printed" || fail "composition-refused missing"
+EV_MIDC="$(grep -m1 '^message_id:' "$(ls -t "$EV/.comms/to-codex/"*panel-codex*.md | head -1)" | sed 's/^message_id: //')"
+EV_MIDG="$(grep -m1 '^message_id:' "$(ls -t "$EV/.comms/to-grok/"*panel-grok*.md | head -1)" | sed 's/^message_id: //')"
+EV_WS="$(run_ev workspace)"
+ev_mk_reply() { # <agent> <thread> <in-reply-to> <minute>
+  local f="$EV/.comms/archive/${EV_WS}_2026-08-29T09-2${4}-00_${1}-reply.md"
+  printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-29T09:2%s:00Z\nworkspace: %s\nmessage_id: %s-ev-reply\nthread: %s\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: REQUEST_CHANGES\n---\n\n## Findings\n\n### Blocking\n- `s.txt:1` — %s says this is real.\n\n### Advisory\n- `s.txt:9` — %s advisory.\n' \
+    "$1" "$4" "$EV_WS" "$1" "$2" "$3" "$1" "$1" > "$f"
+}
+ev_mk_reply codex ev-panel-codex "$EV_MIDC" 1
+ev_mk_reply grok  ev-panel-grok  "$EV_MIDG" 2
+run_ev compose --set "$EV_SET" >/dev/null 2>&1 || true
+awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v s="$EV_SET" '$c==s && $e=="composition-completed"' "$EV_LOG" | grep -q . \
+  && ok "a completed composition closes the set's trace" || fail "composition-completed missing"
+awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v n="$C_NOTE" -v s="$EV_SET" '$c==s && $e=="composition-completed" && $n ~ /corroborated=1/' "$EV_LOG" | grep -q . \
+  && ok "the composition event carries what the gate actually found" || fail "composition counts"
+
+# CRITERION 4: the events that matter are written by the DETACHED runner. `send` returns at
+# spawn, so every row below was appended by a process the dispatching shell no longer owns.
+EV_HL="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-10-00_ev-hl.md"
+sed 's/message_id: ev-req-1/message_id: ev-hl-1/; s/thread: ev-loop/thread: ev-headless/' "$EV_REQ" > "$EV_HL"
+run_ev_hl() { (cd "$EV" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
+EV_HLOUT="$(run_ev_hl send --to codex "$EV_HL" 2>/dev/null)"
+EV_HLDIR="$(rundir_of "$EV_HLOUT")"
+[ -n "$EV_HLDIR" ] && ok "the headless dispatch spawned a detached runner" || fail "no run dir (got: $EV_HLOUT)"
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && $e=="turn-started"' "$EV_LOG" | grep -q . \
+  && fail "turn-started was written before any runner ran" \
+  || ok "no turn is claimed to have started before its runner runs"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" "$RUNPHASE" await "$EV_HLDIR" --timeout-secs 60 >/dev/null 2>&1) || true
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && $e=="turn-started"' "$EV_LOG" | grep -q . \
+  && ok "the detached runner records that the turn started" || fail "runner turn-started missing"
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-headless" && $e=="provider-result" && $st!=""' "$EV_LOG" | grep -q . \
+  && ok "the detached runner records the provider's own result" || fail "runner provider-result missing"
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-headless" && $e=="turn-finished" && $st!=""' "$EV_LOG" | grep -q . \
+  && ok "the turn's terminal status is a separate, later event" || fail "turn-finished missing"
+[ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && $e=="turn-finished"' "$EV_LOG" | grep -c .)" = "1" ] \
+  && ok "the terminal event is written once, not again by the exit trap" || fail "turn-finished double-counted"
+EV_ORDER="$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && ($e=="turn-started" || $e=="provider-result" || $e=="turn-finished"){printf "%s ", $e}' "$EV_LOG")"
+[ "$EV_ORDER" = "turn-started provider-result turn-finished " ] \
+  && ok "the provider's result precedes the turn's terminal status" || fail "runner event order (got: $EV_ORDER)"
+[ -f "$EV_HLDIR/turn.tsv" ] && grep -q '^thread	ev-headless$' "$EV_HLDIR/turn.tsv" \
+  && ok "the runner leaves its identity where a synthetic result can find it" || fail "turn.tsv identity"
+
+# A runner killed before it can write result.json: await synthesizes one, and the terminal
+# event must still name the right leg or a kill is a permanent unknown. (grok, plan r2.)
+EV_KL="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-11-00_ev-kill.md"
+sed 's/message_id: ev-req-1/message_id: ev-kill-1/; s/thread: ev-loop/thread: ev-killed/' "$EV_REQ" > "$EV_KL"
+EV_KOUT="$(CODEX_STUB_HANG=30 run_ev_hl send --to codex "$EV_KL" 2>/dev/null)"
+EV_KDIR="$(rundir_of "$EV_KOUT")"
+sleep 2
+kill -9 "$(cat "$EV_KDIR/pid" 2>/dev/null)" 2>/dev/null || true
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" "$RUNPHASE" await "$EV_KDIR" --timeout-secs 30 >/dev/null 2>&1) || true
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-killed" && $e=="turn-finished"' "$EV_LOG" | grep -q . \
+  && ok "a killed runner still gets a terminal event, from the awaiting process" || fail "synthetic turn-finished missing"
+
+EV_GMSG="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-30-00_ev-grok.md"
+sed 's/message_id: ev-req-1/message_id: ev-grok-1/; s/thread: ev-loop/thread: ev-grok/' "$EV_REQ" > "$EV_GMSG"
+EV_GDIR="$WORK/ev-grok-leg"; mkdir -p "$EV_GDIR"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   GROK_STUB_NO_VERDICT=1 "$RUNPHASE" run --message "$EV_GMSG" --dir "$EV_GDIR" --provider grok) >/dev/null 2>&1 || true
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v n="$C_NOTE" '$t=="ev-grok" && $e=="reply-refused" && $n!=""' "$EV_LOG" | grep -q . \
+  && ok "a refused reply records WHY, outside the run dir" || fail "reply-refused missing"
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-grok" && $e=="reply-accepted"' "$EV_LOG" | grep -q . \
+  && fail "a refused reply was also recorded as accepted" || ok "a refusal never counts as an acceptance"
+
+EV_GMSG2="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-31-00_ev-grok2.md"
+sed 's/message_id: ev-req-1/message_id: ev-grok-2/; s/thread: ev-loop/thread: ev-grok-ok/' "$EV_REQ" > "$EV_GMSG2"
+EV_GDIR2="$WORK/ev-grok-leg2"; mkdir -p "$EV_GDIR2"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   "$RUNPHASE" run --message "$EV_GMSG2" --dir "$EV_GDIR2" --provider grok) >/dev/null 2>&1 || true
+EV_GSEQ="$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-grok-ok" && ($e=="reply-validated" || $e=="reply-accepted"){printf "%s ", $e}' "$EV_LOG")"
+[ "$EV_GSEQ" = "reply-validated reply-accepted " ] \
+  && ok "a brokered reply is recorded as validated, then accepted" || fail "broker success sequence (got: $EV_GSEQ)"
+[ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-grok-ok" && $e=="turn-finished"{print $st}' "$EV_LOG")" = "completed" ] \
+  && ok "a turn whose acceptance IS in the log signs off completed" || fail "turn-finished status on a clean brokered turn"
+
+# A turn whose own acceptance never reached the log must not sign off as `completed`:
+# absence means unknown, but a terminal row claiming a clean turn over a missing milestone
+# is a positive contradiction. (codex, plan r2, blocking.)
+EV_GMSG4="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-33-00_ev-grok4.md"
+sed 's/message_id: ev-req-1/message_id: ev-grok-4/; s/thread: ev-loop/thread: ev-logloss/' "$EV_REQ" > "$EV_GMSG4"
+EV_GDIR4="$WORK/ev-grok-leg4"; mkdir -p "$EV_GDIR4"
+cp "$EV_LOG" "$WORK/events-backup.tsv"
+chmod a-w "$EV_LOG"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   "$RUNPHASE" run --message "$EV_GMSG4" --dir "$EV_GDIR4" --provider grok) >/dev/null 2>&1 || true
+chmod u+w "$EV_LOG"
+grep -q 'coordinator log not updated' "$EV_GDIR4/runner.log" \
+  && ok "a lost advisory append is reported in the run dir" || fail "advisory append failure not reported"
+[ -f "$EV/.comms/to-claude/$(basename "$(ls -t "$EV/.comms/to-claude" | head -1)")" ] \
+  && ok "the reply still reached the inbox with the log unwritable" || fail "an unwritable log cost a delivered reply"
+
+EV_GMSG3="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-32-00_ev-grok3.md"
+sed 's/message_id: ev-req-1/message_id: ev-grok-3/; s/thread: ev-loop/thread: ev-shadow/' "$EV_REQ" > "$EV_GMSG3"
+EV_GDIR3="$WORK/ev-grok-leg3"; mkdir -p "$EV_GDIR3"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   "$RUNPHASE" run --message "$EV_GMSG3" --dir "$EV_GDIR3" --provider grok --no-deliver) >/dev/null 2>&1 || true
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v r="$C_ROLE" '$t=="ev-shadow" && $e=="reply-validated" && $r=="shadow"' "$EV_LOG" | grep -q . \
+  && ok "a measurement turn is recorded as shadow, never as the gating leg" || fail "shadow role not recorded"
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v r="$C_ROLE" '$t=="ev-shadow" && $e=="turn-started" && $r=="shadow"' "$EV_LOG" | grep -q . \
+  && ok "every event of a shadow turn carries the shadow role, not just the reply" || fail "shadow role on turn-started"
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-shadow" && $e=="reply-accepted"' "$EV_LOG" | grep -q . \
+  && fail "a shadow turn recorded an acceptance it never delivered" || ok "a shadow turn accepts nothing"
+
+EV_AID="$(run_ev snapshot create 2>/dev/null | head -1)"
+git -C "$EV" ls-tree -r --name-only "$EV_AID" 2>/dev/null | grep -q '^\.comms/' \
+  && fail "the coordinator log rides into the reviewed artifact" \
+  || ok "the reviewed artifact never carries the coordinator log"
+
 section "comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture"
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
 DRY="$(run_comms clean --as claude workspace)"

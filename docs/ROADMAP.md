@@ -93,6 +93,17 @@ exactly; that is not a license to weaken the presence model (see step 7).
      not ACP): request persisted → turn started → provider result persisted →
      reply validated → reply accepted → composition completed. A crash between
      ACP exit and compose recovers from this log.
+     **LANDED 2026-08-29** as `.comms/events.tsv` + the `events` verb (two plan
+     rounds: codex found the fail-closed boundary was drawn on the wrong line and
+     that `write_result` cannot carry the provider's result on the ACP path; grok
+     found that `cmd_send` is also how a REPLY lands, so a fail-closed append
+     there turns a delivered reply into a failed turn). The roster is persisted
+     before any leg, every event of an attempt carries a `dispatch` id because a
+     set id is deterministic and a retry rebinds it, and a turn whose own trace
+     lost an event signs off `log-incomplete` rather than `completed`. Recovery
+     walk in PROTOCOL; the design rationale in INTERNALS. Criterion 4 falls out
+     of placement: everything from `turn-started` on is written by the detached
+     runner, and `await` records a terminal event for a runner that died.
    - **Enforced reviewer permissions** (acceptance criteria, not a follow-up):
      deny repo writes; deny commit/ref/remote/publish; allow read-only
      inspection; tests only if the mode says so; the mount must not share the

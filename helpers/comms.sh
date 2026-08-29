@@ -85,6 +85,15 @@
 #                               cluster every leg's findings and label them by SUPPORT:
 #                               corroborated (gates), uncorroborated (cross-check first),
 #                               unanchored, advisory. Drops nothing; no model arbitrates.
+#   events [--set S] [--thread T] [--kind K] [--agent A] [--limit N]
+#           events append --kind <kind> [--set|--thread|--round|--agent|--role|--artifact|
+#                                        --request-id|--message-id|--run-dir|--status|--note]
+#                               the coordinator's append-only log of what IT did: roster
+#                               planned -> request persisted -> dispatched -> turn started
+#                               -> provider result -> reply validated/refused -> reply
+#                               accepted -> turn finished -> composition completed. Not the
+#                               mailbox, not ACP. The durable answer to "what happened to
+#                               leg X" after an await dies with its session.
 #   friction [--thread T] [--severity 1-5] "<note>"  |  friction --list
 #                               --list reads the GLOBAL rollup across every project: the
 #                               maintainer's inbox for what actually broke in the field.
@@ -1479,7 +1488,26 @@ cmd_panel() {
   mkdir -p "$(dirname "$idx")" 2>/dev/null || true
   [ -s "$idx" ] || printf 'review_set_id\trequest_message_id\tthread\tround\tphase\tartifact_id\tprompt_version\tbase_sha\tgating_agent\tshadow_agent\tdrift_status\tdrift_artifact_id\tcreated\n' > "$idx"
 
-  local gating="${roster%% *}" leg_thread leg_file leg_mid ts n=0
+  local gating="${roster%% *}" leg_thread leg_file leg_mid ts n=0 dispatch_id
+  # THE ATTEMPT ID. A set id is deterministic — same thread, phase, round and artifact
+  # produce the same one — and a retry deliberately rebinds the set's rows. So set+agent
+  # cannot tell two CONCURRENT attempts apart: plan-A, plan-B, A/codex, B/codex, B/grok,
+  # A/grok interleave in one file and neither "latest plan" nor "latest request per agent"
+  # reconstructs an unmixed attempt. Every event of a leg carries the id of the dispatch it
+  # belongs to, and the legs carry it on the wire so the runner and the broker can stamp it
+  # too. (codex, plan r2, blocking.)
+  dispatch_id="d-$(date -u +%Y%m%dT%H%M%S)-$$-${RANDOM}"
+  # THE EXPECTED ROSTER, PERSISTED BEFORE ANY LEG GOES OUT. Legs are sent sequentially, so
+  # a crash after leg 1 of 2 leaves a history that is otherwise indistinguishable from a
+  # legitimate one-leg panel — and `compose` would gate on that roster believing it was
+  # complete. A re-dispatch writes a second row; the LAST one is authoritative, exactly as
+  # the sets.tsv rebind already treats a retry. (codex, plan r1, blocking.)
+  cmd_events append --kind panel-planned --set "$set_id" --dispatch "$dispatch_id" \
+    --thread "${base_thread:-panel}" \
+    --round "$round" --agent "$gating" --artifact "$aid" \
+    --request-id "$(frontmatter_field "$req" message_id)" --status planned \
+    --note "roster=$(printf '%s' "$roster" | tr ' ' ',') legs=$(printf '%s' "$roster" | wc -w | tr -d ' ') phase=${phase:-}" \
+    || die "panel dispatch: could not record the roster in the coordinator log — refusing to fan out a panel whose legs nothing can enumerate"
   echo "panel: dispatching artifact ${aid} to [$roster] as review set $set_id (gating: $gating)"
   for ag in $roster; do
     ts="$(date -u +%Y-%m-%dT%H-%M-%S)"
@@ -1489,12 +1517,13 @@ cmd_panel() {
     mkdir -p "$(dirname "$leg_file")" 2>/dev/null || true
     # Same body, same artifact, same round — only identity and routing differ. Anything
     # else here would make the legs incomparable, which is the point of fanning out.
-    LC_ALL=C awk -v th="$leg_thread" -v mid="$leg_mid" -v setid="$set_id" -v aid="$aid" -v base="$dispatch_base" '
+    LC_ALL=C awk -v th="$leg_thread" -v mid="$leg_mid" -v setid="$set_id" -v aid="$aid" -v base="$dispatch_base" -v disp="$dispatch_id" '
       NR == 1 { nl = ($0 ~ /\r$/) ? "\r\n" : "\n" }
       { probe = $0; sub(/\r$/, "", probe) }
       NR == 1 && probe == "---" { fm = 1; print; next }
       fm && probe == "---" {
         printf "review_set: %s%s", setid, nl
+        printf "dispatch: %s%s", disp, nl
         printf "artifact_id: %s%s", aid, nl
         if (base != "") printf "head_sha: %s%s", base, nl
         fm = 0; print; next
@@ -1506,6 +1535,7 @@ cmd_panel() {
       # appending the new one after it loses to grep -m1 and the round would gate on
       # the OLD set. Replace, exactly like artifact_id. (grok, panel r2.)
       fm && index(probe, "review_set:") == 1 { next }
+      fm && index(probe, "dispatch:") == 1 { next }
       fm && index(probe, "head_sha:") == 1 { next }
       { print }
     ' "$req" > "$leg_file"
@@ -1646,6 +1676,9 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   if [ -n "$pending" ]; then
     echo "compose: INCOMPLETE — no reply yet from:$pending ($n_answered of $n_legs legs answered)"
     echo "compose: refusing to gate on a partial panel; re-run when the set is complete"
+    cmd_events append --kind composition-refused --set "$set_id" --status partial \
+      --note "$n_answered of $n_legs legs answered; no reply yet from:$pending" \
+      || echo "warning: coordinator log not updated (composition-refused)" >&2
     return 3
   fi
 
@@ -1654,6 +1687,9 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   if [ -n "$blind" ]; then
     printf '%s\n' "${blind# }"
     echo "compose: refusing to gate on a review this parser could not read"
+    cmd_events append --kind composition-refused --set "$set_id" --status unreadable \
+      --note "$(printf '%s' "${blind# }" | tr '\n' ' ')" \
+      || echo "warning: coordinator log not updated (composition-refused)" >&2
     # The remedy depends on WHY it could not be read: telling someone whose reply was cut
     # off by a stray fence to use list items sends them at the wrong fix. (grok, panel r5.)
     case "$blind" in
@@ -1702,7 +1738,211 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
     if [ -n "$out" ]; then cat > "$out"; else cat; fi
   }
   rm -f "$tmp"
+  # Composition is the last coordinator act of a round, so it closes the trace the roster
+  # event opened: a set with a panel-planned and no composition-* is a round nobody gated.
+  cmd_events append --kind composition-completed --set "$set_id" --status composed \
+    --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0}" \
+    || echo "warning: coordinator log not updated (composition-completed)" >&2
   [ -z "$out" ] || echo "compose: wrote ${out#"$root"/}"
+}
+
+# ---------- the coordinator's event log ----------
+#
+# Contraction step 3, criterion 1: a DURABLE COORDINATOR LOG — append-only events owned by
+# this process. Not the model mailbox (that is the wire the thing under review writes on),
+# not ACP (a session is not a record), not `result.json` (per-run, and findable only if you
+# already know the run dir it lives in).
+#
+# What existed before this was four stores, none of them a history: `grades/sets.tsv`
+# records `dispatched` and is never updated again, `.comms/state/` is last-write-wins, and
+# a broker REFUSAL ("refusing to stamp a verdict derived from an unread body") lived only
+# in a run dir's runner.log. A driver that died between the ACP turn exiting and `compose`
+# had no durable answer to "what happened to leg X". This is that answer.
+#
+# ONE writer, so no producer invents its own row shape, and ONE reader, so recovery never
+# means joining four stores by hand.
+#
+# NOT AUTHORITATIVE YET, and this is deliberate: a mounted review child reaches the real
+# `.comms` through this same helper, so it can forge events until step 3's criterion 2
+# gives reviewer turns an enforced boundary. Same honesty as the mount's own "defence in
+# depth, not containment" note — read this log as the coordinator's record, not as proof
+# against a hostile child. (codex, plan r1, advisory.)
+# 1024 is not a round number here: stdio's buffer on macOS is 1024 bytes, so a single
+# `printf` longer than that is flushed as MORE THAN ONE write(2) — and two writes are two
+# chances for a concurrent appender to land between them. Keeping every row under the
+# buffer is what makes "one row, one write" true rather than hopeful.
+EVENT_ROW_MAX=1024
+# PER-COLUMN budgets that SUM (with their 14 delimiters) to less than the row cap, so the
+# cap is a property of the columns rather than a trim applied to the finished row. Trimming
+# the row would cut trailing delimiters off and break the fixed-column contract every
+# reader depends on. (codex, plan r1, advisory.)
+EVENT_W_WS=48; EVENT_W_SET=80; EVENT_W_DISPATCH=40; EVENT_W_THREAD=80; EVENT_W_ROUND=8
+EVENT_W_AGENT=24; EVENT_W_ARTIFACT=44; EVENT_W_REQID=72; EVENT_W_MID=72; EVENT_W_RUNDIR=160
+EVENT_W_STATUS=32
+# A CLOSED vocabulary. An open one lets a typo mint a kind no reader ever selects for,
+# which is a hole that reads exactly like a turn that never happened.
+EVENT_KINDS=" panel-planned request-persisted request-dispatched message-dispatched turn-started provider-result turn-finished reply-validated reply-refused reply-accepted composition-completed composition-refused "
+EVENT_ROLES=" gating shadow "
+EVENTS_HEADER="ts	workspace	event	review_set	dispatch	thread	round	agent	role	artifact_id	request_id	message_id	run_dir	status	note"
+
+events_file() { printf '%s/events.tsv\n' "$(cmd_root)"; }
+
+event_field() {  # event_field <value> <max-bytes> — never a delimiter, never a line break
+  local v; v="$(printf '%s' "${1:-}" | tr '\t\n\r' '   ')"
+  clip "$v" "${2:-48}"
+}
+
+# fs_events_device <dir> — what the log's filesystem calls itself, or empty.
+fs_events_device() { df -P "$1" 2>/dev/null | awk 'NR==2{print $1}'; }
+
+# fs_events_safe <dir> — 0 only on a filesystem where an append-only log is sound.
+#
+# The atomicity this log relies on (one small `printf` is one flushed write at the append
+# offset) holds on local filesystems. NFS SIMULATES O_APPEND and documents corruption under
+# concurrent appenders — and its failure mode is worse than a torn row, because a lost
+# append leaves a perfectly well-formed file with an event missing, which no reader can
+# detect. So this REFUSES rather than warning: a diagnostic after accepting the risk is not
+# an enforced constraint, and an unclassifiable filesystem fails closed like every other
+# unverifiable check in this tool. (codex, plan r2, blocking.)
+fs_events_safe() {
+  local dev; dev="$(fs_events_device "$1")"
+  [ -n "$dev" ] || return 1          # unclassified is not "probably fine"
+  case "$dev" in //*|*:/*) return 1 ;; esac   # //server/share (SMB), host:/export (NFS)
+  return 0
+}
+
+cmd_events() {
+  # events append --kind K [...]                                    — the single writer
+  # events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--limit N] — reader
+  local sub="list"
+  case "${1:-}" in
+    append) sub=append; shift ;;
+    list)   shift ;;
+    ""|-*)  ;;
+    *)      usage_err "events: unknown argument '$(clip "${1:-}")' (append|list)" ;;
+  esac
+
+  local kind="" set_id="" dispatch="" thread="" round="" agent="" role="" artifact="" \
+        reqid="" mid="" run_dir="" status="" note="" limit=50
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kind)       shift; kind="${1:-}" ;;
+      --set)        shift; set_id="${1:-}" ;;
+      --dispatch)   shift; dispatch="${1:-}" ;;
+      --thread)     shift; thread="${1:-}" ;;
+      --round)      shift; round="${1:-}" ;;
+      --agent)      shift; agent="${1:-}" ;;
+      --role)       shift; role="${1:-}" ;;
+      --artifact)   shift; artifact="${1:-}" ;;
+      --request-id) shift; reqid="${1:-}" ;;
+      --message-id) shift; mid="${1:-}" ;;
+      --run-dir)    shift; run_dir="${1:-}" ;;
+      --status)     shift; status="${1:-}" ;;
+      --note)       shift; note="${1:-}" ;;
+      --limit)      shift; limit="${1:-}" ;;
+      -?*)          usage_err "events: unknown option '$(clip "$1")'" ;;
+      *)            usage_err "events: unexpected argument '$(clip "$1")'" ;;
+    esac
+    shift
+  done
+
+  local f; f="$(events_file)"
+
+  if [ "$sub" = list ]; then
+    case "$limit" in ''|*[!0-9]*) usage_err "events: --limit must be a positive integer" ;; esac
+    [ "$limit" -gt 0 ] || usage_err "events: --limit must be a positive integer"
+    [ -f "$f" ] || { emit_diagnostic "events: no coordinator log yet ($f)"; return 0; }
+    # ONE pass, ONE predicate. What the reader prints and what it refuses are decided in
+    # the same place, so they cannot drift: a row that is not a well-formed event — a torn
+    # write, a hand-edit, a second header — is counted and NAMED rather than parsed into an
+    # event nobody wrote. There is no lock (a dead holder is a deadlock the presence work
+    # already taught us), so detection is the guarantee. Filtering happens BEFORE the cap,
+    # or a global tail would answer a --set question with other sets' rows. (grok, plan r1.)
+    local tornf; tornf="$(mktemp "${TMPDIR:-/tmp}/agent-comms-events.XXXXXX" 2>/dev/null || true)"
+    [ -n "$tornf" ] || tornf=/dev/null
+    awk -F'\t' -v s="$set_id" -v d="$dispatch" -v t="$thread" -v k="$kind" -v a="$agent" \
+        -v hdr="$EVENTS_HEADER" -v kinds="$EVENT_KINDS" -v tornf="$tornf" -v lim="$limit" '
+      # The header is printed HERE, by the same process as the rows. Emitted from the shell
+      # it sat in the stdio buffer bash uses whenever stdout is a pipe, so a piped read
+      # (events --set X | head) could see the rows arrive first, or lose the header
+      # entirely to SIGPIPE. One writer, one stream, one order. Found by the suite.
+      BEGIN { print hdr; ncols = split(hdr, H, "\t") }
+      $1 == "ts" { next }
+      # WHOLE-FIELD checks, not "looks like it contains a timestamp": two concatenated rows
+      # would pass a loose prefix test and be read as one event nobody wrote. The kind must
+      # also be in the closed vocabulary. (codex + grok, plan r2.)
+      $1 !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/ \
+        || NF != ncols || index(kinds, " " $3 " ") == 0 { if (NF) torn++; next }
+      # The cap applies to the ROWS, never to the header, so it is a bounded ring buffer
+      # here rather than a `tail` on the whole stream.
+      (s == "" || $4 == s) && (d == "" || $5 == d) && (t == "" || $6 == t) \
+        && (k == "" || $3 == k) && (a == "" || $8 == a) {
+        buf[++n] = $0
+        if (n > lim) delete buf[n - lim]
+      }
+      END {
+        start = (n > lim ? n - lim + 1 : 1)
+        for (i = start; i <= n; i++) print buf[i]
+        if (torn) print torn > tornf
+      }
+    ' "$f"
+    local torn; torn="$(cat "$tornf" 2>/dev/null || true)"
+    [ "$tornf" = /dev/null ] || rm -f "$tornf" 2>/dev/null || true
+    [ -z "$torn" ] || emit_diagnostic "events: skipped ${torn} malformed row(s) — the log holds a torn or hand-edited line; inspect $f"
+    return 0
+  fi
+
+  # ---- append ----
+  [ -n "$kind" ] || usage_err "events append: --kind is required"
+  case "$EVENT_KINDS" in
+    *" $kind "*) ;;
+    *) usage_err "events append: unknown kind '$(clip "$kind")' — the vocabulary is:$EVENT_KINDS" ;;
+  esac
+  [ -n "$role" ] || role=gating
+  case "$EVENT_ROLES" in
+    *" $role "*) ;;
+    *) usage_err "events append: unknown role '$(clip "$role")' —$EVENT_ROLES" ;;
+  esac
+  local dir; dir="$(dirname "$f")"
+  mkdir -p "$dir" 2>/dev/null || die "events: cannot create $(clip "$dir")"
+  # Create the header exactly ONCE, even with N detached runners appending at once.
+  # `[ -s ] || printf > file` lets two first-creators truncate each other and lose a row,
+  # and a second header read as a row is the log lying about an event. `ln` is atomic and
+  # fails if the name exists, so the loser simply discards its copy. Same filesystem by
+  # construction (same directory). (grok, plan r1.)
+  if [ ! -f "$f" ]; then
+    # The filesystem is judged BEFORE the log exists, which is also the only time this
+    # costs anything: on a sound filesystem the check runs exactly once in the log's life,
+    # and on an unsound one there is never a log to append to. The seed lives in the log's
+    # OWN directory so `ln` cannot fail with EXDEV. (grok, plan r2.)
+    fs_events_safe "$dir" \
+      || die "events: refusing to create the coordinator log on '$(fs_events_device "$dir")' — an append-only log is only sound on a local filesystem (NFS simulates O_APPEND and can drop a whole append, leaving a well-formed file with an event missing). Point .comms at local storage."
+    local seed; seed="$(mktemp "$dir/.events.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$seed" ]; then
+      printf '%s\n' "$EVENTS_HEADER" > "$seed"
+      ln "$seed" "$f" 2>/dev/null || true
+      rm -f "$seed" 2>/dev/null || true
+    fi
+  fi
+  local fixed room
+  fixed="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(event_field "$(cmd_workspace 2>/dev/null || true)" "$EVENT_W_WS")" \
+    "$kind" \
+    "$(event_field "$set_id" "$EVENT_W_SET")" "$(event_field "$dispatch" "$EVENT_W_DISPATCH")" \
+    "$(event_field "$thread" "$EVENT_W_THREAD")" \
+    "$(event_field "$round" "$EVENT_W_ROUND")" "$(event_field "$agent" "$EVENT_W_AGENT")" \
+    "$role" \
+    "$(event_field "$artifact" "$EVENT_W_ARTIFACT")" "$(event_field "$reqid" "$EVENT_W_REQID")" \
+    "$(event_field "$mid" "$EVENT_W_MID")" "$(event_field "$run_dir" "$EVENT_W_RUNDIR")" \
+    "$(event_field "$status" "$EVENT_W_STATUS")")"
+  # One `printf` of one small row: on a local filesystem that is one flushed write at the
+  # append offset, which is what keeps concurrent runners from tearing each other's rows.
+  # The note is the only variable-width column, so it takes whatever room is left.
+  room=$(( EVENT_ROW_MAX - $(byte_len "$fixed") - 1 ))
+  [ "$room" -ge 8 ] || room=0
+  if [ "$room" -eq 0 ]; then note=""; else note="$(event_field "$note" "$room")"; fi
+  printf '%s\t%s\n' "$fixed" "$note" >> "$f"
 }
 
 cmd_friction() {
@@ -3951,6 +4191,40 @@ cmd_send() {
 
   # Atomicity guard: never deliver or archive on a malformed outbound message.
   cmd_validate "$file" || die "send: refusing to deliver malformed message (and not archiving inbound)"
+  # THE COORDINATOR LOG (contraction step 3, criterion 1). Identity is read ONCE, here,
+  # while the message is still on disk and validated.
+  #
+  # The leg belongs to the REVIEWER, so that is what `agent` names: the target for a
+  # request, the AUTHOR for a reply. Recording the send target on a reply made the driver
+  # look like a second reviewer, which `events --set` renders as an extra leg. (grok, plan
+  # r1.) `request_id` is what binds a reply to the attempt it answers — a panel retry
+  # reuses set+thread+round, so without it a stale acceptance reads as the new leg
+  # answering. (codex + grok, plan r1.)
+  local ev_type ev_thread ev_round ev_set ev_dispatch ev_aid ev_mid ev_agent ev_reqid
+  ev_type="$(frontmatter_field "$file" type)"
+  ev_thread="$(frontmatter_field "$file" thread)"
+  ev_round="$(frontmatter_field "$file" round)"
+  ev_set="$(frontmatter_field "$file" review_set)"
+  ev_dispatch="$(frontmatter_field "$file" dispatch)"
+  ev_aid="$(frontmatter_field "$file" artifact_id)"
+  ev_mid="$(frontmatter_field "$file" message_id)"
+  case "$ev_type" in
+    review-feedback) ev_agent="$(frontmatter_field "$file" from)"; ev_reqid="$(frontmatter_field "$file" in-reply-to)" ;;
+    *)               ev_agent="$to"; ev_reqid="$ev_mid" ;;
+  esac
+  # FAIL-CLOSED, and only here. This is the one point where refusing changes nothing that
+  # has already happened: the request is written and valid, nobody has been nudged, and the
+  # whole dispatch is replayable. `die` rather than errexit on purpose — `panel dispatch`
+  # calls this function as `cmd_send ... || echo warning`, which suppresses errexit inside
+  # it, so an unchecked append would have been advisory exactly where it claimed to gate.
+  # (codex, plan r1, blocking.) Every later event is advisory: see the outcome event below.
+  if [ "$ev_type" = "review-request" ]; then
+    cmd_events append --kind request-persisted --set "$ev_set" --dispatch "$ev_dispatch" --thread "$ev_thread" \
+      --round "$ev_round" --agent "$ev_agent" --artifact "$ev_aid" --request-id "$ev_reqid" \
+      --message-id "$ev_mid" --status persisted \
+      --note "phase=$(frontmatter_field "$file" phase) workflow=$(frontmatter_field "$file" workflow)" \
+      || die "send: could not record the request in the coordinator log — refusing to dispatch a leg nothing can recover"
+  fi
   local root_send
   root_send="$(cmd_root)"
   mkdir -p "$root_send/$(inbox_for "$to")" 2>/dev/null || true
@@ -4024,6 +4298,30 @@ cmd_send() {
   # ||-context also suppresses errexit inside the function, so NO state failure
   # mode — mkdir, redirect, parse — can abort send before the inbound archive.
   state_update_from "$file" "$outcome" "$rundir" "$to" || echo "warning: thread state not recorded" >&2
+  # The OUTCOME half of the pair. TWO events, not one: a `request-persisted` with no
+  # `request-dispatched` after it names the turn that never got out the door — a wedged
+  # acpx is a real failure mode — which a single post-delivery event could only report as
+  # silence.
+  #
+  # ADVISORY from here on, and the reason is the asymmetry with the event above: the leg is
+  # already delivered, so dying would tell the driver a live leg failed. A reply is the same
+  # case one level down — `broker_stamp` copies the stamped reply into the inbox and THEN
+  # calls this function, and a self-sending child calls it too, so a fail-closed append here
+  # would turn an already-delivered reply into a failed turn. (grok, plan r1, blocking.)
+  local ev_kind ev_status
+  case "$ev_type" in
+    review-request)  ev_kind=request-dispatched; ev_status="$outcome" ;;
+    review-feedback) ev_kind=reply-accepted;     ev_status="$(cmd_verdict "$file" 2>/dev/null || true)" ;;
+    *)               ev_kind=message-dispatched; ev_status="$outcome" ;;
+  esac
+  if ! cmd_events append --kind "$ev_kind" --set "$ev_set" --dispatch "$ev_dispatch" --thread "$ev_thread" \
+      --round "$ev_round" --agent "$ev_agent" --artifact "$ev_aid" --request-id "$ev_reqid" \
+      --message-id "$ev_mid" --run-dir "$rundir" --status "${ev_status:-$outcome}" \
+      --note "type=$ev_type delivery=$outcome"; then
+    # `A || { test && die; }` would abort the whole send under errexit whenever the test is
+    # false — the opposite of the advisory intent — so the branch is spelled out.
+    echo "warning: coordinator log not updated ($ev_kind); the $ev_type WAS $outcome" >&2
+  fi
   if [ -n "$archive_inbound" ]; then
     # Archive the inbound only after the outbound was validated and delivery
     # attempted. A failed nudge still archives — the inbound WAS processed; the
@@ -4105,6 +4403,7 @@ case "${1:-}" in
   panel)          shift; cmd_panel "$@" ;;
   compose)        shift; cmd_compose "$@" ;;
   round-note)     shift; cmd_round_note "$@" ;;
+  events)         shift; cmd_events "$@" ;;
   friction)       shift; cmd_friction "$@" ;;
   shadow)         shift; cmd_shadow "$@" ;;
   snapshot)       shift; cmd_snapshot "$@" ;;

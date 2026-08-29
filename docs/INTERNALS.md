@@ -247,6 +247,62 @@ someone has to remember:
 and would be garbage-collected; the ref is what keeps the reviewed tree resolvable weeks
 later. Deleting that ref namespace discards the artifacts, not just the pointers.
 
+## Coordinator event log (`.comms/events.tsv`)
+
+Contraction step 3 asks for a durable coordinator log, and the reason is a specific failure:
+before it, reconstructing a review turn meant joining four stores, none of which is a
+history. `grades/sets.tsv` records `dispatched` and is never updated again. `.comms/state/`
+is last-write-wins. `result.json` is per-run and findable only if you already know the run
+dir. And every broker REFUSAL — the ones that exist precisely because a stamped verdict must
+never be derived from a body the parser could not read — lived only in a `runner.log` inside
+a run dir the driver may never open. A driver that died between the ACP turn exiting and
+`compose` had no durable answer to "what happened to leg X".
+
+Four decisions are load-bearing, and each one was argued down from something worse:
+
+**Fail-closed exactly once, where refusing changes nothing.** `request-persisted` is written
+after the request validates and before anything is nudged, and a failure there `die`s: a
+request nobody could record is a leg nobody can recover, and at that instant nothing has
+happened yet. It uses `die` rather than `set -e` because `panel dispatch` calls
+`cmd_send ... || echo warning`, which suppresses errexit inside the function — an unchecked
+append would have been advisory exactly where it claimed to gate. Everything after that
+point is advisory and loud. The asymmetry is the whole design: `cmd_send` is also how a
+brokered (and a self-sent) REPLY reaches the driver, so a fail-closed append there would
+turn an already-delivered reply into a failed turn.
+
+**The provider's result and the turn's result are two events.** They differ exactly when the
+provider exits clean and the broker then refuses. Emitting one event from `write_result` put
+it after every reply event on the ACP path and relabelled a broker refusal as a provider
+failure.
+
+**No lock; constrain, then detect.** A single small `printf` append is one flushed write on a
+local filesystem — small matters literally: stdio's buffer is 1024 bytes on macOS, so the row
+cap is what keeps one row from becoming two `write(2)`s. That is a property of the platform,
+not a POSIX guarantee, and NFS documents the opposite, so the constraint is ENFORCED rather
+than assumed: `events append` refuses to create the log on a network or unclassifiable
+filesystem. Refusing beats warning here because NFS's failure mode is a LOST append, which
+leaves a perfectly well-formed file with an event missing — nothing downstream could ever
+detect it. What detection does cover is the torn-row case: the reader validates each row
+whole (full ISO timestamp, exact column count, a kind from the closed vocabulary) and reports
+`skipped N malformed row(s)` instead of parsing an event nobody wrote. A `mkdir` lock was
+rejected for the reason the presence work already established — a dead holder is a deadlock.
+
+**A turn will not sign off clean over a hole in its own trace.** Runner-side appends are
+advisory, so one can be lost; "absence means unknown" covers a gap, but it cannot excuse a
+terminal row that positively claims `completed` while the acceptance before it is missing.
+The runner watches for the warning `send` emits when its advisory append fails and, having
+seen it, writes `turn-finished log-incomplete`. That signal is read from `runner.log` rather
+than by looking the row up by id — an id lookup would have to match a column the writer is
+allowed to clip, which would invent losses that never happened.
+
+**Not authoritative against a hostile child, and it says so.** A mounted review turn reaches
+the real `.comms` through this same helper, so it can forge events until step 3's criterion 2
+gives reviewer turns an enforced boundary. Read the log as the coordinator's record, the same
+way the mount's PATH shim is documented as defence in depth rather than containment.
+
+The recovery walk the log is designed to support is in
+[PROTOCOL.md](PROTOCOL.md#recovering-a-loop-from-the-log).
+
 ## ACP consult transport (acp.sh)
 
 Consults are synchronous by nature, so `/ask --via acp` bypasses the mailbox: one

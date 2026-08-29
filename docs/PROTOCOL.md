@@ -244,6 +244,102 @@ Inspection: `comms.sh state list | get <thread> | complete <thread>`, and
 (default 15m) and marks a matching file still in the target inbox as `inbox=unread`.
 That persisted-file evidence outranks a prior notification result.
 
+## Coordinator event log
+
+`.comms/events.tsv` is the coordinator's own append-only record of what IT did. It is not
+the mailbox (that is the wire the reviewed agent writes on) and not ACP (a session is not a
+record). Every row is written by `comms.sh events append`, the single writer; nothing else
+formats a row.
+
+```
+ts  workspace  event  review_set  dispatch  thread  round  agent  role  artifact_id  request_id  message_id  run_dir  status  note
+```
+
+File order **is** the sequence — `ts` is for humans, not for sorting. `agent` names the
+LEG's reviewer (the target of a request, the author of a reply), never the send target.
+`role` is `gating` or `shadow`; a `--no-deliver` measurement turn is recorded and is
+structurally distinguishable from the leg that gates.
+
+`dispatch` is the ATTEMPT id, and it is what makes a retry readable. A `review_set` id is
+deterministic — same thread, phase, round and artifact produce the same one — and a retry
+deliberately rebinds the set's rows, so two concurrent attempts would otherwise interleave
+in one file with nothing to separate them. `panel dispatch` mints one id per fan-out,
+stamps it on every leg's frontmatter (`dispatch:`), and every event of that attempt carries
+it. **The last `panel-planned` for a set, by file order, is the current attempt; an event
+belongs to the attempt its `dispatch` names.** A bare `send` (no panel) carries no dispatch
+id — an empty column means "not a panel attempt", never "attempt unknown". `request_id`
+binds a reply to the request it answers (`in-reply-to`); a re-send of the same request
+appends another `request-persisted`, and the LAST pair for that request id is the live one.
+
+A `question` never enters the request lifecycle: consults are recorded as
+`message-dispatched` and nothing more, because nothing in this log completes them.
+
+The lifecycle, in the order it is written:
+
+| event | written by | means |
+|---|---|---|
+| `panel-planned` | `panel dispatch`, before any leg | the roster this set expects |
+| `request-persisted` | `send`, after validation, before any nudge | the request exists on disk |
+| `request-dispatched` | `send`, after delivery | how the nudge actually went (`status` = outcome) |
+| `message-dispatched` | `send`, for consults and anything not a loop turn | |
+| `turn-started` | the detached runner | a provider turn is running |
+| `provider-result` | the runner, where the provider exits | the CLI's own result, before brokering |
+| `reply-validated` | the broker | a stamped reply passed validation (`status` = verdict) |
+| `reply-refused` | the broker | it refused to STAMP, and why (`note`) |
+| `reply-accepted` | `send`, for a reply | the reply reached the driver's inbox (`status` = verdict) |
+| `turn-finished` | the runner (or `await`, for a runner that died) | the TURN's terminal status, which differs from the provider's; `log-incomplete` when an event this turn produced never reached the log |
+| `composition-completed` / `composition-refused` | `compose` | the gate ran, or refused a partial/unreadable panel |
+
+Read it with
+`comms.sh events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--limit N]`.
+Filters apply before the limit, so `--set X --limit 1` is the newest row of THAT set. A row
+that is not a well-formed event — a torn write, a hand-edit, an unknown kind — is counted
+and named on stderr rather than parsed.
+
+**Not every route produces every event.** The strict order
+`turn-started -> provider-result -> reply-* -> turn-finished` is the ACP/brokered path. On
+the self-send arm the child sends its own reply before exiting, so `reply-accepted` precedes
+`provider-result`, and `reply-validated` / `reply-refused` never appear at all (no broker
+runs). A turn that fails before the provider starts — mount claim refused, artifact
+unresolvable, prompt build — has a `turn-finished` and no `provider-result`. A shadow turn
+validates and never accepts. Read the log per route, not against one canonical shape.
+
+The log must live on a local filesystem. `events append` refuses to CREATE it anywhere else
+(NFS simulates `O_APPEND` and can drop a whole append, leaving a well-formed file with an
+event missing — a loss no reader can detect), and a filesystem it cannot classify is refused
+the same way.
+
+### Recovering a loop from the log
+
+After a driver dies, `comms.sh events --set <id>` answers what to do next:
+
+- a leg named by `panel-planned` with **no `request-dispatched`** — it never went out; re-send it.
+- **`turn-started` with no `provider-result`** — it may still be running or have been killed;
+  inspect its `run_dir`. Do not re-spawn blind (the mount claim refuses a second owner anyway).
+- **`reply-refused`**, or a failed/timeout `turn-finished` with no `reply-accepted` — do not
+  compose; re-dispatch that leg or escalate, using the `note` as the reason.
+- **`reply-validated` with no `reply-accepted`** — do NOT re-dispatch. The stamped body is in
+  `<run_dir>/reply.md` and may already be in the inbox; compose may simply succeed.
+- **every planned leg `reply-accepted`, no `composition-*`** — compose now.
+- **`composition-refused`** — a human decides; `status` says whether the panel was partial or
+  a leg was unreadable.
+
+Two corroborations belong in that walk, because the log alone cannot settle them: the
+MAILBOX decides compose-versus-re-dispatch (a reply already in the inbox needs no new turn),
+and the run dir's `pid` decides running-versus-dead. A missing `panel-planned` with N
+`request-persisted` rows means **roster unknown** — never "N was the whole panel".
+
+`panel dispatch` fails closed on the roster event and on each leg's `request-persisted`, so
+a dispatch can exit non-zero with earlier legs already in flight. Await those run dirs
+before re-dispatching the set; a re-dispatch mints a new attempt id and the old legs' events
+stay readable under the old one.
+
+One rule governs all of it: **the absence of a runner-side event means UNKNOWN, never "it did
+not happen".** Everything the runner writes is advisory (a turn that produced a valid reply is
+never killed to record an event about it), so a consumer that reads absence as proof will
+re-dispatch a leg that was already paid for. The one thing that is never ambiguous is a
+`turn-finished log-incomplete`: that turn is telling you its own trace has a hole.
+
 ## Delivery
 
 With cmux available, `comms.sh deliver <target>` resolves the target surface in order:

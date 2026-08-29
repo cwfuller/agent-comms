@@ -211,6 +211,62 @@ cmd_release() {
 
 RESULT_WRITTEN=false
 RUN_PROVIDER=codex
+# Turn identity, captured ONCE from the inbound before the child archives it — the same
+# reason update_thread_state takes the thread VALUE rather than the message path. Every
+# coordinator-log line this runner writes is stamped from these.
+RUN_THREAD=""; RUN_SET=""; RUN_DISPATCH=""; RUN_ROUND=""; RUN_MID=""; RUN_ARTIFACT=""; RUN_DIR=""
+# Set when an ADVISORY append fails, or when the acceptance this turn believes it delivered
+# is not in the log afterwards. The terminal event then says `log-incomplete` instead of
+# `completed`: "absence means unknown" cannot excuse a terminal row that positively claims
+# a clean turn while the milestone before it is missing. (codex, plan r2, blocking.)
+LOG_INCOMPLETE=0
+# Set the moment the stamped reply passes validation, so the refusal wrapper can tell
+# "refused to stamp" from "stamped, then delivery failed" — those demand opposite recovery
+# actions and only one of them is a refusal. (grok, plan r1, blocking.)
+BROKER_VALIDATED=0
+
+# log_event <kind> <status> <note> [message-id] — the runner's ONE way into the log.
+#
+# ADVISORY, always. These are the events that must survive the driver's death (criterion
+# 4), but a turn that produced a valid reply must never be killed to record an event about
+# it, so a failed append becomes a runner.log line and nothing else. The fail-closed half
+# of the policy lives in `comms.sh send`, at the one point where refusing changes nothing
+# that has already happened.
+#
+# `agent` is the provider, because on this side the reviewer IS this turn. `role` marks a
+# `--no-deliver` measurement run, which must never read as the leg that gates. (grok.)
+# load_turn_identity <run-dir> — adopt a dead runner's identity so THIS process can record
+# a terminal event for the right leg. Fixed two-column file written by cmd_run; parsed, not
+# sourced, because a run dir is data.
+load_turn_identity() {
+  local f="$1/turn.tsv" k v
+  RUN_DIR="$1"
+  [ -f "$f" ] || return 0
+  while IFS="$(printf '\t')" read -r k v; do
+    case "$k" in
+      thread)   RUN_THREAD="$v" ;;
+      set)      RUN_SET="$v" ;;
+      dispatch) RUN_DISPATCH="$v" ;;
+      round)    RUN_ROUND="$v" ;;
+      request)  RUN_MID="$v" ;;
+      artifact) RUN_ARTIFACT="$v" ;;
+      provider) [ -n "$v" ] && RUN_PROVIDER="$v" ;;
+    esac
+  done < "$f"
+  return 0
+}
+
+log_event() {
+  local kind="$1" status="${2:-}" note="${3:-}" mid="${4:-}" role=gating
+  [ "${RUNPHASE_NO_DELIVER:-}" = 1 ] && role=shadow
+  "$COMMS" events append --kind "$kind" --status "$status" --note "$note" \
+    --set "$RUN_SET" --dispatch "$RUN_DISPATCH" --thread "$RUN_THREAD" --round "$RUN_ROUND" \
+    --role "$role" --agent "$RUN_PROVIDER" --artifact "$RUN_ARTIFACT" --request-id "$RUN_MID" \
+    --message-id "$mid" --run-dir "$RUN_DIR" >/dev/null 2>&1 && return 0
+  LOG_INCOMPLETE=1
+  [ -n "$RUN_DIR" ] && echo "warning: coordinator log not updated ($kind)" >> "$RUN_DIR/runner.log" 2>/dev/null
+  return 0
+}
 write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <message-file> <note>
   local dir="$1" status="$2" rc="$3" sid="$4" mf="$5" note="$6"
   [ "$RESULT_WRITTEN" = true ] && return 0
@@ -222,6 +278,17 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
     > "$dir/result.json.tmp" && mv "$dir/result.json.tmp" "$dir/result.json" \
     || echo "warning: could not write result.json in $dir" >&2
   RESULT_WRITTEN=true
+  # The TURN's terminal status — not the provider's. They differ exactly when the provider
+  # exited clean and the broker then refused, and reporting that as a provider failure was
+  # both out of order and wrong. `provider-result` is emitted where the provider actually
+  # exits; this is the last word on the turn. Inside the write-once guard, so the EXIT
+  # trap's belt-and-braces call cannot double it. (codex, plan r1, blocking.)
+  # A turn whose own trace is missing a milestone must not sign off as `completed`.
+  if [ "${LOG_INCOMPLETE:-0}" = 1 ]; then
+    log_event turn-finished log-incomplete "turn=$status exit=$rc session=$sid — an event this turn produced is MISSING from the log; do not read this trace as complete${note:+ (note=$note)}"
+  else
+    log_event turn-finished "$status" "exit=$rc session=$sid${note:+ note=$note}"
+  fi
 }
 
 # update_thread_state <thread> <status> <session-id> <session-field> — mirror
@@ -394,6 +461,7 @@ build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> [agent] — sets the
   # first brokered leg as a single-reviewer reply and the round-1 lifecycle defect
   # comes back through the broker path. (codex + grok, panel r2.)
   GROK_RSET="$(frontmatter_field "$msg" review_set)"
+  GROK_DISPATCH="$(frontmatter_field "$msg" dispatch)"
   GROK_INID="$(frontmatter_field "$msg" message_id)"
   # The two prompt shapes are fully split on the reply type — a consult never
   # sees reviewer framing or the verdict bar, and a review never hears "this is
@@ -682,7 +750,7 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
   chmod +x "$acp_shim/git"
 }
 
-broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivered
+broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivered
   local msg="$1" run_dir="$2" peer="$3"
   [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="the child produced no reply text"; return 1; }
   # NOTHING is normalised here either. unwrap_reply used to strip a whole-answer fence, but
@@ -819,6 +887,7 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     [ -n "$GROK_MAXR" ] && printf 'max-rounds: %s\n' "$GROK_MAXR"
     [ -n "$GROK_LOOPR" ] && printf 'loop-rounds: %s\n' "$GROK_LOOPR"
     [ -n "$GROK_RSET" ] && printf 'review_set: %s\n' "$GROK_RSET"
+    [ -n "${GROK_DISPATCH:-}" ] && printf 'dispatch: %s\n' "$GROK_DISPATCH"
     [ -n "$verdict" ] && printf 'verdict: %s\n' "$verdict"
     printf -- '---\n\n'
     if [ -n "${vline:-}" ] && [ "${vcount:-0}" -eq 1 ]; then
@@ -833,6 +902,11 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     GROK_BROKER_NOTE="stamped grok reply failed validation (degenerate body?) — see runner.log; inbound NOT archived"
     return 1
   fi
+  # Stamped and VALID. Recorded before delivery, because "the reviewer answered" and "the
+  # driver was told" are different facts and a crash can land between them. The flag is
+  # what lets the wrapper below refuse to call a delivery failure a refusal.
+  BROKER_VALIDATED=1
+  log_event reply-validated "${verdict:-}" "reply stamped for $peer type=${GROK_RTYPE:-}" "${GROK_REPLY_ID:-}"
   # Measurement runs stop HERE, with a validated reply in the run dir and
   # nothing in any inbox. This is what makes "the shadow verdict never gates"
   # a mechanical property rather than a promise: the reply cannot steer a loop
@@ -848,7 +922,36 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamp
     GROK_BROKER_NOTE="send failed after persistence — reply is at $dest; see runner.log"
     return 1
   fi
+  # `send` writes reply-accepted ADVISORY-ly, in another process. If that append was lost,
+  # this turn would otherwise sign off `completed` with no acceptance in its trace — a
+  # positively contradictory history, which is worse than a gap. (codex, plan r2, blocking.)
+  #
+  # The signal is the warning `send` prints on exactly that failure, captured in runner.log
+  # by the redirect above — NOT a lookup of the row by id. An id lookup would have to match
+  # a column the writer is allowed to CLIP, so a long message id would report a loss that
+  # never happened, which is the same class of false certainty this event exists to remove.
+  grep -q 'coordinator log not updated' "$run_dir/runner.log" 2>/dev/null && LOG_INCOMPLETE=1
   return 0
+}
+
+# The wrapper every turn path actually calls. Each refusal inside broker_stamp sets
+# GROK_BROKER_NOTE and returns non-zero, and until now that reason lived ONLY in a run
+# dir's runner.log — a driver returning to a dead await could see that no reply arrived,
+# never why. Recording it in ONE place means a new refusal path cannot forget to log
+# itself.
+#
+# `reply-refused` means REFUSED TO STAMP, and nothing else. A failure after a successful
+# validate leaves `reply-validated` with no `reply-accepted`, which is the pair that says
+# "the body exists, do not re-dispatch" — calling it a refusal would send a recovering
+# driver at the wrong remedy. (grok, plan r1, blocking.)
+broker_stamp_and_deliver() {  # <msg> <run-dir> <peer>
+  local rc=0
+  BROKER_VALIDATED=0
+  broker_stamp "$@" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$BROKER_VALIDATED" -ne 1 ]; then
+    log_event reply-refused refused "${GROK_BROKER_NOTE:-the broker refused this reply without saying why}"
+  fi
+  return "$rc"
 }
 
 cmd_spawn() {
@@ -1579,6 +1682,25 @@ cmd_run() {
   # of its reply, so exit-time re-reads of $msg fail on the success path.
   local msg_thread
   msg_thread="$(frontmatter_field "$msg" thread || true)"
+  RUN_THREAD="$msg_thread"
+  RUN_DIR="$run_dir"
+  RUN_SET="$(frontmatter_field "$msg" review_set || true)"
+  RUN_DISPATCH="$(frontmatter_field "$msg" dispatch || true)"
+  RUN_ROUND="$(frontmatter_field "$msg" round || true)"
+  RUN_MID="$(frontmatter_field "$msg" message_id || true)"
+  RUN_ARTIFACT="$(frontmatter_field "$msg" artifact_id || true)"
+  # The identity, on disk, next to the turn. `await` synthesizes a result when a runner
+  # dies without writing one — and that synthetic result must be able to record a TERMINAL
+  # event for the right leg, from a process that never read the inbound. Without this a
+  # `kill -9` leaves the leg permanently unknown. (grok, plan r2.)
+  { printf 'thread\t%s\n' "$RUN_THREAD"
+    printf 'set\t%s\n'    "$RUN_SET"
+    printf 'dispatch\t%s\n' "$RUN_DISPATCH"
+    printf 'round\t%s\n'  "$RUN_ROUND"
+    printf 'request\t%s\n' "$RUN_MID"
+    printf 'artifact\t%s\n' "$RUN_ARTIFACT"
+    printf 'provider\t%s\n' "$RUN_PROVIDER"
+  } > "$run_dir/turn.tsv" 2>/dev/null || true
 
   # If anything below aborts unexpectedly (set -e, TERM/INT), reap the provider
   # child and still leave a result on disk so `await` reports a diagnosable
@@ -1631,6 +1753,11 @@ cmd_run() {
     trap - EXIT
     exit 1
   fi
+  # THE FIRST DURABLE EVIDENCE that a turn is running, written by this process — which is
+  # detached, so everything from here on outlives the dispatching shell (criterion 4).
+  # `sets.tsv` says a leg was dispatched and can never say more than that.
+  log_event turn-started running "provider=$provider via=${via:-direct} artifact=${msg_artifact:-none}"
+
   if [ -n "$msg_artifact" ]; then
     local mount_base
     mount_base="$(frontmatter_field "$msg" head_sha)"
@@ -2149,6 +2276,11 @@ PROMPT
       > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" || acp_rc=$?
     acp_elapsed=$(( $(date +%s) - acp_t0 ))
     echo "acp turn finished after ${acp_elapsed}s (budget ${timeout}s)" >>"$run_dir/runner.log"
+    # THE PROVIDER'S OWN RESULT, recorded where the provider actually exits — before the
+    # broker runs. Emitting it from write_result put it AFTER every reply event on this
+    # path and relabelled a broker refusal as a provider failure. (codex, plan r1.)
+    log_event provider-result "$([ "$acp_rc" -eq 0 ] && echo completed || echo failed)" \
+      "exit=$acp_rc elapsed=${acp_elapsed}s budget=${timeout}s via=acp"
     # acpx hands back the answer as TEXT, so the streaming extractor is skipped
     # entirely and only the stamping half of the broker applies.
     # Whether the turn OUTRAN ITS BUDGET is a fact about the turn, not about how many bytes
@@ -2270,6 +2402,7 @@ PROMPT
       wait "$codex_pid" 2>/dev/null || true
       local sid_t
       sid_t="$(session_id_from_events "$run_dir" "$provider")"
+      log_event provider-result timeout "killed at the ${timeout}s budget"
       update_thread_state "$msg_thread" timeout "$sid_t" "$sfield" || true
       write_result "$run_dir" timeout 124 "$sid_t" "$msg" "killed after ${timeout}s — raise COMMS_RUNPHASE_TIMEOUT_SECS or investigate events.ndjson"
       unmount_artifact
@@ -2282,6 +2415,12 @@ PROMPT
   done
   wait "$codex_pid" || rc=$?
 
+  local sid status note=""
+  sid="$(session_id_from_events "$run_dir" "$provider")"
+  # Same rule as the ACP path: the provider's exit is a fact about the provider, and it is
+  # recorded before the broker gets a chance to make the TURN fail for its own reasons.
+  log_event provider-result "$([ "$rc" -eq 0 ] && echo completed || echo failed)" \
+    "exit=$rc session=$sid provider=$provider"
   local sid status note=""
   sid="$(session_id_from_events "$run_dir" "$provider")"
   if [ "$rc" -eq 0 ] && [ "$provider" = "grok" ]; then
@@ -2359,6 +2498,7 @@ cmd_await() {
         # later reader see a turn that neither succeeded nor failed — it just is not
         # there. Observed live: a grok run dir holding only a `pid`. (Field report from a
         # codex session, 2026-08-26.)
+        load_turn_identity "$run_dir"
         write_result "$run_dir" failed 1 "" "$(json_get "$run_dir/result.json" message_file 2>/dev/null || true)" \
           "runner (pid $pid) died without writing result.json — synthesized by await; see runner.log"
         echo "await: runner (pid $pid) died without writing result.json — recorded a synthetic failed result; see $run_dir/runner.log" >&2
