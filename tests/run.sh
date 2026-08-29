@@ -6882,6 +6882,19 @@ grep -q 'emitted no completion line' "$REPO/helpers/comms.sh" \
   && ok "integrate requires positive proof the suite ran to the end" || fail "integrate accepts an exit status alone"
 grep -q 'tee "\$suite_log"' "$REPO/helpers/comms.sh" \
   && ok "integrate keeps the output of the run it judges" || fail "integrate discards the suite output"
+# The watchdog that waits on a provider child must poll SUB-SECOND. Its only job is to
+# notice the child exited; at a 1s interval a stub-backed turn that finishes in
+# milliseconds still waits out a full second, measured at 58s across one suite run — 13%
+# of the runtime. The timeout itself is still evaluated in whole seconds against
+# `date +%s`, so the watchdog's contract is unchanged.
+#
+# Asserted on the SOURCE deliberately: the loop body only executes when the child is
+# still alive at the first check, so a timing assertion would be racy in the direction
+# that produces false failures.
+awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -qE '^ *sleep 0\.[0-9]+$' \
+  && ok "the provider watchdog polls sub-second" || fail "the provider watchdog is back to a whole-second poll"
+awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -qE '^ *sleep [0-9]+$' \
+  && fail "a whole-second sleep returned to the provider watchdog" || ok "no whole-second sleep in the provider watchdog"
 # The contract must come from the commit under test, not from a file on disk.
 grep -q 'git -C "\$REPO" show "\${TESTED_OID:-missing}:tests/expected-counts.tsv"' "$REPO/tests/run.sh" \
   && ok "the coverage contract is read from the commit under test" || fail "the contract is not bound to TESTED_OID"

@@ -2264,7 +2264,12 @@ PROMPT
     trap - EXIT
       exit 1
     fi
-    sleep 1
+    # Poll at 0.1s, not 1s. The TIMEOUT is still evaluated in whole seconds against
+    # `date +%s` above, so the watchdog's contract is unchanged — only the interval
+    # between checks shrinks. A stub-backed turn finishes in milliseconds and then sat
+    # here waiting out a full second: measured at 58s across one suite run, 13% of its
+    # runtime, for a loop whose only job is to notice the child already exited.
+    sleep 0.1
   done
   wait "$codex_pid" || rc=$?
 
