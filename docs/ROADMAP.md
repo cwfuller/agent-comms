@@ -1604,7 +1604,32 @@ Ranked work, foldable into the step-2 harness split:
    paranoid re-run stays the default. Landed alongside self-healing
    never-occupy-main (a clean checkout idling on `main` is fast-forwarded
    through the landing instead of refusing it after a ten-minute suite).
-4. [ ] **Shard sections in parallel** with isolated TMPDIRs — except the
+4. [ ] **Shard sections in parallel** — **PROVEN 2026-08-28 by measurement, 1.6x today.**
+   Prototype: derive one script per lane from `tests/run.sh`, each lane running the
+   dependency CLOSURE of the sections it owns, assertions credited only to owned
+   sections. Measured on a quiet machine, same generated machinery both sides:
+   - **serial 424s (1138 assertions, 0 fail) -> 4 closure lanes 264s = 1.6x**
+   - **owned-section coverage 1134/1138 = 99.6%**, 0 sections unreached; the 2 short
+     sections are the load-flaky presence lane (88/91) and one other (4/5).
+   - Parallelism itself scales near-ideally: two lanes, 285s sequential -> 132s
+     concurrent (2.17x), and the 5-lane wall clock equalled its heaviest lane exactly.
+     Contention is NOT the limit on this machine.
+   What limits it to 1.6x is DUPLICATION, not concurrency: a lane must run its
+   dependencies, and one section — `runphase v0: headless delivery via stubbed codex` —
+   is pulled into 24 other closures. Measured split for one closure: 45.3s full vs
+   25.0s setup-only, so **45% of a dependency's cost is assertions a dependent lane does
+   not need**. Separating setup from assertions in ~6 sections (dominated by that one)
+   should take this to roughly 2.4x; better packing beyond that (the trial lanes ran
+   118s..264s, so the heaviest is 2x the lightest).
+   Two traps confirmed the hard way while proving this: a naive split by fixture family
+   ran only 655/1138 assertions while reporting just 5 failures — silent coverage loss,
+   which the per-section vector now catches; and a derived script placed outside the repo
+   resolves `REPO` from `BASH_SOURCE` to the wrong directory and fails every section for
+   reasons that have nothing to do with coupling.
+   Constraints unchanged: bash 3.2 (no `wait -n`; `xargs -P` or explicit pid waits), no
+   new dependency, the presence/signal section stays in its own unshared lane, and a
+   sharded run must never mint an attestation.
+   Original note: isolated TMPDIRs — except the
    signal-timing presence section, which stays in its own unshared lane (machine
    load provably flaked it during the presence arc; keeping it serial is now
    known to be cheap). **This is the remaining lever, and it is [Contraction
