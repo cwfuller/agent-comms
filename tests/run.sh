@@ -5774,23 +5774,59 @@ WM_KDIR16="$(dirname "$(awk -F'\t' '$2 !~ /sessions (ensure|show)/ {print $1}' "
 if [ -n "$WM_KDIR16" ] && [ -f "$WM_KDIR16/.state.record" ]; then
   rm -f "$WM_KDIR16/.state.home"
   : > "$WM/cwd.log"; WM_D17="$(wm_turn wm-lease wm17 "$WM_A1" HOME="$WM_HOME")"
-  [ "$(wm_status "$WM_D17")" = "completed" ] \
-    && ok "a record predating the owner-home field still runs instead of wedging on upgrade" \
-    || fail "a legacy record with no recorded home wedged the mount (status=$(wm_status "$WM_D17"))"
+  WM_C17="$(wm_prompt_cwds | sed -n 1p)"
+  if [ "$(wm_status "$WM_D17")" = "completed" ] \
+     && [ "$WM_C17" = "$(cd "$WM/run-wm17" && pwd -P)/tree" ]; then
+    ok "a record predating the owner-home field degrades to the per-message path, not a wedge"
+  else
+    fail "a legacy record neither ran nor degraded (status=$(wm_status "$WM_D17") cwd=$WM_C17)"
+  fi
+  # ...and it must NOT have rebuilt the stable mount, whose owner it cannot prove is gone.
+  [ -d "$WM_KDIR16/tree" ] \
+    && ok "the stable mount is left untouched when ownership cannot be established" \
+    || fail "an unprovable-ownership turn rebuilt the stable mount anyway"
   # ...and the fallback must NOT adopt a store the record does not live in: probing the
   # wrong queues would report "gone" and restage under a live owner. Point HOME at an empty
   # store with no sessions/<id>.json and require a refusal.
   rm -f "$WM_KDIR16/.state.home"
   WM_HOME2="$WM/fakehome2"; mkdir -p "$WM_HOME2/.acpx/queues" "$WM_HOME2/.acpx/sessions"
   : > "$WM/cwd.log"; WM_D18="$(wm_turn wm-lease wm18 "$WM_A1" HOME="$WM_HOME2")"
-  if [ "$(wm_status "$WM_D18")" = "failed" ] \
-     && [ "$(wm_prompt_cwds | awk 'END{print NR+0}')" = "0" ]; then
-    ok "a legacy record is not adopted into a store it does not live in"
+  WM_C18="$(wm_prompt_cwds | sed -n 1p)"
+  if [ "$(wm_status "$WM_D18")" = "completed" ] \
+     && [ "$WM_C18" = "$(cd "$WM/run-wm18" && pwd -P)/tree" ]; then
+    ok "a foreign acpx store is never adopted; the turn degrades instead"
   else
-    fail "the home fallback adopted a foreign acpx store (status=$(wm_status "$WM_D18"))"
+    fail "the home fallback adopted a foreign store (status=$(wm_status "$WM_D18") cwd=$WM_C18)"
   fi
 else
   fail "could not stage the legacy-record fixture (kdir=$WM_KDIR16)"
+fi
+
+# Two runners racing ONE ident from a stale claim. The old check-delete-relink sequence was
+# not a compare-and-swap: both could judge the same holder stale, and the second would delete
+# the FIRST's live claim and install its own, so both restaged one mount concurrently.
+# Self-contained: derive the ident dir from a turn on THIS thread rather than reusing another
+# test's, or the stale claim is seeded somewhere the racers never look.
+: > "$WM/cwd.log"; WM_DR0="$(wm_turn wm-race wmR0 "$WM_A1")"
+WM_KR="$(dirname "$(wm_prompt_cwds | sed -n 1p)")"
+if [ -n "$WM_KR" ] && [ -d "$WM_KR" ] && [ "$(wm_status "$WM_DR0")" = "completed" ]; then
+  rm -f "$WM_KR"/.claim.* 2>/dev/null
+  printf 'pid=999999\nfmt=v2\nstart=NOT-A-REAL-START\nrun=crashed\n' > "$WM_KR/.claim.0"
+  ( wm_turn wm-race wmR1 "$WM_A1" AX_CWD_LOG="$WM/cwd.r1" >"$WM/r1.out" 2>&1 ) &
+  ( wm_turn wm-race wmR2 "$WM_A1" AX_CWD_LOG="$WM/cwd.r2" >"$WM/r2.out" 2>&1 ) &
+  wait
+  WM_R1="$(cat "$WM/r1.out" 2>/dev/null)"; WM_R2="$(cat "$WM/r2.out" 2>/dev/null)"
+  WM_S1="$(wm_status "$WM_R1")"; WM_S2="$(wm_status "$WM_R2")"
+  WM_NDONE=0
+  [ "$WM_S1" = "completed" ] && WM_NDONE=$(( WM_NDONE + 1 ))
+  [ "$WM_S2" = "completed" ] && WM_NDONE=$(( WM_NDONE + 1 ))
+  if [ "$WM_NDONE" = 1 ]; then
+    ok "two runners racing one ident from a stale claim: exactly one gets the mount"
+  else
+    fail "a stale claim was granted to $WM_NDONE runners at once (r1=$WM_S1 r2=$WM_S2)"
+  fi
+else
+  fail "could not stage the claim-race fixture (kdir=$WM_KR status=$(wm_status "$WM_DR0"))"
 fi
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini

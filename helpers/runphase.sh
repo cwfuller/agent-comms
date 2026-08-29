@@ -1002,7 +1002,14 @@ mount_state_get() {  # <kdir> <key>
 # Two runners under different environments would otherwise read the same live process as two
 # different processes, each conclude the other's pid was recycled, and both restage one mount.
 # Pin both, so the recorded and compared forms are always the same bytes.
-proc_start() { LC_ALL=C TZ=UTC ps -p "${1:-0}" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ *//; s/ *$//'; }
+proc_start() {  # -> 0 and the normalised start time, or non-zero if the pid is absent
+  # The STATUS must be `ps`'s own, not the tail of a pipeline: as a pipeline this returned
+  # sed's status unless the caller happened to have `pipefail` set, which made "is this pid
+  # dead" silently depend on a shell option set somewhere else.
+  local out
+  out="$(LC_ALL=C TZ=UTC ps -p "${1:-0}" -o lstart= 2>/dev/null)" || return 1
+  printf '%s' "$out" | tr -s ' ' | sed 's/^ *//; s/ *$//'
+}
 
 mount_container() {  # <mounts root> <ident> -> physical container path, or non-zero
   local base="$1" ident="$2" phys_base phys
@@ -1024,8 +1031,23 @@ mount_container() {  # <mounts root> <ident> -> physical container path, or non-
 # treats a live runner as stale.
 MOUNT_HOLDER=""; MOUNT_CLAIM_NOTE=""
 mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
-  local kdir="$1" rd="$2" stage="$1/.claim.stage.$$" held hp hs
+  # GENERATIONAL, because check-then-delete-then-relink is NOT a compare-and-swap. With a
+  # single `.claim` name, two runners that both fail the first `ln` and both judge the same
+  # holder stale will each `rm` and `ln` in turn — the second deletes the FIRST's live claim
+  # and installs its own, and both return success and restage one mount concurrently.
+  #
+  # Instead the claim name carries a generation. Reclaiming does not delete anything a racer
+  # may be adjudicating: it ADVANCES the generation, which is an idempotent, monotone write,
+  # so the order of two racers' writes cannot matter. Both then contend on `ln` for the new
+  # generation and exactly one wins; the loser re-reads, finds the winner's live claim, and
+  # refuses.
+  local kdir="$1" rd="$2" stage held hp hs hfmt n tries=0
   MOUNT_HOLDER=""; MOUNT_CLAIM_NOTE=""
+  # mktemp, not $$: the staged record is hard-linked into place, so two actors sharing a
+  # stage path would link the same inode and each `rm` the other's pending stage. $$ is not
+  # unique across subshells of one process, which is exactly how that arises.
+  stage="$(mktemp "$kdir/.claim.stage.XXXXXX" 2>/dev/null)" \
+    || { MOUNT_CLAIM_NOTE="cannot write a claim beside $kdir"; return 1; }
   { printf 'pid=%s\n' "$$"
     # v2 marks the proc_start (LC_ALL=C TZ=UTC, stripped) rendering. A claim without it was
     # written by an older helper in a different locale/zone, so its `start=` bytes are not
@@ -1033,41 +1055,53 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
     printf 'fmt=v2\n'
     printf 'start=%s\n' "$(proc_start "$$")"
     printf 'run=%s\n' "$rd"
-  } > "$stage" 2>/dev/null || { MOUNT_CLAIM_NOTE="cannot write a claim beside $kdir"; return 1; }
-  if ln "$stage" "$kdir/.claim" 2>/dev/null; then
-    rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$kdir/.claim"; return 0
-  fi
-  held="$kdir/.claim"
-  hp="$(sed -n 's/^pid=//p' "$held" 2>/dev/null | head -1)"
-  hs="$(sed -n 's/^start=//p' "$held" 2>/dev/null | head -1)"
-  # A holder is DEAD only on positive proof of absence. `ps -p` exiting 1 with empty
-  # stdout is that proof; a denied or broken ps is ambiguous and must not license a
-  # reclaim. A live pid whose start time differs from the record is a recycled number.
-  local now rc=0
-  now="$(proc_start "${hp:-0}")" || rc=$?
-  # Reclaimable on POSITIVE proof of absence (ps exits 1 with empty stdout), OR when the
-  # pid is live but its start time differs from the record — that is a RECYCLED number,
-  # not our holder. A denied or unparseable ps stays ambiguous and never reclaims.
-  local hfmt; hfmt="$(sed -n 's/^fmt=//p' "$held" 2>/dev/null | head -1)"
-  # Only compare start times when the holder recorded them in OUR format. A pre-upgrade
-  # holder's bytes differ for the same live process, and treating that as pid reuse would
-  # reclaim a mount out from under a runner that is still using it.
-  if [ "$hfmt" = v2 ] && [ -n "$hp" ] && [ -n "$hs" ] && [ "$rc" -eq 0 ] && [ -n "$now" ] && [ "$now" != "$hs" ]; then
-    rm -f "$held" 2>/dev/null || true
+  } > "$stage" 2>/dev/null || { rm -f "$stage" 2>/dev/null || true; MOUNT_CLAIM_NOTE="cannot write a claim beside $kdir"; return 1; }
+
+  while [ "$tries" -lt 8 ]; do
+    tries=$(( tries + 1 ))
+    n="$(cat "$kdir/.claim.gen" 2>/dev/null)"; case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    held="$kdir/.claim.$n"
     if ln "$stage" "$held" 2>/dev/null; then
-      rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$held"; return 0
+      rm -f "$stage" 2>/dev/null || true
+      MOUNT_HOLDER="$held"
+      # Generations two or more behind are provably abandoned: reaching $n required judging
+      # $((n-1)) dead.
+      local g
+      for g in "$kdir"/.claim.*; do
+        case "${g##*/.claim.}" in ''|*[!0-9]*) continue ;; esac
+        [ "${g##*/.claim.}" -le $(( n - 2 )) ] && rm -f "$g" 2>/dev/null || true
+      done
+      return 0
     fi
-  fi
-  if [ -n "$hp" ] && [ "$rc" -eq 1 ] && [ -z "$now" ]; then
-    rm -f "$held" 2>/dev/null || true
-    if ln "$stage" "$held" 2>/dev/null; then
-      rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$held"; return 0
+    hp="$(sed -n 's/^pid=//p' "$held" 2>/dev/null | head -1)"
+    hs="$(sed -n 's/^start=//p' "$held" 2>/dev/null | head -1)"
+    hfmt="$(sed -n 's/^fmt=//p' "$held" 2>/dev/null | head -1)"
+    local now rc=0
+    now="$(proc_start "${hp:-0}")" || rc=$?
+    # DEAD on positive proof of absence (`ps` exits 1 with empty stdout), or when the pid is
+    # live but its start time differs from the record in OUR format — a recycled number, not
+    # our holder. A denied or unparseable `ps`, or an unversioned holder, stays ambiguous and
+    # never reclaims.
+    local dead=0
+    [ -n "$hp" ] && [ "$rc" -eq 1 ] && [ -z "$now" ] && dead=1
+    [ "$hfmt" = v2 ] && [ -n "$hp" ] && [ -n "$hs" ] && [ "$rc" -eq 0 ] && [ -n "$now" ] \
+      && [ "$now" != "$hs" ] && dead=1
+    if [ "$dead" = 0 ]; then
+      rm -f "$stage" 2>/dev/null || true
+      MOUNT_CLAIM_NOTE="the mount at $kdir is held by runner pid ${hp:-<unknown>} (run $(sed -n 's/^run=//p' "$held" 2>/dev/null | head -1)); if no runner is really alive, clear it with: rm -f '$held'"
+      return 1
     fi
-  fi
+    # Dead: advance the generation rather than deleting a record a racer may be reading.
+    printf '%s\n' "$(( n + 1 ))" > "$kdir/.claim.gen.tmp.$$" 2>/dev/null \
+      && mv -f "$kdir/.claim.gen.tmp.$$" "$kdir/.claim.gen" 2>/dev/null || {
+        rm -f "$kdir/.claim.gen.tmp.$$" "$stage" 2>/dev/null || true
+        MOUNT_CLAIM_NOTE="cannot advance the mount claim generation at $kdir"; return 1; }
+  done
   rm -f "$stage" 2>/dev/null || true
-  MOUNT_CLAIM_NOTE="the mount at $kdir is held by runner pid ${hp:-<unknown>} (run $(sed -n 's/^run=//p' "$held" 2>/dev/null | head -1)); if no runner is really alive, clear it with: rm -f '$held'"
+  MOUNT_CLAIM_NOTE="the mount claim at $kdir churned through $tries generations without settling"
   return 1
 }
+
 mount_claim_release() {
   [ -n "${MOUNT_HOLDER:-}" ] || return 0
   grep -qx "pid=$$" "$MOUNT_HOLDER" 2>/dev/null && rm -f "$MOUNT_HOLDER" 2>/dev/null
@@ -1114,13 +1148,8 @@ mount_owner_wait() {  # <acpx record id> <owner home> <deadline secs> -> 0 gone 
     # we are about to probe is the one that owns this record. Without that check the
     # fallback is fail-open across a legitimate home change: we would probe the wrong
     # store, see no lease, and restage under a live owner.
-    if [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx/sessions/$id.json" ]; then
-      ohome="$HOME"
-      echo "mount: no recorded owner home; the record lives in the current store, probing it" >&2
-    else
-      MOUNT_WAIT_NOTE="the previous ACP owner's home was not recorded and this record is not in the current acpx store, so its queue lease cannot be located"
-      return 1
-    fi
+    MOUNT_WAIT_NOTE="the previous ACP owner's home was not recorded, so which store holds its queue lease cannot be established"
+    return 2
   fi
   [ -n "$ohome" ] || { MOUNT_WAIT_NOTE="neither a recorded owner home nor \$HOME is set, so the queue lease cannot be located"; return 1; }
   lock="$ohome/.acpx/queues/$hh.lock"
@@ -1481,13 +1510,23 @@ cmd_run() {
       fi
       # The previous round's queue owner must be gone before its directory is rebuilt;
       # it exits on its own --ttl and we only observe the lease and socket vanishing.
-      if ! mount_owner_wait "$(mount_state_get "$mount_kdir" record)" "$(mount_state_get "$mount_kdir" home)" "${COMMS_RUNPHASE_OWNER_WAIT_SECS:-45}"; then
-        update_thread_state "$msg_thread" failed "" "$sfield" || true
-        write_result "$run_dir" failed 1 "" "$msg" "${MOUNT_WAIT_NOTE:-the previous ACP queue owner for this mount has not exited} — refusing to restage under a live owner"
-        unmount_artifact
-        trap - EXIT
-        exit 1
-      fi
+      local owner_rc=0
+      mount_owner_wait "$(mount_state_get "$mount_kdir" record)" "$(mount_state_get "$mount_kdir" home)" "${COMMS_RUNPHASE_OWNER_WAIT_SECS:-45}" || owner_rc=$?
+      case "$owner_rc" in
+        0) : ;;
+        2) # OWNERSHIP UNPROVABLE (a record written before the home field existed). Rebuilding
+           # the stable mount could restage under an owner living in a store we cannot name,
+           # so DEGRADE to the disposable per-message path: the turn still reviews the pinned
+           # artifact, just cold, and the stable mount is left untouched for an operator.
+           echo "mount: ${MOUNT_WAIT_NOTE:-ownership unprovable}; using the per-message path this turn and leaving $mount_kdir alone (clear it with: rm -rf '$mount_kdir' once no reviewer is running)" >>"$run_dir/runner.log"
+           mount_claim_release
+           mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""; mount_ident="" ;;
+        *) update_thread_state "$msg_thread" failed "" "$sfield" || true
+           write_result "$run_dir" failed 1 "" "$msg" "${MOUNT_WAIT_NOTE:-the previous ACP queue owner for this mount has not exited} — refusing to restage under a live owner"
+           unmount_artifact
+           trap - EXIT
+           exit 1 ;;
+      esac
     else
       mount_kdir="$run_dir"
       mount_dir="$run_dir/tree"
