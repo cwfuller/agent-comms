@@ -6621,15 +6621,15 @@ esac
 
 # 2. Declared, file never arrives -> the budget is HONOURED, not ignored. A fix
 #    that simply deleted the wait would pass test 1 and fail this one.
-SW_E2="$(sw_elapsed sw_run "$WORK/sw-r2" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=3)"
-[ "$SW_E2" -ge 3 ] && ok "declared spawn waits out its budget when the write never lands (${SW_E2}s)" \
+SW_E2="$(sw_elapsed sw_run "$WORK/sw-r2" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=1)"
+[ "$SW_E2" -ge 1 ] && ok "declared spawn waits out its budget when the write never lands (${SW_E2}s)" \
   || fail "declared spawn skipped its budget (${SW_E2}s, expected >=3)"
 
 # 3. Declared, file lands DURING the turn -> the race window still works, and the
 #    state is actually MUTATED. Asserting only that the "missing file" note is absent
 #    would pass on a turn that found the file and then failed to write it. The stub
 #    creates the file from inside the turn, so there is no sleep to lose under load.
-SW_O3="$(SW_LATE_STATE="$SW_SF" sw_turn "$WORK/sw-r3" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=8 || true)"
+SW_O3="$(SW_LATE_STATE="$SW_SF" sw_turn "$WORK/sw-r3" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=4 || true)"
 case "$SW_O3" in
   *'no thread state file to update'*) fail "state file written during the turn was missed — the race window regressed" ;;
   *) ok "declared spawn picks up a state file written after it started" ;;
@@ -6649,12 +6649,12 @@ rm -f "$SW_SF"
 #     If load delays the runner past the 2s write, this degrades to test 3 (file
 #     already present) and still passes — it loses coverage, never invents failure.
 #     (codex + grok, panel r2 flagged the gap; codex, r3 asked for the wider margin.)
-( sleep 2; printf '{\n  "workspace": "sw",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' > "$SW_SF" ) &
+( sleep 1; printf '{\n  "workspace": "sw",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' > "$SW_SF" ) &
 SW_MIDW=$!
-SW_E3A="$(sw_elapsed sw_run "$WORK/sw-r3a" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=20)"
+SW_E3A="$(sw_elapsed sw_run "$WORK/sw-r3a" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=10)"
 wait "$SW_MIDW" 2>/dev/null || true
-[ "$SW_E3A" -lt 12 ] && ok "a file landing mid-wait wakes the poll early (${SW_E3A}s of a 20s budget)" \
-  || fail "the wait did not wake early (${SW_E3A}s of a 20s budget — is it polling?)"
+[ "$SW_E3A" -lt 6 ] && ok "a file landing mid-wait wakes the poll early (${SW_E3A}s of a 10s budget)" \
+  || fail "the wait did not wake early (${SW_E3A}s of a 10s budget — is it polling?)"
 grep -q '"last_delivery": "failed"' "$SW_SF" 2>/dev/null \
   && ok "the mid-wait file is mutated too" || fail "mid-wait file not mutated"
 rm -f "$SW_SF"
@@ -7087,7 +7087,7 @@ git -C "$IH7" init -q -b main
 printf '.comms/\n.claude/worktrees/\n' > "$IH7/.gitignore"
 mkdir -p "$IH7/tests" "$IH7/.comms"
 printf 'total\t3\n' > "$IH7/tests/expected-counts.tsv"
-printf '#!/bin/bash\nsleep 4\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IH7/tests/slow.sh"
+printf '#!/bin/bash\nsleep 2\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IH7/tests/slow.sh"
 chmod +x "$IH7/tests/slow.sh"
 printf 'suite-cmd = bash tests/slow.sh\n' > "$IH7/.comms/config"
 (cd "$IH7" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
@@ -7095,7 +7095,7 @@ printf 'suite-cmd = bash tests/slow.sh\n' > "$IH7/.comms/config"
 (cd "$IH7" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new slowone) >/dev/null 2>&1
 (cd "$IH7/.claude/worktrees/slowone" && echo l > k.txt && git add k.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: k") >/dev/null 2>&1
-(cd "$IH7" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 \
+(cd "$IH7" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=1 \
     COMMS_PRESENCE_NAME=slowghost COMMS_PRESENCE_INSTANCE=77777777777777777777777777777777 \
     "$COMMS" integrate worktree-slowone) >/dev/null 2>&1 || true
 [ "$(cd "$IH7" && git rev-parse main)" = "$(cd "$IH7" && git rev-parse worktree-slowone)" ] \
@@ -7116,7 +7116,7 @@ mkdir -p "$IH8/tests" "$IH8/.comms"
 printf 'total\t3\n' > "$IH8/tests/expected-counts.tsv"
 # Completion line first, then a detached descendant, then exit 0 — the shape that walks
 # past a supervisor which only waits on the direct child.
-printf '#!/bin/bash\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n( sleep 3; : > "$IH8_MARK" ) </dev/null >/dev/null 2>&1 &\nexit 0\n' > "$IH8/tests/detach.sh"
+printf '#!/bin/bash\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n( sleep 2; : > "$IH8_MARK" ) </dev/null >/dev/null 2>&1 &\nexit 0\n' > "$IH8/tests/detach.sh"
 chmod +x "$IH8/tests/detach.sh"
 printf 'suite-cmd = bash tests/detach.sh\n' > "$IH8/.comms/config"
 (cd "$IH8" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
@@ -7135,14 +7135,14 @@ rm -f "$IH8_MARKF"
     "$COMMS" integrate worktree-detachone) >/dev/null 2>&1 || true
 [ "$(cd "$IH8" && git rev-parse main)" = "$(cd "$IH8" && git rev-parse worktree-detachone)" ] \
   && ok "the detached-descendant fixture lands" || fail "the detach fixture did not land"
-sleep 4   # outlive the descendant's own sleep, so a SURVIVING one would have marked by now
+sleep 3   # outlive the descendant's own sleep, so a SURVIVING one would have marked by now
 [ ! -f "$IH8_MARKF" ] \
   && ok "an absent-record run still reaps its process group (the descendant never acted)" \
   || fail "a detached descendant outlived the landing — supervision was lost on the absent-record path"
 # CONTROL: unsupervised, that descendant DOES act — otherwise the assertion above is vacuous.
 rm -f "$IH8_MARKF"
 ( cd "$IH8" && IH8_MARK="$IH8_MARKF" bash tests/detach.sh ) >/dev/null 2>&1 || true
-sleep 4
+sleep 3
 [ -f "$IH8_MARKF" ] \
   && ok "unsupervised, the same descendant does act (control)" \
   || fail "the control did not reproduce a surviving descendant — the assertion above proves nothing"
