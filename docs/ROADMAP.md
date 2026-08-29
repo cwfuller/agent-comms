@@ -1687,6 +1687,50 @@ Ranked work, foldable into the step-2 harness split:
    whether the runner should record waits it actually served somewhere a human
    or the suite reads. A stall nobody can see is the shape of the next one.
 
+### Section accounting: the vector's own bypass (2026-08-29, LANDED 03ee675)
+
+A section landed using the OLD banner form — a bare `echo "== ... =="` — instead of
+`section "..."`. The banner prints identically in the output, but `section()` is the only
+caller of `_flush_section`, so that section emitted **no row of its own** and its 47
+assertions were credited to the **previous** section (44 + 47 became one row of 91). The
+total gate is blind to this by construction: the corpus did not shrink.
+
+The root cause is not the stray banner. Converting the 62 banners **established** the
+invariant and nothing **enforced** it, so the next section to land was free to bypass it.
+Fixed by an assertion that fails on any raw banner, excluding `section()`'s own emitter.
+Panel: codex APPROVE, grok APPROVE, 0 blocking. The landing consumed the attestation
+(625s old, 1800s window) and skipped integrate's re-run — a landing at one run, not two.
+
+**Follow-ups the panel filed, in priority order:**
+
+1. **Unify the two derivations — but not before an independent check exists.** The golden is
+   regenerated from run OUTPUT; the gate builds its vector from `section()` CALLS. Those agree
+   only by convention, and a raw banner is exactly the input on which they disagreed. Writing
+   `$SECTION_VECTOR` to a caller-supplied path would let the golden come from the same code path
+   that checks it (`$WORK` is `rm -rf`'d at exit, which is the only reason it is output-derived).
+   **codex's caveat is the load-bearing part: do NOT unify until an independent banner-versus-vector
+   check is preserved** — otherwise the bypasses in (2) become invisible, because the only two
+   things that could have disagreed have been made the same thing. The emit is write-only and
+   cannot weaken the verdict; the golden stays the committed blob at `TESTED_OID`.
+2. **The guard's exclusion has a hole of its own.** `-vF 'echo "== $1 =="'` also hides a SECOND
+   copy of that exact body — say a `banner()` helper — which would never flush. Tighter
+   formulation: assert EXACTLY ONE `^[[:space:]]*echo "== .* =="` in the file, which drops the
+   exclusion and fails on a duplicate. Neither form sees `printf '%s\n' "== ... =="`,
+   `echo '== ... =='`, `echo -e`, or `echo "$banner"` built elsewhere. (`section` called through a
+   variable is the harmless direction — it still flushes, and only evades the uniqueness `sed`.)
+3. **Same class, still unenforced:** an `ok`/`fail`/`skip` BEFORE the first `section()` or AFTER
+   the final `_flush_section` increments the total and not the vector, so bumping
+   `expected-counts.tsv` alone leaves both gates green with an unattributed assertion. Today the
+   layout happens to prevent it; nothing pins it. Cheap pin: the vector's covered sum equals
+   `PASS+FAIL+SKIP`, excluding the probe subshells that re-point `SECTION_VECTOR`.
+4. **Widen the greps when a lane split adds files.** Both the uniqueness check and the banner
+   guard read only `tests/run.sh`.
+
+**The lesson worth carrying beyond this item:** this is the second time in this arc that an
+invariant was established by a one-time edit and left unenforced — the coverage total was the
+first. Ask it of every such edit: *what makes the NEXT change obey this?* If the answer is
+"the author will notice", it is not enforced. The reviewers found both; reading did not.
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 **Superseded 2026-08-28** by [Contraction (2026-08-28)](#contraction-2026-08-28--current-program).
