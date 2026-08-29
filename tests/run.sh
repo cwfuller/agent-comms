@@ -5646,12 +5646,14 @@ WM_HAVE="$( GIT_INDEX_FILE="$WM/vidx" git -C "$WM_C9" read-tree "$WM_A2" >/dev/n
 
 # AC4 properly: two panelists CONCURRENTLY, on different leg threads, must not collide.
 : > "$WM/cwd.log"
-( wm_turn wm-par-a wmA "$WM_A1" >"$WM/pa.out" 2>&1 ) &
-( wm_turn wm-par-b wmB "$WM_A1" >"$WM/pb.out" 2>&1 ) &
+# Separate logs per child: two writers appending to one file can tear a line, and a torn
+# line would corrupt the uniqueness count this assertion rests on.
+( wm_turn wm-par-a wmA "$WM_A1" AX_CWD_LOG="$WM/cwd.a" >"$WM/pa.out" 2>&1 ) &
+( wm_turn wm-par-b wmB "$WM_A1" AX_CWD_LOG="$WM/cwd.b" >"$WM/pb.out" 2>&1 ) &
 wait
 WM_PA="$(cat "$WM/pa.out" 2>/dev/null)"; WM_PB="$(cat "$WM/pb.out" 2>/dev/null)"
 if [ "$(wm_status "$WM_PA")" = "completed" ] && [ "$(wm_status "$WM_PB")" = "completed" ] \
-   && [ "$(awk -F'\t' '$2 !~ /sessions (ensure|show)/ {print $1}' "$WM/cwd.log" | sort -u | wc -l | tr -d ' ')" = 2 ]; then
+   && [ "$(awk -F'\t' '$2 !~ /sessions (ensure|show)/ {print $1}' "$WM/cwd.a" "$WM/cwd.b" 2>/dev/null | sort -u | wc -l | tr -d ' ')" = 2 ]; then
   ok "two CONCURRENT panelists get two distinct mounts and both complete"
 else
   fail "concurrent panelists collided (a=$(wm_status "$WM_PA") b=$(wm_status "$WM_PB"))"
@@ -5698,10 +5700,12 @@ WM_IDENT_DIR="$WM_KDIR"
 rm -rf "$WM_IDENT_DIR"; ln -s "$MA_FIX" "$WM_IDENT_DIR"
 WM_MAIN_B4="$(git -C "$MA_FIX" status --porcelain)"
 : > "$WM/cwd.log"; WM_D12="$(wm_turn wm-seq wm12 "$WM_A1")"
-if [ "$(git -C "$MA_FIX" status --porcelain)" = "$WM_MAIN_B4" ] && [ -L "$WM_IDENT_DIR" ]; then
-  ok "a symlinked mount container is never followed or written through"
+WM_C12="$(wm_prompt_cwds | sed -n 1p)"
+if [ "$(git -C "$MA_FIX" status --porcelain)" = "$WM_MAIN_B4" ] && [ -L "$WM_IDENT_DIR" ] \
+   && [ -n "$WM_C12" ] && [ "$WM_C12" = "$(cd "$WM/run-wm12" && pwd -P)/tree" ]; then
+  ok "a symlinked mount container degrades to the per-message path instead of being followed"
 else
-  fail "a symlinked mount container was adopted and written through"
+  fail "a symlinked container was followed, or the turn did not degrade as specified (cwd=$WM_C12)"
 fi
 rm -f "$WM_IDENT_DIR"
 
@@ -5717,9 +5721,15 @@ mkdir -p "$WM/run-wm13"
 ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$AXD/payload" \
     COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$WM_MSG13" --dir "$WM/run-wm13" \
     --provider grok --timeout-secs 20 ) >/dev/null 2>&1
-[ "$(ls "$MA_FIX/.git/worktrees" 2>/dev/null | wc -l | tr -d ' ')" = "$WM_ADM_BEFORE" ] \
-  && ok "a non-ACP grok turn still unmounts and leaves no admin dir behind" \
-  || fail "the ephemeral mount path leaked an admin dir"
+# Count-in/count-out alone would also pass if the turn never mounted at all, so require
+# positive evidence that it DID mount before believing the cleanup.
+if ! grep -q 'tree' "$WM/run-wm13/runner.log" 2>/dev/null && [ ! -s "$WM/run-wm13/result.json" ]; then
+  fail "the non-ACP turn never ran, so its unmount assertion would be vacuous"
+elif [ "$(ls "$MA_FIX/.git/worktrees" 2>/dev/null | wc -l | tr -d ' ')" = "$WM_ADM_BEFORE" ]; then
+  ok "a non-ACP grok turn still unmounts and leaves no admin dir behind"
+else
+  fail "the ephemeral mount path leaked an admin dir"
+fi
 
 # The quiescence boundary itself. Both legs flagged it as untested: the npx stub never
 # creates a lease, so `mount_owner_wait` always returned immediately and its fail-closed

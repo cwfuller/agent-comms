@@ -994,8 +994,16 @@ mount_state_get() {  # <kdir> <key>
 # symlink and `cd … && pwd -P` then adopts its target, so a child that replaced
 # $root/mounts/<ident> with a link at the live tree would have every later claim, state
 # write and rename land there. Require a real directory whose physical path is genuinely
-# beneath the physical mounts root. A violation REFUSES rather than being repaired:
-# repairing it would mean deleting whatever the link names.
+# beneath the physical mounts root. A violation DEGRADES to the per-message path — it does
+# NOT refuse the turn, and it is not repaired either: repairing would mean deleting whatever
+# the link names. The turn still reviews the pinned artifact, just cold, which is strictly
+# better than following the link and strictly better than failing the round.
+# `ps -o lstart=` renders a LOCALE- and TZ-dependent string, and LC_ALL overrides LC_TIME.
+# Two runners under different environments would otherwise read the same live process as two
+# different processes, each conclude the other's pid was recycled, and both restage one mount.
+# Pin both, so the recorded and compared forms are always the same bytes.
+proc_start() { LC_ALL=C TZ=UTC ps -p "${1:-0}" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ *//; s/ *$//'; }
+
 mount_container() {  # <mounts root> <ident> -> physical container path, or non-zero
   local base="$1" ident="$2" phys_base phys
   case "$ident" in ''|*/*|.|..) return 1 ;; esac
@@ -1019,7 +1027,7 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
   local kdir="$1" rd="$2" stage="$1/.claim.stage.$$" held hp hs
   MOUNT_HOLDER=""; MOUNT_CLAIM_NOTE=""
   { printf 'pid=%s\n' "$$"
-    printf 'start=%s\n' "$(LC_TIME=C ps -p "$$" -o lstart= 2>/dev/null | tr -s ' ')"
+    printf 'start=%s\n' "$(proc_start "$$")"
     printf 'run=%s\n' "$rd"
   } > "$stage" 2>/dev/null || { MOUNT_CLAIM_NOTE="cannot write a claim beside $kdir"; return 1; }
   if ln "$stage" "$kdir/.claim" 2>/dev/null; then
@@ -1032,7 +1040,7 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
   # stdout is that proof; a denied or broken ps is ambiguous and must not license a
   # reclaim. A live pid whose start time differs from the record is a recycled number.
   local now rc=0
-  now="$(LC_TIME=C ps -p "${hp:-0}" -o lstart= 2>/dev/null | tr -s ' ')" || rc=$?
+  now="$(proc_start "${hp:-0}")" || rc=$?
   # Reclaimable on POSITIVE proof of absence (ps exits 1 with empty stdout), OR when the
   # pid is live but its start time differs from the record — that is a RECYCLED number,
   # not our holder. A denied or unparseable ps stays ambiguous and never reclaims.
@@ -1068,9 +1076,9 @@ mount_claim_release() {
 # `sessions close` (it sets closed:true, which makes the record invisible to ensure and
 # prompt — a permanent cold start).
 MOUNT_WAIT_NOTE=""
-mount_owner_wait() {  # <acpx record id> <deadline secs> -> 0 gone | 1 still held
+mount_owner_wait() {  # <acpx record id> <owner home> <deadline secs> -> 0 gone | 1 still held
   MOUNT_WAIT_NOTE="the previous ACP queue owner for this mount has not exited"
-  local id="$1" secs="${2:-45}" lock sock hh deadline
+  local id="$1" ohome="$2" secs="${3:-45}" lock sock hh deadline
   # An EMPTY id means no mounted turn has ever recorded one here, which is the genuine
   # first-turn case. It cannot mean "a turn ran but failed to persist its id": the caller
   # refuses the turn when the write fails, precisely so this stays unambiguous.
@@ -1082,8 +1090,13 @@ mount_owner_wait() {  # <acpx record id> <deadline secs> -> 0 gone | 1 still hel
   # session's stored cwd string would still match, so nothing downstream could tell that
   # prompts were executing against the previous artifact.
   [ -n "$hh" ] || { MOUNT_WAIT_NOTE="no sha256 utility, so the acpx queue lease cannot be addressed"; return 1; }
-  lock="${HOME:-}/.acpx/queues/$hh.lock"
-  sock="/tmp/acpx-$(printf '%s' "${HOME:-}" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-10
+  # The store belongs to the home the OWNER ran under, which is recorded with its id. The
+  # current $HOME may be unset (acpx would have fallen back to the account home while this
+  # hashed the empty string) or simply different, and either way we would probe a store the
+  # previous owner never used and call it "gone".
+  [ -n "$ohome" ] || { MOUNT_WAIT_NOTE="the previous ACP owner's home was not recorded, so its queue lease cannot be located"; return 1; }
+  lock="$ohome/.acpx/queues/$hh.lock"
+  sock="/tmp/acpx-$(printf '%s' "$ohome" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-10
         elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-10; else printf ''; fi; })/$hh.sock"
   deadline=$(( $(date +%s) + secs ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -1121,10 +1134,18 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
       "$kdir"/.new.*)
         mount_git -C "$mr" worktree remove --force "$pend" >>"$log" 2>&1 || true
         rm -rf -- "$pend" 2>/dev/null || true
+        # KEEP THE JOURNAL UNLESS THE RECLAIM IS PROVEN. Clearing it after a failed removal
+        # discards the only handle on that registration, which then leaks permanently.
+        if [ -e "$pend" ] || mount_git -C "$mr" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $pend"; then
+          echo "mount: could not reclaim the pending generation at $pend — refusing rather than losing its record" >>"$log"
+          return 1
+        fi
+        rm -f "$kdir/.state.pending" 2>/dev/null || true
         echo "mount: reclaimed a pending generation at $pend" >>"$log" ;;
-      *) echo "mount: ignoring a pending record outside this mount ($pend)" >>"$log" ;;
+      *)
+        echo "mount: ignoring a pending record outside this mount ($pend)" >>"$log"
+        rm -f "$kdir/.state.pending" 2>/dev/null || true ;;
     esac
-    rm -f "$kdir/.state.pending" 2>/dev/null || true
   fi
 
   # DECIDE ON THE PREVIOUS ADMIN DIR **BEFORE** MOVING ANYTHING. Refusing after the move
@@ -1161,12 +1182,24 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
     mv -- "$mount" "$aside/held" 2>>"$log" || {
       echo "mount: cannot move the previous mount aside" >>"$log"; return 2; }
   fi
-  [ "$prev_action" = delete ] && { rm -rf -- "$prev" 2>>"$log" || true; }
+  if [ "$prev_action" = delete ]; then
+    rm -rf -- "$prev" 2>>"$log" || true
+    # Same rule: a surviving previous admin can still name the stable mount, which produces
+    # a duplicate registration after `repair` and makes the tripwire refuse every later round.
+    if [ -e "$prev" ]; then
+      echo "mount: could not remove the previous admin dir at $prev — refusing rather than clearing its record" >>"$log"
+      return 1
+    fi
+  fi
   rm -f "$kdir/.state.admin" 2>/dev/null || true
   tmp="$(mktemp -d "$kdir/.new.XXXXXX" 2>/dev/null)" || return 2
   rm -rf -- "$tmp" 2>/dev/null || true          # `worktree add` wants a free path
   mount_state_put "$kdir" pending "$tmp" || return 2
-  mount_git -C "$mr" worktree add --detach --quiet "$tmp" "$base" 2>>"$log" || return 2
+  # Also hold it in memory: an EPHEMERAL mount's kdir is its run dir, which is never
+  # reused, so its journal would never be replayed and an interrupt here would leak the
+  # registration forever. The EXIT trap reads this.
+  MOUNT_PENDING_TMP="$tmp"; MOUNT_PENDING_ROOT="$mr"
+  mount_git -C "$mr" worktree add --detach --quiet "$tmp" "$base" 2>>"$log" || { MOUNT_PENDING_TMP=""; return 2; }
   adm="$(mount_git -C "$tmp" rev-parse --absolute-git-dir 2>/dev/null)" || {
     mount_git -C "$mr" worktree remove --force "$tmp" 2>/dev/null || true; return 2; }
   # The admin id must be DURABLE before the move: it is the only handle a later round has
@@ -1179,6 +1212,7 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   mount_git -C "$mr" worktree repair "$mount" >>"$log" 2>&1 || {
     echo "mount: worktree repair failed after the move" >>"$log"; return 2; }
   rm -f "$kdir/.state.pending" 2>/dev/null || true
+  MOUNT_PENDING_TMP=""
   mount_git -C "$mount" read-tree -u --reset "$art" 2>>"$log" || return 2
   mount_git -C "$mount" reset -q --mixed "$base" 2>>"$log" || return 2
   # Tripwire, not a lock: it cannot close the window, it makes a breach loud.
@@ -1209,7 +1243,12 @@ mount_tree_matches() {  # <mount> <artifact> <log> -> 0 identical
   GIT_INDEX_FILE="$idx" mount_git -C "$mount" read-tree "$art" 2>>"$log" || ok=0
   GIT_INDEX_FILE="$idx" mount_git -C "$mount" add -A -- . >/dev/null 2>>"$log" || ok=0
   have="$(GIT_INDEX_FILE="$idx" mount_git -C "$mount" write-tree 2>>"$log")" || ok=0
-  extra="$(mount_git -C "$mount" status --porcelain --ignored=matching 2>>"$log" | grep -cE '^!!' || true)" || ok=0
+  # Capture status SEPARATELY from the match count. Piping into `grep -c … || true` inside
+  # the substitution swallows git's own exit status, so a status that could not enumerate
+  # ignored residue read as "no residue" — the one scan step that was still fail-open.
+  local st_out=""
+  st_out="$(mount_git -C "$mount" status --porcelain --ignored=matching 2>>"$log")" || ok=0
+  extra="$(printf '%s' "$st_out" | grep -cE '^!!' || true)"
   rm -rf "$idxd" 2>/dev/null || true
   if [ "$ok" = 0 ]; then
     echo "mount: could not inspect the mount to verify it matches the artifact — refusing" >>"$log"
@@ -1228,7 +1267,16 @@ mount_tree_matches() {  # <mount> <artifact> <log> -> 0 identical
 # inode a queue owner may still hold, and the next round rebuilds it anyway. An EPHEMERAL
 # mount ($run_dir/tree, used by non-ACP parent-brokered turns) is still removed, or every
 # direct grok turn would leak an admin dir.
+MOUNT_PENDING_TMP=""; MOUNT_PENDING_ROOT=""
 unmount_artifact() {
+  # An interrupt between `worktree add` and the rename leaves a REGISTERED worktree at the
+  # temp path that no later run can find: $mount_dir still names a path that does not
+  # exist, and an ephemeral kdir (the run dir) is never revisited to replay its journal.
+  if [ -n "${MOUNT_PENDING_TMP:-}" ] && [ -n "${MOUNT_PENDING_ROOT:-}" ]; then
+    mount_git -C "$MOUNT_PENDING_ROOT" worktree remove --force "$MOUNT_PENDING_TMP" 2>/dev/null || true
+    rm -rf -- "$MOUNT_PENDING_TMP" 2>/dev/null || true
+    MOUNT_PENDING_TMP=""
+  fi
   if [ -n "${mount_dir:-}" ] && [ -n "${main_root:-}" ] && [ -z "${mount_durable:-}" ]; then
     mount_git -C "$main_root" worktree remove --force "$mount_dir" 2>/dev/null || true
     mount_dir=""
@@ -1389,7 +1437,7 @@ cmd_run() {
       fi
       # The previous round's queue owner must be gone before its directory is rebuilt;
       # it exits on its own --ttl and we only observe the lease and socket vanishing.
-      if ! mount_owner_wait "$(mount_state_get "$mount_kdir" record)" "${COMMS_RUNPHASE_OWNER_WAIT_SECS:-45}"; then
+      if ! mount_owner_wait "$(mount_state_get "$mount_kdir" record)" "$(mount_state_get "$mount_kdir" home)" "${COMMS_RUNPHASE_OWNER_WAIT_SECS:-45}"; then
         update_thread_state "$msg_thread" failed "" "$sfield" || true
         write_result "$run_dir" failed 1 "" "$msg" "${MOUNT_WAIT_NOTE:-the previous ACP queue owner for this mount has not exited} — refusing to restage under a live owner"
         unmount_artifact
@@ -1700,7 +1748,8 @@ PROMPT
       # quiescence check reads it, and an empty record there is indistinguishable from
       # "no turn has ever run here" — which would let a restage proceed under a live owner
       # whose session cwd string still matches, so nothing downstream could tell.
-      if [ -z "${mount_kdir:-}" ] || [ -z "$acp_record_id" ] \
+      if [ -z "${mount_kdir:-}" ] || [ -z "$acp_record_id" ] || [ -z "${HOME:-}" ] \
+         || ! mount_state_put "$mount_kdir" home "$HOME" \
          || ! mount_state_put "$mount_kdir" record "$acp_record_id"; then
         update_thread_state "$msg_thread" failed "" "$sfield" || true
         write_result "$run_dir" failed 1 "" "$msg" "could not durably record the ACP session id for this mount — refusing, because the next round could not then prove the queue owner had exited"
