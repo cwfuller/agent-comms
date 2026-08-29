@@ -1270,6 +1270,17 @@ and lossy rewriting of inter-agent instructions is the `$N`-corruption class). R
   before the prompt and again before stamping, not prevented. Full containment needs the
   enforced boundary, and enumerating hostile shapes is the pattern `docs/advisories.md`
   records as repeatedly failing on this track.
+  **Second residual, same item, named by codex at implement r12 and NOT closed:** the mount's
+  bookkeeping (`.state.record`, `.state.home`) lives beside the mount, so a child with a shell
+  can write a fake record id *and* a store that corroborates it; both lease probes then hash
+  the fake id and miss the live lease under the real one, and the mount restages under a live
+  owner. Everything reachable was closed — a deleted record no longer reads as a first turn, an
+  unreadable one degrades, the corroborated store is cross-checked against the runner's own
+  `$HOME` — but an identity the child can forge cannot be authenticated by state the child can
+  write. Closing it needs bookkeeping outside the child's reach, i.e. the enforced boundary.
+  **The landing was made on an explicit human instruction with codex's final verdict at
+  REQUEST_CHANGES on this residual**; grok approved. Recorded here rather than in a commit
+  message so the next session finds it.
 - [ ] **Skip re-dispatch of legs that already APPROVEd the artifact** — a driver rule,
   not compression; reserve full-panel holistic re-dispatch for the final round.
 - [ ] **Live-zone delta prompts on warm legs**: round N+1 over a warm session sends only

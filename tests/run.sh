@@ -6045,6 +6045,17 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
     else
       fail "could not stage the unreadable-record fixture ($WM_RECJ)"
     fi
+    # A DELETED session record is not a first turn when the mount still exists: treating it
+    # as one skips the owner check entirely and licenses a restage under a live owner.
+    printf '%s\n' "$WM_HOME_A" > "$WM_KHA/.state.home"
+    rm -f "$WM_KHA/.state.record" 2>/dev/null
+    : > "$WM/cwd.log"; WM_DDR="$(wm_turn wm-home wmDR "$WM_A1" HOME="$WM_HOME_A" AX_RECORD_ID=stub-record-1)"
+    WM_CDR="$(wm_prompt_cwds | sed -n 1p)"
+    if [ "$WM_CDR" = "$(cd "$WM/run-wmDR" && pwd -P)/tree" ] && [ "$(wm_status "$WM_DDR")" = "completed" ]; then
+      ok "a deleted session record degrades instead of passing as a first turn"
+    else
+      fail "a deleted session record was treated as a first turn (cwd=$WM_CDR status=$(wm_status "$WM_DDR"))"
+    fi
     rm -f "$WM_HOME_A/.acpx/queues/$WM_LEASE_A.lock" 2>/dev/null
   else
     fail "could not stage the rewritten-home fixture (kdir=$WM_KHA status=$(wm_status "$WM_DHA"))"

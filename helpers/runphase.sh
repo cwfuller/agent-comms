@@ -1413,6 +1413,22 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   # names — and mutate that index before the old tripwire at the end noticed.
   if [ ! -d "$mount" ] || [ -L "$mount" ]; then
     echo "mount: the mount path is not a real directory immediately after the rename — refusing before running git through it" >>"$log"
+    # AND REMOVE WHAT THE RENAME DEPOSITED. `mv` onto a symlink-to-directory puts the temp
+    # INSIDE the target, so refusing alone would leave a checkout in whatever that names —
+    # the main repo or a peer worktree — which is exactly the AC this change promises. The
+    # landing site is computable: <target of the link>/<basename of the temp>.
+    if [ -L "$mount" ]; then
+      local depot_target depot
+      depot_target="$( cd "$mount" 2>/dev/null && pwd -P )" || depot_target=""
+      if [ -n "$depot_target" ]; then
+        depot="$depot_target/${tmp##*/}"
+        if [ -d "$depot" ]; then
+          mount_git -C "$mr" worktree remove --force "$depot" >>"$log" 2>&1 || true
+          rm -rf -- "$depot" 2>/dev/null || true
+          echo "mount: removed the worktree the rename deposited at $depot" >>"$log"
+        fi
+      fi
+    fi
     return 2
   fi
   mount_git -C "$mr" worktree repair "$mount" >>"$log" 2>&1 || true
@@ -1650,6 +1666,15 @@ cmd_run() {
       # it exits on its own --ttl and we only observe the lease and socket vanishing.
       local owner_rc=0 st_record="" st_home="" st_rc=0
       st_record="$(mount_state_get "$mount_kdir" record)" || st_rc=$?
+      # A GENUINE first turn has no mount either. An existing mount whose record is absent has
+      # had that record removed — by a crash or by the previous child — and "no turn has ever
+      # run here" is then false, so it must not license skipping the owner check.
+      if [ "$st_rc" = 1 ] && { [ -e "$mount_dir" ] || [ -L "$mount_dir" ]; }; then
+        echo "mount: the mount exists but its session record is gone; degrading rather than treating it as a first turn" >>"$run_dir/runner.log"
+        mount_claim_release
+        mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
+        st_record=""
+      fi
       if [ "$st_rc" = 2 ]; then
         # Present but unreadable: we cannot tell whether an owner exists, so this must not
         # look like a first turn.
