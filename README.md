@@ -26,12 +26,13 @@ Then, in Claude Code:
 /auto add rate limiting to the API
 ```
 
-That's it. Claude implements, sends the diff to **every other registered agent** for
-review, fixes what they agree on, and re-submits — until they approve or it runs out of
-rounds (default 10 per phase).
+That's it. Claude implements, snapshots the tree, and every other registered agent
+reviews **that same pinned artifact**. Shared blockers gate the next round; unique
+ones are flagged for you. It repeats until they approve or it hits the round cap
+(default 10 per phase).
 
-Nothing else is required: no terminal panes, no second window open. Review turns run over
-ACP in a warm background session.
+Nothing else is required: no terminal panes, no second window open. Review turns run
+over ACP in the background.
 
 ## Everyday use
 
@@ -50,11 +51,12 @@ ACP in a warm background session.
 after implementing — novel architecture, high blast radius, safety-critical. Most work
 should let the implementation speak for itself.
 
-**A panel is the default.** Every registered agent except the one driving reviews the same
-pinned artifact — they reliably find different things. A finding two of them raise gates the
-loop; a finding only one raises is flagged for you to cross-check rather than obeyed
-automatically, so one noisy reviewer cannot cost you a round. Narrow with `--reviewers`
-when you want speed over coverage.
+**A panel is the default.** This tool is for work that wants that bar — every
+registered agent except the driver reviews the same pinned artifact. They find
+different things. A blocking finding two of them raise (same `path:line`) gates
+the loop; a finding only one raises is flagged for you to cross-check rather than
+obeyed automatically, so one noisy reviewer cannot cost you a round. Narrow with
+`--reviewers` when you want speed over coverage.
 
 Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
 
@@ -73,9 +75,11 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
   approval.
 - **Advisories survive.** Un-actioned advisory findings are carried into
   `docs/advisories.md` when a loop ends, so lessons compound instead of evaporating.
-- **A panel costs less than it sounds.** Each reviewer keeps a warm session, so round 2
-  pays for what changed rather than re-reading everything: ~1k new tokens per review turn,
-  against ~115k for a cold start. Adding a reviewer costs a delta, not another full read.
+- **ACP is the default transport.** Reviewers run in the background; you do not
+  babysit a pane. `--via cmux` is still available if you want a watchable
+  session. (Do not expect later panel rounds to be a cheap token delta yet:
+  each mounted turn currently uses a new working directory, so ACP starts
+  cold. That is step 1 of [the current program](docs/ROADMAP.md#contraction-2026-08-28--current-program).)
 
 Message format, loop semantics, and the state model: **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
 
