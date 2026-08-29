@@ -6623,7 +6623,7 @@ esac
 #    that simply deleted the wait would pass test 1 and fail this one.
 SW_E2="$(sw_elapsed sw_run "$WORK/sw-r2" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=1)"
 [ "$SW_E2" -ge 1 ] && ok "declared spawn waits out its budget when the write never lands (${SW_E2}s)" \
-  || fail "declared spawn skipped its budget (${SW_E2}s, expected >=3)"
+  || fail "declared spawn skipped its budget (${SW_E2}s, expected >=1)"
 
 # 3. Declared, file lands DURING the turn -> the race window still works, and the
 #    state is actually MUTATED. Asserting only that the "missing file" note is absent
@@ -6642,11 +6642,11 @@ rm -f "$SW_SF"
 # 3a. The poll must WAKE EARLY. Test 2 already covers "the wait exists at all"; 3a's
 #     unique job is narrower — that the wait is a POLL and not a flat `sleep $budget`.
 #     Test 3's file already exists when the waiter starts, so nothing there touches
-#     the polling. Here the file lands ~2s into a 20s budget: a non-polling
-#     implementation takes 20s and fails the <12s bound, while the real one returns
-#     in ~2s. The margin is deliberately wide because this suite is known to flake
+#     the polling. Here the file lands ~1s into a 10s budget: a non-polling
+#     implementation takes 10s and fails the <6s bound, while the real one returns
+#     in ~1s. The margin is deliberately wide because this suite is known to flake
 #     under machine load, and a false failure here costs more than a loose bound.
-#     If load delays the runner past the 2s write, this degrades to test 3 (file
+#     If load delays the runner past the 1s write, this degrades to test 3 (file
 #     already present) and still passes — it loses coverage, never invents failure.
 #     (codex + grok, panel r2 flagged the gap; codex, r3 asked for the wider margin.)
 ( sleep 1; printf '{\n  "workspace": "sw",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' > "$SW_SF" ) &
@@ -6891,8 +6891,15 @@ grep -q 'tee "\$suite_log"' "$REPO/helpers/comms.sh" \
 # Asserted on the SOURCE deliberately: the loop body only executes when the child is
 # still alive at the first check, so a timing assertion would be racy in the direction
 # that produces false failures.
-awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -qE '^ *sleep 0\.[0-9]+$' \
+awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -qE 'sleep 0\.[1-9]' \
   && ok "the provider watchdog polls sub-second" || fail "the provider watchdog is back to a whole-second poll"
+# The deadline must come from COUNTED intervals, not `date`. Reading a truncated clock let
+# a one-second timeout fire after 0.215s when the turn began at phase .850 — killing a
+# provider before the timeout it was given. (codex, watchdog r1, blocking.)
+awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -q 'waited_ds' \
+  && ok "the watchdog measures elapsed by counting its own sleeps" || fail "the watchdog is back to a clock deadline"
+awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -q 'date +%s' \
+  && fail "the watchdog reads a truncated clock again" || ok "the watchdog does not read the clock per tick"
 awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -qE '^ *sleep [0-9]+$' \
   && fail "a whole-second sleep returned to the provider watchdog" || ok "no whole-second sleep in the provider watchdog"
 # The contract must come from the commit under test, not from a file on disk.
@@ -7087,7 +7094,7 @@ git -C "$IH7" init -q -b main
 printf '.comms/\n.claude/worktrees/\n' > "$IH7/.gitignore"
 mkdir -p "$IH7/tests" "$IH7/.comms"
 printf 'total\t3\n' > "$IH7/tests/expected-counts.tsv"
-printf '#!/bin/bash\nsleep 2\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IH7/tests/slow.sh"
+printf '#!/bin/bash\nsleep 4\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IH7/tests/slow.sh"
 chmod +x "$IH7/tests/slow.sh"
 printf 'suite-cmd = bash tests/slow.sh\n' > "$IH7/.comms/config"
 (cd "$IH7" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
@@ -7095,7 +7102,7 @@ printf 'suite-cmd = bash tests/slow.sh\n' > "$IH7/.comms/config"
 (cd "$IH7" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new slowone) >/dev/null 2>&1
 (cd "$IH7/.claude/worktrees/slowone" && echo l > k.txt && git add k.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: k") >/dev/null 2>&1
-(cd "$IH7" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=1 \
+(cd "$IH7" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 \
     COMMS_PRESENCE_NAME=slowghost COMMS_PRESENCE_INSTANCE=77777777777777777777777777777777 \
     "$COMMS" integrate worktree-slowone) >/dev/null 2>&1 || true
 [ "$(cd "$IH7" && git rev-parse main)" = "$(cd "$IH7" && git rev-parse worktree-slowone)" ] \

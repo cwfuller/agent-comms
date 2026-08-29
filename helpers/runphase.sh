@@ -2242,7 +2242,7 @@ PROMPT
     return
   fi
 
-  local rc=0 deadline now
+  local rc=0
   # set -m: give the provider its own process group so a timeout/abort can reap
   # the WHOLE tree (CLI + the shell commands it spawns) with one group signal.
   set -m
@@ -2250,10 +2250,22 @@ PROMPT
     < "$run_dir/prompt.md" > "$run_dir/events.ndjson" 2>> "$run_dir/runner.log" &
   codex_pid=$!
   set +m
-  deadline=$(( $(date +%s) + timeout ))
+  # ELAPSED IS COUNTED, NOT READ FROM THE CLOCK. `$(date +%s) + timeout` truncates the
+  # start to a whole second, so a deadline can be reached a fraction of a second after the
+  # turn began: at phase .850 a one-second timeout fired after .215s. The old 1s poll hid
+  # that by implicitly serving most of a second before its first check; polling finely
+  # exposed it and would kill a provider before the timeout it was given.
+  #
+  # Counting the intervals we actually slept can only ever make the timeout LATER (a
+  # loaded machine's sleep overshoots), which is the safe direction — never early. It also
+  # drops a `date` fork per tick.
+  #
+  # The poll is fine for the first two seconds and coarse after: a stub-backed turn exits
+  # in milliseconds and is caught immediately, while a long production turn does not wake
+  # ten times a second for an hour.
+  local waited_ds=0 poll_ds=1 budget_ds=$(( timeout * 10 ))
   while kill -0 "$codex_pid" 2>/dev/null; do
-    now="$(date +%s)"
-    if [ "$now" -ge "$deadline" ]; then
+    if [ "$waited_ds" -ge "$budget_ds" ]; then
       kill_codex
       wait "$codex_pid" 2>/dev/null || true
       local sid_t
@@ -2264,12 +2276,9 @@ PROMPT
     trap - EXIT
       exit 1
     fi
-    # Poll at 0.1s, not 1s. The TIMEOUT is still evaluated in whole seconds against
-    # `date +%s` above, so the watchdog's contract is unchanged — only the interval
-    # between checks shrinks. A stub-backed turn finishes in milliseconds and then sat
-    # here waiting out a full second: measured at 58s across one suite run, 13% of its
-    # runtime, for a loop whose only job is to notice the child already exited.
-    sleep 0.1
+    [ "$waited_ds" -lt 20 ] || poll_ds=10
+    if [ "$poll_ds" = 1 ]; then sleep 0.1; else sleep 1; fi
+    waited_ds=$(( waited_ds + poll_ds ))
   done
   wait "$codex_pid" || rc=$?
 

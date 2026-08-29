@@ -61,7 +61,7 @@ exactly; that is not a license to weaken the presence model (see step 7).
    59 sections were 87% of the original runtime; the largest section after the
    fix is ~50s.
 
-   **Remaining lever: shard sections in parallel** (isolated TMPDIRs).
+   **Remaining lever: REJECTED — see ranked item 4** (sharding measured at 1.07x) (isolated TMPDIRs).
    Presence/signal stays serial — it flakes under load and is cheap relative
    to a review turn. `suite-lanes` pins per-section counts so a wrap cannot
    silently move coverage; land that, then shard. Floor without splitting the
@@ -1604,7 +1604,7 @@ Ranked work, foldable into the step-2 harness split:
    paranoid re-run stays the default. Landed alongside self-healing
    never-occupy-main (a clean checkout idling on `main` is fast-forwarded
    through the landing instead of refusing it after a ten-minute suite).
-4. [ ] **Shard sections in parallel — MEASURED AND REJECTED 2026-08-29.** Built in full
+4. [x] **Shard sections in parallel — MEASURED AND REJECTED 2026-08-29.** Built in full
    (dependency closures, lane derivation, a driver with union-minimising packing, a
    merged-vector coverage gate and owned-failure crediting) and measured on a quiet
    machine against the same corpus:
