@@ -5758,6 +5758,21 @@ rm -f "$WM_HOME/.acpx/queues/$WM_LEASE_HASH.lock"
   && ok "the same mount restages normally once the queue lease has gone" \
   || fail "the lease check refuses even with no lease present (status=$(wm_status "$WM_D16"))"
 
+# A record written before the owner-home field existed carries no `.state.home`. Refusing
+# there is an UPGRADE failure, not a safety property -- and it is not hypothetical: it
+# refused every leg of a live review panel on an existing thread before this fallback
+# landed. The suite had no assertion for it because every fixture starts from an empty kdir.
+WM_KDIR16="$(dirname "$(awk -F'\t' '$2 !~ /sessions (ensure|show)/ {print $1}' "$WM/cwd.log" | sed -n 1p)")"
+if [ -n "$WM_KDIR16" ] && [ -f "$WM_KDIR16/.state.record" ]; then
+  rm -f "$WM_KDIR16/.state.home"
+  : > "$WM/cwd.log"; WM_D17="$(wm_turn wm-lease wm17 "$WM_A1" HOME="$WM_HOME")"
+  [ "$(wm_status "$WM_D17")" = "completed" ] \
+    && ok "a record predating the owner-home field still runs instead of wedging on upgrade" \
+    || fail "a legacy record with no recorded home wedged the mount (status=$(wm_status "$WM_D17"))"
+else
+  fail "could not stage the legacy-record fixture (kdir=$WM_KDIR16)"
+fi
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 

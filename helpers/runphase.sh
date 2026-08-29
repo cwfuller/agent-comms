@@ -1094,7 +1094,17 @@ mount_owner_wait() {  # <acpx record id> <owner home> <deadline secs> -> 0 gone 
   # current $HOME may be unset (acpx would have fallen back to the account home while this
   # hashed the empty string) or simply different, and either way we would probe a store the
   # previous owner never used and call it "gone".
-  [ -n "$ohome" ] || { MOUNT_WAIT_NOTE="the previous ACP owner's home was not recorded, so its queue lease cannot be located"; return 1; }
+  # A record written before this field existed — or by an older install — carries no home.
+  # Refusing outright there wedges every mount that predates the field, which is an upgrade
+  # failure, not a safety property: the previous owner ran as the same user on the same box,
+  # so the current HOME is the right store to probe. Refuse only when there is no home at
+  # all, which is the case where acpx would have fallen back to an account home this code
+  # cannot name. (Caught live: this refused every panel leg on an existing thread.)
+  if [ -z "$ohome" ]; then
+    ohome="${HOME:-}"
+    [ -n "$ohome" ] && echo "mount: no recorded owner home; probing the current HOME" >&2
+  fi
+  [ -n "$ohome" ] || { MOUNT_WAIT_NOTE="neither a recorded owner home nor \$HOME is set, so the queue lease cannot be located"; return 1; }
   lock="$ohome/.acpx/queues/$hh.lock"
   sock="/tmp/acpx-$(printf '%s' "$ohome" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-10
         elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-10; else printf ''; fi; })/$hh.sock"
