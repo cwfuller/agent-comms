@@ -1525,7 +1525,7 @@ Measured on an unloaded machine (load ~8), instrumented clone at `3be9044`:
 - **`git init` fixture churn is not a term worth chasing.** A full worktree
   add + read-tree + reset + remove measures 92ms.
 - **The cost is CONCENTRATED, not spread.** Ten of 62 sections = 86.6% of
-  runtime; the top two = 35.8% on just 77 of 932 assertions. The remaining 50
+  runtime; the top two = 35.8% on just 77 of 932 assertions. The remaining 52
   sections share 67s between them.
 
 **Root cause of the worst offenders, found and fixed 2026-08-27: a 6-second
