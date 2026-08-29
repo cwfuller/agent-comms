@@ -1238,15 +1238,29 @@ mount_owner_wait() {  # <acpx record id> <owner home> <deadline secs> -> 0 gone 
     MOUNT_WAIT_NOTE="the previous ACP owner's home was not recorded, so which store holds its queue lease cannot be established"
     return 2
   fi
-  lock="$ohome/.acpx/queues/$hh.lock"
-  sock="/tmp/acpx-$(printf '%s' "$ohome" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-10
-        elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-10; else printf ''; fi; })/$hh.sock"
+  # Probe the corroborated store AND the store this runner is itself using. `.state.home` is a
+  # sibling of the mount, so a child can point it at a directory it controls and plant a record
+  # there that corroborates; the one store it cannot make the runner ignore is the one the
+  # runner is running in. An owner counts as gone only when NEITHER holds a lease.
+  local homes="$ohome" h any
+  if [ -n "${HOME:-}" ] && [ "$HOME" != "$ohome" ]; then homes="$homes
+$HOME"; fi
   deadline=$(( $(date +%s) + secs ))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    [ -e "$lock" ] || [ -e "$sock" ] || return 0
+  while :; do
+    any=0
+    while IFS= read -r h; do
+      [ -n "$h" ] || continue
+      lock="$h/.acpx/queues/$hh.lock"
+      sock="/tmp/acpx-$(printf '%s' "$h" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-10
+            elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-10; else printf ''; fi; })/$hh.sock"
+      if [ -e "$lock" ] || [ -e "$sock" ]; then any=1; fi
+    done <<EOF
+$homes
+EOF
+    [ "$any" = 0 ] && return 0
+    [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 1
   done
-  [ -e "$lock" ] || [ -e "$sock" ] || return 0
   return 1
 }
 
@@ -1392,6 +1406,15 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   fi
   # `repair` reports what it FIXED on stdout ("gitdir incorrect: …") and still exits 0, so
   # the exit status alone is a poor signal. What matters is that the mount resolves afterwards.
+  # SHAPE FIRST, before any git runs through this path. The free-path check above is a
+  # time-of-check/time-of-use test: a survivor can recreate $mount as a symlink between it and
+  # the rename, and `mv` then deposits the temp INSIDE the target and leaves the link. Every
+  # later git (-C "$mount") would dereference it — into the main checkout, if that is what it
+  # names — and mutate that index before the old tripwire at the end noticed.
+  if [ ! -d "$mount" ] || [ -L "$mount" ]; then
+    echo "mount: the mount path is not a real directory immediately after the rename — refusing before running git through it" >>"$log"
+    return 2
+  fi
   mount_git -C "$mr" worktree repair "$mount" >>"$log" 2>&1 || true
   mount_git -C "$mount" rev-parse --absolute-git-dir >/dev/null 2>&1 || {
     echo "mount: the mount does not resolve to a git dir after the move" >>"$log"; return 2; }
@@ -1670,10 +1693,17 @@ cmd_run() {
         # record's cwd was written as `pwd -P` of exactly this path when it was a real tree.
         corr_phys="$mount_kdir/tree"
         if [ -f "$corr_json" ] && [ ! -L "$corr_json" ]; then
-          corr_cwd="$(sed -n 's/^[[:space:]]*"cwd":[[:space:]]*"\(.*\)",*$/\1/p' "$corr_json" 2>/dev/null | head -1)"
+          # Capture the READ STATUS: a bare assignment aborts the runner under `set -e` on a
+          # permission or I/O error, turning an unreadable record into "runner aborted
+          # unexpectedly" instead of the promised degrade.
+          local corr_body="" corr_rc=0
+          corr_body="$(cat "$corr_json" 2>/dev/null)" || corr_rc=$?
+          if [ "$corr_rc" = 0 ]; then
+            corr_cwd="$(printf '%s\n' "$corr_body" | sed -n 's/^[[:space:]]*"cwd":[[:space:]]*"\(.*\)",*$/\1/p' | head -1)"
+          fi
         fi
         if [ -z "$corr_cwd" ] || [ -z "$corr_phys" ] || [ "$corr_cwd" != "$corr_phys" ]; then
-          echo "mount: the recorded (record, home) pair does not name an acpx record for this mount; degrading rather than probing a store it may not own (record=$st_record home=$st_home json=$corr_json record_cwd=${corr_cwd:-<none>} mount=$corr_phys)" >>"$run_dir/runner.log"
+          echo "mount: the recorded (record, home) pair does not name an acpx record for this mount; degrading rather than probing a store it may not own — the stable mount is left as-is deliberately; restaging it without corroboration is the bug this check prevents (record=$st_record home=$st_home json=$corr_json record_cwd=${corr_cwd:-<none>} mount=$corr_phys)" >>"$run_dir/runner.log"
           mount_claim_release
           mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
         fi

@@ -6019,13 +6019,31 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
     # a LIVE lease in A, and the child points the record at empty store B
     WM_LEASE_A="$(printf '%s' "stub-record-1" | shasum -a 256 | cut -c1-24)"
     printf '{ "pid": 1 }\n' > "$WM_HOME_A/.acpx/queues/$WM_LEASE_A.lock"
+    WM_KHA_INO0="$(/usr/bin/stat -f %i "$WM_KHA/tree" 2>/dev/null || stat -c %i "$WM_KHA/tree" 2>/dev/null)"
     printf '%s\n' "$WM_HOME_B" > "$WM_KHA/.state.home"
     : > "$WM/cwd.log"; WM_DHB="$(wm_turn wm-home wmHB "$WM_A1" HOME="$WM_HOME_A" AX_RECORD_ID=stub-record-1)"
     WM_CHB="$(wm_prompt_cwds | sed -n 1p)"
-    if [ "$WM_CHB" = "$(cd "$WM/run-wmHB" && pwd -P)/tree" ]; then
-      ok "a rewritten owner home degrades instead of restaging under the live owner it hides"
+    WM_KHA_INO="$(/usr/bin/stat -f %i "$WM_KHA/tree" 2>/dev/null || stat -c %i "$WM_KHA/tree" 2>/dev/null)"
+    if [ "$WM_CHB" = "$(cd "$WM/run-wmHB" && pwd -P)/tree" ] \
+       && [ "$(wm_status "$WM_DHB")" = "completed" ] \
+       && [ "$WM_KHA_INO" = "$WM_KHA_INO0" ]; then
+      ok "a rewritten owner home degrades, completes, and leaves the stable mount untouched"
     else
-      fail "a rewritten owner home permitted a stable restage (cwd=$WM_CHB)"
+      fail "a rewritten owner home was mishandled (cwd=$WM_CHB status=$(wm_status "$WM_DHB") ino=$WM_KHA_INO want=$WM_KHA_INO0)"
+    fi
+    # An unreadable RECORD FILE must degrade too. A bare read of it under `set -e` aborted
+    # the runner outright, which reads as "runner aborted unexpectedly" and wedges every retry.
+    printf '%s\n' "$WM_HOME_A" > "$WM_KHA/.state.home"
+    WM_RECJ="$WM_HOME_A/.acpx/sessions/$(cat "$WM_KHA/.state.record" 2>/dev/null).json"
+    if [ -f "$WM_RECJ" ]; then
+      chmod 000 "$WM_RECJ" 2>/dev/null
+      : > "$WM/cwd.log"; WM_DUR="$(wm_turn wm-home wmUR "$WM_A1" HOME="$WM_HOME_A" AX_RECORD_ID=stub-record-1)"
+      chmod 644 "$WM_RECJ" 2>/dev/null
+      [ "$(wm_status "$WM_DUR")" = "completed" ] \
+        && ok "an unreadable acpx record degrades rather than aborting the runner" \
+        || fail "an unreadable acpx record aborted the turn (status=$(wm_status "$WM_DUR"))"
+    else
+      fail "could not stage the unreadable-record fixture ($WM_RECJ)"
     fi
     rm -f "$WM_HOME_A/.acpx/queues/$WM_LEASE_A.lock" 2>/dev/null
   else
