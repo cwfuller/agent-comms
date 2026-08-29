@@ -1228,11 +1228,9 @@ mount_owner_wait() {  # <acpx record id> <owner home> <deadline secs> -> 0 gone 
   # hashed the empty string) or simply different, and either way we would probe a store the
   # previous owner never used and call it "gone".
   # A record written before this field existed — or by an older install — carries no home.
-  # Refusing outright there wedges every mount that predates the field, which is an upgrade
-  # failure, not a safety property: the previous owner ran as the same user on the same box,
-  # so the current HOME is the right store to probe. Refuse only when there is no home at
-  # all, which is the case where acpx would have fallen back to an account home this code
-  # cannot name. (Caught live: this refused every panel leg on an existing thread.)
+  # Refusing outright there wedged every mount that predates the field, which is an upgrade
+  # failure rather than a safety property (caught live: it refused every panel leg on an
+  # existing thread). The answer is to DEGRADE, not to guess a store: see below.
   if [ -z "$ohome" ]; then
     # NO FALLBACK, and no probe of the current home: a record file proves a store holds a
     # COPY, not that it owns the live queue. There is nothing here that can establish
@@ -1240,7 +1238,6 @@ mount_owner_wait() {  # <acpx record id> <owner home> <deadline secs> -> 0 gone 
     MOUNT_WAIT_NOTE="the previous ACP owner's home was not recorded, so which store holds its queue lease cannot be established"
     return 2
   fi
-  [ -n "$ohome" ] || { MOUNT_WAIT_NOTE="neither a recorded owner home nor \$HOME is set, so the queue lease cannot be located"; return 1; }
   lock="$ohome/.acpx/queues/$hh.lock"
   sock="/tmp/acpx-$(printf '%s' "$ohome" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-10
         elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-10; else printf ''; fi; })/$hh.sock"
@@ -1382,11 +1379,22 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   # on this generation, and a lost one wedges the leg.
   mount_state_put "$kdir" admin "$adm" || {
     mount_git -C "$mr" worktree remove --force "$tmp" 2>/dev/null || true; return 2; }
+  # The path MUST be free. `mv` onto a surviving symlink-to-directory silently relocates the
+  # temp INSIDE the target and returns 0, which would leave the mount pointing at whatever the
+  # child aimed it at. (Measured: mv rc=0, and the path was still a symlink afterwards.)
+  if [ -e "$mount" ] || [ -L "$mount" ]; then
+    echo "mount: the mount path was not cleared before the rename — refusing" >>"$log"
+    mount_git -C "$mr" worktree remove --force "$tmp" 2>/dev/null || true
+    return 2
+  fi
   if ! mv -- "$tmp" "$mount" 2>>"$log"; then
     mount_git -C "$mr" worktree remove --force "$tmp" 2>/dev/null || true; return 2
   fi
-  mount_git -C "$mr" worktree repair "$mount" >>"$log" 2>&1 || {
-    echo "mount: worktree repair failed after the move" >>"$log"; return 2; }
+  # `repair` reports what it FIXED on stdout ("gitdir incorrect: …") and still exits 0, so
+  # the exit status alone is a poor signal. What matters is that the mount resolves afterwards.
+  mount_git -C "$mr" worktree repair "$mount" >>"$log" 2>&1 || true
+  mount_git -C "$mount" rev-parse --absolute-git-dir >/dev/null 2>&1 || {
+    echo "mount: the mount does not resolve to a git dir after the move" >>"$log"; return 2; }
   rm -f "$kdir/.state.pending" 2>/dev/null || true
   MOUNT_PENDING_TMP=""
   mount_git -C "$mount" read-tree -u --reset "$art" 2>>"$log" || return 2
@@ -1644,6 +1652,32 @@ cmd_run() {
       esac
       st_rc=0; st_home="$(mount_state_get "$mount_kdir" home)" || st_rc=$?
       [ "$st_rc" = 2 ] && st_home=""
+      # CORROBORATE the (record, home) pair before trusting it to decide whether an owner is
+      # gone. Both files are siblings of the mount, so a prior --approve-all child can rewrite
+      # them; pointing `home` at a store with no lease makes the probe answer "gone" while the
+      # real owner is still live in the store that actually holds it. The record acpx wrote
+      # names the cwd it ran in, so requiring that to be THIS mount ties the store we are about
+      # to probe to the mount we are about to rebuild. Anything short of that degrades — it is
+      # never a reason to refuse, because the disposable path is always available.
+      if [ -n "$st_record" ] && [ -n "$st_home" ]; then
+        local corr_json="$st_home/.acpx/sessions/$st_record.json" corr_cwd="" corr_phys=""
+        # Use the EXPECTED physical path, never a resolution of the current dirent. `cd`
+        # follows a symlink, so a vandalised mount would resolve to whatever it points at —
+        # the live tree — and be compared against the record. But the mount's SHAPE is the
+        # restage's problem, not the owner check's: refusing to corroborate a symlinked mount
+        # would strand that thread on the disposable path forever, since nothing else ever
+        # rebuilds it. $mount_kdir is already physical (mount_container resolves it), and the
+        # record's cwd was written as `pwd -P` of exactly this path when it was a real tree.
+        corr_phys="$mount_kdir/tree"
+        if [ -f "$corr_json" ] && [ ! -L "$corr_json" ]; then
+          corr_cwd="$(sed -n 's/^[[:space:]]*"cwd":[[:space:]]*"\(.*\)",*$/\1/p' "$corr_json" 2>/dev/null | head -1)"
+        fi
+        if [ -z "$corr_cwd" ] || [ -z "$corr_phys" ] || [ "$corr_cwd" != "$corr_phys" ]; then
+          echo "mount: the recorded (record, home) pair does not name an acpx record for this mount; degrading rather than probing a store it may not own (record=$st_record home=$st_home json=$corr_json record_cwd=${corr_cwd:-<none>} mount=$corr_phys)" >>"$run_dir/runner.log"
+          mount_claim_release
+          mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
+        fi
+      fi
       if [ -n "${mount_durable:-}" ]; then
       mount_owner_wait "$st_record" "$st_home" "${COMMS_RUNPHASE_OWNER_WAIT_SECS:-45}" || owner_rc=$?
       case "$owner_rc" in

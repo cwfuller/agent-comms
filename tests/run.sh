@@ -3064,14 +3064,28 @@ if [ -n "${AX_CWD_LOG:-}" ]; then
 fi
 case " $* " in
   *" sessions ensure "*)
+    # The session NAME drives the record id below, so it must be parsed before it is used.
+    ax_name=""; ax_prev=""
+    for ax_a in "$@"; do [ "$ax_prev" = "--name" ] && ax_name="$ax_a"; ax_prev="$ax_a"; done
     # Real acpx PERSISTS the record under $HOME/.acpx/sessions/<id>.json, and runphase now
     # uses that file's presence to prove a record belongs to the store it is about to probe
     # for a queue lease. A stub that only printed an id would make every same-home legacy
     # record look foreign, so model the write too.
-    ax_id="${AX_RECORD_ID:-stub-record-1}"
-    mkdir -p "${HOME:-/nonexistent}/.acpx/sessions" 2>/dev/null \
-      && printf '{ "acpx_record_id": "%s", "cwd": "%s" }\n' "$ax_id" "$(pwd -P)" \
-         > "${HOME}/.acpx/sessions/$ax_id.json" 2>/dev/null || true
+    # Derive the id from the session NAME, as acpx does per (agent, cwd, name). A single
+    # shared id would leave one record whose cwd is whatever ran last, so every other
+    # session would fail corroboration and degrade.
+    if [ -n "${AX_RECORD_ID:-}" ]; then ax_id="$AX_RECORD_ID"
+    else ax_id="stub-$(printf '%s' "$ax_name" | shasum -a 256 2>/dev/null | cut -c1-12)"; fi
+    [ -n "$ax_id" ] || ax_id=stub-record-1
+    # ONLY into a store the suite marked as its own. Without this the stub wrote into the
+    # user's real ~/.acpx/sessions whenever a turn did not override HOME.
+    if [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx-test-store" ]; then
+      mkdir -p "$HOME/.acpx/sessions" 2>/dev/null
+      # PRETTY-PRINTED, two-space indent, as acpx writes it: the production reader matches
+      # `^  "cwd": "..."`, and a single-line record silently failed that match.
+      printf '{\n  "schema": "acpx.session.v1",\n  "acpx_record_id": "%s",\n  "cwd": "%s",\n  "name": "%s",\n  "closed": false\n}\n' \
+        "$ax_id" "${AX_LIE_CWD:-$(pwd -P)}" "$ax_name" > "$HOME/.acpx/sessions/$ax_id.json" 2>/dev/null || true
+    fi
     printf '%s\t(%s)\n' "$ax_id" "${AX_ENSURE_STATE:-created}"; exit 0 ;;
   *" sessions show "*)
     printf 'name: stub\n'
@@ -5461,6 +5475,10 @@ echo "== runphase: warm ACP mounts live at a stable per-(thread,agent) path =="
 # directory. Nothing here greps runphase.sh for a path expression: that is a string match
 # that would stay green through any refactor which dropped the behaviour.
 WM="$WORK/warm-mount"; mkdir -p "$WM"
+# Every mounted turn runs against a TEST acpx store. The marker is what licenses the stub to
+# write a session record at all, so a turn that forgets to point HOME here writes nothing
+# rather than into the developer's real ~/.acpx.
+mkdir -p "$WM/home/.acpx/sessions" "$WM/home/.acpx/queues"; : > "$WM/home/.acpx-test-store"
 # The stable path is gated on `.comms` being ignore-covered, because a durable mount that
 # snapshot-on-send could capture would put a second checkout into every artifact.
 printf '.comms/\n' > "$MA_FIX/.gitignore"
@@ -5498,6 +5516,7 @@ wm_turn() { # <thread> <tag> <artifact> [extra env assignments...]
   } > "$msg"
   dir="$WM/run-$tag"; mkdir -p "$dir"
   ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" \
+      HOME="$WM/home" \
       ACP_PARITY_PAYLOAD="$AXD/payload" AX_CWD_LOG="$WM/cwd.log" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_RUNPHASE_OWNER_WAIT_SECS=3 \
       "$@" "$RP" run --message "$msg" --dir "$dir" \
@@ -5516,6 +5535,9 @@ wm_kdir_of() {  # <cwd> -> the ident dir, or empty if the cwd is not a mount
   d="$(dirname "$c")"
   case "$d" in ''|.|/) printf ''; return 1 ;; esac
   [ -d "$d" ] || { printf ''; return 1; }
+  # Enforce the stated contract rather than "any parent that exists": only a real ident dir
+  # under the mailbox's mounts/ qualifies, so a fixture can never mutate some other parent.
+  case "$d" in "$WM_ROOT"/mounts/*) ;; *) printf ''; return 1 ;; esac
   printf '%s' "$d"
 }
 wm_status() { sed -n 's/.*"status": "\([a-z]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
@@ -5689,6 +5711,10 @@ esac
 # CRASH WINDOW 1 — interrupted after `worktree add`, before the admin id was recorded.
 # `.state.pending` names a registered temp worktree; without recovery it leaks forever.
 WM_KDIR="$(wm_kdir_of "$WM_C9" || true)"
+if [ -z "$WM_KDIR" ] || [ ! -d "$WM_KDIR" ]; then
+  fail "could not derive the mount dir for the crash-window fixture; its assertion would be vacuous"
+  WM_KDIR="$WM/no-such-kdir"; mkdir -p "$WM_KDIR"
+fi
 git -C "$MA_FIX" worktree add --detach --quiet "$WM_KDIR/.new.crash1" "$WM_HEAD" 2>/dev/null
 printf '%s\n' "$WM_KDIR/.new.crash1" > "$WM_KDIR/.state.pending"
 : > "$WM/cwd.log"; WM_D10="$(wm_turn wm-seq wm10 "$WM_A1")"
@@ -5696,7 +5722,7 @@ if [ "$(wm_status "$WM_D10")" = "completed" ] && [ ! -e "$WM_KDIR/.new.crash1" ]
    && ! git -C "$MA_FIX" worktree list --porcelain | grep -qxF "worktree $WM_KDIR/.new.crash1"; then
   ok "a pending generation left by a crash is reclaimed, not leaked"
 else
-  fail "a crashed pending generation survived the next restage"
+  fail "a crashed pending generation survived the next restage (status=$(wm_status "$WM_D10") cwd=$(wm_prompt_cwds | sed -n 1p) leftover=$([ -e "$WM_KDIR/.new.crash1" ] && echo yes || echo no) reg=$(git -C "$MA_FIX" worktree list --porcelain | grep -cxF "worktree $WM_KDIR/.new.crash1") note=$(sed -n 's/.*"note": "\([^"]*\)".*/\1/p' "$WM_D10/result.json" 2>/dev/null | head -1 | cut -c1-90))"
 fi
 
 # CRASH WINDOW 2 — interrupted between `mv` and `worktree repair`: the recorded admin's
@@ -5755,13 +5781,13 @@ fi
 # behaviour was asserted about rather than exercised. Point HOME at a throwaway store and
 # plant a lease at the path the runner derives, so the wait actually has something to see.
 # (The real ~/.acpx is never touched.)
-WM_HOME="$WM/fakehome"; mkdir -p "$WM_HOME/.acpx/queues"
+WM_HOME="$WM/fakehome"; mkdir -p "$WM_HOME/.acpx/queues" "$WM_HOME/.acpx/sessions"; : > "$WM_HOME/.acpx-test-store"
 WM_LEASE_HASH="$(printf '%s' "stub-record-1" | shasum -a 256 | cut -c1-24)"
 printf '{ "pid": 1, "sessionId": "stub-record-1" }\n' > "$WM_HOME/.acpx/queues/$WM_LEASE_HASH.lock"
-: > "$WM/cwd.log"; WM_D14="$(wm_turn wm-lease wm14 "$WM_A1" HOME="$WM_HOME")"
+: > "$WM/cwd.log"; WM_D14="$(wm_turn wm-lease wm14 "$WM_A1" HOME="$WM_HOME" AX_RECORD_ID=stub-record-1)"
 # First turn on this ident records no id, so the wait is skipped; the SECOND turn reads it
 # back and must find the planted lease still there.
-: > "$WM/cwd.log"; WM_D15="$(wm_turn wm-lease wm15 "$WM_A1" HOME="$WM_HOME")"
+: > "$WM/cwd.log"; WM_D15="$(wm_turn wm-lease wm15 "$WM_A1" HOME="$WM_HOME" AX_RECORD_ID=stub-record-1)"
 if [ "$(wm_status "$WM_D15")" = "failed" ] \
    && grep -q 'refusing to restage under a live owner' "$WM_D15/result.json" 2>/dev/null \
    && [ "$(wm_prompt_cwds | awk 'END{print NR+0}')" = "0" ]; then
@@ -5772,7 +5798,7 @@ fi
 # ...and the same turn succeeds once the lease is gone, so the refusal above is not just
 # "this path always fails".
 rm -f "$WM_HOME/.acpx/queues/$WM_LEASE_HASH.lock"
-: > "$WM/cwd.log"; WM_D16="$(wm_turn wm-lease wm16 "$WM_A1" HOME="$WM_HOME")"
+: > "$WM/cwd.log"; WM_D16="$(wm_turn wm-lease wm16 "$WM_A1" HOME="$WM_HOME" AX_RECORD_ID=stub-record-1)"
 [ "$(wm_status "$WM_D16")" = "completed" ] \
   && ok "the same mount restages normally once the queue lease has gone" \
   || fail "the lease check refuses even with no lease present (status=$(wm_status "$WM_D16"))"
@@ -5784,7 +5810,7 @@ rm -f "$WM_HOME/.acpx/queues/$WM_LEASE_HASH.lock"
 WM_KDIR16="$(wm_kdir_of "$(wm_prompt_cwds | sed -n 1p)" || true)"
 if [ -n "$WM_KDIR16" ] && [ -f "$WM_KDIR16/.state.record" ]; then
   rm -f "$WM_KDIR16/.state.home"
-  : > "$WM/cwd.log"; WM_D17="$(wm_turn wm-lease wm17 "$WM_A1" HOME="$WM_HOME")"
+  : > "$WM/cwd.log"; WM_D17="$(wm_turn wm-lease wm17 "$WM_A1" HOME="$WM_HOME" AX_RECORD_ID=stub-record-1)"
   WM_C17="$(wm_prompt_cwds | sed -n 1p)"
   if [ "$(wm_status "$WM_D17")" = "completed" ] \
      && [ "$WM_C17" = "$(cd "$WM/run-wm17" && pwd -P)/tree" ]; then
@@ -5800,8 +5826,8 @@ if [ -n "$WM_KDIR16" ] && [ -f "$WM_KDIR16/.state.record" ]; then
   # wrong queues would report "gone" and restage under a live owner. Point HOME at an empty
   # store with no sessions/<id>.json and require a refusal.
   rm -f "$WM_KDIR16/.state.home"
-  WM_HOME2="$WM/fakehome2"; mkdir -p "$WM_HOME2/.acpx/queues" "$WM_HOME2/.acpx/sessions"
-  : > "$WM/cwd.log"; WM_D18="$(wm_turn wm-lease wm18 "$WM_A1" HOME="$WM_HOME2")"
+  WM_HOME2="$WM/fakehome2"; mkdir -p "$WM_HOME2/.acpx/queues" "$WM_HOME2/.acpx/sessions"; : > "$WM_HOME2/.acpx-test-store"
+  : > "$WM/cwd.log"; WM_D18="$(wm_turn wm-lease wm18 "$WM_A1" HOME="$WM_HOME2" AX_RECORD_ID=stub-record-1)"
   WM_C18="$(wm_prompt_cwds | sed -n 1p)"
   if [ "$(wm_status "$WM_D18")" = "completed" ] \
      && [ "$WM_C18" = "$(cd "$WM/run-wm18" && pwd -P)/tree" ]; then
@@ -5977,6 +6003,34 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
     fi
   done
   rm -f "$WM_KT/.state.record" 2>/dev/null
+fi
+
+# A prior --approve-all child can rewrite the state siblings. Rewriting `.state.home` to a
+# store with no lease made the probe answer "gone" while the real owner stayed live in the
+# store that actually holds it — a stable restage under a live owner. The recorded pair must
+# be corroborated against an acpx record that names THIS mount, or the turn degrades.
+if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
+  WM_HOME_A="$WM/homeA"; WM_HOME_B="$WM/homeB"
+  mkdir -p "$WM_HOME_A/.acpx/queues" "$WM_HOME_A/.acpx/sessions" "$WM_HOME_B/.acpx/sessions"
+  : > "$WM_HOME_A/.acpx-test-store"; : > "$WM_HOME_B/.acpx-test-store"
+  : > "$WM/cwd.log"; WM_DHA="$(wm_turn wm-home wmHA "$WM_A1" HOME="$WM_HOME_A" AX_RECORD_ID=stub-record-1)"
+  WM_KHA="$(wm_kdir_of "$(wm_prompt_cwds | sed -n 1p)" || true)"
+  if [ -n "$WM_KHA" ] && [ "$(wm_status "$WM_DHA")" = "completed" ]; then
+    # a LIVE lease in A, and the child points the record at empty store B
+    WM_LEASE_A="$(printf '%s' "stub-record-1" | shasum -a 256 | cut -c1-24)"
+    printf '{ "pid": 1 }\n' > "$WM_HOME_A/.acpx/queues/$WM_LEASE_A.lock"
+    printf '%s\n' "$WM_HOME_B" > "$WM_KHA/.state.home"
+    : > "$WM/cwd.log"; WM_DHB="$(wm_turn wm-home wmHB "$WM_A1" HOME="$WM_HOME_A" AX_RECORD_ID=stub-record-1)"
+    WM_CHB="$(wm_prompt_cwds | sed -n 1p)"
+    if [ "$WM_CHB" = "$(cd "$WM/run-wmHB" && pwd -P)/tree" ]; then
+      ok "a rewritten owner home degrades instead of restaging under the live owner it hides"
+    else
+      fail "a rewritten owner home permitted a stable restage (cwd=$WM_CHB)"
+    fi
+    rm -f "$WM_HOME_A/.acpx/queues/$WM_LEASE_A.lock" 2>/dev/null
+  else
+    fail "could not stage the rewritten-home fixture (kdir=$WM_KHA status=$(wm_status "$WM_DHA"))"
+  fi
 fi
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini
