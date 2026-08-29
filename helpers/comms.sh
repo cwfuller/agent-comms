@@ -85,7 +85,7 @@
 #                               cluster every leg's findings and label them by SUPPORT:
 #                               corroborated (gates), uncorroborated (cross-check first),
 #                               unanchored, advisory. Drops nothing; no model arbitrates.
-#   events [--set S] [--thread T] [--kind K] [--agent A] [--limit N]
+#   events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R] [--limit N]
 #           events append --kind <kind> [--set|--thread|--round|--agent|--role|--artifact|
 #                                        --request-id|--message-id|--run-dir|--status|--note]
 #                               the coordinator's append-only log of what IT did: roster
@@ -1288,6 +1288,16 @@ findings_set_header() {
 # and an empty current dispatch selects exactly those — legacy sets compose as they always
 # did. (codex, implement r1, blocking.)
 set_current_dispatch() {
+  # THE PLAN EVENT IS THE AUTHORITY. `panel-planned` is written once per fan-out, before any
+  # leg goes out, so the last one for a set names the attempt in progress. Reading the last
+  # LEG row instead let an interleaving pick an attempt whose roster was never complete.
+  # (codex, implement r2, blocking.)
+  local d
+  d="$(cmd_events --set "$2" --kind panel-planned --limit 1 2>/dev/null | awk -F'\t' 'NR>1{print $5}')"
+  if [ -n "$d" ]; then printf '%s\n' "$d"; return 0; fi
+  # No plan event: either a set recorded before this column existed, or a `shadow` row. Fall
+  # back to the index, which for those rows carries an empty dispatch — and an empty current
+  # attempt selects exactly them.
   awk -F'\t' -v s="$2" 'NR>1 && $1==s {d=$14} END {print d}' "$1"
 }
 
@@ -1323,8 +1333,11 @@ findings_set_lookup() {  # <root> <thread> <round> <phase> -> set\tartifact\tpro
   # A duplicate here would mean two artifacts claim one thread+phase+round, and there is no
   # right way to choose between them — `shadow` refuses to create that state, so if it
   # exists the file was edited by hand and the honest answer is to join nothing.
+  # DISTINCT SET IDS, not rows. Now that a retry preserves the previous attempt's rows
+  # instead of deleting them, one thread legitimately has several rows — all naming the same
+  # set. Counting rows would read that as an ambiguous join and refuse it. (grok, r2.)
   local n
-  n="$(awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph' "$idx" | grep -c . || true)"
+  n="$(awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph {seen[$1]=1} END {print length(seen)}' "$idx")"
   if [ "${n:-0}" -gt 1 ]; then
     emit_diagnostic "findings: $n review sets claim thread '$(clip "$2")' ${4:-<no phase>} round $3 — refusing an ambiguous join; fix .comms/grades/sets.tsv"
     return 0
@@ -1571,9 +1584,15 @@ cmd_panel() {
     # leg to a request nobody was sent: the new replies can never satisfy status or
     # compose — or, if the old set had completed, its stale replies replay as this
     # dispatch's answers. Rebind the agent's row to THIS dispatch. (codex, panel r3.)
-    if awk -F'\t' -v s="$set_id" -v a="$ag" 'NR>1 && $1==s && $10==a' "$idx" | grep -q .; then
+    # SCOPED TO THIS ATTEMPT. Deleting every same-set/same-agent row deleted the OTHER
+    # attempt's leg, which is what defeated the dispatch column: interleave two dispatches
+    # (A plans, B plans, A/codex, B/codex replacing it, B/grok, A/grok replacing it) and the
+    # index ends holding B/codex and A/grok — one leg per attempt, so the selected attempt
+    # composes as a COMPLETE one-leg panel. Rows of other attempts are now preserved and
+    # `set_legs` filters them out instead. (codex + grok, implement r2, corroborated.)
+    if awk -F'\t' -v s="$set_id" -v a="$ag" -v d="$dispatch_id" 'NR>1 && $1==s && $10==a && $14==d' "$idx" | grep -q .; then
       local idx_tmp; idx_tmp="$(mktemp "${TMPDIR:-/tmp}/agent-comms-sets.XXXXXX")"
-      awk -F'\t' -v s="$set_id" -v a="$ag" '!(NR>1 && $1==s && $10==a)' "$idx" > "$idx_tmp" \
+      awk -F'\t' -v s="$set_id" -v a="$ag" -v d="$dispatch_id" '!(NR>1 && $1==s && $10==a && $14==d)' "$idx" > "$idx_tmp" \
         && command mv -f "$idx_tmp" "$idx" \
         && emit_diagnostic "panel: retry — rebound $ag's leg of $set_id to this dispatch's request"
     fi
@@ -1819,8 +1838,35 @@ event_field() {  # event_field <value> <max-bytes> — never a delimiter, never 
   clip "$v" "${2:-48}"
 }
 
-# fs_events_device <dir> — what the log's filesystem calls itself, or empty.
+# fs_events_device <path> — what the filesystem calls itself, or empty.
 fs_events_device() { df -P "$1" 2>/dev/null | awk 'NR==2{print $1}'; }
+# fs_events_mountpoint <path> — where it is mounted, or empty.
+fs_events_mountpoint() { df -P "$1" 2>/dev/null | awk 'NR==2{print $NF}'; }
+
+# The filesystem types on which a small O_APPEND write is one atomic write. An ALLOWLIST,
+# because the shape blacklist it replaces was blind to every network FUSE mount — `s3fs`,
+# `gcsfuse`, a rclone `remote:bucket` — which look nothing like `host:/export` and are
+# exactly as unsafe. Anything not named here fails CLOSED. (codex, implement r2, blocking.)
+EVENT_LOCAL_FSTYPES=" apfs hfs hfsplus ext2 ext2/ext3 ext3 ext4 xfs btrfs zfs tmpfs ramfs overlay overlayfs f2fs jfs reiserfs msdos vfat exfat ufs "
+
+# fs_events_type <path> — a lowercase filesystem-type token, or empty when nothing answers.
+fs_events_type() {
+  local t mp
+  # GNU coreutils answers directly. BSD `stat` reads -f as its FORMAT flag and cheerfully
+  # echoes the string "-c" back, so the answer is only believed when it looks like a
+  # filesystem type — which "-c" does not. Without that guard this probe classified every
+  # macOS disk as unknown and refused a perfectly local log.
+  t="$(stat -f -c %T "$1" 2>/dev/null || true)"
+  case "$t" in
+    [A-Za-z]*) printf '%s\n' "$t" | tr 'A-Z' 'a-z'; return 0 ;;
+  esac
+  # BSD/macOS `stat` has no -c, so read the mount table instead: `/dev/disk3s1 on / (apfs,
+  # local, journaled)`. The type is the first token in the parentheses.
+  mp="$(fs_events_mountpoint "$1")"
+  [ -n "$mp" ] || return 0
+  mount 2>/dev/null | awk -v m=" on $mp " 'index($0, m) {print; exit}' \
+    | sed -n 's/.*(\([A-Za-z0-9_]*\).*/\1/p' | tr 'A-Z' 'a-z'
+}
 
 # fs_events_safe <dir> — 0 only on a filesystem where an append-only log is sound.
 #
@@ -1833,9 +1879,14 @@ fs_events_device() { df -P "$1" 2>/dev/null | awk 'NR==2{print $1}'; }
 # unverifiable check in this tool. (codex, plan r2, blocking.)
 fs_events_safe() {
   local dev; dev="$(fs_events_device "$1")"
-  [ -n "$dev" ] || return 1          # unclassified is not "probably fine"
-  case "$dev" in //*|*:/*) return 1 ;; esac   # //server/share (SMB), host:/export (NFS)
-  return 0
+  [ -n "$dev" ] || return 1                    # unclassifiable is not "probably fine"
+  # Shape first, because it costs nothing and names the obvious remotes: //server/share
+  # (SMB), host:/export (NFS), remote:bucket (rclone and friends).
+  case "$dev" in //*|*:*) return 1 ;; esac
+  local t; t="$(fs_events_type "$1")"
+  [ -n "$t" ] || return 1                      # nothing could answer: fail closed
+  case "$EVENT_LOCAL_FSTYPES" in *" $t "*) return 0 ;; esac
+  return 1
 }
 
 cmd_events() {
@@ -1943,8 +1994,16 @@ cmd_events() {
   # there — appends unchecked for the rest of its life, which is the silent-loss mode this
   # refusal exists to prevent. One `df` per event is cheap next to a review turn.
   # (codex + grok, implement r1 — both found it.)
-  fs_events_safe "$dir" \
-    || die "events: refusing to write the coordinator log on '$(fs_events_device "$dir")' — an append-only log is only sound on a local filesystem (NFS simulates O_APPEND and can drop a whole append, leaving a well-formed file with an event missing). Point .comms at local storage."
+  # RETURN, never `die`. `die` is `exit`, so an unsound filesystem here would take down the
+  # whole process — including `cmd_send` delivering a reply, whose `if ! cmd_events` branch
+  # would never run. The two fail-closed producers keep their own `|| die`; everything else
+  # stays advisory, which is the entire point of the split. (grok, implement r2.)
+  local fs_target="$dir"
+  [ -e "$f" ] && fs_target="$f"
+  if ! fs_events_safe "$fs_target"; then
+    emit_diagnostic "events: refusing to write the coordinator log on '$(fs_events_device "$fs_target")' (type '$(fs_events_type "$fs_target")') — an append-only log is only sound on a local filesystem; point .comms at local storage"
+    return 1
+  fi
   # Create the header exactly ONCE, even with N detached runners appending at once.
   # `[ -s ] || printf > file` lets two first-creators truncate each other and lose a row,
   # and a second header read as a row is the log lying about an event. `ln` is atomic and
@@ -1957,6 +2016,13 @@ cmd_events() {
       printf '%s\n' "$EVENTS_HEADER" > "$seed"
       ln "$seed" "$f" 2>/dev/null || true
       rm -f "$seed" 2>/dev/null || true
+    fi
+    # POSTCONDITION. Without it a failed mktemp or link left the first append to create a
+    # HEADERLESS log — which every reader then reports as one malformed row after another.
+    # (codex, implement r2, advisory.)
+    if [ ! -f "$f" ]; then
+      emit_diagnostic "events: could not create the coordinator log with its header at $(clip "$f") — refusing to write a headerless log"
+      return 1
     fi
   fi
   local fixed room

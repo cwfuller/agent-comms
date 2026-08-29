@@ -260,6 +260,11 @@ LEG's reviewer (the target of a request, the author of a reply), never the send 
 `role` is `gating` or `shadow`; a `--no-deliver` measurement turn is recorded and is
 structurally distinguishable from the leg that gates.
 
+The attempt a reader binds to is the one named by the LAST `panel-planned` for the set — the
+plan event is written once per fan-out, before any leg goes out, so it is the only record of
+which roster is in progress. A dispatch preserves earlier attempts' index rows rather than
+replacing them, and readers filter.
+
 `dispatch` is the ATTEMPT id, and it is what makes a retry readable. A `review_set` id is
 deterministic — same thread, phase, round and artifact produce the same one — and a retry
 deliberately rebinds the set's rows, so two concurrent attempts would otherwise interleave
@@ -309,10 +314,12 @@ runs). A turn that fails before the provider starts — mount claim refused, art
 unresolvable, prompt build — has a `turn-finished` and no `provider-result`. A shadow turn
 validates and never accepts. Read the log per route, not against one canonical shape.
 
-The log must live on a local filesystem. `events append` refuses to CREATE it anywhere else
-(NFS simulates `O_APPEND` and can drop a whole append, leaving a well-formed file with an
-event missing — a loss no reader can detect), and a filesystem it cannot classify is refused
-the same way.
+The log must live on a local filesystem, and EVERY append checks: the type of the actual
+append target is matched against an allowlist of known-local filesystems, and anything else —
+NFS, SMB, a network FUSE mount, or a type nothing can classify — is refused. (NFS simulates
+`O_APPEND` and can drop a whole append, leaving a well-formed file with an event missing: a
+loss no reader can detect, which is why this is a refusal and not a warning.) A refusal
+returns; it never takes down the process that was appending.
 
 ### Recovering a loop from the log
 
@@ -328,6 +335,9 @@ After a driver dies, `comms.sh events --set <id>` answers what to do next:
 - **`reply-validated` with no `reply-accepted`** — do NOT re-dispatch. The stamped body is in
   `<run_dir>/reply.md` and may already be in the inbox; compose may simply succeed.
 - **every planned leg `reply-accepted`, no `composition-*`** — compose now.
+- **`role=shadow` rows** — drop them first. A measurement turn shares its gating leg's thread
+  and attempt, so leaving it in makes a shadow look like the leg that gates. `events --role
+  gating` does this for you.
 - **`composition-refused`** — a human decides; `status` says whether the panel was partial or
   a leg was unreadable.
 

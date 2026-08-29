@@ -4876,8 +4876,13 @@ PN_RT_SET="$(printf '%s\n' "$PN_RT_OUT" | sed -n 's/.*as review set \([^ ]*\) .*
 [ "$PN_RT_SET" = "$PN_ST_SET" ] && ok "a retry recreates the same deterministic set id" || fail "retry set id drifted ($PN_ST_SET vs $PN_RT_SET)"
 PN_RT_LEG="$(find "$PN_FIX/.comms/to-codex" -name '*panel-codex*' -type f | xargs grep -l 'pn-stale-thread' | xargs ls -t 2>/dev/null | head -1)"
 PN_RT_MID="$(grep -m1 '^message_id:' "$PN_RT_LEG" | sed 's/^message_id: //')"
-[ "$(awk -F'\t' -v s="$PN_RT_SET" 'NR>1 && $1==s && $10=="codex"' "$PN_FIX/.comms/grades/sets.tsv" | wc -l | tr -d ' ')" = "1" ] \
-  && ok "a retried leg keeps exactly ONE row in the set index" || fail "retry left duplicate rows"
+# ONE ROW PER ATTEMPT, not one row per agent. Deleting every same-set/same-agent row is what
+# let a second dispatch eat the first attempt's legs, leaving an index with one leg of each
+# and a "complete" one-leg panel to gate on; other attempts' rows are preserved now and the
+# readers filter by dispatch. Within an attempt a duplicate is still a defect.
+# (codex + grok, implement r2, corroborated.)
+[ "$(awk -F'\t' -v s="$PN_RT_SET" 'NR>1 && $1==s && $10=="codex" {n[$14]++} END {for (k in n) if (n[k] != 1) dup=1; print (dup ? "dup" : "one-each")}' "$PN_FIX/.comms/grades/sets.tsv")" = "one-each" ] \
+  && ok "a retried leg keeps exactly ONE row per dispatch attempt" || fail "retry left duplicate rows within one attempt"
 awk -F'\t' -v s="$PN_RT_SET" 'NR>1 && $1==s && $10=="codex" {print $2}' "$PN_FIX/.comms/grades/sets.tsv" | grep -qxF "$PN_RT_MID" \
   && ok "the retried row is REBOUND to the new dispatch's request id" \
   || fail "retry kept the stale request_message_id — new replies can never answer it"
@@ -7350,8 +7355,13 @@ printf '%s\n' "$EV_BADROLE" >> "$EV_LOG"
 run_ev events 2>/dev/null | grep -q 'ev-badrole' && fail "a row naming an impossible role was read as an event" || ok "a row naming a role outside the vocabulary is refused"
 # A row that merely BEGINS with the header's first token is a row, not a header: skipping
 # it would drop a real event, and swallowing a foreign header would hide it. (codex.)
+ev_malformed_count() { run_ev events 2>&1 >/dev/null | sed -n 's/.*skipped \([0-9][0-9]*\) malformed.*/\1/p' | tail -1; }
+EV_MB="$(ev_malformed_count)"
 printf 'ts\tnot\ta\theader\tjust\ta\trow\tthat\tstarts\twith\tts\tand\tis\tmalformed\there\n' >> "$EV_LOG"
-run_ev events 2>&1 >/dev/null | grep -q 'malformed' && ok "a header-shaped row that is not the header is reported, not silently skipped" || fail "header-shaped row swallowed"
+# Counted, not grepped: torn rows planted earlier make a bare `grep malformed` pass whether
+# or not THIS row was caught. (grok, implement r2.)
+[ "$(ev_malformed_count)" = "$(( ${EV_MB:-0} + 1 ))" ] \
+  && ok "a header-shaped row that is not the header is reported, not silently skipped" || fail "header-shaped row swallowed (was ${EV_MB:-0}, now $(ev_malformed_count))"
 
 EV_N=20
 i=1; while [ "$i" -le "$EV_N" ]; do
@@ -7365,6 +7375,18 @@ wait
 [ "$(awk -F'\t' -v c="$C_SET" -v n="$C_NOTE" '$c=="ev-race"{print $n}' "$EV_LOG" | sort -u | grep -c .)" = "$EV_N" ] \
   && ok "every racer's own note survived intact" || fail "a racing note was lost or merged"
 
+# The atomicity argument is about the row that reaches write(2), so the boundary case —
+# maximum-size rows — is the one worth racing. (codex, implement r2, advisory.)
+i=1; while [ "$i" -le 10 ]; do
+  run_ev events append --kind turn-started --set ev-bigrace --thread "big-$i" --status running --note "$EV_BIG" >/dev/null &
+  i=$((i+1))
+done
+wait
+[ "$(awk -F'\t' -v c="$C_SET" '$c=="ev-bigrace"' "$EV_LOG" | grep -c .)" = "10" ] \
+  && ok "concurrent MAXIMUM-size rows all land" || fail "a maximum-size concurrent append was lost"
+[ "$(awk -F'\t' -v c="$C_SET" -v n="$C_NF" '$c=="ev-bigrace" && NF!=n' "$EV_LOG" | grep -c . || true)" = "0" ] \
+  && ok "no maximum-size row tore another" || fail "a maximum-size row was torn"
+
 EV2="$WORK/events-repo-2"; mkdir -p "$EV2"; EV2="$(cd "$EV2" && pwd -P)"
 git -C "$EV2" init -q -b main
 git -C "$EV2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
@@ -7376,6 +7398,15 @@ wait
 [ "$(grep -c '^ts	workspace	event' "$EV2/.comms/events.tsv" 2>/dev/null || true)" = "1" ] \
   && ok "racing first writers create exactly one header" || fail "header raced"
 [ "$(tail -n +2 "$EV2/.comms/events.tsv" | grep -c .)" = "8" ] && ok "no racing first write was lost to the header" || fail "a first write was lost"
+# A log whose header could not be written is refused rather than created headerless — every
+# reader would otherwise report its rows as malformed forever. (codex, implement r2.)
+EV7="$WORK/events-repo-7"; mkdir -p "$EV7"
+git -C "$EV7" init -q -b main; git -C "$EV7" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$EV7/.comms"; chmod a-w "$EV7/.comms"
+EV_NOHDR="$( (cd "$EV7" && env -u CMUX_WORKSPACE_ID "$COMMS" events append --kind turn-started --thread h) 2>&1 || true )"
+chmod u+w "$EV7/.comms"
+printf '%s\n' "$EV_NOHDR" | grep -q 'headerless' && ok "a log whose header cannot be created is refused" || fail "headerless log not refused (got: $EV_NOHDR)"
+[ ! -f "$EV7/.comms/events.tsv" ] && ok "the refusal leaves no headerless log behind" || fail "a headerless log was created"
 
 # The filesystem constraint is ENFORCED, not diagnosed: an NFS append can be LOST whole,
 # leaving a well-formed file with an event missing — which no reader can detect. So the log
@@ -7388,29 +7419,77 @@ printf 'Filesystem 512-blocks Used Available Capacity Mounted on\n'
 [ -n "${DF_STUB_FS:-}" ] || exit 1
 printf '%s 1 1 1 1%% /mnt\n' "$DF_STUB_FS"
 DFS
-chmod +x "$EV_DFB/df"
-ev_fs_try() { # <df-device> <repo-dir>
-  mkdir -p "$2"; git -C "$2" init -q -b main
-  git -C "$2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
-  (cd "$2" && env -u CMUX_WORKSPACE_ID DF_STUB_FS="$1" PATH="$EV_DFB:$PATH" "$COMMS" events append --kind turn-started --thread fs-1) 2>&1
+# The type probes are stubbed too, so BOTH branches — GNU `stat` and the BSD mount table —
+# are driven on either kind of host instead of one of them being untested wherever the
+# suite happens to run.
+cat > "$EV_DFB/stat" <<'STS'
+#!/bin/bash
+[ -n "${STAT_STUB_TYPE:-}" ] || exit 1
+printf '%s\n' "$STAT_STUB_TYPE"
+STS
+cat > "$EV_DFB/mount" <<'MTS'
+#!/bin/bash
+[ -n "${MOUNT_STUB_TYPE:-}" ] || exit 1
+printf 'dev on /mnt (%s, local, journaled)\n' "$MOUNT_STUB_TYPE"
+MTS
+chmod +x "$EV_DFB/df" "$EV_DFB/stat" "$EV_DFB/mount"
+ev_fs_try() { # <df-device> <repo-dir> [env assignments...]
+  local dev="$1" dir="$2"; shift 2
+  mkdir -p "$dir"; git -C "$dir" init -q -b main
+  git -C "$dir" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  (cd "$dir" && env -u CMUX_WORKSPACE_ID DF_STUB_FS="$dev" "$@" PATH="$EV_DFB:$PATH" \
+     "$COMMS" events append --kind turn-started --thread fs-1) 2>&1
 }
-EV_NFS="$(ev_fs_try 'fileserver:/export/home' "$WORK/events-repo-3" || true)"
+ev_fs_case() { # <label> <expect accepted|refused> <df-device> <dir> [env...]
+  local lbl="$1" want="$2"; shift 2
+  local out; out="$(ev_fs_try "$@" || true)"
+  local got=accepted
+  printf '%s\n' "$out" | grep -q 'refusing to write' && got=refused
+  [ "$got" = "$want" ] && ok "$lbl" || fail "$lbl (wanted $want, got $got: $(printf '%s' "$out" | head -1))"
+}
+# An ALLOWLIST of known-local types, failing closed on anything unrecognised. The shape
+# blacklist this replaced was blind to network FUSE mounts, which look nothing like
+# host:/export and are exactly as unsafe. (codex, implement r2, blocking.)
+ev_fs_case "a local disk type is accepted" accepted '/dev/disk1s5' "$WORK/evfs-ext" STAT_STUB_TYPE=ext2/ext3
+ev_fs_case "an NFS type is refused" refused '/dev/disk1s5' "$WORK/evfs-nfs" STAT_STUB_TYPE=nfs
+ev_fs_case "an UNRECOGNISED type fails closed" refused '/dev/disk1s5' "$WORK/evfs-fuse" STAT_STUB_TYPE=fuseblk
+ev_fs_case "the mount table answers where GNU stat cannot" accepted '/dev/disk1s5' "$WORK/evfs-apfs" MOUNT_STUB_TYPE=apfs
+ev_fs_case "a network FUSE mount is refused by type, not by name shape" refused '/dev/disk1s5' "$WORK/evfs-osxfuse" MOUNT_STUB_TYPE=osxfuse
+ev_fs_case "a filesystem nothing can classify fails closed" refused '/dev/disk1s5' "$WORK/evfs-silent"
+ev_fs_case "an rclone-style remote:bucket source is refused" refused 'remote:bucket' "$WORK/evfs-rclone" STAT_STUB_TYPE=ext4
+EV_NFS="$(ev_fs_try 'fileserver:/export/home' "$WORK/events-repo-3" STAT_STUB_TYPE=ext4 || true)"
 printf '%s\n' "$EV_NFS" | grep -q 'refusing to write' && ok "an NFS mount refuses the log outright" || fail "network fs not refused (got: $EV_NFS)"
 [ ! -f "$WORK/events-repo-3/.comms/events.tsv" ] && ok "a refused filesystem leaves no half-made log" || fail "a log was created on a refused filesystem"
-EV_SMB="$(ev_fs_try '//server/share' "$WORK/events-repo-5" || true)"
+EV_SMB="$(ev_fs_try '//server/share' "$WORK/events-repo-5" STAT_STUB_TYPE=ext4 || true)"
 printf '%s\n' "$EV_SMB" | grep -q 'refusing to write' && ok "an SMB mount refuses the log outright" || fail "smb fs not refused (got: $EV_SMB)"
-EV_UNK="$(ev_fs_try '' "$WORK/events-repo-6" || true)"
-printf '%s\n' "$EV_UNK" | grep -q 'refusing to write' && ok "a filesystem that cannot be classified fails closed" || fail "unclassified fs allowed (got: $EV_UNK)"
-EV_LOCAL="$(ev_fs_try '/dev/disk1s5' "$WORK/events-repo-4" || true)"
+EV_LOCAL="$(ev_fs_try '/dev/disk1s5' "$WORK/events-repo-4" STAT_STUB_TYPE=ext4 || true)"
 printf '%s\n' "$EV_LOCAL" | grep -q 'refusing' && fail "a local filesystem was refused" || ok "a local filesystem is accepted"
 # ...and it actually wrote, rather than failing for some other reason the grep cannot see.
 [ -s "$WORK/events-repo-4/.comms/events.tsv" ] && ok "the accepted filesystem really got a log" || fail "no log on the accepted filesystem"
 # CHECKED ON EVERY APPEND. Judging only at creation left the refusal bypassable for the
 # rest of the log's life by a `.comms` that migrates onto network storage — the silent-loss
 # mode the refusal exists to prevent. (codex + grok, implement r1.)
-EV_MIGRATED="$( (cd "$WORK/events-repo-4" && env -u CMUX_WORKSPACE_ID DF_STUB_FS='fileserver:/export/home' PATH="$EV_DFB:$PATH" "$COMMS" events append --kind turn-started --thread migrated-1) 2>&1 >/dev/null || true )"
+EV_MIGRATED="$( (cd "$WORK/events-repo-4" && env -u CMUX_WORKSPACE_ID DF_STUB_FS='fileserver:/export/home' STAT_STUB_TYPE=ext4 PATH="$EV_DFB:$PATH" "$COMMS" events append --kind turn-started --thread migrated-1) 2>&1 >/dev/null || true )"
 printf '%s\n' "$EV_MIGRATED" | grep -q 'refusing to write' && ok "an EXISTING log that moved onto network storage refuses further appends" || fail "migrated log appended unchecked (got: $EV_MIGRATED)"
 grep -q 'migrated-1' "$WORK/events-repo-4/.comms/events.tsv" && fail "the refused append was written anyway" || ok "a refused append leaves no row"
+# ...and refusing must RETURN, not exit: `die` inside the accessor would take the whole
+# process with it, including a `send` that is delivering a reply — the advisory half of the
+# policy would silently become fail-closed. (grok, implement r2.)
+EV_FSREPLY="$EV/.comms/to-claude/$(basename "$EV")_2026-08-29T09-40-00_ev-fsreply.md"
+printf -- '---\ntype: review-feedback\nfrom: codex\ntimestamp: 2026-08-29T09:40:00Z\nworkspace: %s\nmessage_id: ev-fsreply-1\nthread: ev-loop\nin-reply-to: ev-req-1\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' "$(basename "$EV")" > "$EV_FSREPLY"
+if (cd "$EV" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 DF_STUB_FS='fileserver:/export/home' STAT_STUB_TYPE=ext4 PATH="$EV_DFB:$STUB_BIN:$PATH" "$COMMS" send --to claude "$EV_FSREPLY") >/dev/null 2>&1; then
+  ok "an unsound filesystem refuses the log without killing a reply's delivery"
+else
+  fail "a refused log took the reply's send down with it"
+fi
+# The same refusal on a REQUEST must still gate: that producer is the fail-closed one.
+EV_FSREQ="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-41-00_ev-fsreq.md"
+printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:41:00Z\nworkspace: %s\nmessage_id: ev-fsreq-1\nthread: ev-fsreq\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV")" > "$EV_FSREQ"
+if (cd "$EV" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 DF_STUB_FS='fileserver:/export/home' STAT_STUB_TYPE=ext4 PATH="$EV_DFB:$STUB_BIN:$PATH" "$COMMS" send --to codex "$EV_FSREQ") >/dev/null 2>&1; then
+  fail "a request dispatched with no recordable log"
+else
+  ok "a request whose persistence cannot be recorded is still refused outright"
+fi
 
 [ "$(run_ev events --set ev-race 2>/dev/null | tail -n +2 | grep -c .)" = "$EV_N" ] && ok "--set selects one review set" || fail "--set filter"
 [ "$(run_ev events --thread race-3 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] && ok "--thread selects one leg" || fail "--thread filter"
@@ -7545,6 +7624,7 @@ printf '%s\n' "$EV_MIXED" | grep -q 'ev-mixed-a-' && ! printf '%s\n' "$EV_MIXED"
 EV_MIXCOMP="$(run_ev compose --set ev-mixed 2>&1 || true)"
 printf '%s\n' "$EV_MIXCOMP" | grep -q 'of 2 legs' \
   && ok "compose gates on one attempt's roster, never on both" || fail "compose counted both attempts (got: $(printf '%s' "$EV_MIXCOMP" | head -1))"
+
 EV_MIDC="$(grep -m1 '^message_id:' "$(ls -t "$EV/.comms/to-codex/"*panel-codex*.md | head -1)" | sed 's/^message_id: //')"
 EV_MIDG="$(grep -m1 '^message_id:' "$(ls -t "$EV/.comms/to-grok/"*panel-grok*.md | head -1)" | sed 's/^message_id: //')"
 EV_WS="$(run_ev workspace)"
@@ -7560,6 +7640,32 @@ awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v s="$EV_SET" '$c==s && $e=="composition-
   && ok "a completed composition closes the set's trace" || fail "composition-completed missing"
 awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v n="$C_NOTE" -v s="$EV_SET" '$c==s && $e=="composition-completed" && $n ~ /corroborated=1/' "$EV_LOG" | grep -q . \
   && ok "the composition event carries what the gate actually found" || fail "composition counts"
+
+# ...and now through the PRODUCER. The hand-written rows above test the selector; they
+# cannot see the write path, and the write path was the defect: dispatch deleted every
+# same-set/same-agent row, so a second attempt ATE the first attempt's legs and the index
+# ended up holding one leg of each. A retry is DETERMINISTIC — same request over the same
+# tree recreates the set id — so this is a second attempt, not a second set. (`--set` is
+# only a seed: safe_set_id appends a hash, so feeding the resolved id back in would make a
+# different set and test nothing.) (codex + grok, implement r2, corroborated.)
+EV_D1="$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v d="$C_DSP" -v s="$EV_SET" '$c==s && $e=="panel-planned"{print $d}' "$EV_LOG" | tail -1)"
+EV_RD="$(run_ev panel dispatch --to codex,grok "$EV_PREQ" 2>&1 || true)"
+EV_RDSET="$(printf '%s\n' "$EV_RD" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ "$EV_RDSET" = "$EV_SET" ] && ok "a retry over the same tree recreates the same set" || fail "retry set id drifted ($EV_SET vs $EV_RDSET)"
+EV_D2="$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v d="$C_DSP" -v s="$EV_SET" '$c==s && $e=="panel-planned"{print $d}' "$EV_LOG" | tail -1)"
+[ -n "$EV_D2" ] && [ "$EV_D1" != "$EV_D2" ] && ok "a re-dispatch mints a new attempt id" || fail "re-dispatch reused the attempt id"
+[ "$(awk -F'\t' -v s="$EV_SET" -v d="$EV_D1" 'NR>1 && $1==s && $14==d' "$EV/.comms/grades/sets.tsv" | grep -c .)" = "2" ] \
+  && ok "the FIRST attempt's legs survive a re-dispatch instead of being eaten" || fail "a re-dispatch deleted the earlier attempt's rows"
+[ "$(awk -F'\t' -v s="$EV_SET" -v d="$EV_D2" 'NR>1 && $1==s && $14==d' "$EV/.comms/grades/sets.tsv" | grep -c .)" = "2" ] \
+  && ok "the new attempt records its own two legs" || fail "the new attempt is not fully recorded"
+[ "$(run_ev panel status --set "$EV_SET" 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] \
+  && ok "status still reports exactly one attempt's legs after a real re-dispatch" || fail "status mixed two real attempts"
+# The PLAN event is the authority, not the last row: append a stale leg row for the OLD
+# attempt after the new one and the binding must not follow it.
+printf '%s\ty\tz\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-08-29T10:00:00Z\t%s\n' "$EV_SET" "$EV_D1" >> "$EV/.comms/grades/sets.tsv"
+[ "$(run_ev panel status --set "$EV_SET" 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] \
+  && ok "a stale row appended after the plan cannot move the binding" || fail "the binding followed the last row instead of the plan event"
+
 
 # CRITERION 4: the events that matter are written by the DETACHED runner. `send` returns at
 # spawn, so every row below was appended by a process the dispatching shell no longer owns.
@@ -7674,6 +7780,37 @@ EV_GDIR5="$WORK/ev-grok-leg5"; mkdir -p "$EV_GDIR5"
   && ok "a turn that lost one of its own events signs off log-incomplete, not completed" || fail "turn-finished did not report the hole"
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-logloss2" && $e=="reply-accepted"' "$EV_LOG" | grep -q . \
   && ok "the reply still landed while its trace was incomplete" || fail "a lost event cost the reply"
+
+# THE LOOKUP ITSELF. The earlier shim drops `reply-validated`, which sets LOG_INCOMPLETE
+# in-process — so it never exercised the acceptance lookup at all. This one lets `send`
+# record the acceptance and then removes that row, which is what a lost advisory append
+# looks like to the check that runs next; it also plants a DIFFERENT turn's acceptance on
+# the same thread, so a thread-only join would call this turn clean. (codex + grok, r2.)
+EV_SHIM3="$WORK/ev-shim3"; mkdir -p "$EV_SHIM3"
+cp "$RUNPHASE" "$EV_SHIM3/runphase.sh"; chmod +x "$EV_SHIM3/runphase.sh"
+cat > "$EV_SHIM3/comms.sh" <<SHIM
+#!/bin/bash
+if [ "\$1" = send ]; then
+  "$COMMS" "\$@"; rc=\$?
+  T="\$(mktemp)"
+  grep -v 'reply-accepted' "$EV_LOG" > "\$T" 2>/dev/null && cat "\$T" > "$EV_LOG"
+  rm -f "\$T"
+  "$COMMS" events append --kind reply-accepted --thread ev-lostaccept \
+    --request-id some-other-turn --status APPROVE >/dev/null 2>&1
+  exit \$rc
+fi
+exec "$COMMS" "\$@"
+SHIM
+chmod +x "$EV_SHIM3/comms.sh"
+EV_GMSG6="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-36-00_ev-grok6.md"
+sed 's/message_id: ev-req-1/message_id: ev-grok-6/; s/thread: ev-loop/thread: ev-lostaccept/' "$EV_REQ" > "$EV_GMSG6"
+EV_GDIR6="$WORK/ev-grok-leg6"; mkdir -p "$EV_GDIR6"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   "$EV_SHIM3/runphase.sh" run --message "$EV_GMSG6" --dir "$EV_GDIR6" --provider grok) >/dev/null 2>&1 || true
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v rq="$C_REQ" '$t=="ev-lostaccept" && $e=="reply-accepted" && $rq=="some-other-turn"' "$EV_LOG" | grep -q . \
+  && ok "the fixture really did plant another turn's acceptance on this thread" || fail "the overlapping-turn fixture planted nothing"
+[ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-lostaccept" && $e=="turn-finished"{print $st}' "$EV_LOG")" = "log-incomplete" ] \
+  && ok "a lost acceptance is detected even with another turn's acceptance on the thread" || fail "the acceptance lookup accepted a different turn's row"
 
 EV_GMSG3="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-32-00_ev-grok3.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-3/; s/thread: ev-loop/thread: ev-shadow/' "$EV_REQ" > "$EV_GMSG3"

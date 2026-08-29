@@ -944,13 +944,19 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
   # review requests do, repeatedly — would mark a perfectly recorded turn incomplete.
   # (grok, implement r1.)
   #
-  # The match is (kind, thread, written no earlier than this turn started). Thread is used
-  # rather than a message id because it is short enough that the writer's per-column clip
-  # cannot alter it; a thread long enough to be clipped degrades to a CONSERVATIVE
-  # log-incomplete, never to a false clean bill.
+  # The match is (kind, REQUEST, attempt, written no earlier than this turn started).
+  # Thread alone was not enough: two overlapping turns on one leg thread — a re-send, a
+  # shadow beside the gating leg — let the later runner find the EARLIER turn's acceptance
+  # and sign off `completed` having recorded nothing of its own. The request id is the
+  # inbound's message_id, which is what `cmd_send` stamps on the reply's acceptance from
+  # `in-reply-to`, so it identifies this turn and no other. (codex + grok, implement r2.)
+  #
+  # Both joined columns are subject to the writer's per-column clip. An id long enough to be
+  # clipped therefore fails to match and yields a CONSERVATIVE `log-incomplete` — never a
+  # false clean bill, which is the only direction that would matter.
   local evf; evf="$("$COMMS" root 2>/dev/null)/events.tsv"
-  awk -F'\t' -v th="$RUN_THREAD" -v t0="${STARTED_AT:-}" \
-      '$3=="reply-accepted" && $6==th && (t0=="" || $1>=t0)' "$evf" 2>/dev/null | grep -q . \
+  awk -F'\t' -v rq="$RUN_MID" -v dp="$RUN_DISPATCH" -v t0="${STARTED_AT:-}" \
+      '$3=="reply-accepted" && $11==rq && $5==dp && (t0=="" || $1>=t0)' "$evf" 2>/dev/null | grep -q . \
     || LOG_INCOMPLETE=1
   return 0
 }

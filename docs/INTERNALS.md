@@ -260,6 +260,12 @@ a run dir the driver may never open. A driver that died between the ACP turn exi
 
 Four decisions are load-bearing, and each one was argued down from something worse:
 
+**The accessor never exits; only its two fail-closed callers do.** `events append` reports a
+refusal and RETURNS non-zero. It used to `die`, which is `exit` — so an unsound filesystem
+would have taken down whatever process was appending, including a `cmd_send` in the middle of
+delivering a reply, quietly converting the advisory half of the policy into the fail-closed
+half.
+
 **Fail-closed exactly twice, where refusing changes nothing.** `panel-planned` (the roster,
 before any leg is sent) and `request-persisted` (after the request validates, before
 anything is nudged) both `die` on failure: a roster or a request nobody could record is a
@@ -278,10 +284,14 @@ failure.
 
 **No lock; constrain, then detect.** A single small `printf` append is one flushed write on a
 local filesystem — small matters literally: stdio's buffer is 1024 bytes on macOS, so the row
-cap is what keeps one row from becoming two `write(2)`s. That is a property of the platform,
-not a POSIX guarantee, and NFS documents the opposite, so the constraint is ENFORCED rather
-than assumed: `events append` refuses to create the log on a network or unclassifiable
-filesystem. Refusing beats warning here because NFS's failure mode is a LOST append, which
+cap (newline included) is what keeps one row from becoming two `write(2)`s. That is a property
+of the platform, not a POSIX guarantee, and NFS documents the opposite, so the constraint is
+ENFORCED rather than assumed: **every** append classifies the filesystem of the actual append
+target, by TYPE against an allowlist of known-local ones, and refuses anything else. An
+allowlist rather than a blacklist of remote-looking names, because a network FUSE mount
+(`s3fs`, `gcsfuse`, an rclone `remote:bucket`) looks nothing like `host:/export` and is exactly
+as unsafe; checking only at creation was worse still, since a `.comms` that later migrates onto
+network storage would append unchecked for the rest of its life. Refusing beats warning here because NFS's failure mode is a LOST append, which
 leaves a perfectly well-formed file with an event missing — nothing downstream could ever
 detect it. What detection does cover is the torn-row case: the reader validates each row
 whole (full ISO timestamp, exact column count, a kind from the closed vocabulary) and reports
@@ -291,10 +301,12 @@ rejected for the reason the presence work already established — a dead holder 
 **A turn will not sign off clean over a hole in its own trace.** Runner-side appends are
 advisory, so one can be lost; "absence means unknown" covers a gap, but it cannot excuse a
 terminal row that positively claims `completed` while the acceptance before it is missing.
-The runner watches for the warning `send` emits when its advisory append fails and, having
-seen it, writes `turn-finished log-incomplete`. That signal is read from `runner.log` rather
-than by looking the row up by id — an id lookup would have to match a column the writer is
-allowed to clip, which would invent losses that never happened.
+After delivering, the runner looks in the LOG for the acceptance of THIS turn — joined on the
+request id and the dispatch attempt, not on the thread, because two overlapping turns of one
+leg thread would otherwise let the later one adopt the earlier one's acceptance and sign off
+clean. Not finding it, the runner writes `turn-finished log-incomplete`. Both joined columns
+are clippable, so an identifier long enough to be clipped degrades to a conservative
+`log-incomplete` — never to a false clean bill, which is the only direction that would matter.
 
 **Not authoritative against a hostile child, and it says so.** A mounted review turn reaches
 the real `.comms` through this same helper, so it can forge events until step 3's criterion 2
