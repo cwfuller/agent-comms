@@ -5893,6 +5893,7 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
   rm -f "$WM_KT"/.claim.* 2>/dev/null
   printf 'pid=1\nfmt=v2\nstart=STALE\nrun=unreadable\n' > "$WM_KT/.claim.0"
   chmod 000 "$WM_KT/.claim.0" 2>/dev/null
+  WM_UNREADABLE_STAGED=1
   : > "$WM/cwd.log"; WM_DU="$(wm_turn wm-tomb wmU1 "$WM_A1")"
   chmod 644 "$WM_KT/.claim.0" 2>/dev/null
   if [ "$(wm_status "$WM_DU")" = "failed" ] \
@@ -5904,6 +5905,27 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
   rm -f "$WM_KT"/.claim.* 2>/dev/null
 else
   fail "could not stage the claim-name-reuse fixture"
+fi
+
+# A claim TRUNCATED by the previous release scheme carries no marker. Refusing it wedges every
+# mount an older helper released -- the same upgrade break as a missing `.state.home`, and it
+# refused every leg of this loop's own panel before this case was added. An unverified read
+# still refuses; only a zero-byte file whose read SUCCEEDED is treated as a legacy tombstone.
+if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
+  rm -f "$WM_KT"/.claim.* 2>/dev/null
+  : > "$WM_KT/.claim.0"
+  : > "$WM/cwd.log"; WM_DLG="$(wm_turn wm-tomb wmLG "$WM_A1")"
+  [ "$(wm_status "$WM_DLG")" = "completed" ] \
+    && ok "a claim truncated by an older release scheme is honoured, not a permanent wedge" \
+    || fail "a legacy truncated claim wedged the mount (status=$(wm_status "$WM_DLG"))"
+  # ...and a NON-empty claim with neither a pid nor a marker is still malformed, not free.
+  rm -f "$WM_KT"/.claim.* 2>/dev/null
+  printf 'garbage\n' > "$WM_KT/.claim.0"
+  : > "$WM/cwd.log"; WM_DMF="$(wm_turn wm-tomb wmMF "$WM_A1")"
+  [ "$(wm_status "$WM_DMF")" = "failed" ] \
+    && ok "a malformed claim with content but no runner still refuses" \
+    || fail "a malformed claim was treated as free (status=$(wm_status "$WM_DMF"))"
+  rm -f "$WM_KT"/.claim.* 2>/dev/null
 fi
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini

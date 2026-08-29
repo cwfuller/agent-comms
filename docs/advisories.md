@@ -393,3 +393,33 @@ because round 1 optimised for the wrong invariant.** What generalizes:
   took.** Three test scripts in this arc silently failed to contaminate anything because the
   shell had `noclobber`, and each still printed a verdict — twice a falsely reassuring one. That
   is the same class as a vacuous negative control.
+
+### Upgrade blindness: a suite cannot see state its own code did not write
+
+Three times in the `warm-acp-mount-32182` implement phase, new code REFUSED on-disk state
+written by its own predecessor, and each time it was found by the review loop breaking rather
+than by a test:
+
+- a mount record written before `.state.home` existed wedged every leg permanently;
+- `.claim`'s `start=` bytes changed rendering (`LC_TIME=C` local zone → `LC_ALL=C TZ=UTC`
+  stripped), so a still-live pre-upgrade holder read as a recycled pid;
+- a claim truncated by the old release scheme carried no `released=1` marker, so the new
+  reader treated it as malformed and refused.
+
+The cause is structural, not carelessness: **every fixture starts from state the current run
+just wrote**, so no assertion in the corpus has ever read a record produced by an older
+version. A green suite says nothing about upgrade, and the failure surfaces in production as a
+permanent refusal — the worst shape, because a refusal looks like the safety property working.
+
+What to do when a change alters a PERSISTED representation:
+
+- Treat "an older version wrote this" as a first-class input, and add the fixture for it in
+  the same commit. Writing the legacy form by hand into a kdir is two lines.
+- Version the record (`fmt=v2`) and make the reader's fallback for an unversioned record
+  *safe* rather than *refusing* — refuse only what is genuinely unverifiable.
+- Distinguish "absent" from "unverified". Three of this arc's blockers were the same mistake:
+  an empty field read as evidence when the read itself had not been checked. Check the read's
+  status separately, then an empty value is a fact rather than a guess.
+- Ask what a REFUSAL costs. Fail-closed is right when the alternative is silent corruption,
+  and wrong when the alternative is a turn that would have been correct — a wedge that only an
+  operator can clear is not automatically the safe choice.

@@ -1123,9 +1123,21 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
       fi
       continue
     fi
+    # A ZERO-BYTE claim whose read SUCCEEDED is a tombstone written by the previous release
+    # scheme, which truncated instead of writing a marker. The property codex asked for is
+    # that an UNVERIFIED read never reads as free — and that is upheld above, where a failed
+    # read refuses before we get here. Refusing an empty file as well would wedge every mount
+    # released by an older helper, which is the same upgrade break as the missing
+    # `.state.home` field. (Caught live: it refused every leg of this loop's own panel.)
+    if [ -z "$hp" ] && [ ! -s "$held" ]; then
+      if ln "$stage" "$kdir/.claim.$(( n + 1 ))" 2>/dev/null; then
+        rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$kdir/.claim.$(( n + 1 ))"; return 0
+      fi
+      continue
+    fi
     if [ -z "$hp" ]; then
       rm -f "$stage" 2>/dev/null || true
-      MOUNT_CLAIM_NOTE="the claim at $held names no runner and carries no release marker; refusing rather than assuming it is free"
+      MOUNT_CLAIM_NOTE="the claim at $held has content but names no runner and carries no release marker; refusing rather than assuming it is free"
       return 1
     fi
     # NOT in a command substitution -- see proc_state's contract.
@@ -1247,6 +1259,13 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   # RECOVER A PENDING GENERATION FIRST. `.state.pending` names a temp path that
   # `worktree add` may have registered before the runner died; without this it stays
   # registered forever and leaks an admin dir per crash.
+  # Reap abandoned asides. Each is a FULL CHECKOUT of the artifact, kept only so a live cwd
+  # holder from the previous round can keep writing somewhere harmless; once nothing can still
+  # be holding one, it is pure disk. Observed in production at six per mount before this.
+  # Age-based and best-effort: never a restage gate, and never touching one young enough to
+  # still have a holder.
+  find "$kdir" -maxdepth 1 -type d -name '.aside.*' -mmin +120 -exec rm -rf {} + 2>/dev/null || true
+
   pend="$(mount_state_get "$kdir" pending)"
   if [ -n "$pend" ]; then
     case "$pend" in
