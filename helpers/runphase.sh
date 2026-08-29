@@ -986,13 +986,22 @@ mount_state_put() {  # <kdir> <key> <value>
   printf '%s\n' "$val" > "$kdir/.state.$key.tmp.$$" 2>/dev/null || return 1
   mv -f "$kdir/.state.$key.tmp.$$" "$kdir/.state.$key" 2>/dev/null || return 1
 }
-mount_state_get() {  # <kdir> <key> -> 0 value | 1 genuinely absent | 2 present but unreadable
-  # ABSENT and UNVERIFIED are different facts. Flattening them is how an unreadable
-  # `.state.record` read as "no turn has ever run here" and licensed a restage under a live
-  # queue owner — the same mistake as an empty claim reading as released.
-  local f="$1/.state.$2"
-  [ -e "$f" ] || return 1
-  cat "$f" 2>/dev/null || return 2
+mount_state_get() {  # <kdir> <key> -> 0 value | 1 genuinely absent | 2 present but unusable
+  # ABSENT and UNVERIFIED are different facts, and only rc=1 may carry "no turn has ever run
+  # here" — that meaning licenses skipping the queue-owner check, so anything short of a
+  # readable, non-empty, regular file must be rc=2 and degrade instead.
+  #
+  # Each guard below is a way the earlier version answered "absent" about something present:
+  #   -e follows symlinks, so a DANGLING symlink read as absent;
+  #   a symlink to /dev/null read as present-and-empty, i.e. a first turn;
+  #   a fifo or directory would block or fail in ways `cat` alone does not distinguish;
+  #   a zero-byte file is unverified, not evidence that nothing was ever written.
+  local f="$1/.state.$2" v
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then return 1; fi
+  [ -f "$f" ] && [ ! -L "$f" ] || return 2
+  v="$(cat "$f" 2>/dev/null)" || return 2
+  [ -n "$v" ] || return 2
+  printf '%s' "$v"
 }
 
 # The CONTAINER is as attackable as the mount itself. `mkdir -p` succeeds through a
@@ -1618,6 +1627,21 @@ cmd_run() {
         mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
         st_record=""
       fi
+      # A structurally wrong id hashes to a lease path that cannot exist, which would report
+      # "owner gone" about a store we never addressed. acpx record ids are hex-and-dash.
+      # Reject only what cannot be a usable id: empty, or carrying characters that would make
+      # the derived lease path meaningless or hostile. NOT a hex/UUID test -- acpx's id format
+      # is its own business, and assuming it made every non-UUID id degrade, which took out
+      # every durable mount in the suite at once.
+      case "$st_record" in
+        *[!A-Za-z0-9._-]*)
+          if [ -n "$st_record" ]; then
+            echo "mount: .state.record is not a well-formed acpx id; degrading rather than probing a lease path derived from it" >>"$run_dir/runner.log"
+            mount_claim_release
+            mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
+            st_record=""
+          fi ;;
+      esac
       st_rc=0; st_home="$(mount_state_get "$mount_kdir" home)" || st_rc=$?
       [ "$st_rc" = 2 ] && st_home=""
       if [ -n "${mount_durable:-}" ]; then

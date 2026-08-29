@@ -5507,6 +5507,17 @@ wm_turn() { # <thread> <tag> <artifact> [extra env assignments...]
 wm_prompt_cwds() { # cwds of the PROMPT invocations only (not `sessions ensure`/`show`)
   awk -F'\t' '$2 !~ /sessions (ensure|show)/ {print $1}' "$WM/cwd.log" 2>/dev/null
 }
+# Deriving a kdir from a cwd that was never recorded yields "" and then `dirname` yields ".",
+# and every subsequent rm/printf lands in the REPO ROOT. One such run left .state.pending and
+# an ma-repo symlink in this checkout. Refuse to hand back anything but a real mount dir.
+wm_kdir_of() {  # <cwd> -> the ident dir, or empty if the cwd is not a mount
+  local c="$1" d
+  case "$c" in ''|.|./*|.) printf ''; return 1 ;; esac
+  d="$(dirname "$c")"
+  case "$d" in ''|.|/) printf ''; return 1 ;; esac
+  [ -d "$d" ] || { printf ''; return 1; }
+  printf '%s' "$d"
+}
 wm_status() { sed -n 's/.*"status": "\([a-z]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
 
 printf 'VERDICT: APPROVE\n\n## Summary\nstub\n\n### Blocking\n- None.\n' > "$AXD/payload"
@@ -5669,7 +5680,7 @@ fi
 
 # The ident includes the AGENT, so one thread reviewed by two providers cannot share a
 # worktree. `shadow` does exactly this, concurrently, by design.
-WM_IDENT_G="$(basename "$(dirname "$WM_C9")")"
+WM_IDENT_G="$(basename "$(wm_kdir_of "$WM_C9" || echo /none)")"
 case "$WM_IDENT_G" in
   *-grok) ok "the mount ident carries the reviewing agent, so two providers cannot share one" ;;
   *) fail "the mount ident does not name the agent ($WM_IDENT_G)" ;;
@@ -5677,7 +5688,7 @@ esac
 
 # CRASH WINDOW 1 — interrupted after `worktree add`, before the admin id was recorded.
 # `.state.pending` names a registered temp worktree; without recovery it leaks forever.
-WM_KDIR="$(dirname "$WM_C9")"
+WM_KDIR="$(wm_kdir_of "$WM_C9" || true)"
 git -C "$MA_FIX" worktree add --detach --quiet "$WM_KDIR/.new.crash1" "$WM_HEAD" 2>/dev/null
 printf '%s\n' "$WM_KDIR/.new.crash1" > "$WM_KDIR/.state.pending"
 : > "$WM/cwd.log"; WM_D10="$(wm_turn wm-seq wm10 "$WM_A1")"
@@ -5770,7 +5781,7 @@ rm -f "$WM_HOME/.acpx/queues/$WM_LEASE_HASH.lock"
 # there is an UPGRADE failure, not a safety property -- and it is not hypothetical: it
 # refused every leg of a live review panel on an existing thread before this fallback
 # landed. The suite had no assertion for it because every fixture starts from an empty kdir.
-WM_KDIR16="$(dirname "$(awk -F'\t' '$2 !~ /sessions (ensure|show)/ {print $1}' "$WM/cwd.log" | sed -n 1p)")"
+WM_KDIR16="$(wm_kdir_of "$(wm_prompt_cwds | sed -n 1p)" || true)"
 if [ -n "$WM_KDIR16" ] && [ -f "$WM_KDIR16/.state.record" ]; then
   rm -f "$WM_KDIR16/.state.home"
   : > "$WM/cwd.log"; WM_D17="$(wm_turn wm-lease wm17 "$WM_A1" HOME="$WM_HOME")"
@@ -5808,7 +5819,7 @@ fi
 # Self-contained: derive the ident dir from a turn on THIS thread rather than reusing another
 # test's, or the stale claim is seeded somewhere the racers never look.
 : > "$WM/cwd.log"; WM_DR0="$(wm_turn wm-race wmR0 "$WM_A1")"
-WM_KR="$(dirname "$(wm_prompt_cwds | sed -n 1p)")"
+WM_KR="$(wm_kdir_of "$(wm_prompt_cwds | sed -n 1p)" || true)"
 if [ -n "$WM_KR" ] && [ -d "$WM_KR" ] && [ "$(wm_status "$WM_DR0")" = "completed" ]; then
   rm -f "$WM_KR"/.claim.* 2>/dev/null
   ( exec true ) & WM_DEADPID=$!; wait "$WM_DEADPID" 2>/dev/null
@@ -5858,7 +5869,7 @@ fi
 # contender that read the old holder's fields and paused could wake after a NEW holder had
 # taken the same pathname, judge its CACHED pid dead, and advance -- two owners at once.
 : > "$WM/cwd.log"; WM_DT1="$(wm_turn wm-tomb wmT1 "$WM_A1")"
-WM_KT="$(dirname "$(wm_prompt_cwds | sed -n 1p)")"
+WM_KT="$(wm_kdir_of "$(wm_prompt_cwds | sed -n 1p)" || true)"
 : > "$WM/cwd.log"; WM_DT2="$(wm_turn wm-tomb wmT2 "$WM_A1")"
 # The tombstone is an EXPLICIT marker, not an empty file: emptiness reads the same whether a
 # holder released or the read failed, which is what let a contender advance past a live claim.
@@ -5942,6 +5953,30 @@ if [ -n "$WM_KT" ] && [ -f "$WM_KT/.state.record" ]; then
   else
     fail "an unreadable state record was treated as absent (status=$(wm_status "$WM_DSR") cwd=$WM_CSR)"
   fi
+fi
+
+# Only a GENUINELY ABSENT state record may mean "no turn has ever run here" -- that meaning
+# licenses skipping the queue-owner check. Present-but-empty and a dangling symlink both
+# looked absent to the earlier reader, so both permitted a stable restage under a possibly
+# live owner. Each must degrade to the per-message path instead.
+if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
+  for wmcase in empty dangling malformed; do
+    rm -f "$WM_KT/.state.record" 2>/dev/null
+    case "$wmcase" in
+      empty)     : > "$WM_KT/.state.record" ;;
+      dangling)  ln -s "$WM_KT/.no-such-target" "$WM_KT/.state.record" ;;
+      malformed) printf 'not a valid id!!\n' > "$WM_KT/.state.record" ;;
+    esac
+    : > "$WM/cwd.log"; WM_DSX="$(wm_turn wm-tomb "wmSX$wmcase" "$WM_A1")"
+    WM_CSX="$(wm_prompt_cwds | sed -n 1p)"
+    if [ "$(wm_status "$WM_DSX")" = "completed" ] \
+       && [ "$WM_CSX" = "$(cd "$WM/run-wmSX$wmcase" && pwd -P)/tree" ]; then
+      ok "a $wmcase state record degrades instead of reading as a first turn"
+    else
+      fail "a $wmcase state record permitted a stable restage (status=$(wm_status "$WM_DSX") cwd=$WM_CSX)"
+    fi
+  done
+  rm -f "$WM_KT/.state.record" 2>/dev/null
 fi
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini
