@@ -6108,13 +6108,19 @@ grep -q 'SECTION_GOLDEN="\$(git' "$REPO/tests/run.sh" \
 # The vector is KEYED on the banner and compared sorted, so two sections sharing a banner
 # collide silently — swap their counts and it still sorts identically. The dispatcher will
 # key on this too. None today; assert it before that becomes load-bearing. (codex + grok.)
-SEC_DUPS="$(grep '^section "' "$REPO/tests/run.sh" | sort | uniq -d | head -3)"
+# Extract the banner TEXT, not the whole line: the coming wrap indents these calls into
+# function bodies, and a whole-line comparison would then match nothing and pass vacuously
+# at exactly the moment the dispatcher starts keying on them. (grok, suite-lanes r3.)
+SEC_DUPS="$(sed -n 's/^[[:space:]]*section "\(.*\)".*$/\1/p' "$REPO/tests/run.sh" | sort | uniq -d | head -3)"
 [ -z "$SEC_DUPS" ] && ok "every section banner is unique" || fail "duplicate section banners: $SEC_DUPS"
 [ "$(cut -f1 "$REPO/tests/section-counts.tsv" | sort -u | wc -l | tr -d ' ')" = "$(wc -l < "$REPO/tests/section-counts.tsv" | tr -d ' ')" ] \
   && ok "the committed vector has no duplicate keys" || fail "the per-section vector has duplicate banner keys"
 # A failing assertion must keep its section's covered count whole, or the vector reports a
 # phantom move on top of the real failure. (grok, suite-lanes r2.)
-( SEC_NAME="probe-f"; SEC_PASS=6; SEC_FAIL=2; SEC_SKIP=0; SECTION_VECTOR="$WORK/fv-fail"; _flush_section )
+( SEC_NAME="probe-f"; SEC_PASS=0; SEC_FAIL=0; SEC_SKIP=0; SECTION_VECTOR="$WORK/fv-fail"
+  i=0; while [ "$i" -lt 6 ]; do ok "probe pass" >/dev/null; i=$((i+1)); done
+  i=0; while [ "$i" -lt 2 ]; do fail "probe fail" 2>/dev/null; i=$((i+1)); done
+  _flush_section )
 [ "$(cat "$WORK/fv-fail" 2>/dev/null)" = "$(printf 'probe-f\t8')" ] \
   && ok "a failed assertion still counts toward its section's covered total" \
   || fail "fail() is missing from the section row: [$(cat "$WORK/fv-fail" 2>/dev/null)]"
@@ -6126,8 +6132,17 @@ SEC_DUPS="$(grep '^section "' "$REPO/tests/run.sh" | sort | uniq -d | head -3)"
 # pass and skip as separate columns made every such host red at full coverage — which is
 # precisely the machine-dependence the skip contract exists to prevent, rebuilt one layer
 # down. (codex + grok, suite-lanes r1, blocking.)
-( SEC_NAME="probe-sec"; SEC_PASS=7; SEC_SKIP=1; SECTION_VECTOR="$WORK/fv-skip"; _flush_section )
-( SEC_NAME="probe-sec"; SEC_PASS=8; SEC_SKIP=0; SECTION_VECTOR="$WORK/fv-pass"; _flush_section )
+# The probes drive the REAL counters through ok/skip/fail rather than assigning them, so a
+# revert of the increment inside any of those functions fails here. All three counters are
+# zeroed explicitly, or the probe inherits whatever the harness section already recorded.
+# (grok, suite-lanes r3.)
+( SEC_NAME="probe-sec"; SEC_PASS=0; SEC_FAIL=0; SEC_SKIP=0; SKIP_USED=" "; SECTION_VECTOR="$WORK/fv-skip"
+  i=0; while [ "$i" -lt 7 ]; do ok "probe pass" >/dev/null; i=$((i+1)); done
+  ACL_PROBE_OK=0; skip acl-report "probe skip" >/dev/null 2>&1
+  _flush_section )
+( SEC_NAME="probe-sec"; SEC_PASS=0; SEC_FAIL=0; SEC_SKIP=0; SECTION_VECTOR="$WORK/fv-pass"
+  i=0; while [ "$i" -lt 8 ]; do ok "probe pass" >/dev/null; i=$((i+1)); done
+  _flush_section )
 [ "$(cat "$WORK/fv-skip" 2>/dev/null)" = "$(cat "$WORK/fv-pass" 2>/dev/null)" ] \
   && ok "a permitted skip and the pass it replaced produce the same vector row" \
   || fail "pass/skip split leaks into the vector: [$(cat "$WORK/fv-skip" 2>/dev/null)] vs [$(cat "$WORK/fv-pass" 2>/dev/null)]"
