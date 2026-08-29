@@ -5830,6 +5830,43 @@ else
   fail "could not stage the claim-race fixture (kdir=$WM_KR status=$(wm_status "$WM_DR0"))"
 fi
 
+# A LIVE holder must survive a contender that started in a DIFFERENT wall-clock second. The
+# recycle guard reads the holder's start time; a version of it that compared the CONTENDER's
+# own start instead declared every live peer recycled and granted the mount twice. The earlier
+# race fixture could not see that, because starting both contenders together makes `ps
+# lstart`'s one-second granularity render the two values identical.
+if [ -n "$WM_KR" ] && [ -d "$WM_KR" ]; then
+  rm -f "$WM_KR"/.claim.* 2>/dev/null
+  sleep 45 & WM_LIVE=$!
+  WM_LSTART="$(LC_ALL=C TZ=UTC ps -p "$WM_LIVE" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ *//; s/ *$//')"
+  printf 'pid=%s\nfmt=v2\nstart=%s\nrun=live-holder\n' "$WM_LIVE" "$WM_LSTART" > "$WM_KR/.claim.0"
+  sleep 1.2
+  : > "$WM/cwd.log"; WM_DL="$(wm_turn wm-race wmL1 "$WM_A1")"
+  if [ "$(wm_status "$WM_DL")" = "failed" ] \
+     && grep -q 'held by runner pid' "$WM_DL/result.json" 2>/dev/null; then
+    ok "a live claim holder is not reclaimed by a contender that started a second later"
+  else
+    fail "a live claim holder was reclaimed (status=$(wm_status "$WM_DL"))"
+  fi
+  kill "$WM_LIVE" 2>/dev/null; wait "$WM_LIVE" 2>/dev/null
+  rm -f "$WM_KR"/.claim.* 2>/dev/null
+else
+  fail "could not stage the live-holder fixture"
+fi
+
+# Releasing must TOMBSTONE rather than unlink, or the generation is rewindable by ABA: a
+# contender that read the old holder's fields and paused could wake after a NEW holder had
+# taken the same pathname, judge its CACHED pid dead, and advance -- two owners at once.
+: > "$WM/cwd.log"; WM_DT1="$(wm_turn wm-tomb wmT1 "$WM_A1")"
+WM_KT="$(dirname "$(wm_prompt_cwds | sed -n 1p)")"
+: > "$WM/cwd.log"; WM_DT2="$(wm_turn wm-tomb wmT2 "$WM_A1")"
+if [ -n "$WM_KT" ] && [ -e "$WM_KT/.claim.0" ] && [ ! -s "$WM_KT/.claim.0" ] \
+   && [ -e "$WM_KT/.claim.1" ]; then
+  ok "a released claim is tombstoned, so its generation name is never reused"
+else
+  fail "a released claim name was freed for reuse (kdir=$WM_KT: $(ls -A "$WM_KT" 2>/dev/null | tr '\n' ' '))"
+fi
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 

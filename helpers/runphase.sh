@@ -1007,20 +1007,22 @@ mount_state_get() {  # <kdir> <key>
 # without /proc) would otherwise read as positive proof of absence and reclaim a LIVE holder.
 # Only an exit of 1 with NOTHING on stdout AND NOTHING on stderr is absence; anything else
 # that is not a clean success is ambiguous and never licenses a reclaim.
-PROC_START=""
-proc_state() {  # <pid> -> echoes live|dead|ambig, sets PROC_START on live
-  PROC_START=""
+PROC_START=""; PROC_STATE=""
+proc_state() {  # <pid> -> sets PROC_STATE (live|dead|ambig) and PROC_START. NEVER call this
+                # in a command substitution: the globals would be set in a subshell and the
+                # caller would silently keep its own previous values.
+  PROC_START=""; PROC_STATE="ambig"
   local pid="${1:-}" out err rc=0 errf
-  case "$pid" in ''|*[!0-9]*) printf 'ambig'; return 0 ;; esac
-  errf="$(mktemp 2>/dev/null)" || { printf 'ambig'; return 0; }
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  errf="$(mktemp 2>/dev/null)" || return 0
   out="$(LC_ALL=C TZ=UTC ps -p "$pid" -o lstart= 2>"$errf")" || rc=$?
   err="$(cat "$errf" 2>/dev/null)"; rm -f "$errf" 2>/dev/null || true
   if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
     PROC_START="$(printf '%s' "$out" | tr -s ' ' | sed 's/^ *//; s/ *$//')"
-    printf 'live'; return 0
+    PROC_STATE="live"; return 0
   fi
-  if [ "$rc" -eq 1 ] && [ -z "$out" ] && [ -z "$err" ]; then printf 'dead'; return 0; fi
-  printf 'ambig'
+  if [ "$rc" -eq 1 ] && [ -z "$out" ] && [ -z "$err" ]; then PROC_STATE="dead"; return 0; fi
+  return 0
 }
 
 mount_container() {  # <mounts root> <ident> -> physical container path, or non-zero
@@ -1065,7 +1067,7 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
     # written by an older helper in a different locale/zone, so its `start=` bytes are not
     # comparable with ours — see the reclaim guard below.
     printf 'fmt=v2\n'
-    proc_state "$$" >/dev/null; printf 'start=%s\n' "$PROC_START"
+    proc_state "$$"; printf 'start=%s\n' "$PROC_START"
     printf 'run=%s\n' "$rd"
   } > "$stage" 2>/dev/null || { rm -f "$stage" 2>/dev/null || true; MOUNT_CLAIM_NOTE="cannot write a claim beside $kdir"; return 1; }
 
@@ -1099,13 +1101,21 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
     hs="$(sed -n 's/^start=//p' "$held" 2>/dev/null | head -1)"
     hfmt="$(sed -n 's/^fmt=//p' "$held" 2>/dev/null | head -1)"
     if [ ! -e "$held" ]; then continue; fi        # raced away underneath us; re-derive
-    local st; st="$(proc_state "${hp:-}")"
-    local dead=0
+    if [ -z "$hp" ]; then                        # tombstone: released, name kept reserved
+      if ln "$stage" "$kdir/.claim.$(( n + 1 ))" 2>/dev/null; then
+        rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$kdir/.claim.$(( n + 1 ))"; return 0
+      fi
+      continue
+    fi
+    # NOT in a command substitution -- see proc_state's contract.
+    proc_state "${hp:-}"
+    local st="$PROC_STATE" hstart="$PROC_START" dead=0
     [ "$st" = dead ] && dead=1
     # A live pid whose start differs from the record is a RECYCLED number, not our holder --
-    # but only when the holder wrote its start in our format.
-    [ "$st" = live ] && [ "$hfmt" = v2 ] && [ -n "$hs" ] && [ -n "$PROC_START" ] \
-      && [ "$PROC_START" != "$hs" ] && dead=1
+    # but only when the holder wrote its start in our format, and only when we actually read
+    # THAT pid's start time rather than our own.
+    [ "$st" = live ] && [ "$hfmt" = v2 ] && [ -n "$hs" ] && [ -n "$hstart" ] \
+      && [ "$hstart" != "$hs" ] && dead=1
     if [ "$dead" = 0 ]; then
       rm -f "$stage" 2>/dev/null || true
       MOUNT_CLAIM_NOTE="the mount at $kdir is held by runner pid ${hp:-<unknown>} (run $(sed -n 's/^run=//p' "$held" 2>/dev/null | head -1), liveness=$st); if no runner is really alive, clear it with: rm -f '$held'"
@@ -1130,8 +1140,15 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
 }
 
 mount_claim_release() {
+  # TOMBSTONE, never unlink. Freeing the pathname makes the generation rewindable by ABA: a
+  # contender that read the old holder's fields and paused can wake after a NEW holder has
+  # taken the same name, judge its CACHED pid dead, and advance -- granting one mount twice.
+  # A truncated claim carries no `pid=`, which adjudicates as dead, so the next taker moves
+  # to the next generation instead of reusing this one.
   [ -n "${MOUNT_HOLDER:-}" ] || return 0
-  grep -qx "pid=$$" "$MOUNT_HOLDER" 2>/dev/null && rm -f "$MOUNT_HOLDER" 2>/dev/null
+  if grep -qx "pid=$$" "$MOUNT_HOLDER" 2>/dev/null; then
+    : > "$MOUNT_HOLDER" 2>/dev/null || rm -f "$MOUNT_HOLDER" 2>/dev/null || true
+  fi
   MOUNT_HOLDER=""; return 0
 }
 
@@ -1170,11 +1187,9 @@ mount_owner_wait() {  # <acpx record id> <owner home> <deadline secs> -> 0 gone 
   # all, which is the case where acpx would have fallen back to an account home this code
   # cannot name. (Caught live: this refused every panel leg on an existing thread.)
   if [ -z "$ohome" ]; then
-    # Adopt the current home ONLY if this record actually lives in its store. acpx writes
-    # sessions/<id>.json under the home it ran in, so its presence is proof that the store
-    # we are about to probe is the one that owns this record. Without that check the
-    # fallback is fail-open across a legitimate home change: we would probe the wrong
-    # store, see no lease, and restage under a live owner.
+    # NO FALLBACK. A record file proves a store holds a COPY, not that it owns the live
+    # queue, so there is nothing here that can establish ownership: the caller degrades to
+    # the disposable path instead of rebuilding a mount whose owner it cannot locate.
     MOUNT_WAIT_NOTE="the previous ACP owner's home was not recorded, so which store holds its queue lease cannot be established"
     return 2
   fi
