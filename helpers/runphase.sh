@@ -986,8 +986,13 @@ mount_state_put() {  # <kdir> <key> <value>
   printf '%s\n' "$val" > "$kdir/.state.$key.tmp.$$" 2>/dev/null || return 1
   mv -f "$kdir/.state.$key.tmp.$$" "$kdir/.state.$key" 2>/dev/null || return 1
 }
-mount_state_get() {  # <kdir> <key>
-  cat "$1/.state.$2" 2>/dev/null || true
+mount_state_get() {  # <kdir> <key> -> 0 value | 1 genuinely absent | 2 present but unreadable
+  # ABSENT and UNVERIFIED are different facts. Flattening them is how an unreadable
+  # `.state.record` read as "no turn has ever run here" and licensed a restage under a live
+  # queue owner — the same mistake as an empty claim reading as released.
+  local f="$1/.state.$2"
+  [ -e "$f" ] || return 1
+  cat "$f" 2>/dev/null || return 2
 }
 
 # The CONTAINER is as attackable as the mount itself. `mkdir -p` succeeds through a
@@ -1075,11 +1080,12 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
   # below and would otherwise accumulate without bound.
   # -mmin, not -newermt: the latter is a GNU extension and is rejected by BSD find and bfs.
   find "$kdir" -maxdepth 1 -name '.claim.stage.*' -mmin +60 -exec rm -f {} + 2>/dev/null || true
-  # Numeric claims are reaped ONLY by age, never by generation. Freeing a name a delayed
-  # contender may still target is the ABA that lets two runners own one mount, and a
-  # contender derives its target from the max it read, not from the max that exists now.
-  # A day is far beyond any turn; growth until then is one small file per generation.
-  find "$kdir" -maxdepth 1 -name '.claim.[0-9]*' -mmin +1440 -exec rm -f {} + 2>/dev/null || true
+  # NUMERIC CLAIMS ARE NEVER DELETED HERE. Age is not a bound on a delayed contender: a
+  # runner suspended (SIGSTOP, D-state, a raised budget) past any horizon still derives its
+  # target from the max it READ, so freeing a name — at any age — reopens the ABA where two
+  # runners own one mount. The cost is one ~40-byte file per generation, and a generation
+  # advances only on a release or a reclaim, so this grows with turns and not with time.
+  # Reaping them, if it is ever wanted, belongs out of band with the mount identity retired.
 
   while [ "$tries" -lt 8 ]; do
     tries=$(( tries + 1 ))
@@ -1262,11 +1268,18 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   # Reap abandoned asides. Each is a FULL CHECKOUT of the artifact, kept only so a live cwd
   # holder from the previous round can keep writing somewhere harmless; once nothing can still
   # be holding one, it is pure disk. Observed in production at six per mount before this.
-  # Age-based and best-effort: never a restage gate, and never touching one young enough to
-  # still have a holder.
+  # This is a RETENTION POLICY, not evidence of quiescence: a detached descendant can outlive
+  # its owner indefinitely, so an aside older than the horizon may still be in use. The glob
+  # cannot match the live tree or follow a symlink, so a survivor is never aliased into the
+  # new mount — but it may lose the directory it was writing into. Best-effort, never a gate.
   find "$kdir" -maxdepth 1 -type d -name '.aside.*' -mmin +120 -exec rm -rf {} + 2>/dev/null || true
 
-  pend="$(mount_state_get "$kdir" pending)"
+  local st_rc=0
+  pend="$(mount_state_get "$kdir" pending)" || st_rc=$?
+  if [ "$st_rc" = 2 ]; then
+    echo "mount: .state.pending is present but unreadable — refusing rather than losing a pending generation" >>"$log"
+    return 1
+  fi
   if [ -n "$pend" ]; then
     case "$pend" in
       "$kdir"/.new.*)
@@ -1298,7 +1311,11 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   # DECIDE ON THE PREVIOUS ADMIN DIR **BEFORE** MOVING ANYTHING. Refusing after the move
   # would destroy the stable path and then decline to rebuild it, which wedges the leg on
   # exactly the crash this recovery exists for.
-  prev="$(mount_state_get "$kdir" admin)"
+  st_rc=0; prev="$(mount_state_get "$kdir" admin)" || st_rc=$?
+  if [ "$st_rc" = 2 ]; then
+    echo "mount: .state.admin is present but unreadable — refusing rather than orphaning an admin dir" >>"$log"
+    return 1
+  fi
   local prev_action=none
   if [ -n "$prev" ]; then
     case "$prev" in
@@ -1591,8 +1608,20 @@ cmd_run() {
       fi
       # The previous round's queue owner must be gone before its directory is rebuilt;
       # it exits on its own --ttl and we only observe the lease and socket vanishing.
-      local owner_rc=0
-      mount_owner_wait "$(mount_state_get "$mount_kdir" record)" "$(mount_state_get "$mount_kdir" home)" "${COMMS_RUNPHASE_OWNER_WAIT_SECS:-45}" || owner_rc=$?
+      local owner_rc=0 st_record="" st_home="" st_rc=0
+      st_record="$(mount_state_get "$mount_kdir" record)" || st_rc=$?
+      if [ "$st_rc" = 2 ]; then
+        # Present but unreadable: we cannot tell whether an owner exists, so this must not
+        # look like a first turn.
+        echo "mount: .state.record is present but unreadable; degrading rather than assuming no owner" >>"$run_dir/runner.log"
+        mount_claim_release
+        mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
+        st_record=""
+      fi
+      st_rc=0; st_home="$(mount_state_get "$mount_kdir" home)" || st_rc=$?
+      [ "$st_rc" = 2 ] && st_home=""
+      if [ -n "${mount_durable:-}" ]; then
+      mount_owner_wait "$st_record" "$st_home" "${COMMS_RUNPHASE_OWNER_WAIT_SECS:-45}" || owner_rc=$?
       case "$owner_rc" in
         0) : ;;
         2) # OWNERSHIP UNPROVABLE (a record written before the home field existed). Rebuilding
@@ -1612,6 +1641,7 @@ cmd_run() {
            trap - EXIT
            exit 1 ;;
       esac
+      fi
     else
       mount_kdir="$run_dir"
       mount_dir="$run_dir/tree"

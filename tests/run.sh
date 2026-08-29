@@ -5928,6 +5928,22 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
   rm -f "$WM_KT"/.claim.* 2>/dev/null
 fi
 
+# An UNREADABLE .state.record must not read as "no turn has ever run here". Flattening a read
+# failure into an absent value is what let a mount restage under a possibly-live queue owner;
+# the turn must degrade to the disposable path instead.
+if [ -n "$WM_KT" ] && [ -f "$WM_KT/.state.record" ]; then
+  chmod 000 "$WM_KT/.state.record" 2>/dev/null
+  : > "$WM/cwd.log"; WM_DSR="$(wm_turn wm-tomb wmSR "$WM_A1")"
+  WM_CSR="$(wm_prompt_cwds | sed -n 1p)"
+  chmod 644 "$WM_KT/.state.record" 2>/dev/null
+  if [ "$(wm_status "$WM_DSR")" = "completed" ] \
+     && [ "$WM_CSR" = "$(cd "$WM/run-wmSR" && pwd -P)/tree" ]; then
+    ok "an unreadable state record degrades instead of looking like a first turn"
+  else
+    fail "an unreadable state record was treated as absent (status=$(wm_status "$WM_DSR") cwd=$WM_CSR)"
+  fi
+fi
+
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
 
