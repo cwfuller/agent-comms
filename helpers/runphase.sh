@@ -1027,6 +1027,10 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
   local kdir="$1" rd="$2" stage="$1/.claim.stage.$$" held hp hs
   MOUNT_HOLDER=""; MOUNT_CLAIM_NOTE=""
   { printf 'pid=%s\n' "$$"
+    # v2 marks the proc_start (LC_ALL=C TZ=UTC, stripped) rendering. A claim without it was
+    # written by an older helper in a different locale/zone, so its `start=` bytes are not
+    # comparable with ours — see the reclaim guard below.
+    printf 'fmt=v2\n'
     printf 'start=%s\n' "$(proc_start "$$")"
     printf 'run=%s\n' "$rd"
   } > "$stage" 2>/dev/null || { MOUNT_CLAIM_NOTE="cannot write a claim beside $kdir"; return 1; }
@@ -1044,7 +1048,11 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
   # Reclaimable on POSITIVE proof of absence (ps exits 1 with empty stdout), OR when the
   # pid is live but its start time differs from the record — that is a RECYCLED number,
   # not our holder. A denied or unparseable ps stays ambiguous and never reclaims.
-  if [ -n "$hp" ] && [ -n "$hs" ] && [ "$rc" -eq 0 ] && [ -n "$now" ] && [ "$now" != "$hs" ]; then
+  local hfmt; hfmt="$(sed -n 's/^fmt=//p' "$held" 2>/dev/null | head -1)"
+  # Only compare start times when the holder recorded them in OUR format. A pre-upgrade
+  # holder's bytes differ for the same live process, and treating that as pid reuse would
+  # reclaim a mount out from under a runner that is still using it.
+  if [ "$hfmt" = v2 ] && [ -n "$hp" ] && [ -n "$hs" ] && [ "$rc" -eq 0 ] && [ -n "$now" ] && [ "$now" != "$hs" ]; then
     rm -f "$held" 2>/dev/null || true
     if ln "$stage" "$held" 2>/dev/null; then
       rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$held"; return 0
@@ -1101,8 +1109,18 @@ mount_owner_wait() {  # <acpx record id> <owner home> <deadline secs> -> 0 gone 
   # all, which is the case where acpx would have fallen back to an account home this code
   # cannot name. (Caught live: this refused every panel leg on an existing thread.)
   if [ -z "$ohome" ]; then
-    ohome="${HOME:-}"
-    [ -n "$ohome" ] && echo "mount: no recorded owner home; probing the current HOME" >&2
+    # Adopt the current home ONLY if this record actually lives in its store. acpx writes
+    # sessions/<id>.json under the home it ran in, so its presence is proof that the store
+    # we are about to probe is the one that owns this record. Without that check the
+    # fallback is fail-open across a legitimate home change: we would probe the wrong
+    # store, see no lease, and restage under a live owner.
+    if [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx/sessions/$id.json" ]; then
+      ohome="$HOME"
+      echo "mount: no recorded owner home; the record lives in the current store, probing it" >&2
+    else
+      MOUNT_WAIT_NOTE="the previous ACP owner's home was not recorded and this record is not in the current acpx store, so its queue lease cannot be located"
+      return 1
+    fi
   fi
   [ -n "$ohome" ] || { MOUNT_WAIT_NOTE="neither a recorded owner home nor \$HOME is set, so the queue lease cannot be located"; return 1; }
   lock="$ohome/.acpx/queues/$hh.lock"
@@ -1146,7 +1164,16 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
         rm -rf -- "$pend" 2>/dev/null || true
         # KEEP THE JOURNAL UNLESS THE RECLAIM IS PROVEN. Clearing it after a failed removal
         # discards the only handle on that registration, which then leaks permanently.
-        if [ -e "$pend" ] || mount_git -C "$mr" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $pend"; then
+        # `git worktree list | grep -q` conflates "git failed" with "no match" — under
+        # pipefail a failed producer makes the whole pipeline false, i.e. reads as ABSENT,
+        # and the journal is then cleared for a registration that may still exist.
+        local wl_out="" wl_ok=1
+        wl_out="$(mount_git -C "$mr" worktree list --porcelain 2>>"$log")" || wl_ok=0
+        if [ "$wl_ok" = 0 ]; then
+          echo "mount: could not enumerate worktrees to confirm the pending reclaim — refusing rather than discarding its record" >>"$log"
+          return 1
+        fi
+        if [ -e "$pend" ] || printf '%s\n' "$wl_out" | grep -qxF "worktree $pend"; then
           echo "mount: could not reclaim the pending generation at $pend — refusing rather than losing its record" >>"$log"
           return 1
         fi
@@ -1209,7 +1236,10 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   # reused, so its journal would never be replayed and an interrupt here would leak the
   # registration forever. The EXIT trap reads this.
   MOUNT_PENDING_TMP="$tmp"; MOUNT_PENDING_ROOT="$mr"
-  mount_git -C "$mr" worktree add --detach --quiet "$tmp" "$base" 2>>"$log" || { MOUNT_PENDING_TMP=""; return 2; }
+  # KEEP the handle on failure: `worktree add` can exit non-zero having already created the
+  # admin registration (an interrupted or failing checkout), and for an EPHEMERAL run the
+  # journal is never replayed, so the EXIT trap is the only thing left that can clean it.
+  mount_git -C "$mr" worktree add --detach --quiet "$tmp" "$base" 2>>"$log" || return 2
   adm="$(mount_git -C "$tmp" rev-parse --absolute-git-dir 2>/dev/null)" || {
     mount_git -C "$mr" worktree remove --force "$tmp" 2>/dev/null || true; return 2; }
   # The admin id must be DURABLE before the move: it is the only handle a later round has
@@ -1231,6 +1261,10 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   [ "$(cat "$mount/.git" 2>/dev/null)" = "gitdir: $adm" ] || { echo "mount: .git does not name our admin dir" >>"$log"; return 2; }
   [ "$(mount_git -C "$mr" worktree list --porcelain 2>/dev/null | grep -cxF "worktree $(cd "$mount" && pwd -P)")" = 1 ] \
     || { echo "mount: not registered exactly once" >>"$log"; return 2; }
+  # Positive evidence that a mount was STAGED, not merely that a turn ran. An operator reads
+  # this to tell a mounted turn from an unmounted one, and a test needs it to avoid asserting
+  # cleanup against a turn that never mounted in the first place.
+  echo "mount: staged artifact $art at $mount (admin ${adm##*/})" >>"$log"
   return 0
 }
 

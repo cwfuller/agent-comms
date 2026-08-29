@@ -3064,7 +3064,15 @@ if [ -n "${AX_CWD_LOG:-}" ]; then
 fi
 case " $* " in
   *" sessions ensure "*)
-    printf '%s\t(%s)\n' "${AX_RECORD_ID:-stub-record-1}" "${AX_ENSURE_STATE:-created}"; exit 0 ;;
+    # Real acpx PERSISTS the record under $HOME/.acpx/sessions/<id>.json, and runphase now
+    # uses that file's presence to prove a record belongs to the store it is about to probe
+    # for a queue lease. A stub that only printed an id would make every same-home legacy
+    # record look foreign, so model the write too.
+    ax_id="${AX_RECORD_ID:-stub-record-1}"
+    mkdir -p "${HOME:-/nonexistent}/.acpx/sessions" 2>/dev/null \
+      && printf '{ "acpx_record_id": "%s", "cwd": "%s" }\n' "$ax_id" "$(pwd -P)" \
+         > "${HOME}/.acpx/sessions/$ax_id.json" 2>/dev/null || true
+    printf '%s\t(%s)\n' "$ax_id" "${AX_ENSURE_STATE:-created}"; exit 0 ;;
   *" sessions show "*)
     printf 'name: stub\n'
     printf 'cwd: %s\n' "${AX_LIE_CWD:-$(pwd -P)}"
@@ -5723,8 +5731,8 @@ mkdir -p "$WM/run-wm13"
     --provider grok --timeout-secs 20 ) >/dev/null 2>&1
 # Count-in/count-out alone would also pass if the turn never mounted at all, so require
 # positive evidence that it DID mount before believing the cleanup.
-if ! grep -q 'tree' "$WM/run-wm13/runner.log" 2>/dev/null && [ ! -s "$WM/run-wm13/result.json" ]; then
-  fail "the non-ACP turn never ran, so its unmount assertion would be vacuous"
+if ! grep -q '^mount: staged artifact ' "$WM/run-wm13/runner.log" 2>/dev/null; then
+  fail "the non-ACP turn never STAGED a mount, so its unmount assertion would be vacuous"
 elif [ "$(ls "$MA_FIX/.git/worktrees" 2>/dev/null | wc -l | tr -d ' ')" = "$WM_ADM_BEFORE" ]; then
   ok "a non-ACP grok turn still unmounts and leaves no admin dir behind"
 else
@@ -5769,6 +5777,18 @@ if [ -n "$WM_KDIR16" ] && [ -f "$WM_KDIR16/.state.record" ]; then
   [ "$(wm_status "$WM_D17")" = "completed" ] \
     && ok "a record predating the owner-home field still runs instead of wedging on upgrade" \
     || fail "a legacy record with no recorded home wedged the mount (status=$(wm_status "$WM_D17"))"
+  # ...and the fallback must NOT adopt a store the record does not live in: probing the
+  # wrong queues would report "gone" and restage under a live owner. Point HOME at an empty
+  # store with no sessions/<id>.json and require a refusal.
+  rm -f "$WM_KDIR16/.state.home"
+  WM_HOME2="$WM/fakehome2"; mkdir -p "$WM_HOME2/.acpx/queues" "$WM_HOME2/.acpx/sessions"
+  : > "$WM/cwd.log"; WM_D18="$(wm_turn wm-lease wm18 "$WM_A1" HOME="$WM_HOME2")"
+  if [ "$(wm_status "$WM_D18")" = "failed" ] \
+     && [ "$(wm_prompt_cwds | awk 'END{print NR+0}')" = "0" ]; then
+    ok "a legacy record is not adopted into a store it does not live in"
+  else
+    fail "the home fallback adopted a foreign acpx store (status=$(wm_status "$WM_D18"))"
+  fi
 else
   fail "could not stage the legacy-record fixture (kdir=$WM_KDIR16)"
 fi
