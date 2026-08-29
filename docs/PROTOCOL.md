@@ -276,6 +276,11 @@ id — an empty column means "not a panel attempt", never "attempt unknown". `re
 binds a reply to the request it answers (`in-reply-to`); a re-send of the same request
 appends another `request-persisted`, and the LAST pair for that request id is the live one.
 
+One consequence of that, worth knowing before it looks like a bug: a self-send turn records
+no `dispatch` on its reply, and the runner's acceptance check joins on the reply id it minted,
+so a legacy self-send leg can finish `turn-finished log-incomplete` even though its reply
+arrived. Conservative by design — the arm is scheduled for deletion, not extension.
+
 Two exceptions to "every event of an attempt carries its `dispatch`", both deliberate: a
 bare `send` outside a panel has no attempt to name, and the legacy self-send arm copies
 `review_set` onto its reply but not `dispatch`, so its `reply-accepted` carries none. That

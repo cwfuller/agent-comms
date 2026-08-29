@@ -944,19 +944,20 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
   # review requests do, repeatedly — would mark a perfectly recorded turn incomplete.
   # (grok, implement r1.)
   #
-  # The match is (kind, REQUEST, attempt, written no earlier than this turn started).
-  # Thread alone was not enough: two overlapping turns on one leg thread — a re-send, a
-  # shadow beside the gating leg — let the later runner find the EARLIER turn's acceptance
-  # and sign off `completed` having recorded nothing of its own. The request id is the
-  # inbound's message_id, which is what `cmd_send` stamps on the reply's acceptance from
-  # `in-reply-to`, so it identifies this turn and no other. (codex + grok, implement r2.)
+  # The match is THIS REPLY's own id. Request-plus-attempt was still not unique: a re-send
+  # of one request under one dispatch runs the turn twice, both executions carry the same
+  # request id and the same attempt, and a timestamp guard at second resolution does not
+  # separate them — so the later turn could adopt the earlier one's acceptance and sign off
+  # clean having recorded nothing. `GROK_REPLY_ID` is minted per execution and `cmd_send`
+  # stores it as the acceptance row's message_id, so it names this execution and no other.
+  # (codex, implement r3, blocking.)
   #
-  # Both joined columns are subject to the writer's per-column clip. An id long enough to be
-  # clipped therefore fails to match and yields a CONSERVATIVE `log-incomplete` — never a
-  # false clean bill, which is the only direction that would matter.
+  # The joined column is subject to the writer's per-column clip: an id long enough to be
+  # clipped fails to match and yields a CONSERVATIVE `log-incomplete`, never a false clean
+  # bill, which is the only direction that would matter.
   local evf; evf="$("$COMMS" root 2>/dev/null)/events.tsv"
-  awk -F'\t' -v rq="$RUN_MID" -v dp="$RUN_DISPATCH" -v t0="${STARTED_AT:-}" \
-      '$3=="reply-accepted" && $11==rq && $5==dp && (t0=="" || $1>=t0)' "$evf" 2>/dev/null | grep -q . \
+  awk -F'\t' -v rid="${GROK_REPLY_ID:-}" \
+      '$3=="reply-accepted" && rid != "" && $12==rid' "$evf" 2>/dev/null | grep -q . \
     || LOG_INCOMPLETE=1
   return 0
 }

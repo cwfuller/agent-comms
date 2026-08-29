@@ -1292,13 +1292,32 @@ set_current_dispatch() {
   # leg goes out, so the last one for a set names the attempt in progress. Reading the last
   # LEG row instead let an interleaving pick an attempt whose roster was never complete.
   # (codex, implement r2, blocking.)
-  local d
-  d="$(cmd_events --set "$2" --kind panel-planned --limit 1 2>/dev/null | awk -F'\t' 'NR>1{print $5}')"
+  #
+  # Exit 2 means REFUSE, and it is not the same as "no attempt". Treating every empty answer
+  # as legacy was the hole: a torn `panel-planned` row is SKIPPED by the reader, so the
+  # answer silently became the PRECEDING attempt, and a missing log fell back to last-row-
+  # wins — the exact binding this replaced. The only case that may degrade is a set with no
+  # attempt anywhere, which is what a pre-column set looks like. (codex, implement r3.)
+  local d errf err
+  errf="$(mktemp "${TMPDIR:-/tmp}/agent-comms-setdisp.XXXXXX" 2>/dev/null || true)"
+  [ -n "$errf" ] || errf=/dev/null
+  d="$(cmd_events --set "$2" --kind panel-planned --limit 1 2>"$errf" | awk -F'\t' 'NR>1{print $5}')"
+  err="$(cat "$errf" 2>/dev/null || true)"
+  [ "$errf" = /dev/null ] || rm -f "$errf" 2>/dev/null || true
+  case "$err" in
+    *malformed*)
+      # The log has a torn row. The plan we would read may be the one that tore.
+      emit_diagnostic "panel: the coordinator log has malformed rows — refusing to guess which dispatch attempt of '$(clip "$2")' is current"
+      return 2 ;;
+  esac
   if [ -n "$d" ]; then printf '%s\n' "$d"; return 0; fi
-  # No plan event: either a set recorded before this column existed, or a `shadow` row. Fall
-  # back to the index, which for those rows carries an empty dispatch — and an empty current
-  # attempt selects exactly them.
-  awk -F'\t' -v s="$2" 'NR>1 && $1==s {d=$14} END {print d}' "$1"
+  if awk -F'\t' -v s="$2" 'NR>1 && $1==s && $14!="" {found=1} END {exit !found}' "$1"; then
+    emit_diagnostic "panel: '$(clip "$2")' has legs recorded under a dispatch attempt but no panel-planned event to say which is current — refusing to bind (is .comms/events.tsv missing?)"
+    return 2
+  fi
+  # No attempt anywhere: a set recorded before this column existed, or a `shadow` row. The
+  # empty current attempt selects exactly those rows.
+  printf '\n'
 }
 
 # set_legs <index> <set-id> <dispatch> — one line per leg of THAT attempt:
@@ -1337,7 +1356,7 @@ findings_set_lookup() {  # <root> <thread> <round> <phase> -> set\tartifact\tpro
   # instead of deleting them, one thread legitimately has several rows — all naming the same
   # set. Counting rows would read that as an ambiguous join and refuse it. (grok, r2.)
   local n
-  n="$(awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph {seen[$1]=1} END {print length(seen)}' "$idx")"
+  n="$(awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph && !seen[$1]++ {n++} END {print n+0}' "$idx")"
   if [ "${n:-0}" -gt 1 ]; then
     emit_diagnostic "findings: $n review sets claim thread '$(clip "$2")' ${4:-<no phase>} round $3 — refusing an ambiguous join; fix .comms/grades/sets.tsv"
     return 0
@@ -1434,7 +1453,9 @@ cmd_panel() {
     # who has replied; this answers which sets exist. Newest last in an append-only
     # file, so it is walked backwards rather than by parsing timestamps.
     if [ -z "$set_id" ]; then
-      printf 'set\tphase\tround\tlegs\tcreated\n'
+      # `rows`, not `legs`: preserved attempts mean a two-leg set dispatched twice has four
+      # rows here. `panel status --set <id>` is the attempt-aware view. (codex, r3, advisory.)
+      printf 'set\tphase\tround\trows\tcreated\n'
       # NF>=13: a truncated row would otherwise be counted as a leg and printed with
       # blank metadata, which is the listing lying about durable state. (codex, r1.)
       awk -F'\t' 'NR>1 && NF>=13 && $1!="" {
@@ -1442,7 +1463,7 @@ cmd_panel() {
         legs[$1]++
       }
       END { for (i=n; i>=1; i--) { k=order[i]; printf "%s\t%s\t%s\t%s\t%s\n", k, ph[k], rd[k], legs[k], cr[k] } }' "$idx"
-      emit_diagnostic "panel: 'panel status --set <id>' shows each leg's reply and verdict"
+      emit_diagnostic "panel: 'panel status --set <id>' shows the CURRENT attempt's legs and verdicts; 'rows' here counts every attempt ever recorded"
       return 0
     fi
     # Resolve the workspace ONCE — per-candidate calls also re-emit the resolver's
@@ -1458,7 +1479,9 @@ cmd_panel() {
     # never by whatever the newest same-agent same-thread message happens to be. A
     # status that says "answered / APPROVE" off a stale or type:error message is the
     # false all-clear compose exists to refuse. (grok, panel r1.)
-    local status_dispatch; status_dispatch="$(set_current_dispatch "$idx" "$set_id")"
+    local status_dispatch
+    status_dispatch="$(set_current_dispatch "$idx" "$set_id")" \
+      || die "panel status: cannot determine which dispatch attempt of '$(clip "$set_id")' is current"
     set_legs "$idx" "$set_id" "$status_dispatch" | while IFS=$'\t' read -r ag th rnd req_mid; do
       [ -n "$ag" ] || continue
       local reply="" verdict="" answered=no cand
@@ -1641,7 +1664,9 @@ cmd_compose() {
   # The ROUND is part of a leg's identity. Finding replies by reviewer+thread alone
   # makes round 2 compose round 1's replies and report "all answered" — the panel would
   # gate on findings about an artifact it is no longer reviewing. (grok, panel r1.)
-  local compose_dispatch; compose_dispatch="$(set_current_dispatch "$idx" "$set_id")"
+  local compose_dispatch
+  compose_dispatch="$(set_current_dispatch "$idx" "$set_id")" \
+    || die "compose: cannot determine which dispatch attempt of '$(clip "$set_id")' is current — refusing to gate on a guessed roster"
   local legs; legs="$(set_legs "$idx" "$set_id" "$compose_dispatch")"
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
@@ -1841,13 +1866,20 @@ event_field() {  # event_field <value> <max-bytes> — never a delimiter, never 
 # fs_events_device <path> — what the filesystem calls itself, or empty.
 fs_events_device() { df -P "$1" 2>/dev/null | awk 'NR==2{print $1}'; }
 # fs_events_mountpoint <path> — where it is mounted, or empty.
-fs_events_mountpoint() { df -P "$1" 2>/dev/null | awk 'NR==2{print $NF}'; }
+# Fields 6..NF, not $NF: `df -P` puts the mount point last and it may contain spaces, which
+# would otherwise truncate to the final word. (grok, implement r3.)
+fs_events_mountpoint() {
+  df -P "$1" 2>/dev/null | awk 'NR==2{ for (i=6; i<=NF; i++) printf "%s%s", $i, (i<NF ? " " : "") }'
+}
 
 # The filesystem types on which a small O_APPEND write is one atomic write. An ALLOWLIST,
 # because the shape blacklist it replaces was blind to every network FUSE mount — `s3fs`,
 # `gcsfuse`, a rclone `remote:bucket` — which look nothing like `host:/export` and are
 # exactly as unsafe. Anything not named here fails CLOSED. (codex, implement r2, blocking.)
-EVENT_LOCAL_FSTYPES=" apfs hfs hfsplus ext2 ext2/ext3 ext3 ext4 xfs btrfs zfs tmpfs ramfs overlay overlayfs f2fs jfs reiserfs msdos vfat exfat ufs "
+# msdos/vfat/exfat are deliberately ABSENT: the header is created exactly once with a hard
+# link, which those filesystems do not support, so a log there could never be initialised.
+# (codex, implement r3, advisory.)
+EVENT_LOCAL_FSTYPES=" apfs hfs hfsplus ext2 ext2/ext3 ext3 ext4 xfs btrfs zfs tmpfs ramfs overlay overlayfs f2fs jfs reiserfs ufs "
 
 # fs_events_type <path> — a lowercase filesystem-type token, or empty when nothing answers.
 fs_events_type() {
@@ -1988,7 +2020,14 @@ cmd_events() {
     *) usage_err "events append: unknown role '$(clip "$role")' —$EVENT_ROLES" ;;
   esac
   local dir; dir="$(dirname "$f")"
-  mkdir -p "$dir" 2>/dev/null || die "events: cannot create $(clip "$dir")"
+  # RETURN, not die — the same reason the filesystem refusal returns. A `die` here exits the
+  # whole process, so a post-delivery `reply-accepted` append would kill the `send` that just
+  # delivered the reply, skip the inbound archive, and make the broker report a delivered
+  # reply as failed. (codex, implement r3, blocking.)
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    emit_diagnostic "events: cannot create $(clip "$dir") — the coordinator log was not written"
+    return 1
+  fi
   # EVERY append, not just the first. Checking only at creation left the refusal trivially
   # bypassable: a `.comms` that migrates onto a network mount — or an events.tsv copied
   # there — appends unchecked for the rest of its life, which is the silent-loss mode this

@@ -7337,6 +7337,19 @@ run_ev events append --kind turn-started --set "$EV_BIG" --dispatch "$EV_BIG" --
 
 # A torn row is NAMED, not parsed: there is no lock (a dead holder is a deadlock), so
 # detection is the guarantee. Whole-field checks, or two concatenated rows pass. (codex r2.)
+#
+# In its OWN repo, because a torn row now makes attempt binding refuse — planting one in the
+# fixture the panel tests share would poison every later status and compose here, which is
+# precisely the loud behaviour being asserted further down. (codex, implement r3.)
+EVT="$WORK/events-torn"; mkdir -p "$EVT"; EVT="$(cd "$EVT" && pwd -P)"
+git -C "$EVT" init -q -b main
+git -C "$EVT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+run_evt() { (cd "$EVT" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+EVT_LOG="$EVT/.comms/events.tsv"
+run_evt events append --kind turn-started --set ev-set-1 --thread ev-thread --agent codex --status running >/dev/null
+EV_LOG_MAIN="$EV_LOG"; EV_LOG="$EVT_LOG"
+run_ev_main() { run_ev "$@"; }
+run_ev() { run_evt "$@"; }
 printf 'this row has no columns and no timestamp\n' >> "$EV_LOG"
 EV_TORN="$(run_ev events 2>&1 >/dev/null)"
 printf '%s\n' "$EV_TORN" | grep -q 'malformed' && ok "a malformed row is reported on stderr" || fail "torn row not reported (got: $EV_TORN)"
@@ -7362,6 +7375,10 @@ printf 'ts\tnot\ta\theader\tjust\ta\trow\tthat\tstarts\twith\tts\tand\tis\tmalfo
 # or not THIS row was caught. (grok, implement r2.)
 [ "$(ev_malformed_count)" = "$(( ${EV_MB:-0} + 1 ))" ] \
   && ok "a header-shaped row that is not the header is reported, not silently skipped" || fail "header-shaped row swallowed (was ${EV_MB:-0}, now $(ev_malformed_count))"
+
+# Back to the shared fixture, whose log is still clean.
+EV_LOG="$EV_LOG_MAIN"
+run_ev() { (cd "$EV" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 
 EV_N=20
 i=1; while [ "$i" -le "$EV_N" ]; do
@@ -7406,6 +7423,14 @@ mkdir -p "$EV7/.comms"; chmod a-w "$EV7/.comms"
 EV_NOHDR="$( (cd "$EV7" && env -u CMUX_WORKSPACE_ID "$COMMS" events append --kind turn-started --thread h) 2>&1 || true )"
 chmod u+w "$EV7/.comms"
 printf '%s\n' "$EV_NOHDR" | grep -q 'headerless' && ok "a log whose header cannot be created is refused" || fail "headerless log not refused (got: $EV_NOHDR)"
+# A directory that cannot be created reports and RETURNS, the same as every other refusal —
+# `die` there would exit a `send` mid-delivery. (codex, implement r3, blocking.)
+EV8="$WORK/events-repo-8"; mkdir -p "$EV8"
+git -C "$EV8" init -q -b main; git -C "$EV8" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+: > "$EV8/.comms"
+EV_NODIR="$( (cd "$EV8" && env -u CMUX_WORKSPACE_ID "$COMMS" events append --kind turn-started --thread d) 2>&1 || true )"
+rm -f "$EV8/.comms"
+printf '%s\n' "$EV_NODIR" | grep -q 'cannot create' && ok "an uncreatable events directory is reported, not a bash error" || fail "uncreatable dir (got: $EV_NODIR)"
 [ ! -f "$EV7/.comms/events.tsv" ] && ok "the refusal leaves no headerless log behind" || fail "a headerless log was created"
 
 # The filesystem constraint is ENFORCED, not diagnosed: an NFS append can be LOST whole,
@@ -7612,6 +7637,13 @@ ev_idx_row() { # <mid> <thread> <agent> <dispatch>
   printf 'ev-mixed\t%s\t%s\t1\timplement\taid\tpv\tbase\tcodex\t%s\tdispatched\t\t2026-08-29T10:00:00Z\t%s\n' \
     "$1" "$2" "$3" "$4" >> "$EV_IDX"
 }
+# Both attempts PLANNED, A first, then their legs interleaved — the shape a pair of
+# concurrent dispatches leaves behind. The index's last row belongs to attempt A; the last
+# PLAN is B's, and B is what a reader must bind to. (codex, implement r2/r3.)
+run_ev events append --kind panel-planned --set ev-mixed --dispatch d-attempt-a --agent codex \
+  --status planned --note "roster=codex,grok legs=2" >/dev/null
+run_ev events append --kind panel-planned --set ev-mixed --dispatch d-attempt-b --agent codex \
+  --status planned --note "roster=codex,grok legs=2" >/dev/null
 ev_idx_row mixed-a-codex ev-mixed-a-codex codex d-attempt-a
 ev_idx_row mixed-b-codex ev-mixed-b-codex codex d-attempt-b
 ev_idx_row mixed-b-grok  ev-mixed-b-grok  grok  d-attempt-b
@@ -7619,8 +7651,8 @@ ev_idx_row mixed-a-grok  ev-mixed-a-grok  grok  d-attempt-a
 EV_MIXED="$(run_ev panel status --set ev-mixed 2>/dev/null | tail -n +2)"
 [ "$(printf '%s\n' "$EV_MIXED" | grep -c .)" = "2" ] \
   && ok "status reports the legs of ONE attempt, not the mixture of two" || fail "status mixed two attempts (got: $(printf '%s' "$EV_MIXED" | tr '\n' '|'))"
-printf '%s\n' "$EV_MIXED" | grep -q 'ev-mixed-a-' && ! printf '%s\n' "$EV_MIXED" | grep -q 'ev-mixed-b-' \
-  && ok "the attempt it binds to is the last one recorded" || fail "status bound to the wrong attempt"
+printf '%s\n' "$EV_MIXED" | grep -q 'ev-mixed-b-' && ! printf '%s\n' "$EV_MIXED" | grep -q 'ev-mixed-a-' \
+  && ok "the attempt it binds to is the one the last PLAN named, not the last row" || fail "status bound to the wrong attempt"
 EV_MIXCOMP="$(run_ev compose --set ev-mixed 2>&1 || true)"
 printf '%s\n' "$EV_MIXCOMP" | grep -q 'of 2 legs' \
   && ok "compose gates on one attempt's roster, never on both" || fail "compose counted both attempts (got: $(printf '%s' "$EV_MIXCOMP" | head -1))"
@@ -7660,6 +7692,38 @@ EV_D2="$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v d="$C_DSP" -v s="$EV_SET" '$c=
   && ok "the new attempt records its own two legs" || fail "the new attempt is not fully recorded"
 [ "$(run_ev panel status --set "$EV_SET" 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] \
   && ok "status still reports exactly one attempt's legs after a real re-dispatch" || fail "status mixed two real attempts"
+# REFUSING beats guessing. A torn log could have torn the very plan row the binding reads,
+# and a missing log with attempts recorded is the last-row-wins binding this round removed —
+# both refuse loudly now instead of silently degrading. Only a set with no attempt anywhere,
+# which is what a pre-column set looks like, may still bind. (codex, implement r3, blocking.)
+EV_RF="$WORK/events-refuse"; mkdir -p "$EV_RF"; EV_RF="$(cd "$EV_RF" && pwd -P)"
+git -C "$EV_RF" init -q -b main
+printf '.comms/\n' > "$EV_RF/.gitignore"; echo s > "$EV_RF/s.txt"
+git -C "$EV_RF" add -A >/dev/null 2>&1
+git -C "$EV_RF" -c user.email=t@t -c user.name=t commit -q -m init
+mkdir -p "$EV_RF/.comms/to-codex" "$EV_RF/.comms/to-grok" "$EV_RF/.comms/to-claude" "$EV_RF/.comms/archive" "$EV_RF/.comms/grades"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV_RF/.comms/config"
+run_evrf() { (cd "$EV_RF" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+EV_RFREQ="$EV_RF/.comms/to-codex/$(basename "$EV_RF")_2026-08-29T09-00-00_rf.md"
+printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:00:00Z\nworkspace: %s\nmessage_id: rf-1\nthread: rf-th\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV_RF")" > "$EV_RFREQ"
+EV_RFOUT="$(run_evrf panel dispatch --to codex,grok "$EV_RFREQ" 2>&1 || true)"
+EV_RFSET="$(printf '%s\n' "$EV_RFOUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+run_evrf panel status --set "$EV_RFSET" >/dev/null 2>&1 \
+  && ok "a clean log binds the attempt without complaint" || fail "a clean log failed to bind"
+cp "$EV_RF/.comms/events.tsv" "$WORK/rf-events-clean.tsv"
+printf 'a torn row\n' >> "$EV_RF/.comms/events.tsv"
+run_evrf panel status --set "$EV_RFSET" >/dev/null 2>&1 \
+  && fail "a torn log still bound an attempt" || ok "a torn log refuses to bind an attempt rather than guessing"
+run_evrf compose --set "$EV_RFSET" >/dev/null 2>&1 \
+  && fail "compose gated with a torn log" || ok "compose refuses to gate on a guessed roster"
+rm -f "$EV_RF/.comms/events.tsv"
+run_evrf panel status --set "$EV_RFSET" >/dev/null 2>&1 \
+  && fail "a missing log fell back to last-row-wins" || ok "a missing log with attempts recorded refuses, never falls back"
+printf 'legacy-set\tlm-1\tlegacy-codex\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-08-29T10:00:00Z\n' >> "$EV_RF/.comms/grades/sets.tsv"
+[ "$(run_evrf panel status --set legacy-set 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] \
+  && ok "a set recorded before attempts existed still binds" || fail "a legacy set stopped binding"
+cp "$WORK/rf-events-clean.tsv" "$EV_RF/.comms/events.tsv"
+
 # The PLAN event is the authority, not the last row: append a stale leg row for the OLD
 # attempt after the new one and the binding must not follow it.
 printf '%s\ty\tz\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-08-29T10:00:00Z\t%s\n' "$EV_SET" "$EV_D1" >> "$EV/.comms/grades/sets.tsv"
@@ -7796,7 +7860,7 @@ if [ "\$1" = send ]; then
   grep -v 'reply-accepted' "$EV_LOG" > "\$T" 2>/dev/null && cat "\$T" > "$EV_LOG"
   rm -f "\$T"
   "$COMMS" events append --kind reply-accepted --thread ev-lostaccept \
-    --request-id some-other-turn --status APPROVE >/dev/null 2>&1
+    --request-id ev-grok-6 --message-id an-earlier-execution --status APPROVE >/dev/null 2>&1
   exit \$rc
 fi
 exec "$COMMS" "\$@"
@@ -7807,10 +7871,13 @@ sed 's/message_id: ev-req-1/message_id: ev-grok-6/; s/thread: ev-loop/thread: ev
 EV_GDIR6="$WORK/ev-grok-leg6"; mkdir -p "$EV_GDIR6"
 (cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    "$EV_SHIM3/runphase.sh" run --message "$EV_GMSG6" --dir "$EV_GDIR6" --provider grok) >/dev/null 2>&1 || true
-awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v rq="$C_REQ" '$t=="ev-lostaccept" && $e=="reply-accepted" && $rq=="some-other-turn"' "$EV_LOG" | grep -q . \
-  && ok "the fixture really did plant another turn's acceptance on this thread" || fail "the overlapping-turn fixture planted nothing"
+# The planted row shares the thread, the REQUEST id and the attempt — it differs only in
+# which execution wrote it. Request-plus-attempt was not unique: a re-send runs the same
+# request twice. Only the reply id names one execution. (codex, implement r3, blocking.)
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v rq="$C_REQ" -v m="$C_MID" '$t=="ev-lostaccept" && $e=="reply-accepted" && $rq=="ev-grok-6" && $m=="an-earlier-execution"' "$EV_LOG" | grep -q . \
+  && ok "the fixture planted an earlier EXECUTION of the same request and attempt" || fail "the collision fixture planted nothing"
 [ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-lostaccept" && $e=="turn-finished"{print $st}' "$EV_LOG")" = "log-incomplete" ] \
-  && ok "a lost acceptance is detected even with another turn's acceptance on the thread" || fail "the acceptance lookup accepted a different turn's row"
+  && ok "a lost acceptance is detected even when an earlier execution of the SAME request accepted" || fail "the acceptance lookup adopted another execution's row"
 
 EV_GMSG3="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-32-00_ev-grok3.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-3/; s/thread: ev-loop/thread: ev-shadow/' "$EV_REQ" > "$EV_GMSG3"
