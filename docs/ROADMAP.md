@@ -30,10 +30,12 @@ archive. ACP is transport and session. The coordinator's event log is the source
 of truth — never the model's mailbox, never ACP itself.
 
 **In flight — do not restart:** `acp-warm-mount` (`worktree-acp-warm-mount`) is
-step 1. `suite-lanes` (`worktree-suite-lanes`, per-section assertion vector) is
-the shard precondition and **is** step 2 — rebase it onto main after warm-mount
-lands; do not run it in parallel (both edit `tests/run.sh` and
-`tests/expected-counts.tsv`). `suite-perf` / `worktree-suite-shard` has no
+step 1. `suite-lanes` (`worktree-suite-lanes`) carries the per-section assertion
+vector and the watchdog-poll fix — rebase it onto main after warm-mount lands; do
+not run it in parallel (both edit `tests/run.sh` and `tests/expected-counts.tsv`).
+It is NOT a shard precondition any more: sharding was measured at 1.07x and
+rejected (ranked item 4). The vector earns its place on its own — it is what
+detects assertions moving between sections. `suite-perf` / `worktree-suite-shard` has no
 commits vs main; do not start a third suite effort.
 
 ### Freeze
@@ -61,14 +63,12 @@ exactly; that is not a license to weaken the presence model (see step 7).
    59 sections were 87% of the original runtime; the largest section after the
    fix is ~50s.
 
-   **Remaining lever: REJECTED — see ranked item 4** (sharding measured at 1.07x) (isolated TMPDIRs).
-   Presence/signal stays serial — it flakes under load and is cheap relative
-   to a review turn. `suite-lanes` pins per-section counts so a wrap cannot
-   silently move coverage; land that, then shard. Floor without splitting the
-   hottest section: ~50s. Constraints, already decided:
-
-   - bash 3.2.57 (no `wait -n`) — `xargs -P` or explicit pids; no new
-     dependency
+   **Superseded — sharding was built, measured at 1.07x and REJECTED; see ranked
+   item 4.** What actually moved the number was profiling: a `sleep 1` in the
+   provider watchdog cost 58s a run (13%), and polling it finely took 430s -> 360s.
+   `suite-lanes` still earns its place for the per-section vector, which detects
+   assertions moving between sections — but nothing here should be read as an
+   instruction to shard.
    - **a sharded or partial run must never mint an attestation** (the
      coverage contract is the gate, not a courtesy)
    - do not "tier" the suite as a speed hack — a subset that attests is how
@@ -1531,8 +1531,9 @@ bought a spec, whichever language executes it.
 **Promoted 2026-08-28 into [Contraction step 2](#contraction-2026-08-28--current-program).**
 Owner: five-plus minutes is current pain, not a later cleanup. This subsection
 is the measurement and the remaining work; the queue is the contraction
-sequence. Shard is the remaining lever; `suite-lanes` is the coverage-vector
-precondition and lands after warm-mount, not beside it.
+sequence. Sharding is NOT the remaining lever — it was built and measured at
+1.07x (item 4). `suite-lanes` lands after warm-mount for its coverage vector and
+its watchdog fix, not as a shard precondition.
 
 **PROFILED 2026-08-27 (suite-perf). The original estimate below was REFUTED on
 both of its main claims; the measured numbers replace it.** A landing still costs

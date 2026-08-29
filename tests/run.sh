@@ -6882,23 +6882,28 @@ grep -q 'emitted no completion line' "$REPO/helpers/comms.sh" \
   && ok "integrate requires positive proof the suite ran to the end" || fail "integrate accepts an exit status alone"
 grep -q 'tee "\$suite_log"' "$REPO/helpers/comms.sh" \
   && ok "integrate keeps the output of the run it judges" || fail "integrate discards the suite output"
-# The watchdog that waits on a provider child must poll SUB-SECOND. Its only job is to
-# notice the child exited; at a 1s interval a stub-backed turn that finishes in
-# milliseconds still waits out a full second, measured at 58s across one suite run — 13%
-# of the runtime. The timeout itself is still evaluated in whole seconds against
-# `date +%s`, so the watchdog's contract is unchanged.
+# The watchdog that waits on a provider child measures elapsed time by COUNTING the
+# intervals it slept, and polls on a graduated cadence: fine for the first two seconds so
+# a stub-backed turn (milliseconds) is caught at once, coarse after so a long production
+# turn does not wake ten times a second for an hour.
 #
-# Asserted on the SOURCE deliberately: the loop body only executes when the child is
-# still alive at the first check, so a timing assertion would be racy in the direction
-# that produces false failures.
-awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -qE 'sleep 0\.[1-9]' \
-  && ok "the provider watchdog polls sub-second" || fail "the provider watchdog is back to a whole-second poll"
-# The deadline must come from COUNTED intervals, not `date`. Reading a truncated clock let
-# a one-second timeout fire after 0.215s when the turn began at phase .850 — killing a
-# provider before the timeout it was given. (codex, watchdog r1, blocking.)
-awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -q 'waited_ds' \
-  && ok "the watchdog measures elapsed by counting its own sleeps" || fail "the watchdog is back to a clock deadline"
-awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -q 'date +%s' \
+# It must NOT compute its deadline from `date +%s`. That truncates the start to a whole
+# second, so a one-second timeout beginning at phase .850 fired after 0.215s — killing a
+# provider before the budget it was given. A 1s poll hid that by serving most of a second
+# before its first check; polling finely exposed it. Counting can only ever push a timeout
+# LATER, which is the safe direction. (codex, watchdog r1, blocking.)
+#
+# Asserted on the SOURCE deliberately: the loop body only runs when the child is still
+# alive at the first check, so a timing assertion would be racy toward false failures.
+WD="$(awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh")"
+printf '%s\n' "$WD" | grep -q '"\$waited_ds" -ge "\$budget_ds"' \
+  && ok "the watchdog compares counted elapsed against the budget" || fail "the watchdog does not compare counted elapsed to its budget"
+if printf '%s\n' "$WD" | grep -q 'budget_ds'; then ok "the budget is derived from the requested timeout"; else fail "the budget is not derived from timeout"; fi
+printf '%s\n' "$WD" | grep -qE 'sleep 0\.[1-9]' \
+  && ok "the fine tier of the watchdog poll is sub-second" || fail "the watchdog lost its sub-second tier"
+printf '%s\n' "$WD" | grep -q 'poll_ds=10' \
+  && ok "the watchdog graduates to a coarse poll" || fail "the watchdog has no coarse tier"
+printf '%s\n' "$WD" | grep -q 'date +%s' \
   && fail "the watchdog reads a truncated clock again" || ok "the watchdog does not read the clock per tick"
 awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -qE '^ *sleep [0-9]+$' \
   && fail "a whole-second sleep returned to the provider watchdog" || ok "no whole-second sleep in the provider watchdog"
