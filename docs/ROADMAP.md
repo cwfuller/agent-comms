@@ -22,25 +22,27 @@ the author fixes or a human is asked.
 
 **Not in the installed product:** presence, session worktrees, `integrate`,
 grading, suite attestation, cmux. Those stay this-repo contributor tooling until
-step 6 removes them from the install surface.
+step 7 removes them from the install surface.
 
 **Keep:** loopspec, retained artifacts, two-party legs, fail-closed parsing,
 provenance, partial-panel refusal, human escalation. Markdown is the human
 archive. ACP is transport and session. The coordinator's event log is the source
 of truth — never the model's mailbox, never ACP itself.
 
-**In flight — do not restart:** `acp-warm-mount` (`worktree-acp-warm-mount`,
-stable per-thread ACP mount) is step 1. `suite-lanes` also edits `tests/run.sh`
-and `tests/expected-counts.tsv`; pause and rebase it after warm-mount, or drop
-it until the freeze lifts. `suite-perf` / `worktree-suite-shard` has no commits
-vs main; do not restage.
+**In flight — do not restart:** `acp-warm-mount` (`worktree-acp-warm-mount`) is
+step 1. `suite-lanes` (`worktree-suite-lanes`, per-section assertion vector) is
+the shard precondition and **is** step 2 — rebase it onto main after warm-mount
+lands; do not run it in parallel (both edit `tests/run.sh` and
+`tests/expected-counts.tsv`). `suite-perf` / `worktree-suite-shard` has no
+commits vs main; do not start a third suite effort.
 
 ### Freeze
 
-No new tracks until step 3 has deleted cmux/self-send: grading, routing, a
-judge, dispute lane, presence-heal, findings-grammar widenings, Node extraction.
+No new *product* tracks until step 4 has deleted cmux/self-send: grading,
+routing, a judge, dispute lane, presence-heal, findings-grammar widenings,
+Node extraction. **Suite runtime is not frozen** — it is step 2, owner pain.
 The named zombie presence records (`7b`, `a2`, `a7`, `be`) may be force-reaped
-exactly; that is not a license to weaken the presence model (see step 6).
+exactly; that is not a license to weaken the presence model (see step 7).
 
 ### Sequence (do in this order)
 
@@ -50,7 +52,34 @@ exactly; that is not a license to weaken the presence model (see step 6).
    already fixing it. This also makes later token claims measurable. Do not
    start a second copy.
 
-2. **Parent-broker Claude and Codex on ACP — before deleting anything that
+2. **Cut the suite wall-clock.** Owner, 2026-08-28: five-plus minutes is a
+   first-class pain, not a later maintainability leftover. Profiled 2026-08-27
+   (see [Suite runtime](#suite-runtime-2026-08-27-user-that-seems-excessive--extends-step-2)):
+   504.8s → 325.8s after the unconditional state-wait was removed; the landed
+   tree is ~340s because new assertions spend ~25s exercising that wait. Spawns
+   are ~5%, sleeps ~27s, `git init` is noise. The cost is concentrated: ten of
+   59 sections were 87% of the original runtime; the largest section after the
+   fix is ~50s.
+
+   **Remaining lever: shard sections in parallel** (isolated TMPDIRs).
+   Presence/signal stays serial — it flakes under load and is cheap relative
+   to a review turn. `suite-lanes` pins per-section counts so a wrap cannot
+   silently move coverage; land that, then shard. Floor without splitting the
+   hottest section: ~50s. Constraints, already decided:
+
+   - bash 3.2.57 (no `wait -n`) — `xargs -P` or explicit pids; no new
+     dependency
+   - **a sharded or partial run must never mint an attestation** (the
+     coverage contract is the gate, not a courtesy)
+   - do not "tier" the suite as a speed hack — a subset that attests is how
+     `integrate` lands untested code
+   - `attest-green` already skips integrate's *second* run; it does not
+     shrink the pre-flight 5 minutes, which is the pain
+
+   Back-dating age-based tests instead of `sleep` is worth ~27s at most;
+   do it for determinism under load, not as the answer.
+
+3. **Parent-broker Claude and Codex on ACP — before deleting anything that
    still works.** Reviewer children return a structured body only (`VERDICT:` +
    findings). The parent stamps identity, thread, artifact, round, verdict, and
    delivery (the grok path already). Keep cmux/self-send **working and
@@ -74,13 +103,13 @@ exactly; that is not a license to weaken the presence model (see step 6).
    - A valid reply always lands in the coordinator log even if the driver
      process dies.
 
-3. **Advertise ACP-only, then delete cmux and self-send.** After step 2 is
+4. **Advertise ACP-only, then delete cmux and self-send.** After step 3 is
    green on live loops: templates, README, `transport` default, `--via cmux`
    gone. Then delete surface picking, bindings, `cmux_tree`, `doctor` /
    `codex-permissions`, and self-send prompt arms. Mailbox-as-model-wire goes
    with them. Coordinator-owned durable records stay.
 
-4. **Modes.** Three, named. **`strict` is the installed `/auto` default**
+5. **Modes.** Three, named. **`strict` is the installed `/auto` default**
    (owner, 2026-08-28: every project this is installed on wants that bar). The
    consults argued for `standard` as the default so a challenger cannot hostage
    a round; that is what `standard` is *for*, and it remains an explicit opt-in.
@@ -89,7 +118,7 @@ exactly; that is not a license to weaken the presence model (see step 6).
 
    | Mode | Reviewers | Automatic gate | Unique blockers | Who |
    |---|---|---|---|---|
-   | **strict** | full panel | reciprocal confirmation of the *claim*, or a test that fails on the retained artifact | see step 5 — must not APPROVE while one is unresolved | **default** (`/auto`) |
+   | **strict** | full panel | reciprocal confirmation of the *claim*, or a test that fails on the retained artifact | see step 6 — must not APPROVE while one is unresolved | **default** (`/auto`) |
    | **standard** | primary + independent **non-gating** challenger | **primary only** | challenger uniques are recorded and shown, never dropped, never hostage a round | `--standard` |
    | **fast** | one reviewer | that reviewer's blockers | they all gate | `--fast` / `--reviewers` one |
 
@@ -99,7 +128,7 @@ exactly; that is not a license to weaken the presence model (see step 6).
    consensus. (`compose` today clusters on exact shared anchor; that is a
    grouping, not a predicate — do not promote it.)
 
-5. **Strict disposition. Nothing silent.** Automatic gate stays: confirmed
+6. **Strict disposition. Nothing silent.** Automatic gate stays: confirmed
    claim, or reproducible artifact-bound test. Every unique blocker gets an
    explicit disposition before the loop may APPROVE:
 
@@ -114,7 +143,7 @@ exactly; that is not a license to weaken the presence model (see step 6).
    distinction. `strict` is "nothing silently dropped **and** nothing
    auto-obeyed."
 
-6. **Contributor tooling leaves the install. This repo always-worktrees.**
+7. **Contributor tooling leaves the install. This repo always-worktrees.**
    Strip presence / worktree / integrate / attest / grading from what
    `install.sh` puts on a user machine. `/auto` and `/ask` should not mention
    them.
@@ -129,8 +158,8 @@ exactly; that is not a license to weaken the presence model (see step 6).
    better of those two: creation is cheap relative to a review turn;
    inference is not.
 
-7. **Reassess the shell. Extract only what is still fighting.** After steps
-   2–6, the remaining coordinator job is parse, state/events, panel
+8. **Reassess the shell. Extract only what is still fighting.** After steps
+   3–7, the remaining coordinator job is parse, state/events, panel
    collection, supervision, serialize. If that is still drowning in
    Bash-semantics defects, extract **that** into a small Node artifact behind
    the current CLI. Git, install, and provider launch stay shell. If it is
@@ -139,10 +168,10 @@ exactly; that is not a license to weaken the presence model (see step 6).
    stop-rule, sequenced after the obsolete paths are removed rather than
    instead of removing them.)
 
-8. **Prove it off this repo.** 20–30 `/auto` runs on ordinary product work,
+9. **Prove it off this repo.** 20–30 `/auto` runs on ordinary product work,
    **strict** mode (the default), sampled human adjudication of unique
    findings. No stronger quality or token claims until that exists.
-   Step 1 makes the token claim measurable; step 2 makes the quality claim
+   Step 1 makes the token claim measurable; step 3 makes the quality claim
    attributable to the coordinator rather than to prompt-mediated mailboxes.
 
 ### Explicitly not now
@@ -156,7 +185,11 @@ exactly; that is not a license to weaken the presence model (see step 6).
 - Deleting cmux before parent-broker parity
 - Making ACP the source of truth
 - Treating `--approve-all` on a mount as the permission story
-- Restaging `suite-lanes` / `suite-perf` in parallel with warm-mount
+- Running `suite-lanes` or a new shard effort **in parallel with** warm-mount
+  (both touch `tests/run.sh`); after warm-mount lands, suite-lanes **is**
+  the next commit
+- "Tiering" the suite so a subset can attest — that is a fake green, not a
+  faster green
 
 ## PR 1 — verified bug fixes (small, independent)
 
@@ -506,8 +539,8 @@ watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
   + `comms.sh status`/`stalled` absorbed the orchestration surface.* Original gate for
   the record: trackerless local mode covering status/dispatch/dispatch-all/
   harvest/concurrency caps/dirty-tree+push safety/stalled recovery.
-- [ ] **Delete cmux delivery (step 6)** — *sequenced under [Contraction step 3](#contraction-2026-08-28--current-program):
-  parent-broker Claude/Codex on ACP (step 2) first, with cmux kept working and
+- [ ] **Delete cmux delivery (step 6)** — *sequenced under [Contraction step 4](#contraction-2026-08-28--current-program):
+  parent-broker Claude/Codex on ACP (step 3) first, with cmux kept working and
   unadvertised until parity; then advertise ACP-only and delete.* Original text:
   one release after the default flip with no fallback invocations; deletion
   audit must include every known dispatch consumer; keep optional log/tail
@@ -1461,10 +1494,17 @@ bought a spec, whichever language executes it.
 
 ### Suite runtime (2026-08-27, user: "that seems excessive") — extends step 2
 
+**Promoted 2026-08-28 into [Contraction step 2](#contraction-2026-08-28--current-program).**
+Owner: five-plus minutes is current pain, not a later cleanup. This subsection
+is the measurement and the remaining work; the queue is the contraction
+sequence. Shard is the remaining lever; `suite-lanes` is the coverage-vector
+precondition and lands after warm-mount, not beside it.
+
 **PROFILED 2026-08-27 (suite-perf). The original estimate below was REFUTED on
 both of its main claims; the measured numbers replace it.** A landing still costs
 TWO runs (the pre-flight plus integrate's re-run at the candidate OID), which is
-what makes the wall-clock hurt.
+what makes the wall-clock hurt. (`attest-green` can skip the second; it does
+not shrink the first.)
 
 *Superseded estimate, kept so the next reader can see what was wrong and why:*
 ~8–12 min at ~912 assertions; per-assertion `comms.sh` spawns "likely the
@@ -1533,7 +1573,8 @@ Ranked work, foldable into the step-2 harness split:
 4. [ ] **Shard sections in parallel** with isolated TMPDIRs — except the
    signal-timing presence section, which stays in its own unshared lane (machine
    load provably flaked it during the presence arc; keeping it serial is now
-   known to be cheap). **This is the remaining lever.** Note the floor: after
+   known to be cheap). **This is the remaining lever, and it is [Contraction
+   step 2](#contraction-2026-08-28--current-program).** Note the floor: after
    the fix above the largest single section is ~50s, so section-level
    parallelism alone cannot go below that without splitting it. Three
    constraints: the suite runs under **bash 3.2.57** (macOS system bash) so
