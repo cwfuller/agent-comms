@@ -1,8 +1,162 @@
 # agent-comms roadmap
 
+**Current program: [Contraction (2026-08-28)](#contraction-2026-08-28--current-program).**
+Do that sequence. Historical tracks below are evidence, not the queue.
+"Priorities (2026-08-20)" is superseded.
+
 Backlog from the 2026-06-04 multi-agent audit (64 agents, 56 raw findings → 49 confirmed
 after adversarial verification) plus field reports from three agents running the loops
-daily. Items are grouped into sequenced PRs. Check items off as they land.
+daily. Check items off as they land.
+
+## Contraction (2026-08-28) — current program
+
+Decided after independent grok + codex re-evals of the product (local `9c3b10e`,
+main 43 commits ahead of origin) and a merge pass. Owner confirmed the sequence
+and that **strict is the default** — this tool is only installed on projects that
+want that bar. Re-litigate only with new evidence.
+
+**The product** is a cross-vendor, artifact-bound adversarial review gate:
+snapshot a tree, independent reviewers read that snapshot over ACP, the
+coordinator stamps and records everything, composition applies an explicit gate,
+the author fixes or a human is asked.
+
+**Not in the installed product:** presence, session worktrees, `integrate`,
+grading, suite attestation, cmux. Those stay this-repo contributor tooling until
+step 6 removes them from the install surface.
+
+**Keep:** loopspec, retained artifacts, two-party legs, fail-closed parsing,
+provenance, partial-panel refusal, human escalation. Markdown is the human
+archive. ACP is transport and session. The coordinator's event log is the source
+of truth — never the model's mailbox, never ACP itself.
+
+**In flight — do not restart:** `acp-warm-mount` (`worktree-acp-warm-mount`,
+stable per-thread ACP mount) is step 1. `suite-lanes` also edits `tests/run.sh`
+and `tests/expected-counts.tsv`; pause and rebase it after warm-mount, or drop
+it until the freeze lifts. `suite-perf` / `worktree-suite-shard` has no commits
+vs main; do not restage.
+
+### Freeze
+
+No new tracks until step 3 has deleted cmux/self-send: grading, routing, a
+judge, dispute lane, presence-heal, findings-grammar widenings, Node extraction.
+The named zombie presence records (`7b`, `a2`, `a7`, `be`) may be force-reaped
+exactly; that is not a license to weaken the presence model (see step 6).
+
+### Sequence (do in this order)
+
+1. **Land `acp-warm-mount`.** The README's "~1k vs ~115k" claim is currently
+   false on the default panel path: mounts go to `$run_dir/tree` while acpx keys
+   identity on `(agent, cwd, name)`, so every mounted turn is cold. Someone is
+   already fixing it. This also makes later token claims measurable. Do not
+   start a second copy.
+
+2. **Parent-broker Claude and Codex on ACP — before deleting anything that
+   still works.** Reviewer children return a structured body only (`VERDICT:` +
+   findings). The parent stamps identity, thread, artifact, round, verdict, and
+   delivery (the grok path already). Keep cmux/self-send **working and
+   unadvertised** until parity is proven. Headless `exec`/`-p` stays an
+   undocumented recovery/test adapter on the same criteria, then go or stay —
+   not a product surface.
+
+   This step is not done until all four hold:
+
+   - **Durable coordinator log** (append-only events, not the model mailbox,
+     not ACP): request persisted → turn started → provider result persisted →
+     reply validated → reply accepted → composition completed. A crash between
+     ACP exit and compose recovers from this log.
+   - **Enforced reviewer permissions** (acceptance criteria, not a follow-up):
+     deny repo writes; deny commit/ref/remote/publish; allow read-only
+     inspection; tests only if the mode says so; the mount must not share the
+     real remotes when practical. `--approve-all` on a linked worktree is not a
+     boundary. (Closes the [open security item](#open-security-item-the-mounted-review-turn-has-no-enforced-boundary).)
+   - Timeouts and truncations already named as what they are — no derived
+     `APPROVE` from a cut-off body.
+   - A valid reply always lands in the coordinator log even if the driver
+     process dies.
+
+3. **Advertise ACP-only, then delete cmux and self-send.** After step 2 is
+   green on live loops: templates, README, `transport` default, `--via cmux`
+   gone. Then delete surface picking, bindings, `cmux_tree`, `doctor` /
+   `codex-permissions`, and self-send prompt arms. Mailbox-as-model-wire goes
+   with them. Coordinator-owned durable records stay.
+
+4. **Modes.** Three, named. **`strict` is the installed `/auto` default**
+   (owner, 2026-08-28: every project this is installed on wants that bar). The
+   consults argued for `standard` as the default so a challenger cannot hostage
+   a round; that is what `standard` is *for*, and it remains an explicit opt-in.
+   Today's panel-by-default roster is already closest to `strict`; this step
+   adds reciprocal confirmation and disposition, not "turn panels on."
+
+   | Mode | Reviewers | Automatic gate | Unique blockers | Who |
+   |---|---|---|---|---|
+   | **strict** | full panel | reciprocal confirmation of the *claim*, or a test that fails on the retained artifact | see step 5 — must not APPROVE while one is unresolved | **default** (`/auto`) |
+   | **standard** | primary + independent **non-gating** challenger | **primary only** | challenger uniques are recorded and shown, never dropped, never hostage a round | `--standard` |
+   | **fast** | one reviewer | that reviewer's blockers | they all gate | `--fast` / `--reviewers` one |
+
+   Skip re-dispatch of a leg that already APPROVEd an **unchanged** artifact.
+   `--plan` stays opt-in. `--rounds` stays a wall, not a budget. Anchors are
+   display/grouping only: two bullets on the same `path:line` are not
+   consensus. (`compose` today clusters on exact shared anchor; that is a
+   grouping, not a predicate — do not promote it.)
+
+5. **Strict disposition. Nothing silent.** Automatic gate stays: confirmed
+   claim, or reproducible artifact-bound test. Every unique blocker gets an
+   explicit disposition before the loop may APPROVE:
+
+   - **confirmed** → gates
+   - **disproved / downgraded**, with a written reason → does not gate, still
+     archived
+   - **unresolved** (no confirmation, no disproof, failed confirmation round)
+     → **human escalation**; strict **must not APPROVE**
+
+   `standard` may APPROVE on the primary while challenger uniques ride out as
+   recorded, un-dropped findings (advisories / carry-over). That is the mode
+   distinction. `strict` is "nothing silently dropped **and** nothing
+   auto-obeyed."
+
+6. **Contributor tooling leaves the install. This repo always-worktrees.**
+   Strip presence / worktree / integrate / attest / grading from what
+   `install.sh` puts on a user machine. `/auto` and `/ask` should not mention
+   them.
+
+   **This repo:** every writing session gets a worktree; `main` is
+   integration-only; `integrate` CAS serializes landing; presence is a listing
+   and **cannot authorize a write**. No "pid or beat inside TTL" halfway
+   model — that *is* the unsolved liveness question, and a Claude-only pid
+   also fights vendor-neutrality. If always-worktree is refused, **keep** the
+   current tombstone/heal machinery and only force-reap the named zombies.
+   Do not weaken it. Halfway is how the zombies won. Always-worktree is the
+   better of those two: creation is cheap relative to a review turn;
+   inference is not.
+
+7. **Reassess the shell. Extract only what is still fighting.** After steps
+   2–6, the remaining coordinator job is parse, state/events, panel
+   collection, supervision, serialize. If that is still drowning in
+   Bash-semantics defects, extract **that** into a small Node artifact behind
+   the current CLI. Git, install, and provider launch stay shell. If it is
+   not, stop. Do not extract presence, cmux, or self-send — those should
+   already be gone. (This is the [maintainability track](#maintainability--implementation-language-track-2026-08-26-user-direction)
+   stop-rule, sequenced after the obsolete paths are removed rather than
+   instead of removing them.)
+
+8. **Prove it off this repo.** 20–30 `/auto` runs on ordinary product work,
+   **strict** mode (the default), sampled human adjudication of unique
+   findings. No stronger quality or token claims until that exists.
+   Step 1 makes the token claim measurable; step 2 makes the quality claim
+   attributable to the coordinator rather than to prompt-mediated mailboxes.
+
+### Explicitly not now
+
+- Grading platform, routing, a judge, dispute lane, test-evidence contract
+- More fail-closed presence machinery (heal provenance, suite wrappers
+  manufacturing records)
+- Another findings-grammar widening (residue was the right fix; remaining 0/0
+  holes want parent-brokered structure, not more list shapes)
+- Wholesale language rewrite
+- Deleting cmux before parent-broker parity
+- Making ACP the source of truth
+- Treating `--approve-all` on a mount as the permission story
+- Restaging `suite-lanes` / `suite-perf` in parallel with warm-mount
 
 ## PR 1 — verified bug fixes (small, independent)
 
@@ -352,9 +506,12 @@ watchdog (05f0df5), loopspec v1 kernel (0919306). Remaining, in order:
   + `comms.sh status`/`stalled` absorbed the orchestration surface.* Original gate for
   the record: trackerless local mode covering status/dispatch/dispatch-all/
   harvest/concurrency caps/dirty-tree+push safety/stalled recovery.
-- [ ] **Delete cmux delivery (step 6)** — one release after the default flip with no
-  fallback invocations; deletion audit must include every known dispatch consumer;
-  keep optional log/tail viewing only if useful. Interop drill before declaring done.
+- [ ] **Delete cmux delivery (step 6)** — *sequenced under [Contraction step 3](#contraction-2026-08-28--current-program):
+  parent-broker Claude/Codex on ACP (step 2) first, with cmux kept working and
+  unadvertised until parity; then advertise ACP-only and delete.* Original text:
+  one release after the default flip with no fallback invocations; deletion
+  audit must include every known dispatch consumer; keep optional log/tail
+  viewing only if useful. Interop drill before declaring done.
 
 ## Scope-dial track
 
@@ -1437,6 +1594,10 @@ Ranked work, foldable into the step-2 harness split:
    or the suite reads. A stall nobody can see is the shape of the next one.
 
 ## Priorities (2026-08-20, user-confirmed order)
+
+**Superseded 2026-08-28** by [Contraction (2026-08-28)](#contraction-2026-08-28--current-program).
+Kept as the record of what that order actually delivered. Do not take this list as
+the queue.
 
 1. **`/ask` unification + thoughts mode** — one template change, daily-use pain, and doing
    the informal-consult edit on the new shape avoids reworking `/ask-codex` twice
