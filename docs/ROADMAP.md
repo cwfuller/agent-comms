@@ -1604,44 +1604,37 @@ Ranked work, foldable into the step-2 harness split:
    paranoid re-run stays the default. Landed alongside self-healing
    never-occupy-main (a clean checkout idling on `main` is fast-forwarded
    through the landing instead of refusing it after a ten-minute suite).
-4. [ ] **Shard sections in parallel** — **PROVEN 2026-08-28 by measurement, 1.6x today.**
-   Prototype: derive one script per lane from `tests/run.sh`, each lane running the
-   dependency CLOSURE of the sections it owns, assertions credited only to owned
-   sections. Measured on a quiet machine, same generated machinery both sides:
-   - **serial 424s (1138 assertions, 0 fail) -> 4 closure lanes 264s = 1.6x**
-   - **owned-section coverage 1134/1138 = 99.6%**, 0 sections unreached; the 2 short
-     sections are the load-flaky presence lane (88/91) and one other (4/5).
-   - Parallelism itself scales near-ideally: two lanes, 285s sequential -> 132s
-     concurrent (2.17x), and the 5-lane wall clock equalled its heaviest lane exactly.
-     Contention is NOT the limit on this machine.
-   What limits it to 1.6x is DUPLICATION, not concurrency: a lane must run its
-   dependencies, and one section — `runphase v0: headless delivery via stubbed codex` —
-   is pulled into 24 other closures. Measured split for one closure: 45.3s full vs
-   25.0s setup-only, so **45% of a dependency's cost is assertions a dependent lane does
-   not need**. Separating setup from assertions in ~6 sections (dominated by that one)
-   should take this to roughly 2.4x; better packing beyond that (the trial lanes ran
-   118s..264s, so the heaviest is 2x the lightest).
-   Two traps confirmed the hard way while proving this: a naive split by fixture family
-   ran only 655/1138 assertions while reporting just 5 failures — silent coverage loss,
-   which the per-section vector now catches; and a derived script placed outside the repo
-   resolves `REPO` from `BASH_SOURCE` to the wrong directory and fails every section for
-   reasons that have nothing to do with coupling.
-   Constraints unchanged: bash 3.2 (no `wait -n`; `xargs -P` or explicit pid waits), no
-   new dependency, the presence/signal section stays in its own unshared lane, and a
-   sharded run must never mint an attestation.
-   Original note: isolated TMPDIRs — except the
-   signal-timing presence section, which stays in its own unshared lane (machine
-   load provably flaked it during the presence arc; keeping it serial is now
-   known to be cheap). **This is the remaining lever, and it is [Contraction
-   step 2](#contraction-2026-08-28--current-program).** Note the floor: after
-   the fix above the largest single section is ~50s, so section-level
-   parallelism alone cannot go below that without splitting it. Three
-   constraints: the suite runs under **bash 3.2.57** (macOS system bash) so
-   there is no `wait -n` — use `xargs -P` or explicit pid waits; add no new
-   dependency, because a zero-install story is a real feature for this tool's
-   users; and **a sharded or partial run must never mint an attestation** (see
-   the attestation invariant in AGENTS.md) or `integrate` will land code the
-   deep tests never ran.
+4. [ ] **Shard sections in parallel — MEASURED AND REJECTED 2026-08-29.** Built in full
+   (dependency closures, lane derivation, a driver with union-minimising packing, a
+   merged-vector coverage gate and owned-failure crediting) and measured on a quiet
+   machine against the same corpus:
+   - **serial 424s -> 4 lanes 397s = 1.07x**, with coverage verified complete.
+   - An earlier 1.6x figure was OPTIMISTIC and is withdrawn: it skipped isolating the
+     presence lane and was two sections short of full coverage. With both corrected the
+     win disappears.
+   The blocker is DUPLICATION, not concurrency. Parallelism itself scales near-ideally
+   here (two lanes: 285s sequential -> 132s concurrent; a 5-lane wall clock equalled its
+   heaviest lane exactly), but a lane must run its dependencies: **98 section-runs for 62
+   sections = 1.58x the work**. And the coupling is not removable by hoisting — simulated
+   hoisting the shared definitions and the closures did not shrink, because the edges are
+   `REPLY`, `DUP_OUT`, `HL_WF`: state produced by other sections' ASSERTIONS, not
+   definitions that can move. The presence/signal section also has to run alone (80s and
+   0 failures in isolation; 3 signal assertions fail when it shares the machine), which
+   adds a serial phase on top.
+   Two traps worth keeping: splitting naively by fixture family ran 655 of 1138
+   assertions while reporting only 5 failures — silent coverage loss, now caught by the
+   per-section vector; and a derived lane script placed outside the repo resolves `REPO`
+   from `BASH_SOURCE` to the wrong directory and fails every section for reasons that
+   have nothing to do with coupling.
+   **Where the time actually was:** profiling instead of parallelising found a `sleep 1`
+   in the provider watchdog — a loop whose only job is to notice the child exited, while
+   a stub-backed turn exits in milliseconds. Measured at 58s per run, 13% of the suite.
+   Polling at 0.1s took 430s -> 364s, beating the entire sharding effort with one line,
+   no concurrency and no coverage risk. Two other suspects were measured first and were
+   NOT hot (the spawn delay: 12s, already zeroed at 86 of 98 sites; the kill/await
+   graces: never fired). The prototype tooling is the right instrument if this is ever
+   revisited, but it is not landed.
+
 5. [ ] **Back-date instead of sleep** in the remaining age-based tests (most
    already stamp epochs). Worth ~27s at the absolute most — do it for
    determinism under load, not for speed.
