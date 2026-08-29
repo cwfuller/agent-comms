@@ -5860,11 +5860,50 @@ fi
 : > "$WM/cwd.log"; WM_DT1="$(wm_turn wm-tomb wmT1 "$WM_A1")"
 WM_KT="$(dirname "$(wm_prompt_cwds | sed -n 1p)")"
 : > "$WM/cwd.log"; WM_DT2="$(wm_turn wm-tomb wmT2 "$WM_A1")"
-if [ -n "$WM_KT" ] && [ -e "$WM_KT/.claim.0" ] && [ ! -s "$WM_KT/.claim.0" ] \
+# The tombstone is an EXPLICIT marker, not an empty file: emptiness reads the same whether a
+# holder released or the read failed, which is what let a contender advance past a live claim.
+if [ -n "$WM_KT" ] && grep -qx 'released=1' "$WM_KT/.claim.0" 2>/dev/null \
    && [ -e "$WM_KT/.claim.1" ]; then
   ok "a released claim is tombstoned, so its generation name is never reused"
 else
   fail "a released claim name was freed for reuse (kdir=$WM_KT: $(ls -A "$WM_KT" 2>/dev/null | tr '\n' ' '))"
+fi
+
+# A numeric claim name must NEVER be freed while an arbitrarily delayed contender may target
+# it. The interleaving: a contender reads a tombstoned .claim.0 and pauses; later holders take
+# .claim.1 and .claim.2 and crash; a fourth takes .claim.3 and its cleanup deletes .claim.1;
+# the paused contender wakes and links the now-free .claim.1 beside the live holder.
+if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
+  rm -f "$WM_KT"/.claim.* 2>/dev/null
+  for wmg in 0 1 2; do
+    ( exec true ) & WM_DP=$!; wait "$WM_DP" 2>/dev/null
+    printf 'pid=%s\nfmt=v2\nstart=STALE\nrun=crashed-%s\n' "$WM_DP" "$wmg" > "$WM_KT/.claim.$wmg"
+  done
+  : > "$WM/cwd.log"; WM_DN="$(wm_turn wm-tomb wmN1 "$WM_A1")"
+  WM_LOST=0
+  for wmg in 0 1 2; do [ -e "$WM_KT/.claim.$wmg" ] || WM_LOST=$(( WM_LOST + 1 )); done
+  if [ "$(wm_status "$WM_DN")" = "completed" ] && [ "$WM_LOST" = 0 ] && [ -e "$WM_KT/.claim.3" ]; then
+    ok "advancing past crashed generations frees no earlier claim name"
+  else
+    fail "a claim name was freed while advancing (lost=$WM_LOST status=$(wm_status "$WM_DN"))"
+  fi
+  # An UNREADABLE claim is not evidence of anything. An empty field reads the same whether the
+  # holder released or the read failed, and treating that as released lets a contender advance
+  # while the holder is still live.
+  rm -f "$WM_KT"/.claim.* 2>/dev/null
+  printf 'pid=1\nfmt=v2\nstart=STALE\nrun=unreadable\n' > "$WM_KT/.claim.0"
+  chmod 000 "$WM_KT/.claim.0" 2>/dev/null
+  : > "$WM/cwd.log"; WM_DU="$(wm_turn wm-tomb wmU1 "$WM_A1")"
+  chmod 644 "$WM_KT/.claim.0" 2>/dev/null
+  if [ "$(wm_status "$WM_DU")" = "failed" ] \
+     && [ "$(wm_prompt_cwds | awk 'END{print NR+0}')" = "0" ]; then
+    ok "an unreadable claim refuses the turn instead of reading as released"
+  else
+    fail "a turn advanced past an unreadable claim (status=$(wm_status "$WM_DU"))"
+  fi
+  rm -f "$WM_KT"/.claim.* 2>/dev/null
+else
+  fail "could not stage the claim-name-reuse fixture"
 fi
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini

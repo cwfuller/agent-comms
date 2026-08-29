@@ -1075,6 +1075,11 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
   # below and would otherwise accumulate without bound.
   # -mmin, not -newermt: the latter is a GNU extension and is rejected by BSD find and bfs.
   find "$kdir" -maxdepth 1 -name '.claim.stage.*' -mmin +60 -exec rm -f {} + 2>/dev/null || true
+  # Numeric claims are reaped ONLY by age, never by generation. Freeing a name a delayed
+  # contender may still target is the ABA that lets two runners own one mount, and a
+  # contender derives its target from the max it read, not from the max that exists now.
+  # A day is far beyond any turn; growth until then is one small file per generation.
+  find "$kdir" -maxdepth 1 -name '.claim.[0-9]*' -mmin +1440 -exec rm -f {} + 2>/dev/null || true
 
   while [ "$tries" -lt 8 ]; do
     tries=$(( tries + 1 ))
@@ -1097,15 +1102,31 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
       continue
     fi
     held="$kdir/.claim.$n"
-    hp="$(sed -n 's/^pid=//p' "$held" 2>/dev/null | head -1)"
-    hs="$(sed -n 's/^start=//p' "$held" 2>/dev/null | head -1)"
-    hfmt="$(sed -n 's/^fmt=//p' "$held" 2>/dev/null | head -1)"
-    if [ ! -e "$held" ]; then continue; fi        # raced away underneath us; re-derive
-    if [ -z "$hp" ]; then                        # tombstone: released, name kept reserved
+    # READ ONCE, AND CHECK THE READ. An empty field is not evidence: an unreadable or
+    # transiently failing claim yields the same empty string as a released one, and treating
+    # that as "released" lets a contender advance while the holder is still live.
+    local hbody="" hread=1
+    hbody="$(cat "$held" 2>/dev/null)" || hread=0
+    if [ ! -e "$held" ]; then continue; fi       # raced away underneath us; re-derive
+    if [ "$hread" = 0 ]; then
+      rm -f "$stage" 2>/dev/null || true
+      MOUNT_CLAIM_NOTE="the claim at $held could not be read, so its holder cannot be adjudicated; refusing rather than assuming it is free"
+      return 1
+    fi
+    hp="$(printf '%s\n' "$hbody" | sed -n 's/^pid=//p' | head -1)"
+    hs="$(printf '%s\n' "$hbody" | sed -n 's/^start=//p' | head -1)"
+    hfmt="$(printf '%s\n' "$hbody" | sed -n 's/^fmt=//p' | head -1)"
+    # A tombstone is an EXPLICIT, successfully-read marker -- never merely an absent pid.
+    if printf '%s\n' "$hbody" | grep -qx 'released=1'; then
       if ln "$stage" "$kdir/.claim.$(( n + 1 ))" 2>/dev/null; then
         rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$kdir/.claim.$(( n + 1 ))"; return 0
       fi
       continue
+    fi
+    if [ -z "$hp" ]; then
+      rm -f "$stage" 2>/dev/null || true
+      MOUNT_CLAIM_NOTE="the claim at $held names no runner and carries no release marker; refusing rather than assuming it is free"
+      return 1
     fi
     # NOT in a command substitution -- see proc_state's contract.
     proc_state "${hp:-}"
@@ -1126,11 +1147,6 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
     if ln "$stage" "$kdir/.claim.$(( n + 1 ))" 2>/dev/null; then
       rm -f "$stage" 2>/dev/null || true
       MOUNT_HOLDER="$kdir/.claim.$(( n + 1 ))"
-      local g2
-      for g2 in "$kdir"/.claim.[0-9]*; do
-        case "${g2##*/.claim.}" in ''|*[!0-9]*) continue ;; esac
-        [ "${g2##*/.claim.}" -le $(( n - 1 )) ] && rm -f "$g2" 2>/dev/null || true
-      done
       return 0
     fi
   done
@@ -1147,7 +1163,11 @@ mount_claim_release() {
   # to the next generation instead of reusing this one.
   [ -n "${MOUNT_HOLDER:-}" ] || return 0
   if grep -qx "pid=$$" "$MOUNT_HOLDER" 2>/dev/null; then
-    : > "$MOUNT_HOLDER" 2>/dev/null || rm -f "$MOUNT_HOLDER" 2>/dev/null || true
+    # An EXPLICIT marker, because an empty file is indistinguishable from an unreadable one.
+    # If the write fails, leave the live record in place: unlinking would free the name for a
+    # delayed contender, which is the ABA this tombstone exists to prevent. A stale live
+    # record is merely reclaimed later on positive proof of death.
+    printf 'released=1\n' > "$MOUNT_HOLDER" 2>/dev/null || true
   fi
   MOUNT_HOLDER=""; return 0
 }
@@ -1187,9 +1207,9 @@ mount_owner_wait() {  # <acpx record id> <owner home> <deadline secs> -> 0 gone 
   # all, which is the case where acpx would have fallen back to an account home this code
   # cannot name. (Caught live: this refused every panel leg on an existing thread.)
   if [ -z "$ohome" ]; then
-    # NO FALLBACK. A record file proves a store holds a COPY, not that it owns the live
-    # queue, so there is nothing here that can establish ownership: the caller degrades to
-    # the disposable path instead of rebuilding a mount whose owner it cannot locate.
+    # NO FALLBACK, and no probe of the current home: a record file proves a store holds a
+    # COPY, not that it owns the live queue. There is nothing here that can establish
+    # ownership, so this always returns 2 and the caller degrades to the disposable path.
     MOUNT_WAIT_NOTE="the previous ACP owner's home was not recorded, so which store holds its queue lease cannot be established"
     return 2
   fi
