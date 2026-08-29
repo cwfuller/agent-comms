@@ -5811,7 +5811,8 @@ fi
 WM_KR="$(dirname "$(wm_prompt_cwds | sed -n 1p)")"
 if [ -n "$WM_KR" ] && [ -d "$WM_KR" ] && [ "$(wm_status "$WM_DR0")" = "completed" ]; then
   rm -f "$WM_KR"/.claim.* 2>/dev/null
-  printf 'pid=999999\nfmt=v2\nstart=NOT-A-REAL-START\nrun=crashed\n' > "$WM_KR/.claim.0"
+  ( exec true ) & WM_DEADPID=$!; wait "$WM_DEADPID" 2>/dev/null
+  printf 'pid=%s\nfmt=v2\nstart=NOT-A-REAL-START\nrun=crashed\n' "$WM_DEADPID" > "$WM_KR/.claim.0"
   ( wm_turn wm-race wmR1 "$WM_A1" AX_CWD_LOG="$WM/cwd.r1" >"$WM/r1.out" 2>&1 ) &
   ( wm_turn wm-race wmR2 "$WM_A1" AX_CWD_LOG="$WM/cwd.r2" >"$WM/r2.out" 2>&1 ) &
   wait

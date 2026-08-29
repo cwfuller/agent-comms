@@ -1002,13 +1002,25 @@ mount_state_get() {  # <kdir> <key>
 # Two runners under different environments would otherwise read the same live process as two
 # different processes, each conclude the other's pid was recycled, and both restage one mount.
 # Pin both, so the recorded and compared forms are always the same bytes.
-proc_start() {  # -> 0 and the normalised start time, or non-zero if the pid is absent
-  # The STATUS must be `ps`'s own, not the tail of a pipeline: as a pipeline this returned
-  # sed's status unless the caller happened to have `pipefail` set, which made "is this pid
-  # dead" silently depend on a shell option set somewhere else.
-  local out
-  out="$(LC_ALL=C TZ=UTC ps -p "${1:-0}" -o lstart= 2>/dev/null)" || return 1
-  printf '%s' "$out" | tr -s ' ' | sed 's/^ *//; s/ *$//'
+# PROC_STATE: live | dead | ambig. Deliberately three-valued, because "ps failed" is not
+# "the process is gone": a transient or operational ps error (EPERM, a broken ps, a container
+# without /proc) would otherwise read as positive proof of absence and reclaim a LIVE holder.
+# Only an exit of 1 with NOTHING on stdout AND NOTHING on stderr is absence; anything else
+# that is not a clean success is ambiguous and never licenses a reclaim.
+PROC_START=""
+proc_state() {  # <pid> -> echoes live|dead|ambig, sets PROC_START on live
+  PROC_START=""
+  local pid="${1:-}" out err rc=0 errf
+  case "$pid" in ''|*[!0-9]*) printf 'ambig'; return 0 ;; esac
+  errf="$(mktemp 2>/dev/null)" || { printf 'ambig'; return 0; }
+  out="$(LC_ALL=C TZ=UTC ps -p "$pid" -o lstart= 2>"$errf")" || rc=$?
+  err="$(cat "$errf" 2>/dev/null)"; rm -f "$errf" 2>/dev/null || true
+  if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+    PROC_START="$(printf '%s' "$out" | tr -s ' ' | sed 's/^ *//; s/ *$//')"
+    printf 'live'; return 0
+  fi
+  if [ "$rc" -eq 1 ] && [ -z "$out" ] && [ -z "$err" ]; then printf 'dead'; return 0; fi
+  printf 'ambig'
 }
 
 mount_container() {  # <mounts root> <ident> -> physical container path, or non-zero
@@ -1041,7 +1053,7 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
   # so the order of two racers' writes cannot matter. Both then contend on `ln` for the new
   # generation and exactly one wins; the loser re-reads, finds the winner's live claim, and
   # refuses.
-  local kdir="$1" rd="$2" stage held hp hs hfmt n tries=0
+  local kdir="$1" rd="$2" stage held hp hs hfmt n g tries=0
   MOUNT_HOLDER=""; MOUNT_CLAIM_NOTE=""
   # mktemp, not $$: the staged record is hard-linked into place, so two actors sharing a
   # stage path would link the same inode and each `rm` the other's pending stage. $$ is not
@@ -1053,49 +1065,64 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
     # written by an older helper in a different locale/zone, so its `start=` bytes are not
     # comparable with ours — see the reclaim guard below.
     printf 'fmt=v2\n'
-    printf 'start=%s\n' "$(proc_start "$$")"
+    proc_state "$$" >/dev/null; printf 'start=%s\n' "$PROC_START"
     printf 'run=%s\n' "$rd"
   } > "$stage" 2>/dev/null || { rm -f "$stage" 2>/dev/null || true; MOUNT_CLAIM_NOTE="cannot write a claim beside $kdir"; return 1; }
 
+  # Reap stage files abandoned by crashed runners; they are skipped by the numeric cleanup
+  # below and would otherwise accumulate without bound.
+  # -mmin, not -newermt: the latter is a GNU extension and is rejected by BSD find and bfs.
+  find "$kdir" -maxdepth 1 -name '.claim.stage.*' -mmin +60 -exec rm -f {} + 2>/dev/null || true
+
   while [ "$tries" -lt 8 ]; do
     tries=$(( tries + 1 ))
-    n="$(cat "$kdir/.claim.gen" 2>/dev/null)"; case "$n" in ''|*[!0-9]*) n=0 ;; esac
-    held="$kdir/.claim.$n"
-    if ln "$stage" "$held" 2>/dev/null; then
-      rm -f "$stage" 2>/dev/null || true
-      MOUNT_HOLDER="$held"
-      # Generations two or more behind are provably abandoned: reaching $n required judging
-      # $((n-1)) dead.
-      local g
-      for g in "$kdir"/.claim.*; do
-        case "${g##*/.claim.}" in ''|*[!0-9]*) continue ;; esac
-        [ "${g##*/.claim.}" -le $(( n - 2 )) ] && rm -f "$g" 2>/dev/null || true
-      done
-      return 0
+    # THE GENERATION IS THE HIGHEST CLAIM THAT EXISTS — there is no counter file. A counter
+    # was rewindable: a delayed racer holding a stale snapshot could overwrite generation 3
+    # with 1, and once the generation-3 winner's cleanup had removed .claim.1 it could
+    # acquire that name while the real holder sat at .claim.3. Deriving the generation from
+    # the directory makes a rewind unrepresentable: `ln` on the next name is the only way to
+    # advance, and it is atomic.
+    n=-1
+    for g in "$kdir"/.claim.[0-9]*; do
+      case "${g##*/.claim.}" in ''|*[!0-9]*) continue ;; esac
+      [ "${g##*/.claim.}" -gt "$n" ] && n="${g##*/.claim.}"
+    done
+    if [ "$n" -lt 0 ]; then
+      # No claim at all: generation 0 is free.
+      if ln "$stage" "$kdir/.claim.0" 2>/dev/null; then
+        rm -f "$stage" 2>/dev/null || true; MOUNT_HOLDER="$kdir/.claim.0"; return 0
+      fi
+      continue
     fi
+    held="$kdir/.claim.$n"
     hp="$(sed -n 's/^pid=//p' "$held" 2>/dev/null | head -1)"
     hs="$(sed -n 's/^start=//p' "$held" 2>/dev/null | head -1)"
     hfmt="$(sed -n 's/^fmt=//p' "$held" 2>/dev/null | head -1)"
-    local now rc=0
-    now="$(proc_start "${hp:-0}")" || rc=$?
-    # DEAD on positive proof of absence (`ps` exits 1 with empty stdout), or when the pid is
-    # live but its start time differs from the record in OUR format — a recycled number, not
-    # our holder. A denied or unparseable `ps`, or an unversioned holder, stays ambiguous and
-    # never reclaims.
+    if [ ! -e "$held" ]; then continue; fi        # raced away underneath us; re-derive
+    local st; st="$(proc_state "${hp:-}")"
     local dead=0
-    [ -n "$hp" ] && [ "$rc" -eq 1 ] && [ -z "$now" ] && dead=1
-    [ "$hfmt" = v2 ] && [ -n "$hp" ] && [ -n "$hs" ] && [ "$rc" -eq 0 ] && [ -n "$now" ] \
-      && [ "$now" != "$hs" ] && dead=1
+    [ "$st" = dead ] && dead=1
+    # A live pid whose start differs from the record is a RECYCLED number, not our holder --
+    # but only when the holder wrote its start in our format.
+    [ "$st" = live ] && [ "$hfmt" = v2 ] && [ -n "$hs" ] && [ -n "$PROC_START" ] \
+      && [ "$PROC_START" != "$hs" ] && dead=1
     if [ "$dead" = 0 ]; then
       rm -f "$stage" 2>/dev/null || true
-      MOUNT_CLAIM_NOTE="the mount at $kdir is held by runner pid ${hp:-<unknown>} (run $(sed -n 's/^run=//p' "$held" 2>/dev/null | head -1)); if no runner is really alive, clear it with: rm -f '$held'"
+      MOUNT_CLAIM_NOTE="the mount at $kdir is held by runner pid ${hp:-<unknown>} (run $(sed -n 's/^run=//p' "$held" 2>/dev/null | head -1), liveness=$st); if no runner is really alive, clear it with: rm -f '$held'"
       return 1
     fi
-    # Dead: advance the generation rather than deleting a record a racer may be reading.
-    printf '%s\n' "$(( n + 1 ))" > "$kdir/.claim.gen.tmp.$$" 2>/dev/null \
-      && mv -f "$kdir/.claim.gen.tmp.$$" "$kdir/.claim.gen" 2>/dev/null || {
-        rm -f "$kdir/.claim.gen.tmp.$$" "$stage" 2>/dev/null || true
-        MOUNT_CLAIM_NOTE="cannot advance the mount claim generation at $kdir"; return 1; }
+    # Dead: claim the NEXT generation. Nothing is deleted, so no racer can lose a record it
+    # is still adjudicating, and exactly one `ln` can win.
+    if ln "$stage" "$kdir/.claim.$(( n + 1 ))" 2>/dev/null; then
+      rm -f "$stage" 2>/dev/null || true
+      MOUNT_HOLDER="$kdir/.claim.$(( n + 1 ))"
+      local g2
+      for g2 in "$kdir"/.claim.[0-9]*; do
+        case "${g2##*/.claim.}" in ''|*[!0-9]*) continue ;; esac
+        [ "${g2##*/.claim.}" -le $(( n - 1 )) ] && rm -f "$g2" 2>/dev/null || true
+      done
+      return 0
+    fi
   done
   rm -f "$stage" 2>/dev/null || true
   MOUNT_CLAIM_NOTE="the mount claim at $kdir churned through $tries generations without settling"
@@ -1518,9 +1545,13 @@ cmd_run() {
            # the stable mount could restage under an owner living in a store we cannot name,
            # so DEGRADE to the disposable per-message path: the turn still reviews the pinned
            # artifact, just cold, and the stable mount is left untouched for an operator.
-           echo "mount: ${MOUNT_WAIT_NOTE:-ownership unprovable}; using the per-message path this turn and leaving $mount_kdir alone (clear it with: rm -rf '$mount_kdir' once no reviewer is running)" >>"$run_dir/runner.log"
+           echo "mount: ${MOUNT_WAIT_NOTE:-ownership unprovable}; using the per-message path this turn and leaving $mount_kdir alone (clear it once no reviewer is running with: git -C '$main_root' worktree remove --force '$mount_dir' && rm -rf '$mount_kdir')" >>"$run_dir/runner.log"
            mount_claim_release
-           mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""; mount_ident="" ;;
+           # KEEP mount_ident. Only the PATH degrades; the session must stay in the mounted
+           # namespace, because `agent-comms-<thread>` from inside a linked worktree is
+           # exactly the ancestor-walk escape `+mount+` exists to close — acpx would resolve
+           # up to the enclosing repo and could bind a record whose cwd is the live tree.
+           mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable="" ;;
         *) update_thread_state "$msg_thread" failed "" "$sfield" || true
            write_result "$run_dir" failed 1 "" "$msg" "${MOUNT_WAIT_NOTE:-the previous ACP queue owner for this mount has not exited} — refusing to restage under a live owner"
            unmount_artifact
