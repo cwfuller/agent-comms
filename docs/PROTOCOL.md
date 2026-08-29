@@ -271,6 +271,11 @@ id — an empty column means "not a panel attempt", never "attempt unknown". `re
 binds a reply to the request it answers (`in-reply-to`); a re-send of the same request
 appends another `request-persisted`, and the LAST pair for that request id is the live one.
 
+Two exceptions to "every event of an attempt carries its `dispatch`", both deliberate: a
+bare `send` outside a panel has no attempt to name, and the legacy self-send arm copies
+`review_set` onto its reply but not `dispatch`, so its `reply-accepted` carries none. That
+arm is scheduled for deletion rather than extension.
+
 A `question` never enters the request lifecycle: consults are recorded as
 `message-dispatched` and nothing more, because nothing in this log completes them.
 
@@ -314,6 +319,8 @@ the same way.
 After a driver dies, `comms.sh events --set <id>` answers what to do next:
 
 - a leg named by `panel-planned` with **no `request-dispatched`** — it never went out; re-send it.
+- **two `turn-finished` rows for one run dir** — the runner recorded its terminal event, died
+  before publishing `result.json`, and `await` synthesized one. The later row is authoritative.
 - **`turn-started` with no `provider-result`** — it may still be running or have been killed;
   inspect its `run_dir`. Do not re-spawn blind (the mount claim refuses a second owner anyway).
 - **`reply-refused`**, or a failed/timeout `turn-finished` with no `reply-accepted` — do not

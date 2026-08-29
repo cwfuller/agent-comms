@@ -260,10 +260,11 @@ a run dir the driver may never open. A driver that died between the ACP turn exi
 
 Four decisions are load-bearing, and each one was argued down from something worse:
 
-**Fail-closed exactly once, where refusing changes nothing.** `request-persisted` is written
-after the request validates and before anything is nudged, and a failure there `die`s: a
-request nobody could record is a leg nobody can recover, and at that instant nothing has
-happened yet. It uses `die` rather than `set -e` because `panel dispatch` calls
+**Fail-closed exactly twice, where refusing changes nothing.** `panel-planned` (the roster,
+before any leg is sent) and `request-persisted` (after the request validates, before
+anything is nudged) both `die` on failure: a roster or a request nobody could record is a
+panel nobody can enumerate and a leg nobody can recover, and at those two instants nothing
+has happened yet. It uses `die` rather than `set -e` because `panel dispatch` calls
 `cmd_send ... || echo warning`, which suppresses errexit inside the function — an unchecked
 append would have been advisory exactly where it claimed to gate. Everything after that
 point is advisory and loud. The asymmetry is the whole design: `cmd_send` is also how a

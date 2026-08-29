@@ -224,6 +224,8 @@ LOG_INCOMPLETE=0
 # "refused to stamp" from "stamped, then delivery failed" — those demand opposite recovery
 # actions and only one of them is a refusal. (grok, plan r1, blocking.)
 BROKER_VALIDATED=0
+# Idempotence for the refusal boundary below: the non-ACP path passes through two of them.
+BROKER_REFUSAL_LOGGED=0
 
 # log_event <kind> <status> <note> [message-id] — the runner's ONE way into the log.
 #
@@ -275,20 +277,26 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
     "$(json_escape "$mf")" "$(json_escape "$dir")" \
     "$(json_escape "${STARTED_AT:-}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(json_escape "$note")" \
-    > "$dir/result.json.tmp" && mv "$dir/result.json.tmp" "$dir/result.json" \
-    || echo "warning: could not write result.json in $dir" >&2
-  RESULT_WRITTEN=true
-  # The TURN's terminal status — not the provider's. They differ exactly when the provider
-  # exited clean and the broker then refused, and reporting that as a provider failure was
-  # both out of order and wrong. `provider-result` is emitted where the provider actually
-  # exits; this is the last word on the turn. Inside the write-once guard, so the EXIT
-  # trap's belt-and-braces call cannot double it. (codex, plan r1, blocking.)
-  # A turn whose own trace is missing a milestone must not sign off as `completed`.
+    > "$dir/result.json.tmp"
+  # THE TERMINAL EVENT IS DURABLE FIRST. result.json is the signal `await` unblocks on, so
+  # a runner that died between publishing it and appending this row left await with a
+  # result in hand, nothing to synthesize, and no terminal event at all — the permanent
+  # unknown this event exists to remove. Ordering it before the publish costs nothing and
+  # closes the window. (codex, implement r1, blocking.) If the runner dies in the NEW
+  # window — event written, result.json not — await synthesizes its own terminal row, and
+  # the later row is the authoritative one; PROTOCOL says so.
+  #
+  # The TURN's terminal status, not the provider's: they differ exactly when the provider
+  # exited clean and the broker then refused. A turn whose own trace lost an event signs
+  # off `log-incomplete` rather than claiming a clean run over a hole.
   if [ "${LOG_INCOMPLETE:-0}" = 1 ]; then
     log_event turn-finished log-incomplete "turn=$status exit=$rc session=$sid — an event this turn produced is MISSING from the log; do not read this trace as complete${note:+ (note=$note)}"
   else
     log_event turn-finished "$status" "exit=$rc session=$sid${note:+ note=$note}"
   fi
+  mv "$dir/result.json.tmp" "$dir/result.json" \
+    || echo "warning: could not write result.json in $dir" >&2
+  RESULT_WRITTEN=true
 }
 
 # update_thread_state <thread> <status> <session-id> <session-field> — mirror
@@ -594,7 +602,12 @@ PROMPT
 grok_broker() {  # <msg> <run-dir> <peer> — extract, then stamp/persist/validate/send/archive
   local msg="$1" run_dir="$2" peer="$3"
   GROK_BROKER_NOTE=""
-  if ! broker_extract_stream "$run_dir"; then return 1; fi
+  BROKER_REFUSAL_LOGGED=0
+  # The boundary is the WHOLE pipeline, not just the stamping half. An extraction failure
+  # returned straight out of here and never reached the refusal logger, so the loudest
+  # broker failure there is — "the reply could not be read out of the stream at all" —
+  # was the one case with no durable record. (codex, implement r1, blocking.)
+  if ! broker_extract_stream "$run_dir"; then broker_note_refusal; return 1; fi
   broker_stamp_and_deliver "$msg" "$run_dir" "$peer"
 }
 
@@ -926,11 +939,19 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
   # this turn would otherwise sign off `completed` with no acceptance in its trace — a
   # positively contradictory history, which is worse than a gap. (codex, plan r2, blocking.)
   #
-  # The signal is the warning `send` prints on exactly that failure, captured in runner.log
-  # by the redirect above — NOT a lookup of the row by id. An id lookup would have to match
-  # a column the writer is allowed to CLIP, so a long message id would report a loss that
-  # never happened, which is the same class of false certainty this event exists to remove.
-  grep -q 'coordinator log not updated' "$run_dir/runner.log" 2>/dev/null && LOG_INCOMPLETE=1
+  # Read the LOG for the acceptance, not runner.log for a warning about it: runner.log also
+  # carries provider stderr, and a reply that quotes the warning text — this very arc's
+  # review requests do, repeatedly — would mark a perfectly recorded turn incomplete.
+  # (grok, implement r1.)
+  #
+  # The match is (kind, thread, written no earlier than this turn started). Thread is used
+  # rather than a message id because it is short enough that the writer's per-column clip
+  # cannot alter it; a thread long enough to be clipped degrades to a CONSERVATIVE
+  # log-incomplete, never to a false clean bill.
+  local evf; evf="$("$COMMS" root 2>/dev/null)/events.tsv"
+  awk -F'\t' -v th="$RUN_THREAD" -v t0="${STARTED_AT:-}" \
+      '$3=="reply-accepted" && $6==th && (t0=="" || $1>=t0)' "$evf" 2>/dev/null | grep -q . \
+    || LOG_INCOMPLETE=1
   return 0
 }
 
@@ -948,10 +969,17 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer>
   local rc=0
   BROKER_VALIDATED=0
   broker_stamp "$@" || rc=$?
-  if [ "$rc" -ne 0 ] && [ "$BROKER_VALIDATED" -ne 1 ]; then
-    log_event reply-refused refused "${GROK_BROKER_NOTE:-the broker refused this reply without saying why}"
-  fi
+  [ "$rc" -eq 0 ] || [ "$BROKER_VALIDATED" -eq 1 ] || broker_note_refusal
   return "$rc"
+}
+
+# broker_note_refusal — the ONE place a broker refusal becomes an event, called from both
+# boundaries and idempotent, so the non-ACP path (which passes through both) records it
+# exactly once and a new refusal path cannot forget to.
+broker_note_refusal() {
+  [ "${BROKER_REFUSAL_LOGGED:-0}" = 1 ] && return 0
+  BROKER_REFUSAL_LOGGED=1
+  log_event reply-refused refused "${GROK_BROKER_NOTE:-the broker refused this reply without saying why}"
 }
 
 cmd_spawn() {

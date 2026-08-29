@@ -1272,6 +1272,31 @@ $(findings_rebuild_shadow_rows "$root")"
 # re-running anything or touching the loop.
 findings_set_index() { printf '%s/.comms/grades/sets.tsv' "$1"; }
 
+# ONE definition of the index header. It was written out twice — `panel dispatch` and
+# `shadow` — which is a column-drift waiting to happen the moment either grows a field.
+findings_set_header() {
+  printf 'review_set_id\trequest_message_id\tthread\tround\tphase\tartifact_id\tprompt_version\tbase_sha\tgating_agent\tshadow_agent\tdrift_status\tdrift_artifact_id\tcreated\tdispatch\n'
+}
+
+# set_current_dispatch <index> <set-id> — the attempt a reader should bind to: the LAST row
+# recorded for that set, by file order.
+#
+# A set id is deterministic (thread, phase, round, artifact) and a retry deliberately
+# rebinds the set's rows, so set+agent alone cannot separate two concurrent attempts: their
+# legs interleave in one index, and a status or composition built from that mixture reports
+# a panel that never existed. Rows written before this column existed carry an empty value,
+# and an empty current dispatch selects exactly those — legacy sets compose as they always
+# did. (codex, implement r1, blocking.)
+set_current_dispatch() {
+  awk -F'\t' -v s="$2" 'NR>1 && $1==s {d=$14} END {print d}' "$1"
+}
+
+# set_legs <index> <set-id> <dispatch> — one line per leg of THAT attempt:
+#   <agent> <thread> <round> <request_message_id>, tab separated.
+set_legs() {
+  awk -F'\t' -v s="$2" -v d="$3" 'NR>1 && $1==s && $14==d {print $10 "\t" $3 "\t" $4 "\t" $2}' "$1"
+}
+
 safe_set_id() {  # a review_set_id is used as a DIRECTORY NAME — treat it as hostile
   # safe_name NORMALIZES, and normalization is not identity: `a/b` and `a_b` both become
   # `a_b`, so two distinct legal sets would share one directory and the second would
@@ -1420,7 +1445,8 @@ cmd_panel() {
     # never by whatever the newest same-agent same-thread message happens to be. A
     # status that says "answered / APPROVE" off a stale or type:error message is the
     # false all-clear compose exists to refuse. (grok, panel r1.)
-    awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4 "\t" $2}' "$idx" | while IFS=$'\t' read -r ag th rnd req_mid; do
+    local status_dispatch; status_dispatch="$(set_current_dispatch "$idx" "$set_id")"
+    set_legs "$idx" "$set_id" "$status_dispatch" | while IFS=$'\t' read -r ag th rnd req_mid; do
       [ -n "$ag" ] || continue
       local reply="" verdict="" answered=no cand
       for cand in $(leg_reply_candidates "$root" "$status_ws" "$ag" "$th" "$status_reg"); do
@@ -1486,7 +1512,7 @@ cmd_panel() {
 
   local idx; idx="$(findings_set_index "$root")"
   mkdir -p "$(dirname "$idx")" 2>/dev/null || true
-  [ -s "$idx" ] || printf 'review_set_id\trequest_message_id\tthread\tround\tphase\tartifact_id\tprompt_version\tbase_sha\tgating_agent\tshadow_agent\tdrift_status\tdrift_artifact_id\tcreated\n' > "$idx"
+  [ -s "$idx" ] || findings_set_header > "$idx"
 
   local gating="${roster%% *}" leg_thread leg_file leg_mid ts n=0 dispatch_id
   # THE ATTEMPT ID. A set id is deterministic — same thread, phase, round and artifact
@@ -1551,10 +1577,10 @@ cmd_panel() {
         && command mv -f "$idx_tmp" "$idx" \
         && emit_diagnostic "panel: retry — rebound $ag's leg of $set_id to this dispatch's request"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$set_id" "$leg_mid" "$leg_thread" "$round" "$phase" "$aid" "$pver" \
       "${dispatch_base:-$(frontmatter_field "$req" head_sha)}" "$gating" "$ag" "dispatched" "" \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$idx"
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$dispatch_id" >> "$idx"
     echo "  leg: $ag  thread=$leg_thread"
     cmd_send --to "$ag" "$leg_file" || echo "  warning: leg for '$ag' did not deliver — the set is incomplete"
     n=$((n + 1))
@@ -1596,7 +1622,8 @@ cmd_compose() {
   # The ROUND is part of a leg's identity. Finding replies by reviewer+thread alone
   # makes round 2 compose round 1's replies and report "all answered" — the panel would
   # gate on findings about an artifact it is no longer reviewing. (grok, panel r1.)
-  local legs; legs="$(awk -F'\t' -v s="$set_id" 'NR>1 && $1==s {print $10 "\t" $3 "\t" $4 "\t" $2}' "$idx")"
+  local compose_dispatch; compose_dispatch="$(set_current_dispatch "$idx" "$set_id")"
+  local legs; legs="$(set_legs "$idx" "$set_id" "$compose_dispatch")"
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
   local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread="" blind=""
@@ -1676,7 +1703,7 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   if [ -n "$pending" ]; then
     echo "compose: INCOMPLETE — no reply yet from:$pending ($n_answered of $n_legs legs answered)"
     echo "compose: refusing to gate on a partial panel; re-run when the set is complete"
-    cmd_events append --kind composition-refused --set "$set_id" --status partial \
+    cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" --status partial \
       --note "$n_answered of $n_legs legs answered; no reply yet from:$pending" \
       || echo "warning: coordinator log not updated (composition-refused)" >&2
     return 3
@@ -1687,7 +1714,7 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   if [ -n "$blind" ]; then
     printf '%s\n' "${blind# }"
     echo "compose: refusing to gate on a review this parser could not read"
-    cmd_events append --kind composition-refused --set "$set_id" --status unreadable \
+    cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" --status unreadable \
       --note "$(printf '%s' "${blind# }" | tr '\n' ' ')" \
       || echo "warning: coordinator log not updated (composition-refused)" >&2
     # The remedy depends on WHY it could not be read: telling someone whose reply was cut
@@ -1740,7 +1767,7 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   rm -f "$tmp"
   # Composition is the last coordinator act of a round, so it closes the trace the roster
   # event opened: a set with a panel-planned and no composition-* is a round nobody gated.
-  cmd_events append --kind composition-completed --set "$set_id" --status composed \
+  cmd_events append --kind composition-completed --set "$set_id" --dispatch "$compose_dispatch" --status composed \
     --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0}" \
     || echo "warning: coordinator log not updated (composition-completed)" >&2
   [ -z "$out" ] || echo "compose: wrote ${out#"$root"/}"
@@ -1861,22 +1888,28 @@ cmd_events() {
     local tornf; tornf="$(mktemp "${TMPDIR:-/tmp}/agent-comms-events.XXXXXX" 2>/dev/null || true)"
     [ -n "$tornf" ] || tornf=/dev/null
     awk -F'\t' -v s="$set_id" -v d="$dispatch" -v t="$thread" -v k="$kind" -v a="$agent" \
-        -v hdr="$EVENTS_HEADER" -v kinds="$EVENT_KINDS" -v tornf="$tornf" -v lim="$limit" '
+        -v hdr="$EVENTS_HEADER" -v kinds="$EVENT_KINDS" -v roles="$EVENT_ROLES" \
+        -v tornf="$tornf" -v lim="$limit" -v r="$role" '
       # The header is printed HERE, by the same process as the rows. Emitted from the shell
       # it sat in the stdio buffer bash uses whenever stdout is a pipe, so a piped read
       # (events --set X | head) could see the rows arrive first, or lose the header
       # entirely to SIGPIPE. One writer, one stream, one order. Found by the suite.
       BEGIN { print hdr; ncols = split(hdr, H, "\t") }
-      $1 == "ts" { next }
+      # EXACT match. Skipping anything whose first field is "ts" would drop a real row that
+      # merely began with that token, and would swallow a foreign header from an older
+      # schema instead of naming it. Anything else header-shaped falls through to the
+      # malformed count, where it is reported. (codex, implement r1, blocking.)
+      $0 == hdr { next }
       # WHOLE-FIELD checks, not "looks like it contains a timestamp": two concatenated rows
       # would pass a loose prefix test and be read as one event nobody wrote. The kind must
       # also be in the closed vocabulary. (codex + grok, plan r2.)
       $1 !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/ \
-        || NF != ncols || index(kinds, " " $3 " ") == 0 { if (NF) torn++; next }
+        || NF != ncols || index(kinds, " " $3 " ") == 0 \
+        || index(roles, " " $9 " ") == 0 { if (NF) torn++; next }
       # The cap applies to the ROWS, never to the header, so it is a bounded ring buffer
       # here rather than a `tail` on the whole stream.
       (s == "" || $4 == s) && (d == "" || $5 == d) && (t == "" || $6 == t) \
-        && (k == "" || $3 == k) && (a == "" || $8 == a) {
+        && (k == "" || $3 == k) && (a == "" || $8 == a) && (r == "" || $9 == r) {
         buf[++n] = $0
         if (n > lim) delete buf[n - lim]
       }
@@ -1905,18 +1938,20 @@ cmd_events() {
   esac
   local dir; dir="$(dirname "$f")"
   mkdir -p "$dir" 2>/dev/null || die "events: cannot create $(clip "$dir")"
+  # EVERY append, not just the first. Checking only at creation left the refusal trivially
+  # bypassable: a `.comms` that migrates onto a network mount — or an events.tsv copied
+  # there — appends unchecked for the rest of its life, which is the silent-loss mode this
+  # refusal exists to prevent. One `df` per event is cheap next to a review turn.
+  # (codex + grok, implement r1 — both found it.)
+  fs_events_safe "$dir" \
+    || die "events: refusing to write the coordinator log on '$(fs_events_device "$dir")' — an append-only log is only sound on a local filesystem (NFS simulates O_APPEND and can drop a whole append, leaving a well-formed file with an event missing). Point .comms at local storage."
   # Create the header exactly ONCE, even with N detached runners appending at once.
   # `[ -s ] || printf > file` lets two first-creators truncate each other and lose a row,
   # and a second header read as a row is the log lying about an event. `ln` is atomic and
   # fails if the name exists, so the loser simply discards its copy. Same filesystem by
   # construction (same directory). (grok, plan r1.)
   if [ ! -f "$f" ]; then
-    # The filesystem is judged BEFORE the log exists, which is also the only time this
-    # costs anything: on a sound filesystem the check runs exactly once in the log's life,
-    # and on an unsound one there is never a log to append to. The seed lives in the log's
-    # OWN directory so `ln` cannot fail with EXDEV. (grok, plan r2.)
-    fs_events_safe "$dir" \
-      || die "events: refusing to create the coordinator log on '$(fs_events_device "$dir")' — an append-only log is only sound on a local filesystem (NFS simulates O_APPEND and can drop a whole append, leaving a well-formed file with an event missing). Point .comms at local storage."
+    # The seed lives in the log's OWN directory so `ln` cannot fail with EXDEV. (grok, r2.)
     local seed; seed="$(mktemp "$dir/.events.XXXXXX" 2>/dev/null || true)"
     if [ -n "$seed" ]; then
       printf '%s\n' "$EVENTS_HEADER" > "$seed"
@@ -1939,7 +1974,11 @@ cmd_events() {
   # One `printf` of one small row: on a local filesystem that is one flushed write at the
   # append offset, which is what keeps concurrent runners from tearing each other's rows.
   # The note is the only variable-width column, so it takes whatever room is left.
-  room=$(( EVENT_ROW_MAX - $(byte_len "$fixed") - 1 ))
+  # Two bytes are reserved, not one: the delimiter before the note AND the newline. The cap
+  # is about what reaches write(2), and the newline is part of that — budgeting only the tab
+  # let a maximum row reach 1025 bytes, one past the bound the whole argument rests on, and
+  # the test that accepted 1025 hid it. (codex, implement r1, blocking.)
+  room=$(( EVENT_ROW_MAX - $(byte_len "$fixed") - 2 ))
   [ "$room" -ge 8 ] || room=0
   if [ "$room" -eq 0 ]; then note=""; else note="$(event_field "$note" "$room")"; fi
   printf '%s\t%s\n' "$fixed" "$note" >> "$f"
@@ -2251,11 +2290,13 @@ cmd_shadow() {
 
   local idx; idx="$(findings_set_index "$root")"
   mkdir -p "$(dirname "$idx")" 2>/dev/null || true
-  [ -s "$idx" ] || printf 'review_set_id\trequest_message_id\tthread\tround\tphase\tartifact_id\tprompt_version\tbase_sha\tgating_agent\tshadow_agent\tdrift_status\tdrift_artifact_id\tcreated\n' > "$idx"
+  [ -s "$idx" ] || findings_set_header > "$idx"
   if ! cut -f1 "$idx" | grep -qxF -- "$rsid"; then
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    # A shadow row carries no attempt id: it is a MEASUREMENT of a thread, not a leg of a
+    # dispatch, and giving it one would make it selectable as a leg of that attempt.
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$rsid" "$reqid" "$thread" "$round" "$phase" "$aid" "$pver" "$base" "$gating" "$to" \
-      "$drift_status" "$drift" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$idx"
+      "$drift_status" "$drift" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "" >> "$idx"
   fi
   case "$drift_status" in
     changed) echo "shadow: WARNING - the live tree moved during the review ($aid -> $drift). The shadow read the mounted artifact; the gating reviewer may not have." ;;

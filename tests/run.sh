@@ -1448,6 +1448,9 @@ for a in "$@"; do [ "$prev" = "--prompt-file" ] && pf="$a"; prev="$a"; done
 # parent-stamped envelope the child emits ONLY a VERDICT line (reviews) + body.
 esc() { printf '%s' "$1" | awk '{gsub(/\t/, "\\t"); printf "%s\\n", $0}'; }
 printf '{"type":"system","subtype":"init","session_id":"stub-grok-session-1"}\n'
+# A turn that emits no result event at all: the extractor finds no reply text, which is the
+# loudest broker failure there is and the one that used to leave no durable record.
+[ -n "${GROK_STUB_NO_RESULT:-}" ] && exit 0
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"narration to ignore"}]}}\n'
 if [ -n "${GROK_STUB_NO_VERDICT:-}" ]; then
   REPLY="$(printf -- '## Summary\nreview without any verdict line')"
@@ -7314,13 +7317,17 @@ run_ev events append --kind reply-refused --thread ev-thread --status refused \
 [ "$(tail -1 "$EV_LOG" | awk -F'\t' '{print NF}')" = "$C_NF" ] && ok "the sanitised row keeps every column" || fail "column count after sanitisation"
 EV_BIG="$(awk 'BEGIN{while(i++<4000)printf "x"}')"
 run_ev events append --kind reply-validated --thread ev-thread --status APPROVE --note "$EV_BIG" >/dev/null
-[ "$(tail -1 "$EV_LOG" | LC_ALL=C wc -c | tr -d ' ')" -le 1025 ] && ok "an oversized note is clipped to the row cap" || fail "row cap on a long note"
+[ "$(tail -1 "$EV_LOG" | LC_ALL=C wc -c | tr -d ' ')" -le 1024 ] && ok "an oversized note is clipped to the row cap" || fail "row cap on a long note"
 # The cap is a property of the COLUMNS. Clipping the assembled row instead would cut
 # trailing delimiters off and break the fixed-column contract. (codex, plan r1.)
 run_ev events append --kind turn-started --set "$EV_BIG" --dispatch "$EV_BIG" --thread "$EV_BIG" \
   --round "$EV_BIG" --agent "$EV_BIG" --artifact "$EV_BIG" --request-id "$EV_BIG" \
   --message-id "$EV_BIG" --run-dir "$EV_BIG" --status "$EV_BIG" --note "$EV_BIG" >/dev/null
-[ "$(tail -1 "$EV_LOG" | LC_ALL=C wc -c | tr -d ' ')" -le 1025 ] && ok "every column at its maximum still fits the row cap" || fail "row cap with all columns maxed"
+[ "$(tail -1 "$EV_LOG" | LC_ALL=C wc -c | tr -d ' ')" -le 1024 ] && ok "every column at its maximum still fits the row cap" || fail "row cap with all columns maxed"
+# The cap is about what reaches write(2), so the newline counts. Accepting 1025 was the
+# test masking the violation. (codex, implement r1, blocking.)
+[ "$(awk 'END{print (max+0)}{ if (length($0)+1 > max) max = length($0)+1 }' "$EV_LOG")" -le 1024 ] \
+  && ok "no row in the whole log exceeds the cap, newline included" || fail "a row exceeds the cap with its newline"
 [ "$(tail -1 "$EV_LOG" | awk -F'\t' '{print NF}')" = "$C_NF" ] && ok "a maxed row keeps every column" || fail "maxed row lost columns"
 
 # A torn row is NAMED, not parsed: there is no lock (a dead holder is a deadlock), so
@@ -7336,6 +7343,15 @@ printf '%s%s\n' "$EV_GOOD" "$EV_GOOD" >> "$EV_LOG"
 EV_BADKIND="$(printf '%s' "$EV_GOOD" | awk -F'\t' -v c="$C_EV" 'BEGIN{OFS="\t"}{$c="turn-invented"; print}')"
 printf '%s\n' "$EV_BADKIND" >> "$EV_LOG"
 run_ev events 2>/dev/null | grep -q 'turn-invented' && fail "a row with an unknown kind was read as an event" || ok "a row naming a kind outside the vocabulary is refused"
+# EVERY closed vocabulary, not just the kind: a role nobody can write was being printed as
+# a real event. (codex, implement r1, blocking.)
+EV_BADROLE="$(printf '%s' "$EV_GOOD" | awk -F'\t' -v c="$C_ROLE" -v t="$C_TH" 'BEGIN{OFS="\t"}{$c="auditor"; $t="ev-badrole"; print}')"
+printf '%s\n' "$EV_BADROLE" >> "$EV_LOG"
+run_ev events 2>/dev/null | grep -q 'ev-badrole' && fail "a row naming an impossible role was read as an event" || ok "a row naming a role outside the vocabulary is refused"
+# A row that merely BEGINS with the header's first token is a row, not a header: skipping
+# it would drop a real event, and swallowing a foreign header would hide it. (codex.)
+printf 'ts\tnot\ta\theader\tjust\ta\trow\tthat\tstarts\twith\tts\tand\tis\tmalformed\there\n' >> "$EV_LOG"
+run_ev events 2>&1 >/dev/null | grep -q 'malformed' && ok "a header-shaped row that is not the header is reported, not silently skipped" || fail "header-shaped row swallowed"
 
 EV_N=20
 i=1; while [ "$i" -le "$EV_N" ]; do
@@ -7379,14 +7395,22 @@ ev_fs_try() { # <df-device> <repo-dir>
   (cd "$2" && env -u CMUX_WORKSPACE_ID DF_STUB_FS="$1" PATH="$EV_DFB:$PATH" "$COMMS" events append --kind turn-started --thread fs-1) 2>&1
 }
 EV_NFS="$(ev_fs_try 'fileserver:/export/home' "$WORK/events-repo-3" || true)"
-printf '%s\n' "$EV_NFS" | grep -q 'refusing to create' && ok "an NFS mount refuses the log outright" || fail "network fs not refused (got: $EV_NFS)"
+printf '%s\n' "$EV_NFS" | grep -q 'refusing to write' && ok "an NFS mount refuses the log outright" || fail "network fs not refused (got: $EV_NFS)"
 [ ! -f "$WORK/events-repo-3/.comms/events.tsv" ] && ok "a refused filesystem leaves no half-made log" || fail "a log was created on a refused filesystem"
 EV_SMB="$(ev_fs_try '//server/share' "$WORK/events-repo-5" || true)"
-printf '%s\n' "$EV_SMB" | grep -q 'refusing to create' && ok "an SMB mount refuses the log outright" || fail "smb fs not refused (got: $EV_SMB)"
+printf '%s\n' "$EV_SMB" | grep -q 'refusing to write' && ok "an SMB mount refuses the log outright" || fail "smb fs not refused (got: $EV_SMB)"
 EV_UNK="$(ev_fs_try '' "$WORK/events-repo-6" || true)"
-printf '%s\n' "$EV_UNK" | grep -q 'refusing to create' && ok "a filesystem that cannot be classified fails closed" || fail "unclassified fs allowed (got: $EV_UNK)"
+printf '%s\n' "$EV_UNK" | grep -q 'refusing to write' && ok "a filesystem that cannot be classified fails closed" || fail "unclassified fs allowed (got: $EV_UNK)"
 EV_LOCAL="$(ev_fs_try '/dev/disk1s5' "$WORK/events-repo-4" || true)"
-printf '%s\n' "$EV_LOCAL" | grep -q 'refusing to create' && fail "a local filesystem was refused" || ok "a local filesystem is accepted"
+printf '%s\n' "$EV_LOCAL" | grep -q 'refusing' && fail "a local filesystem was refused" || ok "a local filesystem is accepted"
+# ...and it actually wrote, rather than failing for some other reason the grep cannot see.
+[ -s "$WORK/events-repo-4/.comms/events.tsv" ] && ok "the accepted filesystem really got a log" || fail "no log on the accepted filesystem"
+# CHECKED ON EVERY APPEND. Judging only at creation left the refusal bypassable for the
+# rest of the log's life by a `.comms` that migrates onto network storage — the silent-loss
+# mode the refusal exists to prevent. (codex + grok, implement r1.)
+EV_MIGRATED="$( (cd "$WORK/events-repo-4" && env -u CMUX_WORKSPACE_ID DF_STUB_FS='fileserver:/export/home' PATH="$EV_DFB:$PATH" "$COMMS" events append --kind turn-started --thread migrated-1) 2>&1 >/dev/null || true )"
+printf '%s\n' "$EV_MIGRATED" | grep -q 'refusing to write' && ok "an EXISTING log that moved onto network storage refuses further appends" || fail "migrated log appended unchecked (got: $EV_MIGRATED)"
+grep -q 'migrated-1' "$WORK/events-repo-4/.comms/events.tsv" && fail "the refused append was written anyway" || ok "a refused append leaves no row"
 
 [ "$(run_ev events --set ev-race 2>/dev/null | tail -n +2 | grep -c .)" = "$EV_N" ] && ok "--set selects one review set" || fail "--set filter"
 [ "$(run_ev events --thread race-3 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] && ok "--thread selects one leg" || fail "--thread filter"
@@ -7397,6 +7421,12 @@ printf '%s\n' "$EV_LOCAL" | grep -q 'refusing to create' && fail "a local filesy
 run_ev events --set ev-race --limit 1 2>/dev/null | tail -1 | grep -q 'racer-' && ok "--limit applies AFTER the filter, never as a global tail" || fail "--limit filter ordering"
 run_ev events --set ev-race 2>/dev/null | head -1 | grep -q '^ts' && ok "a filtered read still prints the header" || fail "filtered header"
 check_not "--limit rejects a non-numeric budget" run_ev events --limit nine
+# A shadow turn shares its gating leg's thread and dispatch, so a recovery read has to be
+# able to drop it or a measurement looks like the leg that gates. (grok, implement r1.)
+run_ev events append --kind turn-started --set ev-roles --thread ev-roles --role shadow --status running >/dev/null
+run_ev events append --kind turn-started --set ev-roles --thread ev-roles --role gating --status running >/dev/null
+[ "$(run_ev events --set ev-roles --role gating 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] \
+  && ok "--role separates the gating leg from a measurement on the same thread" || fail "--role filter"
 
 EV_REQ="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-00-00_ev-req.md"
 cat > "$EV_REQ" <<EVEOF
@@ -7490,6 +7520,31 @@ EV_DID="$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v d="$C_DSP" -v s="$EV_SET" '$c
 run_ev compose --set "$EV_SET" >/dev/null 2>&1 || true
 awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v st="$C_ST" -v s="$EV_SET" '$c==s && $e=="composition-refused" && $st=="partial"' "$EV_LOG" | grep -q . \
   && ok "a refused partial panel is recorded, not just printed" || fail "composition-refused missing"
+awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v d="$C_DSP" -v s="$EV_SET" '$c==s && $e=="composition-refused" && $d!=""' "$EV_LOG" | grep -q . \
+  && ok "a composition event names the attempt it composed" || fail "composition event has no dispatch"
+
+# TWO ATTEMPTS, INTERLEAVED. The set id is deterministic and a retry rebinds it, so
+# concurrent dispatches can leave legs of both attempts in one index in any order —
+# plan-A, A/codex, plan-B, B/codex, B/grok, A/grok. A reader that binds to the set alone
+# reports a four-leg panel that never existed. The index is written directly here because
+# the race cannot be provoked reliably from two live dispatches. (codex, implement r1.)
+EV_IDX="$EV/.comms/grades/sets.tsv"
+ev_idx_row() { # <mid> <thread> <agent> <dispatch>
+  printf 'ev-mixed\t%s\t%s\t1\timplement\taid\tpv\tbase\tcodex\t%s\tdispatched\t\t2026-08-29T10:00:00Z\t%s\n' \
+    "$1" "$2" "$3" "$4" >> "$EV_IDX"
+}
+ev_idx_row mixed-a-codex ev-mixed-a-codex codex d-attempt-a
+ev_idx_row mixed-b-codex ev-mixed-b-codex codex d-attempt-b
+ev_idx_row mixed-b-grok  ev-mixed-b-grok  grok  d-attempt-b
+ev_idx_row mixed-a-grok  ev-mixed-a-grok  grok  d-attempt-a
+EV_MIXED="$(run_ev panel status --set ev-mixed 2>/dev/null | tail -n +2)"
+[ "$(printf '%s\n' "$EV_MIXED" | grep -c .)" = "2" ] \
+  && ok "status reports the legs of ONE attempt, not the mixture of two" || fail "status mixed two attempts (got: $(printf '%s' "$EV_MIXED" | tr '\n' '|'))"
+printf '%s\n' "$EV_MIXED" | grep -q 'ev-mixed-a-' && ! printf '%s\n' "$EV_MIXED" | grep -q 'ev-mixed-b-' \
+  && ok "the attempt it binds to is the last one recorded" || fail "status bound to the wrong attempt"
+EV_MIXCOMP="$(run_ev compose --set ev-mixed 2>&1 || true)"
+printf '%s\n' "$EV_MIXCOMP" | grep -q 'of 2 legs' \
+  && ok "compose gates on one attempt's roster, never on both" || fail "compose counted both attempts (got: $(printf '%s' "$EV_MIXCOMP" | head -1))"
 EV_MIDC="$(grep -m1 '^message_id:' "$(ls -t "$EV/.comms/to-codex/"*panel-codex*.md | head -1)" | sed 's/^message_id: //')"
 EV_MIDG="$(grep -m1 '^message_id:' "$(ls -t "$EV/.comms/to-grok/"*panel-grok*.md | head -1)" | sed 's/^message_id: //')"
 EV_WS="$(run_ev workspace)"
@@ -7554,6 +7609,18 @@ awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v n="$C_NOTE" '$t=="ev-grok" && $e=="reply
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-grok" && $e=="reply-accepted"' "$EV_LOG" | grep -q . \
   && fail "a refused reply was also recorded as accepted" || ok "a refusal never counts as an acceptance"
 
+# An EXTRACTION failure returned before the stamping half ever ran, so the loudest broker
+# failure was the one with no event. The boundary is the whole pipeline now. (codex, r1.)
+EV_GMSGX="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-34-00_ev-grokx.md"
+sed 's/message_id: ev-req-1/message_id: ev-grok-x/; s/thread: ev-loop/thread: ev-noresult/' "$EV_REQ" > "$EV_GMSGX"
+EV_GDIRX="$WORK/ev-grok-legx"; mkdir -p "$EV_GDIRX"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   GROK_STUB_NO_RESULT=1 "$RUNPHASE" run --message "$EV_GMSGX" --dir "$EV_GDIRX" --provider grok) >/dev/null 2>&1 || true
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v n="$C_NOTE" '$t=="ev-noresult" && $e=="reply-refused" && $n ~ /no reply text/' "$EV_LOG" | grep -q . \
+  && ok "a reply the extractor could not read is recorded as a refusal, with the reason" || fail "extraction failure left no reply-refused"
+[ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-noresult" && $e=="reply-refused"' "$EV_LOG" | grep -c .)" = "1" ] \
+  && ok "the refusal is recorded once, though the path crosses two boundaries" || fail "refusal double-logged"
+
 EV_GMSG2="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-31-00_ev-grok2.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-2/; s/thread: ev-loop/thread: ev-grok-ok/' "$EV_REQ" > "$EV_GMSG2"
 EV_GDIR2="$WORK/ev-grok-leg2"; mkdir -p "$EV_GDIR2"
@@ -7571,15 +7638,42 @@ EV_GSEQ="$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-grok-ok" && ($e=="reply
 EV_GMSG4="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-33-00_ev-grok4.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-4/; s/thread: ev-loop/thread: ev-logloss/' "$EV_REQ" > "$EV_GMSG4"
 EV_GDIR4="$WORK/ev-grok-leg4"; mkdir -p "$EV_GDIR4"
-cp "$EV_LOG" "$WORK/events-backup.tsv"
 chmod a-w "$EV_LOG"
 (cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    "$RUNPHASE" run --message "$EV_GMSG4" --dir "$EV_GDIR4" --provider grok) >/dev/null 2>&1 || true
 chmod u+w "$EV_LOG"
 grep -q 'coordinator log not updated' "$EV_GDIR4/runner.log" \
   && ok "a lost advisory append is reported in the run dir" || fail "advisory append failure not reported"
-[ -f "$EV/.comms/to-claude/$(basename "$(ls -t "$EV/.comms/to-claude" | head -1)")" ] \
-  && ok "the reply still reached the inbox with the log unwritable" || fail "an unwritable log cost a delivered reply"
+# THE POINT of the fixture: an unwritable log must not cost a delivered reply. Asserting
+# that SOME file exists in the inbox proved nothing — an earlier test had already put one
+# there. Bind it to THIS turn. (grok, implement r1.)
+EV_LOSTREPLY="$(grep -l '^in-reply-to: ev-grok-4$' "$EV/.comms/to-claude/"*.md 2>/dev/null | head -1)"
+[ -n "$EV_LOSTREPLY" ] && ok "the reply for THIS turn reached the inbox with the log unwritable" || fail "an unwritable log cost a delivered reply"
+
+# `turn-finished log-incomplete`: an event this turn produced never reached the log, so the
+# terminal row must not claim a clean run. Deterministic because the runner reaches its log
+# through $COMMS in ITS OWN helper directory — a fixture copy of runphase.sh beside a
+# forwarding comms.sh that drops exactly one kind. Not a shipped knob; nothing in the
+# product can silently drop an event. (grok, implement r1 — the seam it asked for.)
+EV_SHIM="$WORK/ev-shim"; mkdir -p "$EV_SHIM"
+cp "$RUNPHASE" "$EV_SHIM/runphase.sh"; chmod +x "$EV_SHIM/runphase.sh"
+cat > "$EV_SHIM/comms.sh" <<SHIM
+#!/bin/bash
+if [ "\$1" = events ] && [ "\$2" = append ]; then
+  case " \$* " in *" --kind reply-validated "*) exit 1 ;; esac
+fi
+exec "$COMMS" "\$@"
+SHIM
+chmod +x "$EV_SHIM/comms.sh"
+EV_GMSG5="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-35-00_ev-grok5.md"
+sed 's/message_id: ev-req-1/message_id: ev-grok-5/; s/thread: ev-loop/thread: ev-logloss2/' "$EV_REQ" > "$EV_GMSG5"
+EV_GDIR5="$WORK/ev-grok-leg5"; mkdir -p "$EV_GDIR5"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   "$EV_SHIM/runphase.sh" run --message "$EV_GMSG5" --dir "$EV_GDIR5" --provider grok) >/dev/null 2>&1 || true
+[ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-logloss2" && $e=="turn-finished"{print $st}' "$EV_LOG")" = "log-incomplete" ] \
+  && ok "a turn that lost one of its own events signs off log-incomplete, not completed" || fail "turn-finished did not report the hole"
+awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-logloss2" && $e=="reply-accepted"' "$EV_LOG" | grep -q . \
+  && ok "the reply still landed while its trace was incomplete" || fail "a lost event cost the reply"
 
 EV_GMSG3="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-32-00_ev-grok3.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-3/; s/thread: ev-loop/thread: ev-shadow/' "$EV_REQ" > "$EV_GMSG3"
