@@ -5465,7 +5465,7 @@ else
   fail "a mounted child resolves git elsewhere (got: $(grep '^git=' "$AXD/childenv" | head -1))"
 fi
 
-echo "== runphase: warm ACP mounts live at a stable per-(thread,agent) path =="
+section "runphase: warm ACP mounts live at a stable per-(thread,agent) path"
 # The defect: run_dir is per-message, so mounting at $run_dir/tree gave acpx a NEW cwd
 # every round. acpx keys session identity on (agent, cwd, name) and compares cwd as a
 # string, so every mounted panel leg was a fresh session while the session NAME looked
@@ -6735,6 +6735,15 @@ grep -q 'if \[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \] && \[ -n "${TESTED
   && ok "the expected-coverage contract is committed" || fail "tests/expected-counts.tsv missing"
 [ -s "$REPO/tests/section-counts.tsv" ] \
   && ok "the per-section vector is committed" || fail "tests/section-counts.tsv missing"
+# A section added with a RAW echo banner prints a banner that looks identical in the output
+# but never calls section(), so _flush_section does not fire: it emits no row of its own and
+# its assertions are credited to the PREVIOUS section. The total gate is blind to this — the
+# corpus did not shrink. It landed for real: 47 assertions merged into their predecessor, and
+# the vector showed one row of 91 where the golden had 44 + 47. Converting the 62 banners
+# ESTABLISHED the invariant; only this assertion enforces it for the next section to land.
+grep -nE '^[[:space:]]*echo "== .* =="' "$REPO/tests/run.sh" | grep -vF 'echo "== $1 =="' | grep -q . \
+  && fail "a section banner uses a raw echo — it will not be counted; call section() instead" \
+  || ok "every section banner goes through section()"
 # STRUCTURAL. An edit landed the gate block ABOVE the shebang: the file stopped being a
 # script, top-level code ran with WORK and REPO unset, and it called a function that did
 # not exist yet — all of it silent, because stray top-level failures are uncounted and the
