@@ -1855,6 +1855,60 @@ What would make it real, roughly in order of cost:
 Until one of those lands, the honest statement is the one now in the code comment and in
 acceptance criterion 9: defence in depth, tested by invariant, not a containment guarantee.
 
+### What a four-round plan arc measured (2026-08-30, thread `reviewer-boundary-71ce143`)
+
+**No code changed. The plan hit its 4-round cap with both reviewers at REQUEST_CHANGES, and the
+decision it surfaced belongs to the maintainer.** Recorded here so the next agent does not spend
+four rounds rediscovering it. Versions: `acpx@0.13.1`, `@agentclientprotocol/codex-acp` resolved
+**1.6.2** (acpx names `^1.1.5` — the boundary runs on floating ranges), grok CLI 1.0.13.
+
+**1. The first lever this section proposes does not work.** `--permission-policy` matches on exact
+whole-token equality against `{inferred kind, raw kind, title, toolName, title-head}` or `*`
+(`findPolicyRule`/`permissionMatchTokens`). **argv is never a token**, so no policy can "deny
+writes and non-git execs while allowing the read-only terminal commands a review needs". Both
+reviewers confirmed independently. *That bullet above is false and should be struck when this
+item is next touched.*
+
+**2. Five parent-side controls were measured to be no-ops against codex**, because
+`~/.codex/config.toml` — installed by **our own `codex-permissions` recipe**
+(`helpers/comms.sh:155`, `default_permissions = "workspace-cmux"` extending `:workspace`) — makes
+the agent self-authorise, so no `session/requestPermission` is ever issued and there is nothing
+for the client to deny: permission policy, `--no-terminal`, `--deny-all`, `acpx set-mode
+read-only`, and an isolated `CODEX_HOME` carrying `sandbox_mode`. The ACP layer can only deny what
+the agent chooses to ask about.
+
+**3. There IS a working per-provider backend for codex.** Isolated `CODEX_HOME` **plus
+`INITIAL_AGENT_MODE=read-only`** (the adapter reads that env var, not `sandbox_mode`, and defaults
+to `AgentMode.Agent`) gives, measured on Darwin:
+
+| probe | result |
+|---|---|
+| write in the workspace | `operation not permitted` (OS refusal), file absent |
+| write to `/tmp` | `operation not permitted`, file absent |
+| `cat`, `git log` | exit 0 — reads and history work |
+| `curl https://api.github.com/` | exit 6, `Could not resolve host` — child network denied |
+| the turn itself | completed — the model API still works |
+
+**4. The same is NOT true of grok on macOS, and that is the blocker.** Per the vendor's own
+installed docs (`~/.grok/docs/user-guide/18-sandbox.md`): *"Child-network blocking is enforced on
+Linux only (via seccomp). On macOS it is a no-op."* `read-only` also write-allows `/tmp`. So a grok
+reviewer on Darwin can clone to `/tmp` and push with the inherited `osxkeychain` / `gh` helpers —
+and the mount carries a live `origin` push URL (verified: `git -C <mount> remote -v`).
+
+**The decision this forces:** on macOS the default two-reviewer panel cannot have both legs
+contained. Either mounted grok turns are refused on Darwin — which costs the cross-vendor
+corroboration that is this repo's whole gate — or the security item stays open with a named
+product hole. That is a product call, not an implementation detail.
+
+**Still-open design work the panel named** (all blocking, none addressed): isolation must wrap
+every invocation that can spawn or reuse a queue owner (acpx spawns it on the *send*, not on
+`sessions ensure`) with owner-side attestation; the acpx owner's Unix socket accepts `set_mode` /
+`set_config_option` and codex-acp allows `AgentFullAccess`, so mode must be re-pinned and verified
+before every prompt and proven unreachable from inside a turn; the review root sits under the real
+repo so ancestor `.codex`/MCP/hooks config is merged in and must be excluded; the toolchain must be
+integrity-pinned into owner identity and fail closed; and a redacted evidence pack must never ship
+raw `git config --show-origin` or remote URLs, which can carry credentials.
+
 ## Field report — cmux freeze incident (2026-08-27, coordinator session)
 
 Live 90-minute recovery: the cmux host livelocked its main thread with four agent
