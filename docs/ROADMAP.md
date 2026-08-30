@@ -1864,8 +1864,11 @@ What would make it real, roughly in order of cost:
 - Running the mount from a repository with no remotes and a detached object store, so a
   publish has nowhere to go even if a write escapes.
 
-Until one of those lands, the honest statement is the one now in the code comment and in
-acceptance criterion 9: defence in depth, tested by invariant, not a containment guarantee.
+**Partly landed 2026-08-30 (see the codex bullet above and the LANDED section below).** For
+codex the boundary is now real and enforced; for grok on Darwin it is not, so the item stays
+OPEN. Until grok is contained (or refused everywhere it can mount), the honest statement for the
+UNCONTAINED providers is the one in the code comment and in acceptance criterion 9: defence in
+depth, tested by invariant, not a containment guarantee.
 
 ### What a four-round plan arc measured (2026-08-30, thread `reviewer-boundary-71ce143`)
 

@@ -1766,7 +1766,13 @@ cmd_run() {
   # State first, result.json last — everywhere. result.json is the signal
   # `await` unblocks on, so every other record must already be in place.
   codex_pid=""
-  trap 'kill_codex; unmount_artifact 2>/dev/null || true; update_thread_state "$msg_thread" failed "" "$sfield" || true; write_result "$run_dir" failed "?" "" "$msg" "runner aborted unexpectedly — see runner.log"' EXIT
+  # The abort note is a VARIABLE so a deliberate refusal can say WHY. The isolation checks below
+  # `die` after this trap is armed, and a bare default would file every one of them under "runner
+  # aborted unexpectedly" — sending an operator to runner.log for what is really a one-line policy
+  # refusal. Setting ABORT_NOTE just before such a die surfaces the reason in result.json, where
+  # `await` reads it. (grok, implement r1, advisory.)
+  ABORT_NOTE="runner aborted unexpectedly — see runner.log"
+  trap 'kill_codex; unmount_artifact 2>/dev/null || true; update_thread_state "$msg_thread" failed "" "$sfield" || true; write_result "$run_dir" failed "?" "" "$msg" "$ABORT_NOTE"' EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
 
@@ -2262,7 +2268,21 @@ PROMPT
           # child network denied the token cannot be posted anywhere; it can still be COPIED
           # INTO THE REVIEW BODY, which is a real residual and is why this is not yet a close.
           acp_iso_home="${mount_kdir:-$run_dir}/codex-home"
+          # NEVER through a symlink. A leftover `codex-home` symlink beside the mount (a prior
+          # --approve-all child, or an uncontained sibling writer) would make CODEX_HOME resolve
+          # OUTSIDE the parent-owned sibling, and the config write / auth copy below would follow
+          # it. Refuse a symlink outright; require the realpath to be the sibling we intend. A
+          # hostile artifact cannot plant this (it is outside tree/), and restage does not wipe it
+          # (which is what keeps resume warm), so the check is the only thing standing between a
+          # stale symlink and a home that escapes the mount. (grok, implement r1, advisory.)
+          if [ -L "$acp_iso_home" ]; then
+            die "run: the isolated CODEX_HOME path is a symlink ($acp_iso_home) — refusing to follow it out of the mount"
+          fi
           mkdir -p "$acp_iso_home" || die "run: cannot create the isolated CODEX_HOME"
+          local acp_iso_phys; acp_iso_phys="$( cd "$acp_iso_home" 2>/dev/null && pwd -P )" || true
+          if [ "$acp_iso_phys" != "$acp_iso_home" ]; then
+            die "run: the isolated CODEX_HOME resolves outside its mount (want '$acp_iso_home', got '$acp_iso_phys') — refusing"
+          fi
           # Credentials only. NOT the workspace-cmux profile this repo's own
           # `codex-permissions` recipe installs: that profile is exactly what makes the
           # agent self-authorise, so no permission request is ever issued and no client-side
@@ -2290,7 +2310,8 @@ PROMPT
             acp_iso_backend="none(operator-override)"
             echo "warning: '$provider' has no verified isolation backend on $(uname -s) and COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 — this mounted turn is NOT contained: it can write outside the mount and reach the network with your git credentials." >&2
           else
-            die "run: '$provider' has no verified isolation backend on $(uname -s), so a mounted review turn cannot be contained — refusing. See docs/ROADMAP.md (open security item). Set COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to accept an uncontained reviewer deliberately."
+ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s); mounted review turns require containment (COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to override)"
+                        die "run: '$provider' has no verified isolation backend on $(uname -s), so a mounted review turn cannot be contained — refusing. See docs/ROADMAP.md (open security item). Set COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to accept an uncontained reviewer deliberately."
           fi
           ;;
       esac
@@ -2401,14 +2422,20 @@ PROMPT
     # leave the next round unconfined. Setting it here, every round, is what makes the
     # backend hold across owner reuse. (grok, plan r4, blocking.)
     if [ -n "$mount_dir" ] && [ "$acp_iso_backend" = "codex-home+read-only" ]; then
+      # The confirmation is EXACT, and it reads ONLY stdout. A glob for "read-only" over
+      # stdout+stderr passes on the adapter's REJECTION too: a refused set_mode throws
+      # `Agent rejected session/set_mode for mode "read-only": …`, which interpolates the
+      # requested id and so contains the very string a loose match looks for — leaving a
+      # reused owner stuck in AgentFullAccess prompted anyway, the exact case this pin exists
+      # to stop. Require rc 0 AND stdout equal to acpx's success line. (grok, implement r1, blocking.)
       local acp_mode_out="" acp_mode_rc=0
       acp_mode_out="$( cd "$workdir" && ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" --format text \
-          "$acp_profile" -s "$acp_session" set-mode read-only 2>&1 )" && acp_mode_rc=0 || acp_mode_rc=$?
-      printf 'set-mode read-only: rc=%s %s\n' "$acp_mode_rc" "$acp_mode_out" >>"$run_dir/runner.log"
-      case "$acp_mode_out" in
-        *read-only*) : ;;
-        *) die "run: could not pin '$provider' to read-only before the prompt (rc=$acp_mode_rc) — refusing to send a review turn whose containment is unconfirmed" ;;
-      esac
+          "$acp_profile" -s "$acp_session" set-mode read-only 2>>"$run_dir/runner.log" )" && acp_mode_rc=0 || acp_mode_rc=$?
+      printf 'set-mode read-only: rc=%s out=[%s]\n' "$acp_mode_rc" "$acp_mode_out" >>"$run_dir/runner.log"
+      if [ "$acp_mode_rc" -ne 0 ] || [ "$acp_mode_out" != "mode set: read-only" ]; then
+ABORT_NOTE="refused: could not confirm '$provider' is read-only before the prompt — containment unconfirmed"
+                die "run: could not pin '$provider' to read-only before the prompt (rc=$acp_mode_rc, out='$(printf '%.120s' "$acp_mode_out")') — refusing to send a review turn whose containment is unconfirmed"
+      fi
     fi
     ( cd "$workdir" && PATH="${acp_shim:+$acp_shim:}$PATH" ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" \
         "${acp_perm[@]}" "${acp_ttl[@]+"${acp_ttl[@]}"}" \
