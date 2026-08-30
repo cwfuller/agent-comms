@@ -996,6 +996,13 @@ cb_sleeps() {  # echo the schedule cmux_tree actually slept; with no arg the ove
   && ok "one bad token rejects the WHOLE schedule (atomic fallback)" || fail "partial schedule honored (got: $(cb_sleeps '0.3 1..2'))"
 [ "$(cb_sleeps '   ')" = "0.3 0.7 1.2" ] \
   && ok "a whitespace-only override cannot collapse the retries" || fail "whitespace collapsed retries (got: $(cb_sleeps '   '))"
+# The validator split its input with an UNQUOTED expansion, so pathname expansion ran BEFORE
+# validation: with a file named `0.1` present, an override of `*` globbed into a valid-looking
+# schedule and was accepted — the verdict depended on the caller's cwd. (codex, r2, blocking.)
+: > "$REPO_FIX/0.1"
+[ "$(cb_sleeps '*')" = "0.3 0.7 1.2" ] \
+  && ok "a glob override cannot expand into a valid-looking schedule" || fail "glob became a schedule (got: $(cb_sleeps '*'))"
+rm -f "$REPO_FIX/0.1"
 
 section "comms.sh v2.1: surface binding"
 check "bind sets an explicit surface" env -u X bash -c "cd '$REPO_FIX' && PATH='$STUB_BIN:$PATH' CMUX_WORKSPACE_ID=workspace:10 '$COMMS' bind claude surface:11"

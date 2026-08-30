@@ -14,7 +14,7 @@ comms.sh v2: state lifecycle	13
 comms.sh v2: delivery failure is explicit and recorded	2
 comms.sh v2: state hardening (slash thread, garbage epoch, quotes)	5
 comms.sh v2: state dir blocked as a FILE must not break send/archive	3
-comms.sh v2.1: workspace resilience (empty cmux tree must not abort or flap)	10
+comms.sh v2.1: workspace resilience (empty cmux tree must not abort or flap)	11
 comms.sh v2.1: surface binding	4
 comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery)	4
 comms.sh v2.2: sandbox block emits direct recovery + state reconciliation	12

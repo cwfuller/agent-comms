@@ -239,14 +239,24 @@ cmux_pace() { [ "${COMMS_CMUX_PACE:-1}" = 0 ] || sleep "$1"; }
 # ATOMIC: one bad token rejects the whole list rather than yielding a half-honoured schedule.
 # (codex, suite-hot-waits r1, blocking.)
 cmux_backoff_valid() {
-  local t seen=0
+  # `for t in $1` is an UNQUOTED expansion, so pathname expansion runs BEFORE validation:
+  # COMMS_CMUX_BACKOFF='*' in a directory that happens to contain a file named `0.1` globs
+  # into a valid-looking schedule and is accepted. That makes this validator's verdict depend
+  # on unrelated filesystem contents — a validator whose entire job is rejecting malformed
+  # input must not be steerable by the caller's cwd. `set -f` suppresses the expansion while
+  # word-splitting still happens, and the previous glob state is restored on every path.
+  # (codex, suite-hot-waits r2, blocking.)
+  local t seen=0 rc=0 had_f=0
+  case "$-" in *f*) had_f=1 ;; esac
+  set -f
   for t in $1; do
     case "$t" in
-      ''|*[!0-9.]*|*.*.*|.*|*.) return 1 ;;
+      ''|*[!0-9.]*|*.*.*|.*|*.) rc=1; break ;;
     esac
     seen=1
   done
-  [ "$seen" = 1 ]
+  [ "$had_f" = 1 ] || set +f
+  [ "$rc" = 0 ] && [ "$seen" = 1 ]
 }
 
 # workspace resolution AND surface picking in the same session.
