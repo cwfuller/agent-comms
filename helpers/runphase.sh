@@ -2249,7 +2249,19 @@ PROMPT
         codex)
           # The adapter reads INITIAL_AGENT_MODE (not sandbox_mode) and defaults to
           # AgentMode.Agent, so the home alone is not enough — both are required.
-          acp_iso_home="$run_dir/codex-home"
+          # BESIDE the mount, not under run_dir. run_dir is per-MESSAGE, so a home there is
+          # rebuilt every round and the provider's own session state — the thing warm resume
+          # is made of — would be cold every time, silently undoing the 1405->442 saving this
+          # path exists for. $mount_kdir is stable per (thread, agent) and is the same place
+          # `tree/` lives, so it is a parent-owned sibling of the artifact and never inside
+          # it: `mount_tree_matches` still verifies `tree/` alone.
+          #
+          # The child can READ this directory (the backend denies writes and network, not
+          # reads), so `auth.json` here is readable by the reviewer — but it already could
+          # read ~/.codex/auth.json before any of this, so copying adds no capability. With
+          # child network denied the token cannot be posted anywhere; it can still be COPIED
+          # INTO THE REVIEW BODY, which is a real residual and is why this is not yet a close.
+          acp_iso_home="${mount_kdir:-$run_dir}/codex-home"
           mkdir -p "$acp_iso_home" || die "run: cannot create the isolated CODEX_HOME"
           # Credentials only. NOT the workspace-cmux profile this repo's own
           # `codex-permissions` recipe installs: that profile is exactly what makes the
