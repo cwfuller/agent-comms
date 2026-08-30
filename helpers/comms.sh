@@ -1350,21 +1350,49 @@ set_planned_agents() {
   # without its blocking findings. `main` never did this, so it was a regression, and no
   # roster gate could catch it: the plan event faithfully recorded the smaller roster.
   # (self-review, round 6, reproduced against main.)
-  local cur; cur="$(cmd_events --set "$1" --dispatch "$2" --kind panel-planned --limit 64 2>/dev/null \
-    | awk -F'\t' 'NR>1 && $8 != "" && !seen[$8]++ {print $8}')" || return 1
-  local prior; prior="$(cmd_events --set "$1" --kind panel-planned --limit 256 2>/dev/null \
-    | awk -F'\t' 'NR>1 && $8 != "" && !seen[$8]++ {print $8}')" || return 1
+  local cur; cur="$(set_plan_agents_of "$1" "$2")" || return 1
+  local prior; prior="$(set_plan_agents_of "$1" "")" || return 1
   printf '%s\n%s\n' "$cur" "$prior" | awk 'NF && !seen[$0]++'
+}
+
+# set_plan_agents_of <set-id> <dispatch|""> — planned agents of ONE attempt, or of every
+# attempt when the dispatch is empty. Unbounded on purpose: see --all above.
+set_plan_agents_of() {
+  if [ -n "$2" ]; then
+    cmd_events --set "$1" --dispatch "$2" --kind panel-planned --all 2>/dev/null \
+      | awk -F'\t' 'NR>1 && $8 != "" && !seen[$8]++ {print $8}'
+  else
+    cmd_events --set "$1" --kind panel-planned --all 2>/dev/null \
+      | awk -F'\t' 'NR>1 && $8 != "" && !seen[$8]++ {print $8}'
+  fi
+}
+
+# set_attempt_artifact <set-id> <dispatch> — the artifact this attempt planned against.
+set_attempt_artifact() {
+  cmd_events --set "$1" --dispatch "$2" --kind panel-planned --all 2>/dev/null \
+    | awk -F'\t' 'NR>1 && $10 != "" {a=$10} END {print a}'
 }
 
 # set_agent_leg <index> <set-id> <dispatch> <agent> — that reviewer's leg row for THIS
 # attempt if it has one, otherwise its newest row from any earlier attempt. A leg is only
 # superseded by a newer leg FOR THE SAME REVIEWER; it is never dropped because some other
 # reviewer was re-dispatched.
+# set_agent_leg <index> <set-id> <dispatch> <agent> <carry-forward:0|1> <artifact>
+#
+# A reviewer PLANNED BY THE CURRENT ATTEMPT must have a CURRENT-attempt row; substituting an
+# older one there would let a dispatch that crashed after its plan and before that leg's row
+# compose the previous attempt's reply as this attempt's answer. Carry-forward exists only
+# for union members the current attempt did not plan — the subset-retry case — and even then
+# only from a row that reviewed the SAME artifact, or an id reused across artifacts would
+# resurrect a reply to a different tree. (codex, implement r6, blocking x2.)
 set_agent_leg() {
-  awk -F'\t' -v s="$2" -v d="$3" -v a="$4" '
-    NR>1 && $1==s && $10==a { row = $10 "\t" $3 "\t" $4 "\t" $2; if ($14==d) cur = row }
-    END { print (cur != "" ? cur : row) }' "$1"
+  awk -F'\t' -v s="$2" -v d="$3" -v a="$4" -v carry="$5" -v art="$6" '
+    NR>1 && $1==s && $10==a {
+      row = $10 "\t" $3 "\t" $4 "\t" $2
+      if ($14 == d) cur = row
+      else if (carry == 1 && (art == "" || $6 == art)) prev = row
+    }
+    END { print (cur != "" ? cur : (carry == 1 ? prev : "")) }' "$1"
 }
 
 # set_legs <index> <set-id> <dispatch> — one line per leg of THAT attempt:
@@ -1563,7 +1591,7 @@ cmd_panel() {
     # never by whatever the newest same-agent same-thread message happens to be. A
     # status that says "answered / APPROVE" off a stale or type:error message is the
     # false all-clear compose exists to refuse. (grok, panel r1.)
-    local status_dispatch one_row pag
+    local status_dispatch one_row pag one_carry
     status_dispatch="$(set_current_dispatch "$idx" "$set_id")" \
       || die "panel status: cannot determine which dispatch attempt of '$(clip "$set_id")' is current"
     # Planned legs with no index row are listed too: a leg that vanished from the index is
@@ -1571,9 +1599,16 @@ cmd_panel() {
     local status_planned
     status_planned="$(set_planned_agents "$set_id" "$status_dispatch")" \
       || die "panel status: could not read the planned roster for '$(clip "$set_id")'"
+    local status_now status_art
+    status_now="$(set_plan_agents_of "$set_id" "$status_dispatch")" || status_now=""
+    status_art="$(set_attempt_artifact "$set_id" "$status_dispatch")" || status_art=""
     { if [ -n "$status_planned" ]; then
         for pag in $status_planned; do
-          one_row="$(set_agent_leg "$idx" "$set_id" "$status_dispatch" "$pag")"
+          case " $(printf '%s' "$status_now" | tr '\n' ' ') " in
+            *" $pag "*) one_carry=0 ;;
+            *)          one_carry=1 ;;
+          esac
+          one_row="$(set_agent_leg "$idx" "$set_id" "$status_dispatch" "$pag" "$one_carry" "$status_art")"
           if [ -n "$one_row" ]; then printf '%s\n' "$one_row"
           else printf '%s\t(no leg row recorded)\t\t\n' "$pag"; fi
         done
@@ -1775,13 +1810,22 @@ cmd_compose() {
   local compose_dispatch
   compose_dispatch="$(set_current_dispatch "$idx" "$set_id")" \
     || die "compose: cannot determine which dispatch attempt of '$(clip "$set_id")' is current — refusing to gate on a guessed roster"
-  local planned_all; planned_all="$(set_planned_agents "$set_id" "$compose_dispatch")" \
+  local planned_all planned_now compose_art
+  planned_all="$(set_planned_agents "$set_id" "$compose_dispatch")" \
     || die "compose: could not read the planned roster for '$(clip "$set_id")' — refusing to gate on a roster it cannot enumerate"
+  planned_now="$(set_plan_agents_of "$set_id" "$compose_dispatch")" || planned_now=""
+  compose_art="$(set_attempt_artifact "$set_id" "$compose_dispatch")" || compose_art=""
   local legs=""
   if [ -n "$planned_all" ]; then
-    local one_ag one_row
+    local one_ag one_row one_carry
     for one_ag in $planned_all; do
-      one_row="$(set_agent_leg "$idx" "$set_id" "$compose_dispatch" "$one_ag")"
+      # planned by THIS attempt -> its row must come from this attempt; otherwise it may be
+      # carried forward, but only from the same artifact.
+      case " $(printf '%s' "$planned_now" | tr '\n' ' ') " in
+        *" $one_ag "*) one_carry=0 ;;
+        *)             one_carry=1 ;;
+      esac
+      one_row="$(set_agent_leg "$idx" "$set_id" "$compose_dispatch" "$one_ag" "$one_carry" "$compose_art")"
       [ -n "$one_row" ] && legs="${legs:+$legs
 }$one_row"
     done
@@ -2112,6 +2156,7 @@ cmd_events() {
       --status)     shift; status="${1:-}" ;;
       --note)       shift; note="${1:-}" ;;
       --limit)      shift; limit="${1:-}" ;;
+      --all)        limit=0 ;;
       -?*)          usage_err "events: unknown option '$(clip "$1")'" ;;
       *)            usage_err "events: unexpected argument '$(clip "$1")'" ;;
     esac
@@ -2122,7 +2167,10 @@ cmd_events() {
 
   if [ "$sub" = list ]; then
     case "$limit" in ''|*[!0-9]*) usage_err "events: --limit must be a positive integer" ;; esac
-    [ "$limit" -gt 0 ] || usage_err "events: --limit must be a positive integer"
+    # `--all` (limit 0) is for CORRECTNESS reads. A cap on a roster read silently shrinks the
+    # union it is enumerating — a big panel or a long retry history would drop members and
+    # false-complete — and dispatch enforces no matching maximum. (codex, implement r6.)
+    [ "$limit" -gt 0 ] || [ "$limit" = 0 ] || usage_err "events: --limit must be a positive integer"
     [ -f "$f" ] || { emit_diagnostic "events: no coordinator log yet ($f)"; return 0; }
     # ONE pass, ONE predicate. What the reader prints and what it refuses are decided in
     # the same place, so they cannot drift: a row that is not a well-formed event — a torn
@@ -2181,10 +2229,10 @@ cmd_events() {
         && (k == "" || $3 == k) && (a == "" || $8 == a) && (r == "" || $9 == r) \
         && (m == "" || $12 == m) && (q == "" || $11 == q) {
         buf[++n] = $0
-        if (n > lim) delete buf[n - lim]
+        if (lim > 0 && n > lim) delete buf[n - lim]
       }
       END {
-        start = (n > lim ? n - lim + 1 : 1)
+        start = ((lim > 0 && n > lim) ? n - lim + 1 : 1)
         for (i = start; i <= n; i++) print buf[i]
         if (torn) print torn > tornf
       }

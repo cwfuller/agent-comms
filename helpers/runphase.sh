@@ -272,12 +272,13 @@ log_event() {
 write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <message-file> <note>
   local dir="$1" status="$2" rc="$3" sid="$4" mf="$5" note="$6"
   [ "$RESULT_WRITTEN" = true ] && return 0
+  local RESULT_COMPOSED=1
   printf '{\n  "provider": "'"$RUN_PROVIDER"'",\n  "status": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s"\n}\n' \
     "$(json_escape "$status")" "$(json_escape "$rc")" "$(json_escape "$sid")" \
     "$(json_escape "$mf")" "$(json_escape "$dir")" \
     "$(json_escape "${STARTED_AT:-}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(json_escape "$note")" \
-    > "$dir/result.json.tmp" || echo "warning: could not compose result.json in $dir" >&2
+    > "$dir/result.json.tmp" || RESULT_COMPOSED=0
   # THE TERMINAL EVENT IS DURABLE FIRST. result.json is the signal `await` unblocks on, so
   # a runner that died between publishing it and appending this row left await with a
   # result in hand, nothing to synthesize, and no terminal event at all — the permanent
@@ -300,10 +301,18 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
   # by a concurrent cleanup) stopped aborting nothing and started aborting the whole turn,
   # so a completed provider with a delivered reply exited through the EXIT trap and was
   # recorded `failed`. Both halves warn and continue. (self-review, round 6.)
-  [ -s "$dir/result.json.tmp" ] \
-    && { mv "$dir/result.json.tmp" "$dir/result.json" \
-         || echo "warning: could not publish result.json in $dir" >&2; } \
-    || echo "warning: result.json was not written in $dir" >&2
+  # Gated on COMPOSITION, not on size. `-s` only says the file has bytes: a printf that
+  # failed partway leaves the leading fields behind, which is nonempty and truncated — and
+  # publishing it hands `await` a completion signal over a corrupt result, so it never
+  # synthesizes the sound one. A failed compose leaves no result.json at all, which `await`
+  # already knows how to handle. (codex, implement r6, blocking.)
+  if [ "$RESULT_COMPOSED" = 1 ]; then
+    mv "$dir/result.json.tmp" "$dir/result.json" \
+      || echo "warning: could not publish result.json in $dir" >&2
+  else
+    echo "warning: result.json could not be composed in $dir — leaving no completion signal rather than a truncated one" >&2
+    rm -f "$dir/result.json.tmp" 2>/dev/null || true
+  fi
   RESULT_WRITTEN=true
 }
 

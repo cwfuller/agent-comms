@@ -7536,6 +7536,18 @@ fi
 run_ev events --set ev-race --limit 1 2>/dev/null | tail -1 | grep -q 'racer-' && ok "--limit applies AFTER the filter, never as a global tail" || fail "--limit filter ordering"
 run_ev events --set ev-race 2>/dev/null | head -1 | grep -q '^ts' && ok "a filtered read still prints the header" || fail "filtered header"
 check_not "--limit rejects a non-numeric budget" run_ev events --limit nine
+# A roster read must not be capped: dispatch enforces no maximum, so a silent cap would drop
+# members from the union it is enumerating and let a short panel report itself complete.
+# (codex, implement r6, blocking.)
+i=1; while [ "$i" -le 60 ]; do
+  run_ev events append --kind panel-planned --set ev-bigroster --dispatch d-big --agent "codex" \
+    --thread "big-$i" --status planned >/dev/null
+  i=$((i+1))
+done
+[ "$(run_ev events --set ev-bigroster --limit 50 2>/dev/null | tail -n +2 | grep -c .)" = "50" ] \
+  && ok "--limit still caps an ordinary read" || fail "--limit stopped capping"
+[ "$(run_ev events --set ev-bigroster --all 2>/dev/null | tail -n +2 | grep -c .)" = "60" ] \
+  && ok "--all reads every row, so a roster is never silently shortened" || fail "--all is still capped"
 # The set id is bounded at its SOURCE, so sets.tsv and the log hold the same bytes and the
 # bare listing can join them. Unbounded, a long id was stored raw in one and encoded in the
 # other, and the listing reported zero legs for a valid set. (codex + grok, implement r5.)
@@ -7845,6 +7857,45 @@ printf '%s\n' "$EV_SUBCOMP" | grep -q 'no reply yet from' \
 printf '%s\n' "$EV_SUBCOMP" | grep -q 'of 2 legs' \
   && ok "the narrowed attempt still gates on the FULL roster" || fail "compose forgot a planned reviewer"
 
+# CARRY-FORWARD IS FOR THE UNRE-DISPATCHED ONLY. An agent the CURRENT attempt planned must
+# have a CURRENT row: substituting its previous one would let a dispatch that crashed after
+# its plan and before that leg's row compose the earlier attempt's reply as this attempt's
+# answer. (codex, implement r6, blocking.)
+run_evsub panel dispatch --to codex,grok "$EV_SUBREQ" >/dev/null 2>&1 || true
+EV_SUBD3="$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v d="$C_DSP" -v s="$EV_SUBSET" '$c==s && $e=="panel-planned"{print $d}' "$EV_SUB/.comms/events.tsv" | tail -1)"
+EV_SUBIDX="$EV_SUB/.comms/grades/sets.tsv"
+awk -F'\t' -v d="$EV_SUBD3" 'NR==1 || !($10=="grok" && $14==d)' "$EV_SUBIDX" > "$EV_SUBIDX.tmp" && mv "$EV_SUBIDX.tmp" "$EV_SUBIDX"
+EV_SUBC3="$(run_evsub compose --set "$EV_SUBSET" 2>&1 || true)"
+printf '%s\n' "$EV_SUBC3" | grep -q 'never finished recording' \
+  && ok "an agent planned by THIS attempt cannot be answered by its previous leg" || fail "a crashed re-dispatch substituted the earlier attempt's leg (got: $(printf '%s' "$EV_SUBC3" | head -1))"
+run_evsub panel status --set "$EV_SUBSET" 2>/dev/null | grep -q 'no leg row recorded' \
+  && ok "status names the leg the current attempt planned and never recorded" || fail "status substituted a stale leg"
+
+# CARRY-FORWARD IS ARTIFACT-BOUND. An explicit --set reused across two different trees, then
+# subset-dispatched, would otherwise resurrect the other reviewer's row — and its reply — from
+# the EARLIER artifact, and compose would report a mixed-artifact panel as all answered.
+# (codex, implement r6, blocking.)
+EV_ART="$WORK/events-artifact"; mkdir -p "$EV_ART"; EV_ART="$(cd "$EV_ART" && pwd -P)"
+git -C "$EV_ART" init -q -b main
+printf '.comms/\n' > "$EV_ART/.gitignore"; echo one > "$EV_ART/s.txt"
+git -C "$EV_ART" add -A >/dev/null 2>&1
+git -C "$EV_ART" -c user.email=t@t -c user.name=t commit -q -m init
+mkdir -p "$EV_ART/.comms/to-codex" "$EV_ART/.comms/to-grok" "$EV_ART/.comms/to-claude" "$EV_ART/.comms/archive" "$EV_ART/.comms/grades"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV_ART/.comms/config"
+run_evart() { (cd "$EV_ART" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+EV_ARTREQ="$EV_ART/.comms/to-codex/$(basename "$EV_ART")_2026-08-29T09-00-00_art.md"
+printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:00:00Z\nworkspace: %s\nmessage_id: art-1\nthread: art-th\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV_ART")" > "$EV_ARTREQ"
+EV_ARTOUT="$(run_evart panel dispatch --to codex,grok --set pinned-set "$EV_ARTREQ" 2>&1 || true)"
+EV_ARTSET="$(printf '%s\n' "$EV_ARTOUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+echo two > "$EV_ART/s.txt"   # a DIFFERENT tree, so a different artifact
+git -C "$EV_ART" -c user.email=t@t -c user.name=t commit -q -am second
+EV_ARTOUT2="$(run_evart panel dispatch --to grok --set pinned-set "$EV_ARTREQ" 2>&1 || true)"
+EV_ARTSET2="$(printf '%s\n' "$EV_ARTOUT2" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ "$EV_ARTSET2" = "$EV_ARTSET" ] \
+  && ok "an explicit --set really does collide across artifacts" || fail "the artifact fixture never collided ($EV_ARTSET vs $EV_ARTSET2)"
+run_evart panel status --set "$EV_ARTSET" 2>/dev/null | grep -q 'no leg row recorded' \
+  && ok "a leg from a DIFFERENT artifact is never carried into this panel" || fail "a stale-artifact leg was resurrected"
+
 # A set id long enough to exceed the events column must be stored IDENTICALLY in sets.tsv
 # and in the log, or the two can never be joined. Querying an id nobody ever wrote proved
 # nothing — it returns zero rows whether or not safe_set_id bounds anything.
@@ -8043,6 +8094,23 @@ EV_GDIR7="$WORK/ev-grok-leg7"; mkdir -p "$EV_GDIR7"
    "$EV_SHIM4/runphase.sh" run --message "$EV_GMSG7" --dir "$EV_GDIR7" --provider grok) >/dev/null 2>&1 || true
 [ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-partialrow" && $e=="turn-finished"{print $st}' "$EV_LOG")" = "log-incomplete" ] \
   && ok "a truncated acceptance row does not satisfy the lookup" || fail "a partial row passed as an acceptance"
+
+# A failed compose leaves the leading bytes behind, which is nonempty and truncated — and
+# publishing that hands `await` a completion signal over a corrupt result, so it never
+# synthesizes the sound one. Publication is gated on the compose, not on the file having
+# bytes. (codex, implement r6, blocking.)
+EV_GMSG8="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-38-00_ev-grok8.md"
+sed 's/message_id: ev-req-1/message_id: ev-grok-8/; s/thread: ev-loop/thread: ev-partialresult/' "$EV_REQ" > "$EV_GMSG8"
+EV_GDIR8="$WORK/ev-grok-leg8"; mkdir -p "$EV_GDIR8"
+printf '{\n  "provider": "grok",\n  "status": "completed",\n  "TRUNC' > "$EV_GDIR8/result.json.tmp"
+chmod a-w "$EV_GDIR8/result.json.tmp"
+(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+   "$RUNPHASE" run --message "$EV_GMSG8" --dir "$EV_GDIR8" --provider grok) >/dev/null 2>&1 || true
+chmod u+w "$EV_GDIR8/result.json.tmp" 2>/dev/null || true
+[ ! -f "$EV_GDIR8/result.json" ] \
+  && ok "a result that could not be composed is never published" || fail "a truncated result.json was published"
+grep -q 'TRUNC' "$EV_GDIR8/result.json" 2>/dev/null \
+  && fail "await would read a truncated completion signal" || ok "no truncated completion signal is left for await"
 
 EV_GMSG3="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-32-00_ev-grok3.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-3/; s/thread: ev-loop/thread: ev-shadow/' "$EV_REQ" > "$EV_GMSG3"
