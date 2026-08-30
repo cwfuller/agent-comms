@@ -5559,6 +5559,11 @@ section "runphase: warm ACP mounts live at a stable per-(thread,agent) path"
 # directory. Nothing here greps runphase.sh for a path expression: that is a string match
 # that would stay green through any refactor which dropped the behaviour.
 WM="$WORK/warm-mount"; mkdir -p "$WM"
+# Mounts now live OUTSIDE the repo, under a validated base. Point COMMS_MOUNT_BASE at a
+# throwaway so the suite never writes the developer's real ~/.local/state, and record the
+# physical store prefix ($base/agent-comms/mounts, where <repo-key>/<ident> land under it).
+WM_MBASE="$WM/mbase"; mkdir -p "$WM_MBASE"; WM_MBASE="$(cd "$WM_MBASE" && pwd -P)"
+WM_STORE="$WM_MBASE/agent-comms/mounts"
 # Every mounted turn runs against a TEST acpx store. The marker is what licenses the stub to
 # write a session record at all, so a turn that forgets to point HOME here writes nothing
 # rather than into the developer's real ~/.acpx.
@@ -5606,6 +5611,7 @@ wm_turn() { # <thread> <tag> <artifact> [extra env assignments...]
   dir="$WM/run-$tag"; mkdir -p "$dir"
   ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" \
       HOME="$WM/home" \
+      COMMS_MOUNT_BASE="$WM_STORE" \
       ACP_PARITY_PAYLOAD="$AXD/payload" AX_CWD_LOG="$WM/cwd.log" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_RUNPHASE_OWNER_WAIT_SECS=3 \
       COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 \
@@ -5619,16 +5625,27 @@ wm_prompt_cwds() { # cwds of the PROMPT invocations only (not `sessions ensure`/
 # Deriving a kdir from a cwd that was never recorded yields "" and then `dirname` yields ".",
 # and every subsequent rm/printf lands in the REPO ROOT. One such run left .state.pending and
 # an ma-repo symlink in this checkout. Refuse to hand back anything but a real mount dir.
-wm_kdir_of() {  # <cwd> -> the ident dir, or empty if the cwd is not a mount
-  local c="$1" d
-  case "$c" in ''|.|./*|.) printf ''; return 1 ;; esac
-  d="$(dirname "$c")"
-  case "$d" in ''|.|/) printf ''; return 1 ;; esac
+wm_kdir_of() {  # <prompt cwd = .../<ident>/view/tree> -> the ident dir, or empty
+  local c="$1" v d
+  case "$c" in ''|.|./*) printf ''; return 1 ;; esac
+  # The mount cwd is <ident>/view/tree now, so the ident (state/claim/restage) dir is two up.
+  v="$(dirname "$c")"; case "$v" in ''|.|/) printf ''; return 1 ;; esac
+  d="$(dirname "$v")"; case "$d" in ''|.|/) printf ''; return 1 ;; esac
   [ -d "$d" ] || { printf ''; return 1; }
-  # Enforce the stated contract rather than "any parent that exists": only a real ident dir
-  # under the mailbox's mounts/ qualifies, so a fixture can never mutate some other parent.
-  case "$d" in "$WM_ROOT"/mounts/*) ;; *) printf ''; return 1 ;; esac
+  # Only a real ident dir under this fixture's EXTERNAL store (base/<repo-key>/<ident>)
+  # qualifies, so a fixture can never mutate some other parent.
+  case "$d" in "$WM_STORE"/*/*) ;; *) printf ''; return 1 ;; esac
   printf '%s' "$d"
+}
+# A degrade must land on an EXTERNAL THROWAWAY (base/<repo-key>/tmp-*/view/tree), never the old
+# $run_dir/tree and never in-repo. Pure string checks: the throwaway is removed at turn end.
+wm_is_throwaway() {  # <cwd> <run_dir> -> 0 if an external throwaway distinct from run_dir/repo
+  local c="$1" rd="$2" rp
+  case "$c" in "$WM_STORE"/*/tmp-*/view/tree) ;; *) return 1 ;; esac
+  rp="$(cd "$rd" 2>/dev/null && pwd -P)" || rp=""
+  [ -n "$rp" ] && case "$c" in "$rp"/*) return 1 ;; esac
+  case "$c" in "$WM_ROOT"/*) return 1 ;; esac
+  return 0
 }
 wm_status() { sed -n 's/.*"status": "\([a-z]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
 
@@ -5657,7 +5674,7 @@ case "$WM_C1" in
   *) ok "the mount is not inside either per-message run dir" ;;
 esac
 case "$WM_C1" in
-  "$WM_ROOT"/mounts/*) ok "the mount lives under the mailbox root's mounts/ directory" ;;
+  "$WM_STORE"/*/*/view/tree) ok "the mount lives OUTSIDE the repo, under the validated external store's <repo-key>/<ident>/view/tree" ;;
   *) fail "the mount is somewhere unexpected ($WM_C1)" ;;
 esac
 # A function of (thread, agent) only: neither message id may appear in the path.
@@ -5837,7 +5854,7 @@ WM_MAIN_B4="$(git -C "$MA_FIX" status --porcelain)"
 : > "$WM/cwd.log"; WM_D12="$(wm_turn wm-seq wm12 "$WM_A1")"
 WM_C12="$(wm_prompt_cwds | sed -n 1p)"
 if [ "$(git -C "$MA_FIX" status --porcelain)" = "$WM_MAIN_B4" ] && [ -L "$WM_IDENT_DIR" ] \
-   && [ -n "$WM_C12" ] && [ "$WM_C12" = "$(cd "$WM/run-wm12" && pwd -P)/tree" ]; then
+   && [ -n "$WM_C12" ] && wm_is_throwaway "$WM_C12" "$WM/run-wm12"; then
   ok "a symlinked mount container degrades to the per-message path instead of being followed"
 else
   fail "a symlinked container was followed, or the turn did not degrade as specified (cwd=$WM_C12)"
@@ -5903,13 +5920,13 @@ if [ -n "$WM_KDIR16" ] && [ -f "$WM_KDIR16/.state.record" ]; then
   : > "$WM/cwd.log"; WM_D17="$(wm_turn wm-lease wm17 "$WM_A1" HOME="$WM_HOME" AX_RECORD_ID=stub-record-1)"
   WM_C17="$(wm_prompt_cwds | sed -n 1p)"
   if [ "$(wm_status "$WM_D17")" = "completed" ] \
-     && [ "$WM_C17" = "$(cd "$WM/run-wm17" && pwd -P)/tree" ]; then
+     && wm_is_throwaway "$WM_C17" "$WM/run-wm17"; then
     ok "a record predating the owner-home field degrades to the per-message path, not a wedge"
   else
     fail "a legacy record neither ran nor degraded (status=$(wm_status "$WM_D17") cwd=$WM_C17)"
   fi
   # ...and it must NOT have rebuilt the stable mount, whose owner it cannot prove is gone.
-  [ -d "$WM_KDIR16/tree" ] \
+  [ -d "$WM_KDIR16/view/tree" ] \
     && ok "the stable mount is left untouched when ownership cannot be established" \
     || fail "an unprovable-ownership turn rebuilt the stable mount anyway"
   # ...and the fallback must NOT adopt a store the record does not live in: probing the
@@ -5920,7 +5937,7 @@ if [ -n "$WM_KDIR16" ] && [ -f "$WM_KDIR16/.state.record" ]; then
   : > "$WM/cwd.log"; WM_D18="$(wm_turn wm-lease wm18 "$WM_A1" HOME="$WM_HOME2" AX_RECORD_ID=stub-record-1)"
   WM_C18="$(wm_prompt_cwds | sed -n 1p)"
   if [ "$(wm_status "$WM_D18")" = "completed" ] \
-     && [ "$WM_C18" = "$(cd "$WM/run-wm18" && pwd -P)/tree" ]; then
+     && wm_is_throwaway "$WM_C18" "$WM/run-wm18"; then
     ok "a foreign acpx store is never adopted; the turn degrades instead"
   else
     fail "the home fallback adopted a foreign store (status=$(wm_status "$WM_D18") cwd=$WM_C18)"
@@ -6064,7 +6081,7 @@ if [ -n "$WM_KT" ] && [ -f "$WM_KT/.state.record" ]; then
   WM_CSR="$(wm_prompt_cwds | sed -n 1p)"
   chmod 644 "$WM_KT/.state.record" 2>/dev/null
   if [ "$(wm_status "$WM_DSR")" = "completed" ] \
-     && [ "$WM_CSR" = "$(cd "$WM/run-wmSR" && pwd -P)/tree" ]; then
+     && wm_is_throwaway "$WM_CSR" "$WM/run-wmSR"; then
     ok "an unreadable state record degrades instead of looking like a first turn"
   else
     fail "an unreadable state record was treated as absent (status=$(wm_status "$WM_DSR") cwd=$WM_CSR)"
@@ -6086,7 +6103,7 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
     : > "$WM/cwd.log"; WM_DSX="$(wm_turn wm-tomb "wmSX$wmcase" "$WM_A1")"
     WM_CSX="$(wm_prompt_cwds | sed -n 1p)"
     if [ "$(wm_status "$WM_DSX")" = "completed" ] \
-       && [ "$WM_CSX" = "$(cd "$WM/run-wmSX$wmcase" && pwd -P)/tree" ]; then
+       && wm_is_throwaway "$WM_CSX" "$WM/run-wmSX$wmcase"; then
       ok "a $wmcase state record degrades instead of reading as a first turn"
     else
       fail "a $wmcase state record permitted a stable restage (status=$(wm_status "$WM_DSX") cwd=$WM_CSX)"
@@ -6109,12 +6126,12 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
     # a LIVE lease in A, and the child points the record at empty store B
     WM_LEASE_A="$(printf '%s' "stub-record-1" | shasum -a 256 | cut -c1-24)"
     printf '{ "pid": 1 }\n' > "$WM_HOME_A/.acpx/queues/$WM_LEASE_A.lock"
-    WM_KHA_INO0="$(/usr/bin/stat -f %i "$WM_KHA/tree" 2>/dev/null || stat -c %i "$WM_KHA/tree" 2>/dev/null)"
+    WM_KHA_INO0="$(/usr/bin/stat -f %i "$WM_KHA/view/tree" 2>/dev/null || stat -c %i "$WM_KHA/view/tree" 2>/dev/null)"
     printf '%s\n' "$WM_HOME_B" > "$WM_KHA/.state.home"
     : > "$WM/cwd.log"; WM_DHB="$(wm_turn wm-home wmHB "$WM_A1" HOME="$WM_HOME_A" AX_RECORD_ID=stub-record-1)"
     WM_CHB="$(wm_prompt_cwds | sed -n 1p)"
-    WM_KHA_INO="$(/usr/bin/stat -f %i "$WM_KHA/tree" 2>/dev/null || stat -c %i "$WM_KHA/tree" 2>/dev/null)"
-    if [ "$WM_CHB" = "$(cd "$WM/run-wmHB" && pwd -P)/tree" ] \
+    WM_KHA_INO="$(/usr/bin/stat -f %i "$WM_KHA/view/tree" 2>/dev/null || stat -c %i "$WM_KHA/view/tree" 2>/dev/null)"
+    if wm_is_throwaway "$WM_CHB" "$WM/run-wmHB" \
        && [ "$(wm_status "$WM_DHB")" = "completed" ] \
        && [ "$WM_KHA_INO" = "$WM_KHA_INO0" ]; then
       ok "a rewritten owner home degrades, completes, and leaves the stable mount untouched"
@@ -6141,7 +6158,7 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
     rm -f "$WM_KHA/.state.record" 2>/dev/null
     : > "$WM/cwd.log"; WM_DDR="$(wm_turn wm-home wmDR "$WM_A1" HOME="$WM_HOME_A" AX_RECORD_ID=stub-record-1)"
     WM_CDR="$(wm_prompt_cwds | sed -n 1p)"
-    if [ "$WM_CDR" = "$(cd "$WM/run-wmDR" && pwd -P)/tree" ] && [ "$(wm_status "$WM_DDR")" = "completed" ]; then
+    if wm_is_throwaway "$WM_CDR" "$WM/run-wmDR" && [ "$(wm_status "$WM_DDR")" = "completed" ]; then
       ok "a deleted session record degrades instead of passing as a first turn"
     else
       fail "a deleted session record was treated as a first turn (cwd=$WM_CDR status=$(wm_status "$WM_DDR"))"
@@ -6154,6 +6171,203 @@ fi
 
 check_not "transport rejects an unregistered agent" run_tr transport gemini
 check_not "transport rejects an unknown option" run_tr transport codex --bogus
+
+section "reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)"
+# Self-contained: a fresh fixture so clean-mounts' repo-key scope never collides with the
+# warm-mount leftovers above. Reuses the acpx stub ($AXB) and drives grok under the operator
+# override, exactly as the warm-mount section does.
+RELO_FIX="$WORK/relo-repo"; mkdir -p "$RELO_FIX"; RELO_FIX="$(cd "$RELO_FIX" && pwd -P)"
+git -C "$RELO_FIX" init -q -b feature/relo
+printf '.comms/\n' > "$RELO_FIX/.gitignore"
+git -C "$RELO_FIX" -c user.email=t@t -c user.name=t commit -q -m init 2>/dev/null || \
+  { git -C "$RELO_FIX" add -A >/dev/null 2>&1; git -C "$RELO_FIX" -c user.email=t@t -c user.name=t commit -q -m init; }
+mkdir -p "$RELO_FIX/.comms/to-grok" "$RELO_FIX/.comms/to-claude" "$RELO_FIX/.comms/archive"
+RELO_WS="$(cd "$RELO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" workspace)"
+RELO_HEAD="$(git -C "$RELO_FIX" rev-parse HEAD)"
+printf 'relo-marker\n' > "$RELO_FIX/relo.txt"
+RELO_T="$(cd "$RELO_FIX" && GIT_INDEX_FILE="$WORK/relo.idx" git add -A -- . >/dev/null 2>&1; GIT_INDEX_FILE="$WORK/relo.idx" git -C "$RELO_FIX" write-tree)"
+rm -f "$RELO_FIX/relo.txt"
+RELO_ART="$(git -C "$RELO_FIX" -c user.email=t@t -c user.name=t commit-tree "$RELO_T" -p HEAD -m art 2>/dev/null)"
+RELO_HOME="$WORK/relo-home"; mkdir -p "$RELO_HOME/.acpx/sessions" "$RELO_HOME/.acpx/queues"; : > "$RELO_HOME/.acpx-test-store"
+RELO_STORE_MB="$WORK/relo-mbase"; mkdir -p "$RELO_STORE_MB"; RELO_STORE_MB="$(cd "$RELO_STORE_MB" && pwd -P)"
+RELO_STORE="$RELO_STORE_MB/agent-comms/mounts"
+: > "$WORK/relo-cwd.log"
+relo_turn() {  # <thread> <tag> [extra env...] -> run dir
+  local thread="$1" tag="$2"; shift 2
+  local m="$RELO_FIX/.comms/to-grok/${RELO_WS}_2026-08-20T10-00-00_$tag.md" dir="$WORK/relo-run-$tag"
+  cat > "$m" <<EOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-20T14:00:00Z
+workspace: $RELO_WS
+message_id: ${RELO_WS}_2026-08-20T10-00-00_$tag
+thread: $thread
+artifact_id: $RELO_ART
+head_sha: $RELO_HEAD
+workflow: auto
+phase: plan
+round: 1
+max-rounds: 4
+---
+## Plan
+review
+EOF
+  mkdir -p "$dir"
+  ( cd "$RELO_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" HOME="$RELO_HOME" \
+      COMMS_MOUNT_BASE="$RELO_STORE" ACP_PARITY_PAYLOAD="$AXD/payload" AX_CWD_LOG="$WORK/relo-cwd.log" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_RUNPHASE_OWNER_WAIT_SECS=3 COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 \
+      "$@" "$RP" run --message "$m" --dir "$dir" --provider grok --via acp --timeout-secs 20 ) >/dev/null 2>&1
+  printf '%s' "$dir"
+}
+relo_last_cwd() { awk -F'\t' '$2 !~ /sessions (ensure|show|set-mode)/ {print $1}' "$WORK/relo-cwd.log" | sed -n '$p'; }
+relo_status() { sed -n 's/.*"status": "\([a-z]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
+relo_clean() { ( cd "$RELO_FIX" && env -u CMUX_WORKSPACE_ID HOME="$RELO_HOME" COMMS_MOUNT_BASE="$RELO_STORE" "$RP" clean-mounts "$@" 2>&1 ); }
+
+printf 'VERDICT: APPROVE\n\n## Summary\nstub\n\n### Blocking\n- None.\n' > "$AXD/payload"
+
+# A base UNDER the repo is refused before anything is created — never mount inside the snapshot.
+: > "$WORK/relo-cwd.log"; RELO_D1="$(relo_turn relo-underrepo r1 COMMS_MOUNT_BASE="$RELO_FIX/mounts")"
+if [ "$(relo_status "$RELO_D1")" = failed ] && grep -q 'under the repo' "$RELO_D1/result.json" 2>/dev/null \
+   && [ ! -e "$RELO_FIX/mounts" ]; then
+  ok "a mount base under the repo is refused, and nothing is created inside the snapshot"
+else
+  fail "a base under the repo was accepted (status=$(relo_status "$RELO_D1"))"
+fi
+
+# A non-absolute base is refused.
+RELO_D2="$(relo_turn relo-rel r2 COMMS_MOUNT_BASE="relative/mounts")"
+[ "$(relo_status "$RELO_D2")" = failed ] && grep -q 'not an absolute path' "$RELO_D2/result.json" 2>/dev/null \
+  && ok "a non-absolute mount base is refused" || fail "a non-absolute base was accepted (status=$(relo_status "$RELO_D2"))"
+
+# The DEFAULT base (COMMS_MOUNT_BASE empty == unset) lands under \$HOME/.local/state, mode 700.
+: > "$WORK/relo-cwd.log"; RELO_D3="$(relo_turn relo-default r3 COMMS_MOUNT_BASE=)"
+RELO_C3="$(relo_last_cwd)"; RELO_DEF="$(cd "$RELO_HOME" && pwd -P)/.local/state/agent-comms/mounts"
+case "$RELO_C3" in
+  "$RELO_DEF"/*/*/view/tree) ok "the default base is \${XDG_STATE_HOME:-\$HOME/.local/state}/agent-comms/mounts" ;;
+  *) fail "the default base is not under \$HOME/.local/state (cwd=$RELO_C3)" ;;
+esac
+case "$(ls -ld "$RELO_DEF" 2>/dev/null | awk '{print substr($1,5,6)}')" in
+  "------") ok "the created mount base is mode 700 (no group/other access)" ;;
+  *) fail "the created mount base is not mode 700" ;;
+esac
+
+# QUARANTINE: a legacy in-repo .comms/mounts/<ident> is NEVER selected, mkdir'd, or modified;
+# the new turn runs externally and leaves the legacy tree byte-for-byte untouched.
+RELO_LEG="$RELO_FIX/.comms/mounts/relo-legacy-grok"
+mkdir -p "$RELO_LEG/tree"; printf 'FORGED\n' > "$RELO_LEG/.state.record"; printf 'legacy\n' > "$RELO_LEG/tree/marker"
+RELO_LEG_B4="$(ls -laR "$RELO_LEG" 2>/dev/null)"
+: > "$WORK/relo-cwd.log"; RELO_D4="$(relo_turn relo-quar r4)"
+RELO_C4="$(relo_last_cwd)"; RELO_EXT4=0; RELO_INREPO4=0
+case "$RELO_C4" in "$RELO_STORE"/*/*/view/tree) RELO_EXT4=1 ;; esac
+case "$RELO_C4" in "$RELO_FIX"/*) RELO_INREPO4=1 ;; esac
+if [ "$(relo_status "$RELO_D4")" = completed ] && [ "$RELO_EXT4" = 1 ] && [ "$RELO_INREPO4" = 0 ] \
+   && [ "$(ls -laR "$RELO_LEG" 2>/dev/null)" = "$RELO_LEG_B4" ]; then
+  ok "a legacy in-repo mount is quarantined: the turn runs externally and never touches it"
+else
+  fail "a legacy in-repo mount was selected or modified (cwd=$RELO_C4 ext=$RELO_EXT4 inrepo=$RELO_INREPO4)"
+fi
+rm -rf "$RELO_FIX/.comms/mounts"
+
+# A degrade lands on an EXTERNAL throwaway that is REMOVED at turn end (no auth.json accretion).
+# Force a degrade by planting an unreadable .state.record on the durable ident from a first turn.
+: > "$WORK/relo-cwd.log"; RELO_D5="$(relo_turn relo-degrade r5)"
+RELO_K5="$(dirname "$(dirname "$(relo_last_cwd)")")"
+if [ -d "$RELO_K5" ] && [ -f "$RELO_K5/.state.record" ]; then
+  chmod 000 "$RELO_K5/.state.record" 2>/dev/null
+  : > "$WORK/relo-cwd.log"; RELO_D5B="$(relo_turn relo-degrade r5b)"
+  chmod 644 "$RELO_K5/.state.record" 2>/dev/null
+  RELO_C5B="$(relo_last_cwd)"; RELO_TW=0
+  case "$RELO_C5B" in "$RELO_STORE"/*/tmp-*/view/tree) RELO_TW=1 ;; esac
+  RELO_TWDIR="$(dirname "$(dirname "$RELO_C5B")")"
+  if [ "$(relo_status "$RELO_D5B")" = completed ] && [ "$RELO_TW" = 1 ] && [ ! -e "$RELO_TWDIR" ] \
+     && [ -d "$RELO_K5/view/tree" ]; then
+    ok "a degrade uses an external throwaway that is removed at turn end, leaving the durable mount"
+  else
+    fail "the degrade throwaway was not external/removed, or the durable mount was disturbed (cwd=$RELO_C5B)"
+  fi
+else
+  fail "could not stage the degrade fixture (kdir=$RELO_K5)"
+fi
+
+# clean-mounts: dry-run lists this repo's mounts and removes nothing; --yes then removes them.
+RELO_DRY="$(relo_clean)"
+RELO_ANY_MOUNT="$(find "$RELO_STORE" -maxdepth 2 -type d -name 'relo-*' 2>/dev/null | head -1)"
+if printf '%s' "$RELO_DRY" | grep -qF 'would remove' && [ -n "$RELO_ANY_MOUNT" ] && [ -d "$RELO_ANY_MOUNT" ]; then
+  ok "clean-mounts dry-run lists removable mounts and deletes nothing"
+else
+  fail "clean-mounts dry-run misbehaved (any=$RELO_ANY_MOUNT)"
+fi
+# A LIVE claim on any ident refuses the WHOLE repo-key, even under --yes.
+RELO_K6="$(find "$RELO_STORE" -maxdepth 2 -type d -name 'relo-*-grok' 2>/dev/null | head -1)"
+if [ -n "$RELO_K6" ] && [ -d "$RELO_K6" ]; then
+  sleep 30 & RELO_LIVE=$!
+  RELO_LS="$(LC_ALL=C TZ=UTC ps -p "$RELO_LIVE" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ *//; s/ *$//')"
+  printf 'pid=%s\nfmt=v2\nstart=%s\nrun=live\n' "$RELO_LIVE" "$RELO_LS" > "$RELO_K6/.claim.0"
+  RELO_CM_LIVE="$(relo_clean --yes)"
+  kill "$RELO_LIVE" 2>/dev/null; wait "$RELO_LIVE" 2>/dev/null
+  if printf '%s' "$RELO_CM_LIVE" | grep -qF 'refusing' && [ -d "$RELO_K6" ]; then
+    ok "clean-mounts refuses the whole repo-key while an owner claim is live"
+  else
+    fail "clean-mounts removed a mount with a live claim"
+  fi
+  rm -f "$RELO_K6"/.claim.* 2>/dev/null
+else
+  fail "could not find a durable mount for the live-claim clean-mounts fixture"
+fi
+# With no live owner, --yes removes the repo-key's mounts and their registered worktrees.
+relo_clean --yes >/dev/null 2>&1
+RELO_LEFT="$(find "$RELO_STORE" -maxdepth 2 -type d \( -name 'relo-*-grok' -o -name 'tmp-*' \) 2>/dev/null | wc -l | tr -d ' ')"
+[ "$RELO_LEFT" = 0 ] \
+  && ok "clean-mounts --yes removes this repo's mounts once no owner is live" \
+  || fail "clean-mounts --yes left $RELO_LEFT mount(s) behind"
+
+# clean-mounts is SCOPED to this repo-key: a second repo sharing the same base is never touched,
+# and the two repos hash to distinct repo-keys.
+RELO_FIX2="$WORK/relo-repo2"; mkdir -p "$RELO_FIX2"; RELO_FIX2="$(cd "$RELO_FIX2" && pwd -P)"
+git -C "$RELO_FIX2" init -q -b feature/relo2
+printf '.comms/\n' > "$RELO_FIX2/.gitignore"
+git -C "$RELO_FIX2" add -A >/dev/null 2>&1; git -C "$RELO_FIX2" -c user.email=t@t -c user.name=t commit -q -m init
+mkdir -p "$RELO_FIX2/.comms"
+RELO_KEY1="$(printf '%s' "$RELO_FIX" | shasum -a 256 | cut -c1-64)"
+RELO_KEY2="$(printf '%s' "$RELO_FIX2" | shasum -a 256 | cut -c1-64)"
+mkdir -p "$RELO_STORE/$RELO_KEY2/sentinel-ident/view"
+printf '%s\n' "$RELO_FIX2" > "$RELO_STORE/$RELO_KEY2/.root"
+if [ "$RELO_KEY1" != "$RELO_KEY2" ]; then
+  ok "two repos sharing one base hash to distinct repo-keys"
+else
+  fail "two distinct repos collided on one repo-key"
+fi
+relo_clean --yes >/dev/null 2>&1
+[ -d "$RELO_STORE/$RELO_KEY2/sentinel-ident" ] \
+  && ok "clean-mounts never crosses into another repo-key's store" \
+  || fail "clean-mounts deleted a sibling repo-key's mount"
+
+# A repo-key store whose .root names a DIFFERENT root is refused, never adopted or deleted.
+RELO_CM_MM="$( cd "$RELO_FIX" && env -u CMUX_WORKSPACE_ID HOME="$RELO_HOME" COMMS_MOUNT_BASE="$RELO_STORE" \
+  bash -c 'root="$('"$COMMS"' root)"; mr="${root%/.comms}"; mr="$(cd "$mr" && pwd -P)"; key="$(printf "%s" "$mr" | shasum -a 256 | cut -c1-64)"; printf "%s\n" "/somewhere/else" > "'"$RELO_STORE"'/$key/.root" 2>/dev/null; '"$RP"' clean-mounts --yes 2>&1' )"
+printf '%s' "$RELO_CM_MM" | grep -qF '.root does not name this repo' \
+  && ok "clean-mounts refuses a store whose .root names a different repo" \
+  || fail "clean-mounts did not refuse a mismatched .root store"
+# Restore this repo's .root so the orphan scan below (which validates the current scope first)
+# is not blocked by the mismatch we just planted.
+printf '%s\n' "$RELO_FIX" > "$RELO_STORE/$RELO_KEY1/.root" 2>/dev/null || true
+
+# clean-mounts --orphans is REPORT-ONLY: it names a moved checkout's stale key but deletes nothing.
+mkdir -p "$RELO_STORE/deadkeydeadkeydeadkeydeadkeydeadkeydeadkeydeadkeydeadkeydeadbeef/x"
+printf '/no/such/checkout/anymore\n' > "$RELO_STORE/deadkeydeadkeydeadkeydeadkeydeadkeydeadkeydeadkeydeadkeydeadbeef/.root"
+RELO_ORPH="$(relo_clean --orphans)"
+if printf '%s' "$RELO_ORPH" | grep -qF 'orphan candidate' && printf '%s' "$RELO_ORPH" | grep -qF 'REPORT-ONLY' \
+   && [ -d "$RELO_STORE/deadkeydeadkeydeadkeydeadkeydeadkeydeadkeydeadkeydeadkeydeadbeef" ]; then
+  ok "clean-mounts --orphans reports a moved checkout's stale key without deleting it"
+else
+  fail "clean-mounts --orphans deleted an orphan or did not report it"
+fi
+
+# The cwd-outside-repo gate and the non-gating git-ancestor probe both leave a runner.log trace.
+grep -q 'git-ancestor probe' "$WORK/relo-run-r4/runner.log" 2>/dev/null \
+  && ok "the git-ancestor probe is logged (non-gating in this increment)" \
+  || fail "the git-ancestor probe left no log line"
 
 section "presence & worktrees: advisory coordination (plan presence-worktrees-15135)"
 # Self-contained section (maintainability track: pre-split, local fixtures).
@@ -8367,11 +8581,18 @@ grep -q 'CODEX_HOME=\$acp_iso_home' "$ISO_RP" \
 
 # THE LIFECYCLE POINT. acpx spawns the persistent queue owner on the SEND when none exists, so
 # isolation that wraps only `sessions ensure` leaves the process that actually runs tools
-# unconfined. Every acpx invocation that can spawn or reuse an owner must carry it.
-ISO_N="$(grep -c 'acp_iso\[@\]+' "$ISO_RP")"
-[ "$ISO_N" -ge 3 ] \
-  && ok "isolation wraps every owner-spawning acpx invocation, not just sessions ensure" \
-  || fail "isolation reaches only $ISO_N acpx invocations (want >= 3: ensure, set-mode, send)"
+# unconfined. Every acpx invocation now routes through ONE wrapper (acp_exec) that applies both
+# the per-provider isolation env AND the GIT_* scrub, so the invariant is "every owner-spawning
+# call goes through the wrapper" rather than "N call sites each remembered to add acp_iso".
+ISO_N="$(grep -c 'acp_exec "' "$ISO_RP")"
+grep -q 'acp_iso\[@\]+"\${acp_iso\[@\]}"' "$ISO_RP" && [ "$ISO_N" -ge 3 ] \
+  && ok "isolation wraps every owner-spawning acpx invocation via the acp_exec wrapper (n=$ISO_N)" \
+  || fail "isolation does not route every acpx invocation through the wrapper (n=$ISO_N, want >= 3)"
+# The wrapper also scrubs the GIT_* environment so a caller's GIT_DIR / GIT_WORK_TREE /
+# GIT_COMMON_DIR cannot redirect the child's git out of the mount.
+grep -q 'env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR' "$ISO_RP" \
+  && ok "the acp wrapper scrubs GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR from the child env" \
+  || fail "the acp wrapper does not scrub the GIT_* environment"
 
 # INITIAL_AGENT_MODE is read ONCE, when the adapter builds sessionState -- it is not a
 # process-lifetime lock, and `set_mode` accepts AgentFullAccess with no allowlist. With --ttl
@@ -8457,13 +8678,17 @@ grep -q 'GROK_SANDBOX applies to' "$ISO_RP" \
 
 # The isolated home is per-MOUNT, not per-message: under run_dir it would be rebuilt every round
 # and the provider's own session state -- what warm resume is made of -- would be cold each time.
-grep -q 'acp_iso_home="\${mount_kdir:-\$run_dir}/codex-home"' "$ISO_RP" \
-  && ok "the isolated home is per-mount, so warm resume survives" || fail "the isolated home is per-message"
-# ...and it is a SIBLING of tree/, never inside it, so mount_tree_matches still verifies the
-# artifact alone.
-grep -q 'mount_kdir:-\$run_dir}/codex-home' "$ISO_RP" \
-  && ok "the isolated home sits beside tree/, never inside the verified artifact" \
-  || fail "the isolated home could contaminate the artifact"
+# It is now the home/ SIBLING of view/ that mount_alloc creates, always a validated external
+# ident dir (durable or throwaway) — never the old ${mount_kdir:-$run_dir} in-repo fallback.
+grep -q 'acp_iso_home="\$mount_kdir/home"' "$ISO_RP" \
+  && ok "the isolated home is the per-mount home/ sibling, so warm resume survives" || fail "the isolated home is per-message"
+# ...and it is a SIBLING of view/ (which holds tree/), never inside the verified artifact, so
+# mount_tree_matches still verifies the artifact alone. The old $run_dir/codex-home fallback,
+# a 7th in-repo landing for auth.json, is gone.
+grep -q 'acp_iso_home="\$mount_kdir/home"' "$ISO_RP" \
+  && ! grep -q 'mount_kdir:-\$run_dir}/codex-home' "$ISO_RP" \
+  && ok "the isolated home sits beside view/, never inside the artifact, with no in-repo fallback" \
+  || fail "the isolated home could contaminate the artifact or still has an in-repo fallback"
 
 # The roadmap bullet that proposed --permission-policy as the fix is MEASURABLY FALSE (argv is
 # never a match token). Leaving it in place is how the next agent implements the thing that does

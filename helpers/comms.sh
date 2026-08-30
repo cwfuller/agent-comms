@@ -56,6 +56,9 @@
 #                               attesting a commit the run was not about
 #   bind <claude|codex> [surface:N]   pin which surface delivery targets (show with no arg)
 #   clean --as <agent> [workspace|all|archive|<file>] [--yes]
+#   clean mounts [--yes] [--orphans]   GC this repo's EXTERNAL mount store (dry-run default;
+#                              refuses the whole repo-key on any live owner; --orphans reports
+#                              moved-checkout keys without deleting). No --as; needs no mailbox.
 #                               guarded delete; dry-run without --yes; own-inbox default
 #   lessons [--bytes N] [--surface P] [--file F]
 #                               bounded newest-first tail of docs/advisories.md (whole
@@ -4503,15 +4506,28 @@ cmd_verdict() {
 }
 
 cmd_clean() {
-  local as="" yes=false mode="" targets=()
+  local as="" yes=false orphans=false mode="" targets=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --as) shift; as="${1:-}" ;;
       --yes) yes=true ;;
+      --orphans) orphans=true ;;
       *) [ -z "$mode" ] && mode="$1" || die "clean: unexpected argument '$1'" ;;
     esac
     shift
   done
+  # `clean mounts` is the external mount-store GC — a different concern from mailbox cleanup:
+  # it needs no --as, and the store logic (validated base, repo-key scope, owner liveness)
+  # lives in runphase.sh, so route there rather than duplicate it. (mount-relocation, r3.)
+  if [ "$mode" = mounts ]; then
+    local rp; rp="$(dirname "$SELF")/runphase.sh"
+    [ -x "$rp" ] || die "clean: runphase.sh not found next to comms.sh — re-run install.sh"
+    local -a mflags=()
+    [ "$yes" = true ] && mflags+=(--yes)
+    [ "$orphans" = true ] && mflags+=(--orphans)
+    "$rp" clean-mounts ${mflags[@]+"${mflags[@]}"}
+    return $?
+  fi
   [ -n "$as" ] || die "clean: --as <agent> is required (registered: $(registry_agents))"
   [ -n "$mode" ] || mode="workspace"
   local root ws inbox

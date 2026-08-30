@@ -1280,7 +1280,8 @@ and lossy rewriting of inter-agent instructions is the `$N`-corruption class). R
   on `(agent, cwd, name)` — run_dir is per-message, so every mounted turn was a new cwd
   and a fresh ~115k context while the session NAME looked stable.
   **LANDED 2026-08-28** (thread `warm-acp-mount-32182`, 10 plan rounds, double APPROVE).
-  The mount is now `$root/mounts/<slug>-<hash12>-<agent>/tree`, keyed on a hash of the
+  The mount was originally `$root/mounts/<slug>-<hash12>-<agent>/tree` (in-repo), keyed on a
+  hash of the
   RAW thread (`safe_name` maps `a/b` and `a_b` onto one token, and under a stable cwd that
   collapse would merge two threads into one warm session), scoped to `--via acp` because
   `shadow` runs a non-ACP grok turn on the same thread concurrently by design.
@@ -1297,8 +1298,10 @@ and lossy rewriting of inter-agent instructions is the `$N`-corruption class). R
   is retired by a short `--ttl` and observed self-exit, never by a signal: its pid cannot be
   authenticated (the lease records `createdAt`, not a start time), and since it is detached,
   a mistaken signal would hit an unrelated process group.
-  Cost accepted: one checkout per (thread, agent) persists under `.comms/mounts`, plus one
+  Cost accepted: one checkout per (thread, agent) persists per mount, plus one
   aside per round until reaped — as is already true of `.comms/logs`, which nothing prunes.
+  (RELOCATED 2026-08-30: these checkouts moved OUT of `.comms/mounts` to an external base —
+  see the criterion-2 "INCREMENT 1 LANDED" note below — and `comms.sh clean mounts` now GCs them.)
   Residual, tracked against the enforced-boundary item below and NOT closed here: a survivor
   that re-resolves the stable path after restage is *detected* by a tree-identity check
   before the prompt and again before stamping, not prevented. Full containment needs the
@@ -2064,6 +2067,36 @@ STILL OPEN (why the item is not closed):
   against advertising ACP-only (step 4). Until then the denylist stands and criterion 2 rests
   where it is: reviewer BEHAVIOR enforced, the confirmed artifact-config vector refused, the
   security item open.
+
+  **INCREMENT 1 LANDED (2026-08-30, mount-relocation panel, double APPROVE): mounts now live
+  OUTSIDE the repo.** The relocation the paragraph above called for is the first of three reviewed
+  increments, and it is done. Mounts move from `$root/mounts/<ident>/tree` to a validated external
+  base — `${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts` by default, `COMMS_MOUNT_BASE`
+  to override (the suite points it at a throwaway) — laid out
+  `<base>/<repo-key>/<ident>/{ view/tree, home/, .state.* }`, where repo-key is the full sha256 of
+  the CANONICAL (`pwd -P`) repo root and each key dir records that root in `.root` (a differing
+  stored root is refused, never adopted or deleted). The base accessor validates every dir it
+  creates (mode 700, uid-owned, `pwd -P` identity, not a symlink) and every existing ancestor it
+  did not create (a symlink or world-writable-non-sticky component is refused below `$HOME`; a
+  sticky world-writable ancestor like `/tmp` is allowed for an override outside `$HOME`), refuses a
+  base under the repo, and NEVER falls back to an in-repo path. Legacy in-repo mounts are
+  QUARANTINED — never selected, `mkdir`'d, corroborated, used as cwd, or deleted; the `.comms`-ignore
+  / `$root/mounts` durable gate is gone. Every degrade path (missing/unreadable/malformed record,
+  corroboration mismatch, unprovable owner, the non-ACP else-branch) now lands on an EXTERNAL
+  THROWAWAY (`<base>/<repo-key>/tmp-<run-id>/`) that `unmount_artifact` removes whole, so isolated
+  `auth.json` copies no longer accumulate. The GIT_* environment is scrubbed through a single
+  `acp_exec` ACP-launch wrapper used by every acpx invocation. A new `comms.sh clean mounts`
+  (delegating to `runphase.sh clean-mounts`) GCs this repo's store: dry-run by default, `--yes` to
+  act, scoped to `<base>/<repo-key>` after a `pwd -P` identity + `.root` match, refusing the whole
+  repo-key if any owner claim is live or unprovable, with a REPORT-ONLY `--orphans` scan for moved
+  checkouts (never auto-deletes — a stored root may be a temporarily unmounted volume).
+  **What increment 1 does NOT do:** the turn's cwd stays `view/tree` and the `.codex` denylist
+  stays, so it closes NO general project-config vector by itself. The no-git-ancestor probe on the
+  container is computed and LOGGED but does NOT gate the turn yet. Increment 2 will move the cwd up
+  to the container behind a runtime no-git-ancestor assert (now that the container is external, its
+  git ancestry is no longer the live repo); increment 3 will live-probe the config layer from the
+  external cwd and then drop the denylist. **Criterion 2 stays OPEN until increment 3** — do not
+  describe increment 1 as closing it.
 - **grok on Darwin has no backend.** Its sandbox is a documented macOS network no-op, so a grok
   mounted turn is REFUSED by default (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override). The
   default panel therefore loses cross-vendor corroboration on macOS unless reviews run on Linux.

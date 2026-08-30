@@ -128,6 +128,7 @@ agnostic.
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |
 | `clean --as <claude\|codex> [mode] [--yes]` | guarded delete; dry-run without `--yes` |
+| `clean mounts [--yes] [--orphans]` | GC this repo's EXTERNAL mount store (`${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts`, or `COMMS_MOUNT_BASE`); dry-run without `--yes`; scoped to this repo's `<repo-key>` and refuses the whole key if any owner is live or unprovable; `--orphans` REPORTS moved-checkout keys without deleting. Needs no `--as` |
 | `lessons [--bytes N] [--surface P] [--file F]` | bounded newest-first tail of the current worktree's `docs/advisories.md` |
 | `archive-search <pattern> [--bytes N] [--limit K]` | bounded newest-first search of `archive/` across workspaces |
 | `findings [--out F] [--role gating\|shadow] [--review-set ID] [--artifact ID] [--reviewer-version V] [--prompt-version V] [--header] [<message>...]` | extract review findings to TSV (default: the whole archive, oldest first); `--out` appends and is idempotent by `finding_id` |

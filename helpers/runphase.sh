@@ -1214,6 +1214,177 @@ mount_container() {  # <mounts root> <ident> -> physical container path, or non-
   printf '%s' "$phys"
 }
 
+# ---------------------------------------------------------------------------
+# EXTERNAL MOUNT STORE. A mounted review artifact is a linked worktree, and it must NOT
+# live under the live repo: a durable mount under `$root/mounts` was swept into every
+# snapshot-on-send (which is why the old path gated on `.comms` being ignore-covered) and,
+# worse, sat inside the reviewer's own git ancestry. Mounts now live under a validated base
+# OUTSIDE the repo — `${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts` by default,
+# `COMMS_MOUNT_BASE` to override (the suite points it at a throwaway so it never writes the
+# developer's real state dir). The base is validated once and NEVER falls back in-repo.
+# Layout: <base>/<repo-key>/<ident>/{ view/tree, home/, .state.*, .claim.*, .new.*, .aside.* }
+#   repo-key = full sha256 of `pwd -P` of the repo root; a key dir records that canonical
+#     root and is refused (never adopted or deleted) if the stored root differs.
+#   view/tree is the artifact worktree (what `mount_tree_matches` verifies and, in this
+#     increment, still the turn's cwd); home/ is the isolated CODEX_HOME, a SIBLING of view/,
+#     never inside it; state/claim/restage scratch stay at ident level so the existing
+#     `$kdir/.new.*` / `.state.*` globs hold with kdir = the ident dir.
+#
+# The accessor returns its result AND its refusal reason through GLOBALS, not stdout: the
+# callers below need the note, and a value returned through `$(...)` would strand the note
+# in the command-substitution subshell. Call them directly and read MOUNT_BASE_DIR /
+# MOUNT_ALLOC_DIR / MOUNT_*_NOTE.
+MOUNT_BASE_DIR=""; MOUNT_BASE_NOTE=""; MOUNT_ALLOC_DIR=""; MOUNT_ALLOC_NOTE=""
+mount_perm_str() { ls -ldn "$1" 2>/dev/null | awk 'NR==1{print $1}'; }  # drwxr-xr-x[+@]
+mount_owner_uid() { ls -ldn "$1" 2>/dev/null | awk 'NR==1{print $3}'; } # numeric uid
+mount_is_wwns() {  # <perms str> -> 0 if world-writable AND not sticky
+  local p="$1"; [ "${p:8:1}" = "w" ] || return 1
+  case "${p:9:1}" in t|T) return 1 ;; *) return 0 ;; esac
+}
+
+mount_base_root() {  # <canonical main_root> -> sets MOUNT_BASE_DIR (0) or MOUNT_BASE_NOTE (1)
+  MOUNT_BASE_DIR=""; MOUNT_BASE_NOTE=""
+  local main_root="$1" base uid anchor
+  uid="$(id -u)"
+  base="${COMMS_MOUNT_BASE:-}"                 # empty == unset -> the default, never cwd
+  [ -n "$base" ] || base="${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts"
+  case "$base" in
+    /*) ;;
+    *) MOUNT_BASE_NOTE="mount base '$base' is not an absolute path"; return 1 ;;
+  esac
+  # Refuse a non-canonical spelling rather than silently collapsing it: a `//`, `.` or `..`
+  # component would make the physical-prefix comparisons below unsound.
+  case "$base" in
+    *//*|*/./*|*/../*|*/.|*/..) MOUNT_BASE_NOTE="mount base '$base' has a non-canonical component (// . ..)"; return 1 ;;
+  esac
+  base="${base%/}"; [ -n "$base" ] || { MOUNT_BASE_NOTE="mount base resolves to /"; return 1; }
+
+  # Split into components; find the deepest EXISTING ancestor and the to-create suffix.
+  local -a comps=() creating=()
+  local IFS=/ ; read -r -a comps <<<"${base#/}" ; IFS=' '
+  local cur="" existing="/" seen_missing=0 c
+  for c in ${comps[@]+"${comps[@]}"}; do
+    cur="$cur/$c"
+    if [ "$seen_missing" = 0 ] && { [ -e "$cur" ] || [ -L "$cur" ]; }; then
+      existing="$cur"
+    else
+      seen_missing=1; creating+=("$c")
+    fi
+  done
+
+  # Trust anchor: $HOME if it is a LOGICAL ancestor of base (the default case); empty for an
+  # override outside $HOME. Symlink refusal on existing ancestors applies only in the
+  # under-$HOME case, for the user-controlled tail: system dirs (/var, /tmp on macOS) are
+  # legitimately symlinks and appear only in the operator-chosen override case.
+  anchor=""
+  if [ -n "${HOME:-}" ]; then case "$base/" in "${HOME%/}"/*) anchor="${HOME%/}" ;; esac; fi
+
+  # Validate EXISTING ancestors from the deepest existing dir upward toward / (or $HOME).
+  local p="$existing" perms
+  while [ -n "$p" ] && [ "$p" != "/" ]; do
+    [ -n "$anchor" ] && [ "$p" = "$anchor" ] && break
+    perms="$(mount_perm_str "$p")"
+    if [ -n "$perms" ] && mount_is_wwns "$perms"; then
+      MOUNT_BASE_NOTE="mount base ancestor '$p' is world-writable without the sticky bit ($perms) — refusing"; return 1
+    fi
+    if [ -n "$anchor" ] && [ -L "$p" ]; then
+      MOUNT_BASE_NOTE="mount base ancestor '$p' is a symlink — refusing to follow it out of \$HOME"; return 1
+    fi
+    p="$(dirname "$p")"
+  done
+
+  # Refuse a base under the repo snapshot BEFORE creating anything: resolve the deepest
+  # existing dir physically and append the (not-yet-existing, symlink-free) suffix. The
+  # comparison is a physical prefix with a path-separator boundary, so /repo never matches
+  # /repo-fork.
+  local existing_phys eventual suffix
+  existing_phys="$(cd "$existing" 2>/dev/null && pwd -P)" || { MOUNT_BASE_NOTE="cannot resolve existing base ancestor '$existing'"; return 1; }
+  [ "$existing_phys" = "/" ] && existing_phys=""
+  if [ "${#creating[@]}" -gt 0 ]; then
+    suffix="$(IFS=/; printf '%s' "${creating[*]}")"; eventual="$existing_phys/$suffix"
+  else
+    eventual="$existing_phys"; [ -n "$eventual" ] || eventual="/"
+  fi
+  case "$eventual/" in
+    "${main_root%/}"/*) MOUNT_BASE_NOTE="mount base '$eventual' is under the repo ($main_root) — refusing to mount inside the snapshot"; return 1 ;;
+  esac
+
+  # Create each missing component mode 700 and verify identity+owner+mode after each. A
+  # racer that wins the mkdir is tolerated; the strict checks below still have to pass.
+  local built="$existing_phys" comp phys
+  for comp in ${creating[@]+"${creating[@]}"}; do
+    built="$built/$comp"
+    mkdir -m 700 "$built" 2>/dev/null || true
+    chmod 700 "$built" 2>/dev/null || { MOUNT_BASE_NOTE="cannot chmod created base dir '$built'"; return 1; }
+    if [ -L "$built" ] || [ ! -d "$built" ]; then MOUNT_BASE_NOTE="created base dir '$built' is not a real directory"; return 1; fi
+    phys="$(cd "$built" 2>/dev/null && pwd -P)" || { MOUNT_BASE_NOTE="cannot resolve created base dir '$built'"; return 1; }
+    [ "$phys" = "$built" ] || { MOUNT_BASE_NOTE="created base dir '$built' resolves elsewhere ($phys)"; return 1; }
+    [ "$(mount_owner_uid "$built")" = "$uid" ] || { MOUNT_BASE_NOTE="created base dir '$built' is not owned by uid $uid"; return 1; }
+    perms="$(mount_perm_str "$built")"
+    case "${perms:4:6}" in "------") ;; *) MOUNT_BASE_NOTE="created base dir '$built' is not mode 700 ($perms)"; return 1 ;; esac
+  done
+  MOUNT_BASE_DIR="$eventual"; return 0
+}
+
+mount_repo_key() {  # <canonical main_root> -> 64-hex sha256 on stdout, or 1 (no sha256 utility)
+  local r
+  r="$(printf '%s' "$1" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256; \
+        elif command -v sha256sum >/dev/null 2>&1; then sha256sum; else printf ''; fi; } | cut -c1-64)"
+  [ ${#r} -eq 64 ] || return 1
+  printf '%s' "$r"
+}
+
+mount_alloc() {  # <base> <repo-key> <canonical main_root> <ident> -> sets MOUNT_ALLOC_DIR (0) or MOUNT_ALLOC_NOTE (1)
+  MOUNT_ALLOC_DIR=""; MOUNT_ALLOC_NOTE=""
+  local base="$1" key="$2" main_root="$3" ident="$4" kr kd rootf stored sub
+  case "$ident" in ''|*/*|.|..) MOUNT_ALLOC_NOTE="invalid mount ident '$ident'"; return 1 ;; esac
+  case "$key" in ''|*[!0-9a-f]*) MOUNT_ALLOC_NOTE="invalid repo-key"; return 1 ;; esac
+  kr="$base/$key"
+  # repo-key dir: a real, uid-private dir that records its canonical repo root. A key dir
+  # whose stored root differs from ours is refused — never adopted, never deleted.
+  if [ -L "$kr" ]; then MOUNT_ALLOC_NOTE="repo-key dir '$kr' is a symlink"; return 1; fi
+  mkdir -m 700 "$kr" 2>/dev/null || true
+  chmod 700 "$kr" 2>/dev/null || true
+  [ -d "$kr" ] && [ ! -L "$kr" ] || { MOUNT_ALLOC_NOTE="repo-key dir '$kr' is not a real directory"; return 1; }
+  [ "$(cd "$kr" 2>/dev/null && pwd -P)" = "$kr" ] || { MOUNT_ALLOC_NOTE="repo-key dir '$kr' resolves elsewhere"; return 1; }
+  rootf="$kr/.root"
+  if [ -e "$rootf" ] || [ -L "$rootf" ]; then
+    if [ ! -f "$rootf" ] || [ -L "$rootf" ]; then MOUNT_ALLOC_NOTE="repo-key .root is not a regular file"; return 1; fi
+    stored="$(cat "$rootf" 2>/dev/null)" || { MOUNT_ALLOC_NOTE="repo-key .root is unreadable"; return 1; }
+    [ "$stored" = "$main_root" ] || { MOUNT_ALLOC_NOTE="repo-key .root mismatch (stored='$stored' current='$main_root') — refusing to adopt or delete another checkout's store"; return 1; }
+  else
+    printf '%s\n' "$main_root" > "$rootf.tmp.$$" 2>/dev/null && command mv -f "$rootf.tmp.$$" "$rootf" 2>/dev/null \
+      || { rm -f "$rootf.tmp.$$" 2>/dev/null || true; MOUNT_ALLOC_NOTE="cannot record repo-key .root"; return 1; }
+  fi
+  kd="$(mount_container "$kr" "$ident")" || { MOUNT_ALLOC_NOTE="cannot create ident container under repo-key"; return 1; }
+  chmod 700 "$kd" 2>/dev/null || true
+  # view/ (holds only tree/) and home/ (isolated CODEX_HOME) — siblings, created up front so
+  # restage's `mv` onto view/tree has its parent, and never symlinks out of the ident dir.
+  for sub in view home; do
+    if [ -L "$kd/$sub" ]; then MOUNT_ALLOC_NOTE="$kd/$sub is a symlink"; return 1; fi
+    mkdir -m 700 "$kd/$sub" 2>/dev/null || true
+    [ -d "$kd/$sub" ] && [ ! -L "$kd/$sub" ] || { MOUNT_ALLOC_NOTE="$kd/$sub is not a real directory"; return 1; }
+    [ "$(cd "$kd/$sub" 2>/dev/null && pwd -P)" = "$kd/$sub" ] || { MOUNT_ALLOC_NOTE="$kd/$sub resolves elsewhere"; return 1; }
+  done
+  MOUNT_ALLOC_DIR="$kd"; return 0
+}
+
+# The no-git-ancestor probe. In THIS increment the cwd stays view/tree (a linked worktree,
+# so `git rev-parse --show-toplevel` is the artifact tree and the denylist still covers
+# tree/.codex); the probe is computed and LOGGED but does NOT gate the turn. It becomes the
+# gate in increment 2, when the cwd moves up to the container: a container with a .git
+# ancestor (a repo at $HOME, say) would let acpx's root-walk escape, and that is what the
+# gate will refuse. Logging it now surfaces the fact for the machines that will host it.
+mount_log_git_ancestor() {  # <ident dir> -> a single log line, never fails the turn
+  local d p; d="$(cd "$1" 2>/dev/null && pwd -P)" || { printf 'mount: git-ancestor probe: cannot resolve container %s\n' "$1"; return 0; }
+  p="$d"
+  while [ -n "$p" ] && [ "$p" != "/" ]; do
+    if [ -e "$p/.git" ]; then printf 'mount: git-ancestor probe: nearest .git at %s (non-gating in this increment)\n' "$p"; return 0; fi
+    p="$(dirname "$p")"
+  done
+  printf 'mount: git-ancestor probe: no .git ancestor above the container %s (good)\n' "$d"
+}
+
 # Runner-vs-runner exclusion ONLY. This says nothing about whether a queue owner still
 # holds the directory — conflating the two is what made an earlier revision unsafe.
 # `ln` is the atomic primitive rather than mkdir+write: it creates-or-fails-EEXIST AND
@@ -1440,9 +1611,17 @@ EOF
 #     refusing worktrees that contain submodules.
 mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1 refuse | 2 error
   local mr="$1" kdir="$2" mount="$3" base="$4" art="$5" log="$6"
-  local aside tmp adm prev pend
+  local aside tmp adm prev pend mparent
   [ -n "$mount" ] && [ -n "$kdir" ] || return 2
   mkdir -p "$kdir" 2>/dev/null || return 2
+  # The mount now lives at <ident>/view/tree; its parent (view/) is created by mount_alloc,
+  # but ensure it here too so the final `mv -- "$tmp" "$mount"` always has a landing dir even
+  # if view/ was reaped. Refuse a symlinked view/ rather than move a checkout through it.
+  mparent="$(dirname "$mount")"
+  if [ "$mparent" != "$kdir" ]; then
+    [ ! -L "$mparent" ] || { echo "mount: the mount parent $mparent is a symlink — refusing" >>"$log"; return 2; }
+    mkdir -p "$mparent" 2>/dev/null || return 2
+  fi
 
   # RECOVER A PENDING GENERATION FIRST. `.state.pending` names a temp path that
   # `worktree add` may have registered before the runner died; without this it stays
@@ -1670,7 +1849,68 @@ unmount_artifact() {
     mount_git -C "$main_root" worktree remove --force "$mount_dir" 2>/dev/null || true
     mount_dir=""
   fi
+  # A THROWAWAY ident dir (external, disposable) is removed WHOLE after its worktree — its
+  # home/ holds an isolated auth.json copy that would otherwise accumulate under the store.
+  # Never-follow, and only ever a throwaway this run allocated: a DURABLE ident dir is never
+  # named here, so a degrade that left the durable mount for `clean mounts` cannot delete it.
+  if [ -n "${mount_throwaway:-}" ] && [ -d "$mount_throwaway" ] && [ ! -L "$mount_throwaway" ]; then
+    rm -rf -- "$mount_throwaway" 2>/dev/null || true
+    mount_throwaway=""
+  fi
   mount_claim_release
+}
+
+# Swap the current mount for an EXTERNAL THROWAWAY under the validated store. Every degrade
+# reason (missing/unreadable/malformed record, corroboration mismatch, unprovable owner, and
+# the non-ACP else-branch) lands here rather than the old `$run_dir/tree`, so a disposable
+# turn still runs OUTSIDE the repo. Reads mount_store/mount_key/main_root/run_dir by dynamic
+# scope (as unmount_artifact reads mount_dir/main_root) and sets mount_kdir/mount_dir/
+# mount_throwaway/mount_durable. The throwaway ident (`tmp-<run-id>`) passes mount_container's
+# ident rules and gets the same view/tree + home layout as a durable mount.
+mount_use_throwaway() {  # -> 0 with globals set, or 1 + MOUNT_ALLOC_NOTE
+  local tid
+  tid="tmp-$(safe_name "$(basename "$run_dir")")"
+  mount_alloc "$mount_store" "$mount_key" "$main_root" "$tid" || return 1
+  mount_kdir="$MOUNT_ALLOC_DIR"; mount_dir="$MOUNT_ALLOC_DIR/view/tree"
+  mount_throwaway="$MOUNT_ALLOC_DIR"; mount_durable=""
+  return 0
+}
+
+# A degrade site: log the reason, drop the durable claim, and move to an external throwaway.
+# If even a throwaway cannot be allocated the store is unusable and we FAIL CLOSED — never a
+# fall back to an in-repo path. Resets st_record (dynamic scope; always a cmd_run local at the
+# call sites) so a later corroboration/owner check cannot fire a second degrade and leak a
+# throwaway. mount_ident is deliberately left intact, so the ACP session keeps the `+mount+`
+# namespace even on the disposable path.
+mount_degrade() {  # <reason for the log>
+  echo "mount: $1" >>"$run_dir/runner.log"
+  mount_claim_release
+  if ! mount_use_throwaway; then
+    update_thread_state "$msg_thread" failed "" "$sfield" || true
+    write_result "$run_dir" failed 1 "" "$msg" "degrade requested ($1) but no external throwaway mount could be allocated: ${MOUNT_ALLOC_NOTE:-unknown}"
+    unmount_artifact
+    trap - EXIT
+    exit 1
+  fi
+  st_record=""
+}
+
+# ONE wrapper for EVERY acpx invocation — `sessions ensure`, the bound-cwd `sessions show`,
+# `set-mode`, and the prompt send. Two things must be uniform across all four, and retargeting
+# them one at a time drifts (the code already assembled several `acp_launch` calls separately):
+#   (1) the GIT_* environment is scrubbed, so a caller's GIT_DIR / GIT_WORK_TREE /
+#       GIT_COMMON_DIR cannot point the child's git out of the mount. Harmless while the cwd is
+#       view/tree; load-bearing for increment 2, wired now so it cannot be forgotten then.
+#   (2) the per-provider isolation env (acp_iso) and the read-only git shim (acp_shim, empty
+#       until the prompt) are applied everywhere the owner can be spawned or reused. acp_iso
+#       sets CODEX_HOME, not HOME, so applying it to `sessions show` does not move acpx's own
+#       session store (which lives under $HOME/.acpx) — the show still finds the record.
+# Reads acp_iso/acp_launch/acp_shim by dynamic scope, as unmount_artifact reads mount_dir.
+acp_exec() {  # <cwd> [acpx args...]
+  local _cwd="$1"; shift
+  ( cd "$_cwd" && PATH="${acp_shim:+$acp_shim:}$PATH" \
+      env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+      ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" "$@" )
 }
 
 # ---------- run (spawn's detached child) ----------
@@ -1783,8 +2023,12 @@ cmd_run() {
   sleep "${COMMS_RUNPHASE_SPAWN_DELAY_SECS:-1}"
 
   local root main_root workdir msg_cwd msg_artifact mount_dir="" mount_durable="" mount_kdir="" mount_ident=""
+  local mount_throwaway="" mount_store="" mount_key=""
   root="$("$COMMS" root)"
   main_root="${root%/.comms}"
+  # CANONICAL repo root. The repo-key hashes it, and the "cwd is outside the repo" gate and
+  # the base-under-repo refusal are physical-prefix tests; `${root%/.comms}` is only lexical.
+  main_root="$( cd "$main_root" 2>/dev/null && pwd -P )" || main_root="${root%/.comms}"
   msg_cwd="$(frontmatter_field "$msg" cwd)"
   if [ -n "$msg_cwd" ] && [ -d "$msg_cwd" ]; then
     workdir="$msg_cwd"
@@ -1839,13 +2083,36 @@ cmd_run() {
     # whose .comms is not ignored, snapshot-on-send would fold an entire second checkout
     # into every review artifact. We DEGRADE to the per-message path rather than refuse,
     # so a working setup is never broken by this change.
+    # Resolve the EXTERNAL store ONCE. Both the durable mount and any throwaway live under
+    # it, never in-repo; if it cannot be validated there is no safe external path, so FAIL
+    # CLOSED rather than fall back inside the repo (which is exactly what this increment ends).
+    if ! mount_base_root "$main_root"; then
+      update_thread_state "$msg_thread" failed "" "$sfield" || true
+      write_result "$run_dir" failed 1 "" "$msg" "could not establish a mount store outside the repo: ${MOUNT_BASE_NOTE:-unknown}"
+      unmount_artifact
+      trap - EXIT
+      exit 1
+    fi
+    mount_store="$MOUNT_BASE_DIR"
+    if ! mount_key="$(mount_repo_key "$main_root")"; then
+      update_thread_state "$msg_thread" failed "" "$sfield" || true
+      write_result "$run_dir" failed 1 "" "$msg" "could not derive a repo-key for the mount store (no sha256 utility)"
+      unmount_artifact
+      trap - EXIT
+      exit 1
+    fi
+    # A DURABLE per-(thread,agent) mount for ACP turns (round N pays only the warm-resume
+    # delta); a disposable external THROWAWAY for everything else. Scoped to `--via acp`
+    # because only an ACP turn has a warm session to keep: `comms.sh shadow` runs a NON-acp
+    # grok turn that also mounts and keeps a disposable path. The old `.comms`-ignore /
+    # `$root/mounts` durable gate is GONE — ignore-coverage of `.comms` no longer decides
+    # mount safety now that mounts live outside the repo entirely.
     if [ "$via" = "acp" ] \
        && mount_ident="$(acp_mount_ident "$main_root" "${msg_thread:-$(frontmatter_field "$msg" message_id)}" "$provider")" \
        && [ -n "$mount_ident" ] \
-       && git -C "$main_root" check-ignore -q ".comms" 2>/dev/null \
-       && mkdir -p "$root/mounts" 2>/dev/null \
-       && mount_kdir="$(mount_container "$root/mounts" "$mount_ident")"; then
-      mount_dir="$mount_kdir/tree"
+       && mount_alloc "$mount_store" "$mount_key" "$main_root" "$mount_ident"; then
+      mount_kdir="$MOUNT_ALLOC_DIR"
+      mount_dir="$mount_kdir/view/tree"
       mount_durable=1
       if ! mount_claim_take "$mount_kdir" "$run_dir"; then
         mount_dir=""; mount_durable=""; mount_kdir=""
@@ -1862,32 +2129,19 @@ cmd_run() {
       # had that record removed — by a crash or by the previous child — and "no turn has ever
       # run here" is then false, so it must not license skipping the owner check.
       if [ "$st_rc" = 1 ] && { [ -e "$mount_dir" ] || [ -L "$mount_dir" ]; }; then
-        echo "mount: the mount exists but its session record is gone; degrading rather than treating it as a first turn" >>"$run_dir/runner.log"
-        mount_claim_release
-        mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
-        st_record=""
+        mount_degrade "the mount exists but its session record is gone; degrading rather than treating it as a first turn"
       fi
       if [ "$st_rc" = 2 ]; then
         # Present but unreadable: we cannot tell whether an owner exists, so this must not
         # look like a first turn.
-        echo "mount: .state.record is present but unreadable; degrading rather than assuming no owner" >>"$run_dir/runner.log"
-        mount_claim_release
-        mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
-        st_record=""
+        mount_degrade ".state.record is present but unreadable; degrading rather than assuming no owner"
       fi
       # A structurally wrong id hashes to a lease path that cannot exist, which would report
-      # "owner gone" about a store we never addressed. acpx record ids are hex-and-dash.
-      # Reject only what cannot be a usable id: empty, or carrying characters that would make
-      # the derived lease path meaningless or hostile. NOT a hex/UUID test -- acpx's id format
-      # is its own business, and assuming it made every non-UUID id degrade, which took out
-      # every durable mount in the suite at once.
+      # "owner gone" about a store we never addressed. Reject only what cannot be a usable id.
       case "$st_record" in
         *[!A-Za-z0-9._-]*)
           if [ -n "$st_record" ]; then
-            echo "mount: .state.record is not a well-formed acpx id; degrading rather than probing a lease path derived from it" >>"$run_dir/runner.log"
-            mount_claim_release
-            mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
-            st_record=""
+            mount_degrade ".state.record is not a well-formed acpx id; degrading rather than probing a lease path derived from it"
           fi ;;
       esac
       st_rc=0; st_home="$(mount_state_get "$mount_kdir" home)" || st_rc=$?
@@ -1896,23 +2150,17 @@ cmd_run() {
       # gone. Both files are siblings of the mount, so a prior --approve-all child can rewrite
       # them; pointing `home` at a store with no lease makes the probe answer "gone" while the
       # real owner is still live in the store that actually holds it. The record acpx wrote
-      # names the cwd it ran in, so requiring that to be THIS mount ties the store we are about
-      # to probe to the mount we are about to rebuild. Anything short of that degrades — it is
-      # never a reason to refuse, because the disposable path is always available.
+      # names the cwd it ran in, so requiring that to be THIS mount's view/tree ties the store
+      # we are about to probe to the mount we are about to rebuild. Anything short of that
+      # degrades — never refuses, because the disposable path is always available.
       if [ -n "$st_record" ] && [ -n "$st_home" ]; then
         local corr_json="$st_home/.acpx/sessions/$st_record.json" corr_cwd="" corr_phys=""
-        # Use the EXPECTED physical path, never a resolution of the current dirent. `cd`
-        # follows a symlink, so a vandalised mount would resolve to whatever it points at —
-        # the live tree — and be compared against the record. But the mount's SHAPE is the
-        # restage's problem, not the owner check's: refusing to corroborate a symlinked mount
-        # would strand that thread on the disposable path forever, since nothing else ever
-        # rebuilds it. $mount_kdir is already physical (mount_container resolves it), and the
-        # record's cwd was written as `pwd -P` of exactly this path when it was a real tree.
-        corr_phys="$mount_kdir/tree"
+        # Use the EXPECTED physical path (the durable view/tree), never a resolution of the
+        # current dirent: `cd` would follow a vandalised symlink out to the live tree. mount_dir
+        # is already physical here (mount_alloc resolves the ident dir), and the record's cwd was
+        # written as `pwd -P` of exactly this path when it was a real tree.
+        corr_phys="$mount_dir"
         if [ -f "$corr_json" ] && [ ! -L "$corr_json" ]; then
-          # Capture the READ STATUS: a bare assignment aborts the runner under `set -e` on a
-          # permission or I/O error, turning an unreadable record into "runner aborted
-          # unexpectedly" instead of the promised degrade.
           local corr_body="" corr_rc=0
           corr_body="$(cat "$corr_json" 2>/dev/null)" || corr_rc=$?
           if [ "$corr_rc" = 0 ]; then
@@ -1920,9 +2168,7 @@ cmd_run() {
           fi
         fi
         if [ -z "$corr_cwd" ] || [ -z "$corr_phys" ] || [ "$corr_cwd" != "$corr_phys" ]; then
-          echo "mount: the recorded (record, home) pair does not name an acpx record for this mount; degrading rather than probing a store it may not own — the stable mount is left as-is deliberately; restaging it without corroboration is the bug this check prevents (record=$st_record home=$st_home json=$corr_json record_cwd=${corr_cwd:-<none>} mount=$corr_phys)" >>"$run_dir/runner.log"
-          mount_claim_release
-          mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable=""
+          mount_degrade "the recorded (record, home) pair does not name an acpx record for this mount; degrading rather than probing a store it may not own — the durable mount is left as-is deliberately; restaging it without corroboration is the bug this check prevents (record=$st_record home=$st_home json=$corr_json record_cwd=${corr_cwd:-<none>} mount=$corr_phys)"
         fi
       fi
       if [ -n "${mount_durable:-}" ]; then
@@ -1930,16 +2176,12 @@ cmd_run() {
       case "$owner_rc" in
         0) : ;;
         2) # OWNERSHIP UNPROVABLE (a record written before the home field existed). Rebuilding
-           # the stable mount could restage under an owner living in a store we cannot name,
-           # so DEGRADE to the disposable per-message path: the turn still reviews the pinned
-           # artifact, just cold, and the stable mount is left untouched for an operator.
-           echo "mount: ${MOUNT_WAIT_NOTE:-ownership unprovable}; using the per-message path this turn and leaving $mount_kdir alone (clear it once no reviewer is running with: git -C '$main_root' worktree remove --force '$mount_dir' && rm -rf '$mount_kdir')" >>"$run_dir/runner.log"
-           mount_claim_release
-           # KEEP mount_ident. Only the PATH degrades; the session must stay in the mounted
-           # namespace, because `agent-comms-<thread>` from inside a linked worktree is
-           # exactly the ancestor-walk escape `+mount+` exists to close — acpx would resolve
-           # up to the enclosing repo and could bind a record whose cwd is the live tree.
-           mount_kdir="$run_dir"; mount_dir="$run_dir/tree"; mount_durable="" ;;
+           # the durable mount could restage under an owner living in a store we cannot name,
+           # so DEGRADE to a disposable external throwaway: the turn still reviews the pinned
+           # artifact, just cold, and the durable mount is left untouched for `clean mounts`.
+           # KEEP mount_ident: only the PATH degrades; the session stays in the `+mount+`
+           # namespace so acpx's root-walk cannot escape to a same-named ancestor record.
+           mount_degrade "${MOUNT_WAIT_NOTE:-ownership unprovable}; using a disposable external mount this turn and leaving the durable mount for 'comms.sh clean mounts'" ;;
         *) update_thread_state "$msg_thread" failed "" "$sfield" || true
            write_result "$run_dir" failed 1 "" "$msg" "${MOUNT_WAIT_NOTE:-the previous ACP queue owner for this mount has not exited} — refusing to restage under a live owner"
            unmount_artifact
@@ -1948,9 +2190,15 @@ cmd_run() {
       esac
       fi
     else
-      mount_kdir="$run_dir"
-      mount_dir="$run_dir/tree"
-      mount_durable=""
+      # Non-ACP (shadow's direct grok), a one-off, or a durable alloc that failed: a disposable
+      # external throwaway, never in-repo. Fail closed if the store cannot even hold that.
+      if ! mount_use_throwaway; then
+        update_thread_state "$msg_thread" failed "" "$sfield" || true
+        write_result "$run_dir" failed 1 "" "$msg" "could not allocate an external throwaway mount: ${MOUNT_ALLOC_NOTE:-unknown}"
+        unmount_artifact
+        trap - EXIT
+        exit 1
+      fi
     fi
     # `|| mount_rc=$?` puts the call in a condition context: a bare call under `set -e`
     # exits the runner before `case "$?"` can run, which made the refuse-vs-error split
@@ -1969,6 +2217,23 @@ cmd_run() {
         trap - EXIT
         exit 1 ;;
     esac
+    # INCREMENT-1 HARD GATE: the reviewed cwd must live OUTSIDE the repo snapshot. The store
+    # is validated to be external and refused if under the repo, so this is belt-and-braces —
+    # but it is the one invariant this increment promises, so it is asserted at the cwd itself,
+    # physically, with a path-separator boundary (so /repo never matches /repo-fork). The
+    # no-git-ancestor probe is LOGGED, not gating, in this increment (it becomes the gate in
+    # increment 2 when the cwd moves up to the container).
+    local cwd_phys=""
+    cwd_phys="$( cd "$mount_dir" 2>/dev/null && pwd -P )" || cwd_phys=""
+    case "${cwd_phys:-x}/" in
+      "$main_root"/*)
+        update_thread_state "$msg_thread" failed "" "$sfield" || true
+        write_result "$run_dir" failed 1 "" "$msg" "the mounted cwd '$cwd_phys' is under the repo ($main_root) — refusing to review inside the snapshot"
+        unmount_artifact
+        trap - EXIT
+        exit 1 ;;
+    esac
+    mount_log_git_ancestor "$mount_kdir" >>"$run_dir/runner.log" 2>&1 || true
     # A mounted tree that carries its own acpx project config would choose the reviewer:
     # acpx resolves .acpxrc.json from the cwd, and its `agents` entry overrides the
     # profile acp.sh selected by name, before any later assert can run.
@@ -2285,7 +2550,13 @@ PROMPT
           # read ~/.codex/auth.json before any of this, so copying adds no capability. With
           # child network denied the token cannot be posted anywhere; it can still be COPIED
           # INTO THE REVIEW BODY, which is a real residual and is why this is not yet a close.
-          acp_iso_home="${mount_kdir:-$run_dir}/codex-home"
+          # The isolated CODEX_HOME is the `home/` SIBLING of view/ that mount_alloc created —
+          # never inside view/tree (so mount_tree_matches still verifies tree/ alone) and never
+          # under $run_dir (which was per-message and rebuilt every round, silently undoing warm
+          # resume). mount_kdir is always a validated external ident dir here — durable or a
+          # throwaway — so the old `${mount_kdir:-$run_dir}` fallback (an in-repo landing for
+          # auth.json) is gone.
+          acp_iso_home="$mount_kdir/home"
           # NEVER through a symlink. A leftover `codex-home` symlink beside the mount (a prior
           # --approve-all child, or an uncontained sibling writer) would make CODEX_HOME resolve
           # OUTSIDE the parent-owned sibling, and the config write / auth copy below would follow
@@ -2383,7 +2654,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       printf 'isolation: provider=%s backend=%s\n' "$provider" "$acp_iso_backend" >>"$run_dir/runner.log"
     fi
     local acp_ensure_out="" acp_record_id=""
-    acp_ensure_out="$( cd "$workdir" && ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" --format text "$acp_profile" \
+    acp_ensure_out="$( acp_exec "$workdir" --format text "$acp_profile" \
         sessions ensure --name "$acp_session" 2>>"$run_dir/runner.log" )" || true
     printf 'sessions ensure: %s\n' "$acp_ensure_out" >>"$run_dir/runner.log"
     acp_record_id="$(printf '%s' "$acp_ensure_out" | head -1 | cut -f1)"
@@ -2409,7 +2680,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       # records process.cwd(), which is physical, so compare against `pwd -P`.
       local acp_bound_cwd="" acp_phys=""
       acp_phys="$( cd "$mount_dir" && pwd -P )"
-      acp_bound_cwd="$( cd "$workdir" && "${acp_launch[@]}" --format text "$acp_profile" \
+      acp_bound_cwd="$( acp_exec "$workdir" --format text "$acp_profile" \
           sessions show "$acp_session" 2>>"$run_dir/runner.log" | sed -n 's/^[[:space:]]*cwd:[[:space:]]*//p' | head -1 )" || true
       if [ -z "$acp_bound_cwd" ] || [ "$acp_bound_cwd" != "$acp_phys" ]; then
         update_thread_state "$msg_thread" failed "" "$sfield" || true
@@ -2498,7 +2769,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       # reused owner stuck in AgentFullAccess prompted anyway, the exact case this pin exists
       # to stop. Require rc 0 AND stdout equal to acpx's success line. (grok, implement r1, blocking.)
       local acp_mode_out="" acp_mode_rc=0
-      acp_mode_out="$( cd "$workdir" && ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" --format text \
+      acp_mode_out="$( acp_exec "$workdir" --format text \
           "$acp_profile" -s "$acp_session" set-mode read-only 2>>"$run_dir/runner.log" )" && acp_mode_rc=0 || acp_mode_rc=$?
       printf 'set-mode read-only: rc=%s out=[%s]\n' "$acp_mode_rc" "$acp_mode_out" >>"$run_dir/runner.log"
       if [ "$acp_mode_rc" -ne 0 ] || [ "$acp_mode_out" != "mode set: read-only" ]; then
@@ -2506,7 +2777,7 @@ ABORT_NOTE="refused: could not confirm '$provider' is read-only before the promp
                 die "run: could not pin '$provider' to read-only before the prompt (rc=$acp_mode_rc, out='$(printf '%.120s' "$acp_mode_out")') — refusing to send a review turn whose containment is unconfirmed"
       fi
     fi
-    ( cd "$workdir" && PATH="${acp_shim:+$acp_shim:}$PATH" ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" \
+    ( acp_exec "$workdir" \
         "${acp_perm[@]}" "${acp_ttl[@]+"${acp_ttl[@]}"}" \
         --timeout "$timeout" --format quiet \
         "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
@@ -2781,11 +3052,130 @@ cmd_result() {
   cat "$run_dir/result.json"
 }
 
+# Is a mount ident live or its ownership unprovable? Returns 0 (do NOT remove) or 1 (provably
+# gone). A live runner CLAIM (a `.claim.<gen>` whose pid is alive) or an acpx queue owner that
+# cannot be proven gone both count as live. Conservative by construction: anything unreadable
+# or ambiguous is treated as live.
+MOUNT_LIVE_NOTE=""
+mount_ident_live() {  # <ident dir> -> 0 live/ambiguous, 1 provably gone
+  MOUNT_LIVE_NOTE=""
+  local d="$1" c hp rec home st_rc=0 rc=0
+  for c in "$d"/.claim.[0-9]*; do
+    [ -f "$c" ] || continue
+    grep -qx 'released=1' "$c" 2>/dev/null && continue
+    hp="$(sed -n 's/^pid=//p' "$c" 2>/dev/null | head -1)"
+    [ -n "$hp" ] || continue
+    proc_state "$hp"
+    if [ "$PROC_STATE" != dead ]; then MOUNT_LIVE_NOTE="held by runner pid $hp (state=$PROC_STATE)"; return 0; fi
+  done
+  rec="$(mount_state_get "$d" record)" || st_rc=$?
+  if [ "$st_rc" = 2 ]; then MOUNT_LIVE_NOTE=".state.record present but unreadable"; return 0; fi
+  st_rc=0; home="$(mount_state_get "$d" home)" || st_rc=$?
+  [ "$st_rc" = 2 ] && home=""
+  mount_owner_wait "$rec" "$home" 2 || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    *) MOUNT_LIVE_NOTE="${MOUNT_WAIT_NOTE:-acpx queue owner not provably gone}"; return 0 ;;
+  esac
+}
+
+# REPORT-ONLY orphan scan. A checkout that moved hashes to a NEW repo-key, so its old key is
+# not reachable from the current repo's scope; only a scan of the whole base can surface it.
+# Deletion based solely on "the stored root no longer exists" is unsafe around a temporarily
+# unmounted volume, so this only ever REPORTS candidates — a human removes one deliberately.
+mount_report_orphans() {  # <base> <this canonical main_root>
+  local base="$1" me="$2" kd rootf stored found=0
+  for kd in "$base"/*/; do
+    [ -d "$kd" ] || continue; kd="${kd%/}"
+    [ -L "$kd" ] && continue
+    rootf="$kd/.root"
+    if [ ! -f "$rootf" ]; then printf 'clean-mounts: orphan candidate (no .root record): %s\n' "$kd"; found=1; continue; fi
+    stored="$(cat "$rootf" 2>/dev/null)" || continue
+    [ "$stored" = "$me" ] && continue
+    if [ ! -d "$stored" ]; then printf 'clean-mounts: orphan candidate (stored root gone: %s): %s\n' "$stored" "$kd"; found=1; fi
+  done
+  [ "$found" = 1 ] && echo "clean-mounts: the orphan scan is REPORT-ONLY (a stored root may be a temporarily unmounted volume); nothing above was deleted — remove one deliberately with 'rm -rf <path>'."
+  return 0
+}
+
+# Conservative GC of THIS repo's external mount store. Dry-run by default (--yes to act),
+# scoped to <base>/<repo-key> after a pwd -P identity check and a .root match (never <base>,
+# never a symlink, never-follow). Refuses the WHOLE repo-key if ANY ident is live or its
+# ownership is unprovable. Registered worktrees are removed via git before the ident dir is
+# deleted. NOT folded into `clean workspace`/`clean all` (those stay mail-only). (both, r3.)
+cmd_clean_mounts() {  # [--yes] [--orphans]
+  local yes=0 orphans=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --yes) yes=1 ;;
+      --orphans) orphans=1 ;;
+      *) die "clean-mounts: unknown argument '$1'" ;;
+    esac
+    shift
+  done
+  local root main_root
+  root="$("$COMMS" root)"; main_root="${root%/.comms}"
+  main_root="$( cd "$main_root" 2>/dev/null && pwd -P )" || die "clean-mounts: cannot resolve the repo root"
+  if ! mount_base_root "$main_root"; then
+    echo "clean-mounts: no usable mount store: ${MOUNT_BASE_NOTE:-unknown}" >&2; return 1
+  fi
+  local base="$MOUNT_BASE_DIR" key scope
+  key="$(mount_repo_key "$main_root")" || die "clean-mounts: no sha256 utility, cannot address the store"
+  scope="$base/$key"
+  if [ ! -d "$scope" ]; then
+    echo "clean-mounts: no mount store for this repo ($scope)"
+    [ "$orphans" = 1 ] && mount_report_orphans "$base" "$main_root"
+    return 0
+  fi
+  [ ! -L "$scope" ] || die "clean-mounts: the mount store scope is a symlink — refusing to follow it"
+  [ "$(cd "$scope" 2>/dev/null && pwd -P)" = "$scope" ] || die "clean-mounts: the mount store scope resolves elsewhere — refusing"
+  [ -f "$scope/.root" ] && [ "$(cat "$scope/.root" 2>/dev/null)" = "$main_root" ] \
+    || die "clean-mounts: the mount store .root does not name this repo ($main_root) — refusing; run this from the checkout that owns $scope"
+  local d ident live_blockers="" candidates=()
+  for d in "$scope"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"; ident="$(basename "$d")"
+    case "$ident" in .*) continue ;; esac
+    if [ -L "$d" ]; then live_blockers="$live_blockers
+  $ident (symlinked ident — refusing to touch)"; continue; fi
+    if mount_ident_live "$d"; then
+      live_blockers="$live_blockers
+  $ident ($MOUNT_LIVE_NOTE)"
+    else
+      candidates+=("$d")
+    fi
+  done
+  if [ -n "$live_blockers" ]; then
+    printf 'clean-mounts: refusing the whole repo-key — a live or unprovable owner in %s:%s\n' "$scope" "$live_blockers" >&2
+    return 1
+  fi
+  if [ "${#candidates[@]}" -eq 0 ]; then
+    echo "clean-mounts: nothing removable in $scope"
+    [ "$orphans" = 1 ] && mount_report_orphans "$base" "$main_root"
+    return 0
+  fi
+  if [ "$yes" != 1 ]; then
+    echo "clean-mounts: would remove ${#candidates[@]} mount(s) under $scope (re-run with --yes):"
+    printf '  %s\n' "${candidates[@]}"
+    [ "$orphans" = 1 ] && mount_report_orphans "$base" "$main_root"
+    return 0
+  fi
+  local removed=0
+  for d in "${candidates[@]}"; do
+    [ -d "$d/view/tree" ] && mount_git -C "$main_root" worktree remove --force "$d/view/tree" 2>/dev/null || true
+    if [ -d "$d" ] && [ ! -L "$d" ]; then rm -rf -- "$d" 2>/dev/null && removed=$((removed+1)); fi
+  done
+  echo "clean-mounts: removed $removed mount(s) under $scope"
+  [ "$orphans" = 1 ] && mount_report_orphans "$base" "$main_root"
+  return 0
+}
+
 case "${1:-}" in
   spawn)   shift; cmd_spawn "$@" ;;
   run)     shift; cmd_run "$@" ;;
   await)   shift; cmd_await "$@" ;;
   result)  shift; cmd_result "$@" ;;
+  clean-mounts) shift; cmd_clean_mounts "$@" ;;
   hold)    shift; cmd_hold "$@" ;;
   release) shift; cmd_release "$@" ;;
   ""|help|-h|--help)
