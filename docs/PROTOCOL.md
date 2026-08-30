@@ -274,8 +274,16 @@ silently discarding the newer attempt. So `panel dispatch` stakes an empty marke
 `.comms/grades/attempts/<review_set_id>` before anything else it writes — before the plan
 events, before the legs, before the index rows. **The marker, not the shape of the index
 rows, is what settles whether a set is legacy.** Its absence means no attempt was ever
-planned here; its presence with no readable plan means UNKNOWN, and every reader refuses
-rather than degrading to the legacy path.
+planned here; its presence with no readable plan means UNKNOWN, and the readers that GATE —
+`compose` and `panel status --set` — refuse rather than degrading to the legacy path.
+
+One reader deliberately does not: the BARE `panel status` listing. It counts the legs of
+whatever attempt the plan events name, and with no readable plan that is the empty attempt —
+so for a crashed set it still prints the previous round's leg count. That is the surface a
+driver reaches for after losing its set id, so read it as a directory, never as a verdict:
+re-run `panel status --set <id>` on anything it lists before acting, and that call will refuse.
+The listing gates nothing, which is why it is allowed to stay lossy rather than grow a refusal
+that would make an inventory command fail on one bad row.
 
 `dispatch` is the ATTEMPT id, and it is what makes a retry readable. A `review_set` id is
 deterministic — same thread, phase, round and artifact produce the same one — and a retry
