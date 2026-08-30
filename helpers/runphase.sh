@@ -2686,7 +2686,11 @@ kill_codex() {
   [ -n "${codex_pid:-}" ] || return 0
   kill -0 "$codex_pid" 2>/dev/null || return 0
   kill -TERM -- "-$codex_pid" 2>/dev/null || kill -TERM "$codex_pid" 2>/dev/null || true
-  sleep 2
+  # Poll for the child to actually die instead of always paying the full grace: a stub-backed
+  # turn is gone in milliseconds. Same 2s budget, same KILL fallback — this can only return
+  # SOONER than the flat sleep, never later.
+  local _kc=0
+  while [ "$_kc" -lt 20 ] && kill -0 "$codex_pid" 2>/dev/null; do sleep 0.1; _kc=$(( _kc + 1 )); done
   kill -KILL -- "-$codex_pid" 2>/dev/null || kill -KILL "$codex_pid" 2>/dev/null || true
 }
 
@@ -2716,7 +2720,7 @@ cmd_await() {
   done
   [ -n "$run_dir" ] || die "await: run-dir argument required"
   [ -d "$run_dir" ] || die "await: no such run dir: $run_dir"
-  local deadline pid
+  local deadline pid waited_ds=0 _g
   deadline=$(( $(date +%s) + timeout ))
   while :; do
     if [ -f "$run_dir/result.json" ]; then
@@ -2726,7 +2730,10 @@ cmd_await() {
     if [ -f "$run_dir/pid" ]; then
       pid="$(cat "$run_dir/pid" 2>/dev/null || true)"
       if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-        sleep 2   # grace: the EXIT trap may still be writing result.json
+        # grace: the EXIT trap may still be writing result.json. Poll for the write rather
+        # than always paying the full grace — same 2s budget, spent only when needed.
+        _g=0
+        while [ "$_g" -lt 20 ] && [ ! -f "$run_dir/result.json" ]; do sleep 0.1; _g=$(( _g + 1 )); done
         [ -f "$run_dir/result.json" ] && continue
         # Write a SYNTHETIC result rather than only reporting to stderr. Without it the
         # run leaves no machine-readable trace, so `status`, the stalled watchdog and any
@@ -2756,7 +2763,14 @@ cmd_await() {
         "$COMMS" presence beat --name "$COMMS_PRESENCE_NAME" --instance "$COMMS_PRESENCE_INSTANCE" || true
       fi
     fi
-    sleep 2
+    # Fine-then-coarse. A stub-backed turn writes result.json in milliseconds, so a flat 2s
+    # poll made every await pay up to 2s of pure latency — the same defect the provider
+    # watchdog had, and this sits on the path of every spawned turn in the suite. Poll at
+    # 0.1s for the first 2s, then back off to 1s so a long real turn does not spin. The
+    # presence beat above is gated on ELAPSED time, not on iteration count, so polling more
+    # often does not change its cadence.
+    if [ "$waited_ds" -lt 20 ]; then sleep 0.1; waited_ds=$(( waited_ds + 1 ))
+    else sleep 1; waited_ds=$(( waited_ds + 10 )); fi
   done
 }
 

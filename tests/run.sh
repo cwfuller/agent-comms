@@ -14,7 +14,7 @@ set -uo pipefail
 # operator's tuning cannot silently change what the timing assertions measure.
 unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP COMMS_RUNPHASE_VIA \
       COMMS_RUNPHASE_EXPECT_STATE COMMS_RUNPHASE_STATE_WAIT_SECS \
-      COMMS_RUNPHASE_TIMEOUT_SECS 2>/dev/null || true
+      COMMS_RUNPHASE_TIMEOUT_SECS COMMS_CMUX_PACE COMMS_CMUX_BACKOFF 2>/dev/null || true
 # Probe-result flags gate condition-bound skips, so an inherited value would let a skip be
 # cashed before its probe ran. Same class as the scrub above. (grok, panel r7.)
 unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
@@ -24,6 +24,12 @@ unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
 # for cmux explicitly instead of relying on a default that no longer points at them.
 # Sections that test the DEFAULT routing clear this with `env -u COMMS_DELIVERY`.
 export COMMS_DELIVERY=cmux
+# cmux is a STUB in this harness. Keystroke pacing exists so a real terminal does not
+# interleave send/escape/enter, and the tree backoff exists to ride out a real contention
+# window — a stub can do neither, so both are pure wall-clock here. Scrubbed above (an
+# inherited value must not decide what the timing assertions measure), then set explicitly.
+# The production DEFAULTS are pinned by assertion in the stubbed-cmux section below.
+export COMMS_CMUX_PACE=0 COMMS_CMUX_BACKOFF=0
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMS="$REPO/helpers/comms.sh"
@@ -476,6 +482,16 @@ echo "$ARCH_HINT3" | grep -q "$(basename "$ARCH_WRONG_DIRECTION")" \
   && fail "3-agent hint crossed reader direction" || ok "3-agent hint excludes the reader's own messages"
 
 section "comms.sh: deliver via stubbed cmux"
+# The suite runs with both timing knobs zeroed, so nothing else here would notice if a
+# refactor made 0 the DEFAULT — which would silently drop pacing and backoff for every real
+# user. Pinned at the source, not behaviourally: this suite already has one timing-sensitive
+# section that flakes under load, and a wall-clock assertion here would add another.
+grep -qF 'cmux_pace() { [ "${COMMS_CMUX_PACE:-1}" = 0 ] || sleep "$1"; }' "$COMMS" \
+  && ok "keystroke pacing defaults ON (only an explicit 0 skips it)" \
+  || fail "cmux_pace no longer defaults to pacing"
+grep -qF 'backoff="${COMMS_CMUX_BACKOFF:-0.3 0.7 1.2}"' "$COMMS" \
+  && ok "the cmux tree backoff default is unchanged" \
+  || fail "the cmux tree backoff default changed"
 : > "$CMUX_STUB_LOG"
 OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver codex)"
 echo "$OUT" | grep -q "delivered to surface:22" && ok "picker chose other-pane surface (not ◀ here)" || fail "picker chose other-pane surface (got: $OUT)"
@@ -1065,7 +1081,10 @@ STUB
 chmod +x "$STUB_BIN/codex"
 
 run_headless() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
-run_rp() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$RUNPHASE" "$@"); }
+# SPAWN_DELAY_SECS=0: every run_rp turn is stub-backed and exits in milliseconds, so the 1s
+# default is pure wait across fifteen call sites. Zeroed here the same way the other 80-odd
+# spawn sites already are; no assertion in the corpus depends on the delay's default.
+run_rp() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 PATH="$STUB_BIN:$PATH" "$RUNPHASE" "$@"); }
 rundir_of() { echo "$1" | sed -n 's/^ *run dir: //p' | head -1; }
 
 # -- workflow message: spawn -> await -> completed, state mirrored --
@@ -5269,9 +5288,14 @@ rm -f "$GCAN" "$GOUT"
 # PATH-FIRST records so LC_ALL=C sort and comm agree on ordering — hash-first records are
 # ordered by hash, which is not the order comm requires and made the comparison unreliable.
 gs_files() {
-  find "$GV" -type f ! -name '.payload' 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-    printf '%s\t%s\n' "$f" "$(shasum "$f" 2>/dev/null | cut -d" " -f1)"
-  done
+  # ONE shasum process for the whole tree, not one per file plus a `cut`: measured 409ms -> 22ms
+  # per call on a 27-file fixture, and this is called from ten sites. `-exec ... +` batches AND —
+  # unlike `xargs` — runs nothing at all on an empty tree, so shasum can never be left reading
+  # stdin and hanging the suite. Output stays PATH-FIRST and LC_ALL=C sorted (see below);
+  # verified byte-identical to the per-file form, including paths containing spaces.
+  find "$GV" -type f ! -name '.payload' -exec shasum {} + 2>/dev/null \
+    | sed -E 's/^([0-9a-f]+)  (.*)$/\2\t\1/' \
+    | LC_ALL=C sort
 }
 # Any difference IN EITHER DIRECTION. `comm -13` alone missed deletions, so a review turn that
 # removed a file read as clean. (codex, round 10.)

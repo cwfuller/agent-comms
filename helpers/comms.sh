@@ -215,19 +215,32 @@ shell_quote() {
 
 # Retried cmux tree fetch. A single un-retried call was the root cause of a
 # field incident: under load it intermittently returns empty, which broke
+# Keystroke pacing for a REAL terminal: cmux needs a beat between send / escape / enter or
+# the sequence interleaves and a half-typed nudge is submitted. A STUBBED cmux needs none of
+# it, and the suite pays it on every delivery. ONE accessor, so the two sequences below cannot
+# drift apart — a second copy of this rule is the bug shape this codebase keeps rediscovering.
+# Default is pacing ON; only an explicit COMMS_CMUX_PACE=0 skips it.
+cmux_pace() { [ "${COMMS_CMUX_PACE:-1}" = 0 ] || sleep "$1"; }
+
 # workspace resolution AND surface picking in the same session.
 cmux_tree() {
   # Backoff matters: a fixed 3x0.3s burst sits inside a single cmux contention
   # window (observed in the field while a background terminal was attaching);
   # spreading attempts over ~2.5s survives it.
-  local out delay
+  local out delay backoff
   # No identity means there is nothing to query — return immediately instead of
   # dereferencing an unset var under `set -u`, which printed "unbound variable"
   # twice and swallowed the caller's specific diagnostic. Fixed here rather than at
   # the call site so every caller is covered. (codex, transport-flip round 2.)
   [ -n "${CMUX_WORKSPACE_ID:-}" ] || return 1
   command -v cmux >/dev/null 2>&1 || return 1
-  for delay in 0.3 0.7 1.2 0; do
+  # The delays are overridable so a STUBBED cmux (the suite) need not pay a contention
+  # window that cannot occur — a stub either has a tree or never will, so retrying slower
+  # changes nothing. Default is unchanged and a malformed override falls back to it rather
+  # than reaching `sleep` as garbage, which would abort the caller under errexit.
+  local backoff="${COMMS_CMUX_BACKOFF:-0.3 0.7 1.2}"
+  case "$backoff" in ''|*[!0-9.\ ]*) backoff="0.3 0.7 1.2" ;; esac
+  for delay in $backoff 0; do
     out="$(cmux tree --workspace "${CMUX_WORKSPACE_ID}" 2>/dev/null)" || out=""
     if [ -n "$out" ]; then
       printf '%s\n' "$out"
@@ -4123,16 +4136,16 @@ cmd_deliver() {
   errf="$(mktemp 2>/dev/null || echo /tmp/comms-deliver.$$)"
   case "$target" in
     codex)
-      { cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && sleep 0.5 \
-        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 \
+      { cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && cmux_pace 0.5 \
+        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && cmux_pace 0.3 \
         && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" enter; } 2>"$errf" || seq_ok=false
       ;;
     claude)
       # Claude Code in vim mode: ensure insert mode before typing, then submit.
-      { cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.2 \
-        && cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" 'i' && sleep 0.2 \
-        && cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '/read-from-codex' && sleep 0.5 \
-        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && sleep 0.3 \
+      { cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && cmux_pace 0.2 \
+        && cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" 'i' && cmux_pace 0.2 \
+        && cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '/read-from-codex' && cmux_pace 0.5 \
+        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && cmux_pace 0.3 \
         && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" enter; } 2>"$errf" || seq_ok=false
       ;;
   esac
