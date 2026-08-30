@@ -2191,6 +2191,8 @@ PROMPT
   # write is denied outright, because prompting is impossible in a detached turn.
   if [ "$via" = "acp" ]; then
     local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim=""
+    local -a acp_iso=()          # isolation env, applied to EVERY owner-spawning invocation
+    local acp_iso_backend=none acp_iso_home=""
     acp_sh="$(dirname "$SELF")/acp.sh"
     [ -x "$acp_sh" ] || die "run: --via acp but acp.sh is not installed next to runphase.sh"
     acp_profile="$("$acp_sh" profile "$provider" 2>/dev/null || true)"
@@ -2231,8 +2233,59 @@ PROMPT
     # --format text is PINNED: `format` is a config scalar, so the ambient default is
     # branch-controllable. Field 1 of the first line is the record id in both the created
     # and the already-existing case.
+    # THE ISOLATION BACKEND, resolved per PROVIDER and applied to EVERY acpx invocation that
+    # can spawn or reuse a queue owner — `sessions ensure` AND the prompt send. acpx spawns
+    # the persistent owner on the SEND when no owner exists, so wrapping only `ensure` leaves
+    # the process that actually runs tools unconfined. (codex, plan r4, blocking.)
+    #
+    # This is a real boundary, not a cost increase, and only where it was MEASURED to be one.
+    # Measured on Darwin with acpx 0.13.1 / codex-acp 1.6.2: an isolated CODEX_HOME plus
+    # INITIAL_AGENT_MODE=read-only refuses workspace writes AND /tmp writes at the OS
+    # ("operation not permitted"), denies child network (curl: could not resolve host), and
+    # still permits reads, `git log` and the model's own API call. Five parent-side controls
+    # that do NOT work are recorded in docs/ROADMAP.md; do not substitute one of them.
+    if [ -n "$mount_dir" ]; then
+      case "$provider" in
+        codex)
+          # The adapter reads INITIAL_AGENT_MODE (not sandbox_mode) and defaults to
+          # AgentMode.Agent, so the home alone is not enough — both are required.
+          acp_iso_home="$run_dir/codex-home"
+          mkdir -p "$acp_iso_home" || die "run: cannot create the isolated CODEX_HOME"
+          # Credentials only. NOT the workspace-cmux profile this repo's own
+          # `codex-permissions` recipe installs: that profile is exactly what makes the
+          # agent self-authorise, so no permission request is ever issued and no client-side
+          # denial is possible. An isolated home is how the review turn escapes it.
+          local acp_auth
+          for acp_auth in auth.json; do
+            [ -f "${CODEX_HOME:-$HOME/.codex}/$acp_auth" ] \
+              && cp "${CODEX_HOME:-$HOME/.codex}/$acp_auth" "$acp_iso_home/$acp_auth" 2>/dev/null || true
+          done
+          printf 'approval_policy = "on-request"\nsandbox_mode = "read-only"\n' > "$acp_iso_home/config.toml" \
+            || die "run: cannot write the isolated codex config"
+          acp_iso=(env "CODEX_HOME=$acp_iso_home" "INITIAL_AGENT_MODE=read-only")
+          acp_iso_backend="codex-home+read-only"
+          ;;
+        *)
+          # NO VERIFIED BACKEND ON THIS OS. grok's own docs are explicit that child-network
+          # blocking is "enforced on Linux only (via seccomp). On macOS it is a no-op", and
+          # its read-only profile still write-allows /tmp — so a mounted grok turn on Darwin
+          # can clone to /tmp and push with the inherited keychain helper. claude has no
+          # backend wired here at all. Refusing is the fail-closed answer both reviewers
+          # asked for; the escape hatch is explicit and it is not the default, because a
+          # silent degradation to an uncontained mount is how this item gets marked done
+          # while staying open.
+          if [ "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-0}" = 1 ]; then
+            acp_iso_backend="none(operator-override)"
+            echo "warning: '$provider' has no verified isolation backend on $(uname -s) and COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 — this mounted turn is NOT contained: it can write outside the mount and reach the network with your git credentials." >&2
+          else
+            die "run: '$provider' has no verified isolation backend on $(uname -s), so a mounted review turn cannot be contained — refusing. See docs/ROADMAP.md (open security item). Set COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to accept an uncontained reviewer deliberately."
+          fi
+          ;;
+      esac
+      printf 'isolation: provider=%s backend=%s\n' "$provider" "$acp_iso_backend" >>"$run_dir/runner.log"
+    fi
     local acp_ensure_out="" acp_record_id=""
-    acp_ensure_out="$( cd "$workdir" && "${acp_launch[@]}" --format text "$acp_profile" \
+    acp_ensure_out="$( cd "$workdir" && ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" --format text "$acp_profile" \
         sessions ensure --name "$acp_session" 2>>"$run_dir/runner.log" )" || true
     printf 'sessions ensure: %s\n' "$acp_ensure_out" >>"$run_dir/runner.log"
     acp_record_id="$(printf '%s' "$acp_ensure_out" | head -1 | cut -f1)"
@@ -2327,7 +2380,25 @@ PROMPT
     # replays through the prompt cache, which is where the saving actually comes from.
     local -a acp_ttl=()
     [ -n "$mount_dir" ] && acp_ttl=(--ttl "${COMMS_RUNPHASE_OWNER_TTL_SECS:-20}")
-    ( cd "$workdir" && PATH="${acp_shim:+$acp_shim:}$PATH" "${acp_launch[@]}" \
+    # RE-PIN THE MODE IMMEDIATELY BEFORE THE PROMPT, and refuse if it will not hold.
+    # INITIAL_AGENT_MODE is read once, when the adapter builds sessionState — it is not a
+    # process-lifetime lock. `setSessionMode` accepts any of [ReadOnly, Agent,
+    # AgentFullAccess] with no allowlist, the sandbox policy is sent per turn from the
+    # CURRENT mode, and `--ttl` owner reuse means a later round talks to an owner that was
+    # started under whatever mode was last set. So a turn that raised its own mode would
+    # leave the next round unconfined. Setting it here, every round, is what makes the
+    # backend hold across owner reuse. (grok, plan r4, blocking.)
+    if [ -n "$mount_dir" ] && [ "$acp_iso_backend" = "codex-home+read-only" ]; then
+      local acp_mode_out="" acp_mode_rc=0
+      acp_mode_out="$( cd "$workdir" && ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" --format text \
+          "$acp_profile" -s "$acp_session" set-mode read-only 2>&1 )" && acp_mode_rc=0 || acp_mode_rc=$?
+      printf 'set-mode read-only: rc=%s %s\n' "$acp_mode_rc" "$acp_mode_out" >>"$run_dir/runner.log"
+      case "$acp_mode_out" in
+        *read-only*) : ;;
+        *) die "run: could not pin '$provider' to read-only before the prompt (rc=$acp_mode_rc) — refusing to send a review turn whose containment is unconfirmed" ;;
+      esac
+    fi
+    ( cd "$workdir" && PATH="${acp_shim:+$acp_shim:}$PATH" ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" \
         "${acp_perm[@]}" "${acp_ttl[@]+"${acp_ttl[@]}"}" \
         --timeout "$timeout" --format quiet \
         "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
