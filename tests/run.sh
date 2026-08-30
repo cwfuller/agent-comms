@@ -7798,18 +7798,60 @@ printf '%s\n' "$EV_CRASHST" | grep -q 'dispatched under a recorded attempt' \
 # reads as legacy: compose invents a one-leg roster out of the leftover legacy row and
 # gates on it, when the attempt that actually ran planned two. Nothing else about the
 # fixture changes, so the assertions above cannot be passing on some unrelated guard.
-command mv -f "$EV_RF/.comms/grades/attempts/$EV_RFSET" "$WORK/rf-marker-keep"
-EV_NOMARK="$(run_evrf compose --set "$EV_RFSET" 2>&1 || true)"
-if printf '%s\n' "$EV_NOMARK" | grep -q 'dispatched under a recorded attempt'; then
-  fail "the index rows, not the marker, were settling legacy-ness"
-elif printf '%s\n' "$EV_NOMARK" | grep -q '0 of 1 legs'; then
-  ok "the marker, not the index rows, is what settles legacy-ness"
+# The mv is CHECKED. Unchecked, it no-ops on a tree where no marker was ever staked, the
+# fixture goes unchanged, compose repeats the refusal it gave two lines earlier, and this
+# assertion prints green while asserting a mechanism that does not exist. (Found by
+# reverting helpers/comms.sh under the new tests: A1-A3 went red and this one stayed green.)
+if ! command mv -f "$EV_RF/.comms/grades/attempts/$EV_RFSET" "$WORK/rf-marker-keep" 2>/dev/null; then
+  fail "the no-marker control had no marker to remove — it was never staked"
 else
-  fail "the no-marker control did not reproduce the legacy misread ($EV_NOMARK)"
+  EV_NOMARK="$(run_evrf compose --set "$EV_RFSET" 2>&1 || true)"
+  if printf '%s\n' "$EV_NOMARK" | grep -q 'dispatched under a recorded attempt'; then
+    fail "the index rows, not the marker, were settling legacy-ness"
+  elif printf '%s\n' "$EV_NOMARK" | grep -q '0 of 1 legs'; then
+    ok "the marker, not the index rows, is what settles legacy-ness"
+  else
+    fail "the no-marker control did not reproduce the legacy misread ($EV_NOMARK)"
+  fi
 fi
 command mv -f "$WORK/rf-marker-keep" "$EV_RF/.comms/grades/attempts/$EV_RFSET"
 command cp -f "$WORK/rf-sets-keep.tsv" "$EV_RF/.comms/grades/sets.tsv"
 cp "$WORK/rf-events-keep.tsv" "$EV_RF/.comms/events.tsv" 2>/dev/null || :
+
+# THE ORDER IS THE MECHANISM, so the order is what has to be pinned. Every assertion above
+# builds its crash by HAND, after a dispatch that ran to completion — so all of them stay
+# green on a tree where the marker is staked LAST, which is the one arrangement that puts
+# codex's defect straight back. Kill a dispatch for real instead: make the gating agent's
+# inbox unwritable and it dies at its first leg, after the plan events and before its first
+# index row. That is the exact window, and the marker must already be on disk when it lands.
+EV_ORDREQ="$EV_RF/.comms/to-codex/$(basename "$EV_RF")_2026-08-29T09-30-00_ord.md"
+printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:30:00Z\nworkspace: %s\nmessage_id: ord-1\nthread: ord-th\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV_RF")" > "$EV_ORDREQ"
+cp "$EV_RF/.comms/events.tsv" "$WORK/rf-events-preord.tsv" 2>/dev/null || :
+chmod 500 "$EV_RF/.comms/to-codex"
+EV_ORDOUT="$(run_evrf panel dispatch --to codex,grok "$EV_ORDREQ" 2>&1 || true)"
+chmod 755 "$EV_RF/.comms/to-codex"
+EV_ORDSET="$(awk -F'\t' '$3=="panel-planned" {print $4}' "$EV_RF/.comms/events.tsv" 2>/dev/null | tail -1)"
+if [ -z "$EV_ORDSET" ] || [ "$EV_ORDSET" = "$EV_RFSET" ]; then
+  fail "the mid-dispatch death fixture did not plan a new set (got '$EV_ORDSET')"
+elif awk -F'\t' -v s="$EV_ORDSET" 'NR>1 && $1==s' "$EV_RF/.comms/grades/sets.tsv" | grep -q .; then
+  fail "the dispatch got as far as an index row — that is not the window this pins ($EV_ORDOUT)"
+else
+  [ -f "$EV_RF/.comms/grades/attempts/$EV_ORDSET" ] \
+    && ok "a dispatch that dies before its first leg row has already staked its marker" \
+    || fail "the marker is staked too late: a dispatch died mid-flight and left none ($EV_ORDOUT)"
+fi
+# ...and that marker is what makes the wreckage refuse. Complete codex's sequence on it:
+# the log goes, and only a legacy-shaped row for the set is left behind.
+rm -f "$EV_RF/.comms/events.tsv"
+printf '%s\tord-crash\tord-th-codex\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-08-29T11:30:00Z\n' \
+  "$EV_ORDSET" >> "$EV_RF/.comms/grades/sets.tsv"
+EV_ORDC="$(run_evrf compose --set "$EV_ORDSET" 2>&1 || true)"
+printf '%s\n' "$EV_ORDC" | grep -q 'dispatched under a recorded attempt' \
+  && ok "a really-crashed dispatch refuses instead of composing the legacy row" \
+  || fail "a really-crashed dispatch composed from index rows alone ($EV_ORDC)"
+command cp -f "$WORK/rf-sets-keep.tsv" "$EV_RF/.comms/grades/sets.tsv"
+cp "$WORK/rf-events-preord.tsv" "$EV_RF/.comms/events.tsv" 2>/dev/null || :
+rm -f "$EV_ORDREQ"
 
 printf 'legacy-set\tlm-1\tlegacy-codex\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-08-29T10:00:00Z\n' >> "$EV_RF/.comms/grades/sets.tsv"
 [ "$(run_evrf panel status --set legacy-set 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] \
