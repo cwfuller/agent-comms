@@ -223,6 +223,13 @@ check_not() {
 
 # ---------- fixtures ----------
 WORK="$(mktemp -d)"
+# NOTHING in this suite may write the developer's REAL external mount store. Mounts now live
+# outside the repo under ${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts by default, so
+# any mounted turn that does not set COMMS_MOUNT_BASE (the acp-parity, MA-fixture and shadow turns)
+# would land in ~/.local/state. Point the whole suite at a throwaway under $WORK; the warm-mount,
+# relocation and the explicit accessor tests still override this per-turn in the child env, and the
+# default-base test also overrides HOME, so those keep exercising the real code paths.
+export COMMS_MOUNT_BASE="$WORK/suite-mounts/agent-comms/mounts"
 # NOTHING in this suite may touch the real global rollup. `friction` appends to
 # ${AGENT_COMMS_HOME:-$HOME/.agent-comms}/friction.tsv, and the fixture calls below were
 # writing straight into the developer's own ledger: 74 of 86 rows in it were this suite's
@@ -6368,6 +6375,53 @@ fi
 grep -q 'git-ancestor probe' "$WORK/relo-run-r4/runner.log" 2>/dev/null \
   && ok "the git-ancestor probe is logged (non-gating in this increment)" \
   || fail "the git-ancestor probe left no log line"
+
+# ---- round 2: GC/claim safety (codex + grok, impl r1 blocking) ----
+# An UNREADABLE claim on a durable ident must read as LIVE, so clean-mounts refuses the whole
+# repo-key rather than deleting a mount a runner may still hold. (codex + grok, impl r1, blocking.)
+: > "$WORK/relo-cwd.log"; RELO_D7="$(relo_turn relo-failclosed r7)"
+RELO_K7="$(dirname "$(dirname "$(relo_last_cwd)")")"
+if [ -n "$RELO_K7" ] && [ -d "$RELO_K7" ]; then
+  : > "$RELO_K7/.claim.0"; chmod 000 "$RELO_K7/.claim.0" 2>/dev/null
+  RELO_CM_FC="$(relo_clean --yes)"
+  chmod 644 "$RELO_K7/.claim.0" 2>/dev/null; rm -f "$RELO_K7"/.claim.* 2>/dev/null
+  if printf '%s' "$RELO_CM_FC" | grep -qF 'refusing' && [ -d "$RELO_K7" ]; then
+    ok "clean-mounts treats an unreadable claim as live and refuses (fail-closed)"
+  else
+    fail "clean-mounts deleted an ident with an unreadable claim"
+  fi
+else
+  fail "could not stage the fail-closed-claim fixture (kdir=$RELO_K7)"
+fi
+# clean-mounts HOLDS an exclusion claim across the owner re-check and the delete (closes the
+# scan-then-delete race), and never follows a symlinked view/tree into `git worktree remove`.
+awk '/^cmd_clean_mounts\(\)/{f=1} f&&/mount_claim_take "\$d" "\$gc_rd"/{c=1} f&&/\[ ! -L "\$d\/view\/tree" \]/{s=1} /^}/{if(f && /^}/ && NR>1)f=f} END{exit !(c&&s)}' "$RP" \
+  && ok "cmd_clean_mounts takes a claim before deleting and never-follows a symlinked view/tree" \
+  || fail "cmd_clean_mounts deletes without a held claim or follows a symlinked view/tree"
+# The THROWAWAY ident is claimed exactly like a durable one, so a live throwaway (non-ACP grok, or
+# an ACP degrade after the ttl owner exits) is visible to clean-mounts. (grok, impl r1, blocking.)
+awk '/^mount_use_throwaway\(\)/{f=1} f&&/mount_claim_take "\$mount_kdir" "\$run_dir"/{c=1} f&&/^}/{exit !c} END{exit !c}' "$RP" \
+  && ok "mount_use_throwaway claims the throwaway ident (fail-closed)" \
+  || fail "the throwaway ident is never claimed, so a live throwaway reads as dead"
+# mount_alloc verifies the repo-key dir is uid-owned and mode 700 with a fail-closed chmod BEFORE
+# writing .root — refusing an attacker-planted key dir on a shared sticky base. (codex, impl r1.)
+grep -qF "cannot chmod repo-key dir" "$RP" \
+  && grep -qF "not owned by the current uid — refusing a foreign-owned store" "$RP" \
+  && grep -qF "refusing a group/other-accessible store" "$RP" \
+  && ok "mount_alloc requires the repo-key dir uid-owned + mode 700 (fail-closed chmod) before .root" \
+  || fail "mount_alloc adopts a repo-key dir without owner/mode verification"
+# COMPLETENESS (the plan asked to grep BOTH old degrade assignment forms): neither remains.
+[ "$(grep -cF 'mount_kdir="$run_dir"' "$RP")" = 0 ] && [ "$(grep -cF 'mount_dir="$run_dir/tree"' "$RP")" = 0 ] \
+  && ok "no \$run_dir-derived mount path remains (both degrade assignment forms are gone)" \
+  || fail "a \$run_dir-derived mount assignment survives"
+# The cwd gate FAILS CLOSED on an unresolvable cwd (an empty pwd -P must not slip past). (grok r1.)
+grep -qF "does not resolve — refusing rather than reviewing an unverifiable location" "$RP" \
+  && ok "the mounted-cwd gate refuses an unresolvable cwd (fail-closed)" \
+  || fail "the cwd gate can fail open on an unresolvable cwd"
+# The acp wrapper also scrubs the index/object-dir GIT_* vars that redirect WRITES. (grok r1.)
+grep -qF 'GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES' "$RP" \
+  && ok "acp_exec also scrubs GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY / GIT_ALTERNATE_OBJECT_DIRECTORIES" \
+  || fail "the acp wrapper leaves index/object-dir GIT_* vars unscrubbed"
 
 section "presence & worktrees: advisory coordination (plan presence-worktrees-15135)"
 # Self-contained section (maintainability track: pre-split, local fixtures).

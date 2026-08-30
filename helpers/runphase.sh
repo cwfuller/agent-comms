@@ -1336,17 +1336,26 @@ mount_repo_key() {  # <canonical main_root> -> 64-hex sha256 on stdout, or 1 (no
 
 mount_alloc() {  # <base> <repo-key> <canonical main_root> <ident> -> sets MOUNT_ALLOC_DIR (0) or MOUNT_ALLOC_NOTE (1)
   MOUNT_ALLOC_DIR=""; MOUNT_ALLOC_NOTE=""
-  local base="$1" key="$2" main_root="$3" ident="$4" kr kd rootf stored sub
+  local base="$1" key="$2" main_root="$3" ident="$4" kr kd rootf stored sub kperms
   case "$ident" in ''|*/*|.|..) MOUNT_ALLOC_NOTE="invalid mount ident '$ident'"; return 1 ;; esac
   case "$key" in ''|*[!0-9a-f]*) MOUNT_ALLOC_NOTE="invalid repo-key"; return 1 ;; esac
   kr="$base/$key"
-  # repo-key dir: a real, uid-private dir that records its canonical repo root. A key dir
-  # whose stored root differs from ours is refused — never adopted, never deleted.
+  # repo-key dir: a real, uid-PRIVATE dir that records its canonical repo root. A key dir whose
+  # stored root differs from ours is refused — never adopted, never deleted.
+  # OWNERSHIP + MODE are verified BEFORE we read or write `.root` inside it. mount_base_root
+  # permits a shared sticky base (/tmp), where another user can pre-create the PREDICTABLE
+  # <repo-key> dir writable and plant a `.root` to control our idents and mount contents; the
+  # `.root.tmp.$$` write would also land in that hostile dir. chmod fails CLOSED and we require
+  # uid ownership + mode 700, so a foreign-owned or group/other-accessible key dir is refused
+  # rather than adopted. (codex, impl r1, blocking.)
   if [ -L "$kr" ]; then MOUNT_ALLOC_NOTE="repo-key dir '$kr' is a symlink"; return 1; fi
   mkdir -m 700 "$kr" 2>/dev/null || true
-  chmod 700 "$kr" 2>/dev/null || true
   [ -d "$kr" ] && [ ! -L "$kr" ] || { MOUNT_ALLOC_NOTE="repo-key dir '$kr' is not a real directory"; return 1; }
+  chmod 700 "$kr" 2>/dev/null || { MOUNT_ALLOC_NOTE="cannot chmod repo-key dir '$kr' to 700"; return 1; }
   [ "$(cd "$kr" 2>/dev/null && pwd -P)" = "$kr" ] || { MOUNT_ALLOC_NOTE="repo-key dir '$kr' resolves elsewhere"; return 1; }
+  [ "$(mount_owner_uid "$kr")" = "$(id -u)" ] || { MOUNT_ALLOC_NOTE="repo-key dir '$kr' is not owned by the current uid — refusing a foreign-owned store on a shared base"; return 1; }
+  kperms="$(mount_perm_str "$kr")"
+  case "${kperms:4:6}" in "------") ;; *) MOUNT_ALLOC_NOTE="repo-key dir '$kr' is not mode 700 ($kperms) — refusing a group/other-accessible store"; return 1 ;; esac
   rootf="$kr/.root"
   if [ -e "$rootf" ] || [ -L "$rootf" ]; then
     if [ ! -f "$rootf" ] || [ -L "$rootf" ]; then MOUNT_ALLOC_NOTE="repo-key .root is not a regular file"; return 1; fi
@@ -1832,14 +1841,15 @@ mount_tree_matches() {  # <mount> <artifact> <log> -> 0 identical
 # the mount block would fire a trap whose unmount_artifact is "command not found",
 # swallowed by `2>/dev/null || true`, stranding the claim every later round needs.
 # A DURABLE mount is deliberately left registered and on disk: removing it would unlink an
-# inode a queue owner may still hold, and the next round rebuilds it anyway. An EPHEMERAL
-# mount ($run_dir/tree, used by non-ACP parent-brokered turns) is still removed, or every
-# direct grok turn would leak an admin dir.
+# inode a queue owner may still hold, and the next round rebuilds it anyway. A THROWAWAY
+# mount (an external `<base>/<repo-key>/tmp-<run-id>/view/tree`, used by non-ACP parent-brokered
+# turns and by every degrade) is still removed, or every direct grok turn would leak an admin
+# dir and an isolated-home copy.
 MOUNT_PENDING_TMP=""; MOUNT_PENDING_ROOT=""
 unmount_artifact() {
   # An interrupt between `worktree add` and the rename leaves a REGISTERED worktree at the
   # temp path that no later run can find: $mount_dir still names a path that does not
-  # exist, and an ephemeral kdir (the run dir) is never revisited to replay its journal.
+  # exist, and a throwaway ident dir (removed whole below) is never revisited to replay its journal.
   if [ -n "${MOUNT_PENDING_TMP:-}" ] && [ -n "${MOUNT_PENDING_ROOT:-}" ]; then
     mount_git -C "$MOUNT_PENDING_ROOT" worktree remove --force "$MOUNT_PENDING_TMP" 2>/dev/null || true
     rm -rf -- "$MOUNT_PENDING_TMP" 2>/dev/null || true
@@ -1873,6 +1883,15 @@ mount_use_throwaway() {  # -> 0 with globals set, or 1 + MOUNT_ALLOC_NOTE
   mount_alloc "$mount_store" "$mount_key" "$main_root" "$tid" || return 1
   mount_kdir="$MOUNT_ALLOC_DIR"; mount_dir="$MOUNT_ALLOC_DIR/view/tree"
   mount_throwaway="$MOUNT_ALLOC_DIR"; mount_durable=""
+  # CLAIM the throwaway exactly as a durable ident is claimed. Without this the throwaway carries
+  # no `.claim`, and a concurrent `clean mounts` (whose owner probe returns "gone" the moment the
+  # --ttl owner has exited, or always for a non-ACP grok turn) would `rm -rf` this LIVE cwd from
+  # under the running turn. The claim publishes a live pid so GC sees the mount as held and refuses.
+  # Fail closed if it cannot be taken. (grok, impl r1, blocking.)
+  if ! mount_claim_take "$mount_kdir" "$run_dir"; then
+    MOUNT_ALLOC_NOTE="could not claim the throwaway mount at $mount_kdir — $MOUNT_CLAIM_NOTE"
+    return 1
+  fi
   return 0
 }
 
@@ -1910,6 +1929,7 @@ acp_exec() {  # <cwd> [acpx args...]
   local _cwd="$1"; shift
   ( cd "$_cwd" && PATH="${acp_shim:+$acp_shim:}$PATH" \
       env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+          -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
       ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" "$@" )
 }
 
@@ -2225,7 +2245,17 @@ cmd_run() {
     # increment 2 when the cwd moves up to the container).
     local cwd_phys=""
     cwd_phys="$( cd "$mount_dir" 2>/dev/null && pwd -P )" || cwd_phys=""
-    case "${cwd_phys:-x}/" in
+    # FAIL CLOSED on an unresolvable cwd too: an empty $cwd_phys must not slip past the
+    # under-repo test (a `${cwd_phys:-x}` sentinel would never match and silently fail open).
+    # (grok, impl r1, advisory.)
+    if [ -z "$cwd_phys" ]; then
+      update_thread_state "$msg_thread" failed "" "$sfield" || true
+      write_result "$run_dir" failed 1 "" "$msg" "the mounted cwd '$mount_dir' does not resolve — refusing rather than reviewing an unverifiable location"
+      unmount_artifact
+      trap - EXIT
+      exit 1
+    fi
+    case "$cwd_phys/" in
       "$main_root"/*)
         update_thread_state "$msg_thread" failed "" "$sfield" || true
         write_result "$run_dir" failed 1 "" "$msg" "the mounted cwd '$cwd_phys' is under the repo ($main_root) — refusing to review inside the snapshot"
@@ -3062,9 +3092,14 @@ mount_ident_live() {  # <ident dir> -> 0 live/ambiguous, 1 provably gone
   local d="$1" c hp rec home st_rc=0 rc=0
   for c in "$d"/.claim.[0-9]*; do
     [ -f "$c" ] || continue
+    # An EXPLICIT release tombstone is the only thing that reads as not-live. Everything else —
+    # an unreadable file, a zero-byte file, a claim with no parseable pid — is LIVE/unprovable,
+    # never "dead": GC must fail closed on a claim it cannot fully read and validate, or it will
+    # delete a mount a live runner still holds. (codex + grok, impl r1, blocking.)
     grep -qx 'released=1' "$c" 2>/dev/null && continue
     hp="$(sed -n 's/^pid=//p' "$c" 2>/dev/null | head -1)"
-    [ -n "$hp" ] || continue
+    if [ -z "$hp" ]; then MOUNT_LIVE_NOTE="claim $c is unreadable or carries no pid — treating as live"; return 0; fi
+    case "$hp" in *[!0-9]*) MOUNT_LIVE_NOTE="claim $c has a non-numeric pid — treating as live"; return 0 ;; esac
     proc_state "$hp"
     if [ "$PROC_STATE" != dead ]; then MOUNT_LIVE_NOTE="held by runner pid $hp (state=$PROC_STATE)"; return 0; fi
   done
@@ -3160,11 +3195,42 @@ cmd_clean_mounts() {  # [--yes] [--orphans]
     [ "$orphans" = 1 ] && mount_report_orphans "$base" "$main_root"
     return 0
   fi
+  # --yes DELETES, so it must HOLD an exclusion claim on every ident across the owner re-check AND
+  # the removal — the scan above is a snapshot, and a runner (or the throwaway's own turn) can
+  # claim an ident in the gap between "looks gone" and `rm -rf`, so GC would delete a live cwd. Take
+  # the claim (the same runner-vs-runner exclusion mount_use_throwaway / the durable path take); a
+  # claim that FAILS means a live runner is on that ident -> refuse the whole repo-key, releasing
+  # what we hold. Then re-verify the acpx owner UNDER the held claim (never via mount_ident_live,
+  # which would now see our OWN claim as live), and only then delete. (codex + grok, impl r1, blocking.)
+  local gc_rd held=() hst hrec hhome rc2
+  gc_rd="$(mktemp -d 2>/dev/null)" || { echo "clean-mounts: cannot create a GC work dir" >&2; return 1; }
+  _clean_release_held() { local h; for h in ${held[@]+"${held[@]}"}; do MOUNT_HOLDER="$h"; mount_claim_release; done; MOUNT_HOLDER=""; rm -rf "$gc_rd" 2>/dev/null || true; }
+  for d in "${candidates[@]}"; do
+    MOUNT_HOLDER=""
+    if ! mount_claim_take "$d" "$gc_rd"; then
+      _clean_release_held
+      printf 'clean-mounts: refusing the whole repo-key — a runner claimed %s during GC (%s)\n' "$(basename "$d")" "$MOUNT_CLAIM_NOTE" >&2
+      return 1
+    fi
+    held+=("$MOUNT_HOLDER")
+    hst=0; hrec="$(mount_state_get "$d" record)" || hst=$?
+    if [ "$hst" = 2 ]; then _clean_release_held; printf 'clean-mounts: refusing — %s .state.record became unreadable during GC\n' "$(basename "$d")" >&2; return 1; fi
+    hst=0; hhome="$(mount_state_get "$d" home)" || hst=$?
+    [ "$hst" = 2 ] && hhome=""
+    rc2=0; mount_owner_wait "$hrec" "$hhome" 2 || rc2=$?
+    if [ "$rc2" != 0 ]; then _clean_release_held; printf 'clean-mounts: refusing — the acpx owner for %s is live or unprovable during GC (%s)\n' "$(basename "$d")" "${MOUNT_WAIT_NOTE:-unprovable}" >&2; return 1; fi
+  done
+  # All candidates are claimed by us and owner-gone. Delete each — removing the ident dir takes our
+  # claim with it. NEVER follow a symlinked view/tree into a `git worktree remove` that would then
+  # target whatever it names; skip a non-real view/tree and let the ident-dir rm handle it. (grok r1.)
   local removed=0
   for d in "${candidates[@]}"; do
-    [ -d "$d/view/tree" ] && mount_git -C "$main_root" worktree remove --force "$d/view/tree" 2>/dev/null || true
+    if [ -d "$d/view/tree" ] && [ ! -L "$d/view/tree" ]; then
+      mount_git -C "$main_root" worktree remove --force "$d/view/tree" 2>/dev/null || true
+    fi
     if [ -d "$d" ] && [ ! -L "$d" ]; then rm -rf -- "$d" 2>/dev/null && removed=$((removed+1)); fi
   done
+  rm -rf "$gc_rd" 2>/dev/null || true
   echo "clean-mounts: removed $removed mount(s) under $scope"
   [ "$orphans" = 1 ] && mount_report_orphans "$base" "$main_root"
   return 0

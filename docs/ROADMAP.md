@@ -2097,6 +2097,31 @@ STILL OPEN (why the item is not closed):
   git ancestry is no longer the live repo); increment 3 will live-probe the config layer from the
   external cwd and then drop the denylist. **Criterion 2 stays OPEN until increment 3** — do not
   describe increment 1 as closing it.
+
+  **Round-2 GC/claim hardening (impl panel, codex 3 + grok 1 blocking, all addressed).** The first
+  implementation had real GC-safety holes the panel caught: `clean mounts` classified an ident as
+  gone then deleted it without holding any exclusion (a runner could claim in the gap); the
+  throwaway ident was never claimed, so a LIVE throwaway (non-ACP grok, or an ACP degrade after the
+  ~20s ttl owner exits) read as dead and `--yes` would `rm -rf` it mid-turn; the claim check
+  `continue`d past unreadable/pid-less claims instead of treating them as live; and `mount_alloc`
+  adopted an attacker-planted repo-key dir on a shared sticky base (`chmod` failure ignored, no
+  owner/mode check before writing `.root`). Fixed: `mount_use_throwaway` claims the throwaway like a
+  durable ident (fail-closed); `mount_ident_live` treats any non-released claim it cannot fully
+  read+parse as live; `mount_alloc` requires the repo-key dir uid-owned + mode 700 with a
+  fail-closed `chmod` before `.root`; and `clean mounts --yes` HOLDS a claim on every candidate
+  across the owner re-check AND the delete (refusing the whole repo-key if any claim fails), never
+  following a symlinked `view/tree`. The `acp_exec` scrub was extended to `GIT_INDEX_FILE` /
+  `GIT_OBJECT_DIRECTORY` / `GIT_ALTERNATE_OBJECT_DIRECTORIES`, and the cwd gate now fails closed on
+  an unresolvable cwd.
+
+  **Known limits (accepted, documented).** (1) Two legitimate setups fail closed and need
+  `COMMS_MOUNT_BASE` pointed at a physical path outside the repo: a checkout whose `pwd -P` is
+  literally `$HOME` (the default base would then sit under the snapshot), and a symlinked `~/.local`
+  (or any user-controlled tail component below `$HOME`) — the accessor refuses a symlinked tail
+  below `$HOME` by design. (2) `clean mounts` refuses the WHOLE repo-key when any one ident is live
+  or its ownership is unprovable, and a recycled claim pid reads as live, so a single permanently
+  ambiguous ident can wedge GC of unrelated stale idents. This is fail-SAFE (it never deletes a live
+  mount, only declines to delete), and per-ident retained claims would relax it later if needed.
 - **grok on Darwin has no backend.** Its sandbox is a documented macOS network no-op, so a grok
   mounted turn is REFUSED by default (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override). The
   default panel therefore loses cross-vendor corroboration on macOS unless reviews run on Linux.
