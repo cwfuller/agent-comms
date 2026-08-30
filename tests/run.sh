@@ -966,6 +966,37 @@ WS_REPAIRED="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$PO
 [ "$WS_REPAIRED" = "feature-helper-tests" ] && ok "decorated cache is rejected and repaired from repo identity" || fail "decorated cache repair (got: $WS_REPAIRED)"
 [ "$(cat "$REPO_FIX/.comms/.cache/ws-workspace_spinner-poison")" = "feature-helper-tests" ] && ok "repaired identity replaces poisoned cache" || fail "poisoned cache not replaced"
 
+# BLOCKING (codex, suite-hot-waits r1). The first version of the override validated
+# CHARACTERS, not TOKENS: `1..2`, `1.2.3` and `.` are built only from permitted characters yet
+# reach `sleep` as invalid operands, and a whitespace-only value passed the filter while
+# expanding to NO tokens — silently collapsing the retry loop to its final single attempt and
+# removing the contention retries the backoff exists for. A stubbed `sleep` records the
+# schedule that was actually slept, so this pins the behaviour with no wall-clock assertion and
+# no new timing sensitivity (the reason the defaults were only source-pinned before).
+CB_BIN="$WORK/cbbin"; mkdir -p "$CB_BIN"; export CB_LOG="$WORK/cb-sleeps.log"
+printf '#!/bin/bash\nprintf "%%s\\n" "$1" >> "$CB_LOG"\n' > "$CB_BIN/sleep"; chmod +x "$CB_BIN/sleep"
+cb_sleeps() {  # echo the schedule cmux_tree actually slept; with no arg the override is UNSET
+  : > "$CB_LOG"; rm -f "$REPO_FIX/.comms/.cache/ws-workspace_backoff"
+  if [ "$#" -ge 1 ]; then
+    (cd "$REPO_FIX" && PATH="$CB_BIN:$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:backoff \
+       CMUX_STUB_TREE_EMPTY=1 COMMS_CMUX_BACKOFF="$1" "$COMMS" workspace) >/dev/null 2>&1
+  else
+    (cd "$REPO_FIX" && PATH="$CB_BIN:$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:backoff \
+       CMUX_STUB_TREE_EMPTY=1 env -u COMMS_CMUX_BACKOFF "$COMMS" workspace) >/dev/null 2>&1
+  fi
+  tr '\n' ' ' < "$CB_LOG" | sed 's/ *$//'
+}
+[ "$(cb_sleeps)" = "0.3 0.7 1.2" ] \
+  && ok "the default backoff schedule survives the override" || fail "default schedule (got: $(cb_sleeps))"
+[ "$(cb_sleeps '0.1 0.2')" = "0.1 0.2" ] \
+  && ok "a valid backoff override is honored" || fail "valid override (got: $(cb_sleeps '0.1 0.2'))"
+[ "$(cb_sleeps '1..2')" = "0.3 0.7 1.2" ] \
+  && ok "a malformed backoff token falls back to the default" || fail "malformed token (got: $(cb_sleeps '1..2'))"
+[ "$(cb_sleeps '0.3 1..2')" = "0.3 0.7 1.2" ] \
+  && ok "one bad token rejects the WHOLE schedule (atomic fallback)" || fail "partial schedule honored (got: $(cb_sleeps '0.3 1..2'))"
+[ "$(cb_sleeps '   ')" = "0.3 0.7 1.2" ] \
+  && ok "a whitespace-only override cannot collapse the retries" || fail "whitespace collapsed retries (got: $(cb_sleeps '   '))"
+
 section "comms.sh v2.1: surface binding"
 check "bind sets an explicit surface" env -u X bash -c "cd '$REPO_FIX' && PATH='$STUB_BIN:$PATH' CMUX_WORKSPACE_ID=workspace:10 '$COMMS' bind claude surface:11"
 : > "$CMUX_STUB_LOG"

@@ -109,6 +109,14 @@
 #                               (a real commit object anchored under refs/agent-comms/)
 #   prompt-version [--list]     content hash of the reviewer instruction surface; grades
 #                               are partitioned on it, never pooled across an edit
+#
+# Environment (pane timing — defaults are what a REAL terminal needs; override only
+# against a stub, e.g. the test harness):
+#   COMMS_CMUX_PACE             default 1; 0 skips keystroke pacing between send/escape/enter
+#   COMMS_CMUX_BACKOFF          default "0.3 0.7 1.2"; whitespace-separated non-negative
+#                               decimals, the cmux-tree retry schedule. Every token must be a
+#                               complete decimal; one bad token (or whitespace only) falls
+#                               back to the full default, never to a partial schedule.
 set -euo pipefail
 
 die() { echo "comms.sh: $*" >&2; exit 1; }
@@ -222,6 +230,25 @@ shell_quote() {
 # Default is pacing ON; only an explicit COMMS_CMUX_PACE=0 skips it.
 cmux_pace() { [ "${COMMS_CMUX_PACE:-1}" = 0 ] || sleep "$1"; }
 
+# Every token must be a COMPLETE non-negative decimal. Filtering by CHARACTER is not enough,
+# and the first version of this did exactly that: `1..2`, `1.2.3` and `.` are built entirely
+# from permitted characters yet reach `sleep` as invalid operands, and a whitespace-only value
+# passes the character filter while expanding to NO tokens — which silently reduces the retry
+# loop to its final single attempt and removes the very contention retries this backoff exists
+# to provide. That is fail-OPEN in the one place the delay is load-bearing. The fallback is
+# ATOMIC: one bad token rejects the whole list rather than yielding a half-honoured schedule.
+# (codex, suite-hot-waits r1, blocking.)
+cmux_backoff_valid() {
+  local t seen=0
+  for t in $1; do
+    case "$t" in
+      ''|*[!0-9.]*|*.*.*|.*|*.) return 1 ;;
+    esac
+    seen=1
+  done
+  [ "$seen" = 1 ]
+}
+
 # workspace resolution AND surface picking in the same session.
 cmux_tree() {
   # Backoff matters: a fixed 3x0.3s burst sits inside a single cmux contention
@@ -239,7 +266,7 @@ cmux_tree() {
   # changes nothing. Default is unchanged and a malformed override falls back to it rather
   # than reaching `sleep` as garbage, which would abort the caller under errexit.
   local backoff="${COMMS_CMUX_BACKOFF:-0.3 0.7 1.2}"
-  case "$backoff" in ''|*[!0-9.\ ]*) backoff="0.3 0.7 1.2" ;; esac
+  cmux_backoff_valid "$backoff" || backoff="0.3 0.7 1.2"
   for delay in $backoff 0; do
     out="$(cmux tree --workspace "${CMUX_WORKSPACE_ID}" 2>/dev/null)" || out=""
     if [ -n "$out" ]; then

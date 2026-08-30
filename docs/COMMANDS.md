@@ -231,6 +231,15 @@ Opting back into the watchable pane: `--via cmux` on an `auto-*` command, or
 runner. If cmux is explicitly requested and no surface is live, delivery reports
 `mailbox` rather than silently substituting a transport you did not choose.
 
+Pane-timing knobs, both of which default to the values a REAL terminal needs and should
+only be changed against a stub: `COMMS_CMUX_PACE` (default `1`; set to `0` to skip the
+keystroke pacing between `send` / `escape` / `enter` — a real cmux needs the beat or the
+sequence interleaves and submits a half-typed nudge) and `COMMS_CMUX_BACKOFF` (default
+`0.3 0.7 1.2`; whitespace-separated non-negative decimals giving the retry schedule for
+reading the cmux tree, which exists to ride out a contention window observed in the field).
+Every `COMMS_CMUX_BACKOFF` token must be a complete decimal — one malformed token, or a
+whitespace-only value, falls back to the full default rather than to a partial schedule.
+
 Headless-first falls back to a pane **only** when `runphase.sh` is genuinely missing —
 flipping the default must not strand every loop on an install where it never landed.
 
