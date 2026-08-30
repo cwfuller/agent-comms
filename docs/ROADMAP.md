@@ -1974,6 +1974,31 @@ STILL OPEN (why the item is not closed):
   legitimately carry a benign `.codex/config.toml` and still be reviewed) is the composite
   review-root cwd change: run from a clean cwd with the artifact as a subdir, since codex reads
   only the cwd's `.codex` — a load-bearing change grok flagged as needing its own careful landing.
+
+  **REJECTED as a cwd-move (2026-08-30, plan panel, both REQUEST_CHANGES, measured).** Moving the
+  turn's cwd to `$mount_kdir` does NOT close the vector — it makes it worse, because the mount
+  lives UNDER the live repo (`.comms/mounts/<ident>/`):
+  - `git rev-parse --show-toplevel` from `$mount_kdir` returns the LIVE checkout, not the
+    artifact (measured: container→live repo, `tree/`→artifact). A bare `git log`/`diff` from the
+    reviewer would then read whatever the developer is sitting on — the exact escape the mount
+    exists to prevent. The prompt is not a cage; a `git -C tree` shim-injection would be required.
+  - Codex's `repo` config layer is `$(git rev-parse --show-toplevel)/.codex/config.toml`, which
+    from `$mount_kdir` is the LIVE checkout — so a developer-local `.codex/config.toml` becomes
+    the MCP vector instead of the artifact's. (grok, plan r1, blocking.)
+  - The session-corroboration guard compares the acpx record cwd to `$mount_kdir/tree`; a cwd move
+    makes every existing durable record mismatch → permanent degrade, not "one-time warmth loss."
+    A real mount migration would be required. (grok, plan r1, blocking.)
+
+  **Why the landed denylist is the correct resting point:** `tree/` IS a git worktree, and that
+  boundary is exactly what bounds codex's config discovery to `tree/` — so refusing `tree/.codex`
+  is complete for the cwd. Moving cwd off the worktree is what breaks the bound. The general fix
+  (an artifact carrying a BENIGN `.codex/config.toml` and still being reviewable) is not a cwd
+  move at all; it requires **relocating the mount OUTSIDE the live repo tree** (e.g. a detached
+  location with its own object store), so no ancestor is the live checkout. That touches snapshot,
+  mount build, and verification — a separate, larger arc, and the maintainer's call to prioritize
+  against advertising ACP-only (step 4). Until then the denylist stands and criterion 2 rests
+  where it is: reviewer BEHAVIOR enforced, the confirmed artifact-config vector refused, the
+  security item open.
 - **grok on Darwin has no backend.** Its sandbox is a documented macOS network no-op, so a grok
   mounted turn is REFUSED by default (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override). The
   default panel therefore loses cross-vendor corroboration on macOS unless reviews run on Linux.
