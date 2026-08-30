@@ -117,7 +117,7 @@ exactly; that is not a license to weaken the presence model (see step 7).
      deny repo writes; deny commit/ref/remote/publish; allow read-only
      inspection; tests only if the mode says so; the mount must not share the
      real remotes when practical. `--approve-all` on a linked worktree is not a
-     boundary. (Closes the [open security item](#open-security-item-the-mounted-review-turn-has-no-enforced-boundary).)
+     boundary. (Closes the [open security item](#open-security-item-the-mounted-review-turn-is-contained-for-reviewer-behavior-not-yet-for-a-hostile-artifact).)
    - Timeouts and truncations already named as what they are — no derived
      `APPROVE` from a cut-off body.
    - A valid reply always lands in the coordinator log even if the driver
@@ -1827,7 +1827,7 @@ the queue.
    budget signaling; stakes-tiering docs) and the standing DEFERRED backlog in
    docs/advisories.md
 
-## Open security item: the mounted review turn has no enforced boundary
+## Open security item: the mounted review turn is contained for reviewer behavior, not yet for a hostile artifact
 
 *(field-report-9446 round 8, codex. The top open item on this track.)*
 
@@ -1917,7 +1917,9 @@ product hole. That is a product call, not an implementation detail.
 
 **Design work the panel named — status after the isolation implement arc (2026-08-30):**
 
-LANDED and verified by reproducible probe (see "Isolation probes" below):
+LANDED and verified by reproducible probe — enforced against MODEL-GENERATED SHELL COMMANDS
+(the reviewer's own actions), NOT against a hostile artifact's own provider config (see the
+CONFIRMED MCP hole under STILL OPEN). What is verified:
 - Isolation wraps every invocation that can spawn or reuse a queue owner (`sessions ensure`,
   `set-mode`, and the prompt send — acpx spawns the owner on the *send*). ✓
 - The mode is re-pinned to `read-only` and CONFIRMED (rc 0 + exact stdout `mode set: read-only`,
@@ -1926,12 +1928,29 @@ LANDED and verified by reproducible probe (see "Isolation probes" below):
   `connect` returns `Operation not permitted` under the read-only sandbox, so it cannot reach
   the owner to raise its own mode to `AgentFullAccess`. ✓ (measured, not a hermetic suite test —
   see the probe note on why)
-- Ancestor/project `.codex` config cannot widen the sandbox: a hostile `sandbox_mode =
-  "danger-full-access"` planted at repo root and cwd did NOT override the isolated home. ✓
-  (MCP servers / hooks the provider spawns inherit the same sandbox, so they cannot write,
-  exec-escape, or reach the network either.)
+- Ancestor/project `.codex` config **values** cannot widen the sandbox: a hostile `sandbox_mode
+  = "danger-full-access"` planted at repo root and cwd did NOT override the isolated home's
+  read-only mode — a subsequent shell write was still denied. ✓ (This is only the config-VALUE
+  path. The config-EXECUTION path is a SEPARATE, open hole — see below.)
 
 STILL OPEN (why the item is not closed):
+- **A hostile artifact's `.codex/config.toml` MCP server runs OUTSIDE the sandbox (CONFIRMED).**
+  This is the most serious remaining hole and it is the one the mount's own purpose — reviewing
+  possibly-hostile artifacts — makes matter. The enforced boundary above covers MODEL-GENERATED
+  SHELL COMMANDS (the reviewer's own actions, including a prompt-injected reviewer). It does NOT
+  cover the provider's own config: the codex provider process must keep model-network access, so
+  it runs outside the command sandbox, and codex loads `mcp_servers` from the **cwd's**
+  `.codex/config.toml` — which, for a mounted turn, is the artifact. **Measured:** a project
+  `.codex/config.toml` declaring an MCP server whose command writes `/tmp/marker` produced the
+  marker (a write the sandboxed shell is denied); removing the project `.codex` removed the
+  marker (control); the same config one directory ABOVE cwd was NOT loaded (codex reads cwd's
+  `.codex`, not ancestors'). Hooks are trust-gated (`--dangerously-bypass-hook-trust` implies
+  persisted trust is required) and did not run, but MCP is not. Until this is closed, the codex
+  backend is "enforced against model-generated commands", NOT "encloses a hostile artifact". The
+  fix is not yet chosen — candidates: run the turn from a clean cwd with the artifact as a
+  subdir (codex reads only cwd's `.codex`, so a descendant `tree/.codex` would be ignored — but
+  this is the load-bearing review-root-cwd change grok flagged, needing its own careful landing),
+  or a codex mechanism to disable project-config discovery if one exists.
 - **grok on Darwin has no backend.** Its sandbox is a documented macOS network no-op, so a grok
   mounted turn is REFUSED by default (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override). The
   default panel therefore loses cross-vendor corroboration on macOS unless reviews run on Linux.
@@ -1958,8 +1977,11 @@ turn driven through the real `panel dispatch` path:
 |---|---|
 | write in the mount / write to `/tmp` | `operation not permitted`, file absent |
 | `curl https://api.github.com/` | exit 6, `Could not resolve host` |
-| `python3` unix-socket `connect` to a live listener | `PermissionError: [Errno 1] Operation not permitted` |
+| `python3` unix-socket `connect` to a parent-created listener at `/tmp/*.sock` | `PermissionError: [Errno 1] Operation not permitted` |
 | hostile ancestor+cwd `.codex/config.toml` = `danger-full-access`, then write | `operation not permitted`, file absent |
+| hostile **cwd** `.codex/config.toml` `[mcp_servers]` command writes `/tmp/marker` | **marker WRITTEN** — MCP ran outside the sandbox (the open hole) |
+| same, with the project `.codex` removed (control) | marker absent |
+| same `.codex` one directory ABOVE cwd | marker absent — codex reads cwd's `.codex`, not ancestors' |
 | `cat`, `git log` | exit 0 |
 | the turn itself | completes (model API alive) |
 

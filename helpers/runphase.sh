@@ -2279,34 +2279,48 @@ PROMPT
             ABORT_NOTE="refused: isolated CODEX_HOME for '$provider' is a symlink — refusing to follow it out of the mount"
             die "run: the isolated CODEX_HOME path is a symlink ($acp_iso_home) — refusing to follow it out of the mount"
           fi
-          ABORT_NOTE="refused: could not create a usable isolated CODEX_HOME for '$provider'" \
-            mkdir -p "$acp_iso_home" || die "run: cannot create the isolated CODEX_HOME"
+          # ABORT_NOTE on its OWN line, not a prefix assignment on mkdir: `NOTE=x mkdir ...`
+          # scopes NOTE to mkdir's environment only, so the EXIT trap (which expands the SHELL
+          # variable) would still see the generic note if mkdir failed. (codex + grok, r3.)
+          ABORT_NOTE="refused: could not create a usable isolated CODEX_HOME for '$provider'"
+          mkdir -p "$acp_iso_home" || die "run: cannot create the isolated CODEX_HOME"
           local acp_iso_phys; acp_iso_phys="$( cd "$acp_iso_home" 2>/dev/null && pwd -P )" || true
           if [ "$acp_iso_phys" != "$acp_iso_home" ]; then
             ABORT_NOTE="refused: isolated CODEX_HOME for '$provider' resolves outside its mount"
             die "run: the isolated CODEX_HOME resolves outside its mount (want '$acp_iso_home', got '$acp_iso_phys') — refusing"
           fi
-          # Credentials only. NOT the workspace-cmux profile this repo's own
-          # `codex-permissions` recipe installs: that profile is exactly what makes the
-          # agent self-authorise, so no permission request is ever issued and no client-side
-          # denial is possible. An isolated home is how the review turn escapes it.
-          local acp_auth
-          for acp_auth in auth.json; do
-            [ -f "${CODEX_HOME:-$HOME/.codex}/$acp_auth" ] \
-              && cp "${CODEX_HOME:-$HOME/.codex}/$acp_auth" "$acp_iso_home/$acp_auth" 2>/dev/null || true
-          done
-          # The home is REUSED across rounds for warmth, so a prior (possibly uncontained,
-          # pre-isolation) writer could have left a `config.toml` SYMLINK here; overwriting
-          # through it would clobber the link target and — worse — could point the effective
-          # config outside the home. The directory check above is directory-only, so guard the
-          # file too. (grok, implement r2, advisory.)
-          if [ -L "$acp_iso_home/config.toml" ]; then
-            ABORT_NOTE="refused: isolated codex config.toml is a symlink — refusing to write through it"
-            die "run: '$acp_iso_home/config.toml' is a symlink — refusing to write the isolated config through it"
+          # EVERY file in the reused home is written FRESH and RENAMED into place, never
+          # overwritten in situ. The home persists across rounds for warmth, so a prior
+          # (possibly uncontained, pre-isolation) writer could have left a `config.toml` or
+          # `auth.json` that is a SYMLINK (cp/`>` would write through it and land outside the
+          # home) or a HARD LINK (truncation would corrupt the link target). A symlink `-L`
+          # check alone misses the hard-link case; writing a fresh temp and `mv -f` over the
+          # dirent defeats both, because rename replaces the name rather than the inode.
+          # (codex, implement r3, blocking; grok, implement r3, advisory.)
+          _iso_place() {  # <src-or-empty> <dest> <mode> [literal-content]
+            local _src="$1" _dst="$2" _mode="$3" _lit="${4:-}" _tmp
+            _tmp="$(mktemp "$acp_iso_home/.stage.XXXXXX")" || return 1
+            if [ -n "$_lit" ]; then printf '%s' "$_lit" > "$_tmp" || { rm -f "$_tmp"; return 1; }
+            elif [ -n "$_src" ] && [ -f "$_src" ] && [ ! -L "$_src" ]; then
+              cat "$_src" > "$_tmp" || { rm -f "$_tmp"; return 1; }
+            fi
+            chmod "$_mode" "$_tmp" 2>/dev/null || true
+            command mv -f "$_tmp" "$_dst" || { rm -f "$_tmp"; return 1; }
+          }
+          # Credentials only, copied fresh. NOT the workspace-cmux profile this repo's own
+          # `codex-permissions` recipe installs: that profile is exactly what makes the agent
+          # self-authorise, so no permission request is ever issued and no client-side denial
+          # is possible. An isolated home is how the review turn escapes it.
+          local acp_src_home="${CODEX_HOME:-$HOME/.codex}"
+          if [ -f "$acp_src_home/auth.json" ]; then
+            ABORT_NOTE="refused: could not stage isolated auth.json for '$provider'"
+            _iso_place "$acp_src_home/auth.json" "$acp_iso_home/auth.json" 600 \
+              || die "run: cannot stage the isolated auth.json"
           fi
           ABORT_NOTE="refused: could not write the isolated read-only codex config for '$provider'"
-          printf 'approval_policy = "on-request"\nsandbox_mode = "read-only"\n' > "$acp_iso_home/config.toml" \
-            || die "run: cannot write the isolated codex config"
+          _iso_place "" "$acp_iso_home/config.toml" 600 'approval_policy = "on-request"
+sandbox_mode = "read-only"
+' || die "run: cannot write the isolated codex config"
           ABORT_NOTE="runner aborted unexpectedly — see runner.log"
           acp_iso=(env "CODEX_HOME=$acp_iso_home" "INITIAL_AGENT_MODE=read-only")
           acp_iso_backend="codex-home+read-only"

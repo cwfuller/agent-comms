@@ -8340,10 +8340,23 @@ ISO_NOTES="$(grep -c 'ABORT_NOTE="refused:' "$ISO_RP")"
 [ "$ISO_NOTES" -ge 5 ] \
   && ok "every isolation refusal names its reason ($ISO_NOTES paths), not just the first two" \
   || fail "only $ISO_NOTES isolation refusals name a reason; the rest fall to the generic abort note"
-# A reused isolated home with a config.toml SYMLINK is refused, not written through.
-awk '/config.toml.*is a symlink/{f=1} END{exit !f}' "$ISO_RP" \
-  && ok "a symlinked isolated config.toml is refused, not overwritten through the link" \
-  || fail "the isolated config.toml would be written through a symlink"
+# The reused home's files are written FRESH and RENAMED into place, defeating a leftover
+# symlink OR hard link at config.toml/auth.json (a `-L` check alone misses the hard link).
+grep -q '_iso_place()' "$ISO_RP" \
+  && ok "isolated home files are staged fresh and renamed, not overwritten in place" \
+  || fail "no atomic stage-and-rename for the isolated home files"
+grep -q 'command mv -f "\$_tmp" "\$_dst"' "$ISO_RP" \
+  && ok "the stage is renamed over the dirent (defeats symlink and hard link)" \
+  || fail "the isolated home write does not rename over the dirent"
+# auth.json specifically goes through the atomic placer, not a bare cp that follows a symlink.
+awk '/_iso_place "\$acp_src_home\/auth.json"/{f=1} END{exit !f}' "$ISO_RP" \
+  && ok "auth.json is staged atomically, not copied through a possible symlink" \
+  || fail "auth.json is still copied without symlink/hardlink safety"
+# The mkdir refusal note is set on its OWN line, not as a prefix assignment that would not
+# persist to the EXIT trap. Assert no ABORT_NOTE prefixes an mkdir on the same line.
+grep -Eq 'ABORT_NOTE=.*mkdir' "$ISO_RP" \
+  && fail "ABORT_NOTE is a prefix assignment on mkdir — it will not persist to the trap" \
+  || ok "the mkdir refusal note is a standalone assignment that persists to the trap"
 # The mounted-path boundary comment must name the kernel sandbox, not the retired GROK_SANDBOX lever.
 grep -q 'GROK_SANDBOX applies to' "$ISO_RP" \
   && fail "a mounted-path comment still names COMMS_RUNPHASE_GROK_SANDBOX as the boundary" \
