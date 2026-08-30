@@ -261,8 +261,10 @@ LEG's reviewer (the target of a request, the author of a reply), never the send 
 structurally distinguishable from the leg that gates.
 
 The attempt a reader binds to is the one named by the LAST `panel-planned` for the set — the
-plan event is written once per fan-out, before any leg goes out, so it is the only record of
-which roster is in progress. A dispatch preserves earlier attempts' index rows rather than
+plan rows are written before any leg goes out, one per PLANNED REVIEWER sharing a single
+attempt id, so they are the only record of which roster is in progress. (One row per reviewer,
+not one per fan-out: a roster that lives in a single row's note is a roster nothing can
+enforce, which is how a driver dying between two leg rows once gated as a complete panel.) A dispatch preserves earlier attempts' index rows rather than
 replacing them, and readers filter.
 
 Sets recorded before attempts existed have no plan event and still bind the old way, from
@@ -284,6 +286,24 @@ driver reaches for after losing its set id, so read it as a directory, never as 
 re-run `panel status --set <id>` on anything it lists before acting, and that call will refuse.
 The listing gates nothing, which is why it is allowed to stay lossy rather than grow a refusal
 that would make an inventory command fail on one bad row.
+
+**The un-wedge, because the refusal is permanent and there is no `panel forget`.** A set whose
+marker is present and whose log is legitimately gone — pruned, archived, never recoverable — is
+UNKNOWN forever, and `compose --set` and `panel status --set` will refuse it every time. The
+operator's recovery is to delete the marker (`rm .comms/grades/attempts/<review_set_id>`), which
+demotes the set to legacy and lets it bind from its index rows again. Do that only when you know
+no newer attempt is being discarded: deleting the marker is exactly the state the marker exists
+to distinguish, so it trades a loud refusal for the silent misread. Losing the marker is quiet;
+losing the index is loud. Re-dispatching the round is usually the better answer.
+
+**Treat `grades/attempts/` as inseparable from `grades/sets.tsv`.** The marker check is
+deliberately fail-OPEN in one direction: a marker that is missing or unreadable falls through
+to the old index-shape inference, so a set that loses only its marker — while keeping stale
+legacy-shaped rows and no readable log — can recreate the false-legacy composition. Nothing in
+this repository removes markers, so reaching that state needs out-of-band corruption; the rule
+that keeps it out of reach is that anything which copies, backs up, restores, prunes or
+relocates one of those two paths must do the same to the other. Copy `sets.tsv` without
+`attempts/` and every set in it silently becomes legacy.
 
 `dispatch` is the ATTEMPT id, and it is what makes a retry readable. A `review_set` id is
 deterministic — same thread, phase, round and artifact produce the same one — and a retry

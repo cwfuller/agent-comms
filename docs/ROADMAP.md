@@ -93,11 +93,20 @@ exactly; that is not a license to weaken the presence model (see step 7).
      not ACP): request persisted → turn started → provider result persisted →
      reply validated → reply accepted → composition completed. A crash between
      ACP exit and compose recovers from this log.
-     **LANDED 2026-08-29** as `.comms/events.tsv` + the `events` verb (two plan
-     rounds: codex found the fail-closed boundary was drawn on the wrong line and
-     that `write_result` cannot carry the provider's result on the ACP path; grok
-     found that `cmd_send` is also how a REPLY lands, so a fail-closed append
-     there turns a delivered reply into a failed turn). The roster is persisted
+     **LANDED 2026-08-30** as `.comms/events.tsv` + the `events` verb, after two
+     plan rounds and **ten implement rounds** — the longest arc this repo has run,
+     and every round after the fifth was the same shape: a guard that existed and
+     protected nothing. Plan rounds: codex found the fail-closed boundary was drawn
+     on the wrong line and that `write_result` cannot carry the provider's result on
+     the ACP path; grok found that `cmd_send` is also how a REPLY lands, so a
+     fail-closed append there turns a delivered reply into a failed turn. The last
+     three implement rounds, in order: a composition published before the attempt it
+     names was re-verified (r9); legacy-ness inferred from an index shape that a
+     crashed modern attempt also produces (r10, closed by the durable
+     `grades/attempts/<set>` marker); and — found by the author's own adversarial
+     pass, not the panel — four assertions covering that marker that all stayed green
+     on a tree with the marker staked LAST, i.e. with the defect live again. Closed
+     with a double APPROVE. The roster is persisted
      before any leg, every event of an attempt carries a `dispatch` id because a
      set id is deterministic and a retry rebinds it, and a turn whose own trace
      lost an event signs off `log-incomplete` rather than `completed`. Recovery
@@ -1697,6 +1706,51 @@ Ranked work, foldable into the step-2 harness split:
    six-second wait announced itself only on stderr, into `/dev/null`. Consider
    whether the runner should record waits it actually served somewhere a human
    or the suite reads. A stall nobody can see is the shape of the next one.
+
+### The attempts marker: a shape a crash also produces (2026-08-30, LANDED)
+
+`set_index_has_attempts` decided "was this set dispatched under the attempts scheme?" by
+scanning `sets.tsv` for a leg row with a non-empty `dispatch` column. A modern dispatch that
+dies after its plan events and before its first index row, whose `events.tsv` is later lost,
+leaves an index holding only the PREVIOUS round's legacy-shaped rows — indistinguishable from
+a genuinely pre-attempts set. Every reader then called it legacy, composed those old bound
+replies, and silently discarded the newer attempt. Fixed by staking an empty
+`grades/attempts/<review_set_id>` marker BEFORE the plan events, the legs and the index rows;
+the marker, not the shape of the rows, now settles legacy-ness. Implementing it exposed a
+third reader — `set_current_dispatch` — carrying its own inline copy of the rule.
+Panel: codex APPROVE, grok APPROVE, 0 blocking.
+
+**The part worth carrying:** the first four assertions written for this marker were all green
+on a tree with the marker staked LAST — i.e. with the defect fully live. Every one of them
+built its crash BY HAND, after a dispatch that ran to completion, so none of them observed the
+one thing that is the mechanism: WHEN the marker is written. The author's own adversarial pass
+caught it, not the panel. A fixture that constructs the post-crash state is not a test of the
+code that survives the crash.
+
+**Follow-ups the panel filed, in priority order:**
+
+1. **The order fixture still does not fully pin the order.** (codex, advisory.) It kills the
+   dispatch at its FIRST LEG, which is after every `panel-planned` append — so moving marker
+   creation below the plan loop but above the leg loop still passes, and a crash *during* that
+   multi-row plan loop would again leave an attempt trace with no marker. Production ordering is
+   correct; the coverage is one notch looser than the invariant. Pinning it needs a death
+   BETWEEN two plan rows, which needs a hook in `cmd_events append`.
+2. **Marker loss is fail-open, by construction.** (codex + grok, corroborated.) A missing or
+   unreadable marker falls through to index-shape inference, so losing only the marker while
+   keeping stale legacy rows recreates the false-legacy composition. Nothing in the repo removes
+   markers, so this needs out-of-band corruption — but any tooling that copies, prunes, restores
+   or relocates `grades/sets.tsv` must do the same to `grades/attempts/`. Documented in PROTOCOL;
+   nothing enforces it. Same shape as follow-up 3 of the section-accounting item: an invariant
+   established by documentation and left unenforced.
+3. **The two reader-side `case 3)` arms are unreachable and uncovered.** Both callers hit
+   `set_current_dispatch` first, which refuses for the same condition; the arms only cover a
+   concurrent dispatch landing between the caller's two reads. Deliberately kept — deleting a
+   race guard because the suite cannot force two reads to disagree is worse than landing it
+   uncovered — but a future reader will see dead code. Covering it needs a shim of the same class
+   as the r4 `log-incomplete` one.
+4. **There is no `panel forget`.** A set whose marker survives and whose log is legitimately
+   pruned is UNKNOWN forever; the only un-wedge is `rm .comms/grades/attempts/<id>`, which trades
+   a loud refusal for the silent misread. A first-class recovery verb would not have to.
 
 ### Section accounting: the vector's own bypass (2026-08-29, LANDED 03ee675)
 

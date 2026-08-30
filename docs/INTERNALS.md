@@ -221,6 +221,11 @@ archive-scope fix closed.
 .comms/grades/
   findings.tsv          append-only observations; idempotent by finding_id
   sets.tsv              review_set_id -> thread+phase+round, artifact_id, prompt_version
+  attempts/<set>        empty marker: this set was dispatched under the ATTEMPTS scheme.
+                        Staked by `panel dispatch` before its plan events, its legs and its
+                        index rows, so it survives a driver that dies mid-fan-out and a lost
+                        events log — the two states in which the index alone cannot tell a
+                        crashed modern attempt from a genuinely pre-attempts set.
   shadow/<set>/<agent>.md          the shadow reply, stored but NEVER delivered
   shadow/<set>/<agent>.result.json the turn's own outcome record
 ```
@@ -260,17 +265,20 @@ a run dir the driver may never open. A driver that died between the ACP turn exi
 
 Four decisions are load-bearing, and each one was argued down from something worse:
 
-**The accessor never exits; only its two fail-closed callers do.** `events append` reports a
+**The accessor never exits; only its fail-closed callers do.** `events append` reports a
 refusal and RETURNS non-zero. It used to `die`, which is `exit` — so an unsound filesystem
 would have taken down whatever process was appending, including a `cmd_send` in the middle of
 delivering a reply, quietly converting the advisory half of the policy into the fail-closed
 half.
 
-**Fail-closed exactly twice, where refusing changes nothing.** `panel-planned` (the roster,
-before any leg is sent) and `request-persisted` (after the request validates, before
-anything is nudged) both `die` on failure: a roster or a request nobody could record is a
-panel nobody can enumerate and a leg nobody can recover, and at those two instants nothing
-has happened yet. It uses `die` rather than `set -e` because `panel dispatch` calls
+**Fail-closed only where refusing changes nothing — three writes, all before anything has
+happened.** `panel-planned` (the roster, before any leg is sent) and `request-persisted`
+(after the request validates, before anything is nudged) both `die` on failure: a roster or a
+request nobody could record is a panel nobody can enumerate and a leg nobody can recover, and
+at those two instants nothing has happened yet. The `grades/attempts/<set>` marker joins them
+as the THIRD, and is staked earliest of all — before the plan rows — because a set that cannot
+record which scheme it was dispatched under is a set a later `compose` may silently
+misclassify as legacy. It uses `die` rather than `set -e` because `panel dispatch` calls
 `cmd_send ... || echo warning`, which suppresses errexit inside the function — an unchecked
 append would have been advisory exactly where it claimed to gate. Everything after that
 point is advisory and loud. The asymmetry is the whole design: `cmd_send` is also how a
