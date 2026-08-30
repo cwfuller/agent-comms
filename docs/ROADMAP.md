@@ -1844,11 +1844,23 @@ round 8 after a reviewer traced the flag to its actual call site.
 
 What would make it real, roughly in order of cost:
 
-- `acpx --permission-policy <json>` (autoApprove/autoDeny/escalate/defaultAction) instead of
-  `--approve-all`, denying writes and non-git execs while still allowing the read-only
-  terminal commands a review genuinely needs. This is the ACP-layer lever that already
-  exists and is unused on this path.
-- An OS sandbox profile applied to the mounted turn, the way the direct grok path does it.
+- ~~`acpx --permission-policy <json>` … denying writes and non-git execs while still allowing
+  the read-only terminal commands a review genuinely needs.~~ **STRUCK 2026-08-30: measured
+  false.** Policy rules match exact whole tokens (kind / title / toolName / title-head) or `*`;
+  **argv is never a token**, so no policy can separate `git log` from `git push`. Worse, a
+  provider that self-authorises never issues a permission request at all, so the client has
+  nothing to deny — five parent-side controls were measured to be no-ops against codex. Do not
+  implement this; it is the lever that looks like a fix and is not one.
+- **LANDED 2026-08-30 for codex:** the provider's OWN kernel sandbox, selected by the parent —
+  an isolated `CODEX_HOME` plus `INITIAL_AGENT_MODE=read-only`, applied to every acpx invocation
+  that can spawn or reuse a queue owner, with the mode re-pinned and verified before each prompt.
+  Verified live through `panel dispatch`: workspace and `/tmp` writes refused by the OS, child
+  network dead, reads and `git log` alive. A provider with no verified backend on this OS is
+  REFUSED (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override deliberately).
+- A parent-authored `sandbox-exec` profile was considered and rejected: Seatbelt is inherited by
+  the whole tree, has no hostname rules ("host must be * or localhost"), and `(allow default)`
+  leaves Mach/AppleEvents/socket deputies — so it cannot express "deny GitHub, allow the model
+  API". The providers already make that split natively.
 - Running the mount from a repository with no remotes and a detached object store, so a
   publish has nowhere to go even if a write escapes.
 

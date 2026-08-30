@@ -5467,8 +5467,12 @@ SW_MSG="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-58-00_shimpath-1.md"
 SW_DIR="$WORK/ma-shimpath"; mkdir -p "$SW_DIR"
 printf 'x\n' > "$AXD/payload"
 rm -f "$AXD/childenv"
+# Mount lifecycle again, as grok, so it opts out of the containment refusal explicitly — see
+# the note on wm_turn. The shim is DEFENCE IN DEPTH under an isolation backend, and it is what
+# an operator who sets the override is left with, so it must keep working in exactly this case.
 ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$AXD/payload" \
     ACP_PARITY_PROBE="$AXD/childenv" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+    COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 \
     "$RP" run --message "$SW_MSG" --dir "$SW_DIR" --provider grok --via acp --timeout-secs 20 ) \
   >/dev/null 2>&1
 if [ ! -s "$AXD/childenv" ]; then
@@ -5519,6 +5523,11 @@ else
 fi
 
 # Run one real mounted ACP turn. Returns the run dir it used.
+# These turns drive the MOUNT LIFECYCLE, not containment, and they drive it as grok — which
+# has no verified isolation backend on Darwin and is therefore refused by default now. They opt
+# out explicitly rather than silently, so the refusal keeps its teeth everywhere else and the
+# opt-out itself stays visible in this file. The refusal and the override are asserted directly
+# in the isolation section below.
 wm_turn() { # <thread> <tag> <artifact> [extra env assignments...]
   local thread="$1" tag="$2" art="$3"; shift 3
   local msg dir
@@ -5533,6 +5542,7 @@ wm_turn() { # <thread> <tag> <artifact> [extra env assignments...]
       HOME="$WM/home" \
       ACP_PARITY_PAYLOAD="$AXD/payload" AX_CWD_LOG="$WM/cwd.log" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_RUNPHASE_OWNER_WAIT_SECS=3 \
+      COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 \
       "$@" "$RP" run --message "$msg" --dir "$dir" \
       --provider grok --via acp --timeout-secs 20 ) >/dev/null 2>&1
   printf '%s' "$dir"
@@ -8258,6 +8268,74 @@ EV_AID="$(run_ev snapshot create 2>/dev/null | head -1)"
 git -C "$EV" ls-tree -r --name-only "$EV_AID" 2>/dev/null | grep -q '^\.comms/' \
   && fail "the coordinator log rides into the reviewed artifact" \
   || ok "the reviewed artifact never carries the coordinator log"
+
+section "reviewer isolation: a mounted turn is contained or it does not run"
+
+# CRITERION 2 of contraction step 3. The measurements behind these assertions are in
+# docs/ROADMAP.md; the short version is that NOTHING at the ACP layer contains a provider that
+# does not ask permission — five parent-side controls were measured to be no-ops — so the
+# boundary is the provider's own kernel sandbox, selected by the parent, or there is no boundary
+# and the turn must not run.
+ISO="$WORK/iso"; mkdir -p "$ISO"
+ISO_RP="$REPO/helpers/runphase.sh"
+
+# The refusal names the provider, the OS, and the way out. A mounted turn for a provider with no
+# verified backend must DIE, not warn: silent degradation to an uncontained mount is exactly how
+# this item gets marked done while staying open.
+grep -q 'no verified isolation backend on' "$ISO_RP" \
+  && ok "an unbacked provider's mounted turn is refused, not degraded" \
+  || fail "the refusal for an unbacked provider is gone"
+grep -q 'COMMS_RUNPHASE_ALLOW_UNCONTAINED' "$ISO_RP" \
+  && ok "the uncontained escape hatch exists and is explicit" || fail "no operator override"
+# The override must be OPT-IN. A default-on override is the same as no refusal at all.
+grep -q 'COMMS_RUNPHASE_ALLOW_UNCONTAINED:-0' "$ISO_RP" \
+  && ok "the uncontained override defaults to OFF" || fail "the override does not default off"
+
+# Both halves of the codex backend are required and neither is sufficient: the adapter reads
+# INITIAL_AGENT_MODE (not sandbox_mode) and defaults to AgentMode.Agent, so an isolated home
+# alone leaves the turn in write mode -- measured.
+grep -q 'INITIAL_AGENT_MODE=read-only' "$ISO_RP" \
+  && ok "the codex backend pins INITIAL_AGENT_MODE=read-only" || fail "no INITIAL_AGENT_MODE pin"
+grep -q 'CODEX_HOME=\$acp_iso_home' "$ISO_RP" \
+  && ok "the codex backend runs from a parent-owned isolated home" || fail "no isolated CODEX_HOME"
+
+# THE LIFECYCLE POINT. acpx spawns the persistent queue owner on the SEND when none exists, so
+# isolation that wraps only `sessions ensure` leaves the process that actually runs tools
+# unconfined. Every acpx invocation that can spawn or reuse an owner must carry it.
+ISO_N="$(grep -c 'acp_iso\[@\]+' "$ISO_RP")"
+[ "$ISO_N" -ge 3 ] \
+  && ok "isolation wraps every owner-spawning acpx invocation, not just sessions ensure" \
+  || fail "isolation reaches only $ISO_N acpx invocations (want >= 3: ensure, set-mode, send)"
+
+# INITIAL_AGENT_MODE is read ONCE, when the adapter builds sessionState -- it is not a
+# process-lifetime lock, and `set_mode` accepts AgentFullAccess with no allowlist. With --ttl
+# owner reuse, a turn that raised its own mode would leave the NEXT round unconfined. Re-pinning
+# before every prompt is what makes the backend survive owner reuse.
+grep -q 'set-mode read-only' "$ISO_RP" \
+  && ok "the mode is re-pinned immediately before every prompt" || fail "no per-prompt mode pin"
+awk '/set-mode read-only/{m=NR} /refusing to send a review turn whose containment is unconfirmed/{if (NR>m && m) f=1} END{exit !f}' "$ISO_RP" \
+  && ok "an unconfirmed mode refuses the turn instead of sending it" || fail "an unpinnable mode still sends"
+
+# The isolated home is per-MOUNT, not per-message: under run_dir it would be rebuilt every round
+# and the provider's own session state -- what warm resume is made of -- would be cold each time.
+grep -q 'acp_iso_home="\${mount_kdir:-\$run_dir}/codex-home"' "$ISO_RP" \
+  && ok "the isolated home is per-mount, so warm resume survives" || fail "the isolated home is per-message"
+# ...and it is a SIBLING of tree/, never inside it, so mount_tree_matches still verifies the
+# artifact alone.
+grep -q 'mount_kdir:-\$run_dir}/codex-home' "$ISO_RP" \
+  && ok "the isolated home sits beside tree/, never inside the verified artifact" \
+  || fail "the isolated home could contaminate the artifact"
+
+# The roadmap bullet that proposed --permission-policy as the fix is MEASURABLY FALSE (argv is
+# never a match token). Leaving it in place is how the next agent implements the thing that does
+# not work and marks the item done.
+grep -q 'deny writes and non-git execs while still allowing' "$REPO/docs/ROADMAP.md" \
+  && fail "the measurably-false --permission-policy lever is still proposed in ROADMAP" \
+  || ok "the false --permission-policy lever is struck from the roadmap"
+# ...and the item itself stays OPEN, because grok on Darwin is still uncontained.
+grep -q 'open security item' "$REPO/docs/ROADMAP.md" \
+  && ok "the open security item stays open while a dispatched provider is uncontained" \
+  || fail "the security item was closed while grok remains uncontained"
 
 section "comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture"
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"
