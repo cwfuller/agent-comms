@@ -1,6 +1,7 @@
 # Local agent communication
 .comms/
 .codex/AGENTS.md
+.codex/config.toml
 .agent-comms/
 
 # Session worktrees created INSIDE the checkout. Snapshot-on-send captures untracked

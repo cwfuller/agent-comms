@@ -118,6 +118,18 @@ exactly; that is not a license to weaken the presence model (see step 7).
      inspection; tests only if the mode says so; the mount must not share the
      real remotes when practical. `--approve-all` on a linked worktree is not a
      boundary. (Closes the [open security item](#open-security-item-the-mounted-review-turn-is-contained-for-reviewer-behavior-not-yet-for-a-hostile-artifact).)
+     **PARTLY LANDED 2026-08-30** (double APPROVE, 6 implement rounds after a 4-round plan cap):
+     mounted codex turns run under an isolated `CODEX_HOME` + `INITIAL_AGENT_MODE=read-only`
+     kernel sandbox, applied to every owner-spawning acpx invocation and re-pinned+verified
+     before each prompt; MEASURED to deny writes, `/tmp`, child network, and the owner
+     control-plane socket while leaving reads and the model API. A provider with no verified
+     backend (grok on Darwin) is REFUSED (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` overrides). A
+     reviewed tree carrying `.codex/config.toml` is refused (the confirmed MCP-RCE vector).
+     This ENFORCES reviewer BEHAVIOR (model-generated commands); it is NOT yet general
+     hostile-artifact containment, so the security item **stays open** for: general
+     project-config (composite-review-root cwd change), grok-on-Darwin, toolchain integrity
+     pinning, credential-read/redacted-evidence, and the stale-credential and repo-footgun
+     follow-ups below.
    - Timeouts and truncations already named as what they are — no derived
      `APPROVE` from a cut-off body.
    - A valid reply always lands in the coordinator log even if the driver
@@ -1932,7 +1944,8 @@ CONFIRMED MCP hole under STILL OPEN). What is verified:
 - Ancestor/project `.codex` config **values** cannot widen the sandbox: a hostile `sandbox_mode
   = "danger-full-access"` planted at repo root and cwd did NOT override the isolated home's
   read-only mode — a subsequent shell write was still denied. ✓ (This is only the config-VALUE
-  path. The config-EXECUTION path is a SEPARATE, open hole — see below.)
+  path. The config-EXECUTION path via `mcp_servers` is handled separately and is now CLOSED by
+  refusal — see the CLOSED bullet below.)
 
 STILL OPEN (why the item is not closed):
 - **A hostile artifact's `.codex/config.toml` `mcp_servers` — CONFIRMED, now CLOSED by refusal.**
@@ -1972,6 +1985,17 @@ STILL OPEN (why the item is not closed):
   `auth.json` into its review body; network is dead so it cannot post it, but the parent reads
   that text. A redacted evidence pack (never raw `git config --show-origin` or remote URLs) is
   the intended mitigation and is not built.
+- **Stale isolated credential.** The isolated home persists across rounds for warmth, so if the
+  source `auth.json` is later removed or replaced (a logout, a credential rotation), the previous
+  per-mount copy lingers in the home. Refuse or clear a stale destination when the source is gone
+  so credential removal cannot be silently undone by the reused home. (codex, isolation impl r6,
+  advisory — filed, not blocking.)
+- **The `.codex/config.toml` refusal is a repo footgun until composite-root.** A developer with a
+  local (untracked) `.codex/config.toml` in the checkout has it snapshotted into every artifact
+  (snapshot-on-send captures untracked files), and every mounted codex review of THIS repo then
+  refuses. `.gitignore` now excludes it, which removes the footgun for the default case; the
+  general fix (an artifact that legitimately carries a benign `.codex/config.toml` and is still
+  reviewable) is the composite-review-root cwd change. (grok, isolation impl r6, advisory.)
 - The behavioral probes above are REPRODUCIBLE BY HAND, not hermetic suite tests: a real codex
   Seatbelt turn needs live auth + network + minutes, which the suite deliberately avoids (it
   stubs acpx). The suite asserts the code SHAPE; the boundary itself is verified by the probes
