@@ -8366,11 +8366,19 @@ awk '/command mv -f "\$_tmp" "\$_dst"/{m=NR} /\[ -f "\$_dst" \] && \[ ! -L "\$_d
 grep -q 'chmod "\$_mode" "\$_tmp" || { rm -f "\$_tmp"; return 1; }' "$ISO_RP" \
   && ok "_iso_place fails closed if the requested mode cannot be set" \
   || fail "_iso_place ignores a chmod failure"
-# A mounted codex turn whose reviewed tree declares mcp_servers in .codex/config.toml is
-# REFUSED before spawn — the confirmed hostile-artifact RCE vector. (grok, implement r4.)
-awk '/mount_dir\/.codex\/config.toml/{a=1} /declares mcp_servers, which would run a provider-side process/{b=1} END{exit !(a&&b)}' "$ISO_RP" \
-  && ok "a reviewed tree that declares .codex mcp_servers is refused before the codex turn spawns" \
-  || fail "a hostile .codex/config.toml mcp_servers is not refused"
+# A mounted codex turn whose reviewed tree carries .codex/config.toml is REFUSED before spawn,
+# regardless of content — codex reads it from the cwd and it can declare provider-side MCP that
+# runs outside the sandbox. The refusal is CONTENT-INDEPENDENT: it tests for the file's
+# existence, never greps it, because TOML quoted/space-padded keys make content-matching
+# bypassable (both reviewers found the grep bypass). (codex + grok, implement r5, blocking.)
+awk '/\[ -e "\$mount_dir\/.codex\/config.toml" \]/{a=1} /the reviewed tree carries .codex\/config.toml/{b=1} END{exit !(a&&b)}' "$ISO_RP" \
+  && ok "a reviewed tree carrying .codex/config.toml is refused before the codex turn spawns" \
+  || fail "a hostile .codex/config.toml is not refused before spawn"
+# The refusal must NOT depend on parsing the file (no grep of the config): a content match is
+# bypassable by quoted/space-padded TOML keys.
+awk '/mount_dir\/.codex\/config.toml/ && /grep/{f=1} END{exit f}' "$ISO_RP" \
+  && ok "the .codex/config.toml refusal does not grep the file (no bypassable content match)" \
+  || fail "the .codex/config.toml refusal still content-matches the file"
 # The mkdir refusal note is set on its OWN line, not as a prefix assignment that would not
 # persist to the EXIT trap. Assert no ABORT_NOTE prefixes an mkdir on the same line.
 grep -Eq 'ABORT_NOTE=.*mkdir' "$ISO_RP" \

@@ -1982,14 +1982,16 @@ cmd_run() {
     # Same class as .acpxrc.json, one layer down: codex resolves `.codex/config.toml` from the
     # CWD (measured: cwd's, not an ancestor's), and an `[mcp_servers]` entry there spawns a
     # provider-side process that runs OUTSIDE the command sandbox — a confirmed RCE from a
-    # hostile artifact (docs/ROADMAP.md, "Isolation probes"). Refuse a mounted tree that
-    # declares MCP servers. This CLOSES the confirmed vector; it is a targeted denylist, NOT a
-    # general project-config boundary — that is the composite-review-root cwd change still open.
-    # Hooks are separately trust-gated by codex and do not run untrusted. (grok, implement r4.)
-    if [ "$provider" = codex ] && [ -f "$mount_dir/.codex/config.toml" ] \
-       && grep -Eq '^[[:space:]]*\[mcp_servers|^[[:space:]]*mcp_servers[[:space:]]*=' "$mount_dir/.codex/config.toml" 2>/dev/null; then
+    # hostile artifact (docs/ROADMAP.md, "Isolation probes"). Refuse ANY such file for a mounted
+    # codex turn, regardless of content: TOML permits quoted/dotted keys (`["mcp_servers".x]`,
+    # `"mcp_servers" = …`) that deserialize to the same key, so content-matching is bypassable —
+    # the conservative refusal is the only bypass-proof denylist without a TOML parser. This
+    # CLOSES the confirmed vector; it is still a denylist, NOT a general project-config boundary
+    # (that is the composite-review-root cwd change, still open). Hooks are separately trust-gated
+    # by codex and do not run untrusted. (grok, implement r4; codex, implement r5, blocking.)
+    if [ "$provider" = codex ] && { [ -e "$mount_dir/.codex/config.toml" ] || [ -L "$mount_dir/.codex/config.toml" ]; }; then
       update_thread_state "$msg_thread" failed "" "$sfield" || true
-      write_result "$run_dir" failed 1 "" "$msg" "the reviewed tree's .codex/config.toml declares mcp_servers, which would run a provider-side process outside the sandbox — refusing"
+      write_result "$run_dir" failed 1 "" "$msg" "the reviewed tree carries .codex/config.toml, which codex reads from the cwd and which can declare provider-side MCP servers that run outside the sandbox — refusing (any such file is refused; content is not parsed)"
       unmount_artifact
       trap - EXIT
       exit 1
@@ -2331,7 +2333,10 @@ PROMPT
             # advisory. (codex, r4, advisory.)
             chmod "$_mode" "$_tmp" || { rm -f "$_tmp"; return 1; }
             command mv -f "$_tmp" "$_dst" || { rm -f "$_tmp"; return 1; }
-            # VERIFY the rename landed a regular file, not a symlink a race re-planted. (codex, r4.)
+            # VERIFY the rename landed a regular file. This DETECTS (not prevents) a symlink a
+            # concurrent actor could re-plant between the precheck and mv; that race is outside
+            # the current lifecycle (prior owner gone, next provider not spawned), and detection
+            # fails the place closed. (codex, r4 + r5.)
             [ -f "$_dst" ] && [ ! -L "$_dst" ] || return 1
           }
           # Credentials only, copied fresh. NOT the workspace-cmux profile this repo's own

@@ -1936,13 +1936,15 @@ CONFIRMED MCP hole under STILL OPEN). What is verified:
 
 STILL OPEN (why the item is not closed):
 - **A hostile artifact's `.codex/config.toml` `mcp_servers` — CONFIRMED, now CLOSED by refusal.**
-  A mounted codex turn whose reviewed tree declares `[mcp_servers]` in `.codex/config.toml` is
-  now REFUSED before spawn (parallel to the existing `.acpxrc.json` refusal), because such a
-  server runs provider-side, outside the command sandbox. This closes the confirmed RCE vector.
-  It is a targeted DENYLIST, not a general project-config boundary: other project-config
-  execution vectors (should codex grow them) are not covered, and the complete fix remains the
-  composite-review-root cwd change (run from a clean cwd so the artifact's `.codex` is never the
-  cwd codex reads). Hooks are separately trust-gated by codex and did not run untrusted.
+  A mounted codex turn whose reviewed tree carries `.codex/config.toml` AT ALL is now REFUSED
+  before spawn (parallel to the existing `.acpxrc.json` refusal): codex reads that file from the
+  cwd, and an MCP server declared there runs provider-side, outside the command sandbox. The
+  refusal does NOT parse the file — content-matching is bypassable because TOML permits quoted
+  and space-padded keys (`["mcp_servers"]`, `[ mcp_servers.x ]`) that a grep misses (both
+  reviewers found this), so any such file is refused outright. This closes the confirmed RCE
+  vector. It is still a DENYLIST, not a general project-config boundary: the complete fix remains
+  the composite-review-root cwd change (run from a clean cwd so the artifact's `.codex` is never
+  the cwd codex reads). Hooks are separately trust-gated by codex and did not run untrusted.
   This is the one the mount's own purpose — reviewing possibly-hostile artifacts — makes matter. The enforced boundary above covers MODEL-GENERATED
   SHELL COMMANDS (the reviewer's own actions, including a prompt-injected reviewer). It does NOT
   cover the provider's own config: the codex provider process must keep model-network access, so
@@ -1952,12 +1954,13 @@ STILL OPEN (why the item is not closed):
   marker (a write the sandboxed shell is denied); removing the project `.codex` removed the
   marker (control); the same config one directory ABOVE cwd was NOT loaded (codex reads cwd's
   `.codex`, not ancestors'). Hooks are trust-gated (`--dangerously-bypass-hook-trust` implies
-  persisted trust is required) and did not run, but MCP is not. Until this is closed, the codex
-  backend is "enforced against model-generated commands", NOT "encloses a hostile artifact". The
-  fix is not yet chosen — candidates: run the turn from a clean cwd with the artifact as a
-  subdir (codex reads only cwd's `.codex`, so a descendant `tree/.codex` would be ignored — but
-  this is the load-bearing review-root-cwd change grok flagged, needing its own careful landing),
-  or a codex mechanism to disable project-config discovery if one exists.
+  persisted trust is required) and did not run, but MCP is not. **This specific vector is now
+  CLOSED** (the codex backend refuses any mounted tree carrying `.codex/config.toml`); the codex
+  backend is "enforced against model-generated commands" AND refuses this artifact-config file,
+  but is still NOT general hostile-artifact containment. The general fix (so an artifact could
+  legitimately carry a benign `.codex/config.toml` and still be reviewed) is the composite
+  review-root cwd change: run from a clean cwd with the artifact as a subdir, since codex reads
+  only the cwd's `.codex` — a load-bearing change grok flagged as needing its own careful landing.
 - **grok on Darwin has no backend.** Its sandbox is a documented macOS network no-op, so a grok
   mounted turn is REFUSED by default (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override). The
   default panel therefore loses cross-vendor corroboration on macOS unless reviews run on Linux.
@@ -1986,7 +1989,7 @@ turn driven through the real `panel dispatch` path:
 | `curl https://api.github.com/` | exit 6, `Could not resolve host` |
 | `python3` unix-socket `connect` to a parent-created listener at `/tmp/*.sock` | `PermissionError: [Errno 1] Operation not permitted` |
 | hostile ancestor+cwd `.codex/config.toml` = `danger-full-access`, then write | `operation not permitted`, file absent |
-| hostile **cwd** `.codex/config.toml` `[mcp_servers]` command writes `/tmp/marker` | **marker WRITTEN** — MCP ran outside the sandbox (the open hole) |
+| hostile **cwd** `.codex/config.toml` `[mcp_servers]` command writes `/tmp/marker` | **marker WRITTEN** — MCP ran outside the sandbox (the vector; now REFUSED before spawn) |
 | same, with the project `.codex` removed (control) | marker absent |
 | same `.codex` one directory ABOVE cwd | marker absent — codex reads cwd's `.codex`, not ancestors' |
 | `cat`, `git log` | exit 0 |
