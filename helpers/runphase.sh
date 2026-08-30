@@ -697,8 +697,9 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
   # DEFENCE IN DEPTH, NOT A BOUNDARY. A PATH shim cannot be a security boundary: a child can
   # call git by absolute path, or just write files with the shell. The enforced boundary on
   # the mounted path is the per-provider kernel sandbox (for codex, the isolated read-only
-  # home; see the acp_iso block); this shim is what a reviewer under COMMS_RUNPHASE_ALLOW_
-  # UNCONTAINED=1 is left with, and what raises the cost of an ACCIDENT and
+  # home; see the acp_iso block) — which enforces MODEL-GENERATED COMMANDS, not a hostile
+  # artifact's own provider config (see docs/ROADMAP.md). This shim is what a reviewer under
+  # COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 is left with, and what raises the cost of an ACCIDENT and
   # of the easy deliberate paths. Round 7 found the previous version trivially defeated three
   # ways at once — env-injected config, exec-taking flags on permitted verbs, and a scan that
   # stopped at the verb so no later flag was ever examined. Claiming more than this comment
@@ -1978,6 +1979,21 @@ cmd_run() {
       trap - EXIT
       exit 1
     fi
+    # Same class as .acpxrc.json, one layer down: codex resolves `.codex/config.toml` from the
+    # CWD (measured: cwd's, not an ancestor's), and an `[mcp_servers]` entry there spawns a
+    # provider-side process that runs OUTSIDE the command sandbox — a confirmed RCE from a
+    # hostile artifact (docs/ROADMAP.md, "Isolation probes"). Refuse a mounted tree that
+    # declares MCP servers. This CLOSES the confirmed vector; it is a targeted denylist, NOT a
+    # general project-config boundary — that is the composite-review-root cwd change still open.
+    # Hooks are separately trust-gated by codex and do not run untrusted. (grok, implement r4.)
+    if [ "$provider" = codex ] && [ -f "$mount_dir/.codex/config.toml" ] \
+       && grep -Eq '^[[:space:]]*\[mcp_servers|^[[:space:]]*mcp_servers[[:space:]]*=' "$mount_dir/.codex/config.toml" 2>/dev/null; then
+      update_thread_state "$msg_thread" failed "" "$sfield" || true
+      write_result "$run_dir" failed 1 "" "$msg" "the reviewed tree's .codex/config.toml declares mcp_servers, which would run a provider-side process outside the sandbox — refusing"
+      unmount_artifact
+      trap - EXIT
+      exit 1
+    fi
   fi
 
   # ----- prompt -----
@@ -2299,20 +2315,36 @@ PROMPT
           # (codex, implement r3, blocking; grok, implement r3, advisory.)
           _iso_place() {  # <src-or-empty> <dest> <mode> [literal-content]
             local _src="$1" _dst="$2" _mode="$3" _lit="${4:-}" _tmp
+            # REFUSE a hostile pre-existing dest that is not a plain regular file. `mv -f` onto a
+            # symlink-to-DIRECTORY or a real directory does NOT replace the dirent — it drops the
+            # staged file INSIDE the target and still exits 0, so the intended config would be
+            # absent and the read-only sandbox never applied. rm -f clears a symlink (of either
+            # kind) but not a directory; a leftover directory is refused outright. (codex, r4, blocking.)
+            if [ -L "$_dst" ]; then rm -f "$_dst" || return 1; fi
+            if [ -e "$_dst" ] && [ ! -f "$_dst" ]; then return 1; fi
             _tmp="$(mktemp "$acp_iso_home/.stage.XXXXXX")" || return 1
             if [ -n "$_lit" ]; then printf '%s' "$_lit" > "$_tmp" || { rm -f "$_tmp"; return 1; }
             elif [ -n "$_src" ] && [ -f "$_src" ] && [ ! -L "$_src" ]; then
               cat "$_src" > "$_tmp" || { rm -f "$_tmp"; return 1; }
             fi
-            chmod "$_mode" "$_tmp" 2>/dev/null || true
+            # chmod fails CLOSED: the mode is part of the contract (600 on a credential), not
+            # advisory. (codex, r4, advisory.)
+            chmod "$_mode" "$_tmp" || { rm -f "$_tmp"; return 1; }
             command mv -f "$_tmp" "$_dst" || { rm -f "$_tmp"; return 1; }
+            # VERIFY the rename landed a regular file, not a symlink a race re-planted. (codex, r4.)
+            [ -f "$_dst" ] && [ ! -L "$_dst" ] || return 1
           }
           # Credentials only, copied fresh. NOT the workspace-cmux profile this repo's own
           # `codex-permissions` recipe installs: that profile is exactly what makes the agent
           # self-authorise, so no permission request is ever issued and no client-side denial
           # is possible. An isolated home is how the review turn escapes it.
+          # Reap any `.stage.*` left by a prior death between mktemp and mv (grok, r4, advisory).
+          rm -f "$acp_iso_home"/.stage.* 2>/dev/null || true
           local acp_src_home="${CODEX_HOME:-$HOME/.codex}"
-          if [ -f "$acp_src_home/auth.json" ]; then
+          # A symlinked SOURCE is skipped entirely, not copied through: following it would read
+          # credentials from wherever the link points, and `_iso_place` would otherwise rename an
+          # empty file into auth.json. (codex, r4, advisory.)
+          if [ -f "$acp_src_home/auth.json" ] && [ ! -L "$acp_src_home/auth.json" ]; then
             ABORT_NOTE="refused: could not stage isolated auth.json for '$provider'"
             _iso_place "$acp_src_home/auth.json" "$acp_iso_home/auth.json" 600 \
               || die "run: cannot stage the isolated auth.json"
@@ -2399,7 +2431,9 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # alone is ISOLATION, not enforcement. The ENFORCED boundary is the per-provider kernel
     # sandbox selected above (acp_iso): for codex, the isolated CODEX_HOME + read-only mode,
     # MEASURED to deny writes, /tmp, child network, and the owner control-plane socket while
-    # leaving reads and the model API. It is NOT COMMS_RUNPHASE_GROK_SANDBOX — that flag was
+    # leaving reads and the model API. That is containment of MODEL-GENERATED COMMANDS; a
+    # hostile artifact's own `.codex` MCP config is handled separately (refused above), and
+    # general artifact-config containment is still open (docs/ROADMAP.md). It is NOT COMMS_RUNPHASE_GROK_SANDBOX — that flag was
     # only ever the direct-grok path and never applied here. A provider with no verified
     # backend does not reach this code: it was refused above. See docs/ROADMAP.md.
     # Outside a mount, stay narrow. (grok, collapse round 1; corrected round 10; isolation r1.)

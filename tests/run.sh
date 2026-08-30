@@ -8352,6 +8352,25 @@ grep -q 'command mv -f "\$_tmp" "\$_dst"' "$ISO_RP" \
 awk '/_iso_place "\$acp_src_home\/auth.json"/{f=1} END{exit !f}' "$ISO_RP" \
   && ok "auth.json is staged atomically, not copied through a possible symlink" \
   || fail "auth.json is still copied without symlink/hardlink safety"
+# _iso_place refuses a non-regular-file dest (symlink-to-dir or real dir): `mv -f` there would
+# deposit the staged file INSIDE the target and exit 0, silently leaving the read-only config
+# absent. It unlinks a symlink dest first, refuses a directory, and verifies a regular file
+# landed. (codex, implement r4, blocking.)
+awk '/if \[ -L "\$_dst" \]; then rm -f "\$_dst"/{a=1} /\[ -e "\$_dst" \] && \[ ! -f "\$_dst" \]/{b=1} END{exit !(a&&b)}' "$ISO_RP" \
+  && ok "_iso_place unlinks a symlink dest and refuses a directory dest" \
+  || fail "_iso_place does not defend against a directory / symlink-to-dir dest"
+awk '/command mv -f "\$_tmp" "\$_dst"/{m=NR} /\[ -f "\$_dst" \] && \[ ! -L "\$_dst" \] \|\| return 1/{if (NR>m && m) v=1} END{exit !v}' "$ISO_RP" \
+  && ok "_iso_place verifies a regular file landed after the rename" \
+  || fail "_iso_place does not verify the rename result"
+# chmod fails closed (the mode is part of the contract, not advisory).
+grep -q 'chmod "\$_mode" "\$_tmp" || { rm -f "\$_tmp"; return 1; }' "$ISO_RP" \
+  && ok "_iso_place fails closed if the requested mode cannot be set" \
+  || fail "_iso_place ignores a chmod failure"
+# A mounted codex turn whose reviewed tree declares mcp_servers in .codex/config.toml is
+# REFUSED before spawn — the confirmed hostile-artifact RCE vector. (grok, implement r4.)
+awk '/mount_dir\/.codex\/config.toml/{a=1} /declares mcp_servers, which would run a provider-side process/{b=1} END{exit !(a&&b)}' "$ISO_RP" \
+  && ok "a reviewed tree that declares .codex mcp_servers is refused before the codex turn spawns" \
+  || fail "a hostile .codex/config.toml mcp_servers is not refused"
 # The mkdir refusal note is set on its OWN line, not as a prefix assignment that would not
 # persist to the EXIT trap. Assert no ABORT_NOTE prefixes an mkdir on the same line.
 grep -Eq 'ABORT_NOTE=.*mkdir' "$ISO_RP" \

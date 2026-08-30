@@ -1865,8 +1865,9 @@ What would make it real, roughly in order of cost:
   publish has nowhere to go even if a write escapes.
 
 **Partly landed 2026-08-30 (see the codex bullet above and the LANDED section below).** For
-codex the boundary is now real and enforced; for grok on Darwin it is not, so the item stays
-OPEN. Until grok is contained (or refused everywhere it can mount), the honest statement for the
+codex the boundary is now enforced AGAINST MODEL-GENERATED SHELL COMMANDS (and the confirmed
+`mcp_servers` artifact vector is refused); it is NOT general hostile-artifact containment, and
+for grok on Darwin there is no backend at all — so the item stays OPEN. Until grok is contained (or refused everywhere it can mount), the honest statement for the
 UNCONTAINED providers is the one in the code comment and in acceptance criterion 9: defence in
 depth, tested by invariant, not a containment guarantee.
 
@@ -1934,9 +1935,15 @@ CONFIRMED MCP hole under STILL OPEN). What is verified:
   path. The config-EXECUTION path is a SEPARATE, open hole — see below.)
 
 STILL OPEN (why the item is not closed):
-- **A hostile artifact's `.codex/config.toml` MCP server runs OUTSIDE the sandbox (CONFIRMED).**
-  This is the most serious remaining hole and it is the one the mount's own purpose — reviewing
-  possibly-hostile artifacts — makes matter. The enforced boundary above covers MODEL-GENERATED
+- **A hostile artifact's `.codex/config.toml` `mcp_servers` — CONFIRMED, now CLOSED by refusal.**
+  A mounted codex turn whose reviewed tree declares `[mcp_servers]` in `.codex/config.toml` is
+  now REFUSED before spawn (parallel to the existing `.acpxrc.json` refusal), because such a
+  server runs provider-side, outside the command sandbox. This closes the confirmed RCE vector.
+  It is a targeted DENYLIST, not a general project-config boundary: other project-config
+  execution vectors (should codex grow them) are not covered, and the complete fix remains the
+  composite-review-root cwd change (run from a clean cwd so the artifact's `.codex` is never the
+  cwd codex reads). Hooks are separately trust-gated by codex and did not run untrusted.
+  This is the one the mount's own purpose — reviewing possibly-hostile artifacts — makes matter. The enforced boundary above covers MODEL-GENERATED
   SHELL COMMANDS (the reviewer's own actions, including a prompt-injected reviewer). It does NOT
   cover the provider's own config: the codex provider process must keep model-network access, so
   it runs outside the command sandbox, and codex loads `mcp_servers` from the **cwd's**
