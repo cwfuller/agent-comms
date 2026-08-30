@@ -695,10 +695,10 @@ probe_field() {  # <probe output> <key>
 
 write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review turn sees
   # DEFENCE IN DEPTH, NOT A BOUNDARY. A PATH shim cannot be a security boundary: a child can
-  # call git by absolute path, or just write files with the shell. There is NO enforced
-  # boundary on the mounted path — COMMS_RUNPHASE_GROK_SANDBOX applies to the direct grok
-  # invocation only, never here (see docs/ROADMAP.md, open security item). What this raises
-  # is the cost of an ACCIDENT and
+  # call git by absolute path, or just write files with the shell. The enforced boundary on
+  # the mounted path is the per-provider kernel sandbox (for codex, the isolated read-only
+  # home; see the acp_iso block); this shim is what a reviewer under COMMS_RUNPHASE_ALLOW_
+  # UNCONTAINED=1 is left with, and what raises the cost of an ACCIDENT and
   # of the easy deliberate paths. Round 7 found the previous version trivially defeated three
   # ways at once — env-injected config, exec-taking flags on permitted verbs, and a scan that
   # stopped at the verb so no later flag was ever examined. Claiming more than this comment
@@ -2276,11 +2276,14 @@ PROMPT
           # (which is what keeps resume warm), so the check is the only thing standing between a
           # stale symlink and a home that escapes the mount. (grok, implement r1, advisory.)
           if [ -L "$acp_iso_home" ]; then
+            ABORT_NOTE="refused: isolated CODEX_HOME for '$provider' is a symlink — refusing to follow it out of the mount"
             die "run: the isolated CODEX_HOME path is a symlink ($acp_iso_home) — refusing to follow it out of the mount"
           fi
-          mkdir -p "$acp_iso_home" || die "run: cannot create the isolated CODEX_HOME"
+          ABORT_NOTE="refused: could not create a usable isolated CODEX_HOME for '$provider'" \
+            mkdir -p "$acp_iso_home" || die "run: cannot create the isolated CODEX_HOME"
           local acp_iso_phys; acp_iso_phys="$( cd "$acp_iso_home" 2>/dev/null && pwd -P )" || true
           if [ "$acp_iso_phys" != "$acp_iso_home" ]; then
+            ABORT_NOTE="refused: isolated CODEX_HOME for '$provider' resolves outside its mount"
             die "run: the isolated CODEX_HOME resolves outside its mount (want '$acp_iso_home', got '$acp_iso_phys') — refusing"
           fi
           # Credentials only. NOT the workspace-cmux profile this repo's own
@@ -2292,8 +2295,19 @@ PROMPT
             [ -f "${CODEX_HOME:-$HOME/.codex}/$acp_auth" ] \
               && cp "${CODEX_HOME:-$HOME/.codex}/$acp_auth" "$acp_iso_home/$acp_auth" 2>/dev/null || true
           done
+          # The home is REUSED across rounds for warmth, so a prior (possibly uncontained,
+          # pre-isolation) writer could have left a `config.toml` SYMLINK here; overwriting
+          # through it would clobber the link target and — worse — could point the effective
+          # config outside the home. The directory check above is directory-only, so guard the
+          # file too. (grok, implement r2, advisory.)
+          if [ -L "$acp_iso_home/config.toml" ]; then
+            ABORT_NOTE="refused: isolated codex config.toml is a symlink — refusing to write through it"
+            die "run: '$acp_iso_home/config.toml' is a symlink — refusing to write the isolated config through it"
+          fi
+          ABORT_NOTE="refused: could not write the isolated read-only codex config for '$provider'"
           printf 'approval_policy = "on-request"\nsandbox_mode = "read-only"\n' > "$acp_iso_home/config.toml" \
             || die "run: cannot write the isolated codex config"
+          ABORT_NOTE="runner aborted unexpectedly — see runner.log"
           acp_iso=(env "CODEX_HOME=$acp_iso_home" "INITIAL_AGENT_MODE=read-only")
           acp_iso_backend="codex-home+read-only"
           ;;
@@ -2367,12 +2381,14 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # requests, not file reads, so --approve-reads denies them and the turn dies after
     # doing the work (observed: grok produced a 9,865-byte review, then exited 5).
     # Inside a MOUNT the child works in a throwaway linked worktree with no .comms in it and
-    # its reply is brokered by the parent, so it reaches neither the real tree nor the
-    # mailbox by the ordinary path. That is ISOLATION, not enforcement: --approve-all below
-    # grants a shell, and a linked worktree shares the main object store and the real
-    # remotes. There is NO enforced boundary here — COMMS_RUNPHASE_GROK_SANDBOX applies to
-    # the direct grok invocation only. See docs/ROADMAP.md, open security item.
-    # Outside a mount, stay narrow. (grok, collapse round 1; corrected round 10.)
+    # its reply is brokered by the parent. --approve-all below grants a shell, so the mount
+    # alone is ISOLATION, not enforcement. The ENFORCED boundary is the per-provider kernel
+    # sandbox selected above (acp_iso): for codex, the isolated CODEX_HOME + read-only mode,
+    # MEASURED to deny writes, /tmp, child network, and the owner control-plane socket while
+    # leaving reads and the model API. It is NOT COMMS_RUNPHASE_GROK_SANDBOX — that flag was
+    # only ever the direct-grok path and never applied here. A provider with no verified
+    # backend does not reach this code: it was refused above. See docs/ROADMAP.md.
+    # Outside a mount, stay narrow. (grok, collapse round 1; corrected round 10; isolation r1.)
     local -a acp_perm
     if [ -n "$mount_dir" ]; then
       acp_perm=(--approve-all)
@@ -2386,12 +2402,12 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       # rejects flags that write or exec — which keeps `git log`/`diff`/`show`, the
       # reviewer's actual job, working.
       #
-      # It is DEFENCE IN DEPTH, not the boundary, and the difference matters: a child can
-      # call git by absolute path or simply write files with the shell, both of which are
-      # outside any PATH shim. The enforced boundary is the sandbox profile in
-      # docs/INTERNALS.md (COMMS_RUNPHASE_GROK_SANDBOX), which is operator-configured and
-      # NOT on by default. Round 7 rejected the claim that the shim alone makes a mount
-      # read-only, and that rejection was correct.
+      # The shim is DEFENCE IN DEPTH, not the boundary, and the difference matters: a child
+      # can call git by absolute path or simply write files with the shell, both outside any
+      # PATH shim. The enforced boundary is the kernel sandbox selected in acp_iso above (for
+      # codex, the isolated read-only home); the shim is what a reviewer under an operator
+      # override (COMMS_RUNPHASE_ALLOW_UNCONTAINED=1) is left with. Round 7 rejected the claim
+      # that the shim alone makes a mount read-only, and that rejection was correct.
       acp_shim="$run_dir/shim"
       mkdir -p "$acp_shim"
       # Resolve the REAL git now and hardcode it: `exec git` would find this shim again

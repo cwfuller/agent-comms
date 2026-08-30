@@ -1915,14 +1915,53 @@ contained. Either mounted grok turns are refused on Darwin — which costs the c
 corroboration that is this repo's whole gate — or the security item stays open with a named
 product hole. That is a product call, not an implementation detail.
 
-**Still-open design work the panel named** (all blocking, none addressed): isolation must wrap
-every invocation that can spawn or reuse a queue owner (acpx spawns it on the *send*, not on
-`sessions ensure`) with owner-side attestation; the acpx owner's Unix socket accepts `set_mode` /
-`set_config_option` and codex-acp allows `AgentFullAccess`, so mode must be re-pinned and verified
-before every prompt and proven unreachable from inside a turn; the review root sits under the real
-repo so ancestor `.codex`/MCP/hooks config is merged in and must be excluded; the toolchain must be
-integrity-pinned into owner identity and fail closed; and a redacted evidence pack must never ship
-raw `git config --show-origin` or remote URLs, which can carry credentials.
+**Design work the panel named — status after the isolation implement arc (2026-08-30):**
+
+LANDED and verified by reproducible probe (see "Isolation probes" below):
+- Isolation wraps every invocation that can spawn or reuse a queue owner (`sessions ensure`,
+  `set-mode`, and the prompt send — acpx spawns the owner on the *send*). ✓
+- The mode is re-pinned to `read-only` and CONFIRMED (rc 0 + exact stdout `mode set: read-only`,
+  stderr excluded) before every prompt; an unconfirmed pin refuses the turn. ✓
+- The owner control-plane socket is unreachable from inside a turn: a child's unix-socket
+  `connect` returns `Operation not permitted` under the read-only sandbox, so it cannot reach
+  the owner to raise its own mode to `AgentFullAccess`. ✓ (measured, not a hermetic suite test —
+  see the probe note on why)
+- Ancestor/project `.codex` config cannot widen the sandbox: a hostile `sandbox_mode =
+  "danger-full-access"` planted at repo root and cwd did NOT override the isolated home. ✓
+  (MCP servers / hooks the provider spawns inherit the same sandbox, so they cannot write,
+  exec-escape, or reach the network either.)
+
+STILL OPEN (why the item is not closed):
+- **grok on Darwin has no backend.** Its sandbox is a documented macOS network no-op, so a grok
+  mounted turn is REFUSED by default (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override). The
+  default panel therefore loses cross-vendor corroboration on macOS unless reviews run on Linux.
+  This is the product decision above, unchanged.
+- **Toolchain is not integrity-pinned.** acpx names codex-acp `^1.1.5`; it resolved to 1.6.2 here.
+  The backend's guarantees are version-specific and nothing binds the resolved versions to owner
+  identity or fails closed on an unapproved combination.
+- **Credential read.** The sandbox allows reads, so a contained reviewer can read the isolated
+  `auth.json` into its review body; network is dead so it cannot post it, but the parent reads
+  that text. A redacted evidence pack (never raw `git config --show-origin` or remote URLs) is
+  the intended mitigation and is not built.
+- The behavioral probes above are REPRODUCIBLE BY HAND, not hermetic suite tests: a real codex
+  Seatbelt turn needs live auth + network + minutes, which the suite deliberately avoids (it
+  stubs acpx). The suite asserts the code SHAPE; the boundary itself is verified by the probes
+  recorded below. A hermetic test would exercise a fake sandbox — testing the stub, not the
+  boundary — which is weaker, not stronger.
+
+### Isolation probes (Darwin; acpx 0.13.1, codex-acp 1.6.2, codex read-only) — reproducible
+
+Isolated `CODEX_HOME` (credentials + `sandbox_mode="read-only"`) with `INITIAL_AGENT_MODE=read-only`,
+turn driven through the real `panel dispatch` path:
+
+| probe (child shell inside the mounted turn) | result |
+|---|---|
+| write in the mount / write to `/tmp` | `operation not permitted`, file absent |
+| `curl https://api.github.com/` | exit 6, `Could not resolve host` |
+| `python3` unix-socket `connect` to a live listener | `PermissionError: [Errno 1] Operation not permitted` |
+| hostile ancestor+cwd `.codex/config.toml` = `danger-full-access`, then write | `operation not permitted`, file absent |
+| `cat`, `git log` | exit 0 |
+| the turn itself | completes (model API alive) |
 
 ## Field report — cmux freeze incident (2026-08-27, coordinator session)
 

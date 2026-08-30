@@ -8332,10 +8332,22 @@ awk '/set-mode read-only 2>>/{f=1} END{exit !f}' "$ISO_RP" \
 awk '/isolated CODEX_HOME path is a symlink/{f=1} END{exit !f}' "$ISO_RP" \
   && ok "a symlinked isolated home is refused, not followed out of the mount" \
   || fail "the isolated home would follow a symlink"
-# A deliberate refusal surfaces its reason in result.json, not the generic abort note.
-grep -q 'ABORT_NOTE="refused:' "$ISO_RP" \
-  && ok "an isolation refusal names its reason in result.json, not 'aborted unexpectedly'" \
-  || fail "isolation refusals file under the generic abort note"
+# Every isolation refusal — not just two of them — surfaces its reason in result.json rather
+# than the generic abort-trap note. Count the refusal ABORT_NOTE assignments; a grep for one
+# stays green on two while the symlink/mkdir/realpath/config paths still say "aborted
+# unexpectedly". (grok + codex, implement r2, advisory.)
+ISO_NOTES="$(grep -c 'ABORT_NOTE="refused:' "$ISO_RP")"
+[ "$ISO_NOTES" -ge 5 ] \
+  && ok "every isolation refusal names its reason ($ISO_NOTES paths), not just the first two" \
+  || fail "only $ISO_NOTES isolation refusals name a reason; the rest fall to the generic abort note"
+# A reused isolated home with a config.toml SYMLINK is refused, not written through.
+awk '/config.toml.*is a symlink/{f=1} END{exit !f}' "$ISO_RP" \
+  && ok "a symlinked isolated config.toml is refused, not overwritten through the link" \
+  || fail "the isolated config.toml would be written through a symlink"
+# The mounted-path boundary comment must name the kernel sandbox, not the retired GROK_SANDBOX lever.
+grep -q 'GROK_SANDBOX applies to' "$ISO_RP" \
+  && fail "a mounted-path comment still names COMMS_RUNPHASE_GROK_SANDBOX as the boundary" \
+  || ok "the mounted-path boundary is described as the per-provider kernel sandbox, not GROK_SANDBOX"
 
 # The isolated home is per-MOUNT, not per-message: under run_dir it would be rebuilt every round
 # and the provider's own session state -- what warm resume is made of -- would be cold each time.
