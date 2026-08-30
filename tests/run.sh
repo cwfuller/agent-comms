@@ -7533,8 +7533,10 @@ fi
 [ "$(run_ev events --agent codex 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] && ok "--agent selects one reviewer" || fail "--agent filter"
 [ "$(run_ev events --dispatch d-1 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] && ok "--dispatch selects one attempt" || fail "--dispatch filter"
 [ "$(run_ev events --limit 3 2>/dev/null | tail -n +2 | grep -c .)" = "3" ] && ok "--limit caps what is printed" || fail "--limit cap"
-run_ev events --set ev-race --limit 1 2>/dev/null | tail -1 | grep -q 'racer-' && ok "--limit applies AFTER the filter, never as a global tail" || fail "--limit filter ordering"
-run_ev events --set ev-race 2>/dev/null | head -1 | grep -q '^ts' && ok "a filtered read still prints the header" || fail "filtered header"
+printf '%s\n' "$(run_ev events --set ev-race --limit 1 2>/dev/null)" | tail -1 | grep -q 'racer-' \
+  && ok "--limit applies AFTER the filter, never as a global tail" || fail "--limit filter ordering"
+[ "$(run_ev events --set ev-race 2>/dev/null | sed -n 1p | cut -f1)" = "ts" ] \
+  && ok "a filtered read still prints the header" || fail "filtered header"
 check_not "--limit rejects a non-numeric budget" run_ev events --limit nine
 # A roster read must not be capped: dispatch enforces no maximum, so a silent cap would drop
 # members from the union it is enumerating and let a short panel report itself complete.
@@ -7679,11 +7681,13 @@ ev_idx_row() { # <mid> <thread> <agent> <dispatch>
 # PLAN is B's, and B is what a reader must bind to. (codex, implement r2/r3.)
 for ev_mix_ag in codex grok; do
   run_ev events append --kind panel-planned --set ev-mixed --dispatch d-attempt-a --agent "$ev_mix_ag" \
-    --status planned --note "roster=codex,grok legs=2" >/dev/null
+    --artifact aid --status planned --note "roster=codex,grok legs=2" >/dev/null
 done
 for ev_mix_ag in codex grok; do
+  # A plan names the artifact it reviews: a plan without one is incoherent, and the snapshot
+  # refuses it rather than treating an empty artifact as "any tree". (codex, implement r7.)
   run_ev events append --kind panel-planned --set ev-mixed --dispatch d-attempt-b --agent "$ev_mix_ag" \
-    --status planned --note "roster=codex,grok legs=2" >/dev/null
+    --artifact aid --status planned --note "roster=codex,grok legs=2" >/dev/null
 done
 ev_idx_row mixed-a-codex ev-mixed-a-codex codex d-attempt-a
 ev_idx_row mixed-b-codex ev-mixed-b-codex codex d-attempt-b
@@ -7817,7 +7821,8 @@ run_evcr events --set "$EV_CRSET" --kind composition-refused 2>/dev/null | tail 
   && ok "the roster refusal is recorded, not just printed" || fail "roster refusal not recorded"
 [ "$(run_evcr panel status --set "$EV_CRSET" 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] \
   && ok "status still lists a planned leg whose index row vanished" || fail "status hid the missing leg"
-run_evcr panel status --set "$EV_CRSET" 2>/dev/null | grep -q 'no leg row recorded' \
+EV_CRSTAT="$(run_evcr panel status --set "$EV_CRSET" 2>/dev/null)"
+printf '%s\n' "$EV_CRSTAT" | grep -q 'no leg row recorded' \
   && ok "the missing leg is named as missing, not silently unanswered" || fail "the missing leg was not named"
 # Captured, not piped into `head`: the suite runs with pipefail, so a producer killed by
 # SIGPIPE fails the assertion even when the grep matched. The property under test is "the
@@ -7868,7 +7873,8 @@ awk -F'\t' -v d="$EV_SUBD3" 'NR==1 || !($10=="grok" && $14==d)' "$EV_SUBIDX" > "
 EV_SUBC3="$(run_evsub compose --set "$EV_SUBSET" 2>&1 || true)"
 printf '%s\n' "$EV_SUBC3" | grep -q 'never finished recording' \
   && ok "an agent planned by THIS attempt cannot be answered by its previous leg" || fail "a crashed re-dispatch substituted the earlier attempt's leg (got: $(printf '%s' "$EV_SUBC3" | head -1))"
-run_evsub panel status --set "$EV_SUBSET" 2>/dev/null | grep -q 'no leg row recorded' \
+EV_SUBSTAT="$(run_evsub panel status --set "$EV_SUBSET" 2>/dev/null)"
+printf '%s\n' "$EV_SUBSTAT" | grep -q 'no leg row recorded' \
   && ok "status names the leg the current attempt planned and never recorded" || fail "status substituted a stale leg"
 
 # CARRY-FORWARD IS ARTIFACT-BOUND. An explicit --set reused across two different trees, then
@@ -7893,8 +7899,32 @@ EV_ARTOUT2="$(run_evart panel dispatch --to grok --set pinned-set "$EV_ARTREQ" 2
 EV_ARTSET2="$(printf '%s\n' "$EV_ARTOUT2" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
 [ "$EV_ARTSET2" = "$EV_ARTSET" ] \
   && ok "an explicit --set really does collide across artifacts" || fail "the artifact fixture never collided ($EV_ARTSET vs $EV_ARTSET2)"
-run_evart panel status --set "$EV_ARTSET" 2>/dev/null | grep -q 'no leg row recorded' \
+EV_ARTSTAT="$(run_evart panel status --set "$EV_ARTSET" 2>/dev/null)"
+printf '%s\n' "$EV_ARTSTAT" | grep -q 'no leg row recorded' \
   && ok "a leg from a DIFFERENT artifact is never carried into this panel" || fail "a stale-artifact leg was resurrected"
+
+# CARRY-FORWARD REACHES BACKWARD ONLY. With three attempts — A plans both, B re-dispatches
+# codex, C re-dispatches grok — the bound attempt is C, and codex must be answered by B's
+# leg. "Any row that is not the bound one" would have let a NEWER concurrent attempt's leg be
+# adopted as a previous one. (codex, implement r7, blocking.)
+run_evsub panel dispatch --to codex "$EV_SUBREQ" >/dev/null 2>&1 || true
+EV_SUBDB="$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v d="$C_DSP" -v s="$EV_SUBSET" '$c==s && $e=="panel-planned"{print $d}' "$EV_SUB/.comms/events.tsv" | tail -1)"
+run_evsub panel dispatch --to grok "$EV_SUBREQ" >/dev/null 2>&1 || true
+EV_SUBDC="$(awk -F'\t' -v c="$C_SET" -v e="$C_EV" -v d="$C_DSP" -v s="$EV_SUBSET" '$c==s && $e=="panel-planned"{print $d}' "$EV_SUB/.comms/events.tsv" | tail -1)"
+[ -n "$EV_SUBDB" ] && [ -n "$EV_SUBDC" ] && [ "$EV_SUBDB" != "$EV_SUBDC" ] \
+  && ok "three attempts leave three distinct ids in the chain" || fail "the chain fixture did not produce distinct attempts"
+EV_SUBST3="$(run_evsub panel status --set "$EV_SUBSET" 2>/dev/null | tail -n +2)"
+[ "$(printf '%s\n' "$EV_SUBST3" | grep -c .)" = "2" ] \
+  && ok "a chain of subset retries still lists the whole roster" || fail "a chain of retries shrank the panel"
+EV_SUBCODEXMID="$(awk -F'\t' -v s="$EV_SUBSET" -v d="$EV_SUBDB" 'NR>1 && $1==s && $10=="codex" && $14==d {print $2}' "$EV_SUB/.comms/grades/sets.tsv" | tail -1)"
+printf '%s\n' "$EV_SUBST3" | grep -q "^codex" && [ -n "$EV_SUBCODEXMID" ] \
+  && ok "the carried leg comes from an attempt EARLIER in the chain, not a newer one" || fail "carry-forward picked the wrong attempt"
+
+# A plan row with no artifact is INCOHERENT, not permissive: an empty artifact used to mean
+# "carry a row from any tree". (codex, implement r7, blocking.)
+run_evsub events append --kind panel-planned --set ev-noart --dispatch d-noart --agent codex --status planned >/dev/null
+run_evsub panel status --set ev-noart >/dev/null 2>&1 \
+  && fail "a plan with no artifact still bound an attempt" || ok "a plan that names no artifact refuses rather than matching any tree"
 
 # A set id long enough to exceed the events column must be stored IDENTICALLY in sets.tsv
 # and in the log, or the two can never be joined. Querying an id nobody ever wrote proved

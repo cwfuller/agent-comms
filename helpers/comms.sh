@@ -1292,42 +1292,74 @@ findings_set_header() {
 # a panel that never existed. Rows written before this column existed carry an empty value,
 # and an empty current dispatch selects exactly those — legacy sets compose as they always
 # did. (codex, implement r1, blocking.)
+# set_plan_snapshot <set-id> — ONE validated read of the plan events, and the ONLY source of
+# every attempt decision.
+#
+# The bound attempt, the roster it planned, the union it inherits and the artifact it reviews
+# used to come from four separate reads of a file another dispatch can append to between
+# them. A concurrent attempt landing mid-compose could therefore supersede the bound one
+# while carry-forward silently adopted its NEWER leg as a previous one, and any read that
+# failed degraded to an empty value that meant "no roster" or "any artifact" rather than
+# "unknown". One read, one snapshot, and every failure is a refusal. (codex, implement r7.)
+#
+# stdout, one field per line:
+#   dispatch <id>        the attempt to bind
+#   artifact <id>        the artifact that attempt planned against
+#   now <agents...>      planned BY that attempt
+#   union <agents...>    planned by it or by any attempt before it
+#   chain <ids...>       attempt ids up to and including it, in order
+# exit 0 usable | 2 refuse (torn after the plan, unreadable, or incoherent) | 3 no plan
+set_plan_snapshot() {
+  local f; f="$(events_file)"
+  [ -f "$f" ] || return 3
+  EV_Q_SET="$(event_identity "$1" "$EVENT_W_SET")" \
+  awk -F'\t' -v hdr="$EVENTS_HEADER" -v ev_kinds="$EVENT_KINDS" -v ev_roles="$EVENT_ROLES" \
+      "$EVENTS_AWK_LIB"'
+    BEGIN { ev_ncols = split(hdr, H, "\t"); s = ENVIRON["EV_Q_SET"] }
+    $0 == hdr { next }
+    !ev_wellformed() { if (NF) lastbad = NR; next }
+    $3 == "panel-planned" && $4 == s {
+      lastplan = NR
+      if ($5 != last_seen) { chain[++nch] = $5; last_seen = $5 }
+      cur = $5
+      if (!(($5 SUBSEP $8) in seen_ag)) { seen_ag[$5 SUBSEP $8] = 1; ag[$5] = ag[$5] " " $8 }
+      art[$5] = $10
+    }
+    END {
+      if (lastplan == 0) exit 3
+      # A torn row AFTER the plan could BE a newer plan; one before it cannot hide anything.
+      if (lastbad > lastplan) exit 2
+      if (cur == "" || art[cur] == "" || ag[cur] == "") exit 2
+      u = ""
+      for (i = 1; i <= nch; i++) u = u ag[chain[i]]
+      c = ""
+      for (i = 1; i <= nch; i++) c = c " " chain[i]
+      printf "dispatch\t%s\n", cur
+      printf "artifact\t%s\n", art[cur]
+      printf "now\t%s\n", ag[cur]
+      printf "union\t%s\n", u
+      printf "chain\t%s\n", c
+    }' "$f"
+}
+
+# snap_field <snapshot> <name> — one field out of a snapshot, deduplicated.
+snap_field() {
+  printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k {print $2}' \
+    | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' '
+}
+
+# set_current_dispatch <index> <set-id> — the bound attempt, or a refusal. Kept as the name
+# every caller already uses; the decision now comes from the snapshot above.
 set_current_dispatch() {
-  # THE PLAN EVENT IS THE AUTHORITY. `panel-planned` is written once per fan-out, before any
-  # leg goes out, so the last one for a set names the attempt in progress.
-  #
-  # Exit 2 means REFUSE. Scoping matters twice over:
-  #
-  #   * refusing on a malformed row ANYWHERE was wrong, and wrong in a way that bricked this
-  #     very repo: the log still carries rows and a header from an older schema, so one
-  #     schema change made every compose and status refuse forever. What can hide the
-  #     current plan is a torn row AFTER it — that row could BE a newer plan — so that, and
-  #     only that, refuses. (grok, implement r4, blocking; hit live before the reply landed.)
-  #   * a set whose legs name an attempt but whose plan is unreadable or absent still
-  #     refuses, because binding to the last leg row is the guess this design removed.
-  #
-  # Only a set with no attempt anywhere may degrade to the index, which is what a set
-  # recorded before the column existed looks like. (codex, implement r3.)
-  local evf out
-  evf="$(events_file)"
-  if [ -f "$evf" ]; then
-    out="$(awk -F'\t' -v s="$(event_identity "$2" "$EVENT_W_SET")" -v hdr="$EVENTS_HEADER" \
-        -v ev_kinds="$EVENT_KINDS" -v ev_roles="$EVENT_ROLES" "$EVENTS_AWK_LIB"'
-      BEGIN { ev_ncols = split(hdr, H, "\t") }
-      $0 == hdr { next }
-      !ev_wellformed() { if (NF) lastbad = NR; next }
-      $3 == "panel-planned" && $4 == s { lastplan = NR; d = $5 }
-      END {
-        if (lastplan == 0) { print "noplan"; exit 0 }
-        if (lastbad > lastplan) { print "torn"; exit 0 }
-        printf "ok\t%s\n", d
-      }' "$evf" 2>/dev/null)"
-    case "$out" in
-      ok*)   printf '%s\n' "${out#ok	}"; return 0 ;;
-      torn)  emit_diagnostic "panel: the coordinator log has a malformed row AFTER the last panel-planned for '$(clip "$2")' — refusing to bind an attempt that a torn row may supersede"
-             return 2 ;;
-    esac
-  fi
+  local snap rc
+  snap="$(set_plan_snapshot "$2")" && rc=0 || rc=$?
+  case "$rc" in
+    0) printf '%s\n' "$(snap_field "$snap" dispatch | tr -d ' ')"; return 0 ;;
+    2) emit_diagnostic "panel: the coordinator log cannot be trusted about which dispatch attempt of '$(clip "$2")' is current — refusing to guess"
+       return 2 ;;
+  esac
+  # No plan at all: a set recorded before this column existed may still bind, but one whose
+  # legs name an attempt may not — that would be last-row-wins again.
   if awk -F'\t' -v s="$2" 'NR>1 && $1==s && $14!="" {found=1} END {exit !found}' "$1"; then
     emit_diagnostic "panel: '$(clip "$2")' has legs recorded under a dispatch attempt but no panel-planned event to say which is current — refusing to bind (is .comms/events.tsv missing?)"
     return 2
@@ -1335,64 +1367,20 @@ set_current_dispatch() {
   printf '\n'
 }
 
-# set_planned_agents <set-id> <dispatch> — the reviewers this attempt PLANNED, from the plan
-# events themselves. The index says who has a leg row; this says who was promised one, and
-# the gap between them is a dispatch that died mid-fan-out. (codex, implement r5, blocking.)
-set_planned_agents() {
-  # The roster of the CURRENT attempt, plus every agent an EARLIER attempt planned and this
-  # one did not. A panel may grow between attempts; it must never shrink.
-  #
-  # Binding strictly to the last attempt was right for the case it was written for — two
-  # concurrent dispatches of the same roster, where the newer one wins entirely — and wrong
-  # for the one the docs actually recommend: re-dispatching a SINGLE leg that failed to
-  # deliver. That attempt plans one agent, so a last-attempt-only roster silently became a
-  # one-leg panel, the other reviewer vanished from `panel status`, and `compose` gated
-  # without its blocking findings. `main` never did this, so it was a regression, and no
-  # roster gate could catch it: the plan event faithfully recorded the smaller roster.
-  # (self-review, round 6, reproduced against main.)
-  local cur; cur="$(set_plan_agents_of "$1" "$2")" || return 1
-  local prior; prior="$(set_plan_agents_of "$1" "")" || return 1
-  printf '%s\n%s\n' "$cur" "$prior" | awk 'NF && !seen[$0]++'
-}
-
-# set_plan_agents_of <set-id> <dispatch|""> — planned agents of ONE attempt, or of every
-# attempt when the dispatch is empty. Unbounded on purpose: see --all above.
-set_plan_agents_of() {
-  if [ -n "$2" ]; then
-    cmd_events --set "$1" --dispatch "$2" --kind panel-planned --all 2>/dev/null \
-      | awk -F'\t' 'NR>1 && $8 != "" && !seen[$8]++ {print $8}'
-  else
-    cmd_events --set "$1" --kind panel-planned --all 2>/dev/null \
-      | awk -F'\t' 'NR>1 && $8 != "" && !seen[$8]++ {print $8}'
-  fi
-}
-
-# set_attempt_artifact <set-id> <dispatch> — the artifact this attempt planned against.
-set_attempt_artifact() {
-  cmd_events --set "$1" --dispatch "$2" --kind panel-planned --all 2>/dev/null \
-    | awk -F'\t' 'NR>1 && $10 != "" {a=$10} END {print a}'
-}
-
-# set_agent_leg <index> <set-id> <dispatch> <agent> — that reviewer's leg row for THIS
-# attempt if it has one, otherwise its newest row from any earlier attempt. A leg is only
-# superseded by a newer leg FOR THE SAME REVIEWER; it is never dropped because some other
-# reviewer was re-dispatched.
-# set_agent_leg <index> <set-id> <dispatch> <agent> <carry-forward:0|1> <artifact>
+# set_agent_leg <index> <set-id> <dispatch> <agent> <prior-dispatch-ids> <artifact>
 #
-# A reviewer PLANNED BY THE CURRENT ATTEMPT must have a CURRENT-attempt row; substituting an
-# older one there would let a dispatch that crashed after its plan and before that leg's row
-# compose the previous attempt's reply as this attempt's answer. Carry-forward exists only
-# for union members the current attempt did not plan — the subset-retry case — and even then
-# only from a row that reviewed the SAME artifact, or an id reused across artifacts would
-# resurrect a reply to a different tree. (codex, implement r6, blocking x2.)
+# A reviewer planned by the CURRENT attempt must have a CURRENT row. Carry-forward is for
+# union members this attempt did not plan, and only from an attempt EARLIER IN THE CHAIN —
+# "any row that is not the bound one" would happily adopt a NEWER concurrent attempt's leg —
+# and only from a row that reviewed the same artifact. (codex, implement r6 and r7.)
 set_agent_leg() {
-  awk -F'\t' -v s="$2" -v d="$3" -v a="$4" -v carry="$5" -v art="$6" '
+  awk -F'\t' -v s="$2" -v d="$3" -v a="$4" -v prior=" $5 " -v art="$6" '
     NR>1 && $1==s && $10==a {
       row = $10 "\t" $3 "\t" $4 "\t" $2
       if ($14 == d) cur = row
-      else if (carry == 1 && (art == "" || $6 == art)) prev = row
+      else if (prior != "  " && index(prior, " " $14 " ") > 0 && art != "" && $6 == art) prev = row
     }
-    END { print (cur != "" ? cur : (carry == 1 ? prev : "")) }' "$1"
+    END { print (cur != "" ? cur : (prior != "  " ? prev : "")) }' "$1"
 }
 
 # set_legs <index> <set-id> <dispatch> — one line per leg of THAT attempt:
@@ -1591,24 +1579,32 @@ cmd_panel() {
     # never by whatever the newest same-agent same-thread message happens to be. A
     # status that says "answered / APPROVE" off a stale or type:error message is the
     # false all-clear compose exists to refuse. (grok, panel r1.)
-    local status_dispatch one_row pag one_carry
+    local status_dispatch one_row pag one_carry status_prior
     status_dispatch="$(set_current_dispatch "$idx" "$set_id")" \
       || die "panel status: cannot determine which dispatch attempt of '$(clip "$set_id")' is current"
     # Planned legs with no index row are listed too: a leg that vanished from the index is
     # exactly what a recovering driver needs to SEE, not something to omit. (codex, r5.)
     local status_planned
-    status_planned="$(set_planned_agents "$set_id" "$status_dispatch")" \
-      || die "panel status: could not read the planned roster for '$(clip "$set_id")'"
-    local status_now status_art
-    status_now="$(set_plan_agents_of "$set_id" "$status_dispatch")" || status_now=""
-    status_art="$(set_attempt_artifact "$set_id" "$status_dispatch")" || status_art=""
+    local status_snap status_rc status_planned status_now status_art status_chain
+    status_snap="$(set_plan_snapshot "$set_id")" && status_rc=0 || status_rc=$?
+    case "$status_rc" in
+      0) status_planned="$(snap_field "$status_snap" union)"
+         status_now="$(snap_field "$status_snap" now)"
+         status_art="$(snap_field "$status_snap" artifact | tr -d ' ')"
+         status_chain="$(snap_field "$status_snap" chain)"
+         status_dispatch="$(snap_field "$status_snap" dispatch | tr -d ' ')" ;;
+      3) status_planned=""; status_now=""; status_art=""; status_chain="" ;;
+      *) die "panel status: the coordinator log cannot be trusted about the roster of '$(clip "$set_id")'" ;;
+    esac
     { if [ -n "$status_planned" ]; then
         for pag in $status_planned; do
           case " $(printf '%s' "$status_now" | tr '\n' ' ') " in
             *" $pag "*) one_carry=0 ;;
             *)          one_carry=1 ;;
           esac
-          one_row="$(set_agent_leg "$idx" "$set_id" "$status_dispatch" "$pag" "$one_carry" "$status_art")"
+          status_prior=""
+          [ "$one_carry" = 1 ] && status_prior="$(printf '%s' "$status_chain" | sed "s/ *$status_dispatch *\$//")"
+          one_row="$(set_agent_leg "$idx" "$set_id" "$status_dispatch" "$pag" "$status_prior" "$status_art")"
           if [ -n "$one_row" ]; then printf '%s\n' "$one_row"
           else printf '%s\t(no leg row recorded)\t\t\n' "$pag"; fi
         done
@@ -1810,11 +1806,19 @@ cmd_compose() {
   local compose_dispatch
   compose_dispatch="$(set_current_dispatch "$idx" "$set_id")" \
     || die "compose: cannot determine which dispatch attempt of '$(clip "$set_id")' is current — refusing to gate on a guessed roster"
-  local planned_all planned_now compose_art
-  planned_all="$(set_planned_agents "$set_id" "$compose_dispatch")" \
-    || die "compose: could not read the planned roster for '$(clip "$set_id")' — refusing to gate on a roster it cannot enumerate"
-  planned_now="$(set_plan_agents_of "$set_id" "$compose_dispatch")" || planned_now=""
-  compose_art="$(set_attempt_artifact "$set_id" "$compose_dispatch")" || compose_art=""
+  # ONE snapshot, taken once, for every attempt decision below. Deriving them from separate
+  # reads let a concurrent dispatch change the answer between two of them. (codex, r7.)
+  local compose_snap compose_rc planned_all planned_now compose_art compose_chain
+  compose_snap="$(set_plan_snapshot "$set_id")" && compose_rc=0 || compose_rc=$?
+  case "$compose_rc" in
+    0) planned_all="$(snap_field "$compose_snap" union)"
+       planned_now="$(snap_field "$compose_snap" now)"
+       compose_art="$(snap_field "$compose_snap" artifact | tr -d ' ')"
+       compose_chain="$(snap_field "$compose_snap" chain)"
+       compose_dispatch="$(snap_field "$compose_snap" dispatch | tr -d ' ')" ;;
+    3) planned_all=""; planned_now=""; compose_art=""; compose_chain="" ;;
+    *) die "compose: the coordinator log cannot be trusted about the roster of '$(clip "$set_id")' — refusing to gate on a roster it cannot enumerate" ;;
+  esac
   local legs=""
   if [ -n "$planned_all" ]; then
     local one_ag one_row one_carry
@@ -1825,7 +1829,10 @@ cmd_compose() {
         *" $one_ag "*) one_carry=0 ;;
         *)             one_carry=1 ;;
       esac
-      one_row="$(set_agent_leg "$idx" "$set_id" "$compose_dispatch" "$one_ag" "$one_carry" "$compose_art")"
+      # prior attempts only: the chain minus the bound attempt itself.
+      local compose_prior=""
+      [ "$one_carry" = 1 ] && compose_prior="$(printf '%s' "$compose_chain" | sed "s/ *$compose_dispatch *\$//")"
+      one_row="$(set_agent_leg "$idx" "$set_id" "$compose_dispatch" "$one_ag" "$compose_prior" "$compose_art")"
       [ -n "$one_row" ] && legs="${legs:+$legs
 }$one_row"
     done
@@ -1994,6 +2001,20 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   rm -f "$tmp"
   # Composition is the last coordinator act of a round, so it closes the trace the roster
   # event opened: a set with a panel-planned and no composition-* is a round nobody gated.
+  # A newer attempt may have landed while this composition was being built. Recording a
+  # completion for a superseded attempt would gate a panel that no longer exists.
+  # (codex, implement r7, blocking.)
+  local recheck_snap recheck_rc recheck_disp
+  recheck_snap="$(set_plan_snapshot "$set_id")" && recheck_rc=0 || recheck_rc=$?
+  recheck_disp=""
+  [ "$recheck_rc" = 0 ] && recheck_disp="$(snap_field "$recheck_snap" dispatch | tr -d ' ')"
+  if [ "$recheck_rc" != 3 ] && [ "$recheck_disp" != "$compose_dispatch" ]; then
+    echo "compose: a newer dispatch attempt (${recheck_disp:-unreadable}) superseded the one this composition was built from (${compose_dispatch}) — refusing to record it"
+    cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" \
+      --status superseded --note "bound=$compose_dispatch current=${recheck_disp:-unreadable}" \
+      || echo "warning: coordinator log not updated (composition-refused)" >&2
+    return 3
+  fi
   cmd_events append --kind composition-completed --set "$set_id" --dispatch "$compose_dispatch" --status composed \
     --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0}" \
     || echo "warning: coordinator log not updated (composition-completed)" >&2
