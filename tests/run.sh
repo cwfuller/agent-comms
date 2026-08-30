@@ -7764,6 +7764,15 @@ run_evrf compose --set "$EV_RFSET" >/dev/null 2>&1 \
 rm -f "$EV_RF/.comms/events.tsv"
 run_evrf panel status --set "$EV_RFSET" >/dev/null 2>&1 \
   && fail "a missing log fell back to last-row-wins" || ok "a missing log with attempts recorded refuses, never falls back"
+# A VANISHED PLAN IS UNKNOWN, NOT LEGACY. Legacy-ness is settled from the index: a set whose
+# legs name an attempt can never fall back to "no plan means no roster", or a lost log would
+# clear the roster and let compose gate from partial index rows. (codex, implement r8.)
+cp "$EV_RF/.comms/events.tsv" "$WORK/rf-events-keep.tsv" 2>/dev/null || :
+rm -f "$EV_RF/.comms/events.tsv"
+run_evrf compose --set "$EV_RFSET" >/dev/null 2>&1 \
+  && fail "a vanished plan composed from index rows alone" || ok "a vanished plan is UNKNOWN, never legacy"
+cp "$WORK/rf-events-keep.tsv" "$EV_RF/.comms/events.tsv" 2>/dev/null || :
+
 printf 'legacy-set\tlm-1\tlegacy-codex\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-08-29T10:00:00Z\n' >> "$EV_RF/.comms/grades/sets.tsv"
 [ "$(run_evrf panel status --set legacy-set 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] \
   && ok "a set recorded before attempts existed still binds" || fail "a legacy set stopped binding"
@@ -7821,6 +7830,17 @@ run_evcr events --set "$EV_CRSET" --kind composition-refused 2>/dev/null | tail 
   && ok "the roster refusal is recorded, not just printed" || fail "roster refusal not recorded"
 [ "$(run_evcr panel status --set "$EV_CRSET" 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] \
   && ok "status still lists a planned leg whose index row vanished" || fail "status hid the missing leg"
+# NOTHING IS PUBLISHED BEFORE IT IS VERIFIED. The supersession check runs after the
+# composition is built, so publishing as it was built put an authoritative-looking
+# "all answered" document on stdout and permanently into --out before anything had
+# confirmed the attempt was still current. (codex, implement r8, blocking.)
+rm -f "$WORK/cr-out.md"
+EV_CROUT2="$(run_evcr compose --set "$EV_CRSET" --out "$WORK/cr-out.md" 2>&1 || true)"
+[ ! -s "$WORK/cr-out.md" ] \
+  && ok "a refused composition writes nothing to --out" || fail "a refused composition left a document behind"
+printf '%s\n' "$EV_CROUT2" | grep -q 'all answered' \
+  && fail "a refused composition still printed a panel" || ok "a refused composition prints only its refusal"
+
 EV_CRSTAT="$(run_evcr panel status --set "$EV_CRSET" 2>/dev/null)"
 printf '%s\n' "$EV_CRSTAT" | grep -q 'no leg row recorded' \
   && ok "the missing leg is named as missing, not silently unanswered" || fail "the missing leg was not named"

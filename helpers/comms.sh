@@ -1342,6 +1342,15 @@ set_plan_snapshot() {
     }' "$f"
 }
 
+# set_index_has_attempts <index> <set-id> — 0 when any leg row of that set names a dispatch
+# attempt. Legacy-ness is a property of the INDEX and is settled ONCE: for a set whose legs
+# name an attempt, a plan that has gone missing is UNKNOWN, never absent. Reading a later
+# empty snapshot as "legacy" let a vanished log clear the roster and compose straight from
+# partial index rows. (codex, implement r8, blocking.)
+set_index_has_attempts() {
+  awk -F'\t' -v s="$2" 'NR>1 && $1==s && $14!="" {f=1} END {exit !f}' "$1"
+}
+
 # snap_field <snapshot> <name> — one field out of a snapshot, deduplicated.
 snap_field() {
   printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k {print $2}' \
@@ -1593,7 +1602,9 @@ cmd_panel() {
          status_art="$(snap_field "$status_snap" artifact | tr -d ' ')"
          status_chain="$(snap_field "$status_snap" chain)"
          status_dispatch="$(snap_field "$status_snap" dispatch | tr -d ' ')" ;;
-      3) status_planned=""; status_now=""; status_art=""; status_chain="" ;;
+      3) set_index_has_attempts "$idx" "$set_id" \
+           && die "panel status: '$(clip "$set_id")' has legs under a dispatch attempt but no readable plan — that is UNKNOWN, not legacy"
+         status_planned=""; status_now=""; status_art=""; status_chain="" ;;
       *) die "panel status: the coordinator log cannot be trusted about the roster of '$(clip "$set_id")'" ;;
     esac
     { if [ -n "$status_planned" ]; then
@@ -1816,7 +1827,9 @@ cmd_compose() {
        compose_art="$(snap_field "$compose_snap" artifact | tr -d ' ')"
        compose_chain="$(snap_field "$compose_snap" chain)"
        compose_dispatch="$(snap_field "$compose_snap" dispatch | tr -d ' ')" ;;
-    3) planned_all=""; planned_now=""; compose_art=""; compose_chain="" ;;
+    3) set_index_has_attempts "$idx" "$set_id" \
+         && die "compose: '$(clip "$set_id")' has legs recorded under a dispatch attempt but no readable plan — that is UNKNOWN, not legacy; refusing to gate from index rows alone"
+       planned_all=""; planned_now=""; compose_art=""; compose_chain="" ;;
     *) die "compose: the coordinator log cannot be trusted about the roster of '$(clip "$set_id")' — refusing to gate on a roster it cannot enumerate" ;;
   esac
   local legs=""
@@ -1965,6 +1978,8 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   # Cluster on the anchor ONLY, and only exact matches. Two findings on one anchor may
   # still assert different things, so every source line is retained and printed.
   local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/agent-comms-compose.XXXXXX")"
+  local compose_buf; compose_buf="$(mktemp "${TMPDIR:-/tmp}/agent-comms-composed.XXXXXX")" \
+    || die "compose: cannot buffer the composition — refusing to publish one that was never verified"
   printf '%s\n' "$rows" | awk -F'\t' 'NF>5 && $15 != ""' > "$tmp"
   local total blocking corroborated unique
   total="$(grep -c . "$tmp" || true)"
@@ -1996,7 +2011,12 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
     # composition even with every leg answered. Plain cat IS stdout; a file
     # target gets a real redirect. (codex, stamped-authorities round 3 —
     # pre-existing, advisory.)
-    if [ -n "$out" ]; then cat > "$out"; else cat; fi
+    # BUFFERED, never published yet. The supersession check below runs after the composition
+    # is built, so writing it here put an authoritative-looking "all answered" document on
+    # stdout — and permanently into --out — before anything had verified the attempt was
+    # still current. The guard existed and protected nothing observable.
+    # (codex, implement r8, blocking.)
+    cat > "$compose_buf"
   }
   rm -f "$tmp"
   # Composition is the last coordinator act of a round, so it closes the trace the roster
@@ -2005,16 +2025,30 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   # completion for a superseded attempt would gate a panel that no longer exists.
   # (codex, implement r7, blocking.)
   local recheck_snap recheck_rc recheck_disp
+  # Nothing below may publish until the recheck passes.
   recheck_snap="$(set_plan_snapshot "$set_id")" && recheck_rc=0 || recheck_rc=$?
   recheck_disp=""
   [ "$recheck_rc" = 0 ] && recheck_disp="$(snap_field "$recheck_snap" dispatch | tr -d ' ')"
-  if [ "$recheck_rc" != 3 ] && [ "$recheck_disp" != "$compose_dispatch" ]; then
-    echo "compose: a newer dispatch attempt (${recheck_disp:-unreadable}) superseded the one this composition was built from (${compose_dispatch}) — refusing to record it"
+  # A plan that has VANISHED since the first read is not "no plan" — it is a plan this
+  # process can no longer verify, and exempting it let a composition complete over it.
+  # Once an attempt was bound, only the SAME attempt still being current may publish.
+  local recheck_bad=0
+  if [ "$compose_rc" = 0 ]; then
+    [ "$recheck_rc" = 0 ] && [ "$recheck_disp" = "$compose_dispatch" ] || recheck_bad=1
+  else
+    [ "$recheck_rc" = 3 ] || recheck_bad=1
+  fi
+  if [ "$recheck_bad" = 1 ]; then
+    echo "compose: the attempt this composition was built from (${compose_dispatch:-legacy}) is no longer the current one (${recheck_disp:-unreadable}) — refusing to publish or record it"
     cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" \
-      --status superseded --note "bound=$compose_dispatch current=${recheck_disp:-unreadable}" \
+      --status superseded --note "bound=${compose_dispatch:-legacy} current=${recheck_disp:-unreadable}" \
       || echo "warning: coordinator log not updated (composition-refused)" >&2
+    rm -f "$compose_buf" 2>/dev/null || true
     return 3
   fi
+  # Still current: publish, THEN record.
+  if [ -n "$out" ]; then cat "$compose_buf" > "$out"; else cat "$compose_buf"; fi
+  rm -f "$compose_buf" 2>/dev/null || true
   cmd_events append --kind composition-completed --set "$set_id" --dispatch "$compose_dispatch" --status composed \
     --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0}" \
     || echo "warning: coordinator log not updated (composition-completed)" >&2
