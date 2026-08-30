@@ -1277,6 +1277,17 @@ $(findings_rebuild_shadow_rows "$root")"
 # re-running anything or touching the loop.
 findings_set_index() { printf '%s/.comms/grades/sets.tsv' "$1"; }
 
+# set_attempts_marker <index> <set-id> — the durable per-set record that this set was
+# dispatched by a build that plans ATTEMPTS. `panel dispatch` creates it before the first
+# plan event, so it outlives the two failures that made the index alone unreliable: a
+# driver that dies between planning and its first leg row, and a coordinator log that has
+# gone unreadable. Absence of an attempt-bearing leg row cannot prove no modern plan
+# existed — it is equally the signature of a plan that crashed early — and reading it as
+# proof composes the PREVIOUS round's bound replies while silently discarding the newer
+# attempt. The marker is the proof; the index rows are only corroboration.
+# (codex, implement r9, blocking.)
+set_attempts_marker() { printf '%s/attempts/%s\n' "$(dirname "$1")" "$(safe_name "$2")"; }
+
 # ONE definition of the index header. It was written out twice — `panel dispatch` and
 # `shadow` — which is a column-drift waiting to happen the moment either grows a field.
 findings_set_header() {
@@ -1342,12 +1353,16 @@ set_plan_snapshot() {
     }' "$f"
 }
 
-# set_index_has_attempts <index> <set-id> — 0 when any leg row of that set names a dispatch
-# attempt. Legacy-ness is a property of the INDEX and is settled ONCE: for a set whose legs
-# name an attempt, a plan that has gone missing is UNKNOWN, never absent. Reading a later
-# empty snapshot as "legacy" let a vanished log clear the roster and compose straight from
-# partial index rows. (codex, implement r8, blocking.)
+# set_index_has_attempts <index> <set-id> — 0 when this set was dispatched under the
+# attempts scheme. Legacy-ness is settled ONCE: for such a set, a plan that has gone
+# missing is UNKNOWN, never absent. Reading a later empty snapshot as "legacy" let a
+# vanished log clear the roster and compose straight from partial index rows.
+# (codex, implement r8, blocking.) The MARKER answers first and the leg rows only
+# corroborate, because a modern attempt that crashed between its plan and its first leg
+# row leaves an index carrying nothing but legacy-shaped rows — proof of nothing.
+# (codex, implement r9, blocking.)
 set_index_has_attempts() {
+  [ -f "$(set_attempts_marker "$1" "$2")" ] && return 0
   awk -F'\t' -v s="$2" 'NR>1 && $1==s && $14!="" {f=1} END {exit !f}' "$1"
 }
 
@@ -1367,10 +1382,14 @@ set_current_dispatch() {
     2) emit_diagnostic "panel: the coordinator log cannot be trusted about which dispatch attempt of '$(clip "$2")' is current — refusing to guess"
        return 2 ;;
   esac
-  # No plan at all: a set recorded before this column existed may still bind, but one whose
-  # legs name an attempt may not — that would be last-row-wins again.
-  if awk -F'\t' -v s="$2" 'NR>1 && $1==s && $14!="" {found=1} END {exit !found}' "$1"; then
-    emit_diagnostic "panel: '$(clip "$2")' has legs recorded under a dispatch attempt but no panel-planned event to say which is current — refusing to bind (is .comms/events.tsv missing?)"
+  # No plan at all: a set recorded before this column existed may still bind, but one
+  # dispatched under a recorded attempt may not — that would be last-row-wins again.
+  # THROUGH THE ACCESSOR, never a private copy of its rule: this site carried its own inline
+  # index scan, so the marker would have settled legacy-ness for two readers and left the
+  # third — the one every caller goes through for the bound attempt — deciding it the old,
+  # crash-blind way. (codex, implement r9.)
+  if set_index_has_attempts "$1" "$2"; then
+    emit_diagnostic "panel: '$(clip "$2")' was dispatched under a recorded attempt but no panel-planned event says which is current — refusing to bind (is .comms/events.tsv missing?)"
     return 2
   fi
   printf '\n'
@@ -1603,7 +1622,7 @@ cmd_panel() {
          status_chain="$(snap_field "$status_snap" chain)"
          status_dispatch="$(snap_field "$status_snap" dispatch | tr -d ' ')" ;;
       3) set_index_has_attempts "$idx" "$set_id" \
-           && die "panel status: '$(clip "$set_id")' has legs under a dispatch attempt but no readable plan — that is UNKNOWN, not legacy"
+           && die "panel status: '$(clip "$set_id")' was dispatched under a recorded attempt but has no readable plan — that is UNKNOWN, not legacy"
          status_planned=""; status_now=""; status_art=""; status_chain="" ;;
       *) die "panel status: the coordinator log cannot be trusted about the roster of '$(clip "$set_id")'" ;;
     esac
@@ -1700,6 +1719,15 @@ cmd_panel() {
   # belongs to, and the legs carry it on the wire so the runner and the broker can stamp it
   # too. (codex, plan r2, blocking.)
   dispatch_id="d-$(date -u +%Y%m%dT%H%M%S)-$$-${RANDOM}"
+  # STAKED BEFORE ANY OTHER DURABLE TRACE OF THIS ATTEMPT — before the plan events, before
+  # the legs, before the index rows. Every one of those can be missing after a crash or an
+  # unreadable log; this cannot, and it is what lets a reader tell "genuinely legacy" from
+  # "a modern attempt that died young". Refusing here is right: a set that cannot record
+  # what scheme it was dispatched under is a set a later compose may misclassify.
+  local attempts_marker; attempts_marker="$(set_attempts_marker "$idx" "$set_id")"
+  mkdir -p "$(dirname "$attempts_marker")" 2>/dev/null || true
+  : >> "$attempts_marker" \
+    || die "panel dispatch: could not record that '$(clip "$set_id")' plans dispatch attempts — refusing to fan out a panel a later reader could mistake for legacy"
   # THE EXPECTED ROSTER, PERSISTED BEFORE ANY LEG GOES OUT. Legs are sent sequentially, so
   # a crash after leg 1 of 2 leaves a history that is otherwise indistinguishable from a
   # legitimate one-leg panel — and `compose` would gate on that roster believing it was
@@ -1828,7 +1856,7 @@ cmd_compose() {
        compose_chain="$(snap_field "$compose_snap" chain)"
        compose_dispatch="$(snap_field "$compose_snap" dispatch | tr -d ' ')" ;;
     3) set_index_has_attempts "$idx" "$set_id" \
-         && die "compose: '$(clip "$set_id")' has legs recorded under a dispatch attempt but no readable plan — that is UNKNOWN, not legacy; refusing to gate from index rows alone"
+         && die "compose: '$(clip "$set_id")' was dispatched under a recorded attempt but has no readable plan — that is UNKNOWN, not legacy; refusing to gate from index rows alone"
        planned_all=""; planned_now=""; compose_art=""; compose_chain="" ;;
     *) die "compose: the coordinator log cannot be trusted about the roster of '$(clip "$set_id")' — refusing to gate on a roster it cannot enumerate" ;;
   esac

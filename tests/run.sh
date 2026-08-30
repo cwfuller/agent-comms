@@ -7773,6 +7773,44 @@ run_evrf compose --set "$EV_RFSET" >/dev/null 2>&1 \
   && fail "a vanished plan composed from index rows alone" || ok "a vanished plan is UNKNOWN, never legacy"
 cp "$WORK/rf-events-keep.tsv" "$EV_RF/.comms/events.tsv" 2>/dev/null || :
 
+# ...AND THE INDEX ROWS ARE NOT WHAT SETTLES IT. A modern attempt that crashes between its
+# plan and its first leg row leaves an index holding nothing but legacy-shaped rows, which
+# reads exactly like a set dispatched before attempts existed — so both readers would call
+# it legacy and compose the PREVIOUS round's bound replies, silently discarding the newer
+# attempt. `panel dispatch` therefore stakes a durable marker before anything else it
+# writes, and that marker, not the absence of an attempt-bearing row, is the proof.
+# (codex, implement r9, blocking.)
+[ -f "$EV_RF/.comms/grades/attempts/$EV_RFSET" ] \
+  && ok "a dispatch stakes a durable attempts marker" || fail "no attempts marker was staked for $EV_RFSET"
+cp "$EV_RF/.comms/grades/sets.tsv" "$WORK/rf-sets-keep.tsv"
+# The crash: the plan is staked, then nothing else lands. Only legacy-shaped rows remain.
+awk -F'\t' -v s="$EV_RFSET" 'NR==1 || $1!=s' "$WORK/rf-sets-keep.tsv" > "$EV_RF/.comms/grades/sets.tsv"
+printf '%s\tcrash-1\trf-th-codex\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-08-29T11:00:00Z\n' \
+  "$EV_RFSET" >> "$EV_RF/.comms/grades/sets.tsv"
+rm -f "$EV_RF/.comms/events.tsv"
+EV_CRASHED="$(run_evrf compose --set "$EV_RFSET" 2>&1 || true)"
+printf '%s\n' "$EV_CRASHED" | grep -q 'dispatched under a recorded attempt' \
+  && ok "compose calls a crashed modern attempt UNKNOWN, not legacy" || fail "compose read a crashed attempt as legacy ($EV_CRASHED)"
+EV_CRASHST="$(run_evrf panel status --set "$EV_RFSET" 2>&1 || true)"
+printf '%s\n' "$EV_CRASHST" | grep -q 'dispatched under a recorded attempt' \
+  && ok "panel status calls a crashed modern attempt UNKNOWN, not legacy" || fail "panel status read a crashed attempt as legacy ($EV_CRASHST)"
+# THE CONTROL, and the defect itself. Remove ONLY the marker and the very same index
+# reads as legacy: compose invents a one-leg roster out of the leftover legacy row and
+# gates on it, when the attempt that actually ran planned two. Nothing else about the
+# fixture changes, so the assertions above cannot be passing on some unrelated guard.
+command mv -f "$EV_RF/.comms/grades/attempts/$EV_RFSET" "$WORK/rf-marker-keep"
+EV_NOMARK="$(run_evrf compose --set "$EV_RFSET" 2>&1 || true)"
+if printf '%s\n' "$EV_NOMARK" | grep -q 'dispatched under a recorded attempt'; then
+  fail "the index rows, not the marker, were settling legacy-ness"
+elif printf '%s\n' "$EV_NOMARK" | grep -q '0 of 1 legs'; then
+  ok "the marker, not the index rows, is what settles legacy-ness"
+else
+  fail "the no-marker control did not reproduce the legacy misread ($EV_NOMARK)"
+fi
+command mv -f "$WORK/rf-marker-keep" "$EV_RF/.comms/grades/attempts/$EV_RFSET"
+command cp -f "$WORK/rf-sets-keep.tsv" "$EV_RF/.comms/grades/sets.tsv"
+cp "$WORK/rf-events-keep.tsv" "$EV_RF/.comms/events.tsv" 2>/dev/null || :
+
 printf 'legacy-set\tlm-1\tlegacy-codex\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-08-29T10:00:00Z\n' >> "$EV_RF/.comms/grades/sets.tsv"
 [ "$(run_evrf panel status --set legacy-set 2>/dev/null | tail -n +2 | grep -c .)" = "1" ] \
   && ok "a set recorded before attempts existed still binds" || fail "a legacy set stopped binding"

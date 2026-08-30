@@ -265,6 +265,18 @@ plan event is written once per fan-out, before any leg goes out, so it is the on
 which roster is in progress. A dispatch preserves earlier attempts' index rows rather than
 replacing them, and readers filter.
 
+Sets recorded before attempts existed have no plan event and still bind the old way, from
+their index rows — so every reader needs a way to tell "no attempt was ever planned" from
+"an attempt was planned and its record is gone". The index cannot answer that: an attempt
+that dies between its plan and its first leg row leaves rows shaped exactly like a legacy
+set's, and reading them as legacy composes the PREVIOUS round's bound replies while
+silently discarding the newer attempt. So `panel dispatch` stakes an empty marker file at
+`.comms/grades/attempts/<review_set_id>` before anything else it writes — before the plan
+events, before the legs, before the index rows. **The marker, not the shape of the index
+rows, is what settles whether a set is legacy.** Its absence means no attempt was ever
+planned here; its presence with no readable plan means UNKNOWN, and every reader refuses
+rather than degrading to the legacy path.
+
 `dispatch` is the ATTEMPT id, and it is what makes a retry readable. A `review_set` id is
 deterministic — same thread, phase, round and artifact produce the same one — and a retry
 deliberately rebinds the set's rows, so two concurrent attempts would otherwise interleave
