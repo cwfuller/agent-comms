@@ -3005,6 +3005,12 @@ DUPFROM="$WORK/dupfrom.md"
 printf -- '---\ntype: review-feedback\nfrom: codex\nfrom: grok\ntimestamp: 2026-08-20T14:00:00Z\nverdict: APPROVE\n---\n\nbody\n' > "$DUPFROM"
 GOT3="$(eval "${EXTRACT_LINE/\"<message file>\"/\"$DUPFROM\"}"; printf '%s' "$REVIEWER")"
 [ "$GOT3" = "codex" ] && ok "duplicate from: routes to the FIRST (validated) sender" || fail "duplicate-from agreement (got: $GOT3)"
+# Attempts are preserved in sets.tsv now, so a set dispatched twice has several rows per
+# reviewer. The template derived the next round's roster from every row, producing
+# `codex,grok,grok` — and `panel dispatch` refuses a duplicate reviewer, so the shipped
+# template broke on any set that had been retried. (self-review, round 6.)
+grep -q 'seen\[\$(10)\]++' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "the reader derives each reviewer once, however many attempts a set has" || fail "template roster can repeat a reviewer"
 grep -qF 'send --to "$REVIEWER" "<your reply file>"' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "reader continuations send to the derived reviewer" || fail "reader continuation target"
 
@@ -7530,6 +7536,9 @@ fi
 run_ev events --set ev-race --limit 1 2>/dev/null | tail -1 | grep -q 'racer-' && ok "--limit applies AFTER the filter, never as a global tail" || fail "--limit filter ordering"
 run_ev events --set ev-race 2>/dev/null | head -1 | grep -q '^ts' && ok "a filtered read still prints the header" || fail "filtered header"
 check_not "--limit rejects a non-numeric budget" run_ev events --limit nine
+# The set id is bounded at its SOURCE, so sets.tsv and the log hold the same bytes and the
+# bare listing can join them. Unbounded, a long id was stored raw in one and encoded in the
+# other, and the listing reported zero legs for a valid set. (codex + grok, implement r5.)
 # Identity columns are exact-match join keys. A plain clip breaks the join SILENTLY: the row
 # is written, and then nothing can ever find it again. Writer and reader share one transform
 # — a readable head plus a digest of the whole. (codex, implement r4, blocking.)
@@ -7656,10 +7665,14 @@ ev_idx_row() { # <mid> <thread> <agent> <dispatch>
 # Both attempts PLANNED, A first, then their legs interleaved — the shape a pair of
 # concurrent dispatches leaves behind. The index's last row belongs to attempt A; the last
 # PLAN is B's, and B is what a reader must bind to. (codex, implement r2/r3.)
-run_ev events append --kind panel-planned --set ev-mixed --dispatch d-attempt-a --agent codex \
-  --status planned --note "roster=codex,grok legs=2" >/dev/null
-run_ev events append --kind panel-planned --set ev-mixed --dispatch d-attempt-b --agent codex \
-  --status planned --note "roster=codex,grok legs=2" >/dev/null
+for ev_mix_ag in codex grok; do
+  run_ev events append --kind panel-planned --set ev-mixed --dispatch d-attempt-a --agent "$ev_mix_ag" \
+    --status planned --note "roster=codex,grok legs=2" >/dev/null
+done
+for ev_mix_ag in codex grok; do
+  run_ev events append --kind panel-planned --set ev-mixed --dispatch d-attempt-b --agent "$ev_mix_ag" \
+    --status planned --note "roster=codex,grok legs=2" >/dev/null
+done
 ev_idx_row mixed-a-codex ev-mixed-a-codex codex d-attempt-a
 ev_idx_row mixed-b-codex ev-mixed-b-codex codex d-attempt-b
 ev_idx_row mixed-b-grok  ev-mixed-b-grok  grok  d-attempt-b
@@ -7668,7 +7681,7 @@ EV_MIXED="$(run_ev panel status --set ev-mixed 2>/dev/null | tail -n +2)"
 [ "$(printf '%s\n' "$EV_MIXED" | grep -c .)" = "2" ] \
   && ok "status reports the legs of ONE attempt, not the mixture of two" || fail "status mixed two attempts (got: $(printf '%s' "$EV_MIXED" | tr '\n' '|'))"
 printf '%s\n' "$EV_MIXED" | grep -q 'ev-mixed-b-' && ! printf '%s\n' "$EV_MIXED" | grep -q 'ev-mixed-a-' \
-  && ok "the attempt it binds to is the one the last PLAN named, not the last row" || fail "status bound to the wrong attempt"
+  && ok "each reviewer contributes its row from the attempt the last PLAN named" || fail "status bound to the wrong attempt (got: $(printf '%s' "$EV_MIXED" | tr '\n' '|'))"
 EV_MIXCOMP="$(run_ev compose --set ev-mixed 2>&1 || true)"
 printf '%s\n' "$EV_MIXCOMP" | grep -q 'of 2 legs' \
   && ok "compose gates on one attempt's roster, never on both" || fail "compose counted both attempts (got: $(printf '%s' "$EV_MIXCOMP" | head -1))"
@@ -7750,10 +7763,105 @@ run_evrf panel status --set "$EV_RFSET" >/dev/null 2>&1 \
 cp "$WORK/rf-events-clean.tsv" "$EV_RF/.comms/events.tsv"
 # The bare listing keeps its pinned header and counts the CURRENT attempt.
 run_evrf panel dispatch --to codex,grok "$EV_RFREQ" >/dev/null 2>&1 || true
-run_evrf panel status 2>/dev/null | head -1 | grep -q 'legs' \
-  && ok "the bare listing keeps its pinned header" || fail "bare listing header changed"
+EV_RFHDR="$(run_evrf panel status 2>/dev/null)"
+[ "$(printf '%s\n' "$EV_RFHDR" | sed -n 1p)" = "$(printf 'set\tphase\tround\tlegs\tcreated')" ] \
+  && ok "the bare listing keeps its pinned header, first" || fail "bare listing header changed (got: $(printf '%s' "$EV_RFHDR" | sed -n 1p))"
 [ "$(run_evrf panel status 2>/dev/null | awk -F'\t' -v s="$EV_RFSET" '$1==s{print $4}')" = "2" ] \
   && ok "the bare listing counts the current attempt, not every attempt ever recorded" || fail "bare listing counted historical rows"
+
+# THE ROSTER IS ENFORCED, not merely recorded. A dispatch that dies between two leg rows
+# leaves the index one leg short, and counting index rows alone made that compose as a
+# complete one-leg panel — the very hole the plan event was added to close. Deleting a leg
+# row is exactly what that crash leaves behind. (codex, implement r5, blocking.)
+EV_CRASH="$WORK/events-crash"; mkdir -p "$EV_CRASH"; EV_CRASH="$(cd "$EV_CRASH" && pwd -P)"
+git -C "$EV_CRASH" init -q -b main
+printf '.comms/\n' > "$EV_CRASH/.gitignore"; echo s > "$EV_CRASH/s.txt"
+git -C "$EV_CRASH" add -A >/dev/null 2>&1
+git -C "$EV_CRASH" -c user.email=t@t -c user.name=t commit -q -m init
+mkdir -p "$EV_CRASH/.comms/to-codex" "$EV_CRASH/.comms/to-grok" "$EV_CRASH/.comms/to-claude" "$EV_CRASH/.comms/archive" "$EV_CRASH/.comms/grades"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV_CRASH/.comms/config"
+run_evcr() { (cd "$EV_CRASH" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+EV_CRREQ="$EV_CRASH/.comms/to-codex/$(basename "$EV_CRASH")_2026-08-29T09-00-00_cr.md"
+printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:00:00Z\nworkspace: %s\nmessage_id: cr-1\nthread: cr-th\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV_CRASH")" > "$EV_CRREQ"
+EV_CROUT="$(run_evcr panel dispatch --to codex,grok "$EV_CRREQ" 2>&1 || true)"
+EV_CRSET="$(printf '%s\n' "$EV_CROUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ "$(run_evcr events --set "$EV_CRSET" --kind panel-planned 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] \
+  && ok "the roster is recorded as one plan row per planned reviewer" || fail "the roster is not machine-readable"
+# Simulate the crash: drop grok's leg row from the index, as a death between appends would.
+EV_CRIDX="$EV_CRASH/.comms/grades/sets.tsv"
+awk -F'\t' 'NR==1 || !($10=="grok")' "$EV_CRIDX" > "$EV_CRIDX.tmp" && mv "$EV_CRIDX.tmp" "$EV_CRIDX"
+EV_CRCOMP="$(run_evcr compose --set "$EV_CRSET" 2>&1 || true)"
+printf '%s\n' "$EV_CRCOMP" | grep -q 'never finished recording' \
+  && ok "compose refuses a roster the dispatch never finished recording" || fail "a truncated roster composed (got: $(printf '%s' "$EV_CRCOMP" | head -1))"
+# Not `grep '1 of 1'` — compose cannot emit that string, so the assertion passed with the
+# roster gate deleted. What must be true is that the truncated panel never reports a quorum
+# and never records a completion. (self-review, round 6: vacuous fixture.)
+printf '%s\n' "$EV_CRCOMP" | grep -q 'all answered' && fail "a truncated roster reported a quorum" || ok "a truncated roster never reports itself answered"
+printf '%s\n' "$EV_CRCOMP" | grep -q 'grok' \
+  && ok "the refusal names the reviewer whose leg row is missing" || fail "the refusal does not name the missing reviewer"
+run_evcr events --set "$EV_CRSET" --kind composition-completed 2>/dev/null | tail -n +2 | grep -q . \
+  && fail "a truncated roster recorded a completed composition" || ok "no composition is recorded for a roster that never completed"
+run_evcr events --set "$EV_CRSET" --kind composition-refused 2>/dev/null | tail -n +2 | grep -q 'roster-incomplete' \
+  && ok "the roster refusal is recorded, not just printed" || fail "roster refusal not recorded"
+[ "$(run_evcr panel status --set "$EV_CRSET" 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] \
+  && ok "status still lists a planned leg whose index row vanished" || fail "status hid the missing leg"
+run_evcr panel status --set "$EV_CRSET" 2>/dev/null | grep -q 'no leg row recorded' \
+  && ok "the missing leg is named as missing, not silently unanswered" || fail "the missing leg was not named"
+# Captured, not piped into `head`: the suite runs with pipefail, so a producer killed by
+# SIGPIPE fails the assertion even when the grep matched. The property under test is "the
+# header is line 1", which a capture states directly. (self-review follow-up, round 6.)
+EV_CRHDR="$(run_evcr panel status --set "$EV_CRSET" 2>/dev/null)"
+[ "$(printf '%s\n' "$EV_CRHDR" | sed -n 1p | cut -f1)" = "reviewer" ] \
+  && ok "panel status --set prints its header first" || fail "status header ordering (line 1 was: $(printf '%s' "$EV_CRHDR" | sed -n 1p))"
+
+# A SUBSET RE-DISPATCH MUST NOT SHRINK THE PANEL. Retrying one leg that failed to deliver is
+# the remedy PROTOCOL recommends, and it plans a one-agent roster — so binding strictly to
+# the last attempt silently dropped the other reviewer, hid it from `panel status`, and let
+# `compose` gate without its findings. `main` never did this; the arc introduced it.
+# (self-review, round 6, reproduced side by side against main.)
+EV_SUB="$WORK/events-subset"; mkdir -p "$EV_SUB"; EV_SUB="$(cd "$EV_SUB" && pwd -P)"
+git -C "$EV_SUB" init -q -b main
+printf '.comms/\n' > "$EV_SUB/.gitignore"; echo s > "$EV_SUB/s.txt"
+git -C "$EV_SUB" add -A >/dev/null 2>&1
+git -C "$EV_SUB" -c user.email=t@t -c user.name=t commit -q -m init
+mkdir -p "$EV_SUB/.comms/to-codex" "$EV_SUB/.comms/to-grok" "$EV_SUB/.comms/to-claude" "$EV_SUB/.comms/archive" "$EV_SUB/.comms/grades"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV_SUB/.comms/config"
+run_evsub() { (cd "$EV_SUB" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+EV_SUBREQ="$EV_SUB/.comms/to-codex/$(basename "$EV_SUB")_2026-08-29T09-00-00_sub.md"
+printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:00:00Z\nworkspace: %s\nmessage_id: sub-1\nthread: sub-th\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV_SUB")" > "$EV_SUBREQ"
+EV_SUBOUT="$(run_evsub panel dispatch --to codex,grok "$EV_SUBREQ" 2>&1 || true)"
+EV_SUBSET="$(printf '%s\n' "$EV_SUBOUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ "$(run_evsub panel status --set "$EV_SUBSET" 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] \
+  && ok "the full panel lists both legs" || fail "the full panel did not list two legs"
+run_evsub panel dispatch --to grok "$EV_SUBREQ" >/dev/null 2>&1 || true
+EV_SUBST="$(run_evsub panel status --set "$EV_SUBSET" 2>/dev/null | tail -n +2)"
+[ "$(printf '%s\n' "$EV_SUBST" | grep -c .)" = "2" ] \
+  && ok "re-dispatching ONE leg does not shed the other reviewer" || fail "a subset re-dispatch shrank the panel to $(printf '%s\n' "$EV_SUBST" | grep -c .) leg(s)"
+printf '%s\n' "$EV_SUBST" | grep -q '^codex' \
+  && ok "the reviewer that was not re-dispatched keeps its leg" || fail "the untouched reviewer vanished from the panel"
+EV_SUBCOMP="$(run_evsub compose --set "$EV_SUBSET" 2>&1 || true)"
+printf '%s\n' "$EV_SUBCOMP" | grep -q 'no reply yet from' \
+  && ok "compose still waits for the leg a subset retry did not touch" || fail "compose gated a narrowed panel (got: $(printf '%s' "$EV_SUBCOMP" | head -1))"
+printf '%s\n' "$EV_SUBCOMP" | grep -q 'of 2 legs' \
+  && ok "the narrowed attempt still gates on the FULL roster" || fail "compose forgot a planned reviewer"
+
+# A set id long enough to exceed the events column must be stored IDENTICALLY in sets.tsv
+# and in the log, or the two can never be joined. Querying an id nobody ever wrote proved
+# nothing — it returns zero rows whether or not safe_set_id bounds anything.
+# (self-review, round 6: vacuous fixture.)
+EV_LONGTH="thr-$(awk 'BEGIN{while(i++<160)printf "q"}')"
+EV_LONGREQ="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-50-00_longid.md"
+sed "s/message_id: ev-req-1/message_id: ev-longid-1/; s/thread: ev-loop/thread: $EV_LONGTH/" "$EV_REQ" > "$EV_LONGREQ"
+EV_LONGOUT="$(run_ev panel dispatch --to codex,grok "$EV_LONGREQ" 2>&1 || true)"
+EV_LONGSET="$(printf '%s\n' "$EV_LONGOUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+[ -n "$EV_LONGSET" ] && [ "${#EV_LONGSET}" -le 80 ] \
+  && ok "a set id derived from a long thread is bounded at its source" || fail "set id unbounded (${#EV_LONGSET} bytes)"
+[ "$(awk -F'\t' -v s="$EV_LONGSET" 'NR>1 && $1==s' "$EV/.comms/grades/sets.tsv" | grep -c .)" = "2" ] \
+  && ok "the bounded id is what the index stores" || fail "the index stores a different id"
+[ "$(awk -F'\t' -v c="$C_SET" -v s="$EV_LONGSET" -v e="$C_EV" '$c==s && $e=="panel-planned"' "$EV_LOG" | grep -c .)" = "2" ] \
+  && ok "the log stores the SAME bytes, so the two can be joined" || fail "index and log disagree on a long set id"
+[ "$(run_ev panel status --set "$EV_LONGSET" 2>/dev/null | tail -n +2 | grep -c .)" = "2" ] \
+  && ok "a long set id still binds its attempt" || fail "a long set id could not find its own plan"
 
 # The PLAN event is the authority, not the last row: append a stale leg row for the OLD
 # attempt after the new one and the binding must not follow it.

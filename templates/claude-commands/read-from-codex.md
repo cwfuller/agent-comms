@@ -177,7 +177,7 @@ plan→implement handoff alike. A panel-approved plan implemented under one leg 
 sheds the rest of the panel; the roster comes from the SAME `$SET`/`$SETS` resolved in
 the Panel rounds section — never re-derived, never from memory:
 ```bash
-ROSTER="$(awk -F'\t' -v s="$SET" 'NR>1 && $(1)==s {print $(10)}' "$SETS" | paste -sd, -)"
+ROSTER="$(awk -F'\t' -v s="$SET" 'NR>1 && $(1)==s && !seen[$(10)]++ {print $(10)}' "$SETS" | paste -sd, -)"
 ```
 (Only the error lane stays per-leg: a malformed reply is one leg's problem and its
 error reply routes to that leg's reviewer alone.)

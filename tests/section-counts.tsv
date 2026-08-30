@@ -33,7 +33,7 @@ broker: a missing VERDICT line is DERIVED, not discarded	3
 one placeholder rule: broker derivation and findings/compose cannot disagree	39
 findings are LIST ITEMS in any markdown form (field bug, 2026-08-26)	16
 stamped authorities: workspace pin (#3) + send-time git metadata (#6)	37
-friction: a one-line seam for reporting harness problems	31
+friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	34
 scope-dial template source contract	8
@@ -60,5 +60,5 @@ presence & worktrees: advisory coordination (plan presence-worktrees-15135)	91
 runphase: the state-file wait is DECLARED by the spawner, never guessed	22
 harness: a partial run is never a verdict	55
 integrate: an exit status is not proof the suite ran	30
-the coordinator's event log: a durable record that is not the mailbox	130
+the coordinator's event log: a durable record that is not the mailbox	148
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5

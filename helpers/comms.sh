@@ -888,9 +888,13 @@ findings_header() {
   printf 'schema_version\tfinding_id\treview_set_id\tartifact_id\tbase_sha\tthread\tphase\tround\treviewer\treviewer_version\tprompt_version\trole\tlane\tanchor\tclaim\tverdict\tsource_message_id\n'
 }
 
-hash_stdin() {  # short content hash; whichever digest this box actually has
+hash_stdin() {  # short content hash; whichever digest this box actually has.
+  # `cksum` is CRC32 and is NOT collision-resistant, which matters now that this feeds the
+  # identity suffix. Git is already mandatory here, so its hash-object is a better last
+  # resort than a checksum. (codex, implement r5, advisory.)
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -c1-12
   elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-12
+  elif command -v git >/dev/null 2>&1; then git hash-object --stdin | cut -c1-12
   else cksum | tr -d ' ' | cut -c1-12
   fi
 }
@@ -1331,12 +1335,48 @@ set_current_dispatch() {
   printf '\n'
 }
 
+# set_planned_agents <set-id> <dispatch> — the reviewers this attempt PLANNED, from the plan
+# events themselves. The index says who has a leg row; this says who was promised one, and
+# the gap between them is a dispatch that died mid-fan-out. (codex, implement r5, blocking.)
+set_planned_agents() {
+  # The roster of the CURRENT attempt, plus every agent an EARLIER attempt planned and this
+  # one did not. A panel may grow between attempts; it must never shrink.
+  #
+  # Binding strictly to the last attempt was right for the case it was written for — two
+  # concurrent dispatches of the same roster, where the newer one wins entirely — and wrong
+  # for the one the docs actually recommend: re-dispatching a SINGLE leg that failed to
+  # deliver. That attempt plans one agent, so a last-attempt-only roster silently became a
+  # one-leg panel, the other reviewer vanished from `panel status`, and `compose` gated
+  # without its blocking findings. `main` never did this, so it was a regression, and no
+  # roster gate could catch it: the plan event faithfully recorded the smaller roster.
+  # (self-review, round 6, reproduced against main.)
+  local cur; cur="$(cmd_events --set "$1" --dispatch "$2" --kind panel-planned --limit 64 2>/dev/null \
+    | awk -F'\t' 'NR>1 && $8 != "" && !seen[$8]++ {print $8}')" || return 1
+  local prior; prior="$(cmd_events --set "$1" --kind panel-planned --limit 256 2>/dev/null \
+    | awk -F'\t' 'NR>1 && $8 != "" && !seen[$8]++ {print $8}')" || return 1
+  printf '%s\n%s\n' "$cur" "$prior" | awk 'NF && !seen[$0]++'
+}
+
+# set_agent_leg <index> <set-id> <dispatch> <agent> — that reviewer's leg row for THIS
+# attempt if it has one, otherwise its newest row from any earlier attempt. A leg is only
+# superseded by a newer leg FOR THE SAME REVIEWER; it is never dropped because some other
+# reviewer was re-dispatched.
+set_agent_leg() {
+  awk -F'\t' -v s="$2" -v d="$3" -v a="$4" '
+    NR>1 && $1==s && $10==a { row = $10 "\t" $3 "\t" $4 "\t" $2; if ($14==d) cur = row }
+    END { print (cur != "" ? cur : row) }' "$1"
+}
+
 # set_legs <index> <set-id> <dispatch> — one line per leg of THAT attempt:
 #   <agent> <thread> <round> <request_message_id>, tab separated.
 set_legs() {
   awk -F'\t' -v s="$2" -v d="$3" 'NR>1 && $1==s && $14==d {print $10 "\t" $3 "\t" $4 "\t" $2}' "$1"
 }
 
+# BOUNDED AT THE SOURCE. A set id longer than the events column was stored encoded there and
+# raw in sets.tsv, so the bare listing joined the two forms and reported zero legs for a
+# perfectly valid set. Bounding the id itself — rather than teaching each store to re-encode
+# — means every store holds the same bytes. (codex + grok, implement r5, advisory.)
 safe_set_id() {  # a review_set_id is used as a DIRECTORY NAME — treat it as hostile
   # safe_name NORMALIZES, and normalization is not identity: `a/b` and `a_b` both become
   # `a_b`, so two distinct legal sets would share one directory and the second would
@@ -1351,7 +1391,11 @@ safe_set_id() {  # a review_set_id is used as a DIRECTORY NAME — treat it as h
     */*|*..*) usage_err "shadow: refusing a review-set id that resolves to a path: $(clip "$raw")" ;;
   esac
   h="$(printf '%s' "$raw" | hash_stdin | cut -c1-8)"
-  printf '%s-%s' "$out" "$h"
+  # Bounded to the events column so the id is stored IDENTICALLY everywhere. Unbounded, a
+  # long id went into sets.tsv raw and into the log encoded, and the bare listing joined the
+  # two forms and reported zero legs for a valid set. The digest already makes the truncated
+  # head unambiguous. (codex + grok, implement r5.)
+  printf '%s' "$(event_identity "$(printf '%s-%s' "$out" "$h")" "$EVENT_W_SET")"
 }
 
 findings_set_lookup() {  # <root> <thread> <round> <phase> -> set\tartifact\tprompt_version
@@ -1480,7 +1524,11 @@ cmd_panel() {
           $0 == hdr { next }
           !ev_wellformed() { next }
           $3 == "panel-planned" { cur[$4] = $5 }
-          END { for (k in cur) printf "%s\t%s\n", k, cur[k] }' "$(events_file)" > "$curf" 2>/dev/null
+          END { for (k in cur) printf "%s\t%s\n", k, cur[k] }' "$(events_file)" > "$curf" 2>/dev/null \
+          || : # an unreadable log degrades the COUNT; it must not kill the listing, which is
+               # the surface a driver reaches for after losing its set id. As the last
+               # command of an `if` body this exit status was errexit's, and the whole
+               # process died having printed nothing. (self-review, round 6.)
       fi
       # NF>=13: a truncated row would otherwise be counted as a leg and printed with
       # blank metadata, which is the listing lying about durable state. (codex, r1.)
@@ -1507,15 +1555,33 @@ cmd_panel() {
     # failure is unobservable. The `local` is split from the assignment on purpose:
     # `local x="$(cmd)"` reports the status of `local`, not of the command.
     local status_reg; status_reg="$(registry_agents)" || exit 2
-    printf 'reviewer\tthread\tanswered\tverdict\n'
+    # Header and rows from ONE writer. Printed from the shell it sat in the stdio buffer
+    # bash uses whenever stdout is a pipe, so `panel status --set X | head -1` could see a
+    # row first — the same defect fixed for the bare listing and the events reader.
+    # (grok, implement r5, advisory.)
     # Same binding as compose: a leg is answered by the reply to THIS set's request,
     # never by whatever the newest same-agent same-thread message happens to be. A
     # status that says "answered / APPROVE" off a stale or type:error message is the
     # false all-clear compose exists to refuse. (grok, panel r1.)
-    local status_dispatch
+    local status_dispatch one_row pag
     status_dispatch="$(set_current_dispatch "$idx" "$set_id")" \
       || die "panel status: cannot determine which dispatch attempt of '$(clip "$set_id")' is current"
-    set_legs "$idx" "$set_id" "$status_dispatch" | while IFS=$'\t' read -r ag th rnd req_mid; do
+    # Planned legs with no index row are listed too: a leg that vanished from the index is
+    # exactly what a recovering driver needs to SEE, not something to omit. (codex, r5.)
+    local status_planned
+    status_planned="$(set_planned_agents "$set_id" "$status_dispatch")" \
+      || die "panel status: could not read the planned roster for '$(clip "$set_id")'"
+    { if [ -n "$status_planned" ]; then
+        for pag in $status_planned; do
+          one_row="$(set_agent_leg "$idx" "$set_id" "$status_dispatch" "$pag")"
+          if [ -n "$one_row" ]; then printf '%s\n' "$one_row"
+          else printf '%s\t(no leg row recorded)\t\t\n' "$pag"; fi
+        done
+      else
+        set_legs "$idx" "$set_id" "$status_dispatch"
+      fi
+    } | { printf 'reviewer\tthread\tanswered\tverdict\n'
+    while IFS=$'\t' read -r ag th rnd req_mid; do
       [ -n "$ag" ] || continue
       local reply="" verdict="" answered=no cand
       for cand in $(leg_reply_candidates "$root" "$status_ws" "$ag" "$th" "$status_reg"); do
@@ -1531,7 +1597,7 @@ cmd_panel() {
       done
       if [ -n "$reply" ]; then answered=yes; verdict="$(cmd_verdict "$reply" 2>/dev/null || true)"; fi
       printf '%s\t%s\t%s\t%s\n' "$ag" "$th" "$answered" "$verdict"
-    done
+    done; }
     return 0
   fi
 
@@ -1597,12 +1663,21 @@ cmd_panel() {
   # legitimate one-leg panel — and `compose` would gate on that roster believing it was
   # complete. A re-dispatch writes a second row; the LAST one is authoritative, exactly as
   # the sets.tsv rebind already treats a retry. (codex, plan r1, blocking.)
-  cmd_events append --kind panel-planned --set "$set_id" --dispatch "$dispatch_id" \
-    --thread "${base_thread:-panel}" \
-    --round "$round" --agent "$gating" --artifact "$aid" \
-    --request-id "$(frontmatter_field "$req" message_id)" --status planned \
-    --note "roster=$(printf '%s' "$roster" | tr ' ' ',') legs=$(printf '%s' "$roster" | wc -w | tr -d ' ') phase=${phase:-}" \
-    || die "panel dispatch: could not record the roster in the coordinator log — refusing to fan out a panel whose legs nothing can enumerate"
+  # ONE ROW PER PLANNED LEG, all sharing this attempt. The roster used to live only in a
+  # note, so nothing could ENFORCE it: `compose` counted whatever leg rows the index happened
+  # to hold, and a driver that died between two leg rows left "1 of 1" — a truncated panel
+  # gating as a complete one, which is the hole the roster event was added to close.
+  # Recording the planned reviewer in the `agent` column makes the roster a set of rows any
+  # reader can compare against. (codex, implement r5, blocking.)
+  local plan_ag
+  for plan_ag in $roster; do
+    cmd_events append --kind panel-planned --set "$set_id" --dispatch "$dispatch_id" \
+      --thread "${base_thread:-panel}" \
+      --round "$round" --agent "$plan_ag" --artifact "$aid" \
+      --request-id "$(frontmatter_field "$req" message_id)" --status planned \
+      --note "roster=$(printf '%s' "$roster" | tr ' ' ',') legs=$(printf '%s' "$roster" | wc -w | tr -d ' ') phase=${phase:-} gating=$gating" \
+      || die "panel dispatch: could not record the roster in the coordinator log — refusing to fan out a panel whose legs nothing can enumerate"
+  done
   echo "panel: dispatching artifact ${aid} to [$roster] as review set $set_id (gating: $gating)"
   for ag in $roster; do
     ts="$(date -u +%Y-%m-%dT%H-%M-%S)"
@@ -1700,7 +1775,38 @@ cmd_compose() {
   local compose_dispatch
   compose_dispatch="$(set_current_dispatch "$idx" "$set_id")" \
     || die "compose: cannot determine which dispatch attempt of '$(clip "$set_id")' is current — refusing to gate on a guessed roster"
-  local legs; legs="$(set_legs "$idx" "$set_id" "$compose_dispatch")"
+  local planned_all; planned_all="$(set_planned_agents "$set_id" "$compose_dispatch")" \
+    || die "compose: could not read the planned roster for '$(clip "$set_id")' — refusing to gate on a roster it cannot enumerate"
+  local legs=""
+  if [ -n "$planned_all" ]; then
+    local one_ag one_row
+    for one_ag in $planned_all; do
+      one_row="$(set_agent_leg "$idx" "$set_id" "$compose_dispatch" "$one_ag")"
+      [ -n "$one_row" ] && legs="${legs:+$legs
+}$one_row"
+    done
+  else
+    legs="$(set_legs "$idx" "$set_id" "$compose_dispatch")"
+  fi
+  # THE PLAN IS THE ROSTER. Counting index rows alone let a dispatch that died between two
+  # leg rows compose as a complete one-leg panel. A planned reviewer with no leg row is a leg
+  # that was promised and never recorded — unanswerable, and never a quorum.
+  # (codex, implement r5, blocking.)
+  local planned missing="" pag
+  planned="$planned_all"
+  if [ -n "$planned" ]; then
+    for pag in $planned; do
+      printf '%s\n' "$legs" | awk -F'\t' -v a="$pag" '$1==a' | grep -q . || missing="$missing $pag"
+    done
+  fi
+  if [ -n "$missing" ]; then
+    echo "compose: INCOMPLETE — this attempt planned legs for [$(printf '%s' "$planned" | tr '\n' ' ')] but the index records none for:$missing"
+    echo "compose: refusing to gate on a roster the dispatch never finished recording"
+    cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" \
+      --status roster-incomplete --note "planned=$(printf '%s' "$planned" | tr '\n' ',') missing=$(printf '%s' "$missing" | tr ' ' ',')" \
+      || echo "warning: coordinator log not updated (composition-refused)" >&2
+    return 3
+  fi
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
   local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread="" blind=""
@@ -2027,7 +2133,10 @@ cmd_events() {
     # No /dev/null fallback: if the channel that reports skipped rows cannot be created, the
     # evidence of a torn log silently vanishes and every consumer then trusts a file nothing
     # validated. Refuse instead. (codex, implement r4, blocking.)
+    # RETURN trap, so a reader killed by SIGPIPE mid-write (`events | head -1`) still removes
+    # its scratch file instead of leaving one per invocation. (self-review, round 6.)
     local tornf; tornf="$(mktemp "${TMPDIR:-/tmp}/agent-comms-events.XXXXXX" 2>/dev/null || true)"
+    trap '[ -z "${tornf:-}" ] || rm -f "$tornf" 2>/dev/null' RETURN
     if [ -z "$tornf" ]; then
       emit_diagnostic "events: cannot create a temporary file to record skipped rows — refusing to read a log whose malformed rows could not be counted"
       return 1
@@ -2035,19 +2144,29 @@ cmd_events() {
     # Identity filters go through the SAME transform the writer used, or a value long enough
     # to be reshaped on the way in could never match itself on the way out. One transform,
     # both directions. (codex, implement r4, blocking.)
-    awk -F'\t' -v s="$(event_identity "$set_id" "$EVENT_W_SET")" \
-        -v d="$(event_identity "$dispatch" "$EVENT_W_DISPATCH")" \
-        -v t="$(event_identity "$thread" "$EVENT_W_THREAD")" \
-        -v m="$(event_identity "$mid" "$EVENT_W_MID")" \
-        -v q="$(event_identity "$reqid" "$EVENT_W_REQID")" \
-        -v k="$kind" -v a="$agent" \
+    # Query values travel through the ENVIRONMENT, not `-v`: awk unescapes `\t`, `\n` and
+    # friends in a -v assignment, so a thread or id containing a literal backslash was
+    # transformed on the way in and could never match the row that stores it verbatim.
+    # (self-review, round 6.)
+    EV_Q_SET="$(event_identity "$set_id" "$EVENT_W_SET")" \
+    EV_Q_DISPATCH="$(event_identity "$dispatch" "$EVENT_W_DISPATCH")" \
+    EV_Q_THREAD="$(event_identity "$thread" "$EVENT_W_THREAD")" \
+    EV_Q_MID="$(event_identity "$mid" "$EVENT_W_MID")" \
+    EV_Q_REQ="$(event_identity "$reqid" "$EVENT_W_REQID")" \
+    EV_Q_KIND="$kind" EV_Q_AGENT="$agent" EV_Q_ROLE="$role" \
+    awk -F'\t' \
         -v hdr="$EVENTS_HEADER" -v ev_kinds="$EVENT_KINDS" -v ev_roles="$EVENT_ROLES" \
-        -v tornf="$tornf" -v lim="$limit" -v r="$role" "$EVENTS_AWK_LIB"'
+        -v tornf="$tornf" -v lim="$limit" "$EVENTS_AWK_LIB"'
       # The header is printed HERE, by the same process as the rows. Emitted from the shell
       # it sat in the stdio buffer bash uses whenever stdout is a pipe, so a piped read
       # (events --set X | head) could see the rows arrive first, or lose the header
       # entirely to SIGPIPE. One writer, one stream, one order. Found by the suite.
-      BEGIN { print hdr; ev_ncols = split(hdr, H, "\t") }
+      BEGIN {
+        print hdr; ev_ncols = split(hdr, H, "\t")
+        s = ENVIRON["EV_Q_SET"]; d = ENVIRON["EV_Q_DISPATCH"]; t = ENVIRON["EV_Q_THREAD"]
+        m = ENVIRON["EV_Q_MID"]; q = ENVIRON["EV_Q_REQ"]
+        k = ENVIRON["EV_Q_KIND"]; a = ENVIRON["EV_Q_AGENT"]; r = ENVIRON["EV_Q_ROLE"]
+      }
       # EXACT match. Skipping anything whose first field is "ts" would drop a real row that
       # merely began with that token, and would swallow a foreign header from an older
       # schema instead of naming it. Anything else header-shaped falls through to the
@@ -2124,7 +2243,12 @@ cmd_events() {
       # would otherwise link an empty or truncated file as the permanent log, which passes
       # the -f postcondition and then collects rows under a header that is not there.
       # (codex, implement r4, blocking.)
+      # Byte count AND content: command substitution strips trailing newlines, so a seed
+      # holding the header with no terminating newline compared EQUAL and was linked — the
+      # short write this check exists to catch. (grok, implement r5, advisory.)
+      local want_bytes; want_bytes="$(printf '%s\n' "$EVENTS_HEADER" | wc -c | tr -d ' ')"
       if printf '%s\n' "$EVENTS_HEADER" > "$seed" 2>/dev/null \
+         && [ "$(wc -c < "$seed" 2>/dev/null | tr -d ' ')" = "$want_bytes" ] \
          && [ "$(cat "$seed" 2>/dev/null)" = "$EVENTS_HEADER" ]; then
         ln "$seed" "$f" 2>/dev/null || true
       fi

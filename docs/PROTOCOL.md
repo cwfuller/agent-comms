@@ -339,7 +339,13 @@ After a driver dies, `comms.sh events --set <id>` answers what to do next:
   compose; re-dispatch that leg or escalate, using the `note` as the reason.
 - **`reply-validated` with no `reply-accepted`** — do NOT re-dispatch. The stamped body is in
   `<run_dir>/reply.md` and may already be in the inbox; compose may simply succeed.
-- **every planned leg `reply-accepted`, no `composition-*`** — compose now.
+- **every planned leg `reply-accepted`, no `composition-*`** — compose now. "Planned" means
+  named by a `panel-planned` row of the current attempt, not merely present in the index: a
+  dispatch that died between two leg rows leaves the index short, and `compose` refuses that
+  gap rather than gating a truncated roster.
+- The bare `panel status` listing is a RECOVERY LISTING, not a gate. It skips rows it cannot
+  read and can therefore show a previous attempt's `legs` while `--set` and `compose` refuse
+  outright. Read it to find sets; read `--set` to decide anything.
 - **`role=shadow` rows** — drop them first. A measurement turn shares its gating leg's thread
   and attempt, so leaving it in makes a shadow look like the leg that gates. `events --role
   gating` does this for you.

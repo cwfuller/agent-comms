@@ -301,12 +301,15 @@ rejected for the reason the presence work already established — a dead holder 
 **A turn will not sign off clean over a hole in its own trace.** Runner-side appends are
 advisory, so one can be lost; "absence means unknown" covers a gap, but it cannot excuse a
 terminal row that positively claims `completed` while the acceptance before it is missing.
-After delivering, the runner looks in the LOG for the acceptance of THIS turn — joined on the
-request id and the dispatch attempt, not on the thread, because two overlapping turns of one
-leg thread would otherwise let the later one adopt the earlier one's acceptance and sign off
-clean. Not finding it, the runner writes `turn-finished log-incomplete`. Both joined columns
-are clippable, so an identifier long enough to be clipped degrades to a conservative
-`log-incomplete` — never to a false clean bill, which is the only direction that would matter.
+After delivering, the runner asks the READER for the acceptance of THIS turn, joined on the
+reply id it minted for this execution. Nothing weaker is unique: a thread is shared by
+overlapping turns, and a request id plus attempt is shared by two executions of one re-sent
+request — in both cases the later turn could adopt the earlier one's acceptance and sign off
+clean having recorded nothing. Not finding it, the runner writes `turn-finished
+log-incomplete`. It asks the reader rather than grepping the file so that a row the reader
+would reject — a partial append that happens to reach the id column — cannot satisfy the
+check either; and because the reader applies the same identity transform as the writer, an
+id longer than its column still matches itself.
 
 **Not authoritative against a hostile child, and it says so.** A mounted review turn reaches
 the real `.comms` through this same helper, so it can forge events until step 3's criterion 2

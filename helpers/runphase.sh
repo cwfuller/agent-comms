@@ -277,7 +277,7 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
     "$(json_escape "$mf")" "$(json_escape "$dir")" \
     "$(json_escape "${STARTED_AT:-}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(json_escape "$note")" \
-    > "$dir/result.json.tmp"
+    > "$dir/result.json.tmp" || echo "warning: could not compose result.json in $dir" >&2
   # THE TERMINAL EVENT IS DURABLE FIRST. result.json is the signal `await` unblocks on, so
   # a runner that died between publishing it and appending this row left await with a
   # result in hand, nothing to synthesize, and no terminal event at all — the permanent
@@ -294,8 +294,16 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
   else
     log_event turn-finished "$status" "exit=$rc session=$sid${note:+ note=$note}"
   fi
-  mv "$dir/result.json.tmp" "$dir/result.json" \
-    || echo "warning: could not write result.json in $dir" >&2
+  # Publishing stays TOLERATED, as it always was. Splitting the original
+  # `printf ... > tmp && mv ... || warn` to slip the terminal event between the two halves
+  # left the printf ungated: under errexit a short write (ENOSPC, EDQUOT, a run dir removed
+  # by a concurrent cleanup) stopped aborting nothing and started aborting the whole turn,
+  # so a completed provider with a delivered reply exited through the EXIT trap and was
+  # recorded `failed`. Both halves warn and continue. (self-review, round 6.)
+  [ -s "$dir/result.json.tmp" ] \
+    && { mv "$dir/result.json.tmp" "$dir/result.json" \
+         || echo "warning: could not publish result.json in $dir" >&2; } \
+    || echo "warning: result.json was not written in $dir" >&2
   RESULT_WRITTEN=true
 }
 
@@ -2462,8 +2470,6 @@ PROMPT
   # recorded before the broker gets a chance to make the TURN fail for its own reasons.
   log_event provider-result "$([ "$rc" -eq 0 ] && echo completed || echo failed)" \
     "exit=$rc session=$sid provider=$provider"
-  local sid status note=""
-  sid="$(session_id_from_events "$run_dir" "$provider")"
   if [ "$rc" -eq 0 ] && [ "$provider" = "grok" ]; then
     # Trusted-parent broker: the read-only child produced the reply as OUTPUT;
     # persist -> validate -> send -> archive happens here, in this process.
