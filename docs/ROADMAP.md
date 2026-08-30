@@ -2122,6 +2122,19 @@ STILL OPEN (why the item is not closed):
   or its ownership is unprovable, and a recycled claim pid reads as live, so a single permanently
   ambiguous ident can wedge GC of unrelated stale idents. This is fail-SAFE (it never deletes a live
   mount, only declines to delete), and per-ident retained claims would relax it later if needed.
+
+  **Advisory follow-ups (impl r2 double-APPROVE, non-blocking — carry into increment 2's rework
+  of this code).** (a) `clean mounts` and `unmount_artifact` never-follow a symlinked `view/tree`,
+  but `[ -d "$d/view/tree" ]` still resolves THROUGH a symlinked `view/` PARENT, so a leftover
+  `view -> <other worktree>` (only plantable by an uncontained-override child) could make
+  `git worktree remove --force` target another worktree — add a `! -L "$d/view"` guard.
+  (b) `mount_ident_live` treats a zero-byte `.claim.N` as live, while `mount_claim_take` treats a
+  readable zero-byte claim as a legacy release tombstone; the conservative disagreement is safe but
+  can wedge GC of an ident that carries one — share one claim-classification helper.
+  (c) `mount_ident_live` skips a non-regular dirent at `.claim.N` (`[ -f ] || continue`) rather than
+  treating it as live. (d) A deterministic scan/claim/delete interleaving test would protect the GC
+  race fix from later reordering (the current test is structural). (e) A stale `mount_restage`
+  comment still calls an ephemeral kdir "its run dir". None gate increment 1; the panel approved.
 - **grok on Darwin has no backend.** Its sandbox is a documented macOS network no-op, so a grok
   mounted turn is REFUSED by default (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override). The
   default panel therefore loses cross-vendor corroboration on macOS unless reviews run on Linux.
