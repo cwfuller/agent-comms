@@ -165,12 +165,14 @@ cmd_consult() {
   else
     # The ensure runs FIRST on every warm consult, so it needs the same --timeout: a stalled
     # ensure would otherwise hang /ask --via acp forever, the very failure this fix closes.
-    # (codex, r1, blocking.) Its output is captured so a FAILING ensure's diagnostic is surfaced
-    # rather than dropped to /dev/null (a success prints only the session id, which stays hidden).
-    # (codex, r2, advisory.)
+    # (codex, r1, blocking.) Only its STDOUT is captured — stderr stays live, so npx/acpx warnings
+    # on a SUCCESSFUL ensure are not swallowed — and on a FAILING ensure a non-whitespace stdout
+    # diagnostic is surfaced rather than dropped (a success prints only the session id, which stays
+    # hidden). The `if` (not `A || { B; }`) avoids a set -e footgun when the diagnostic is empty.
+    # (codex + grok, r2/r3, advisory.)
     local ens_out=""
-    ens_out="$("${launcher[@]}" --timeout "$consult_timeout" "$profile" sessions ensure --name "$ACP_SESSION_NAME" 2>&1)" || rc=$?
-    [ "$rc" -eq 0 ] || { [ -n "$ens_out" ] && printf '%s\n' "$ens_out"; }
+    ens_out="$("${launcher[@]}" --timeout "$consult_timeout" "$profile" sessions ensure --name "$ACP_SESSION_NAME")" || rc=$?
+    if [ "$rc" -ne 0 ] && [ -n "$(printf '%s' "$ens_out" | tr -d '[:space:]')" ]; then printf '%s\n' "$ens_out"; fi
     if [ "$rc" -eq 0 ]; then
       if [ -n "$qfile" ]; then
         out="$("${base[@]}" -s "$ACP_SESSION_NAME" --file "$qfile" ${words[@]+"${words[@]}"})" || rc=$?

@@ -1196,8 +1196,10 @@ clearest evidence so far that a panel of two is not redundant.
   default 300; a malformed budget falls back rather than taking the turn down, matching the
   runphase rule) and CAPTURES the answer so a rc-0-with-blank-body turn is refused with the
   mailbox fallback instead of handed back as success. The answer is now buffered rather than
-  streamed (as the runphase reply is). Covered by the acp.sh consult section: `--timeout` in the
-  prompt argv, the malformed-budget default, and the empty-answer refusal.
+  streamed (as the runphase reply is). Covered by the acp.sh consult section: `--timeout` on the
+  prompt, warm-ensure and oneshot argv; the malformed-budget default; the leading-zero (`08→8`),
+  oversized (`2^64→300`), and 6-vs-7-digit boundary normalizations; the empty-answer refusal; and a
+  failing `sessions ensure` surfacing its stdout.
 
 ### Any agent drives (2026-08-26, owner direction)
 

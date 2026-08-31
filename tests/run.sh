@@ -3302,6 +3302,13 @@ grep -q -- '--timeout 8 --approve-reads' "$ACP_STUB_LOG" \
 COMMS_ACP_CONSULT_TIMEOUT_SECS=18446744073709551616 run_acp consult codex --oneshot z >/dev/null 2>&1
 grep -q -- '--timeout 300 --approve-reads' "$ACP_STUB_LOG" \
   && ok "an oversized consult timeout falls back to the default (no integer overflow)" || fail "oversized timeout wrapped instead of defaulting"
+# Digit-count boundary: exactly 6 digits is honoured, 7 falls back (the sane_secs length gate). (grok r3.)
+: > "$ACP_STUB_LOG"; COMMS_ACP_CONSULT_TIMEOUT_SECS=999999 run_acp consult codex --oneshot z >/dev/null 2>&1
+grep -q -- '--timeout 999999 --approve-reads' "$ACP_STUB_LOG" \
+  && ok "a 6-digit consult timeout (999999) is honoured" || fail "a valid 6-digit timeout was rejected"
+: > "$ACP_STUB_LOG"; COMMS_ACP_CONSULT_TIMEOUT_SECS=1000000 run_acp consult codex --oneshot z >/dev/null 2>&1
+grep -q -- '--timeout 300 --approve-reads' "$ACP_STUB_LOG" \
+  && ok "a 7-digit consult timeout (1000000) falls back to the default" || fail "a 7-digit timeout was not rejected"
 # A FAILING sessions ensure surfaces its stdout diagnostic instead of dropping it to /dev/null. (codex r2.)
 OUT="$(ACP_STUB_ENSURE_FAIL=1 run_acp consult codex hello 2>&1)" && rc=0 || rc=$?
 [ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'ensure diagnostic on stdout' && echo "$OUT" | grep -qi 'mailbox' \
