@@ -2157,7 +2157,15 @@ STILL OPEN (why the item is not closed):
   isolation boundary here — the suite stubs acpx and does not run a real codex Seatbelt turn).
   Reproducible probe: stage a round with `~/.codex/auth.json` present, remove it, run a second
   round on the same mount, and confirm the isolated `auth.json` is gone. (codex, isolation impl r6,
-  advisory.)
+  advisory.) Double-APPROVE over two implement rounds; the shape assertion was strengthened in r2 to
+  bind to the source gate and require the fail-closed `die` after the `rm` (which also rejects an
+  inverted gate). **Follow-up when this is next touched (impl r2, both reviewers, non-blocking):** the
+  assertion matches the `die` STRING after the `rm` but not the `[ -e ] || [ -L ]` recheck predicate,
+  so an unconditional `die` replacing the conditional recheck would still pass — add those predicates
+  between the `rm` and the `die` in the awk. A functional codex mounted turn (round-1 stage /
+  round-2 clear) was built and works standalone but is timing-fragile in the full suite under this
+  machine's game-driven load, so it was not committed; it becomes worthwhile once the suite is robust
+  under load.
 - **The `.codex/config.toml` refusal is a repo footgun until composite-root.** A developer with a
   local (untracked) `.codex/config.toml` in the checkout has it snapshotted into every artifact
   (snapshot-on-send captures untracked files), and every mounted codex review of THIS repo then
