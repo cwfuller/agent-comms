@@ -144,10 +144,15 @@ cmd_consult() {
   # budget falls back to the default rather than taking the turn down, matching the runphase rule.
   # (docs/ROADMAP.md, "Found in the field, not yet fixed".)
   local consult_timeout="${COMMS_ACP_CONSULT_TIMEOUT_SECS:-300}"
-  # All-digits, then NORMALIZE base-10 so a leading zero (`08`, `010`) becomes 8/10 rather than
-  # being rejected as invalid octal or reaching acpx as `010`. Non-digits fall back. (grok, r1.)
-  case "$consult_timeout" in ''|*[!0-9]*) consult_timeout=300 ;; *) consult_timeout=$((10#$consult_timeout)) ;; esac
-  [ "$consult_timeout" -ge 1 ] 2>/dev/null || consult_timeout=300
+  # Sanitize like runphase's sane_secs, WITHOUT arithmetic: bash math WRAPS oversized integers, so
+  # `$((10#$v))` would turn a huge digit string into an unrelated positive timeout and 2^64 into 0.
+  # Reject non-digits, strip leading zeros as TEXT (so `08` -> `8`, `000` -> `0`), then reject zero
+  # or an excessive digit count. The value handed to acpx is thus a bounded positive integer. (codex, r2.)
+  case "$consult_timeout" in
+    ''|*[!0-9]*) consult_timeout=300 ;;
+    *) consult_timeout="${consult_timeout#"${consult_timeout%%[!0]*}"}"; consult_timeout="${consult_timeout:-0}"
+       if [ "${#consult_timeout}" -gt 6 ] || [ "$consult_timeout" = 0 ]; then consult_timeout=300; fi ;;
+  esac
   local -a base=("${launcher[@]}" --format quiet --timeout "$consult_timeout"
                  --approve-reads --non-interactive-permissions deny "$profile")
   local rc=0 out=""
@@ -160,8 +165,12 @@ cmd_consult() {
   else
     # The ensure runs FIRST on every warm consult, so it needs the same --timeout: a stalled
     # ensure would otherwise hang /ask --via acp forever, the very failure this fix closes.
-    # (codex, r1, blocking.)
-    "${launcher[@]}" --timeout "$consult_timeout" "$profile" sessions ensure --name "$ACP_SESSION_NAME" >/dev/null || rc=$?
+    # (codex, r1, blocking.) Its output is captured so a FAILING ensure's diagnostic is surfaced
+    # rather than dropped to /dev/null (a success prints only the session id, which stays hidden).
+    # (codex, r2, advisory.)
+    local ens_out=""
+    ens_out="$("${launcher[@]}" --timeout "$consult_timeout" "$profile" sessions ensure --name "$ACP_SESSION_NAME" 2>&1)" || rc=$?
+    [ "$rc" -eq 0 ] || { [ -n "$ens_out" ] && printf '%s\n' "$ens_out"; }
     if [ "$rc" -eq 0 ]; then
       if [ -n "$qfile" ]; then
         out="$("${base[@]}" -s "$ACP_SESSION_NAME" --file "$qfile" ${words[@]+"${words[@]}"})" || rc=$?
@@ -172,8 +181,10 @@ cmd_consult() {
   fi
   # Emit whatever acpx produced, so a NON-ZERO exit's diagnostics are actually visible — the error
   # branches below say "see output above", which was false while stdout was captured and dropped.
-  # On success this re-emits the answer (buffered, as the runphase path buffers its reply). (both, r1.)
-  [ -n "$out" ] && printf '%s\n' "$out"
+  # On success this re-emits the answer (buffered, as the runphase path buffers its reply). Only a
+  # non-whitespace body is emitted, so a whitespace-only reply is not printed before the rc-0 guard
+  # refuses it. (both, r1; whitespace refinement codex, r2.)
+  [ -n "$(printf '%s' "$out" | tr -d '[:space:]')" ] && printf '%s\n' "$out"
   # acpx's exit codes are a stable scripting contract — translate, don't mask.
   # Every nonzero path carries the same fallback line and NO retry advice.
   case "$rc" in

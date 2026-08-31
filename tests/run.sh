@@ -3247,7 +3247,8 @@ printf '%s\n' "$*" >> "${ACP_STUB_LOG:-/dev/null}"
 # ACP_STUB_EMPTY models the rc-0-zero-bytes turn (a dropped or empty model reply): the prompt
 # exits 0 having produced nothing, which the consult must refuse rather than pass as success.
 case " $* " in
-  *" sessions ensure "*) echo "stub-session-id (created)" ;;
+  *" sessions ensure "*) [ -n "${ACP_STUB_ENSURE_FAIL:-}" ] && { echo "ensure diagnostic on stdout"; exit 4; }
+     echo "stub-session-id (created)" ;;
   *" exec "*|*" -s "*) [ -n "${ACP_STUB_EMPTY:-}" ] && exit 0
      [ -n "${ACP_STUB_OUT_THEN_FAIL:-}" ] && { echo "partial before failure"; exit 5; }
      echo "stub answer"; echo "[acpx] tokens: input=100 output=5 cache_read=25000 total=25105" ;;
@@ -3295,6 +3296,17 @@ grep -q -- '--timeout 300 --approve-reads --non-interactive-permissions deny cod
 COMMS_ACP_CONSULT_TIMEOUT_SECS=08 run_acp consult codex --oneshot z >/dev/null 2>&1
 grep -q -- '--timeout 8 --approve-reads' "$ACP_STUB_LOG" \
   && ok "a leading-zero consult timeout normalizes base-10 (08 -> 8)" || fail "leading-zero timeout not normalized"
+# An OVERSIZED digit budget falls back to the default rather than WRAPPING through arithmetic
+# (2^64 -> 0, huge -> unrelated positive) — the text sanitizer rejects >6 digits before any math. (codex r2.)
+: > "$ACP_STUB_LOG"
+COMMS_ACP_CONSULT_TIMEOUT_SECS=18446744073709551616 run_acp consult codex --oneshot z >/dev/null 2>&1
+grep -q -- '--timeout 300 --approve-reads' "$ACP_STUB_LOG" \
+  && ok "an oversized consult timeout falls back to the default (no integer overflow)" || fail "oversized timeout wrapped instead of defaulting"
+# A FAILING sessions ensure surfaces its stdout diagnostic instead of dropping it to /dev/null. (codex r2.)
+OUT="$(ACP_STUB_ENSURE_FAIL=1 run_acp consult codex hello 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'ensure diagnostic on stdout' && echo "$OUT" | grep -qi 'mailbox' \
+  && ok "a failing sessions ensure surfaces its captured stdout diagnostic" \
+  || fail "a failing ensure's stdout is dropped (rc=$rc)"
 # A FAILING acpx still surfaces its stdout, so the 'see output above' error branches are truthful. (both r1.)
 OUT="$(ACP_STUB_OUT_THEN_FAIL=1 run_acp consult codex --oneshot hi 2>&1)" && rc=0 || rc=$?
 [ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'partial before failure' && echo "$OUT" | grep -qi 'mailbox' \
