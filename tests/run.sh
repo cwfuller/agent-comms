@@ -3249,6 +3249,7 @@ printf '%s\n' "$*" >> "${ACP_STUB_LOG:-/dev/null}"
 case " $* " in
   *" sessions ensure "*) echo "stub-session-id (created)" ;;
   *" exec "*|*" -s "*) [ -n "${ACP_STUB_EMPTY:-}" ] && exit 0
+     [ -n "${ACP_STUB_OUT_THEN_FAIL:-}" ] && { echo "partial before failure"; exit 5; }
      echo "stub answer"; echo "[acpx] tokens: input=100 output=5 cache_read=25000 total=25105" ;;
   *) echo "stub answer"; echo "[acpx] tokens: input=100 output=5 cache_read=25000 total=25105" ;;
 esac
@@ -3263,8 +3264,8 @@ chmod +x "$ACP_STUB/node"
 run_acp() { PATH="$ACP_STUB:$PATH" bash "$ACP" "$@"; }
 OUT="$(run_acp consult codex is the retry approach sound 2>&1)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && echo "$OUT" | grep -q 'stub answer' && ok "consult passes the answer through" || fail "consult happy path (rc=$rc)"
-grep -q -- '-y acpx@0.13.1 codex sessions ensure --name agent-comms-ask' "$ACP_STUB_LOG" \
-  && ok "warm consult ensures the pinned named session" || fail "session ensure argv"
+grep -q -- '-y acpx@0.13.1 --timeout 300 codex sessions ensure --name agent-comms-ask' "$ACP_STUB_LOG" \
+  && ok "warm consult ensures the pinned named session WITH a --timeout (a stalled ensure cannot hang)" || fail "session ensure argv/timeout"
 grep -q -- '-y acpx@0.13.1 --format quiet --timeout 300 --approve-reads --non-interactive-permissions deny codex -s agent-comms-ask is the retry approach sound' "$ACP_STUB_LOG" \
   && ok "warm consult prompts the named session with the pinned acpx and a --timeout" || fail "warm prompt argv"
 # A consult that cannot read is useless — it would answer from recall instead of the
@@ -3286,8 +3287,19 @@ grep -q -- '--timeout 300 --approve-reads' "$ACP_STUB_LOG" \
   && ok "a malformed consult --timeout budget falls back to the default" || fail "malformed consult timeout not defaulted"
 : > "$ACP_STUB_LOG"
 run_acp consult codex --oneshot quick check >/dev/null 2>&1
-grep -q -- 'codex exec quick check' "$ACP_STUB_LOG" && ! grep -q -- '-s agent-comms-ask' "$ACP_STUB_LOG" \
-  && ok "--oneshot uses stateless exec, no session" || fail "oneshot argv"
+grep -q -- '--timeout 300 --approve-reads --non-interactive-permissions deny codex exec quick check' "$ACP_STUB_LOG" \
+  && ! grep -q -- '-s agent-comms-ask' "$ACP_STUB_LOG" \
+  && ok "--oneshot uses stateless exec with a --timeout, no session" || fail "oneshot argv"
+# A leading-zero budget NORMALIZES base-10 (08 -> 8), not rejected as octal nor passed as 010. (grok r1.)
+: > "$ACP_STUB_LOG"
+COMMS_ACP_CONSULT_TIMEOUT_SECS=08 run_acp consult codex --oneshot z >/dev/null 2>&1
+grep -q -- '--timeout 8 --approve-reads' "$ACP_STUB_LOG" \
+  && ok "a leading-zero consult timeout normalizes base-10 (08 -> 8)" || fail "leading-zero timeout not normalized"
+# A FAILING acpx still surfaces its stdout, so the 'see output above' error branches are truthful. (both r1.)
+OUT="$(ACP_STUB_OUT_THEN_FAIL=1 run_acp consult codex --oneshot hi 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'partial before failure' && echo "$OUT" | grep -qi 'mailbox' \
+  && ok "a failing consult surfaces acpx's captured stdout (see-output-above is true)" \
+  || fail "captured stdout dropped on a failing consult (rc=$rc)"
 QF="$WORK/acp-q.md"; printf 'excerpted discussion\n' > "$QF"
 : > "$ACP_STUB_LOG"
 run_acp consult codex --file "$QF" >/dev/null 2>&1

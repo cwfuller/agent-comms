@@ -144,7 +144,9 @@ cmd_consult() {
   # budget falls back to the default rather than taking the turn down, matching the runphase rule.
   # (docs/ROADMAP.md, "Found in the field, not yet fixed".)
   local consult_timeout="${COMMS_ACP_CONSULT_TIMEOUT_SECS:-300}"
-  case "$consult_timeout" in ''|*[!0-9]*) consult_timeout=300 ;; esac
+  # All-digits, then NORMALIZE base-10 so a leading zero (`08`, `010`) becomes 8/10 rather than
+  # being rejected as invalid octal or reaching acpx as `010`. Non-digits fall back. (grok, r1.)
+  case "$consult_timeout" in ''|*[!0-9]*) consult_timeout=300 ;; *) consult_timeout=$((10#$consult_timeout)) ;; esac
   [ "$consult_timeout" -ge 1 ] 2>/dev/null || consult_timeout=300
   local -a base=("${launcher[@]}" --format quiet --timeout "$consult_timeout"
                  --approve-reads --non-interactive-permissions deny "$profile")
@@ -156,7 +158,10 @@ cmd_consult() {
       out="$("${base[@]}" exec "${words[@]}")" || rc=$?
     fi
   else
-    "${launcher[@]}" "$profile" sessions ensure --name "$ACP_SESSION_NAME" >/dev/null || rc=$?
+    # The ensure runs FIRST on every warm consult, so it needs the same --timeout: a stalled
+    # ensure would otherwise hang /ask --via acp forever, the very failure this fix closes.
+    # (codex, r1, blocking.)
+    "${launcher[@]}" --timeout "$consult_timeout" "$profile" sessions ensure --name "$ACP_SESSION_NAME" >/dev/null || rc=$?
     if [ "$rc" -eq 0 ]; then
       if [ -n "$qfile" ]; then
         out="$("${base[@]}" -s "$ACP_SESSION_NAME" --file "$qfile" ${words[@]+"${words[@]}"})" || rc=$?
@@ -165,16 +170,19 @@ cmd_consult() {
       fi
     fi
   fi
+  # Emit whatever acpx produced, so a NON-ZERO exit's diagnostics are actually visible — the error
+  # branches below say "see output above", which was false while stdout was captured and dropped.
+  # On success this re-emits the answer (buffered, as the runphase path buffers its reply). (both, r1.)
+  [ -n "$out" ] && printf '%s\n' "$out"
   # acpx's exit codes are a stable scripting contract — translate, don't mask.
   # Every nonzero path carries the same fallback line and NO retry advice.
   case "$rc" in
-    0)   # SILENT-SUCCESS GUARD: rc 0 with a blank body is not an answer. Refuse it with the
-         # fallback rather than hand the caller zero bytes as success; otherwise re-emit the
-         # captured answer (buffered, as the runphase path buffers its reply, not streamed).
+    0)   # SILENT-SUCCESS GUARD: rc 0 with a blank body is not an answer — refuse it with the
+         # fallback rather than hand the caller zero bytes as success (nothing was emitted above
+         # when $out is blank).
          if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
            die_fb "consult: acpx exited 0 but returned no answer (a dropped or empty turn)"
          fi
-         printf '%s\n' "$out"
          return 0 ;;
     2)   die_fb "consult: acpx usage error (exit 2) — likely an acp.sh bug; report it" ;;
     3)   die_fb "consult: timed out (exit 3)" ;;
