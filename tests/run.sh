@@ -8693,14 +8693,25 @@ grep -q 'command mv -f "\$_tmp" "\$_dst"' "$ISO_RP" \
 awk '/_iso_place "\$acp_src_home\/auth.json"/{f=1} END{exit !f}' "$ISO_RP" \
   && ok "auth.json is staged atomically, not copied through a possible symlink" \
   || fail "auth.json is still copied without symlink/hardlink safety"
-# STALE-CREDENTIAL CLEAR: the persistent isolated home would otherwise keep a copy of an auth.json
-# whose SOURCE was later removed/rotated, silently undoing the logout. When the source is absent (or
-# a symlink we refuse to follow) the else-branch removes the isolated copy, fail-closed — a copy it
-# cannot delete refuses the turn rather than running on a possibly-revoked credential.
-awk '/else$/{e=NR} /a stale isolated auth.json persists after its source credential was removed/{if(e)d=1} END{exit !d}' "$ISO_RP" \
-  && grep -qF 'rm -f "$acp_iso_home/auth.json"' "$ISO_RP" \
-  && ok "a stale isolated auth.json is cleared (fail-closed) when its source credential is gone" \
-  || fail "a removed source credential is silently undone by the persistent isolated home"
+# STALE-CREDENTIAL CLEAR. The persistent isolated home would otherwise keep an auth.json whose
+# SOURCE was later removed/rotated, silently undoing the logout — the next mounted turn would run on
+# a revoked credential. The else-branch removes the isolated copy, fail-closed.
+# The shape check is bound to the SOURCE gate and requires the fail-closed recheck AFTER the rm, in
+# order (stalecred r1, both reviewers): a bare /else$/ matched any of ~15 else lines, and a check
+# that only proved else+rm would stay green if the recheck were deleted. Requiring the rm to sit
+# after the source-gate else also rejects an INVERTED gate (clearing in the source-present branch).
+# The codex Seatbelt backend itself is a reproducible-by-hand probe, as every isolation boundary here
+# is (the suite stubs acpx and does not run a real codex turn); a functional codex fixture was tried
+# and works standalone but is timing-fragile under this machine's load, so it is not committed.
+awk '
+  /\[ -f "\$acp_src_home\/auth.json" \] && \[ ! -L "\$acp_src_home\/auth.json" \]; then/{g=NR}
+  g && /^ *else$/ && NR>g && NR<g+6 {e=NR}
+  e && /rm -f "\$acp_iso_home\/auth.json"/ && NR>e {r=NR}
+  r && /a stale isolated auth.json persists after its source credential was removed/ && NR>r {d=1}
+  END{exit !(g&&e&&r&&d)}
+' "$ISO_RP" \
+  && ok "the stale-auth clear sits on the source gate with a fail-closed recheck after the rm" \
+  || fail "the stale-auth clear is not bound to the source gate or lacks the fail-closed recheck"
 # _iso_place refuses a non-regular-file dest (symlink-to-dir or real dir): `mv -f` there would
 # deposit the staged file INSIDE the target and exit 0, silently leaving the read-only config
 # absent. It unlinks a symlink dest first, refuses a directory, and verifies a regular file
