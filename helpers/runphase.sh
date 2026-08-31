@@ -477,6 +477,10 @@ build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> <agent> [mounted] �
   # misattribution, which is worse than a refused turn. (parent-broker, S3-3.)
   GROK_PROMPT_NOTE=""
   GROK_AGENT="${5:-}"
+  # A WHITESPACE-ONLY name is as unusable as an empty one: `cap_word` yields nothing for it, so
+  # the header would render "##  Take" and `from:` would carry blanks. The allowlist makes this
+  # academic today; the guard is what keeps it academic. (grok, implement r1, advisory.)
+  case "$GROK_AGENT" in *[![:space:]]*) ;; *) GROK_AGENT="" ;; esac
   if [ -z "$GROK_AGENT" ]; then
     GROK_PROMPT_NOTE="internal: the brokered prompt was built without an agent name — refusing rather than stamping a reply under a default identity"
     return 1
@@ -919,10 +923,18 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
       fi
     fi
   fi
+  # THE IDENTITY STAMP FAILS CLOSED TOO. Refusing a missing agent at the prompt build while
+  # `${GROK_AGENT:-grok}` still stood on the line that WRITES `from:` left the misattribution
+  # one caller away from happening anyway — and it is this line, not the prompt, that decides
+  # whose name a published review carries. (grok, implement r1, advisory.)
+  if [ -z "${GROK_AGENT:-}" ]; then
+    GROK_BROKER_NOTE="internal: the reply could not be stamped because no agent identity was set — refusing rather than publishing a review under a default name"
+    return 1
+  fi
   {
     printf -- '---\n'
     printf 'type: %s\n' "$GROK_RTYPE"
-    printf 'from: %s\n' "${GROK_AGENT:-grok}"
+    printf 'from: %s\n' "$GROK_AGENT"
     printf 'timestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'workspace: %s\n' "$GROK_WS"
     printf 'message_id: %s\n' "$GROK_REPLY_ID"
@@ -1016,8 +1028,11 @@ broker_stamp_and_deliver() {  # <msg> <run-dir> <peer>
   local rc=0
   BROKER_VALIDATED=0
   # The ACP path enters HERE, not through grok_broker, so this was the one entry point that
-  # never cleared the note. Both halves of the per-attempt broker state are reset together.
+  # never cleared them. ALL THREE pieces of per-attempt broker state are reset together —
+  # leaving BROKER_REFUSAL_LOGGED out would silently swallow a second attempt's refusal event.
+  # (grok, implement r1, advisory.)
   GROK_BROKER_NOTE=""
+  BROKER_REFUSAL_LOGGED=0
   broker_stamp "$@" || rc=$?
   [ "$rc" -eq 0 ] || [ "$BROKER_VALIDATED" -eq 1 ] || broker_note_refusal
   return "$rc"

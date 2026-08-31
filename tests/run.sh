@@ -2191,8 +2191,13 @@ grep -q '## \$agent_title Take' "$PB_RP" \
   && ok "no hardcoded 'Grok Take' survives in the shared prompt" || fail "literal Grok Take still present"
 
 # A missing agent REFUSES. Defaulting published another agent's review under grok's name.
-! grep -q 'GROK_AGENT="${5:-grok}"' "$PB_RP" \
-  && ok "the brokered prompt has no silent grok agent default" || fail "grok agent default still present"
+# ANY `:-grok` default in non-comment code, not just the arg-5 form. The exact-form grep this
+# replaces was blind to `${GROK_AGENT:-grok}` on the line that stamps `from:`, which is the one
+# that actually decides whose name a published review carries. (grok, implement r1, advisory.)
+PB_DEFAULTS="$(grep -vE '^[[:space:]]*#' "$PB_RP" | grep -c ':-grok' || true)"
+[ "$PB_DEFAULTS" = "0" ] \
+  && ok "no ':-grok' identity default survives anywhere in executable code" \
+  || fail "grok identity default still present on $PB_DEFAULTS code line(s)"
 grep -q 'without an agent name — refusing' "$PB_RP" \
   && ok "a brokered prompt built without an agent refuses instead of stamping a default identity" \
   || fail "no fail-closed refusal for a missing agent"
@@ -2222,6 +2227,14 @@ sed -n '/^broker_stamp_and_deliver() {/,/^}/p' "$PB_RP" | grep -q 'GROK_BROKER_N
   && ok "the ACP broker entry point clears the stale note beside BROKER_VALIDATED" || fail "note not reset on the ACP path"
 ! grep -q 'GROK_BROKER_DERIVED' "$PB_RP" \
   && ok "the write-only GROK_BROKER_DERIVED is gone (the derivation is logged, not stored)" || fail "dead GROK_BROKER_DERIVED remains"
+sed -n '/^broker_stamp_and_deliver() {/,/^}/p' "$PB_RP" | grep -q 'BROKER_REFUSAL_LOGGED=0' \
+  && ok "the ACP broker entry clears all THREE per-attempt flags, not two" || fail "BROKER_REFUSAL_LOGGED not reset on the ACP path"
+sed -n '/^broker_stamp() {/,/^}/p' "$PB_RP" | grep -q 'no agent identity was set' \
+  && ok "the from: stamp itself refuses without an identity, not just the prompt build" || fail "identity stamp has no fail-closed guard"
+PB_BLANK="$(eval "$PB_FN"; GROK_PROMPT_NOTE=""; \
+  if build_grok_prompt m r p main "   " 2>/dev/null; then printf 'RETURNED_ZERO'; else printf 'REFUSED'; fi)"
+[ "$PB_BLANK" = "REFUSED" ] \
+  && ok "a whitespace-only agent name is refused, so '##  Take' cannot render" || fail "blank agent accepted: $PB_BLANK"
 
 section "multi-agent: grok arg refusals"
 R5="$WORK/ma-leg5"; mkdir -p "$R5"
