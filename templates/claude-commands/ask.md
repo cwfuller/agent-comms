@@ -4,12 +4,18 @@ Use this when you want a second opinion — a design choice, an open question, a
 
 ## Talking to the user
 
-Status to the human is plain English, not protocol.
+Every message to the human starts with a status line, then detail if needed. The
+status line is the first sentence — nothing before it. They should not have to ask
+whether this is still running.
 
-- One short update: what happened, what happens next, whether they need to do anything.
-- Name the work, not the machinery. "Asked grok about the lock ordering; waiting" — not
-  helper commands, RESULT lines, or inbox paths unless they asked.
-- When the reply arrives, surface the take, not the envelope.
+Status line is one of:
+- **Waiting on <who>.** Still running; they need do nothing.
+- **Done.** The take is below. They need do nothing unless you are asking a
+  follow-up.
+- **Stopped — I need you.** Send failed, or there was nothing to excerpt.
+
+Then the take, not the envelope. No helper names, RESULT lines, or inbox paths
+unless they asked.
 
 ## Instructions
 

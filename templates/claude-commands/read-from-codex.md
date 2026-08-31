@@ -2,14 +2,21 @@ Read and act on messages from Codex in `.comms/to-claude/`.
 
 ## Talking to the user
 
-Status to the human is plain English, not protocol.
+Every message to the human starts with a status line, then detail if needed. The
+status line is the first sentence — nothing before it. They should not have to ask
+whether the loop is still running.
 
-- One short update: what happened, what happens next, whether they need to do anything.
-- Name the work, not the machinery. "Codex asked for a nil-check in helpers/runphase.sh; I
-  made it; waiting on grok" — not helper commands, RESULT lines, exit codes, presence
-  records, or round-accounting unless they asked.
-- Ask only when the loop cannot proceed (max-rounds, a split it cannot settle, a real
-  failure). Do not narrate every dispatch.
+Status line is one of:
+- **Waiting on <who>.** Still running; they need do nothing.
+- **Fixing findings.** Still running.
+- **Implementing.** Still running.
+- **Done.** Stopped; approved or otherwise finished. They need do nothing unless
+  the next sentence says otherwise (push, deploy, a decision).
+- **Stopped — I need you.** Split, max-rounds, or a failure only they can resolve.
+
+After that, the work: what changed, the decision, any caveat. Do not recap rounds,
+how you found a finding, helper names, RESULT lines, or exit codes unless they
+asked. Do not narrate every dispatch.
 
 ## Instructions
 
@@ -212,7 +219,7 @@ you re-earn at every checkpoint, never tenure.
      on it rather than a separate workflow name. Any approved plan phase continues into
      implementation on the same thread.
      - **Archive the approval message first** (`"$COMMS_SH" archive --as claude "<file>"`) — this prevents a re-triggered `/read-from-codex` from re-reading the stale approval and double-firing the implement phase
-     - Notify user: "Plan approved after N rounds. Starting implementation..."
+     - Notify user, status line first: "Implementing. Plan approved after N rounds."
      - `"$COMMS_SH" lessons --surface "<implementation area>"` (bounded) — the plan was
        lesson-checked at draft time, but implementation surfaces new specifics
      - Implement the approved plan
@@ -252,12 +259,14 @@ you re-earn at every checkpoint, never tenure.
          reviewed the plan (captured mechanically above) reviews the implementation;
          handing it to one approving leg sheds the rest of the panel at the exact
          moment the change grows a diff. (codex + grok, panel r1.)
-   - Otherwise → **Stop. Notify user:** "Approved after N rounds." Record the reviewer
-     performance note (see above), archive: `"$COMMS_SH" archive --as claude "<file>"`,
-     then close the thread's state: `"$COMMS_SH" state complete "<thread>"`
+   - Otherwise → **Stop. Notify user** with status line first: "Done. Approved after N
+     rounds." Then any advisory worth keeping. Record the reviewer performance note
+     (see above), archive: `"$COMMS_SH" archive --as claude "<file>"`, then close the
+     thread's state: `"$COMMS_SH" state complete "<thread>"`
 
 2. **If `round >= max-rounds`:**
-   - **Stop. Escalate to user:** "Max rounds (N) reached. Remaining blocking issues from the reviewer:" then list the unresolved blocking findings.
+   - **Stop. Escalate to user** with status line first: "Stopped — I need you. Max
+     rounds (N) reached." Then list the unresolved blocking findings.
    - Archive the message via the helper.
 
 3. **If verdict is `REQUEST_CHANGES` and round < max-rounds:**

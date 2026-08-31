@@ -63,9 +63,10 @@ message_id: <the filename, without .md>
    Exception — `RESULT: spawned` (a runphase turn, over either `acp` or `headless`; the line names which): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply. `transport` answers which surface a loop uses; `RESULT: spawned` answers how to wait — the wait is the same either way, so do not go looking for a separate ACP protocol.
    <!-- /loopspec:fragment -->
 
-5. Confirm to the user in plain English that it was sent and they do not need to
-   do anything unless a reply later asks. Do not relay helper names or RESULT
-   lines unless delivery failed.
+5. First sentence to the user is the status line, nothing before it: "Waiting on
+   <target>." if delivery worked, or "Stopped — I need you." if it failed. Then
+   at most one line of detail. No helper names or RESULT lines unless delivery
+   failed.
 
 **If the user provides specific instructions** (e.g., "tell codex to focus on the error handling"), incorporate those into the Review focus section.
 
