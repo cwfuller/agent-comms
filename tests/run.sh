@@ -2205,7 +2205,14 @@ grep -q 'without an agent name — refusing' "$PB_RP" \
 # function can be extracted and called with four arguments to prove the refusal actually fires.
 # (codex, implement r1, advisory — the greps above prove the default is gone, not that it refuses.)
 PB_FN="$(sed -n '/^build_grok_prompt() {/,/^}/p' "$PB_RP")"
-PB_GUARD="$(eval "$PB_FN"; GROK_PROMPT_NOTE=""; \
+PB_PRED_FN="$(sed -n '/^agent_name_ok() {/,/^}/p' "$PB_RP")"
+# Without this the two extracted-guard tests below pass because `agent_name_ok` is MISSING, not
+# because the guard works — a vacuous pass that both reviewers caught in round 3.
+PB_INSCOPE="$(eval "$PB_PRED_FN"; eval "$PB_FN"; type agent_name_ok >/dev/null 2>&1 && printf 'yes' || printf 'no')"
+[ "$PB_INSCOPE" = "yes" ] \
+  && ok "the extracted guard scope really defines agent_name_ok (no command-not-found pass)" \
+  || fail "agent_name_ok absent from the extracted scope — the guard tests would pass vacuously"
+PB_GUARD="$(eval "$PB_PRED_FN"; eval "$PB_FN"; GROK_PROMPT_NOTE=""; \
   if build_grok_prompt m r p main 2>/dev/null; then printf 'RETURNED_ZERO'; \
   else printf 'REFUSED|%s' "$GROK_PROMPT_NOTE"; fi)"
 case "$PB_GUARD" in
@@ -2236,10 +2243,11 @@ sed -n '/^broker_stamp() {/,/^}/p' "$PB_RP" | grep -q 'no usable agent identity 
   && ok "the from: stamp itself refuses without an identity, not just the prompt build" || fail "identity stamp has no fail-closed guard"
 # ONE predicate, both doors. Two guards that differ is the bug shape this repo keeps finding:
 # round 2 caught the prompt coercing whitespace while the stamp checked only -z.
-PB_USES="$(grep -c 'agent_name_ok' "$PB_RP")"
-[ "$PB_USES" -ge 3 ] \
-  && ok "one agent_name_ok predicate is defined and used by BOTH the prompt build and the stamp" \
-  || fail "agent_name_ok not shared by both guards (refs: $PB_USES)"
+PB_IN_PROMPT="$(sed -n '/^build_grok_prompt() {/,/^}/p' "$PB_RP" | grep -c 'agent_name_ok ')"
+PB_IN_STAMP="$(sed -n '/^broker_stamp() {/,/^}/p' "$PB_RP" | grep -c 'agent_name_ok ')"
+[ "$PB_IN_PROMPT" -ge 1 ] && [ "$PB_IN_STAMP" -ge 1 ] \
+  && ok "one agent_name_ok predicate is CALLED inside both the prompt build and the stamp" \
+  || fail "agent_name_ok call sites — prompt:$PB_IN_PROMPT stamp:$PB_IN_STAMP"
 # The guard must run BEFORE any other global is read, or a bad body gets blamed for a missing
 # identity — and under set -u a standalone caller aborts before reaching the refusal.
 PB_GUARD_LN="$(awk '/^broker_stamp\(\) \{/{f=1} f&&/agent_name_ok/{print NR; exit}' "$PB_RP")"
@@ -2251,7 +2259,7 @@ PB_PRED="$(eval "$(sed -n '/^agent_name_ok() {/,/^}/p' "$PB_RP")"; \
   for v in "" "   " "$(printf '\t')" grok; do agent_name_ok "$v" && printf 'Y' || printf 'N'; done)"
 [ "$PB_PRED" = "NNNY" ] \
   && ok "agent_name_ok refuses empty, spaces and tab but accepts a real name" || fail "predicate: $PB_PRED"
-PB_BLANK="$(eval "$PB_FN"; GROK_PROMPT_NOTE=""; \
+PB_BLANK="$(eval "$PB_PRED_FN"; eval "$PB_FN"; GROK_PROMPT_NOTE=""; \
   if build_grok_prompt m r p main "   " 2>/dev/null; then printf 'RETURNED_ZERO'; else printf 'REFUSED'; fi)"
 [ "$PB_BLANK" = "REFUSED" ] \
   && ok "a whitespace-only agent name is refused, so '##  Take' cannot render" || fail "blank agent accepted: $PB_BLANK"
