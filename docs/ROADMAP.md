@@ -29,14 +29,14 @@ provenance, partial-panel refusal, human escalation. Markdown is the human
 archive. ACP is transport and session. The coordinator's event log is the source
 of truth — never the model's mailbox, never ACP itself.
 
-**In flight — do not restart:** `acp-warm-mount` (`worktree-acp-warm-mount`) is
-step 1. `suite-lanes` (`worktree-suite-lanes`) carries the per-section assertion
-vector and the watchdog-poll fix — rebase it onto main after warm-mount lands; do
-not run it in parallel (both edit `tests/run.sh` and `tests/expected-counts.tsv`).
-It is NOT a shard precondition any more: sharding was measured at 1.07x and
-rejected (ranked item 4). The vector earns its place on its own — it is what
-detects assertions moving between sections. `suite-perf` / `worktree-suite-shard` has no
-commits vs main; do not start a third suite effort.
+**Nothing is in flight (2026-08-31).** Both branches this block used to reserve have
+landed: `acp-warm-mount` (step 1) is on main, and `suite-lanes` carried the per-section
+assertion vector and the watchdog-poll fix, which are on main too — `worktree-suite-lanes`
+now has zero commits ahead. Read a branch's real distance from main before treating this
+block as a reservation; it was stale for a day before anyone checked. `suite-perf` /
+`worktree-suite-shard` also has no commits vs main. Do not start a new suite effort:
+sharding was measured at 1.07x and rejected (ranked item 4), and the vector — the thing
+that detects assertions MOVING between sections — is already landed and earning its place.
 
 ### Freeze
 
