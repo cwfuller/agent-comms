@@ -1189,10 +1189,15 @@ clearest evidence so far that a panel of two is not redundant.
   set row — but the dispatch-side refusal itself is still unbuilt.)*
 - [ ] **End-to-end coverage for the `deliver → acp → spawn --via acp` path.** The committed
   suite asserts the selector; the path itself is proven only by a live run. *(codex.)*
-- [ ] **`helpers/acp.sh cmd_consult` has the same class of hole, unfixed.** The `/ask --via
-  acp` transport passes NO `--timeout` and never inspects its own output — acpx stdout goes
-  straight to the caller, so rc=0 with zero bytes returns success silently. Same shape as
-  the runphase timeout misdiagnosis, different helper, and deliberately not bundled with it.
+- [x] **`helpers/acp.sh cmd_consult` had the same class of hole — FIXED 2026-08-31.** The
+  `/ask --via acp` transport passed NO `--timeout` (a hung acpx blocked forever) and never
+  inspected its own output — acpx stdout went straight to the caller, so rc=0 with zero bytes
+  returned success silently. Now it pins an acpx `--timeout` (`COMMS_ACP_CONSULT_TIMEOUT_SECS`,
+  default 300; a malformed budget falls back rather than taking the turn down, matching the
+  runphase rule) and CAPTURES the answer so a rc-0-with-blank-body turn is refused with the
+  mailbox fallback instead of handed back as success. The answer is now buffered rather than
+  streamed (as the runphase reply is). Covered by the acp.sh consult section: `--timeout` in the
+  prompt argv, the malformed-budget default, and the empty-answer refusal.
 
 ### Any agent drives (2026-08-26, owner direction)
 

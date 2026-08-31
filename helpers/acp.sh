@@ -137,29 +137,45 @@ cmd_consult() {
   acpx_prepare_cache
   # shellcheck disable=SC2206
   local -a launcher=($(acpx_launcher))
-  local -a base=("${launcher[@]}" --format quiet
+  # A consult that HANGS must not block forever, and a consult that returns rc=0 with ZERO bytes
+  # must not read as a successful answer — the same rc-0-empty misdiagnosis the runphase path
+  # already refuses (a dropped turn, an empty model reply). Pin an acpx `--timeout` (its exit 3 is
+  # caught below) and CAPTURE the answer so it can be inspected before it is trusted. A malformed
+  # budget falls back to the default rather than taking the turn down, matching the runphase rule.
+  # (docs/ROADMAP.md, "Found in the field, not yet fixed".)
+  local consult_timeout="${COMMS_ACP_CONSULT_TIMEOUT_SECS:-300}"
+  case "$consult_timeout" in ''|*[!0-9]*) consult_timeout=300 ;; esac
+  [ "$consult_timeout" -ge 1 ] 2>/dev/null || consult_timeout=300
+  local -a base=("${launcher[@]}" --format quiet --timeout "$consult_timeout"
                  --approve-reads --non-interactive-permissions deny "$profile")
-  local rc=0
+  local rc=0 out=""
   if [ "$oneshot" = true ]; then
     if [ -n "$qfile" ]; then
-      "${base[@]}" exec --file "$qfile" ${words[@]+"${words[@]}"} || rc=$?
+      out="$("${base[@]}" exec --file "$qfile" ${words[@]+"${words[@]}"})" || rc=$?
     else
-      "${base[@]}" exec "${words[@]}" || rc=$?
+      out="$("${base[@]}" exec "${words[@]}")" || rc=$?
     fi
   else
     "${launcher[@]}" "$profile" sessions ensure --name "$ACP_SESSION_NAME" >/dev/null || rc=$?
     if [ "$rc" -eq 0 ]; then
       if [ -n "$qfile" ]; then
-        "${base[@]}" -s "$ACP_SESSION_NAME" --file "$qfile" ${words[@]+"${words[@]}"} || rc=$?
+        out="$("${base[@]}" -s "$ACP_SESSION_NAME" --file "$qfile" ${words[@]+"${words[@]}"})" || rc=$?
       else
-        "${base[@]}" -s "$ACP_SESSION_NAME" "${words[@]}" || rc=$?
+        out="$("${base[@]}" -s "$ACP_SESSION_NAME" "${words[@]}")" || rc=$?
       fi
     fi
   fi
   # acpx's exit codes are a stable scripting contract — translate, don't mask.
   # Every nonzero path carries the same fallback line and NO retry advice.
   case "$rc" in
-    0)   return 0 ;;
+    0)   # SILENT-SUCCESS GUARD: rc 0 with a blank body is not an answer. Refuse it with the
+         # fallback rather than hand the caller zero bytes as success; otherwise re-emit the
+         # captured answer (buffered, as the runphase path buffers its reply, not streamed).
+         if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
+           die_fb "consult: acpx exited 0 but returned no answer (a dropped or empty turn)"
+         fi
+         printf '%s\n' "$out"
+         return 0 ;;
     2)   die_fb "consult: acpx usage error (exit 2) — likely an acp.sh bug; report it" ;;
     3)   die_fb "consult: timed out (exit 3)" ;;
     4)   die_fb "consult: no session (exit 4) despite 'sessions ensure'" ;;

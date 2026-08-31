@@ -3244,8 +3244,12 @@ cat > "$ACP_STUB/npx" <<'NSTUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "${ACP_STUB_LOG:-/dev/null}"
 [ -n "${ACP_STUB_EXIT:-}" ] && exit "$ACP_STUB_EXIT"
+# ACP_STUB_EMPTY models the rc-0-zero-bytes turn (a dropped or empty model reply): the prompt
+# exits 0 having produced nothing, which the consult must refuse rather than pass as success.
 case " $* " in
   *" sessions ensure "*) echo "stub-session-id (created)" ;;
+  *" exec "*|*" -s "*) [ -n "${ACP_STUB_EMPTY:-}" ] && exit 0
+     echo "stub answer"; echo "[acpx] tokens: input=100 output=5 cache_read=25000 total=25105" ;;
   *) echo "stub answer"; echo "[acpx] tokens: input=100 output=5 cache_read=25000 total=25105" ;;
 esac
 NSTUB
@@ -3261,13 +3265,25 @@ OUT="$(run_acp consult codex is the retry approach sound 2>&1)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && echo "$OUT" | grep -q 'stub answer' && ok "consult passes the answer through" || fail "consult happy path (rc=$rc)"
 grep -q -- '-y acpx@0.13.1 codex sessions ensure --name agent-comms-ask' "$ACP_STUB_LOG" \
   && ok "warm consult ensures the pinned named session" || fail "session ensure argv"
-grep -q -- '-y acpx@0.13.1 --format quiet --approve-reads --non-interactive-permissions deny codex -s agent-comms-ask is the retry approach sound' "$ACP_STUB_LOG" \
-  && ok "warm consult prompts the named session with the pinned acpx" || fail "warm prompt argv"
+grep -q -- '-y acpx@0.13.1 --format quiet --timeout 300 --approve-reads --non-interactive-permissions deny codex -s agent-comms-ask is the retry approach sound' "$ACP_STUB_LOG" \
+  && ok "warm consult prompts the named session with the pinned acpx and a --timeout" || fail "warm prompt argv"
 # A consult that cannot read is useless — it would answer from recall instead of the
 # tree. Denied permissions killed a real consult mid-answer before this was added.
 grep -q -- '--approve-reads' "$ACP_STUB_LOG" && ok "consults may READ the tree" || fail "consult read approval"
 grep -q -- '--non-interactive-permissions deny' "$ACP_STUB_LOG" \
   && ok "consults still refuse writes (prompting is impossible here)" || fail "consult write denial"
+# SILENT-SUCCESS GUARD: acpx can exit 0 having produced nothing (a dropped or empty turn). Passing
+# that through hands the caller a blank answer with a success status and no diagnostic — the rc-0-
+# zero-bytes hole. The consult must refuse it with the mailbox fallback. (ROADMAP field item.)
+OUT="$(ACP_STUB_EMPTY=1 run_acp consult codex --oneshot hello 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$OUT" | grep -qi 'no answer' && echo "$OUT" | grep -qi 'mailbox' \
+  && ok "a rc-0 consult with an empty answer is refused, not passed as success" \
+  || fail "an empty consult answer read as success (rc=$rc, out: $(echo "$OUT" | head -1))"
+# A malformed --timeout budget falls back to the default rather than taking the turn down.
+: > "$ACP_STUB_LOG"
+COMMS_ACP_CONSULT_TIMEOUT_SECS=notanumber run_acp consult codex ping >/dev/null 2>&1
+grep -q -- '--timeout 300 --approve-reads' "$ACP_STUB_LOG" \
+  && ok "a malformed consult --timeout budget falls back to the default" || fail "malformed consult timeout not defaulted"
 : > "$ACP_STUB_LOG"
 run_acp consult codex --oneshot quick check >/dev/null 2>&1
 grep -q -- 'codex exec quick check' "$ACP_STUB_LOG" && ! grep -q -- '-s agent-comms-ask' "$ACP_STUB_LOG" \
