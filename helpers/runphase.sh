@@ -464,7 +464,7 @@ cap_word() {
   printf '%s%s' "$(printf '%s' "$1" | cut -c1 | tr '[:lower:]' '[:upper:]')" "$(printf '%s' "$1" | cut -c2-)"
 }
 
-build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> <agent> — sets the GROK_* globals
+build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> <agent> [mounted] — sets the GROK_* globals
   # Parent-brokered prompt. Named for grok because grok was the first such turn, but
   # ANY provider running under --via acp is parent-brokered too: the parent stamps and
   # delivers, so the child must be told to emit its reply as TEXT rather than to send

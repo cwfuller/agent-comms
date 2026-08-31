@@ -2196,6 +2196,21 @@ grep -q '## \$agent_title Take' "$PB_RP" \
 grep -q 'without an agent name — refusing' "$PB_RP" \
   && ok "a brokered prompt built without an agent refuses instead of stamping a default identity" \
   || fail "no fail-closed refusal for a missing agent"
+# BEHAVIORAL, not a grep: the guard runs before any dependency the function has, so the whole
+# function can be extracted and called with four arguments to prove the refusal actually fires.
+# (codex, implement r1, advisory — the greps above prove the default is gone, not that it refuses.)
+PB_FN="$(sed -n '/^build_grok_prompt() {/,/^}/p' "$PB_RP")"
+PB_GUARD="$(eval "$PB_FN"; GROK_PROMPT_NOTE=""; \
+  if build_grok_prompt m r p main 2>/dev/null; then printf 'RETURNED_ZERO'; \
+  else printf 'REFUSED|%s' "$GROK_PROMPT_NOTE"; fi)"
+case "$PB_GUARD" in
+  REFUSED\|*) ok "build_grok_prompt called without an agent REFUSES (behavioral, not a grep)" ;;
+  *) fail "missing-agent guard did not refuse: $PB_GUARD" ;;
+esac
+case "$PB_GUARD" in
+  *"without an agent name"*) ok "the missing-agent refusal explains itself in GROK_PROMPT_NOTE" ;;
+  *) fail "missing-agent refusal set no explanatory note: $PB_GUARD" ;;
+esac
 
 # Runtime notes that reach the operator must name the provider that actually ran.
 ! grep -qE 'grok prompt build refused|grok broker failed|stamped grok reply failed' "$PB_RP" \
