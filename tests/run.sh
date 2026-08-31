@@ -2232,8 +2232,25 @@ sed -n '/^broker_stamp_and_deliver() {/,/^}/p' "$PB_RP" | grep -q 'BROKER_REFUSA
 PB_INITS="$(grep -cE '^(BROKER_VALIDATED=0|BROKER_REFUSAL_LOGGED=0|GROK_BROKER_NOTE="")$' "$PB_RP")"
 [ "$PB_INITS" = "3" ] \
   && ok "all three per-attempt broker flags are initialised at global scope" || fail "global broker-flag inits: $PB_INITS of 3"
-sed -n '/^broker_stamp() {/,/^}/p' "$PB_RP" | grep -q 'no agent identity was set' \
+sed -n '/^broker_stamp() {/,/^}/p' "$PB_RP" | grep -q 'no usable agent identity was set' \
   && ok "the from: stamp itself refuses without an identity, not just the prompt build" || fail "identity stamp has no fail-closed guard"
+# ONE predicate, both doors. Two guards that differ is the bug shape this repo keeps finding:
+# round 2 caught the prompt coercing whitespace while the stamp checked only -z.
+PB_USES="$(grep -c 'agent_name_ok' "$PB_RP")"
+[ "$PB_USES" -ge 3 ] \
+  && ok "one agent_name_ok predicate is defined and used by BOTH the prompt build and the stamp" \
+  || fail "agent_name_ok not shared by both guards (refs: $PB_USES)"
+# The guard must run BEFORE any other global is read, or a bad body gets blamed for a missing
+# identity — and under set -u a standalone caller aborts before reaching the refusal.
+PB_GUARD_LN="$(awk '/^broker_stamp\(\) \{/{f=1} f&&/agent_name_ok/{print NR; exit}' "$PB_RP")"
+PB_RTYPE_LN="$(awk '/^broker_stamp\(\) \{/{f=1} f&&/GROK_RTYPE/{print NR; exit}' "$PB_RP")"
+[ -n "$PB_GUARD_LN" ] && [ -n "$PB_RTYPE_LN" ] && [ "$PB_GUARD_LN" -lt "$PB_RTYPE_LN" ] \
+  && ok "the stamp identity guard runs before any other broker global is read" \
+  || fail "stamp guard at $PB_GUARD_LN is not before the first global read at $PB_RTYPE_LN"
+PB_PRED="$(eval "$(sed -n '/^agent_name_ok() {/,/^}/p' "$PB_RP")"; \
+  for v in "" "   " "$(printf '\t')" grok; do agent_name_ok "$v" && printf 'Y' || printf 'N'; done)"
+[ "$PB_PRED" = "NNNY" ] \
+  && ok "agent_name_ok refuses empty, spaces and tab but accepts a real name" || fail "predicate: $PB_PRED"
 PB_BLANK="$(eval "$PB_FN"; GROK_PROMPT_NOTE=""; \
   if build_grok_prompt m r p main "   " 2>/dev/null; then printf 'RETURNED_ZERO'; else printf 'REFUSED'; fi)"
 [ "$PB_BLANK" = "REFUSED" ] \

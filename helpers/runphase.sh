@@ -461,6 +461,14 @@ parent_thread_context() {
   done < <(find "$arch" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort -r)
 }
 
+# agent_name_ok <name> — the ONE identity predicate. The prompt build and the `from:` stamp
+# both gate on it, so they cannot drift into two different doors: round 2 found exactly that,
+# with whitespace coerced at the prompt but only `-z` checked at the stamp. A name is usable
+# iff it holds at least one non-space character. (codex + grok, implement r2, corroborated.)
+agent_name_ok() {
+  case "${1:-}" in *[![:space:]]*) return 0 ;; *) return 1 ;; esac
+}
+
 # cap_word <word> — Title-case a single word. bash 3.2 has no ${var^}, and the consult
 # header is the one place an agent name is rendered for a human rather than matched, so the
 # capitalization lives in ONE accessor instead of at each call site.
@@ -482,9 +490,8 @@ build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> <agent> [mounted] �
   GROK_PROMPT_NOTE=""
   GROK_AGENT="${5:-}"
   # A WHITESPACE-ONLY name is as unusable as an empty one: `cap_word` yields nothing for it, so
-  # the header would render "##  Take" and `from:` would carry blanks. The allowlist makes this
-  # academic today; the guard is what keeps it academic. (grok, implement r1, advisory.)
-  case "$GROK_AGENT" in *[![:space:]]*) ;; *) GROK_AGENT="" ;; esac
+  # the header would render "##  Take" and `from:` would carry blanks.
+  if ! agent_name_ok "$GROK_AGENT"; then GROK_AGENT=""; fi
   if [ -z "$GROK_AGENT" ]; then
     GROK_PROMPT_NOTE="internal: the brokered prompt was built without an agent name — refusing rather than stamping a reply under a default identity"
     return 1
@@ -808,6 +815,15 @@ write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review tu
 
 broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivered
   local msg="$1" run_dir="$2" peer="$3"
+  # IDENTITY FIRST, before any other global is read. It decides whose name a published review
+  # carries, and checking it late meant a turn with BOTH a bad body and no identity recorded the
+  # body as the cause — and, under `set -u`, a standalone caller aborted on an earlier expansion
+  # instead of reaching this explanatory refusal. Same predicate as the prompt build, so the two
+  # guards are one door. (codex + grok, implement r2, corroborated advisory.)
+  if ! agent_name_ok "${GROK_AGENT:-}"; then
+    GROK_BROKER_NOTE="internal: the reply could not be stamped because no usable agent identity was set — refusing rather than publishing a review under a default or blank name"
+    return 1
+  fi
   [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="the child produced no reply text"; return 1; }
   # NOTHING is normalised here either. unwrap_reply used to strip a whole-answer fence, but
   # that made a model-authored delimiter authoritative BEFORE the shared lexer: a reply
@@ -926,14 +942,6 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
         return 1
       fi
     fi
-  fi
-  # THE IDENTITY STAMP FAILS CLOSED TOO. Refusing a missing agent at the prompt build while
-  # `${GROK_AGENT:-grok}` still stood on the line that WRITES `from:` left the misattribution
-  # one caller away from happening anyway — and it is this line, not the prompt, that decides
-  # whose name a published review carries. (grok, implement r1, advisory.)
-  if [ -z "${GROK_AGENT:-}" ]; then
-    GROK_BROKER_NOTE="internal: the reply could not be stamped because no agent identity was set — refusing rather than publishing a review under a default name"
-    return 1
   fi
   {
     printf -- '---\n'
