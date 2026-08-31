@@ -2146,11 +2146,18 @@ STILL OPEN (why the item is not closed):
   `auth.json` into its review body; network is dead so it cannot post it, but the parent reads
   that text. A redacted evidence pack (never raw `git config --show-origin` or remote URLs) is
   the intended mitigation and is not built.
-- **Stale isolated credential.** The isolated home persists across rounds for warmth, so if the
-  source `auth.json` is later removed or replaced (a logout, a credential rotation), the previous
-  per-mount copy lingers in the home. Refuse or clear a stale destination when the source is gone
-  so credential removal cannot be silently undone by the reused home. (codex, isolation impl r6,
-  advisory — filed, not blocking.)
+- **Stale isolated credential — CLOSED 2026-08-31.** The isolated home persists across rounds for
+  warmth, so if the source `auth.json` was later removed or replaced (a logout, a credential
+  rotation, or the source becoming a symlink we refuse to follow), the previous per-mount copy
+  lingered in the home and silently undid the removal — the next mounted turn ran on a revoked
+  credential. The staging block now has an else-branch: when there is no usable source, the
+  isolated `auth.json` is removed, FAIL-CLOSED (a copy it cannot delete refuses the turn rather
+  than running on a possibly-revoked credential). Verified by a code-shape assertion in the
+  isolation section (the codex backend itself is a reproducible-by-hand probe, like every other
+  isolation boundary here — the suite stubs acpx and does not run a real codex Seatbelt turn).
+  Reproducible probe: stage a round with `~/.codex/auth.json` present, remove it, run a second
+  round on the same mount, and confirm the isolated `auth.json` is gone. (codex, isolation impl r6,
+  advisory.)
 - **The `.codex/config.toml` refusal is a repo footgun until composite-root.** A developer with a
   local (untracked) `.codex/config.toml` in the checkout has it snapshotted into every artifact
   (snapshot-on-send captures untracked files), and every mounted codex review of THIS repo then

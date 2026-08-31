@@ -8693,6 +8693,14 @@ grep -q 'command mv -f "\$_tmp" "\$_dst"' "$ISO_RP" \
 awk '/_iso_place "\$acp_src_home\/auth.json"/{f=1} END{exit !f}' "$ISO_RP" \
   && ok "auth.json is staged atomically, not copied through a possible symlink" \
   || fail "auth.json is still copied without symlink/hardlink safety"
+# STALE-CREDENTIAL CLEAR: the persistent isolated home would otherwise keep a copy of an auth.json
+# whose SOURCE was later removed/rotated, silently undoing the logout. When the source is absent (or
+# a symlink we refuse to follow) the else-branch removes the isolated copy, fail-closed — a copy it
+# cannot delete refuses the turn rather than running on a possibly-revoked credential.
+awk '/else$/{e=NR} /a stale isolated auth.json persists after its source credential was removed/{if(e)d=1} END{exit !d}' "$ISO_RP" \
+  && grep -qF 'rm -f "$acp_iso_home/auth.json"' "$ISO_RP" \
+  && ok "a stale isolated auth.json is cleared (fail-closed) when its source credential is gone" \
+  || fail "a removed source credential is silently undone by the persistent isolated home"
 # _iso_place refuses a non-regular-file dest (symlink-to-dir or real dir): `mv -f` there would
 # deposit the staged file INSIDE the target and exit 0, silently leaving the read-only config
 # absent. It unlinks a symlink dest first, refuses a directory, and verifies a regular file

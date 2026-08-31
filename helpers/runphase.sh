@@ -2654,6 +2654,21 @@ PROMPT
             ABORT_NOTE="refused: could not stage isolated auth.json for '$provider'"
             _iso_place "$acp_src_home/auth.json" "$acp_iso_home/auth.json" 600 \
               || die "run: cannot stage the isolated auth.json"
+          else
+            # STALE-CREDENTIAL CLEAR. The isolated home persists across rounds for warm resume, so
+            # an auth.json staged by an EARLIER round outlives a credential removal or rotation at
+            # the source — a logout, a key revocation, or the source becoming a symlink we refuse
+            # to follow. Left in place it would silently undo that removal: the next mounted turn
+            # would run on a revoked credential. When there is no usable source we therefore REMOVE
+            # the isolated copy, fail-closed — a copy we cannot delete refuses the turn rather than
+            # running on a possibly-revoked credential. (codex, isolation impl r6, advisory.)
+            if [ -e "$acp_iso_home/auth.json" ] || [ -L "$acp_iso_home/auth.json" ]; then
+              ABORT_NOTE="refused: could not clear a stale isolated auth.json for '$provider' after its source went away"
+              rm -f "$acp_iso_home/auth.json" 2>/dev/null || true
+              if [ -e "$acp_iso_home/auth.json" ] || [ -L "$acp_iso_home/auth.json" ]; then
+                die "run: a stale isolated auth.json persists after its source credential was removed — refusing to run on a possibly-revoked credential"
+              fi
+            fi
           fi
           ABORT_NOTE="refused: could not write the isolated read-only codex config for '$provider'"
           _iso_place "" "$acp_iso_home/config.toml" 600 'approval_policy = "on-request"
