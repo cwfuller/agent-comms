@@ -1,5 +1,16 @@
 Read and act on messages from Codex in `.comms/to-claude/`.
 
+## Talking to the user
+
+Status to the human is plain English, not protocol.
+
+- One short update: what happened, what happens next, whether they need to do anything.
+- Name the work, not the machinery. "Codex asked for a nil-check in helpers/runphase.sh; I
+  made it; waiting on grok" — not helper commands, RESULT lines, exit codes, presence
+  records, or round-accounting unless they asked.
+- Ask only when the loop cannot proceed (max-rounds, a split it cannot settle, a real
+  failure). Do not narrate every dispatch.
+
 ## Instructions
 
 1. **Resolve the shared helper** — handles comms root, workspace name, listing, validation, delivery, and archiving. Local pin wins over global:

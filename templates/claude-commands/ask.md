@@ -2,6 +2,15 @@ Ask a supported agent a one-off question via `.comms/` and auto-deliver it — o
 
 Use this when you want a second opinion — a design choice, an open question, a tradeoff, or simply "thoughts?" on what is being discussed — not a review of work you already did. For review-shaped handoffs use `/send-to-codex`. For autonomous loops use `/auto` or `/auto --plan`.
 
+## Talking to the user
+
+Status to the human is plain English, not protocol.
+
+- One short update: what happened, what happens next, whether they need to do anything.
+- Name the work, not the machinery. "Asked grok about the lock ordering; waiting" — not
+  helper commands, RESULT lines, or inbox paths unless they asked.
+- When the reply arrives, surface the take, not the envelope.
+
 ## Instructions
 
 1. **Parse the argument — target agent, then question.**

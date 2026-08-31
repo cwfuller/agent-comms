@@ -9,6 +9,17 @@ implementing: novel architecture, high blast radius, safety-critical, or ambiguo
 It is judged on DIRECTION, never on the prose of the plan — that bar, not a tight round
 cap, is what keeps a plan phase from becoming a document-nit loop.
 
+## Talking to the user
+
+Status to the human is plain English, not protocol.
+
+- One short update: what happened, what happens next, whether they need to do anything.
+- Name the work, not the machinery. "Codex asked for a nil-check in helpers/runphase.sh; I
+  made it; waiting on grok" — not helper commands, RESULT lines, exit codes, presence
+  records, or round-accounting unless they asked.
+- Ask only when the loop cannot proceed (max-rounds, a split it cannot settle, a real
+  failure). Do not narrate every dispatch.
+
 ## Instructions
 
 0. **Presence gate — before touching the tree.** Resolve the helper FIRST (this step
@@ -206,5 +217,6 @@ verdict format. The cycle continues until APPROVE or max rounds.
    Exception — `RESULT: spawned` (a runphase turn, over either `acp` or `headless`; the line names which): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply. `transport` answers which surface a loop uses; `RESULT: spawned` answers how to wait — the wait is the same either way, so do not go looking for a separate ACP protocol.
    <!-- /loopspec:fragment -->
 
-7. **Notify the user:** which reviewers were sent to, the phase, and round 1 of N. If the
-   loop goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.
+7. **Notify the user** (plain English — see "Talking to the user"): who is reviewing and
+   that they do not need to do anything unless this later asks. If the loop goes quiet,
+   `"$COMMS_SH" stalled` lists threads still awaiting a reply.
