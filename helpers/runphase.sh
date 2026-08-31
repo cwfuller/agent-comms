@@ -457,18 +457,35 @@ parent_thread_context() {
   done < <(find "$arch" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort -r)
 }
 
-build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> [agent] — sets the GROK_* globals
+# cap_word <word> — Title-case a single word. bash 3.2 has no ${var^}, and the consult
+# header is the one place an agent name is rendered for a human rather than matched, so the
+# capitalization lives in ONE accessor instead of at each call site.
+cap_word() {
+  printf '%s%s' "$(printf '%s' "$1" | cut -c1 | tr '[:lower:]' '[:upper:]')" "$(printf '%s' "$1" | cut -c2-)"
+}
+
+build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> <agent> — sets the GROK_* globals
   # Parent-brokered prompt. Named for grok because grok was the first such turn, but
   # ANY provider running under --via acp is parent-brokered too: the parent stamps and
   # delivers, so the child must be told to emit its reply as TEXT rather than to send
   # it. Handing a self-sending prompt to a brokered turn makes the child try to run
   # the mailbox flow itself — observed live on the first ACP review.
-  GROK_AGENT="${5:-grok}"
+  # THE AGENT IS REQUIRED, and a missing one REFUSES rather than defaulting. This prompt is
+  # built for every parent-brokered turn — grok, and any provider under --via acp — and the
+  # name it stamps becomes `from:` on the reply. Defaulting to `grok` meant a caller that
+  # forgot arg 5 would publish another agent's review under grok's name: a silent
+  # misattribution, which is worse than a refused turn. (parent-broker, S3-3.)
+  GROK_PROMPT_NOTE=""
+  GROK_AGENT="${5:-}"
+  if [ -z "$GROK_AGENT" ]; then
+    GROK_PROMPT_NOTE="internal: the brokered prompt was built without an agent name — refusing rather than stamping a reply under a default identity"
+    return 1
+  fi
   # Returns 1 with GROK_PROMPT_NOTE set when a REVIEW turn cannot obtain its
   # review bar — the caller fails the run before the child ever starts.
   local msg="$1" run_dir="$2" peer="$3" main_root="$4"
-  local ts
-  GROK_PROMPT_NOTE=""
+  local ts agent_title
+  agent_title="$(cap_word "$GROK_AGENT")"
   GROK_WS="$("$COMMS" workspace)"
   ts="$(date +%Y-%m-%dT%H-%M-%S)"
   GROK_REPLY_ID="$(safe_name "${GROK_WS}")_${ts}_${GROK_AGENT}-reply-$$"
@@ -511,7 +528,7 @@ $(cat "$msg")
 OUTPUT ONLY your reply body as your final message — no frontmatter, no code fences
 around it, and do NOT output a VERDICT line. Body shape:
 ## Summary   (one line)
-## Grok Take (your answer, with reasoning and tradeoffs)
+## $agent_title Take (your answer, with reasoning and tradeoffs)
 PROMPT
     return 0
   fi
@@ -865,7 +882,6 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
         if [ "${nblock:-0}" -gt 0 ]; then verdict="REQUEST_CHANGES"; else verdict="APPROVE"; fi
         body_start=1
         echo "note: reply carried no VERDICT line; DERIVED '$verdict' from ${nblock:-0} blocking finding(s) per the loopspec equivalence" >>"$run_dir/runner.log"
-        GROK_BROKER_DERIVED="$verdict"
       else
         # A reply whose ONLY `### Blocking` is inside a fenced quote of a prior round
         # lands here, which is correct: it has said nothing of its own.
@@ -930,7 +946,7 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
   # Validate BEFORE persistence — an empty/degenerate body never reaches the
   # inbox and the inbound stays unarchived (error-lane semantics for the driver).
   if ! "$COMMS" validate "$run_dir/reply.md" >>"$run_dir/runner.log" 2>&1; then
-    GROK_BROKER_NOTE="stamped grok reply failed validation (degenerate body?) — see runner.log; inbound NOT archived"
+    GROK_BROKER_NOTE="stamped $GROK_AGENT reply failed validation (degenerate body?) — see runner.log; inbound NOT archived"
     return 1
   fi
   # Stamped and VALID. Recorded before delivery, because "the reviewer answered" and "the
@@ -999,6 +1015,9 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
 broker_stamp_and_deliver() {  # <msg> <run-dir> <peer>
   local rc=0
   BROKER_VALIDATED=0
+  # The ACP path enters HERE, not through grok_broker, so this was the one entry point that
+  # never cleared the note. Both halves of the per-attempt broker state are reset together.
+  GROK_BROKER_NOTE=""
   broker_stamp "$@" || rc=$?
   [ "$rc" -eq 0 ] || [ "$BROKER_VALIDATED" -eq 1 ] || broker_note_refusal
   return "$rc"
@@ -2313,7 +2332,7 @@ cmd_run() {
   if [ "$provider" = "grok" ] || [ "$via" = "acp" ]; then
     if ! build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root" "$provider" "${mount_dir:-}"; then
       update_thread_state "$msg_thread" failed "" "$sfield" || true
-      write_result "$run_dir" failed 1 "" "$msg" "${GROK_PROMPT_NOTE:-grok prompt build refused}"
+      write_result "$run_dir" failed 1 "" "$msg" "${GROK_PROMPT_NOTE:-$provider prompt build refused}"
       unmount_artifact
     trap - EXIT
       exit 1
@@ -2981,7 +3000,7 @@ ABORT_NOTE="refused: could not confirm '$provider' is read-only before the promp
       status=completed
     else
       status=failed
-      note="${GROK_BROKER_NOTE:-grok broker failed}"
+      note="${GROK_BROKER_NOTE:-$provider broker failed}"
     fi
   elif [ "$rc" -eq 0 ]; then
     status=completed

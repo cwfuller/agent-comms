@@ -26,6 +26,7 @@ loopspec: conformance fixtures	1
 multi-agent: registry contract	15
 multi-agent: sender enforcement + grok inbox round-trip	2
 multi-agent: grok stub + full-arc runphase legs	96
+runphase: the parent-brokered prompt is provider-neutral	10
 multi-agent: grok arg refusals	13
 multi-agent: archive-owner authority (comms.sh send)	5
 multi-agent: template source contracts	21

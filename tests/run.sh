@@ -2169,6 +2169,45 @@ grep -q '^in-reply-to: '"${MA_WS}"'_2026-08-20T09-00-00_review-req-1$' "$REPLY1"
   && grep -q '^workflow: auto-full$' "$REPLY1" && grep -q '^round: 1$' "$REPLY1" \
   && ok "stamped envelope binds the reply to the inbound turn" || fail "envelope-binding assertion"
 
+section "runphase: the parent-brokered prompt is provider-neutral"
+# The broker gate is `provider = grok OR via = acp` (runphase.sh), so this prompt is built for
+# claude and codex turns too. Anything that hardcodes grok on that path misattributes or
+# mislabels another agent's review. cap_word is unit-tested by EXTRACTING the function rather
+# than grepping for it, because the capitalization is the behavior the header depends on.
+PB_RP="$REPO/helpers/runphase.sh"
+PB_CAP="$(sed -n '/^cap_word() {/,/^}/p' "$PB_RP")"
+[ -n "$PB_CAP" ] && ok "cap_word is defined as a single extractable accessor" || fail "cap_word missing"
+PB_OUT="$(eval "$PB_CAP"; printf '%s|%s|%s' "$(cap_word grok)" "$(cap_word codex)" "$(cap_word claude)")"
+[ "$PB_OUT" = "Grok|Codex|Claude" ] \
+  && ok "cap_word title-cases each agent name (Grok|Codex|Claude)" || fail "cap_word output: $PB_OUT"
+PB_EMPTY="$(eval "$PB_CAP"; cap_word "" 2>/dev/null; printf 'x')"
+[ "$PB_EMPTY" = "x" ] && ok "cap_word on an empty name yields nothing, not a stray capital" || fail "cap_word empty"
+
+# The consult header follows the agent. The grok arc above proves the rendered form
+# ('Grok Take') behaviorally; these pin that no literal remains to regress to.
+grep -q '## \$agent_title Take' "$PB_RP" \
+  && ok "the consult header interpolates the agent, not a literal provider name" || fail "consult header not parameterized"
+! grep -q '## Grok Take' "$PB_RP" \
+  && ok "no hardcoded 'Grok Take' survives in the shared prompt" || fail "literal Grok Take still present"
+
+# A missing agent REFUSES. Defaulting published another agent's review under grok's name.
+! grep -q 'GROK_AGENT="${5:-grok}"' "$PB_RP" \
+  && ok "the brokered prompt has no silent grok agent default" || fail "grok agent default still present"
+grep -q 'without an agent name — refusing' "$PB_RP" \
+  && ok "a brokered prompt built without an agent refuses instead of stamping a default identity" \
+  || fail "no fail-closed refusal for a missing agent"
+
+# Runtime notes that reach the operator must name the provider that actually ran.
+! grep -qE 'grok prompt build refused|grok broker failed|stamped grok reply failed' "$PB_RP" \
+  && ok "broker failure notes name the running provider, not grok" || fail "grok-named broker notes remain"
+
+# Per-attempt broker state is cleared at BOTH entry points; the ACP path enters at
+# broker_stamp_and_deliver, which previously reset only BROKER_VALIDATED.
+sed -n '/^broker_stamp_and_deliver() {/,/^}/p' "$PB_RP" | grep -q 'GROK_BROKER_NOTE=""' \
+  && ok "the ACP broker entry point clears the stale note beside BROKER_VALIDATED" || fail "note not reset on the ACP path"
+! grep -q 'GROK_BROKER_DERIVED' "$PB_RP" \
+  && ok "the write-only GROK_BROKER_DERIVED is gone (the derivation is logged, not stored)" || fail "dead GROK_BROKER_DERIVED remains"
+
 section "multi-agent: grok arg refusals"
 R5="$WORK/ma-leg5"; mkdir -p "$R5"
 for bad in "COMMS_RUNPHASE_GROK_ARGS=--sandbox workspace" "COMMS_RUNPHASE_GROK_ARGS=--sandbox off" \
