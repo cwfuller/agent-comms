@@ -1813,7 +1813,11 @@ first. Ask it of every such edit: *what makes the NEXT change obey this?* If the
 ### Hot waits: five fixed sleeps that were sized for the slow case (2026-08-30, LANDED f8c8866)
 
 Matched A/B, same corpus, back to back: **672s -> 563s (-109s, 1.19x)**, with the optimized run
-carrying HIGHER load than the baseline (10.7 vs 6.2 at start), so the figure is a floor.
+carrying HIGHER observed load than the baseline (10.7 vs 6.2 at start). Read that as a
+conservative INDICATION, not proof of a floor: load average does not identify the competing
+workload, CPU versus I/O pressure, or its timing within the run. What is defensible is the
+plain statement — the optimized run reached 563s despite higher observed load.
+(codex, runtime-figures r1, advisory.)
 Suite: 1395 assertions, 0 failures.
 
 - **`gs_files` spawned one `shasum` PLUS one `cut` per file** inside a `while read` loop, from

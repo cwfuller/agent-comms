@@ -168,9 +168,13 @@ was once estimated to be.
 
 **Read every runtime figure here as paired with its corpus size, and never compare across
 them.** Three separate optimizations have each cut 20–35% *on identical trees* — the state
-wait (505s → 326s), the watchdog poll (430s → 364s), the hot waits (672s → 563s) — while the
-absolute wall clock rose anyway, because the corpus grew from ~929 to 1395 assertions over the
-same period. A bare "the suite takes N seconds" goes stale the moment anyone lands assertions.
+wait (505s → 326s) and the watchdog poll (430s → 364s), both historical matched A/Bs whose
+corpus sizes were NOT recorded — so they are internally valid and comparable to nothing else,
+which is precisely the drift this rule exists to stop — and the hot waits (672s → 563s, at
+1387 and 1395 assertions). Absolute wall clock rose anyway, because the corpus grew from ~929
+to 1395 assertions over the same period. That the first two examples cannot satisfy the rule
+they illustrate is the point: the counts were not written down at the time, and no amount of
+later care recovers them. A bare "the suite takes N seconds" goes stale the moment anyone lands assertions.
 This is not pedantry: an unmatched baseline is exactly how a 1.6x sharding estimate survived
 long enough to be planned around, and how a later session read a 594s run as a regression
 against a 448s figure measured on a corpus 200 assertions smaller. If you are about to quote a
