@@ -77,9 +77,8 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
   `docs/advisories.md` when a loop ends, so lessons compound instead of evaporating.
 - **ACP is the default transport.** Reviewers run in the background; you do not
   babysit a pane. `--via cmux` is still available if you want a watchable
-  session. (Do not expect later panel rounds to be a cheap token delta yet:
-  each mounted turn currently uses a new working directory, so ACP starts
-  cold. That is step 1 of [the current program](docs/ROADMAP.md#contraction-2026-08-28--current-program).)
+  session. Later rounds on the same thread reuse a stable mount path, so ACP
+  can stay warm instead of starting a new session each time.
 
 Message format, loop semantics, and the state model: **[docs/PROTOCOL.md](docs/PROTOCOL.md)**
 
