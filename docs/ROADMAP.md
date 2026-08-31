@@ -65,7 +65,9 @@ exactly; that is not a license to weaken the presence model (see step 7).
 
    **Superseded — sharding was built, measured at 1.07x and REJECTED; see ranked
    item 4.** What actually moved the number was profiling: a `sleep 1` in the
-   provider watchdog cost 58s a run (13%), and polling it finely took 430s -> 360s.
+   provider watchdog cost 58s a run (13%), and polling it finely took 430s -> 364s
+   ON IDENTICAL TREES (the absolute figures are stale — the corpus has grown since;
+   pair every runtime with its assertion count).
    `suite-lanes` still earns its place for the per-section vector, which detects
    assertions moving between sections — but nothing here should be read as an
    instruction to shard.
@@ -1807,6 +1809,65 @@ Panel: codex APPROVE, grok APPROVE, 0 blocking. The landing consumed the attesta
 invariant was established by a one-time edit and left unenforced — the coverage total was the
 first. Ask it of every such edit: *what makes the NEXT change obey this?* If the answer is
 "the author will notice", it is not enforced. The reviewers found both; reading did not.
+
+### Hot waits: five fixed sleeps that were sized for the slow case (2026-08-30, LANDED f8c8866)
+
+Matched A/B, same corpus, back to back: **672s -> 563s (-109s, 1.19x)**, with the optimized run
+carrying HIGHER load than the baseline (10.7 vs 6.2 at start), so the figure is a floor.
+Suite: 1395 assertions, 0 failures.
+
+- **`gs_files` spawned one `shasum` PLUS one `cut` per file** inside a `while read` loop, from
+  ten call sites: 409ms -> 22ms per call. `find -exec shasum {} +`, not `xargs` — with no input
+  `xargs` runs `shasum` with no arguments and leaves it reading stdin, hanging the suite.
+- **`run_rp` paid a literal 1s spawn delay** at 15 sites for stub-backed turns that exit in
+  milliseconds. ~80 other spawn sites were already zeroed; this helper was missed.
+- **Three `runphase.sh` flat sleeps became polls** — the await loop (on every spawned turn's
+  path), the runner-death grace, and `kill_codex`'s TERM->KILL grace. Same budgets; they can
+  only return sooner.
+- **cmux keystroke pacing and tree backoff are real-terminal concerns a STUB cannot have.**
+  Both are now overridable with defaults unchanged, scrubbed then set to 0 by the harness.
+
+**The review found three defects, every one in the ~20 lines of VALIDATION added beside the
+optimizations, none in the optimizations themselves.** In order: (1) the override validated
+CHARACTERS not TOKENS, so `1..2` reached `sleep` as an invalid operand and a whitespace-only
+value expanded to NO tokens and silently deleted the retry schedule — fail-open exactly where
+the delay is load-bearing; (2) the replacement split with an unquoted `for t in $1`, so
+PATHNAME EXPANSION ran before validation and `COMMS_CMUX_BACKOFF='*'` in a directory holding a
+file named `0.1` globbed into a valid-looking schedule — a validator steerable by the caller's
+cwd; (3) the regression written to prove (2) was NOT discriminating, because a bare `*` in a
+populated fixture also expands to non-decimal names and trips the fallback regardless, so it
+would have passed against the very bug it existed to catch. **If you add a guard beside a
+change, review the guard harder than the change.**
+
+### The sharding rejection, adversarially re-audited (2026-08-30)
+
+Item 4's verdict was re-attacked by four independent lenses (critical path, edge breaking,
+partition quality, alternative levers), each trying to OVERTURN it. Three claimed sharding was
+rescuable; **none survived adversarial check.** The verdict STANDS, and the audit added two
+reasons stronger than the recorded one:
+
+- **Sharding never mints an attestation**, so `integrate` still pays the full serial run. It
+  cannot speed the LANDING gate, which is the actual pain.
+- The best measured 4-lane run (1.96x) carried **3 failures and 3 coverage holes**, and bought
+  its speed by having the driver read `section-counts.tsv` from the WORKING TREE — reopening
+  the hole the gate deliberately closed.
+
+**Treat the audit's supporting details as unverified.** Its claim that the `REPLY` / `DUP_OUT` /
+`HL_WF` edges "do not exist at HEAD" is FALSE — they occur 30 / 4 / 9 times. Its claim that the
+1.58x duplication tax was an analyser artifact (34 of 86 edges pointing forward) is plausible
+and unverified. The conclusion is corroborated; the arithmetic behind it is not. Re-derive
+before acting on any of it.
+
+### Review loop blocked for grok on Darwin (2026-08-30, filed as friction sev 4)
+
+Since 21cb780 / c913006, mounted review turns require a per-provider isolation backend and
+there is none verified for grok on Darwin, so every grok leg is refused in ~4s. `compose`
+requires ALL legs, so the two-reviewer loop cannot complete on this machine at all — repo-wide,
+not branch-specific. grok answered panels normally on 2026-08-29. The only bypass is
+`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1`, whose own warning states such a turn can write outside
+the mount and reach the network with git credentials; that is an operator decision, not a
+session's. f8c8866 landed on the gating reviewer alone, by explicit operator choice, with grok
+recorded as MECHANICALLY UNAVAILABLE rather than silent.
 
 ## Priorities (2026-08-20, user-confirmed order)
 

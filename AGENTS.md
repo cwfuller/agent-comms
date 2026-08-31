@@ -159,14 +159,22 @@ the interleaving I think is safe — find one where it isn't" earns its tokens.
 bash tests/run.sh
 ```
 
-One umbrella suite. It is still slow — measured 2026-08-29 at **~360s for 1189 assertions**
-on an unloaded machine, down from 505s once an unconditional 6s wait per spawned turn was
-removed (505s → 326s on identical trees; the rest of the difference is new assertions that
-deliberately spend ~25s exercising that wait) — and reducing it further is active work; see
-the "Suite runtime" subsection of
-`docs/ROADMAP.md`, which now carries the full profile. The cost is concentrated, not
-spread: ten of the 62 sections accounted for ~87% of the original runtime, and spawn
-overhead is ~5%, not the dominant term it was once estimated to be.
+One umbrella suite. It is still slow — measured 2026-08-30 at **~563s for 1395 assertions**
+on a machine at load ~10, down from **672s on the identical corpus** immediately before the
+hot-wait fixes landed. Reducing it further is active work; see the "Suite runtime" subsection
+of `docs/ROADMAP.md`, which carries the full profile. The cost is concentrated, not spread:
+ten sections account for ~87% of runtime, and spawn overhead is ~5%, not the dominant term it
+was once estimated to be.
+
+**Read every runtime figure here as paired with its corpus size, and never compare across
+them.** Three separate optimizations have each cut 20–35% *on identical trees* — the state
+wait (505s → 326s), the watchdog poll (430s → 364s), the hot waits (672s → 563s) — while the
+absolute wall clock rose anyway, because the corpus grew from ~929 to 1395 assertions over the
+same period. A bare "the suite takes N seconds" goes stale the moment anyone lands assertions.
+This is not pedantry: an unmatched baseline is exactly how a 1.6x sharding estimate survived
+long enough to be planned around, and how a later session read a 594s run as a regression
+against a 448s figure measured on a corpus 200 assertions smaller. If you are about to quote a
+runtime, quote the assertion count with it or measure both sides yourself.
 
 - A **fully green** run records an attestation for the exact commit it started on
   (`attest-green`), which lets `integrate` skip a redundant re-run of identical code when
