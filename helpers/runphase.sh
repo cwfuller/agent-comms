@@ -226,6 +226,10 @@ LOG_INCOMPLETE=0
 BROKER_VALIDATED=0
 # Idempotence for the refusal boundary below: the non-ACP path passes through two of them.
 BROKER_REFUSAL_LOGGED=0
+# The third piece of per-attempt broker state, initialised beside the other two so the arms that
+# read it WITHOUT entering the broker (the `acp_rc != 0` failure arm) see a defined empty value
+# rather than relying on each reader's `:-` fallback. (grok, implement r1, advisory.)
+GROK_BROKER_NOTE=""
 
 # log_event <kind> <status> <note> [message-id] — the runner's ONE way into the log.
 #
