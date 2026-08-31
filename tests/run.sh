@@ -999,10 +999,14 @@ cb_sleeps() {  # echo the schedule cmux_tree actually slept; with no arg the ove
 # The validator split its input with an UNQUOTED expansion, so pathname expansion ran BEFORE
 # validation: with a file named `0.1` present, an override of `*` globbed into a valid-looking
 # schedule and was accepted — the verdict depended on the caller's cwd. (codex, r2, blocking.)
-: > "$REPO_FIX/0.1"
-[ "$(cb_sleeps '*')" = "0.3 0.7 1.2" ] \
-  && ok "a glob override cannot expand into a valid-looking schedule" || fail "glob became a schedule (got: $(cb_sleeps '*'))"
-rm -f "$REPO_FIX/0.1"
+# The pattern must match ONLY the decimal-named file. A bare `*` in this POPULATED fixture also
+# expands to non-decimal names, so the fallback would fire for the wrong reason and this
+# regression would pass even against the bug it exists to catch — a control that proves nothing.
+# (codex, suite-hot-waits r3, advisory.)
+: > "$REPO_FIX/0.987654321"
+[ "$(cb_sleeps '0.98765432*')" = "0.3 0.7 1.2" ] \
+  && ok "a glob override cannot expand into a valid-looking schedule" || fail "glob became a schedule (got: $(cb_sleeps '0.98765432*'))"
+rm -f "$REPO_FIX/0.987654321"
 
 section "comms.sh v2.1: surface binding"
 check "bind sets an explicit surface" env -u X bash -c "cd '$REPO_FIX' && PATH='$STUB_BIN:$PATH' CMUX_WORKSPACE_ID=workspace:10 '$COMMS' bind claude surface:11"
