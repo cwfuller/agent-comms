@@ -4074,6 +4074,12 @@ cmd_transport() {
 
   if [ "${COMMS_DELIVERY:-}" = "headless" ]; then printf 'headless\n'; return 0; fi
   if [ "${COMMS_DELIVERY:-}" = "acp" ]; then printf 'acp\n'; return 0; fi
+  # `mailbox` was only ever an OUTPUT of this function — the honest last resort where the file is
+  # written and nobody is nudged. Accepting it as an INPUT gives a caller a way to ask for exactly
+  # that, which is what a test harness needs: no pane, no spawned child, no network. The suite
+  # used to get that property by asking for `cmux` and stubbing the binary, which made a transport
+  # slated for deletion load-bearing for every unrelated section. (contraction step 4, S4-1.)
+  if [ "${COMMS_DELIVERY:-}" = "mailbox" ]; then printf 'mailbox\n'; return 0; fi
 
   local caps picked
   caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"

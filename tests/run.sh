@@ -23,7 +23,16 @@ unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
 # sections below exercise pane mechanics that still exist and still matter, so they ask
 # for cmux explicitly instead of relying on a default that no longer points at them.
 # Sections that test the DEFAULT routing clear this with `env -u COMMS_DELIVERY`.
-export COMMS_DELIVERY=cmux
+#
+# THE DEFAULT IS `mailbox`, NOT `cmux`. What the harness actually needs from a default is "write
+# the file and nudge nobody" — no pane, no spawned child, no network. It used to get that by
+# asking for cmux and stubbing the binary, which made a transport slated for DELETION load-bearing
+# for every section that never cared about it. Deleting cmux under that arrangement would have
+# started spawning real agents in unrelated sections; the first version of this harness already
+# sent a real keystroke to a live pane once (docs/INTERNALS.md). Sections that genuinely exercise
+# pane mechanics still ask for cmux explicitly, so this rewire must move NO section's count.
+# (contraction step 4, S4-1.)
+export COMMS_DELIVERY=mailbox
 # cmux is a STUB in this harness. Keystroke pacing exists so a real terminal does not
 # interleave send/escape/enter, and the tree backoff exists to ride out a real contention
 # window — a stub can do neither, so both are pure wall-clock here. Scrubbed above (an
@@ -505,6 +514,10 @@ echo "$ARCH_HINT3" | grep -q "$(basename "$ARCH_WRONG_DIRECTION")" \
   && fail "3-agent hint crossed reader direction" || ok "3-agent hint excludes the reader's own messages"
 
 section "comms.sh: deliver via stubbed cmux"
+# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
+# suite-wide default, which is how a transport slated for deletion became load-bearing for
+# sections that never mentioned it. (S4-1.)
+export COMMS_DELIVERY=cmux
 # The suite runs with both timing knobs zeroed, so nothing else here would notice if a
 # refactor made 0 the DEFAULT — which would silently drop pacing and backoff for every real
 # user. Pinned at the source, not behaviourally: this suite already has one timing-sensitive
@@ -527,6 +540,8 @@ OUT="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" deliver codex)"
 echo "$OUT" | grep -q "manual pickup" && ok "deliver without cmux degrades to manual pickup" || fail "deliver without cmux degrades to manual pickup"
 
 section "comms.sh: send (atomicity guard)"
+# Back to the hermetic default: write the file, nudge nobody. (S4-1.)
+export COMMS_DELIVERY=mailbox
 IN2="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T12-02-00_reply-2.md"
 cp "$REPO_FIX/.comms/archive/$(basename "$IN1")" "$IN2"
 BADOUT="$WORK/malformed-out.md"
@@ -972,6 +987,10 @@ grep -q '"status": "complete"' "$SF" && ok "state complete persists" || fail "st
 run_comms stalled 15 | grep -q 'no stalled' && ok "completed thread is not stalled" || fail "completed thread is not stalled"
 
 section "comms.sh v2: delivery failure is explicit and recorded"
+# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
+# suite-wide default, which is how a transport slated for deletion became load-bearing for
+# sections that never mentioned it. (S4-1.)
+export COMMS_DELIVERY=cmux
 DELIV_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_FAIL=1 "$COMMS" deliver codex)"
 echo "$DELIV_OUT" | grep -q "FAILED mid-sequence" && ok "mid-sequence cmux failure reported explicitly" || fail "delivery failure report (got: $DELIV_OUT)"
 # Under stub cmux the RESOLVED workspace (test-project) keys the state file —
@@ -981,6 +1000,8 @@ SF_CMUX="$REPO_FIX/.comms/state/test-project_loop-alpha.json"
 grep -q '"last_delivery": "failed"' "$SF_CMUX" && ok "failed delivery recorded in state (resolved-ws key)" || fail "failed delivery recorded in state (state dir: $(ls "$REPO_FIX/.comms/state/" 2>/dev/null))"
 
 section "comms.sh v2: state hardening (slash thread, garbage epoch, quotes)"
+# Back to the hermetic default: write the file, nudge nobody. (S4-1.)
+export COMMS_DELIVERY=mailbox
 SLASH_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-10-00_slash-1.md"
 SLASH_IN="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-09-00_slashin.md"
 sed 's/thread: loop-alpha/thread: fix-auth\/login-99/; s/round: 2/round: 3/' "$OUT_WF" > "$SLASH_WF"
@@ -1072,6 +1093,10 @@ cb_sleeps() {  # echo the schedule cmux_tree actually slept; with no arg the ove
 rm -f "$REPO_FIX/0.987654321"
 
 section "comms.sh v2.1: surface binding"
+# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
+# suite-wide default, which is how a transport slated for deletion became load-bearing for
+# sections that never mentioned it. (S4-1.)
+export COMMS_DELIVERY=cmux
 check "bind sets an explicit surface" env -u X bash -c "cd '$REPO_FIX' && PATH='$STUB_BIN:$PATH' CMUX_WORKSPACE_ID=workspace:10 '$COMMS' bind claude surface:11"
 : > "$CMUX_STUB_LOG"
 BOUND_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver claude)"
@@ -1082,6 +1107,10 @@ echo "$BOUND_GONE" | grep -q "delivered to surface:22" && ok "absent bound surfa
 grep -q "delivered to surface:22" <<<"$BOUND_GONE" && [ "$(cd "$REPO_FIX" && cat .comms/.cache/surface-claude-workspace_10)" = "surface:22" ] && ok "successful delivery refreshes the surface cache" || fail "delivery refreshes surface cache"
 
 section "comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery)"
+# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
+# suite-wide default, which is how a transport slated for deletion became load-bearing for
+# sections that never mentioned it. (S4-1.)
+export COMMS_DELIVERY=cmux
 (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:22) >/dev/null
 : > "$CMUX_STUB_LOG"
 OPT_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" deliver claude)"
@@ -1094,6 +1123,10 @@ echo "$DIAG" | grep -q "manual pickup" && ok "no binding + no tree degrades to m
 echo "$DIAG" | grep -q "tree unavailable after retries" && ok "empty-tree manual outcome carries a diagnostic" || fail "empty-tree diagnostic (got: $DIAG)"
 
 section "comms.sh v2.2: sandbox block emits direct recovery + state reconciliation"
+# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
+# suite-wide default, which is how a transport slated for deletion became load-bearing for
+# sections that never mentioned it. (S4-1.)
+export COMMS_DELIVERY=cmux
 (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:22) >/dev/null
 SBX="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" deliver claude) 2>&1 )"
 echo "$SBX" | grep -q "nested helper cannot access cmux" && ok "socket failure is classified as nested-helper sandboxing" || fail "sandbox recognition (got: $SBX)"
@@ -1118,6 +1151,8 @@ grep -q 'send --surface surface:22' "$CMUX_STUB_LOG" && grep -q 'send-key --surf
 grep -q '"last_delivery": "delivered"' "$SF_CMUX" && grep -q '"last_notified_at":' "$SF_CMUX" && ok "reconcile repairs delivery state with timestamp" || fail "reconciled state (got: $(cat "$SF_CMUX"))"
 
 section "comms.sh v2.1.1: status shouts when a loop stalled undelivered"
+# Back to the hermetic default: write the file, nudge nobody. (S4-1.)
+export COMMS_DELIVERY=mailbox
 perl -pi -e 's/"last_delivery": "[^"]*"/"last_delivery": "manual"/; s/"status": "[^"]*"/"status": "in-progress"/' "$SF"
 ST_OUT="$(run_comms status)"
 echo "$ST_OUT" | grep -q "ACTION NEEDED" && ok "status prints ACTION NEEDED on undelivered last send" || fail "status ACTION line (got: $(echo "$ST_OUT" | tail -2))"
