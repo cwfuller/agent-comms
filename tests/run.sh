@@ -3737,11 +3737,12 @@ for BRK_F in codex claude; do
     && ok "a failed $BRK_F ACP turn records status=failed" || fail "$BRK_F ACP failure status (got: $(head -c 120 "$BRK_FDIR/result.json" 2>/dev/null))"
   grep -q "\"provider\": \"$BRK_F\"" "$BRK_FDIR/result.json" 2>/dev/null \
     && ok "the failed $BRK_F ACP result names the provider that actually ran" || fail "$BRK_F ACP failure provider"
-  BRK_FSTATE="$MA_FIX/.comms/state/$(echo "$MA_WS" | tr -c 'A-Za-z0-9._-\n' '_')_${BRK_FTHREAD}.json"
-  # `last_delivery`, matching how the headless equivalent asserts it — the field the runner
-  # actually writes. My first cut checked "status" and failed for that reason, not a code gap.
-  grep -q '"last_delivery": "failed"' "$BRK_FSTATE" 2>/dev/null \
-    && ok "a failed $BRK_F ACP turn is recorded in thread state, not silently dropped" || fail "$BRK_F ACP failure state (got: $(head -c 140 "$BRK_FSTATE" 2>/dev/null))"
+  # NO thread-state assertion here, deliberately. `cmd_send` creates the state file; runphase
+  # only PATCHES one. A turn that fails before the broker sends has nothing to patch, so there is
+  # no file — asserting one would be testing a non-behaviour, and making it pass would mean
+  # manufacturing a fixture that misrepresents how state files come to exist. The failure is
+  # durably recorded where it actually lives: result.json (above) and the coordinator event log.
+  # (Explained by grok during S3-2: "cmd_send creates that file; runphase will not create one".)
   [ ! -s "$(find "$MA_FIX/.comms/to-$BRK_FFROM" -name "*$BRK_F-reply*brokfail*" -type f 2>/dev/null | head -1)" ] \
     && ok "a failed $BRK_F ACP turn stamps no reply — nothing to mistake for a review" || fail "$BRK_F ACP failure leaked a reply"
 done
