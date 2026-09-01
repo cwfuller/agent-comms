@@ -560,12 +560,15 @@ for RB_LF in verdict-discipline holistic-rereview; do
 done
 # BEHAVIOURAL, with every other tier removed: no global home, and a helper whose ../docs does not
 # exist. This is the only arrangement that proves the PROJECT PIN alone is sufficient.
-RB_LOCAL_RUN="$(cd "$INST_FIX" && env AGENT_COMMS_HOME="$WORK/rb-empty-home" \
-  HELPER_DIR="$INST_FIX/.agent-comms" bash -c '
-    eval "$(sed -n "/^fragment_file() {/,/^}/p" "$1")"
-    f="$(fragment_file verdict-discipline "$2" 2>/dev/null || true)"
-    [ -n "$f" ] && [ -s "$f" ] && printf "PINNED" || printf "MISS"
-  ' _ "$REPO/helpers/runphase.sh" "$INST_FIX")"
+# Extract in THIS shell, not inside a nested `bash -c` — the sed range braces do not survive that
+# quoting, and the first cut of this probe reported MISS because sed had been mangled rather than
+# because the pin was absent. A test that fails for the wrong reason is as useless as one that
+# passes for the wrong reason.
+RB_FF="$(sed -n '/^fragment_file() {/,/^}/p' "$REPO/helpers/runphase.sh")"
+RB_LOCAL_RUN="$( eval "$RB_FF"
+  HELPER_DIR="$INST_FIX/.agent-comms"; AGENT_COMMS_HOME="$WORK/rb-empty-home"
+  f="$(fragment_file verdict-discipline "$INST_FIX" 2>/dev/null || true)"
+  [ -n "$f" ] && [ -s "$f" ] && printf 'PINNED' || printf 'MISS' )"
 [ "$RB_LOCAL_RUN" = "PINNED" ] \
   && ok "a local-only install resolves the bar from its project pin, with no global or repo tier" \
   || fail "local-only install cannot resolve the review bar (got: $RB_LOCAL_RUN)"
