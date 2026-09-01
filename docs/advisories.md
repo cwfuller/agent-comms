@@ -61,7 +61,9 @@ defects in the round-1 *fixes*. What generalizes:
   unbound.
 - **A flag cannot promise what the caller controls.** `run --no-deliver` silenced state
   writes but codex/claude children are still *instructed* to send their own reply — the
-  guarantee held only for parent-brokered reviewers. It now refuses the others outright.
+  guarantee held only for parent-brokered reviewers. It now refuses only where no brokered
+  transport exists: over ACP the parent stamps and delivers, so a self-sending agent never sends
+  and the guarantee holds for it too (S3-5, 2026-09-01).
 - **Test comments rot into false claims.** One comment asserted a live edit between snapshot
   and read with no mutation behind it; the reviewer caught the dead claim, not a test failure.
 - Un-actioned at loop end: nothing. The round-4 advisory (stale `thread+round` wording in

@@ -2599,7 +2599,8 @@ cmd_shadow() {
   done
   [ -n "$to" ] || usage_err "shadow: --to <agent> is required (registered: $(registry_agents))"
   require_agent "$to" "shadow"
-  # --no-deliver suppresses the TRUSTED-PARENT broker. An agent that authors and
+  # --no-deliver suppresses the TRUSTED-PARENT broker, and whether that is possible depends on
+  # the TRANSPORT as well as the agent — see suppression_ok. An agent that authors and
   # sends its own reply (claude, codex) would still write into an inbox and still
   # record thread state, so for those the "cannot gate" guarantee would be a
   # convention rather than a mechanism — and this command's whole value is that it
@@ -4019,6 +4020,12 @@ runphase_available() { [ -x "$(dirname "$SELF")/runphase.sh" ]; }
 # suppression_ok <agent> — can `--no-deliver` keep its promise for this agent, and over which
 # transport? Echoes the `--via` argument the caller must pass (empty = no transport flag needed)
 # and returns non-zero when suppression is impossible.
+#
+# HONEST SCOPE: this is shadow's gate, not a shared one. `runphase` still INLINES the equivalent
+# `via != acp` / `reviewer-consult-only` check at its own boundary and never calls this. They
+# agree today because shadow passes the transport, not because they share a function — so they
+# CAN drift, and the boundary that matters is runphase's, which fails closed. Do not read this
+# comment as "one accessor for both". (grok, capability-registry r1.)
 #
 # Delivery is suppressible IFF the turn is PARENT-BROKERED, and that is a property of
 # (agent, transport), NOT a per-agent constant — which is the bug this replaces: `shadow`

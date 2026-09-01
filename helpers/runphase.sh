@@ -2114,7 +2114,7 @@ cmd_run() {
   # PARENT-BROKERED TURNS ONLY. A mount is a linked worktree with no `.comms` in it, so
   # a reviewer that must author and send its own reply cannot reach the mailbox from
   # inside one. Under ACP (and for grok) the PARENT stamps and delivers, so the child
-  # never needs the mailbox and the mount is safe. This is the same split that makes
+  # never needs the mailbox and the mount is safe. This is the same split that governs
   # `shadow` refuse self-sending agents; unifying on parent-brokering is what would let
   # every reviewer read a pinned artifact.
   msg_artifact="$(frontmatter_field "$msg" artifact_id)"

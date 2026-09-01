@@ -4409,6 +4409,18 @@ sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep -q 'suppression_o
   && ok "shadow gates on the shared accessor rather than the registry string" || fail "shadow still re-implements the rule"
 sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep -q -- '--via "$shadow_via"' \
   && ok "shadow PASSES the transport that makes suppression honourable" || fail "shadow does not pass --via"
+# THE SUCCESS GATE, behaviourally. Everything above pins the REFUSAL and the source shape, so a
+# suppression_ok that always returned 1 would leave them all green — the same vacuity shape this
+# thread has already hit twice. A version-ok `node` makes acp_supports TRUE; a failing `npx` makes
+# the turn die DOWNSTREAM of the gate, which is precisely what we want to observe. The assertion
+# is the ABSENCE of the capability refusal, not the turn succeeding. (grok, r1, advisory.)
+SH_OKBIN="$WORK/shadow-oknode"; mkdir -p "$SH_OKBIN"
+printf '#!/bin/sh\nprintf "v22.22.3\\n"\n' > "$SH_OKBIN/node"; chmod +x "$SH_OKBIN/node"
+printf '#!/bin/sh\nexit 9\n' > "$SH_OKBIN/npx"; chmod +x "$SH_OKBIN/npx"
+SH_PASTGATE="$(PATH="$SH_OKBIN:$PATH" run_sh shadow --to codex "$SH_REQ" 2>&1 || true)"
+printf '%s\n' "$SH_PASTGATE" | grep -q 'parent-brokered' \
+  && fail "shadow refused codex at the capability gate even though ACP was available" \
+  || ok "shadow gets PAST the capability gate for codex when a brokered transport exists"
 # THE TRAP: relaxing the registry instead would let --no-deliver through on the NON-ACP path,
 # where the child sends its own reply and suppression is a lie. runphase reads the same string.
 cmd_agents_out="$(run_sh agents --supported)"

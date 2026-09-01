@@ -167,7 +167,9 @@ comparison is measurable at all before anything richer is justified. See the
   cannot steer a loop it was never delivered into and cannot archive the primary's
   request out from under it. A crashed shadow turn is recorded as an operational
   failure, never as a reviewer that reviewed and found nothing. `runphase.sh run
-  --no-deliver` refuses any provider that authors and sends its own reply, because for
+  --no-deliver` refuses a provider that would author and send its own reply ON THE TRANSPORT IT
+  WILL USE — over ACP the parent stamps and delivers, so it is honourable for any provider, and
+  it is refused only where no brokered transport is available. Because for
   those the flag would silence the state write while the delivery still happened.
 - **The artifact is MOUNTED, and shaped like the worktree it came from.** Retaining a
   commit while the reviewer reads the live tree would let `artifact_id` name content
