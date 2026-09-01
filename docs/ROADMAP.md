@@ -53,6 +53,24 @@ are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnos
 equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
 trusting this number if the corpus has moved.
 
+**The removal map, computed rather than estimated (2026-09-01).**
+
+- `helpers/runphase.sh` — the self-send arm is lines **2423..2483** of the prompt fork that opens
+  at 2414 (`else` at 2422, `fi` at 2484): **61 lines**. Verified self-contained: every local it
+  sets (`self_desc`, `instr_a`, `instr_b`, `instr_note`, `comms_q`, `msg_q`, `prev_d`) is read
+  NOWHERE after the fork, so they die with it. `$peer` IS still read 3 times afterwards and must
+  survive; trim the declaration at 2399 to `peer` alone.
+- `helpers/comms.sh` — three headless rungs: the explicit input (4075), the loop ladder
+  (4119, `runphase_available`), and the consult fallback (4145, non-`*interactive*`).
+
+**A qualification the plan's sketch got wrong, and it matters.** "Make `cmd_transport` never
+select `headless`" cannot be taken literally: grok's registry capability is
+`headless,reviewer-consult-only`, so GROK'S DIRECT PATH *IS* the headless transport — and grok is
+parent-brokered there (the `provider = grok` disjunct), so it is not self-send and must keep
+working. After the arm is deleted the correct rule is **headless is valid only for a provider that
+is brokered without ACP, i.e. grok**; claude/codex must fail closed. Removing the headless rungs
+outright would break grok's direct path, which step 4 never intended to touch.
+
 **The guard itself is written and verified** on `worktree-selfsend-removal`: a non-ACP claude or
 codex `run` now dies with "review turns are ACP-only — re-run with --via acp". That guard is what
 makes deleting the arm safe rather than silently wrong, and it is the piece to keep if this branch
