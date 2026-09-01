@@ -5025,6 +5025,15 @@ printf '%s\n' "$TR_MBX" | grep -qi 'manual pickup' \
   && ok "a deliberate mailbox delivery reports intent, not a broken install" || fail "mailbox delivery still reports a missing capability: $TR_MBX"
 printf '%s\n' "$TR_MBX" | grep -qi 'no headless runner' \
   && fail "mailbox delivery still blames a missing headless runner" || ok "mailbox delivery does not blame a missing runner"
+# SEND, driven directly. A generic `^RESULT: manual` grep matches the OLD copy too, which is how
+# this half stayed unpinned in r1. (codex + grok, S4-1 r2, corroborated.)
+printf -- '---\ntype: question\nfrom: claude\ntimestamp: 2026-09-01T00:00:00Z\nmessage_id: mbx2\nworkspace: transport-repo\nthread: mbx2\n---\n\nhi\n' \
+  > "$WORK/tr-mbx-send.md"
+TR_MBXS="$(run_tr_mailbox send --to codex "$WORK/tr-mbx-send.md" 2>&1 || true)"
+printf '%s\n' "$TR_MBXS" | grep -q 'Nothing to fix' \
+  && ok "a mailbox SEND reports deliberate pickup, not a retry instruction" || fail "mailbox send still instructs a retry: $(printf '%.90s' "$TR_MBXS")"
+printf '%s\n' "$TR_MBXS" | grep -qi 'NOT spawned' \
+  && fail "mailbox send still says NOT spawned" || ok "mailbox send does not claim the peer failed to spawn"
 # THE CMUX WINDOWS ARE PROCESS-GLOBAL EXPORTS, not section-scoped: a section inserted between a
 # `COMMS_DELIVERY=cmux` and its restore would silently inherit the pane transport — the exact way
 # these five sections once inherited the suite default. Pin WHICH banners may appear inside a cmux
@@ -5034,7 +5043,11 @@ TR_WINDOW="$(awk '
   /^export COMMS_DELIVERY=cmux$/   { inwin=1; next }
   /^export COMMS_DELIVERY=mailbox$/{ inwin=0; next }
   inwin && /^section /             { print }
-' "$REPO/tests/run.sh" | grep -cv -E 'deliver via stubbed cmux|delivery failure is explicit|surface binding|binding survives a flaky tree|sandbox block emits')"
+' "$REPO/tests/run.sh" | grep -cvxF -e 'section "comms.sh: deliver via stubbed cmux"' \
+     -e 'section "comms.sh v2: delivery failure is explicit and recorded"' \
+     -e 'section "comms.sh v2.1: surface binding"' \
+     -e 'section "comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery)"' \
+     -e 'section "comms.sh v2.2: sandbox block emits direct recovery + state reconciliation"')"
 [ "$TR_WINDOW" = "0" ] \
   && ok "no unexpected section runs inside a cmux transport window" || fail "$TR_WINDOW section(s) would inherit cmux unintentionally"
 
