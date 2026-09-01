@@ -2034,7 +2034,9 @@ chmod +x "$BARE"/*.sh
 MA_MSGFC="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-45-00_failclosed-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-7/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFC"
 RFC1="$WORK/ma-legfc"; mkdir -p "$RFC1"
+mkdir -p "$WORK/no-bar"
 (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$WORK/no-skills" \
+   AGENT_COMMS_HOME="$WORK/no-bar" \
    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFC" --dir "$RFC1" --provider grok) >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFC1/result.json" | head -1)" = "failed" ] \
   && grep -q 'no review bar' "$RFC1/result.json" && [ -f "$MA_MSGFC" ] && [ ! -s "$RFC1/events.ndjson" ] \
@@ -2045,6 +2047,7 @@ sed -e 's/^type: review-request$/type: question/' -e 's/^thread: ma-arc-1$/threa
   "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFQ"
 RFC2="$WORK/ma-legfq"; mkdir -p "$RFC2"
 (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$WORK/no-skills" \
+   AGENT_COMMS_HOME="$WORK/no-bar" \
    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFQ" --dir "$RFC2" --provider grok) >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFC2/result.json" | head -1)" = "completed" ] \
   && ok "question turn completes without the review bar (never loads it)" || fail "question turn under bare install"
