@@ -2069,6 +2069,14 @@ cmd_run() {
     esac
   fi
   case "$provider" in claude|codex|grok) ;; *) die "run: provider must be claude, codex, or grok" ;; esac
+  # ACP-ONLY FOR THE PROVIDERS THAT USED TO SELF-SEND (contraction step 4, S4-2).
+  # Deleting the arm alone would leave a non-ACP claude/codex run skipping `build_grok_prompt`,
+  # invoking the provider with no prompt, and still taking `rc=0 -> completed` — a FALSE SUCCESS,
+  # because only grok calls `grok_broker` outside ACP. Fail closed and name the fix.
+  # grok is unaffected: it is parent-brokered on its direct path too. (codex, S4-2 plan, blocking.)
+  if [ "$via" != "acp" ] && [ "$provider" != "grok" ]; then
+    die "run: '$provider' review turns are ACP-only — re-run with --via acp (the self-send path was removed in step 4; a non-ACP turn would produce an unstamped, unmounted reply that still reported success)"
+  fi
   [ -n "$msg" ] && [ -f "$msg" ] || die "run: --message <file> required and must exist"
   [ -n "$run_dir" ] && [ -d "$run_dir" ] || die "run: --dir <run-dir> required and must exist"
   msg="$(abs_path "$msg")"
@@ -2149,10 +2157,11 @@ cmd_run() {
   # never needs the mailbox and the mount is safe. This is the same split that governs
   # `shadow` refuse self-sending agents; unifying on parent-brokering is what would let
   # every reviewer read a pinned artifact.
+  # MOUNTS ARE UNIVERSAL NOW. This used to blank the artifact for any non-ACP non-grok turn,
+  # because a SELF-SENDING reviewer read the live tree rather than a pinned snapshot — the one
+  # place the product's artifact-bound promise did not hold. That path is gone (step 4, S4-2), so
+  # every review turn is artifact-bound and the suppression has nothing left to suppress.
   msg_artifact="$(frontmatter_field "$msg" artifact_id)"
-  if [ "$via" != "acp" ] && [ "$provider" != "grok" ]; then
-    msg_artifact=""
-  fi
   # A named-but-unresolvable artifact is a FAILURE, not a reason to fall back to the live
   # tree: the message promises a pinned artifact either way. The earlier guard only
   # covered failures AFTER cat-file succeeded. (codex, panel r1.)
@@ -2396,7 +2405,9 @@ cmd_run() {
 
   # ----- prompt -----
   # Which discipline text the peer follows and where its reply goes, per provider.
-  local peer instr_a instr_b instr_note self_desc peer_desc
+  # Only `peer` survives the self-send removal: the rest described a child that authored its own
+  # envelope, which no provider does any more. (contraction step 4, S4-2.)
+  local peer
   # Pickup peer := the inbound message's sender — that is who reads the reply
   # when this turn exits. Complement fallback only when from: is absent. The
   # value becomes a path component (to-$peer) and a send target, and spawn/run
@@ -2419,68 +2430,6 @@ cmd_run() {
     trap - EXIT
       exit 1
     fi
-  else
-  if [ "$provider" = "codex" ]; then
-    self_desc="Codex"; peer_desc="Claude Code"
-    instr_a="$(skill_file read-from-claude "$main_root" || true)"
-    instr_b="$(skill_file send-to-claude "$main_root" || true)"
-  else
-    self_desc="Claude Code"; peer_desc="Codex"
-    instr_a="$(command_file read-from-codex.md "$main_root" || true)"
-    instr_b="$(command_file send-to-codex.md "$main_root" || true)"
-  fi
-  # Instruction files usually live OUTSIDE the workspace (~/.claude/commands,
-  # ~/.codex/skills) — grant the claude child Read access to their dirs, or the
-  # boot prompt's "read these first" costs a permission-denial round-trip
-  # (observed in the first live claude turn).
-  local -a instr_dirs=()
-  local d prev_d=""
-  for d in "${instr_a:+$(dirname "$instr_a")}" "${instr_b:+$(dirname "$instr_b")}"; do
-    # Plain if, not a `&&` chain: a false condition in the loop body must not
-    # leak a non-zero status into set -e (the print_attach bug class).
-    if [ -n "$d" ] && [ "$d" != "$prev_d" ]; then
-      instr_dirs+=(--add-dir "$d")
-      prev_d="$d"
-    fi
-  done
-  if [ -n "$instr_a" ] && [ -n "$instr_b" ]; then
-    instr_note="Read BOTH instruction files first and follow them for this message:
-  $instr_a
-  $instr_b"
-  else
-    instr_note="(instruction files not found — protocol summary: read the message, act on it per its
-type, then reply with a frontmatter markdown message in the peer's .comms inbox — copy thread/
-workflow/phase/round/max-rounds from the incoming message, add verdict: APPROVE or REQUEST_CHANGES
-for workflow reviews from the reviewer side, use type: response with no verdict for questions.)"
-  fi
-  # Shell-quote the paths that appear inside the command the peer is told to
-  # run — a message path is data, not code, even though our own send flow only
-  # generates safe names.
-  local msg_q comms_q
-  msg_q="$(printf '%q' "$msg")"
-  comms_q="$(printf '%q' "$COMMS")"
-  cat > "$run_dir/prompt.md" <<PROMPT
-You are $self_desc, operating HEADLESS in an agent-comms exchange. No human is watching
-this session and no cmux panes are involved.
-
-A message from $peer_desc is waiting for you at:
-  $msg_q
-
-$instr_note
-
-Headless-mode adjustments (these OVERRIDE anything the instructions say about cmux,
-panes, surfaces, or shell wrappers):
-- Skip inbox listing; the target message file is the one given above.
-- If the message frontmatter has a cwd: field, cd there before reading or changing files.
-- Send your reply with:
-    $comms_q send --to $peer "<your reply file>" --archive-inbound $msg_q
-- The send will report RESULT: manual — that is EXPECTED in headless mode. The driving
-  session picks your reply up when this turn ends. Do not retry delivery, do not look
-  for cmux, and do not request escalation.
-- If you rewrite your reply, delete the superseded draft file — exactly ONE reply may
-  be left in the peer's inbox when you stop.
-- Do not ask the user anything. Complete the task, send the reply, then stop.
-PROMPT
   fi
 
   # ----- provider invocation -----

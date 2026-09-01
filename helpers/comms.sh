@@ -4050,6 +4050,18 @@ acp_supports() {  # <agent> — can an ACP turn actually run here for this agent
   "$acp_sh" supports "$1" >/dev/null 2>&1
 }
 
+# headless_ok <agent> — may this agent take the headless transport? Only a provider that is
+# parent-brokered WITHOUT ACP may: headless used to route a SELF-SENDING child, and that arm is
+# gone (step 4, S4-2). grok qualifies via its registry marker; claude/codex must use ACP, and
+# runphase fails them closed. Gating every rung on ONE predicate is what stops `transport` handing
+# out a route the runner then refuses. (codex, S4-2 plan, blocking.)
+headless_ok() {
+  case "$(cmd_agents --supported | awk -v a="$1" -F'\t' '$1==a {print $2}')" in
+    *reviewer-consult-only*) return 0 ;;
+  esac
+  return 1
+}
+
 cmd_transport() {
   # transport <agent> [--loop] — print the transport that would actually be used:
   # headless | cmux | acp | mailbox.
@@ -4072,7 +4084,14 @@ cmd_transport() {
   [ -n "$agent" ] || usage_err "transport: an agent name is required (registered: $(registry_agents))"
   require_agent "$agent" "transport"
 
-  if [ "${COMMS_DELIVERY:-}" = "headless" ]; then printf 'headless\n'; return 0; fi
+  # HEADLESS IS NO LONGER UNIVERSAL. It used to route a SELF-SENDING child, and that arm is gone
+  # (step 4, S4-2), so it is valid only for a provider that is parent-brokered WITHOUT ACP. grok is
+  # that provider today; claude/codex must go through ACP or fail closed in runphase. Keyed on the
+  # registry marker rather than the name, so a second brokered provider needs no edit here.
+  if [ "${COMMS_DELIVERY:-}" = "headless" ]; then
+    headless_ok "$agent" && { printf 'headless\n'; return 0; }
+    die "transport: COMMS_DELIVERY=headless is not available for '$agent' — its self-send path was removed in step 4; use ACP"
+  fi
   if [ "${COMMS_DELIVERY:-}" = "acp" ]; then printf 'acp\n'; return 0; fi
   # `mailbox` was only ever an OUTPUT of this function — the honest last resort where the file is
   # written and nobody is nudged. Accepting it as an INPUT gives a caller a way to ask for exactly
@@ -4116,7 +4135,7 @@ cmd_transport() {
     # Fall back to a pane only when the headless runner is genuinely missing:
     # flipping the default must not strand every loop on an install where
     # runphase.sh never landed.
-    if runphase_available; then printf 'headless\n'; return 0; fi
+    if runphase_available && headless_ok "$agent"; then printf 'headless\n'; return 0; fi
     case "$caps" in
       *interactive*)
         picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
@@ -4142,7 +4161,7 @@ cmd_transport() {
   # permission policy is unbuilt, so silently re-routing a loop would change its
   # semantics rather than just its transport.
   if [ "$mode" = "consult" ] && acp_supports "$agent"; then printf 'acp\n'; return 0; fi
-  case "$caps" in *interactive*) ;; *) printf 'headless\n'; return 0 ;; esac
+  case "$caps" in *interactive*) ;; *) headless_ok "$agent" && { printf 'headless\n'; return 0; } ;; esac
   printf 'mailbox\n'
 }
 
