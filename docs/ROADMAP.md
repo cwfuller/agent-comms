@@ -1918,6 +1918,28 @@ the queue.
 
 ### Claude containment MEASURED on Darwin (2026-08-31) — write-contained, network NOT contained
 
+> **INVALIDATED IN PART, 2026-09-01 — read this before the table below.** The probes in this
+> section were run under `--approve-all`, which is what a mounted turn used at the time, and they
+> only ever proved containment **while the session stayed in `plan`**. They never tested asking to
+> LEAVE it. grok found the hole by reading acpx's option resolution: `--approve-all` picks an
+> `allow_once` option before any reject, claude's `ExitPlanMode` offers exactly that, the adapter
+> then calls `setPermissionMode("default")`, and the next write is auto-approved. Re-measured and
+> CONFIRMED by ground truth: `EXITPLAN: ALLOWED`, `WRITE_AFTER_EXIT: SUCCEEDED`, file on disk.
+>
+> **What closed it:** a mounted claude turn now runs `--approve-reads --non-interactive-permissions
+> deny`, NOT `--approve-all`. A FORCED `ExitPlanMode` call is then rejected by the client
+> ("User rejected request to exit plan mode", `PERMISSION_DENIED`, rc 5) while `git log` and reads
+> still work. The forcing matters: an earlier attempt showed the MODEL declining, which is
+> politeness, not enforcement. `--permission-policy '{"autoDeny":["ExitPlanMode"]}'` was tried
+> first and did NOT hold — the escape still succeeded.
+>
+> Note (grok): if a turn's only client-visible permission request is a denied `ExitPlanMode`,
+> acpx exits 5 (`requested > 0 && approved === 0`), discarding an otherwise complete reply. That
+> is fail-closed, and it is not a reason to hand out `allow_once` again.
+>
+> The table below remains accurate for IN-PLAN tool use, which is what it measured.
+
+
 Run before writing any `claude)` arm, using the protocol that earned codex its arm. Versions:
 acpx 0.13.1, `@agentclientprotocol/claude-agent-acp@^0.60.0`, `@agentclientprotocol/codex-acp@^1.1.5`,
 macOS (Darwin), scratch git fixture, `--approve-all`.

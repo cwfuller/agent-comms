@@ -8949,6 +8949,10 @@ sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep -q
   && ok "a mode-pinned backend narrows the permission shape instead of --approve-all" || fail "claude-plan still runs under --approve-all"
 sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep -q 'approve-reads' \
   && ok "the narrowed shape still approves reads, so the reviewer can do its job" || fail "narrowed shape blocks reads too"
+# ...and the DEFAULT must stay --approve-all, or a mistaken indent would silently narrow CODEX
+# too while every claude-plan grep above stayed green. (grok, implement r2, advisory.)
+awk '/if \[ -n "\$mount_dir" \]; then/{f=1} f&&/acp_perm=\(--approve-all\)/{print;exit}' "$ISO_RP" | grep -q 'approve-all' \
+  && ok "the mounted default is still --approve-all, so codex's shape is unchanged" || fail "the mounted default no longer grants --approve-all"
 grep -qi 'ExitPlanMode' "$ISO_RP" \
   && ok "the escape that forced the narrowed shape is recorded at the site" || fail "the ExitPlanMode escape is undocumented"
 

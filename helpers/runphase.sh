@@ -2850,8 +2850,12 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # alone is ISOLATION, not enforcement. The ENFORCED boundary is the per-provider kernel
     # sandbox selected above (acp_iso): for codex, the isolated CODEX_HOME + read-only mode,
     # MEASURED to deny writes, /tmp, child network, and the owner control-plane socket while
-    # leaving reads and the model API. That is containment of MODEL-GENERATED COMMANDS; a
-    # hostile artifact's own `.codex` MCP config is handled separately (refused above), and
+    # leaving reads and the model API. That is CODEX's shape. claude's backend is NOT this: its
+    # `acp_iso` is empty, its pin is the in-process `plan` mode, its network stays open, and its
+    # permission shape is narrowed below BECAUSE `--approve-all` was measured to auto-approve the
+    # child out of that pin via ExitPlanMode. Read "the enforced boundary" here as per-backend,
+    # not as one kernel sandbox for everyone. Either way it is containment of MODEL-GENERATED
+    # COMMANDS; a hostile artifact's own `.codex` MCP config is handled separately (refused above), and
     # general artifact-config containment is still open (docs/ROADMAP.md). It is NOT COMMS_RUNPHASE_GROK_SANDBOX — that flag was
     # only ever the direct-grok path and never applied here. A provider with no verified
     # backend does not reach this code: it was refused above. See docs/ROADMAP.md.
