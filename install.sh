@@ -370,6 +370,16 @@ install_local_assets() {
     install_file "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md" "$PROJECT_ROOT/.agents/skills/$skill/SKILL.md"
   done
 
+  # THE REVIEW BAR, pinned locally. Without this a local-only install — which is also the
+  # noninteractive default — gets the new resolver and no fragment to resolve, so every review
+  # turn fails closed outside this repo. The repo tier only rescues a pin sitting next to THIS
+  # checkout's docs/, so dogfooding could not see the hole. (codex + grok, S3-1 r1, blocking.)
+  echo "  installing project-local loopspec fragments..."
+  mkdir -p "$PROJECT_ROOT/.agents/loopspec-fragments"
+  for f in $LOOPSPEC_FRAGMENTS; do
+    install_file "$FRAGMENT_SRC/$f" "$PROJECT_ROOT/.agents/loopspec-fragments/$f"
+  done
+
   echo "  installing project-local shared helpers..."
   mkdir -p "$PROJECT_ROOT/.agent-comms"
   for h in $HELPERS; do
@@ -401,6 +411,11 @@ warn_local_shadowing() {
       [ -f "$CODEX_SKILLS_DIR/$skill/SKILL.md" ] && global_present=true && break
     done
   fi
+  if [ "$global_present" = false ]; then
+    for f in $LOOPSPEC_FRAGMENTS; do
+      [ -f "$AGENT_COMMS_HOME/loopspec-fragments/$f" ] && global_present=true && break
+    done
+  fi
   [ "$global_present" = false ] && return
 
   local shadowed=""
@@ -412,6 +427,11 @@ warn_local_shadowing() {
   done
   for h in $HELPERS; do
     [ -f "$PROJECT_ROOT/.agent-comms/$h" ] && shadowed="$shadowed .agent-comms/$h"
+  done
+  # A pinned review bar outranks the global one the same way a pinned skill does, so a stale
+  # local fragment would silently keep serving an old standard. (grok, S3-1 r1.)
+  for f in $LOOPSPEC_FRAGMENTS; do
+    [ -f "$PROJECT_ROOT/.agents/loopspec-fragments/$f" ] && shadowed="$shadowed .agents/loopspec-fragments/$f"
   done
 
   if [ -n "$shadowed" ]; then

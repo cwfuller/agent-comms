@@ -8,7 +8,7 @@ comms.sh: deliver via stubbed cmux	7
 comms.sh: send (atomicity guard)	4
 install.sh: scopes	14
 comms.sh: status smoke	3
-install.sh: local pin gitignored + global scope (overridden HOME dirs)	45
+install.sh: local pin gitignored + global scope (overridden HOME dirs)	48
 comms.sh v2: thread filter + verdict normalization + error lane	4
 comms.sh v2: state lifecycle	13
 comms.sh v2: delivery failure is explicit and recorded	2
