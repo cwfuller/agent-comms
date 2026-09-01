@@ -728,8 +728,10 @@ probe_field() {  # <probe output> <key>
 write_git_shim() {  # <dir> <real-git> — the read-only git a mounted review turn sees
   # DEFENCE IN DEPTH, NOT A BOUNDARY. A PATH shim cannot be a security boundary: a child can
   # call git by absolute path, or just write files with the shell. The enforced boundary on
-  # the mounted path is the per-provider kernel sandbox (for codex, the isolated read-only
-  # home; see the acp_iso block) — which enforces MODEL-GENERATED COMMANDS, not a hostile
+  # the mounted path is whatever the provider's OWN backend enforces, and that is NOT the same
+  # class for every provider: codex gets a KERNEL sandbox (isolated read-only home; see the
+  # acp_iso block), claude gets an IN-PROCESS write policy (`plan`) with its network still open.
+  # Both enforce MODEL-GENERATED COMMANDS, not a hostile
   # artifact's own provider config (see docs/ROADMAP.md). This shim is what a reviewer under
   # COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 is left with, and what raises the cost of an ACCIDENT and
   # of the easy deliberate paths. Round 7 found the previous version trivially defeated three
@@ -2777,8 +2779,9 @@ sandbox_mode = "read-only"
           # NO VERIFIED BACKEND ON THIS OS. grok's own docs are explicit that child-network
           # blocking is "enforced on Linux only (via seccomp). On macOS it is a no-op", and
           # its read-only profile still write-allows /tmp — so a mounted grok turn on Darwin
-          # can clone to /tmp and push with the inherited keychain helper. claude has no
-          # backend wired here at all. Refusing is the fail-closed answer both reviewers
+          # can clone to /tmp and push with the inherited keychain helper. claude no longer
+          # reaches this arm — it has its own `claude)` backend above — so on Darwin this is
+          # grok's arm in practice. Refusing is the fail-closed answer both reviewers
           # asked for; the escape hatch is explicit and it is not the default, because a
           # silent degradation to an uncontained mount is how this item gets marked done
           # while staying open.
@@ -2868,8 +2871,10 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       #
       # The shim is DEFENCE IN DEPTH, not the boundary, and the difference matters: a child
       # can call git by absolute path or simply write files with the shell, both outside any
-      # PATH shim. The enforced boundary is the kernel sandbox selected in acp_iso above (for
-      # codex, the isolated read-only home); the shim is what a reviewer under an operator
+      # PATH shim. The enforced boundary is the backend selected above — a KERNEL sandbox for
+      # codex (isolated read-only home), an IN-PROCESS mode pin for claude (`plan`, network
+      # open), which is a weaker class and is why the security item stays open; the shim is what
+      # a reviewer under an operator
       # override (COMMS_RUNPHASE_ALLOW_UNCONTAINED=1) is left with. Round 7 rejected the claim
       # that the shim alone makes a mount read-only, and that rejection was correct.
       acp_shim="$run_dir/shim"
