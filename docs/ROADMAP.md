@@ -53,6 +53,30 @@ are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnos
 equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
 trusting this number if the corpus has moved.
 
+**S4-2 REMOVAL: code done, test surgery outstanding (2026-09-01).** The behaviour change is
+written and internally coherent on `worktree-selfsend-removal`; the suite is RED by design and the
+remaining work is enumerated below. Do not land until it is green.
+
+Code, done: the 62-line self-send arm deleted (0 self-send instruction sites remain); the ACP-only
+guard for claude/codex; the artifact suppression removed, so EVERY review turn is now
+artifact-bound — the self-send path was the one place that promise did not hold; and a single
+`headless_ok` predicate gating all four headless rungs in `cmd_transport`.
+
+**That last one was a real trap.** Gating only the explicit `COMMS_DELIVERY=headless` input left
+the loop ladder and consult fallback still SELECTING headless for codex, so `transport` promised a
+route `runphase` then refused — surfacing as "codex was NOT spawned … likely runphase.sh missing",
+i.e. blaming a broken install for a deliberate change. Transport and runner must be gated on the
+same predicate or they drift.
+
+**Test surgery remaining — 74 assertions across 4 sections**, measured with the code in place:
+- `runphase v0: headless delivery via stubbed codex` — 38 of 45 fail. Mostly DELETE: they specify
+  the self-send prompt, direct CLI argv, child-env propagation, headless routing.
+- `runphase step 2: claude backend, direction pickup, hold, watchdog` — 24 of 33. Same shape.
+- `the coordinator's event log` — 8. These are NOT about the deleted path: the fixtures drive a
+  codex turn and relied on headless to spawn it. RE-POINT to ACP (an acpx stub in PATH) or grok.
+- `comms.sh: transport selection` — 4. Semantics changed on purpose; retarget to assert headless
+  is grok-only and refused for codex.
+
 **The removal map, computed rather than estimated (2026-09-01).**
 
 - `helpers/runphase.sh` — the self-send arm is lines **2423..2483** of the prompt fork that opens
