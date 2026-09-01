@@ -4400,6 +4400,11 @@ printf '%s\n' "$SH_UNBROKERED" | grep -q 'parent-brokered' \
 # ONE accessor, and it answers with the TRANSPORT, so shadow cannot re-decide the rule.
 grep -q '^suppression_ok()' "$REPO/helpers/comms.sh" \
   && ok "one suppression_ok accessor states when --no-deliver can be honoured" || fail "no shared suppression predicate"
+# node_ok must REFUSE a version-less node as a predicate, not by way of a numeric-comparison
+# error. The verdict was already right; relying on the error was not. (codex, r1, advisory.)
+SH_NODEOUT="$(PATH="$SH_NONODE:$PATH" "$REPO/helpers/acp.sh" supports codex 2>&1)" && SH_NODERC=0 || SH_NODERC=$?
+[ "$SH_NODERC" -ne 0 ] && [ -z "$SH_NODEOUT" ] \
+  && ok "an unusable node is refused cleanly, with no integer-expression diagnostic" || fail "node probe noisy or accepting (rc=$SH_NODERC out=$SH_NODEOUT)"
 sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep -q 'suppression_ok' \
   && ok "shadow gates on the shared accessor rather than the registry string" || fail "shadow still re-implements the rule"
 sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep -q -- '--via "$shadow_via"' \

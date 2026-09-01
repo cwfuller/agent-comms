@@ -74,6 +74,12 @@ node_ok() {
   v="$(node --version 2>/dev/null)"; v="${v#v}"
   major="${v%%.*}"
   minor="${v#*.}"; minor="${minor%%.*}"
+  # REJECT EMPTY EXPLICITLY. `*[!0-9]*` does not match the empty string, so a node that prints
+  # nothing (absent, broken, or a harness stub) fell through to `[ "" -gt N ]`, which returns
+  # nonzero only by way of an "integer expression expected" diagnostic. The verdict was right and
+  # the noise was suppressed by the caller, but relying on a numeric-comparison ERROR to mean
+  # "unsupported" is not a predicate. (codex, capability-registry r1, advisory.)
+  [ -n "$major" ] && [ -n "$minor" ] || return 1
   case "$major$minor" in *[!0-9]*) return 1 ;; esac
   [ "$major" -gt "$NODE_MIN_MAJOR" ] && return 0
   [ "$major" -eq "$NODE_MIN_MAJOR" ] && [ "$minor" -ge "$NODE_MIN_MINOR" ]
