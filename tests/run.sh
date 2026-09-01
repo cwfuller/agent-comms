@@ -5021,6 +5021,18 @@ printf '%s\n' "$TR_MBX" | grep -qi 'manual pickup' \
   && ok "a deliberate mailbox delivery reports intent, not a broken install" || fail "mailbox delivery still reports a missing capability: $TR_MBX"
 printf '%s\n' "$TR_MBX" | grep -qi 'no headless runner' \
   && fail "mailbox delivery still blames a missing headless runner" || ok "mailbox delivery does not blame a missing runner"
+# THE CMUX WINDOWS ARE PROCESS-GLOBAL EXPORTS, not section-scoped: a section inserted between a
+# `COMMS_DELIVERY=cmux` and its restore would silently inherit the pane transport — the exact way
+# these five sections once inherited the suite default. Pin WHICH banners may appear inside a cmux
+# window, so the next tests/run.sh edit fails here instead of running under the wrong transport.
+# (grok, S4-1 r1, advisory.)
+TR_WINDOW="$(awk '
+  /^export COMMS_DELIVERY=cmux$/   { inwin=1; next }
+  /^export COMMS_DELIVERY=mailbox$/{ inwin=0; next }
+  inwin && /^section /             { print }
+' "$REPO/tests/run.sh" | grep -cv -E 'deliver via stubbed cmux|delivery failure is explicit|surface binding|binding survives a flaky tree|sandbox block emits')"
+[ "$TR_WINDOW" = "0" ] \
+  && ok "no unexpected section runs inside a cmux transport window" || fail "$TR_WINDOW section(s) would inherit cmux unintentionally"
 
 # No cmux surface anywhere: an interactive agent must NOT fall to the mailbox while a
 # synchronous transport is available — that is the case that stranded a real consult.
