@@ -8937,10 +8937,21 @@ grep -q 'env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR' "$ISO_RP" \
 # process-lifetime lock, and `set_mode` accepts AgentFullAccess with no allowlist. With --ttl
 # owner reuse, a turn that raised its own mode would leave the NEXT round unconfined. Re-pinning
 # before every prompt is what makes the backend survive owner reuse.
-grep -q 'set-mode read-only' "$ISO_RP" \
+grep -q 'set-mode "$acp_iso_mode"' "$ISO_RP" \
   && ok "the mode is re-pinned immediately before every prompt" || fail "no per-prompt mode pin"
-awk '/set-mode read-only/{m=NR} /refusing to send a review turn whose containment is unconfirmed/{if (NR>m && m) f=1} END{exit !f}' "$ISO_RP" \
+awk '/set-mode "\$acp_iso_mode"/{m=NR} /refusing to send a review turn whose containment is unconfirmed/{if (NR>m && m) f=1} END{exit !f}' "$ISO_RP" \
   && ok "an unconfirmed mode refuses the turn instead of sending it" || fail "an unpinnable mode still sends"
+# THE PERMISSION SHAPE IS PART OF THE BOUNDARY for an in-process pin. Measured: under
+# --approve-all the child was auto-approved out of `plan` via ExitPlanMode and its next write
+# LANDED ON DISK; under --approve-reads + non-interactive deny, a forced ExitPlanMode call is
+# rejected by the CLIENT while reads and `git log` still work.
+sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep -q 'non-interactive-permissions deny' \
+  && ok "a mode-pinned backend narrows the permission shape instead of --approve-all" || fail "claude-plan still runs under --approve-all"
+sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep -q 'approve-reads' \
+  && ok "the narrowed shape still approves reads, so the reviewer can do its job" || fail "narrowed shape blocks reads too"
+grep -qi 'ExitPlanMode' "$ISO_RP" \
+  && ok "the escape that forced the narrowed shape is recorded at the site" || fail "the ExitPlanMode escape is undocumented"
+
 # The confirmation must be EXACT and stdout-only, for WHICHEVER mode the backend pins. A glob
 # over stdout+stderr passes on the adapter's REJECTION too ("Agent rejected session/set_mode for
 # mode \"<id>\""), which interpolates the requested id and so contains the very string a loose

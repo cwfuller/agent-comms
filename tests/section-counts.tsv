@@ -63,6 +63,6 @@ runphase: the state-file wait is DECLARED by the spawner, never guessed	22
 harness: a partial run is never a verdict	55
 integrate: an exit status is not proof the suite ran	30
 the coordinator's event log: a durable record that is not the mailbox	169
-reviewer isolation: a mounted turn is contained or it does not run	41
+reviewer isolation: a mounted turn is contained or it does not run	44
 reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)	21
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5

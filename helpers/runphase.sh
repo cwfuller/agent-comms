@@ -2859,6 +2859,27 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     local -a acp_perm
     if [ -n "$mount_dir" ]; then
       acp_perm=(--approve-all)
+      # ...EXCEPT where the backend's boundary is IN-PROCESS rather than kernel-enforced.
+      # MEASURED 2026-09-01, and it invalidated the first claude measurement: under
+      # `--approve-all`, acpx resolves an `allow_once` option BEFORE any reject option, and
+      # claude's `ExitPlanMode` offers exactly that. So the parent AUTO-APPROVED the child out of
+      # its own `plan` pin, the adapter called setPermissionMode("default"), and a subsequent
+      # write SUCCEEDED — ground-truthed: the file appeared on disk. The five bash-evasion probes
+      # had only ever proved containment WHILE the session stayed in plan.
+      #
+      # A `--permission-policy autoDeny` on the tool name did NOT close it (measured: the escape
+      # still succeeded). What does is refusing to hand out approvals at all: under
+      # `--approve-reads --non-interactive-permissions deny`, a FORCED ExitPlanMode call is
+      # rejected BY THE CLIENT — "User rejected request to exit plan mode",
+      # `PERMISSION_DENIED` — while reads and `git log` still work, which is the reviewer's
+      # actual job. That distinction matters: an earlier probe showed the MODEL declining, which
+      # is politeness, not enforcement; this one shows the model calling and the client refusing.
+      # So for a mode-pinned backend the permission shape IS part of the boundary.
+      # (grok, implement r1, BLOCKING — found by reading acpx's option resolution, not by running
+      # it; confirmed here by ground truth.)
+      if [ "$acp_iso_backend" = "claude-plan" ]; then
+        acp_perm=(--approve-reads --non-interactive-permissions deny)
+      fi
       # --approve-all gives the child a shell, so the boundary has to be enforced where
       # the damage would be, not by hoping it behaves. The threat model is deliberately
       # "the same as running this agent by hand in the repo" — it may read the tree and
