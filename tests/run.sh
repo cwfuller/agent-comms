@@ -3398,6 +3398,11 @@ if [ -n "${AX_CHILD_WRITE:-}" ]; then
   printf '%s' "$AX_CHILD_WRITE" > ./child-residue.txt 2>/dev/null || true
   mkdir -p ./.comms 2>/dev/null && printf '%s' "$AX_CHILD_WRITE" > ./.comms/child-ignored.txt 2>/dev/null || true
 fi
+# AX_FAIL_RC drives a FAILED acp turn. Without it the ACP path had only happy-path coverage for
+# claude/codex, so deleting the headless arm would have removed the ONLY tests of provider-aware
+# failure reporting for those two. (contraction step 4, S4-2: add the ACP equivalent BEFORE the
+# removal — codex, plan r1, blocking.)
+[ -n "${AX_FAIL_RC:-}" ] && { printf 'stub acpx failure\n' >&2; exit "$AX_FAIL_RC"; }
 cat "$ACP_PARITY_PAYLOAD"
 exit 0
 AXSTUB
@@ -3710,6 +3715,33 @@ for BRK in "codex claude codex_thread_id" "claude codex claude_session_id"; do
   # non-vacuous form.)
   grep -q '"session_id": "acp:' "$BRK_DIR/result.json" 2>/dev/null \
     && ok "the $BRK_PROV leg records an acp: session id, proving the ACP arm ran" || fail "$BRK_PROV result.json carries no acp: session id"
+done
+
+# ---- ACP FAILURE EQUIVALENTS (S4-2 precondition) ----
+# The headless sections are the ONLY place claude/codex failure reporting is exercised today, and
+# step 4 deletes them. These are the ACP equivalents, added BEFORE the removal so the coverage
+# never lapses — the order codex made blocking in the plan round.
+for BRK_F in codex claude; do
+  BRK_FFROM=codex; [ "$BRK_F" = claude ] || BRK_FFROM=claude
+  BRK_FTHREAD="ma-brokfail-$BRK_F"
+  mkdir -p "$MA_FIX/.comms/to-$BRK_F"
+  BRK_FMSG="$MA_FIX/.comms/to-$BRK_F/${MA_WS}_2026-08-20T12-00-00_brokfail-$BRK_F.md"
+  sed -e "s/^thread: ma-arc-1\$/thread: $BRK_FTHREAD/" -e "s/^from: claude\$/from: $BRK_FFROM/" \
+      -e "s/_review-req-1\$/_brokfail-$BRK_F/" \
+      "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$BRK_FMSG"
+  BRK_FDIR="$WORK/ma-brokfail-$BRK_F"; mkdir -p "$BRK_FDIR"
+  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$BRK_PAY" \
+      AX_FAIL_RC=7 COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$BRK_FMSG" \
+      --dir "$BRK_FDIR" --provider "$BRK_F" --via acp --timeout-secs 20 ) >/dev/null 2>&1
+  grep -q '"status": "failed"' "$BRK_FDIR/result.json" 2>/dev/null \
+    && ok "a failed $BRK_F ACP turn records status=failed" || fail "$BRK_F ACP failure status (got: $(head -c 120 "$BRK_FDIR/result.json" 2>/dev/null))"
+  grep -q "\"provider\": \"$BRK_F\"" "$BRK_FDIR/result.json" 2>/dev/null \
+    && ok "the failed $BRK_F ACP result names the provider that actually ran" || fail "$BRK_F ACP failure provider"
+  BRK_FSTATE="$MA_FIX/.comms/state/$(echo "$MA_WS" | tr -c 'A-Za-z0-9._-\n' '_')_${BRK_FTHREAD}.json"
+  grep -q '"status": "failed"' "$BRK_FSTATE" 2>/dev/null \
+    && ok "a failed $BRK_F ACP turn is recorded in thread state, not silently dropped" || fail "$BRK_F ACP failure state"
+  [ ! -s "$(find "$MA_FIX/.comms/to-$BRK_FFROM" -name "*$BRK_F-reply*brokfail*" -type f 2>/dev/null | head -1)" ] \
+    && ok "a failed $BRK_F ACP turn stamps no reply — nothing to mistake for a review" || fail "$BRK_F ACP failure leaked a reply"
 done
 
 section "scope-dial template source contract"
