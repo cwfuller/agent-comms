@@ -539,9 +539,9 @@ grep -q 'send --surface surface:22 --workspace workspace:10 /read-from-codex' "$
 OUT="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" deliver codex)"
 echo "$OUT" | grep -q "manual pickup" && ok "deliver without cmux degrades to manual pickup" || fail "deliver without cmux degrades to manual pickup"
 
-section "comms.sh: send (atomicity guard)"
 # Back to the hermetic default: write the file, nudge nobody. (S4-1.)
 export COMMS_DELIVERY=mailbox
+section "comms.sh: send (atomicity guard)"
 IN2="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T12-02-00_reply-2.md"
 cp "$REPO_FIX/.comms/archive/$(basename "$IN1")" "$IN2"
 BADOUT="$WORK/malformed-out.md"
@@ -999,9 +999,9 @@ echo "$DELIV_OUT" | grep -q "FAILED mid-sequence" && ok "mid-sequence cmux failu
 SF_CMUX="$REPO_FIX/.comms/state/test-project_loop-alpha.json"
 grep -q '"last_delivery": "failed"' "$SF_CMUX" && ok "failed delivery recorded in state (resolved-ws key)" || fail "failed delivery recorded in state (state dir: $(ls "$REPO_FIX/.comms/state/" 2>/dev/null))"
 
-section "comms.sh v2: state hardening (slash thread, garbage epoch, quotes)"
 # Back to the hermetic default: write the file, nudge nobody. (S4-1.)
 export COMMS_DELIVERY=mailbox
+section "comms.sh v2: state hardening (slash thread, garbage epoch, quotes)"
 SLASH_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-10-00_slash-1.md"
 SLASH_IN="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-09-00_slashin.md"
 sed 's/thread: loop-alpha/thread: fix-auth\/login-99/; s/round: 2/round: 3/' "$OUT_WF" > "$SLASH_WF"
@@ -1150,9 +1150,9 @@ echo "$REC_OUT" | grep -q "^RESULT: delivered" && ok "exact RECOVER command nudg
 grep -q 'send --surface surface:22' "$CMUX_STUB_LOG" && grep -q 'send-key --surface surface:22' "$CMUX_STUB_LOG" && ok "RECOVER uses direct cmux commands" || fail "RECOVER direct cmux log (got: $(cat "$CMUX_STUB_LOG"))"
 grep -q '"last_delivery": "delivered"' "$SF_CMUX" && grep -q '"last_notified_at":' "$SF_CMUX" && ok "reconcile repairs delivery state with timestamp" || fail "reconciled state (got: $(cat "$SF_CMUX"))"
 
-section "comms.sh v2.1.1: status shouts when a loop stalled undelivered"
 # Back to the hermetic default: write the file, nudge nobody. (S4-1.)
 export COMMS_DELIVERY=mailbox
+section "comms.sh v2.1.1: status shouts when a loop stalled undelivered"
 perl -pi -e 's/"last_delivery": "[^"]*"/"last_delivery": "manual"/; s/"status": "[^"]*"/"status": "in-progress"/' "$SF"
 ST_OUT="$(run_comms status)"
 echo "$ST_OUT" | grep -q "ACTION NEEDED" && ok "status prints ACTION NEEDED on undelivered last send" || fail "status ACTION line (got: $(echo "$ST_OUT" | tail -2))"
