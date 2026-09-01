@@ -244,9 +244,13 @@ mkdir -p "$AGENT_COMMS_HOME"
 # were silently satisfied by the developer's real ~/.codex/skills. That made the suite's result
 # depend on the machine — green here, red on a clean checkout or CI. Staging it here is the fix,
 # and the fragments come from their canonical home so this cannot drift. (S3-1.)
+# NAMED, not globbed: this suite forbids enumerating the filesystem for corpus paths (a glob lets
+# a candidate delete a tracked file, recreate it untracked, and keep the counts stable). Naming
+# the two fragments the RUNTIME actually reads is also the more honest fixture — it states the
+# dependency instead of hoovering up whatever happens to be on disk.
 mkdir -p "$AGENT_COMMS_HOME/loopspec-fragments"
-for _f in "$REPO"/docs/loopspec/fragments/*.md; do
-  [ -f "$_f" ] && cp "$_f" "$AGENT_COMMS_HOME/loopspec-fragments/$(basename "$_f")"
+for _f in verdict-discipline holistic-rereview; do
+  cp "$REPO/docs/loopspec/fragments/$_f.md" "$AGENT_COMMS_HOME/loopspec-fragments/$_f.md" 2>/dev/null || true
 done
 unset _f
 # The gate only protects runs that REACH it. An `exit 0` added above it later would
