@@ -2044,7 +2044,7 @@ RFC2="$WORK/ma-legfq"; mkdir -p "$RFC2"
 # paths are spelled out would prove nothing about precedence. (contraction step 3, S3-1.)
 RB_FN="$(sed -n '/^fragment_file() {/,/^}/p' "$REPO/helpers/runphase.sh")"
 RB_P="$WORK/rb-proj"; RB_G="$WORK/rb-glob"; RB_R="$WORK/rb-repo"
-mkdir -p "$RB_P/.agents/loopspec-fragments" "$RB_G/loopspec-fragments" "$RB_R/docs/loopspec/fragments"
+mkdir -p "$RB_P/.agents/loopspec-fragments" "$RB_G/loopspec-fragments" "$RB_R/docs/loopspec/fragments" "$RB_R/helpers"
 printf 'PROJECT\n' > "$RB_P/.agents/loopspec-fragments/verdict-discipline.md"
 printf 'GLOBAL\n'  > "$RB_G/loopspec-fragments/verdict-discipline.md"
 printf 'REPO\n'    > "$RB_R/docs/loopspec/fragments/verdict-discipline.md"
@@ -2190,17 +2190,20 @@ for badsbx in off devbox workspace "not a name"; do
 done
 rm -f "$SENS" "$PRIOR" "$QUOTER"
 
-# Fail-closed also when the skill EXISTS but carries no fragment markers.
-MARKERLESS="$WORK/markerless-skills"; mkdir -p "$MARKERLESS/send-to-claude"
-printf '# Send To Claude\nno fragments here\n' > "$MARKERLESS/send-to-claude/SKILL.md"
+# Fail-closed also when the fragment RESOLVES BUT IS EMPTY — the successor to the old
+# "skill exists, markers absent" case. The two causes stay distinguishable: "never installed" and
+# "installed but empty" need different fixes, and a refusal that says only "unavailable" makes the
+# operator guess. (S3-1.)
+MARKERLESS="$WORK/markerless-home"; mkdir -p "$MARKERLESS/loopspec-fragments"
+: > "$MARKERLESS/loopspec-fragments/verdict-discipline.md"
 MA_MSGFM="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-47-00_markerless-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-9/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFM"
 RFM="$WORK/ma-legfm"; mkdir -p "$RFM"
-(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$MARKERLESS" \
+(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" AGENT_COMMS_HOME="$MARKERLESS" \
    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFM" --dir "$RFM" --provider grok) >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFM/result.json" | head -1)" = "failed" ] \
-  && grep -q 'fragment markers absent' "$RFM/result.json" \
-  && ok "markerless skill also fails closed with the precise cause" || fail "markerless fail-closed"
+  && grep -q 'resolved but is EMPTY' "$RFM/result.json" \
+  && ok "an empty fragment fails closed and names THAT cause, not a generic one" || fail "markerless fail-closed"
 
 # Parent-stamped envelope: the successful legs prove the authority — re-assert
 # the stamped fields on the leg-1 reply match the INBOUND turn exactly.

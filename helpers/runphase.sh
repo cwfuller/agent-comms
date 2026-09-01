@@ -578,7 +578,14 @@ PROMPT
   if [ -z "$vtext" ]; then
     # FAIL CLOSED: a review with no bar is worse than no review (codex severity
     # ruling: blocking-latent). Questions never reach this branch.
-    GROK_PROMPT_NOTE="verdict discipline unavailable (the verdict-discipline loopspec fragment is missing or empty at every resolved location) — refusing to run a review turn with no review bar; re-run install.sh"
+    # TWO CAUSES, NAMED SEPARATELY. The pre-move refusal distinguished "skill missing" from
+    # "markers absent", and collapsing that into one message would make the operator guess
+    # between "never installed" and "installed but empty" — different fixes. (S3-1.)
+    if fragment_file verdict-discipline "$main_root" >/dev/null 2>&1; then
+      GROK_PROMPT_NOTE="verdict discipline unavailable (the verdict-discipline loopspec fragment resolved but is EMPTY) — refusing to run a review turn with no review bar"
+    else
+      GROK_PROMPT_NOTE="verdict discipline unavailable (no verdict-discipline loopspec fragment at any resolved location: project pin, installed home, or repo checkout) — refusing to run a review turn with no review bar; re-run install.sh"
+    fi
     return 1
   fi
   htext="$(holistic_rereview_text "$main_root")"
