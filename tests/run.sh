@@ -3489,9 +3489,13 @@ section "runphase: parent-brokered claude and codex legs over ACP"
 #
 # VERIFIED BY CONTROL (2026-09-01), because a first-try green section proves nothing on its own:
 # hardcoding `printf 'from: %s' "grok"` back into broker_stamp turned this section RED with 8
-# failures — 4 per provider (leg status, reply identity, inbound archive movement, session
-# field). The leg fails outright, not just the identity assert, because a misattributed envelope
-# cannot pass sender authority. Restored immediately; the control is recorded, not committed.
+# failures — 4 per provider. Those four are NOT four independent probes, and the section must not
+# be read as 18 fault-isolation witnesses: `send` preflights archive-owner, so a cross-inbox
+# `from:` kills the send, and leg-status + archive + session-field all fall out of that one death.
+# Exactly ONE per provider (reply identity) is an independent stamp witness; persist, verdict,
+# thread and both prompt asserts stay GREEN under the control. Every site still runs, but three
+# share the end-to-end success path rather than naming a distinct parent behaviour.
+# (codex + grok r1, corroborated.)
 #
 # STUB FIDELITY, stated plainly: $AXB/npx returns the payload through the same path for every
 # provider, so these legs prove the PARENT's behaviour (prompt shape, stamping, delivery,
@@ -3527,8 +3531,11 @@ run_brokered_leg() {  # <provider> <from> <thread> -> echoes the run dir
   printf '%s' "$dir"
 }
 
-# codex reviews for claude; claude reviews for codex. peer_of() is the two-party map, and the
-# session FIELD differs per provider (legacy names), so both are asserted per leg.
+# codex reviews for claude; claude reviews for codex. Pickup routes on the inbound `from:` —
+# NOT peer_of(), which is only the fallback when `from:` is absent — so these legs do not depend
+# on the two-party complement. Iteration 1 (provider=codex, from=claude) is the real panel shape;
+# iteration 2 exercises claude-as-provider, which a claude-authored panel would not run. The
+# session FIELD name differs per provider (legacy names), so it is asserted per leg. (grok r1.)
 for BRK in "codex claude codex_thread_id" "claude codex claude_session_id"; do
   set -- $BRK
   BRK_PROV="$1"; BRK_FROM="$2"; BRK_FIELD="$3"
@@ -3567,6 +3574,17 @@ for BRK in "codex claude codex_thread_id" "claude codex claude_session_id"; do
     && ok "the brokered $BRK_PROV prompt never tells the child to send its own reply" || fail "$BRK_PROV prompt carries a self-send instruction"
   grep -qi 'trusted parent' "$BRK_DIR/prompt.md" 2>/dev/null \
     && ok "the brokered $BRK_PROV prompt names the parent as the one that delivers" || fail "$BRK_PROV prompt is not the brokered shape"
+  # POSITIVE form of the same contract: asserting what the child IS told survives a rewording of
+  # what it is NOT told. The `send --to` negative silently weakens if that heredoc line ever
+  # wraps. (codex r1, advisory.)
+  grep -q 'OUTPUT the reply as your final message' "$BRK_DIR/prompt.md" 2>/dev/null \
+    && ok "the brokered $BRK_PROV prompt tells the child to emit its reply as text" || fail "$BRK_PROV prompt lacks the emit-as-text instruction"
+  # PER-RUN transport witness. Only the ACP arm writes session_id as `acp:<session>`, so this
+  # cannot be satisfied by the direct path — and unlike an events.tsv grep it cannot be answered
+  # by an earlier section's grok ACP rows. (codex r1 asked for the witness; grok r1 supplied the
+  # non-vacuous form.)
+  grep -q '"session_id": "acp:' "$BRK_DIR/result.json" 2>/dev/null \
+    && ok "the $BRK_PROV leg records an acp: session id, proving the ACP arm ran" || fail "$BRK_PROV result.json carries no acp: session id"
 done
 
 section "scope-dial template source contract"
