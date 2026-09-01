@@ -1956,11 +1956,22 @@ Enforcement is also in-process tool policy, not a kernel sandbox. It held agains
 but a classifier is a different class of guarantee than `EPERM`, and the honest statement for claude is
 defence in depth, not containment.
 
-**OWNER DECISION, not a session's:** ship a `claude)` arm as write-contained-only (verified `plan` pin,
-plus the still-missing `.claude/settings.json` / `.mcp.json` artifact refusal — codex refuses
-`.codex/config.toml`, claude has no analogue today, grep-confirmed), or keep refusing claude mounts
-until network can be cut. Step 4 (delete self-send) is gated on this either way: with self-send gone,
-mounts are universal, so a refused claude mount means claude cannot review at all.
+**DECIDED AND SHIPPED 2026-09-01 (owner):** the write-contained-only arm. `claude)` now pins
+`plan` through the same verified re-pin codex uses — the mode id became DATA (`acp_iso_mode`)
+rather than a hardcoded `read-only`, which is what lets ONE exact-confirmation mechanism serve
+both providers' vocabularies. `set-mode read-only` returning `Internal error` for claude reads
+exactly like "modes are unimplemented"; it is not, and that misreading is what made this look
+impossible at first. The `.mcp.json` / `.claude/settings.json` / `.claude/settings.local.json`
+refusal shipped in the SAME commit, because enabling a provider without it would have opened the
+confirmed provider-config vector for precisely the provider being enabled. The arm sets NO
+`CLAUDE_CONFIG_DIR`: measured, that isolates settings only and breaks the turn outright
+("Authentication required"), and the credential it would supposedly protect is not there to
+protect — it is in the Keychain.
+
+**The item stays OPEN, and the reason is now narrower.** claude is contained against reviewer
+BEHAVIOUR (writes, ground-truthed against five bash evasion shapes), NOT against a hostile
+artifact's reach: the child's network is open and its credential is unscopable. grok on Darwin
+still has no backend at all. A shipped `claude)` arm is not this item closing.
 
 
 *(field-report-9446 round 8, codex. The top open item on this track.)*
