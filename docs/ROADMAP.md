@@ -42,9 +42,21 @@ two points, and both corrections are load-bearing — do not skip them.**
    routing plus self-send behaviour and its path-specific assertions. Two commits is fine; that
    order is not optional. (codex, S4-2 plan r1, blocking.)
 
-**Measured blast radius:** `runphase v0: headless delivery via stubbed codex` = 45 assertions,
+**Measured blast radius, and then MEASURED AGAIN by experiment.** Section sizes are
+`runphase v0: headless delivery via stubbed codex` = 45 and
 `runphase step 2: claude backend, direction pickup, hold, watchdog` = 33, plus 12 `run_headless`
-call sites. The roadmap's earlier estimate of ~19 is wrong by roughly 4x.
+call sites. The roadmap's earlier estimate of ~19 path-specific assertions is wrong.
+
+The SPLIT was then established empirically rather than by reading: land the ACP-only guard alone
+(no test edits) and let the suite enumerate what breaks. Result — **25 of the 45 and 17 of the 33
+are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnostic and need ACP
+equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
+trusting this number if the corpus has moved.
+
+**The guard itself is written and verified** on `worktree-selfsend-removal`: a non-ACP claude or
+codex `run` now dies with "review turns are ACP-only — re-run with --via acp". That guard is what
+makes deleting the arm safe rather than silently wrong, and it is the piece to keep if this branch
+is otherwise restarted.
 
 **Known trap:** `broker_extract_stream` parses `{"type":"result", …}`, which matches grok and
 `claude -p --output-format stream-json` but NOT `codex exec --json`. The direct arm therefore

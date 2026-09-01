@@ -2069,6 +2069,22 @@ cmd_run() {
     esac
   fi
   case "$provider" in claude|codex|grok) ;; *) die "run: provider must be claude, codex, or grok" ;; esac
+  # ACP-ONLY FOR THE SELF-SENDING PROVIDERS (contraction step 4, S4-2).
+  #
+  # claude and codex used to reach a SELF-SEND arm: the child was told to run the mailbox flow
+  # itself, so the parent never stamped the envelope and the reviewed tree was NOT artifact-bound
+  # (`msg_artifact` was blanked for exactly this case). Both are now parent-brokered over ACP.
+  #
+  # This guard is what makes the deletion of that arm SAFE rather than silently wrong. Removing
+  # the arm alone would leave a non-ACP run skipping `build_grok_prompt`, invoking the provider
+  # with no newly built prompt, and still taking the generic `rc=0 -> completed` branch — a
+  # FALSE SUCCESS, because only grok calls `grok_broker` outside ACP. Fail closed instead, and
+  # name the fix. (codex, S4-2 plan r1, blocking.)
+  #
+  # grok is unaffected: it is parent-brokered on its direct path too.
+  if [ "$via" != "acp" ] && [ "$provider" != "grok" ]; then
+    die "run: '$provider' review turns are ACP-only — re-run with --via acp (the self-send path was removed in step 4; a non-ACP turn would produce an unstamped, unmounted reply that still reported success)"
+  fi
   [ -n "$msg" ] && [ -f "$msg" ] || die "run: --message <file> required and must exist"
   [ -n "$run_dir" ] && [ -d "$run_dir" ] || die "run: --dir <run-dir> required and must exist"
   msg="$(abs_path "$msg")"
