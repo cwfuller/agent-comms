@@ -565,6 +565,17 @@ GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_D
 [ -f "$GHOME/commands/auto.md" ] && ok "global scope installs commands (env-overridden)" || fail "global scope installs commands"
 [ -f "$GHOME/commands/ask.md" ] && ok "global scope installs /ask" || fail "global scope installs ask.md"
 [ -f "$GHOME/skills/read-from-claude/SKILL.md" ] && ok "global scope installs skills (env-overridden)" || fail "global scope installs skills"
+# THE REVIEW BAR IS NOW INSTALLED DATA. It used to be read out of the codex self-send SKILL files
+# at runtime, so step 4's deletion of those templates would have silently removed the reviewer's
+# standard — a diff that reads like cleanup. Installed from docs/loopspec/fragments/, which is
+# their canonical home and what the drift test measures templates against, so this is a copy on
+# disk rather than a second origin. (contraction step 3, S3-1.)
+for RB_F in verdict-discipline holistic-rereview; do
+  [ -s "$GHOME/agent-comms/loopspec-fragments/$RB_F.md" ] \
+    && ok "global scope installs the $RB_F fragment as data" || fail "$RB_F fragment not installed"
+  cmp -s "$GHOME/agent-comms/loopspec-fragments/$RB_F.md" "$REPO/docs/loopspec/fragments/$RB_F.md" \
+    && ok "the installed $RB_F fragment is byte-identical to its canonical origin" || fail "$RB_F drifted from docs/loopspec/fragments"
+done
 echo "$GH_OUT" | grep -q "codex-permissions" \
   && ok "global install names the one-time default Codex socket setup" || fail "global install Codex socket setup hint"
 
@@ -2025,6 +2036,34 @@ RFC2="$WORK/ma-legfq"; mkdir -p "$RFC2"
    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFQ" --dir "$RFC2" --provider grok) >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFC2/result.json" | head -1)" = "completed" ] \
   && ok "question turn completes without the review bar (never loads it)" || fail "question turn under bare install"
+
+# THE RESOLVER'S TIER ORDER, behaviourally. A project that pins its own review bar must keep
+# winning after the bar moved out of the codex skills, and "works in this checkout" is exactly the
+# failure this move could have shipped — the repo tier resolves here and would mask a broken
+# installed tier. Extracted and eval'd: the tiers ARE the behaviour, so a source grep proving the
+# paths are spelled out would prove nothing about precedence. (contraction step 3, S3-1.)
+RB_FN="$(sed -n '/^fragment_file() {/,/^}/p' "$REPO/helpers/runphase.sh")"
+RB_P="$WORK/rb-proj"; RB_G="$WORK/rb-glob"; RB_R="$WORK/rb-repo"
+mkdir -p "$RB_P/.agents/loopspec-fragments" "$RB_G/loopspec-fragments" "$RB_R/docs/loopspec/fragments"
+printf 'PROJECT\n' > "$RB_P/.agents/loopspec-fragments/verdict-discipline.md"
+printf 'GLOBAL\n'  > "$RB_G/loopspec-fragments/verdict-discipline.md"
+printf 'REPO\n'    > "$RB_R/docs/loopspec/fragments/verdict-discipline.md"
+rb_resolve() {  # <main-root> -> the tier's marker word, or MISS
+  ( eval "$RB_FN"; HELPER_DIR="$RB_R/helpers"; AGENT_COMMS_HOME="$RB_G"
+    f="$(fragment_file verdict-discipline "$1" 2>/dev/null || true)"
+    [ -n "$f" ] && cat "$f" || printf 'MISS\n' )
+}
+[ "$(rb_resolve "$RB_P")" = "PROJECT" ] \
+  && ok "a project-pinned review bar wins over the global install" || fail "project tier did not win"
+[ "$(rb_resolve "$WORK/rb-absent")" = "GLOBAL" ] \
+  && ok "the INSTALLED bar resolves when a project pins none — the tier a checkout-only move would break" || fail "global tier did not resolve"
+[ "$( ( eval "$RB_FN"; HELPER_DIR="$RB_R/helpers"; AGENT_COMMS_HOME="$WORK/rb-none"
+        f="$(fragment_file verdict-discipline "$WORK/rb-absent" 2>/dev/null || true)"
+        [ -n "$f" ] && cat "$f" || printf 'MISS\n' ) )" = "REPO" ] \
+  && ok "the repo checkout is the last tier, not the first" || fail "repo tier precedence wrong"
+[ "$( ( eval "$RB_FN"; HELPER_DIR="$WORK/rb-none/helpers"; AGENT_COMMS_HOME="$WORK/rb-none"
+        fragment_file verdict-discipline "$WORK/rb-absent" >/dev/null 2>&1 && printf 'FOUND\n' || printf 'MISS\n' ) )" = "MISS" ] \
+  && ok "the resolver returns non-zero when every tier misses, so the caller can fail closed" || fail "resolver did not miss cleanly"
 
 # Mailbox isolation: the parent assembles the prompt; the child is given NO
 # mailbox path, NO helper invocation, and no way to reach another thread. An

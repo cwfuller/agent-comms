@@ -6,7 +6,7 @@ comms.sh: list	3
 comms.sh: latest archive is direction/thread/time aware	4
 comms.sh: deliver via stubbed cmux	7
 comms.sh: send (atomicity guard)	4
-install.sh: scopes	14
+install.sh: scopes	18
 comms.sh: status smoke	3
 install.sh: local pin gitignored + global scope (overridden HOME dirs)	41
 comms.sh v2: thread filter + verdict normalization + error lane	4
@@ -20,7 +20,7 @@ comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery)	4
 comms.sh v2.2: sandbox block emits direct recovery + state reconciliation	12
 comms.sh v2.1.1: status shouts when a loop stalled undelivered	2
 comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line	3
-runphase v0: headless delivery via stubbed codex	45
+runphase v0: headless delivery via stubbed codex	49
 runphase step 2: claude backend, direction pickup, hold, watchdog	33
 loopspec: conformance fixtures	1
 multi-agent: registry contract	15
