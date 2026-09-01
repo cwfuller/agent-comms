@@ -5002,6 +5002,25 @@ mkdir -p "$TR_FIX/.comms"
 run_tr() { (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID -u COMMS_DELIVERY "$COMMS" "$@"); }
 run_tr_cmux() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
 run_tr_want_cmux() { (cd "$TR_FIX" && env COMMS_DELIVERY=cmux PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
+run_tr_mailbox() { (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=mailbox "$COMMS" "$@"); }
+
+# AN ASKED-FOR MAILBOX IS A SUCCESS. Making `mailbox` requestable put it through a branch that was
+# the catch-all for "nothing could deliver", so a caller who got exactly what they asked for was
+# told their install was broken and to retry. Pinned END-TO-END through deliver and send, not via
+# the suite-wide default — the harness now RUNS on this path, so a regression here would be
+# invisible in every other section while quietly telling users to fix nothing.
+# (codex, S4-1 r1, blocking.)
+[ "$(run_tr_mailbox transport codex)" = "mailbox" ] \
+  && ok "an explicit COMMS_DELIVERY=mailbox is honoured as a transport" || fail "mailbox is not an accepted transport request"
+mkdir -p "$TR_FIX/.comms/to-codex"
+printf -- '---\ntype: question\nfrom: claude\ntimestamp: 2026-09-01T00:00:00Z\nmessage_id: mbx1\nworkspace: transport-repo\nthread: mbx\n---\n\nhi\n' \
+  > "$TR_FIX/.comms/to-codex/transport-repo_2026-09-01T00-00-00_mbx1.md"
+TR_MBX="$(run_tr_mailbox deliver codex 2>&1)"
+printf '%s\n' "$TR_MBX" | grep -qi 'manual pickup' \
+  && ! printf '%s\n' "$TR_MBX" | grep -qi 're-run install.sh' \
+  && ok "a deliberate mailbox delivery reports intent, not a broken install" || fail "mailbox delivery still reports a missing capability: $TR_MBX"
+printf '%s\n' "$TR_MBX" | grep -qi 'no headless runner' \
+  && fail "mailbox delivery still blames a missing headless runner" || ok "mailbox delivery does not blame a missing runner"
 
 # No cmux surface anywhere: an interactive agent must NOT fall to the mailbox while a
 # synchronous transport is available — that is the case that stranded a real consult.

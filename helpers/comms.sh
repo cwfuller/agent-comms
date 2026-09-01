@@ -4181,7 +4181,13 @@ cmd_deliver() {
       ;;
     cmux) ;;
     *)
-      if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
+      if [ "${COMMS_DELIVERY:-}" = "mailbox" ]; then
+        # AN ASKED-FOR MAILBOX IS A SUCCESS, NOT A BROKEN INSTALL. This branch used to be the
+        # catch-all for "nothing could deliver", so once `mailbox` became requestable a caller who
+        # got exactly what they asked for was told to re-run install.sh and retry. Manual pickup is
+        # the POINT here: the file is written and nobody is nudged. (codex, S4-1 r1, blocking.)
+        echo "note: COMMS_DELIVERY=mailbox — message written for manual pickup, nobody was nudged"
+      elif [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
         # Re-run the picker purely for its stderr: it distinguishes "tree
         # unavailable" from "no matching surface", and routing on the summary
         # alone would throw that away. ONE call — an earlier version ran it twice
@@ -4940,7 +4946,12 @@ cmd_send() {
       # Recovery guidance follows the route that was actually attempted. Deriving it
       # from COMMS_DELIVERY alone told operators to "fix cmux" right after a headless
       # runner warning, on a default that no longer prefers cmux. (codex, advisory.)
-      if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
+      if [ "${COMMS_DELIVERY:-}" = "mailbox" ]; then
+        # The SAME correction as in deliver: an explicitly requested mailbox got the generic
+        # "NOT spawned … fix and retry" recovery text, which tells a caller their successful
+        # request is a broken install. (codex, S4-1 r1, blocking.)
+        echo "RESULT: manual — mailbox was requested; the message is on disk and $to was deliberately not nudged. Nothing to fix."
+      elif [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
         echo "RESULT: manual — cmux was requested but $to was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'"
       else
         echo "RESULT: manual — $to was NOT spawned (see the warning above; likely runphase.sh missing or an empty inbox); fix and retry 'comms.sh send --to $to <file>'"
