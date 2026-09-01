@@ -1275,6 +1275,88 @@ resolved 2026-08-26 (see the checkboxes below).
 - Token-compression principles (e.g. headroom) — revisit once the panel's real spend is
   measured rather than projected.
 
+### Event-triggered headless entry (2026-09-01, from the Grok Bot comparison) — DEFERRED
+
+Recorded so it is not lost; **do not start it**. It is a new product track, and the
+Contraction freeze holds until step 4 has deleted cmux/self-send.
+
+**Where it came from.** A Grok Bot port of this loop was evaluated on 2026-09-01 and
+rejected: every bot there shares one vendor, one VM, and one set of credentials, handoffs
+are chat messages, and the coordinator would be a model reading chat — i.e. the model's
+mailbox as the source of truth, which Contraction explicitly rejects. The one thing the
+"ship while you sleep" pattern offers that this tool lacks is the **trigger**: review
+starts because something changed (a pushed branch, an opened PR), not because someone
+typed `/auto` in a session. That part needs no Grok Bot.
+
+**What already exists.** The mechanics are all shell and none of them need a pane:
+`snapshot create --with-base` retains the tree as a git object, `panel dispatch` fans it
+out over ACP, `panel status --set` is already the recovery surface for an await that died
+with its session, `compose --set` applies the gate, and the events log records what the
+coordinator did. A runner that checks out the candidate SHA and runs those verbs in order
+is most of the feature.
+
+**What is missing (the actual work).**
+
+1. **An author with no driver.** The request body (Intent, Prior review context, What was
+   done this round, Review ask) is written by the implementer today. A trigger has only
+   commits and a PR body. The honest v1 derives Intent from the PR body and "what was done"
+   from the commit range, and marks the Review ask **ABSENT** rather than inventing one — a
+   reviewer with no ask reviews the diff cold, which is a weaker review and must be labelled
+   as one, never passed off as the adversarial ask the loop is built around.
+2. **Round continuity across invocations.** Round N+1 needs round N's findings, and a
+   trigger fires once per push. Thread identity must key on the branch or PR, not on the
+   session, and `in-reply-to` binding must survive a fresh runner process.
+3. **A sink that is a projection, not a record.** The coordinator's event log stays the
+   source of truth; a PR comment or check status is a projection of the composed verdict.
+   The trigger reviews. It never merges — landing stays a human or `integrate` decision.
+4. **Containment on the runner — the open security item, with more force.** A runner holds
+   git credentials and network by construction, and mounted turns are refused without a
+   verified isolation backend per provider per OS. Linux may have what Darwin lacks —
+   `runphase.sh` already records that grok's child-network blocking is seccomp-enforced on
+   Linux and a no-op on macOS — but that is a measurement to make, not an assumption to
+   plan on. No credentialed runner runs a panel until it is made.
+5. **Cold cost per trigger.** A fresh runner has no warm ACP session, so every leg pays the
+   cold price (18,562 vs 146 input tokens, the Tier-1 spike measurement) times the roster,
+   once per push. Budget it in writing before enabling on a busy branch.
+
+**Gate to start:** Contraction step 4 done; a verified isolation backend for every roster
+provider on the runner's OS; a written per-trigger token budget.
+**Success:** a composed panel verdict for a pushed SHA with no interactive session
+anywhere, recorded in the events log, and reproducible by re-running the runner on the
+same SHA.
+
+**Not this:** a GitHub Action in this repo (contributor tooling is not the installed
+product).
+
+**If Grok Bot is ever the trigger surface, this is the shape (sketched 2026-09-01, not
+planned).** Grok Bot has no public inbound API: nothing outside can start a bot except a
+person's message or a routine fired by a Cursor-integration event (Slack message, GitHub
+notification). So the round trip has to ride an external bus, and the honest one is the
+forge itself:
+
+- *Trigger:* the person tells the bot "review branch X" from a phone, or a routine fires on
+  a PR notification. The bot's only skill posts a structured comment (`/review <sha>`) on
+  the PR via `gh`.
+- *Runner:* the headless entry above, on a machine the operator controls (the contained
+  Darwin path already measured, or a Linux runner once its backend is verified), polls or
+  is webhooked for that comment, checks out the SHA, dispatches, composes, and posts the
+  composed verdict back as a PR comment. The events log is still the record; the comment
+  is a projection.
+- *Round trip:* the bot's routine wakes on the notification, reads the verdict, and puts
+  it in front of the person with the one question that matters — land, fix, or stop.
+  "Land" becomes another comment (`/land <sha>`) that the runner turns into `integrate`.
+  Grok Bot never holds repo credentials, never runs a provider, and never merges.
+
+The alternative — the bot's own VM as the runner — puts API keys and git credentials on a
+machine every other bot in the account shares, has no verified containment, loses anything
+outside `/workspace` on recovery (the mount store lives under `~/.local/state`), pays cold
+ACP price every run, and stalls on the weekly cap. Rejected as a first shape.
+
+What the forge-bus shape actually adds over a Slack or GitHub notification on a phone is a
+model that can summarise a composed verdict and take "land it" in plain language. That is
+thin. Re-evaluate only if xAI ships a public bot-trigger API, native GitHub-event routines,
+or a model picker — any of those turns Grok Bot from a chat front-end into a transport.
+
 ## Token-efficiency track (2026-08-26, from the headroom consult — codex + grok)
 
 Consulted both reviewers on stealing from headroomlabs-ai/headroom. Consensus: steal the
