@@ -6,7 +6,7 @@ comms.sh: list	3
 comms.sh: latest archive is direction/thread/time aware	4
 comms.sh: deliver via stubbed cmux	7
 comms.sh: send (atomicity guard)	4
-install.sh: scopes	17
+install.sh: scopes	18
 comms.sh: status smoke	3
 install.sh: local pin gitignored + global scope (overridden HOME dirs)	45
 comms.sh v2: thread filter + verdict normalization + error lane	4

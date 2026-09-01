@@ -693,8 +693,8 @@ note_local_pin() {
   echo ""
   echo "  note: project-local copies are pinned — they shadow any global install and"
   echo "  do NOT pick up global updates. Re-run with --scope=local to refresh them, or"
-  echo "  delete the .claude/commands/, .agents/skills/, and .agent-comms/ copies to"
-  echo "  fall back to global."
+  echo "  delete the .claude/commands/, .agents/skills/, .agents/loopspec-fragments/, and"
+  echo "  .agent-comms/ copies to fall back to global."
 }
 
 case "$SCOPE" in

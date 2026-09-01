@@ -555,9 +555,16 @@ LOCAL_OUT="$(cd "$INST_FIX" && bash "$REPO/install.sh" --scope=local 2>&1)"
 # everywhere except a pin sitting next to THIS checkout's docs/. Dogfooding could not see it, and
 # the suite's own $AGENT_COMMS_HOME staging was MASKING it. (codex + grok, S3-1 r1, blocking.)
 for RB_LF in verdict-discipline holistic-rereview; do
-  [ -s "$INST_FIX/.agents/loopspec-fragments/$RB_LF.md" ] \
-    && ok "local scope pins the $RB_LF fragment" || fail "local scope did not pin $RB_LF"
+  # BYTE-COMPARED, mirroring the global-scope coverage: "a non-empty file exists" would pass on
+  # valid-looking but WRONG data, and a review bar that differs from canonical is a silently
+  # different standard. (codex, S3-1 r2, advisory.)
+  cmp -s "$INST_FIX/.agents/loopspec-fragments/$RB_LF.md" "$REPO/docs/loopspec/fragments/$RB_LF.md" \
+    && ok "local scope pins the $RB_LF fragment, byte-identical to canonical" || fail "local scope did not pin $RB_LF faithfully"
 done
+# The unpin recipe must name EVERY pinned path, or following it leaves the bar shadowing the
+# global one and updates to the standard never arrive. (codex + grok, S3-1 r2, corroborated.)
+printf '%s\n' "$LOCAL_OUT" | grep -q 'loopspec-fragments' \
+  && ok "the local-pin note tells the operator to remove the pinned review bar too" || fail "unpin recipe omits the pinned bar"
 # BEHAVIOURAL, with every other tier removed: no global home, and a helper whose ../docs does not
 # exist. This is the only arrangement that proves the PROJECT PIN alone is sufficient.
 # Extract in THIS shell, not inside a nested `bash -c` — the sed range braces do not survive that
