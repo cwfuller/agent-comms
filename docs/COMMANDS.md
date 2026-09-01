@@ -230,7 +230,9 @@ templates, and these docs all read from it rather than each re-deciding.
 | **consult** (`/ask`) | pane if one is live, else `acp` | a consult is synchronous by nature; ACP needs no pane and warm sessions cost ~1/127 the input tokens |
 
 Opting back into the watchable pane: `--via cmux` on an `auto-*` command, or
-`COMMS_DELIVERY=cmux`. `--via headless` / `COMMS_DELIVERY=headless` force the detached
+`COMMS_DELIVERY=cmux`. `--via mailbox` / `COMMS_DELIVERY=mailbox` force manual pickup: the file
+is written and nobody is nudged, which is a requested outcome rather than a failure — `deliver`,
+`send` and `status` all report it as intent. `--via headless` / `COMMS_DELIVERY=headless` force the detached
 runner. If cmux is explicitly requested and no surface is live, delivery reports
 `mailbox` rather than silently substituting a transport you did not choose.
 

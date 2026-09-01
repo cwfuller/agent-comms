@@ -5006,10 +5006,12 @@ run_tr_mailbox() { (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=mail
 
 # AN ASKED-FOR MAILBOX IS A SUCCESS. Making `mailbox` requestable put it through a branch that was
 # the catch-all for "nothing could deliver", so a caller who got exactly what they asked for was
-# told their install was broken and to retry. Pinned END-TO-END through deliver and send, not via
-# the suite-wide default — the harness now RUNS on this path, so a regression here would be
-# invisible in every other section while quietly telling users to fix nothing.
-# (codex, S4-1 r1, blocking.)
+# told their install was broken and to retry. Pinned END-TO-END through deliver, send AND status —
+# all three consumers — not via the suite-wide default. The harness now RUNS on this path, so a
+# regression here would be invisible in every other section while quietly telling users to fix
+# nothing. A generic `^RESULT: manual` grep is NOT enough: it matches the old
+# "NOT spawned … fix and retry" copy too, which is how the send half stayed unpinned in r1.
+# (codex r1 blocking; codex + grok r2, corroborated.)
 [ "$(run_tr_mailbox transport codex)" = "mailbox" ] \
   && ok "an explicit COMMS_DELIVERY=mailbox is honoured as a transport" || fail "mailbox is not an accepted transport request"
 mkdir -p "$TR_FIX/.comms/to-codex"

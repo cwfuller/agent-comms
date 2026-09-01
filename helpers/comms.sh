@@ -4311,7 +4311,11 @@ cmd_status() {
     elif [ "$st" != "complete" ] && [ -n "$deliv" ] \
          && [ "$deliv" != "delivered" ] && [ "$deliv" != "spawned" ] \
          && [ "$deliv" != "completed" ] && [ "$deliv" != "held" ] && [ "$deliv" != "pickup" ]; then
-      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Do not retry from an unchanged sandbox; use manual pickup or configure 'comms.sh codex-permissions' and restart Codex."
+      if [ "${COMMS_DELIVERY:-}" = "mailbox" ]; then
+        echo "note: last delivery was '$deliv' — $owes was deliberately not nudged (COMMS_DELIVERY=mailbox). The message is on disk for manual pickup; nothing is broken."
+      else
+        echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Do not retry from an unchanged sandbox; use manual pickup or configure 'comms.sh codex-permissions' and restart Codex."
+      fi
     fi
   fi
 }
