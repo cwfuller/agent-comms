@@ -2337,6 +2337,27 @@ cmd_run() {
       trap - EXIT
       exit 1
     fi
+    # THE CLAUDE ANALOGUE, and it did not exist until the claude arm shipped: codex's cwd-resolved
+    # config was refused while claude's equivalents were not, so the new backend would otherwise
+    # have arrived with the confirmed vector still open for the provider it enables. `.mcp.json`
+    # declares MCP servers; `.claude/settings.json` and its `.local` sibling can declare hooks.
+    # Both spawn provider-side processes that run OUTSIDE the mode pin — `plan` constrains the
+    # agent's tools, not a server the client was configured to start. Same rule as codex's: ANY
+    # such file is refused and its CONTENT IS NOT PARSED, because a content match is bypassable
+    # (JSON permits escapes and duplicate keys that deserialize to the same setting) and a
+    # denylist that reads the artifact is a denylist the artifact can argue with.
+    if [ "$provider" = claude ]; then
+      local claude_cfg
+      for claude_cfg in .mcp.json .claude/settings.json .claude/settings.local.json; do
+        if [ -e "$mount_dir/$claude_cfg" ] || [ -L "$mount_dir/$claude_cfg" ]; then
+          update_thread_state "$msg_thread" failed "" "$sfield" || true
+          write_result "$run_dir" failed 1 "" "$msg" "the reviewed tree carries $claude_cfg, which claude reads from the cwd and which can declare MCP servers or hooks that run outside the mode pin — refusing (any such file is refused; content is not parsed)"
+          unmount_artifact
+          trap - EXIT
+          exit 1
+        fi
+      done
+    fi
   fi
 
   # ----- prompt -----
@@ -2558,6 +2579,12 @@ PROMPT
     local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim=""
     local -a acp_iso=()          # isolation env, applied to EVERY owner-spawning invocation
     local acp_iso_backend=none acp_iso_home=""
+    # The mode id the backend must hold, carried as DATA because it is PROVIDER VOCABULARY, not a
+    # shared constant: codex names its read-only mode `read-only`, claude names its `plan`. Empty
+    # means "this backend has no mode to pin". Hardcoding one provider's id in the re-pin below is
+    # what made claude look uncontainable — `set-mode read-only` returns `Internal error` for the
+    # claude adapter, which reads exactly like "modes are unimplemented" and is not.
+    local acp_iso_mode=""
     acp_sh="$(dirname "$SELF")/acp.sh"
     [ -x "$acp_sh" ] || die "run: --via acp but acp.sh is not installed next to runphase.sh"
     acp_profile="$("$acp_sh" profile "$provider" 2>/dev/null || true)"
@@ -2723,6 +2750,28 @@ sandbox_mode = "read-only"
           ABORT_NOTE="runner aborted unexpectedly — see runner.log"
           acp_iso=(env "CODEX_HOME=$acp_iso_home" "INITIAL_AGENT_MODE=read-only")
           acp_iso_backend="codex-home+read-only"
+          acp_iso_mode="read-only"
+          ;;
+        claude)
+          # MEASURED 2026-08-31 (acpx 0.13.1, claude-agent-acp ^0.60.0, Darwin); the table and the
+          # residuals are in docs/ROADMAP.md. `plan` is claude's read-only analogue: workspace and
+          # /tmp writes are refused, and five bash evasion shapes (`>` redirect, python open('w'),
+          # tee, sed -i, curl -o) were each refused with NO file ever appearing — ground-truthed
+          # against the filesystem, not taken from the model's own report, because the first probe
+          # answered "write not attempted", which is indistinguishable from politeness.
+          #
+          # WHAT THIS BACKEND DOES NOT DO, stated because the gap is the reason the security item
+          # stays open: the child's NETWORK IS STILL OPEN (measured: HTTP 200), where codex's
+          # sandbox kills it. And there is no credential isolation to add — claude keeps its
+          # credentials in the macOS KEYCHAIN, not a config file, so there is no `auth.json`
+          # analogue to stage or withhold. Pointing CLAUDE_CONFIG_DIR at the mount does NOT help:
+          # it isolates settings only, and it BREAKS THE TURN (measured: "Authentication
+          # required"), so this arm deliberately sets no config-home override. Open network plus an
+          # unscopable credential is a real exfiltration path from a hostile artifact; this is
+          # defence in depth against reviewer BEHAVIOUR, not containment. Shipped on an explicit
+          # owner decision (2026-09-01) to accept write-containment without network-containment.
+          acp_iso_backend="claude-plan"
+          acp_iso_mode="plan"
           ;;
         *)
           # NO VERIFIED BACKEND ON THIS OS. grok's own docs are explicit that child-network
@@ -2852,7 +2901,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # started under whatever mode was last set. So a turn that raised its own mode would
     # leave the next round unconfined. Setting it here, every round, is what makes the
     # backend hold across owner reuse. (grok, plan r4, blocking.)
-    if [ -n "$mount_dir" ] && [ "$acp_iso_backend" = "codex-home+read-only" ]; then
+    if [ -n "$mount_dir" ] && [ -n "$acp_iso_mode" ]; then
       # The confirmation is EXACT, and it reads ONLY stdout. A glob for "read-only" over
       # stdout+stderr passes on the adapter's REJECTION too: a refused set_mode throws
       # `Agent rejected session/set_mode for mode "read-only": …`, which interpolates the
@@ -2861,11 +2910,11 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       # to stop. Require rc 0 AND stdout equal to acpx's success line. (grok, implement r1, blocking.)
       local acp_mode_out="" acp_mode_rc=0
       acp_mode_out="$( acp_exec "$workdir" --format text \
-          "$acp_profile" -s "$acp_session" set-mode read-only 2>>"$run_dir/runner.log" )" && acp_mode_rc=0 || acp_mode_rc=$?
-      printf 'set-mode read-only: rc=%s out=[%s]\n' "$acp_mode_rc" "$acp_mode_out" >>"$run_dir/runner.log"
-      if [ "$acp_mode_rc" -ne 0 ] || [ "$acp_mode_out" != "mode set: read-only" ]; then
-ABORT_NOTE="refused: could not confirm '$provider' is read-only before the prompt — containment unconfirmed"
-                die "run: could not pin '$provider' to read-only before the prompt (rc=$acp_mode_rc, out='$(printf '%.120s' "$acp_mode_out")') — refusing to send a review turn whose containment is unconfirmed"
+          "$acp_profile" -s "$acp_session" set-mode "$acp_iso_mode" 2>>"$run_dir/runner.log" )" && acp_mode_rc=0 || acp_mode_rc=$?
+      printf 'set-mode %s: rc=%s out=[%s]\n' "$acp_iso_mode" "$acp_mode_rc" "$acp_mode_out" >>"$run_dir/runner.log"
+      if [ "$acp_mode_rc" -ne 0 ] || [ "$acp_mode_out" != "mode set: $acp_iso_mode" ]; then
+ABORT_NOTE="refused: could not confirm '$provider' is pinned to '$acp_iso_mode' before the prompt — containment unconfirmed"
+                die "run: could not pin '$provider' to '$acp_iso_mode' before the prompt (rc=$acp_mode_rc, out='$(printf '%.120s' "$acp_mode_out")') — refusing to send a review turn whose containment is unconfirmed"
       fi
     fi
     ( acp_exec "$workdir" \

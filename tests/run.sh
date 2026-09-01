@@ -8861,6 +8861,43 @@ section "reviewer isolation: a mounted turn is contained or it does not run"
 ISO="$WORK/iso"; mkdir -p "$ISO"
 ISO_RP="$REPO/helpers/runphase.sh"
 
+# ---- the claude backend (S3-4b): mode-pinned, write-contained, network NOT contained ----
+# Shipped on an explicit owner decision after measurement; the table is in docs/ROADMAP.md.
+# These pin the SHAPE. What they cannot do is re-measure the adapter, so the residuals below are
+# asserted as DOCUMENTED FACTS, which is the honest thing a source assertion can hold.
+sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -q 'acp_iso_mode="plan"' \
+  && ok "the claude arm pins claude's own read-only analogue (plan), not codex's mode id" || fail "claude arm does not pin plan"
+# The mode is DATA. Hardcoding read-only is what made claude look uncontainable, because
+# `set-mode read-only` returns `Internal error` for the claude adapter.
+grep -q 'set-mode "$acp_iso_mode"' "$ISO_RP" \
+  && ok "the verified re-pin uses the backend's own mode id, not a hardcoded one" || fail "re-pin is still hardcoded to one provider's mode"
+grep -q 'mode set: $acp_iso_mode' "$ISO_RP" \
+  && ok "the re-pin still requires an EXACT success line, now per-mode" || fail "per-mode confirmation is not exact"
+grep -q 'if \[ -n "$mount_dir" \] && \[ -n "$acp_iso_mode" \]' "$ISO_RP" \
+  && ok "any backend carrying a mode is re-pinned, not just codex's" || fail "re-pin gate is still backend-specific"
+# A claude turn must no longer fall through to the no-backend refusal.
+sed -n '/^      case "$provider" in/,/^      esac/p' "$ISO_RP" | grep -q '^        claude)' \
+  && ok "claude has its own isolation arm and no longer hits the no-backend refusal" || fail "claude still falls through to *)"
+# The residual is RECORDED, not quietly dropped: this backend contains writes, not network.
+sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -qi 'NETWORK IS STILL OPEN' \
+  && ok "the claude arm records that network is NOT contained" || fail "the network residual is undocumented"
+sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -qi 'KEYCHAIN' \
+  && ok "the claude arm records why there is no credential isolation to add" || fail "the credential residual is undocumented"
+# CLAUDE_CONFIG_DIR is deliberately NOT set: it isolates settings only and breaks auth.
+sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -q 'CLAUDE_CONFIG_DIR' \
+  && ! sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -q 'acp_iso=(env "CLAUDE_CONFIG_DIR' \
+  && ok "the claude arm explains why it sets no config-home override rather than silently omitting it" || fail "CLAUDE_CONFIG_DIR omission is unexplained"
+
+# ---- the claude analogue of the .codex/config.toml refusal ----
+# It did not exist before this arm: enabling claude without it would have shipped the new
+# backend with the confirmed provider-config vector still open for that provider.
+for ISO_CFG in '.mcp.json' '.claude/settings.json' '.claude/settings.local.json'; do
+  grep -q "$ISO_CFG" "$ISO_RP" \
+    && ok "a reviewed tree carrying $ISO_CFG is refused for a mounted claude turn" || fail "$ISO_CFG is not refused"
+done
+grep -q 'content is not parsed' "$ISO_RP" \
+  && ok "the claude config refusal is unconditional, not a bypassable content match" || fail "claude config refusal parses content"
+
 # The refusal names the provider, the OS, and the way out. A mounted turn for a provider with no
 # verified backend must DIE, not warn: silent degradation to an uncontained mount is exactly how
 # this item gets marked done while staying open.
