@@ -3487,6 +3487,12 @@ section "runphase: parent-brokered claude and codex legs over ACP"
 # "parent-broker claude and codex" — had no coverage at all. A regression that un-brokered
 # claude or codex would have left this suite green. (contraction step 3, S3-2.)
 #
+# VERIFIED BY CONTROL (2026-09-01), because a first-try green section proves nothing on its own:
+# hardcoding `printf 'from: %s' "grok"` back into broker_stamp turned this section RED with 8
+# failures — 4 per provider (leg status, reply identity, inbound archive movement, session
+# field). The leg fails outright, not just the identity assert, because a misattributed envelope
+# cannot pass sender authority. Restored immediately; the control is recorded, not committed.
+#
 # STUB FIDELITY, stated plainly: $AXB/npx returns the payload through the same path for every
 # provider, so these legs prove the PARENT's behaviour (prompt shape, stamping, delivery,
 # archiving, session recording). They do NOT prove that acpx's real claude/codex adapters emit
