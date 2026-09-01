@@ -2604,10 +2604,9 @@ cmd_shadow() {
   # record thread state, so for those the "cannot gate" guarantee would be a
   # convention rather than a mechanism — and this command's whole value is that it
   # is a mechanism. Refuse rather than silently downgrade. (grok, live 2026-08-22.)
-  case "$(cmd_agents --supported | awk -v a="$to" -F'\t' '$1==a {print $2}')" in
-    *reviewer-consult-only*) ;;
-    *) usage_err "shadow: '$to' authors and sends its own replies, so a shadow run could not be prevented from reaching an inbox — only parent-brokered reviewers (reviewer-consult-only) can be shadowed" ;;
-  esac
+  local shadow_via=""
+  shadow_via="$(suppression_ok "$to")" \
+    || usage_err "shadow: '$to' would author and send its own reply here, so a shadow run could not be prevented from reaching an inbox — it can only be shadowed over a parent-brokered transport (ACP), and ACP is not available for it on this machine"
   [ -n "$req" ] || usage_err "shadow: a review-request file is required"
   [ -f "$req" ] || usage_err "shadow: no such file '$(clip "$req")'"
 
@@ -2722,8 +2721,11 @@ cmd_shadow() {
   mkdir -p "$run_dir"
   echo "shadow: $to reviewing artifact ${aid} (set $rsid) in an isolated checkout — not delivered, cannot gate"
   local rc=0
+  # The transport is the thing that MAKES suppression honourable for a self-sending agent, so it
+  # is passed, not assumed: without it runphase refuses the flag at its own boundary — correctly.
   ( cd "$tree" && RUNPHASE_NO_DELIVER=1 "$rp" run --message "$child_msg" --dir "$run_dir" \
-      --provider "$to" --no-deliver ${timeout:+--timeout-secs "$timeout"} ) >/dev/null 2>&1 || rc=$?
+      --provider "$to" --no-deliver ${shadow_via:+--via "$shadow_via"} \
+      ${timeout:+--timeout-secs "$timeout"} ) >/dev/null 2>&1 || rc=$?
   git -C "$root" worktree remove --force "$tree" 2>/dev/null || true
 
   # Did the live tree move while the reviewer was reading? The shadow is immune (it read
@@ -4013,6 +4015,27 @@ print_direct_recovery() {
 }
 
 runphase_available() { [ -x "$(dirname "$SELF")/runphase.sh" ]; }
+
+# suppression_ok <agent> — can `--no-deliver` keep its promise for this agent, and over which
+# transport? Echoes the `--via` argument the caller must pass (empty = no transport flag needed)
+# and returns non-zero when suppression is impossible.
+#
+# Delivery is suppressible IFF the turn is PARENT-BROKERED, and that is a property of
+# (agent, transport), NOT a per-agent constant — which is the bug this replaces: `shadow`
+# gated on the registry string alone and so refused codex on the very path where runphase
+# WOULD have honoured the flag (`[ "$via" != "acp" ]` is checked first there).
+#
+# Do NOT "fix" this by adding `reviewer-consult-only` to claude/codex in the registry: that
+# same string is read by runphase's NON-ACP guard, so it would let `--no-deliver` through on
+# the self-send path, where the child writes to an inbox itself and suppression is a lie.
+suppression_ok() {  # <agent> -> echoes "acp" | "" ; rc 1 if suppression cannot be honoured
+  case "$(cmd_agents --supported | awk -v a="$1" -F'\t' '$1==a {print $2}')" in
+    *reviewer-consult-only*) printf ''; return 0 ;;   # brokered on every path already
+  esac
+  # Otherwise only ACP makes it honourable: the parent stamps and delivers, the child never sends.
+  if acp_supports "$1"; then printf 'acp'; return 0; fi
+  return 1
+}
 
 acp_supports() {  # <agent> — can an ACP turn actually run here for this agent?
   local acp_sh; acp_sh="$(dirname "$SELF")/acp.sh"

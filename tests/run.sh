@@ -4381,13 +4381,36 @@ SH_PRIM_ROW="$(tail -n +2 "$SH_LED" | awk -F'\t' '$9=="codex"' | head -1)"
 check_not "shadow refuses to shadow the request's own author" run_sh shadow --to claude "$SH_REQ"
 check_not "shadow refuses a message that is not a review-request" run_sh shadow --to grok "$SH_PRIMARY"
 
-# --no-deliver suppresses the trusted-parent BROKER. An agent that authors and sends
-# its own reply would still reach an inbox, making "cannot gate" a convention rather
-# than a mechanism. (grok, first live shadow run 2026-08-22.)
-SH_UNBROKERED="$(run_sh shadow --to codex "$SH_REQ" 2>&1)" && SH_URC=0 || SH_URC=$?
-[ "$SH_URC" != "0" ] && ok "shadow refuses an agent that sends its own replies" || fail "unbrokered agent accepted"
+# --no-deliver suppresses the trusted-parent BROKER, so "cannot gate" is a mechanism rather than a
+# convention. WHETHER it can be honoured is a property of (agent, transport), NOT of the agent
+# alone: over ACP the parent stamps and delivers, so a self-sending agent never sends and
+# suppression holds. `shadow` used to gate on the registry string alone and so refused codex on
+# the very path runphase WOULD have honoured (it checks `[ "$via" != "acp" ]` first). One
+# accessor now states the rule for both. (S3-5.)
+#
+# The refusal branch is only REACHABLE where ACP cannot run, so it is tested with a node that
+# fails the version probe — otherwise every registered agent is shadowable and this asserts
+# nothing. That is the honest fixture, not a convenience.
+SH_NONODE="$WORK/shadow-nonode"; mkdir -p "$SH_NONODE"
+printf '#!/bin/sh\nexit 1\n' > "$SH_NONODE/node"; chmod +x "$SH_NONODE/node"
+SH_UNBROKERED="$(PATH="$SH_NONODE:$PATH" run_sh shadow --to codex "$SH_REQ" 2>&1)" && SH_URC=0 || SH_URC=$?
+[ "$SH_URC" != "0" ] && ok "shadow still refuses a self-sending agent when no brokered transport exists" || fail "unbrokered agent accepted with no ACP"
 printf '%s\n' "$SH_UNBROKERED" | grep -q 'parent-brokered' \
-  && ok "the refusal names WHY (only parent-brokered reviewers can be shadowed)" || fail "unbrokered refusal message"
+  && ok "the refusal names WHY (only a parent-brokered transport can be shadowed)" || fail "unbrokered refusal message"
+# ONE accessor, and it answers with the TRANSPORT, so shadow cannot re-decide the rule.
+grep -q '^suppression_ok()' "$REPO/helpers/comms.sh" \
+  && ok "one suppression_ok accessor states when --no-deliver can be honoured" || fail "no shared suppression predicate"
+sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep -q 'suppression_ok' \
+  && ok "shadow gates on the shared accessor rather than the registry string" || fail "shadow still re-implements the rule"
+sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep -q -- '--via "$shadow_via"' \
+  && ok "shadow PASSES the transport that makes suppression honourable" || fail "shadow does not pass --via"
+# THE TRAP: relaxing the registry instead would let --no-deliver through on the NON-ACP path,
+# where the child sends its own reply and suppression is a lie. runphase reads the same string.
+cmd_agents_out="$(run_sh agents --supported)"
+printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="codex"{print $2}' | grep -qv 'reviewer-consult-only' \
+  && ok "codex was NOT given reviewer-consult-only (that would relax runphase's non-ACP guard)" || fail "registry relaxed for codex"
+printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="claude"{print $2}' | grep -qv 'reviewer-consult-only' \
+  && ok "claude was NOT given reviewer-consult-only either" || fail "registry relaxed for claude"
 
 # Prompt parity is the one thing this command must guarantee: an earlier version
 # stamped review_set/artifact_id/role into a copy, which told the child it was a
