@@ -10,6 +10,52 @@ daily. Check items off as they land.
 
 ## Contraction (2026-08-28) — current program
 
+### Step 4 status and the S4-2 plan verdict (2026-09-01)
+
+**Step 3 is COMPLETE** — all five increments on main: the provider-neutral broker, brokered
+claude/codex ACP legs, the measured claude isolation arm, shadow gating on (agent, transport),
+and the review bar as installed data. The gate on step 4 is cleared.
+
+**S4-1 (suite off cmux)** is double-APPROVED. `mailbox` is now an accepted INPUT to
+`cmd_transport`, the suite's default is `mailbox` rather than `cmux`, and the five sections that
+had been INHERITING cmux from the global default now ask for it explicitly. The plan predicted 18
+explicit call sites and assumed that was the dependency; it was not — those five inherited it
+silently and would have changed meaning when cmux is deleted.
+
+**S4-2 (delete self-send): planned, NOT yet implemented. The plan round corrected the approach on
+two points, and both corrections are load-bearing — do not skip them.**
+
+1. **Deleting the self-send arm ALONE produces false-success turns, not ACP-only behaviour.**
+   A non-ACP claude/codex run would skip `build_grok_prompt`, invoke the provider with no newly
+   built prompt, and still take the generic `rc=0 -> completed` branch, because only grok calls
+   `grok_broker`. The increment must ATOMICALLY: make non-ACP claude/codex unreachable or
+   fail closed; change `cmd_transport` so it never selects `headless`; remove or refuse the
+   explicit `COMMS_DELIVERY=headless` route; and give direct `run`/`spawn` callers a clear
+   ACP-required failure. (codex, S4-2 plan r1, blocking.)
+
+2. **"Re-point the existing tests to ACP first" is NOT a safe green intermediate** — it removes
+   coverage before removing behaviour. Most of the 45 `runphase v0` assertions are not
+   transport-agnostic: they specify headless routing, self-send pickup, child-environment
+   propagation, direct CLI execution, and self-send success/failure semantics. Re-pointing them
+   while headless is still live leaves a still-supported path untested. Correct order: FIRST add
+   the missing ACP equivalents while RETAINING the direct tests; THEN atomically remove direct
+   routing plus self-send behaviour and its path-specific assertions. Two commits is fine; that
+   order is not optional. (codex, S4-2 plan r1, blocking.)
+
+**Measured blast radius:** `runphase v0: headless delivery via stubbed codex` = 45 assertions,
+`runphase step 2: claude backend, direction pickup, hold, watchdog` = 33, plus 12 `run_headless`
+call sites. The roadmap's earlier estimate of ~19 is wrong by roughly 4x.
+
+**Known trap:** `broker_extract_stream` parses `{"type":"result", …}`, which matches grok and
+`claude -p --output-format stream-json` but NOT `codex exec --json`. The direct arm therefore
+cannot simply be re-pointed at the broker — it dies with the self-send prompt, or it needs a
+per-provider extractor first.
+
+**Still open after S4-2:** S4-3 (retire the reviewer-side codex skills through `RETIRED_*`, not
+deletion — `prompt_surface_files()` hashes those paths, so `prompt-version` shifts and PARTITIONS
+the grading ledger), S4-4 (delete cmux), S4-5 (docs).
+
+
 Decided after independent grok + codex re-evals of the product (local `9c3b10e`,
 main 43 commits ahead of origin) and a merge pass. Owner confirmed the sequence
 and that **strict is the default** — this tool is only installed on projects that
