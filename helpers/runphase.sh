@@ -405,18 +405,43 @@ update_thread_state() {
 # access) then persists -> validates -> sends -> archives — the same
 # validation-before-persistence and atomic-archive semantics as every other leg.
 
+# fragment_file <name> <main-root> — resolve an INSTALLED loopspec fragment. Same three tiers as
+# skill_file (project pin -> global install -> repo checkout), because a project that pins its own
+# review bar must keep winning after this move.
+#
+# WHY THIS EXISTS: the bar used to be read out of the codex SELF-SEND skills, which step 4 deletes.
+# Reading it from a file that is about to be removed would turn "delete the self-send templates"
+# into "silently delete the reviewer's standard" — a diff that looks like cleanup and is not.
+# The fragments are installed from docs/loopspec/fragments/, which is already their CANONICAL
+# home and what the drift test measures templates against; installing a copy under templates/
+# would have made a third origin for the same text. (contraction step 3, S3-1.)
+fragment_file() {
+  local name="$1" main_root="$2" p
+  for p in \
+    "$main_root/.agents/loopspec-fragments/$name.md" \
+    "${AGENT_COMMS_HOME:-$HOME/.agent-comms}/loopspec-fragments/$name.md" \
+    "$HELPER_DIR/../docs/loopspec/fragments/$name.md"; do
+    [ -f "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+
+# fragment_text <name> <main-root> — the fragment's body, or empty. Empty is what the callers
+# treat as fail-closed, so an unreadable OR blank fragment both refuse the turn rather than
+# running a review with no bar.
+fragment_text() {
+  local f
+  f="$(fragment_file "$1" "$2" 2>/dev/null || true)"
+  [ -n "$f" ] && [ -f "$f" ] || return 0
+  cat "$f"
+}
+
 verdict_discipline_text() {  # runtime read of the shared fragment (single-home)
-  local sk
-  sk="$(skill_file send-to-claude "$1" 2>/dev/null || true)"
-  [ -n "$sk" ] && [ -f "$sk" ] || return 0
-  awk '/<!-- loopspec:fragment verdict-discipline -->/{c=1;next} /<!-- \/loopspec:fragment -->/{if(c)exit} c{sub(/^[[:space:]]+/,"");print}' "$sk"
+  fragment_text verdict-discipline "$1"
 }
 
 holistic_rereview_text() {  # runtime read of the shared fragment (single-home)
-  local sk
-  sk="$(skill_file read-from-claude "$1" 2>/dev/null || true)"
-  [ -n "$sk" ] && [ -f "$sk" ] || return 0
-  awk '/<!-- loopspec:fragment holistic-rereview -->/{c=1;next} /<!-- \/loopspec:fragment -->/{if(c)exit} c{sub(/^[[:space:]]+/,"");print}' "$sk"
+  fragment_text holistic-rereview "$1"
 }
 
 # parent_thread_context <thread> — prior rounds of THIS thread only.
@@ -553,7 +578,7 @@ PROMPT
   if [ -z "$vtext" ]; then
     # FAIL CLOSED: a review with no bar is worse than no review (codex severity
     # ruling: blocking-latent). Questions never reach this branch.
-    GROK_PROMPT_NOTE="verdict discipline unavailable (send-to-claude skill missing, or its verdict-discipline fragment markers absent) — refusing to run a review turn with no review bar; re-run install.sh"
+    GROK_PROMPT_NOTE="verdict discipline unavailable (the verdict-discipline loopspec fragment is missing or empty at every resolved location) — refusing to run a review turn with no review bar; re-run install.sh"
     return 1
   fi
   htext="$(holistic_rereview_text "$main_root")"

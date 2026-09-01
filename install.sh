@@ -33,6 +33,14 @@ CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
 HELPERS="comms.sh runphase.sh acp.sh"
+# The reviewer's REVIEW BAR, installed as data. It used to be read out of the codex self-send
+# skills at runtime, which made "delete the self-send templates" silently equal to "delete the
+# reviewer's standard". Installed from docs/loopspec/fragments/ — their canonical home, and what
+# the drift test measures templates against — so this adds a copy on disk, not a second origin.
+LOOPSPEC_FRAGMENTS="verdict-discipline.md holistic-rereview.md"
+# Resolved per source, like TEMPLATE_DIR: the checkout's docs/ when running locally, a temp dir
+# when piped through curl (BASH_SOURCE is unset then, so a repo-relative path would silently miss).
+FRAGMENT_SRC=""
 SCOPE=""
 
 usage() {
@@ -139,10 +147,12 @@ validate_scope() {
 if [ -d "$SCRIPT_DIR/templates" ]; then
   SOURCE="local"
   TEMPLATE_DIR="$SCRIPT_DIR/templates"
+  FRAGMENT_SRC="$SCRIPT_DIR/docs/loopspec/fragments"
   HELPER_SRC="$SCRIPT_DIR/helpers"
 else
   SOURCE="remote"
   TEMPLATE_DIR=$(mktemp -d)
+  FRAGMENT_SRC="$TEMPLATE_DIR/loopspec-fragments"
   HELPER_SRC="$TEMPLATE_DIR/helpers"
   trap 'rm -rf "$TEMPLATE_DIR"' EXIT
 fi
@@ -331,6 +341,11 @@ install_global_assets() {
   done
   for h in $RETIRED_HELPERS; do
     [ -f "$AGENT_COMMS_HOME/$h" ] && { rm -f "$AGENT_COMMS_HOME/$h"; echo "  removed retired helper $h"; }
+  done
+  echo "  installing loopspec fragments to $AGENT_COMMS_HOME/loopspec-fragments..."
+  mkdir -p "$AGENT_COMMS_HOME/loopspec-fragments"
+  for f in $LOOPSPEC_FRAGMENTS; do
+    install_file "$FRAGMENT_SRC/$f" "$AGENT_COMMS_HOME/loopspec-fragments/$f"
   done
   echo "  Loops run over ACP by default — no cmux pane required."
   echo "  Only if you opt into cmux delivery (--via cmux): run"
@@ -641,6 +656,10 @@ if needs_templates && [ "$SOURCE" = "remote" ]; then
   mkdir -p "$HELPER_SRC"
   for h in $HELPERS; do
     curl -fsSL "$REPO_RAW/helpers/$h" -o "$HELPER_SRC/$h"
+  done
+  mkdir -p "$FRAGMENT_SRC"
+  for f in $LOOPSPEC_FRAGMENTS; do
+    curl -fsSL "$REPO_RAW/docs/loopspec/fragments/$f" -o "$FRAGMENT_SRC/$f"
   done
 else
   if needs_templates; then
