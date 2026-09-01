@@ -3481,6 +3481,88 @@ grep -q 'Parse BOTH transport modifiers out' "$REPO/templates/claude-commands/as
   && ok "ask.md parses and conditionally forwards --oneshot" || fail "ask.md oneshot forwarding contract"
 grep -q 'acp.sh' "$REPO/install.sh" && ok "installer ships acp.sh" || fail "installer acp.sh"
 
+section "runphase: parent-brokered claude and codex legs over ACP"
+# THE GAP THIS CLOSES: every other `--via acp` fixture in this corpus pins `--provider grok`,
+# so the `|| [ "$via" = "acp" ]` half of the broker gate — the half that is the whole point of
+# "parent-broker claude and codex" — had no coverage at all. A regression that un-brokered
+# claude or codex would have left this suite green. (contraction step 3, S3-2.)
+#
+# STUB FIDELITY, stated plainly: $AXB/npx returns the payload through the same path for every
+# provider, so these legs prove the PARENT's behaviour (prompt shape, stamping, delivery,
+# archiving, session recording). They do NOT prove that acpx's real claude/codex adapters emit
+# a final assistant message as stdout text; that is transport behaviour a stub cannot witness.
+BRK_PAY="$WORK/brokered-payload.md"
+cat > "$BRK_PAY" <<'BRKPAY'
+VERDICT: REQUEST_CHANGES
+
+## Summary
+brokered review delivered over ACP
+
+## Findings
+### Blocking
+- a real blocking finding the parent must stamp
+
+### Advisory
+- None.
+BRKPAY
+
+run_brokered_leg() {  # <provider> <from> <thread> -> echoes the run dir
+  local prov="$1" from="$2" thr="$3" msg dir
+  mkdir -p "$MA_FIX/.comms/to-$prov"
+  msg="$MA_FIX/.comms/to-$prov/${MA_WS}_2026-08-20T11-00-00_brokered-$prov.md"
+  sed -e "s/^thread: ma-arc-1\$/thread: $thr/" \
+      -e "s/^from: claude\$/from: $from/" \
+      -e "s/_review-req-1\$/_brokered-$prov/" \
+      "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$msg"
+  dir="$WORK/ma-brokered-$prov"; mkdir -p "$dir"
+  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$BRK_PAY" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$msg" --dir "$dir" \
+      --provider "$prov" --via acp --timeout-secs 20 ) >/dev/null 2>&1
+  printf '%s' "$dir"
+}
+
+# codex reviews for claude; claude reviews for codex. peer_of() is the two-party map, and the
+# session FIELD differs per provider (legacy names), so both are asserted per leg.
+for BRK in "codex claude codex_thread_id" "claude codex claude_session_id"; do
+  set -- $BRK
+  BRK_PROV="$1"; BRK_FROM="$2"; BRK_FIELD="$3"
+  BRK_THREAD="ma-brokered-$BRK_PROV"
+  BRK_DIR="$(run_brokered_leg "$BRK_PROV" "$BRK_FROM" "$BRK_THREAD")"
+  BRK_MSG="$MA_FIX/.comms/to-$BRK_PROV/${MA_WS}_2026-08-20T11-00-00_brokered-$BRK_PROV.md"
+
+  [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$BRK_DIR/result.json" | head -1)" = "completed" ] \
+    && ok "brokered $BRK_PROV leg over ACP completes" || fail "brokered $BRK_PROV leg status (see $BRK_DIR/result.json)"
+
+  BRK_REPLY="$(find "$MA_FIX/.comms/to-$BRK_FROM" -name "*$BRK_PROV-reply*" -type f 2>/dev/null | sort | tail -1)"
+  [ -n "$BRK_REPLY" ] \
+    && ok "the PARENT persisted the $BRK_PROV reply into to-$BRK_FROM" || fail "no parent-stamped $BRK_PROV reply in to-$BRK_FROM"
+
+  # THE MISATTRIBUTION REGRESSION: this is the assertion that would have caught a `from: grok`
+  # default stamping another agent's review.
+  grep -q "^from: $BRK_PROV\$" "$BRK_REPLY" 2>/dev/null \
+    && ok "the $BRK_PROV reply is stamped from: $BRK_PROV, not the first brokered provider" || fail "$BRK_PROV reply identity"
+  grep -q '^verdict: REQUEST_CHANGES$' "$BRK_REPLY" 2>/dev/null \
+    && ok "the parent stamped the $BRK_PROV verdict from the child's body" || fail "$BRK_PROV verdict stamp"
+  grep -q "^thread: $BRK_THREAD\$" "$BRK_REPLY" 2>/dev/null \
+    && ok "the $BRK_PROV reply copies its thread" || fail "$BRK_PROV reply thread"
+
+  [ ! -f "$BRK_MSG" ] && [ -f "$MA_FIX/.comms/archive/$(basename "$BRK_MSG")" ] \
+    && ok "the $BRK_PROV inbound was archived by the parent" || fail "$BRK_PROV inbound archive movement"
+
+  BRK_STATE="$MA_FIX/.comms/state/$(echo "$MA_WS" | tr -c 'A-Za-z0-9._-\n' '_')_${BRK_THREAD}.json"
+  grep -q "\"$BRK_FIELD\"" "$BRK_STATE" 2>/dev/null \
+    && ok "the $BRK_PROV leg records its $BRK_FIELD" || fail "$BRK_PROV session field ($BRK_FIELD) not recorded"
+
+  # THE NEGATIVE THAT DEFINES "BROKERED": a self-send prompt tells the child to run the mailbox
+  # flow itself. A brokered child is told to emit TEXT and nothing else.
+  # `send --to` is the literal self-send instruction the non-ACP arm emits; matching the exact
+  # shape (not the helper's rendered path) is what makes this negative discriminating.
+  [ -s "$BRK_DIR/prompt.md" ] && ! grep -q 'send --to' "$BRK_DIR/prompt.md" \
+    && ok "the brokered $BRK_PROV prompt never tells the child to send its own reply" || fail "$BRK_PROV prompt carries a self-send instruction"
+  grep -qi 'trusted parent' "$BRK_DIR/prompt.md" 2>/dev/null \
+    && ok "the brokered $BRK_PROV prompt names the parent as the one that delivers" || fail "$BRK_PROV prompt is not the brokered shape"
+done
+
 section "scope-dial template source contract"
 # Scope-dial trio: the load-bearing new prose, pinned mechanically.
 FRAGVD="$REPO/docs/loopspec/fragments/verdict-discipline.md"

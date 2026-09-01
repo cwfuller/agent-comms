@@ -37,6 +37,7 @@ stamped authorities: workspace pin (#3) + send-time git metadata (#6)	37
 friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	42
+runphase: parent-brokered claude and codex legs over ACP	18
 scope-dial template source contract	8
 templates: bare dollar-digit/dollar-star hygiene	1
 /ask canonical template source contract	10
