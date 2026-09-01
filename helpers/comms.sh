@@ -4311,11 +4311,14 @@ cmd_status() {
     elif [ "$st" != "complete" ] && [ -n "$deliv" ] \
          && [ "$deliv" != "delivered" ] && [ "$deliv" != "spawned" ] \
          && [ "$deliv" != "completed" ] && [ "$deliv" != "held" ] && [ "$deliv" != "pickup" ]; then
-      if [ "${COMMS_DELIVERY:-}" = "mailbox" ]; then
-        echo "note: last delivery was '$deliv' — $owes was deliberately not nudged (COMMS_DELIVERY=mailbox). The message is on disk for manual pickup; nothing is broken."
-      else
-        echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Do not retry from an unchanged sandbox; use manual pickup or configure 'comms.sh codex-permissions' and restart Codex."
-      fi
+      # NOT keyed on the CURRENT COMMS_DELIVERY. status reports a DURABLE fact from the state
+      # file, and the env at read time says nothing about how the delivery actually happened — a
+      # `manual` left by a failed cmux nudge would be excused simply because the operator happens
+      # to be in mailbox mode now. The honest fix is a distinct outcome token recorded AT DELIVERY
+      # (grok: "a new outcome token, or status treating requested mailbox like `pickup`"), which
+      # is a change to what deliver WRITES, not to what status READS. Filed rather than faked.
+      # (grok, S4-1 r2 — explicitly not this increment's ship gate.)
+      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Do not retry from an unchanged sandbox; use manual pickup or configure 'comms.sh codex-permissions' and restart Codex."
     fi
   fi
 }
