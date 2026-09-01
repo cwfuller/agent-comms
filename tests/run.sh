@@ -237,6 +237,18 @@ export COMMS_MOUNT_BASE="$WORK/suite-mounts/agent-comms/mounts"
 # exists to collect. Suite-wide default; individual tests still override it explicitly.
 export AGENT_COMMS_HOME="$WORK/global-home"
 mkdir -p "$AGENT_COMMS_HOME"
+# THE REVIEW BAR IS AN INSTALLED ASSET, so the suite must PROVIDE it rather than inherit whatever
+# the developer happens to have installed. Every fixture that runs a review turn through a copied
+# or shimmed runphase.sh resolves the bar through this home: the repo tier is
+# $HELPER_DIR/../docs/..., which does not exist for a shim, and before the bar moved these turns
+# were silently satisfied by the developer's real ~/.codex/skills. That made the suite's result
+# depend on the machine — green here, red on a clean checkout or CI. Staging it here is the fix,
+# and the fragments come from their canonical home so this cannot drift. (S3-1.)
+mkdir -p "$AGENT_COMMS_HOME/loopspec-fragments"
+for _f in "$REPO"/docs/loopspec/fragments/*.md; do
+  [ -f "$_f" ] && cp "$_f" "$AGENT_COMMS_HOME/loopspec-fragments/$(basename "$_f")"
+done
+unset _f
 # The gate only protects runs that REACH it. An `exit 0` added above it later would
 # bypass the invariant entirely, so the exit path itself refuses an unexamined
 # success. (codex, panel r1, advisory — makes "a partial run is never a verdict"
