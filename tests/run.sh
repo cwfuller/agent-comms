@@ -8941,17 +8941,19 @@ grep -q 'set-mode read-only' "$ISO_RP" \
   && ok "the mode is re-pinned immediately before every prompt" || fail "no per-prompt mode pin"
 awk '/set-mode read-only/{m=NR} /refusing to send a review turn whose containment is unconfirmed/{if (NR>m && m) f=1} END{exit !f}' "$ISO_RP" \
   && ok "an unconfirmed mode refuses the turn instead of sending it" || fail "an unpinnable mode still sends"
-# The confirmation must be EXACT and stdout-only. A glob for "read-only" over stdout+stderr
-# passes on the adapter's REJECTION too ("Agent rejected session/set_mode for mode \"read-only\""),
+# The confirmation must be EXACT and stdout-only, for WHICHEVER mode the backend pins. A glob
+# over stdout+stderr passes on the adapter's REJECTION too ("Agent rejected session/set_mode for
+# mode \"<id>\""), which interpolates the requested id and so contains the very string a loose
+# match looks for —
 # which would leave a reused owner in a write mode still prompted. Assert the check requires the
 # exact success line AND rc 0, and does NOT fold stderr into the match. (grok, implement r1, blocking.)
-grep -q '\[ "\$acp_mode_out" != "mode set: read-only" \]' "$ISO_RP" \
+grep -q '\[ "\$acp_mode_out" != "mode set: \$acp_iso_mode" \]' "$ISO_RP" \
   && ok "the mode confirmation is the exact acpx success line, not a substring" \
   || fail "the mode confirmation is a loose match a rejection error would satisfy"
 grep -q '\$acp_mode_rc" -ne 0' "$ISO_RP" \
   && ok "the mode confirmation also requires a zero exit status" || fail "the mode confirmation ignores rc"
 # The set-mode capture must send stderr to the LOG, not into the matched output.
-awk '/set-mode read-only 2>>/{f=1} END{exit !f}' "$ISO_RP" \
+awk '/set-mode "\$acp_iso_mode" 2>>/{f=1} END{exit !f}' "$ISO_RP" \
   && ok "set-mode stderr goes to the log, never into the confirmation match" \
   || fail "set-mode still folds stderr into the matched output (2>&1)"
 # The isolated home is refused if it is a symlink, and its realpath must be the intended sibling.
