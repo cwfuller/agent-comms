@@ -3738,8 +3738,10 @@ for BRK_F in codex claude; do
   grep -q "\"provider\": \"$BRK_F\"" "$BRK_FDIR/result.json" 2>/dev/null \
     && ok "the failed $BRK_F ACP result names the provider that actually ran" || fail "$BRK_F ACP failure provider"
   BRK_FSTATE="$MA_FIX/.comms/state/$(echo "$MA_WS" | tr -c 'A-Za-z0-9._-\n' '_')_${BRK_FTHREAD}.json"
-  grep -q '"status": "failed"' "$BRK_FSTATE" 2>/dev/null \
-    && ok "a failed $BRK_F ACP turn is recorded in thread state, not silently dropped" || fail "$BRK_F ACP failure state"
+  # `last_delivery`, matching how the headless equivalent asserts it — the field the runner
+  # actually writes. My first cut checked "status" and failed for that reason, not a code gap.
+  grep -q '"last_delivery": "failed"' "$BRK_FSTATE" 2>/dev/null \
+    && ok "a failed $BRK_F ACP turn is recorded in thread state, not silently dropped" || fail "$BRK_F ACP failure state (got: $(head -c 140 "$BRK_FSTATE" 2>/dev/null))"
   [ ! -s "$(find "$MA_FIX/.comms/to-$BRK_FFROM" -name "*$BRK_F-reply*brokfail*" -type f 2>/dev/null | head -1)" ] \
     && ok "a failed $BRK_F ACP turn stamps no reply — nothing to mistake for a review" || fail "$BRK_F ACP failure leaked a reply"
 done
