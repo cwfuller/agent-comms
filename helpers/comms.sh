@@ -4136,6 +4136,13 @@ cmd_transport() {
     # flipping the default must not strand every loop on an install where
     # runphase.sh never landed.
     if runphase_available && headless_ok "$agent"; then printf 'headless\n'; return 0; fi
+    # A LOOP MUST NOT FALL BACK TO A PANE for a provider whose self-send path is gone. Deleting
+    # headless for claude/codex (step 4, S4-2) made this ladder drop straight through to `cmux` —
+    # which is the SAME self-send model in another costume: a pane nudge tells a live agent to read
+    # and reply itself, with no parent stamping and no pinned artifact. That inverted the rule this
+    # ladder exists to enforce ("a loop must never take a pane it was not asked for") and a test
+    # caught it. Say `mailbox` instead: honest, unattended, and visible to status.
+    if ! headless_ok "$agent"; then printf 'mailbox\n'; return 0; fi
     case "$caps" in
       *interactive*)
         picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"

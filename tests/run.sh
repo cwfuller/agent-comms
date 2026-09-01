@@ -1599,6 +1599,9 @@ export GROK_STUB_LOG="$WORK/grok.log"
 cat > "$STUB_BIN/grok" <<'GSTUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "${GROK_STUB_LOG:-/dev/null}"
+# GROK_STUB_HANG mirrors CODEX_STUB_HANG: the killed-runner fixture needs a child that outlives
+# its budget. It moved to grok when codex lost the headless path in step 4 (S4-2).
+[ -n "${GROK_STUB_HANG:-}" ] && sleep "$GROK_STUB_HANG"
 pf=""; prev=""
 for a in "$@"; do [ "$prev" = "--prompt-file" ] && pf="$a"; prev="$a"; done
 [ -n "$pf" ] && [ -f "$pf" ] || { echo "stub: no prompt file" >&2; exit 2; }
@@ -3729,6 +3732,10 @@ for BRK_F in codex claude; do
   sed -e "s/^thread: ma-arc-1\$/thread: $BRK_FTHREAD/" -e "s/^from: claude\$/from: $BRK_FFROM/" \
       -e "s/_review-req-1\$/_brokfail-$BRK_F/" \
       "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$BRK_FMSG"
+  # `send` first, exactly as a real loop does: it writes the state record before any runner
+  # exists. With the suite's mailbox default this nudges nobody, so the ACP turn below is still
+  # the only thing that runs.
+  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to "$BRK_F" "$BRK_FMSG" ) >/dev/null 2>&1 || true
   BRK_FDIR="$WORK/ma-brokfail-$BRK_F"; mkdir -p "$BRK_FDIR"
   ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$BRK_PAY" \
       AX_FAIL_RC=7 COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$BRK_FMSG" \
@@ -3737,14 +3744,23 @@ for BRK_F in codex claude; do
     && ok "a failed $BRK_F ACP turn records status=failed" || fail "$BRK_F ACP failure status (got: $(head -c 120 "$BRK_FDIR/result.json" 2>/dev/null))"
   grep -q "\"provider\": \"$BRK_F\"" "$BRK_FDIR/result.json" 2>/dev/null \
     && ok "the failed $BRK_F ACP result names the provider that actually ran" || fail "$BRK_F ACP failure provider"
-  # NO thread-state assertion here, deliberately. `cmd_send` creates the state file; runphase
-  # only PATCHES one. A turn that fails before the broker sends has nothing to patch, so there is
-  # no file — asserting one would be testing a non-behaviour, and making it pass would mean
-  # manufacturing a fixture that misrepresents how state files come to exist. The failure is
-  # durably recorded where it actually lives: result.json (above) and the coordinator event log.
-  # (Explained by grok during S3-2: "cmd_send creates that file; runphase will not create one".)
-  [ ! -s "$(find "$MA_FIX/.comms/to-$BRK_FFROM" -name "*$BRK_F-reply*brokfail*" -type f 2>/dev/null | head -1)" ] \
-    && ok "a failed $BRK_F ACP turn stamps no reply — nothing to mistake for a review" || fail "$BRK_F ACP failure leaked a reply"
+  # THREAD STATE, with a REALISTIC precondition. I first dropped this, reasoning that a failed
+  # turn writes no state — but that absence was an artifact of driving runphase directly and
+  # bypassing `cmd_send`, which in production creates the state record BEFORE the runner spawns.
+  # The headless tests pin that a failure is mirrored into state and therefore surfaced by
+  # `status`; dropping it would have lost that. Create the record the way production does, then
+  # assert the ACP failure patches it. (codex, S4-2 precondition r1, blocking.)
+  BRK_FSTATE="$MA_FIX/.comms/state/$(echo "$MA_WS" | tr -c 'A-Za-z0-9._-\n' '_')_${BRK_FTHREAD}.json"
+  grep -q '"last_delivery": "failed"' "$BRK_FSTATE" 2>/dev/null \
+    && ok "a failed $BRK_F ACP turn patches thread state, so status still shows it" || fail "$BRK_F ACP failure state (got: $(head -c 120 "$BRK_FSTATE" 2>/dev/null))"
+  # DISCRIMINATE BY TIME, NOT BY NAME. Reply files are `{ws}_{ts}_{agent}-reply-{pid}.md`; the
+  # `brokfail` token lives on the REQUEST, so a name-glob for it could never match a leaked reply
+  # and the assertion was vacuous — it passed whether or not a failed turn published. `-newer` the
+  # prompt is the discriminator that actually separates this turn's output from the happy-path
+  # replies already sitting in the same inbox. (codex + grok, S4-2 precondition r1, corroborated.)
+  BRK_FLEAK="$(find "$MA_FIX/.comms/to-$BRK_FFROM" -type f -name "*$BRK_F-reply*" -newer "$BRK_FDIR/prompt.md" 2>/dev/null | head -1)"
+  [ -z "$BRK_FLEAK" ] && [ ! -f "$BRK_FDIR/reply.md" ] \
+    && ok "a failed $BRK_F ACP turn stamps no reply — nothing to mistake for a review" || fail "$BRK_F ACP failure leaked a reply: ${BRK_FLEAK:-$BRK_FDIR/reply.md}"
 done
 
 section "scope-dial template source contract"
@@ -5110,9 +5126,14 @@ fi
 [ "$(run_tr transport grok --loop 2>/dev/null)" != "cmux" ] \
   && ok "a headless-only agent's loop never resolves to a pane" || fail "grok loop transport"
 
-# An explicit COMMS_DELIVERY=headless override beats everything.
-[ "$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$COMMS" transport codex) 2>/dev/null)" = "headless" ] \
-  && ok "COMMS_DELIVERY=headless overrides transport selection" || fail "headless override"
+# An explicit COMMS_DELIVERY=headless override beats everything — FOR A PROVIDER THAT STILL HAS
+# THE HEADLESS PATH. Since step 4 deleted self-send, that is grok only; codex must be refused
+# rather than handed a route runphase will reject. (S4-2.)
+[ "$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$COMMS" transport grok) 2>/dev/null)" = "headless" ] \
+  && ok "COMMS_DELIVERY=headless overrides transport selection for a brokered-without-ACP agent" || fail "headless override"
+( cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$COMMS" transport codex ) >/dev/null 2>&1 \
+  && fail "headless was still offered to a provider whose self-send path is gone" \
+  || ok "headless is refused for codex — transport never promises a route runphase would reject"
 
 cat > "$CMUX_STUB_DIR/tree-workspace_7.txt" <<'TRTREE'
 workspace:7
@@ -8893,10 +8914,11 @@ printf '%s\ty\tz\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-
 
 # CRITERION 4: the events that matter are written by the DETACHED runner. `send` returns at
 # spawn, so every row below was appended by a process the dispatching shell no longer owns.
-EV_HL="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-10-00_ev-hl.md"
+EV_HL="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-10-00_ev-hl.md"
 sed 's/message_id: ev-req-1/message_id: ev-hl-1/; s/thread: ev-loop/thread: ev-headless/' "$EV_REQ" > "$EV_HL"
 run_ev_hl() { (cd "$EV" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
-EV_HLOUT="$(run_ev_hl send --to codex "$EV_HL" 2>/dev/null)"
+mkdir -p "$EV/.comms/to-grok"
+EV_HLOUT="$(run_ev_hl send --to grok "$EV_HL" 2>/dev/null)"
 EV_HLDIR="$(rundir_of "$EV_HLOUT")"
 [ -n "$EV_HLDIR" ] && ok "the headless dispatch spawned a detached runner" || fail "no run dir (got: $EV_HLOUT)"
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && $e=="turn-started"' "$EV_LOG" | grep -q . \
@@ -8919,9 +8941,9 @@ EV_ORDER="$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && ($e=="tur
 
 # A runner killed before it can write result.json: await synthesizes one, and the terminal
 # event must still name the right leg or a kill is a permanent unknown. (grok, plan r2.)
-EV_KL="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-11-00_ev-kill.md"
+EV_KL="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-11-00_ev-kill.md"
 sed 's/message_id: ev-req-1/message_id: ev-kill-1/; s/thread: ev-loop/thread: ev-killed/' "$EV_REQ" > "$EV_KL"
-EV_KOUT="$(CODEX_STUB_HANG=30 run_ev_hl send --to codex "$EV_KL" 2>/dev/null)"
+EV_KOUT="$(GROK_STUB_HANG=30 run_ev_hl send --to grok "$EV_KL" 2>/dev/null)"
 EV_KDIR="$(rundir_of "$EV_KOUT")"
 sleep 2
 kill -9 "$(cat "$EV_KDIR/pid" 2>/dev/null)" 2>/dev/null || true
