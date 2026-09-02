@@ -1093,6 +1093,20 @@ broker_note_refusal() {
   log_event reply-refused refused "${GROK_BROKER_NOTE:-the broker refused this reply without saying why}"
 }
 
+# ACP-ONLY FOR THE PROVIDERS THAT USED TO SELF-SEND (contraction step 4, S4-2).
+# ONE predicate, TWO callers. cmd_run enforces it for the turn that actually executes;
+# cmd_spawn enforces it for the operator, who would otherwise get `spawned … pid=NNN` and
+# exit 0 while the detached child died on this very condition a second later — a false
+# success at the spawn layer, which is the failure S4-2 exists to remove. Both resolve
+# `via` the same way (COMMS_RUNPHASE_VIA, then --via), so they cannot disagree.
+# A second caller able to bypass a validation is the bug shape this repo keeps
+# rediscovering. (grok, S4-2 implement r1, advisory.)
+require_acp_transport() {   # <verb> <provider> <via>
+  if [ "$3" != "acp" ] && [ "$2" != "grok" ]; then
+    die "$1: '$2' review turns are ACP-only — re-run with --via acp (the self-send path was removed in step 4; a non-ACP turn would produce an unstamped, unmounted reply that still reported success)"
+  fi
+}
+
 cmd_spawn() {
   local msg="" sandbox="" timeout="" provider="codex" via="${COMMS_RUNPHASE_VIA:-}"
   while [ "$#" -gt 0 ]; do
@@ -1107,6 +1121,7 @@ cmd_spawn() {
     shift
   done
   case "$provider" in claude|codex|grok) ;; *) die "spawn: provider must be claude, codex, or grok" ;; esac
+  require_acp_transport spawn "$provider" "$via"
   [ -n "$msg" ] || die "spawn: --message <file> is required"
   [ -f "$msg" ] || die "spawn: no such message file: $msg"
   msg="$(abs_path "$msg")"
@@ -2057,7 +2072,7 @@ cmd_run() {
   fi
   # --no-deliver suppresses the TRUSTED-PARENT broker and thread-state writes. It
   # cannot suppress a child that is told to run `comms.sh send --archive-inbound`
-  # itself — so for a self-sending provider the flag would deliver and archive while
+  # itself — so without parent brokering the flag would deliver and archive while
   # only the state write was silenced, which is worse than not offering it. Refuse.
   if [ "${RUNPHASE_NO_DELIVER:-}" = 1 ] && [ "$via" != "acp" ]; then
     # Under ACP the PARENT stamps and delivers, so the child never sends and
@@ -2074,9 +2089,7 @@ cmd_run() {
   # invoking the provider with no prompt, and still taking `rc=0 -> completed` — a FALSE SUCCESS,
   # because only grok calls `grok_broker` outside ACP. Fail closed and name the fix.
   # grok is unaffected: it is parent-brokered on its direct path too. (codex, S4-2 plan, blocking.)
-  if [ "$via" != "acp" ] && [ "$provider" != "grok" ]; then
-    die "run: '$provider' review turns are ACP-only — re-run with --via acp (the self-send path was removed in step 4; a non-ACP turn would produce an unstamped, unmounted reply that still reported success)"
-  fi
+  require_acp_transport run "$provider" "$via"
   [ -n "$msg" ] && [ -f "$msg" ] || die "run: --message <file> required and must exist"
   [ -n "$run_dir" ] && [ -d "$run_dir" ] || die "run: --dir <run-dir> required and must exist"
   msg="$(abs_path "$msg")"
