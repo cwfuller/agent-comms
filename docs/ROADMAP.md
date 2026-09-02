@@ -53,6 +53,39 @@ are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnos
 equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
 trusting this number if the corpus has moved.
 
+### Open: `ask` reports a FALSE FAILURE after a successful consult (2026-09-02)
+
+**Observed live.** `comms.sh ask --from claude --to codex --wait --file q.txt` completed the
+consult — `completed: codex finished; the reply is in the inbox`, and `reply.md` is present in the
+run dir — then printed:
+
+```
+awk: can't open file .comms/to-codex/<msg>.md
+RESULT: manual — codex was NOT spawned (see the warning above; likely runphase.sh missing or an
+empty inbox); fix and retry 'comms.sh send --to codex <file>'
+```
+
+**Mechanism.** The ACP consult path ARCHIVES the outbound (confirmed: the message is in
+`.comms/archive/`, absent from `.comms/to-codex/`). `cmd_ask` then delegates to `cmd_send`, which
+later reads the outbound AT ITS ORIGINAL PATH to classify the message —
+`frontmatter_field "$file" workflow`. The path no longer exists, `awk` fails, the field comes back
+empty, and the outcome falls through to `manual` / "NOT spawned … fix and retry".
+
+**Why it matters more than a cosmetic wart.** The consult SUCCEEDED. An operator — or an agent
+driving `ask` — is told the peer was never spawned and to retry, which would pay for a second
+turn that is not needed. It is the same success/failure-signal mismatch class as the S4-2 blocker
+(`broker_stamp` copies the reply before `send`, so a dead send still looked answered) and the
+S4-4 `RESULT: manual … fix and retry` after a refused transport.
+
+**Shape of the fix (not done here).** Classify BEFORE delivery/archiving, or re-resolve the
+message the way `leg_reply_candidates` already does ("archive stays first so ordering semantics
+are identical"). Either way the rule is: never read a path whose owner may have moved it.
+
+**Why it is its own increment.** This is the `send`/report path, which produced three subtle
+defects in one day (a `die` swallowed through nested command substitution on bash 3.2; pickup
+resolved after transport; a fix-and-retry lie on a refused transport). It gets its own branch and
+its own review round rather than riding along on unrelated work.
+
 ### Open after S4-2: an UNSTAMPED review still reads the live tree (2026-09-01)
 
 Found by codex reviewing S4-2, and it is a correction to a claim I made rather than a regression
