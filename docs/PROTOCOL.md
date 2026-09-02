@@ -433,8 +433,9 @@ answered. (grok, S4-2 r3.)
 wasn't a real nudge.
 
 Outcomes recorded in state by `send` (the full enum lives in
-`loopspec/thread-state.schema.json`; `delivered`/`blocked`/`failed` are retained for reading
-ARCHIVED state written before step 4, and are no longer produced):
+`loopspec/thread-state.schema.json`. `delivered` and `blocked` are retained ONLY for reading
+ARCHIVED state written before step 4 and have no emitter left; `failed` is still produced — a
+headless spawn failure emits it):
 
 | outcome | meaning | recovery |
 |---|---|---|

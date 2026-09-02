@@ -4818,7 +4818,6 @@ TR_FOO_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=foo "$COMMS" transport codex 
 mkdir -p "$TR_FIX/.comms/to-codex"
 TR_CONSULT="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-25T10-00-00_q-1.md"
 cat > "$TR_CONSULT" <<TRQ
-
 ---
 type: question
 from: claude
@@ -4855,8 +4854,31 @@ TR_DEL_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" deliv
 # panel dispatch reaches delivery by calling cmd_send as a FUNCTION, so an argv-only gate misses
 # it — and it writes attempt markers, roster events and leg files BEFORE delivering. Refusal must
 # happen before any of that exists. (codex, S4-4 r3, blocking.)
+# The fixture MUST be a review-request. With the `type: question` used at first, `cmd_panel`
+# usage_errs at its own review-request check and writes nothing regardless of the transport —
+# so the file count would have passed with no gate at all, and only the text match pinned
+# anything. A review-request reaches snapshot/events/legs if the gate ever stops firing.
+# (grok, S4-4 r4, advisory — my own "no partial state" proof was weaker than I claimed.)
+TR_PANELREQ="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-25T11-00-00_pr-1.md"
+cat > "$TR_PANELREQ" <<TRPR
+---
+type: review-request
+from: claude
+timestamp: 2026-08-25T11:00:00Z
+message_id: $(basename "$TR_FIX")_2026-08-25T11-00-00_pr-1
+workspace: $(basename "$TR_FIX")
+thread: tr-panel
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## Intent
+panel refusal fixture
+TRPR
 TR_PANEL_BEFORE="$(find "$TR_FIX/.comms" -type f 2>/dev/null | wc -l | tr -d ' ')"
-TR_PANEL_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" panel dispatch --to codex "$TR_CONSULT") 2>&1 )" && TR_PANEL_RC=0 || TR_PANEL_RC=$?
+TR_PANEL_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" panel dispatch --to codex "$TR_PANELREQ") 2>&1 )" && TR_PANEL_RC=0 || TR_PANEL_RC=$?
 [ "$TR_PANEL_RC" != "0" ] && printf '%s\n' "$TR_PANEL_OUT" | grep -q 'cmux pane transport was REMOVED' \
   && ok "panel dispatch refuses an unknown transport" || fail "panel dispatch did not refuse (rc=$TR_PANEL_RC, got: $TR_PANEL_OUT)"
 [ "$(find "$TR_FIX/.comms" -type f 2>/dev/null | wc -l | tr -d ' ')" = "$TR_PANEL_BEFORE" ] \

@@ -70,6 +70,41 @@ live tree and saying so explicitly — either way its own increment, not a rider
 
 The ACP-only entrance rule IS pinned: a direct non-ACP run is refused for both claude and codex.
 
+### S4-4 LANDED (2026-09-02) — four rounds, both reviewers APPROVE
+
+Deleted: 14 functions, both pane arms of the transport ladder, the inline keystroke delivery,
+four commands (`doctor`, `bind`, `reconcile`, `codex-permissions`), the stub fixture, 7 test
+sections. 1466 -> 1416 assertions.
+
+**What review caught that a green suite did not** (four rounds, every blocker in code I had
+already convinced myself was correct):
+
+- **r1** — `docs/INSTALL.md` was an untouched, complete cmux setup guide. My audit checked names
+  *defined* in deleted sections; it missed the PUBLIC COMMAND STRINGS those functions served.
+  The durable rule (grok): ask *"does this path call `cmd_send`/`cmd_deliver`?"*, not *"is the
+  verb in the argv list?"*
+- **r2** — the refusal did not hold on bash 3.2. `cmd_send` -> `cmd_deliver` -> `cmd_transport`
+  runs it inside nested command substitution, where a `die` is SWALLOWED. `send` printed the
+  refusal, then continued to "manual pickup" / "fix and retry" and exited 0. I had tested
+  `deliver` directly, seen rc=1, and drawn the wrong conclusion.
+- **r3** — `panel dispatch` reaches delivery by calling `cmd_send` as a FUNCTION, and writes
+  attempt markers, roster events, leg files and index rows BEFORE delivering.
+- **r3** — my three bash-3.2 regression assertions never invoked the helper: they expanded
+  `$TR_CONSULT` eighteen lines before it was defined and passed on `unbound variable`.
+- **r4** — my "no partial state" proof was weaker than claimed: the fixture was a
+  `type: question`, so `cmd_panel` usage_errs before writing anything regardless of transport.
+  Now a review-request, so the count can actually fail.
+
+**Ten vacuous assertions surfaced across the S4-2 + S4-4 arc.** The recurring shape is a
+success signal produced by an artifact that exists whether or not the step succeeded. Three
+were introduced BY a deletion; two were in tests written specifically to guard against
+vacuity. The count is the only proof an assertion ran — a diff is not.
+
+**Deferred follow-up (grok, r4):** the gate is one predicate with five call sites. The durable
+rule is function-entry on `cmd_send`/`cmd_deliver` plus router ONLY on verbs that write before
+that call (`ask`, `panel dispatch`); the router `send`/`deliver` arms are redundant and
+dropping them would not reopen the 3.2 swallow. Not done here — post-approval scope.
+
 ### S4-4 (delete cmux) — measured map, before anyone starts it (2026-09-01)
 
 **Surface:** 92 `cmux` mentions in `helpers/comms.sh`, and 14 functions defined there:
