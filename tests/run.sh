@@ -1188,7 +1188,78 @@ rundir_of() { echo "$1" | sed -n 's/^ *run dir: //p' | head -1; }
 run_rp() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 PATH="$STUB_BIN:$PATH" "$RUNPHASE" "$@"); }
 run_headless() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
 
-section "runphase step 2: claude backend, direction pickup, hold, watchdog"
+# The grok stub is hoisted ABOVE step 2 (step 4, S4-2): headless is now grok-only, so the
+# hold/release coverage below needs a provider that can still spawn on that transport.
+
+export GROK_STUB_LOG="$WORK/grok.log"
+cat > "$STUB_BIN/grok" <<'GSTUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${GROK_STUB_LOG:-/dev/null}"
+# GROK_STUB_HANG mirrors CODEX_STUB_HANG: the killed-runner fixture needs a child that outlives
+# its budget. It moved to grok when codex lost the headless path in step 4 (S4-2).
+[ -n "${GROK_STUB_HANG:-}" ] && sleep "$GROK_STUB_HANG"
+pf=""; prev=""
+for a in "$@"; do [ "$prev" = "--prompt-file" ] && pf="$a"; prev="$a"; done
+[ -n "$pf" ] && [ -f "$pf" ] || { echo "stub: no prompt file" >&2; exit 2; }
+# streaming-messages-json shape (live 1.0.5): init event carries session_id and
+# the final result event carries the COMPLETE reply text. Under the
+# parent-stamped envelope the child emits ONLY a VERDICT line (reviews) + body.
+esc() { printf '%s' "$1" | awk '{gsub(/\t/, "\\t"); printf "%s\\n", $0}'; }
+printf '{"type":"system","subtype":"init","session_id":"stub-grok-session-1"}\n'
+# A turn that emits no result event at all: the extractor finds no reply text, which is the
+# loudest broker failure there is and the one that used to leave no durable record.
+[ -n "${GROK_STUB_NO_RESULT:-}" ] && exit 0
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"narration to ignore"}]}}\n'
+if [ -n "${GROK_STUB_NO_VERDICT:-}" ]; then
+  REPLY="$(printf -- '## Summary\nreview without any verdict line')"
+elif [ -n "${GROK_STUB_BAD_VERDICT:-}" ]; then
+  REPLY="$(printf -- 'VERDICT: SHIP_IT\n\n## Summary\nnonstandard verdict value')"
+elif [ -n "${GROK_STUB_EMPTY_BODY:-}" ]; then
+  REPLY="$(printf -- 'VERDICT: APPROVE')"
+elif [ -n "${GROK_STUB_DUP_VERDICT:-}" ]; then
+  # line-1 APPROVE + a later REQUEST_CHANGES: ambiguous, derivation must decide
+  REPLY="$(printf -- 'VERDICT: APPROVE\nnarration\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.')"
+elif [ -n "${GROK_STUB_LEAD_TOKEN:-}" ]; then
+  # No VERDICT line, and a Blocking section whose finding is a lead-token line rather than a
+  # list item — byte-for-byte the shape of the real codex reply that DERIVED APPROVE over a
+  # genuine attestation defect on 2026-08-27.
+  REPLY="$(printf -- '## Summary\nreview with an unreadable blocking section\n\n## Findings\n### Blocking\n\nblocking\ttests/run.sh:4948\tattestation is not bound to the tested commit\n\n### Advisory\n- None.')"
+elif [ -n "${GROK_STUB_LIE_APPROVE:-}" ]; then
+  # unique explicit APPROVE that contradicts its own findings
+  REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Findings\n### Blocking\n1. a real blocking finding the verdict ignores\n\n### Advisory\n- None.')"
+elif [ -n "${GROK_STUB_LIE_APPROVE_LOWER:-}" ]; then
+  # The canonical-cased lie-approve stub could not see this: the cross-check gate was a
+  # case-sensitive grep while the parser was case-tolerant, so `### blocking` skipped the
+  # check entirely and stamped APPROVE over a real finding.
+  REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Findings\n### blocking\n- a real blocking finding the verdict ignores\n\n### advisory\n- None.')"
+elif [ -n "${GROK_STUB_LATE_VERDICT:-}" ]; then
+  # A SOLE, valid verdict pushed past line 40 by a long preamble. The old scan
+  # window stopped at 40, so this reply read as having no verdict at all.
+  REPLY="$(printf -- 'thinking out loud\n%s\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.' "$(i=0; while [ $i -lt 45 ]; do printf 'preamble line %s\n' "$i"; i=$((i+1)); done)")"
+elif [ -n "${GROK_STUB_DUP_FAR:-}" ]; then
+  # line-1 APPROVE with the contradicting REQUEST_CHANGES beyond line 40. Under the
+  # window only the line-1 APPROVE was visible, so vcount==1 and the broker trusted
+  # it -- a false all-clear that a long enough reply could always produce.
+  REPLY="$(printf -- 'VERDICT: APPROVE\n%s\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.' "$(i=0; while [ $i -lt 45 ]; do printf 'narration line %s\n' "$i"; i=$((i+1)); done)")"
+elif [ -n "${GROK_STUB_QUOTED_VERDICT:-}" ]; then
+  # A round-N reply QUOTING round N-1 inside a fenced block. Scanning the whole file
+  # without skipping fences would read the quote as a second verdict and go ambiguous.
+  # Quotes a COMPLETE prior review, not just its verdict line. Quoting only the verdict
+  # masked the real path: the verdict scan skipped the fence but the findings parser did
+  # not, so the quoted blocker failed the body cross-check and killed a clean round.
+  REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Prior round\n```\nVERDICT: REQUEST_CHANGES\n### Blocking\n- an OLD blocker from the round before\n```\n\n## Findings\n### Blocking\n- None.\n\n### Advisory\n- None.')"
+elif [ -n "${GROK_STUB_PREAMBLE_NUMBERED:-}" ]; then
+  # the field incident, end to end: preamble pushes the (absent) verdict off
+  # line 1, findings are NUMBERED, and one real item ENDS in "None."
+  REPLY="$(printf -- 'Skill descriptions were shortened to fit context.\nReviewing the handoff now.\n\n## Findings\n### Blocking\n1. helper.sh can incorrectly return None.\n\n### Advisory\n- None.')"
+else
+  REPLY="$(printf -- 'VERDICT: %s\n\n## Summary\nstub review of the handoff\n\n## Findings\n### Blocking\n- none' "${GROK_STUB_VERDICT:-APPROVE}")"
+fi
+printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$(esc "$REPLY")"
+GSTUB
+chmod +x "$STUB_BIN/grok"
+
+section "runphase step 2: hold, release, and the stalled watchdog"
 # claude stub: mirrors the codex stub — init event carries session_id, result
 # event ends the turn. Toggles: CLAUDE_STUB_FAIL, CLAUDE_STUB_HANG.
 cat > "$STUB_BIN/claude" <<'STUB'
@@ -1208,87 +1279,75 @@ exit 0
 STUB
 chmod +x "$STUB_BIN/claude"
 
-# -- reverse direction: codex-authored review request pending in to-claude --
-RV="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T15-00-00_rev-review-1.md"
-cat > "$RV" <<'MSG'
+# The claude-backend blocks that stood here (reverse direction, failed turn, timeout) were
+# deleted in step 4 (S4-2): claude review turns are ACP-only now, and their ACP equivalents
+# — status=failed, provider-named result, no leaked reply — live in the brokered-legs section.
+
+# -- hold: pause at the turn boundary; release resumes. Driven by GROK, because headless is
+# grok-only after step 4 (S4-2) and this coverage is about the HOLD MECHANISM, which is
+# transport-agnostic. It lives nowhere else in the corpus, so it is re-pointed, not deleted.
+HRV="$REPO_FIX/.comms/to-grok/feature-helper-tests_2026-06-04T15-00-00_hold-1.md"
+mkdir -p "$REPO_FIX/.comms/to-grok"
+cat > "$HRV" <<'HOLDEOF'
 ---
 type: review-request
-from: codex
+from: claude
 timestamp: 2026-06-04T15:00:00Z
+message_id: feature-helper-tests_2026-06-04T15-00-00_hold-1
 workspace: feature-helper-tests
-message_id: feature-helper-tests_2026-06-04T15-00-00_rev-review-1
-thread: loop-reverse
-workflow: auto-implement
+thread: loop-hold
+workflow: auto
 phase: implement
 round: 1
-max-rounds: 10
-verdict: REQUEST_CHANGES
+max-rounds: 4
 ---
 
-## Findings
-Reverse-direction fixture.
-MSG
-RV_OUT="$(run_headless send --to claude "$RV" 2>/dev/null)"
-RV_TAIL="$(echo "$RV_OUT" | tail -1)"
-case "$RV_TAIL" in "RESULT: spawned"*) ok "reverse-direction headless send spawns a claude turn" ;; *) fail "reverse RESULT (got: $RV_TAIL)" ;; esac
-RV_DIR="$(rundir_of "$RV_OUT")"
-RV_SF="$REPO_FIX/.comms/state/feature-helper-tests_loop-reverse.json"
-grep -q '"last_run_dir": "/' "$RV_SF" && ok "state records last_run_dir for the watchdog" || fail "state last_run_dir (got: $(cat "$RV_SF" 2>/dev/null))"
-run_rp await "$RV_DIR" --timeout-secs 30 >/dev/null && ok "claude turn completes" || fail "claude turn await (log: $(tail -3 "$RV_DIR/runner.log" 2>/dev/null))"
-grep -q '"provider": "claude"' "$RV_DIR/result.json" && ok "result.json records provider=claude" || fail "result provider (got: $(cat "$RV_DIR/result.json"))"
-grep -q '"session_id": "stub-claude-session-7"' "$RV_DIR/result.json" && ok "claude session id captured from init event" || fail "claude session capture"
-grep -q 'claude-argv: -p --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools Bash' "$CODEX_STUB_LOG" && ok "claude invoked with stream-json + non-bypass policy" || fail "claude argv (got: $(grep claude-argv "$CODEX_STUB_LOG" | tail -1))"
-grep -q 'claude-env: CLAUDECODE=unset' "$CODEX_STUB_LOG" && ok "CLAUDECODE unset for the nested claude child" || fail "CLAUDECODE nesting (got: $(grep claude-env "$CODEX_STUB_LOG" | tail -1))"
-grep -q '"claude_session_id": "stub-claude-session-7"' "$RV_SF" && ok "state records claude_session_id" || fail "state claude_session_id (got: $(cat "$RV_SF"))"
-grep -q '"last_delivery": "completed"' "$RV_SF" && ok "reverse turn mirrored completed into state" || fail "reverse state completed"
-grep -q "$(basename "$RV")" "$RV_DIR/prompt.md" && grep -q "read-from-codex" "$RV_DIR/prompt.md" && ok "claude prompt references the claude-side command files" || fail "claude prompt content"
-grep -q -- '--to codex' "$RV_DIR/prompt.md" && ok "claude prompt routes the reply to codex" || fail "claude prompt reply direction"
+## Plan
+hold fixture
+HOLDEOF
+HRV_OUT="$(run_headless send --to grok "$HRV" 2>/dev/null)"
+case "$(echo "$HRV_OUT" | tail -1)" in "RESULT: spawned"*) ok "a grok loop spawns on the headless transport" ;; *) fail "hold fixture did not spawn (got: $(echo "$HRV_OUT" | tail -1))" ;; esac
+run_rp await "$(rundir_of "$HRV_OUT")" --timeout-secs 30 >/dev/null 2>&1 || true
+HRV_SF="$REPO_FIX/.comms/state/feature-helper-tests_loop-hold.json"
+HOLD_OUT="$(run_rp hold loop-hold)"
+echo "$HOLD_OUT" | grep -q "held: loop-hold" && ok "hold sets a thread marker" || fail "hold output (got: $HOLD_OUT)"
+# Written fresh, NOT sed'd from $HRV: the first send ARCHIVES its inbound, so the source file is
+# already gone by the time this runs.
+HRV2="$REPO_FIX/.comms/to-grok/feature-helper-tests_2026-06-04T15-05-00_hold-2.md"
+cat > "$HRV2" <<'HOLD2EOF'
+---
+type: review-request
+from: claude
+timestamp: 2026-06-04T15:05:00Z
+message_id: feature-helper-tests_2026-06-04T15-05-00_hold-2
+workspace: feature-helper-tests
+thread: loop-hold
+workflow: auto
+phase: implement
+round: 2
+max-rounds: 4
+---
 
-# -- claude failed turn: provider-keyed recording (real-review coverage gap) --
-RVF="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T15-02-00_rev-fail-1.md"
-sed 's/rev-review-1/rev-fail-1/' "$RV" > "$RVF"
-RVF_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless CLAUDE_STUB_FAIL=1 PATH="$STUB_BIN:$PATH" "$COMMS" send --to claude "$RVF") 2>/dev/null )"
-RVF_DIR="$(rundir_of "$RVF_OUT")"
-run_rp await "$RVF_DIR" --timeout-secs 30 >/dev/null 2>&1 && fail "failed claude turn must await non-zero" || ok "failed claude turn awaits non-zero"
-grep -q '"provider": "claude"' "$RVF_DIR/result.json" && grep -q '"status": "failed"' "$RVF_DIR/result.json" && ok "failed claude turn records provider+status" || fail "claude failed result (got: $(cat "$RVF_DIR/result.json" 2>/dev/null))"
-grep -q 'claude CLI exited 1' "$RVF_DIR/result.json" && ok "failure note names the claude CLI, not codex" || fail "provider-aware failure note (got: $(grep note "$RVF_DIR/result.json"))"
-grep -q '"claude_session_id": "stub-claude-session-7"' "$RV_SF" && grep -q '"last_delivery": "failed"' "$RV_SF" && ok "failed claude turn mirrors state with claude_session_id" || fail "claude failed state (got: $(cat "$RV_SF"))"
-
-# -- claude timeout: hung turn killed, session captured from pre-hang init --
-RVT="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T15-03-00_rev-hang-1.md"
-sed 's/rev-review-1/rev-hang-1/' "$RV" > "$RVT"
-RVT_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless CLAUDE_STUB_HANG=30 COMMS_RUNPHASE_TIMEOUT_SECS=6 PATH="$STUB_BIN:$PATH" "$COMMS" send --to claude "$RVT") 2>/dev/null )"
-RVT_DIR="$(rundir_of "$RVT_OUT")"
-run_rp await "$RVT_DIR" --timeout-secs 60 >/dev/null 2>&1 && fail "hung claude turn must await non-zero" || ok "hung claude turn awaits non-zero"
-grep -q '"status": "timeout"' "$RVT_DIR/result.json" && ok "claude timeout recorded" || fail "claude timeout result (got: $(cat "$RVT_DIR/result.json" 2>/dev/null))"
-grep -q '"session_id": "stub-claude-session-7"' "$RVT_DIR/result.json" && ok "session id captured even on timeout (init precedes hang)" || fail "timeout session capture"
-grep -q '"last_delivery": "timeout"' "$RV_SF" && ok "claude timeout mirrored into state" || fail "claude timeout state (got: $(cat "$RV_SF"))"
-
-# -- hold: pause at the turn boundary, attach command printed, release resumes --
-HOLD_OUT="$(run_rp hold loop-reverse)"
-echo "$HOLD_OUT" | grep -q "held: loop-reverse" && ok "hold sets a thread marker" || fail "hold output (got: $HOLD_OUT)"
-echo "$HOLD_OUT" | grep -q "claude --resume stub-claude-session-7" && ok "hold prints the exact claude attach command from state" || fail "hold attach print (got: $HOLD_OUT)"
-RV2="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T15-05-00_rev-review-2.md"
-sed 's/round: 1/round: 2/; s/rev-review-1/rev-review-2/' "$RV" > "$RV2"
-HELD_OUT="$(run_headless send --to claude "$RV2" 2>/dev/null)"
-HELD_TAIL="$(echo "$HELD_OUT" | tail -1)"
-case "$HELD_TAIL" in "RESULT: held"*) ok "send on a held thread reports RESULT: held" ;; *) fail "held RESULT (got: $HELD_TAIL)" ;; esac
+## Plan
+hold fixture round 2
+HOLD2EOF
+HELD_OUT="$(run_headless send --to grok "$HRV2" 2>/dev/null)"
+case "$(echo "$HELD_OUT" | tail -1)" in "RESULT: held"*) ok "send on a held thread reports RESULT: held" ;; *) fail "held RESULT (got: $(echo "$HELD_OUT" | tail -1))" ;; esac
 echo "$HELD_OUT" | grep -q "spawned runphase" && fail "held send must not spawn" || ok "held send spawns nothing"
-grep -q '"last_delivery": "held"' "$RV_SF" && ok "state records held" || fail "state held (got: $(cat "$RV_SF"))"
+grep -q '"last_delivery": "held"' "$HRV_SF" && ok "state records held" || fail "state held (got: $(cat "$HRV_SF" 2>/dev/null | head -c 120))"
 ST_HELD="$(run_headless status)"
-echo "$ST_HELD" | grep -q "ACTION NEEDED" && fail "held thread must not shout ACTION NEEDED" || ok "held thread does not shout"
-run_rp release loop-reverse | grep -q "released" && ok "release lifts the hold" || fail "release output"
-RES_OUT2="$(run_headless send --to claude "$RV2" 2>/dev/null)"
+echo "$ST_HELD" | grep -q "ACTION NEEDED" && fail "held thread must not shout ACTION NEEDED" || ok "a held thread is a deliberate pause, not an alarm"
+run_rp release loop-hold | grep -q "released" && ok "release lifts the hold" || fail "release output"
+RES_OUT2="$(run_headless send --to grok "$HRV2" 2>/dev/null)"
 case "$(echo "$RES_OUT2" | tail -1)" in "RESULT: spawned"*) ok "released thread spawns again" ;; *) fail "post-release send (got: $(echo "$RES_OUT2" | tail -1))" ;; esac
-run_rp await "$(rundir_of "$RES_OUT2")" --timeout-secs 30 >/dev/null || true
+run_rp await "$(rundir_of "$RES_OUT2")" --timeout-secs 30 >/dev/null 2>&1 || true
 
 # -- global hold blocks everything --
 run_rp hold >/dev/null
-GH_OUT="$(run_headless deliver claude)"
+GH_OUT="$(run_headless deliver grok)"
 echo "$GH_OUT" | grep -q "HELD:" && ok "global hold blocks all spawns" || fail "global hold (got: $GH_OUT)"
 run_rp release >/dev/null
 
-# -- stalled watchdog: dead runner vs finished turn vs live runner --
 WD_RUN="$WORK/wd-run"
 mkdir -p "$WD_RUN"
 echo "999999" > "$WD_RUN/pid"
@@ -1316,12 +1375,6 @@ rm -f "$WD_RUN/result.json"
 echo "$$" > "$WD_RUN/pid"
 run_comms stalled 15 | grep -q "runner alive" && ok "watchdog reports a live runner still working" || fail "watchdog alive (got: $(run_comms stalled 15))"
 rm -f "$REPO_FIX/.comms/state/feature-helper-tests_loop-watchdog.json"
-
-# -- bypass/danger permission flags are refused for claude loop turns --
-BP_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_RUNPHASE_CLAUDE_ARGS="--dangerously-skip-permissions" PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider claude --message "$RV") )"
-BP_DIR="$(rundir_of "$BP_OUT")"
-run_rp await "$BP_DIR" --timeout-secs 30 >/dev/null 2>&1 && fail "bypass-flag turn must not complete" || ok "bypass-flag turn refused (await non-zero)"
-grep -q "bypass/danger permission flags are refused" "$BP_DIR/runner.log" && ok "refusal names the policy in runner.log" || fail "bypass refusal message (log: $(tail -2 "$BP_DIR/runner.log" 2>/dev/null))"
 
 section "loopspec: conformance fixtures"
 if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then
@@ -1394,73 +1447,6 @@ check_not "validate rejects unregistered from:" run_ma validate "$BAD_FROM"
 rm -f "$BAD_FROM"
 
 section "multi-agent: grok stub + full-arc runphase legs"
-export GROK_STUB_LOG="$WORK/grok.log"
-cat > "$STUB_BIN/grok" <<'GSTUB'
-#!/bin/bash
-printf '%s\n' "$*" >> "${GROK_STUB_LOG:-/dev/null}"
-# GROK_STUB_HANG mirrors CODEX_STUB_HANG: the killed-runner fixture needs a child that outlives
-# its budget. It moved to grok when codex lost the headless path in step 4 (S4-2).
-[ -n "${GROK_STUB_HANG:-}" ] && sleep "$GROK_STUB_HANG"
-pf=""; prev=""
-for a in "$@"; do [ "$prev" = "--prompt-file" ] && pf="$a"; prev="$a"; done
-[ -n "$pf" ] && [ -f "$pf" ] || { echo "stub: no prompt file" >&2; exit 2; }
-# streaming-messages-json shape (live 1.0.5): init event carries session_id and
-# the final result event carries the COMPLETE reply text. Under the
-# parent-stamped envelope the child emits ONLY a VERDICT line (reviews) + body.
-esc() { printf '%s' "$1" | awk '{gsub(/\t/, "\\t"); printf "%s\\n", $0}'; }
-printf '{"type":"system","subtype":"init","session_id":"stub-grok-session-1"}\n'
-# A turn that emits no result event at all: the extractor finds no reply text, which is the
-# loudest broker failure there is and the one that used to leave no durable record.
-[ -n "${GROK_STUB_NO_RESULT:-}" ] && exit 0
-printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"narration to ignore"}]}}\n'
-if [ -n "${GROK_STUB_NO_VERDICT:-}" ]; then
-  REPLY="$(printf -- '## Summary\nreview without any verdict line')"
-elif [ -n "${GROK_STUB_BAD_VERDICT:-}" ]; then
-  REPLY="$(printf -- 'VERDICT: SHIP_IT\n\n## Summary\nnonstandard verdict value')"
-elif [ -n "${GROK_STUB_EMPTY_BODY:-}" ]; then
-  REPLY="$(printf -- 'VERDICT: APPROVE')"
-elif [ -n "${GROK_STUB_DUP_VERDICT:-}" ]; then
-  # line-1 APPROVE + a later REQUEST_CHANGES: ambiguous, derivation must decide
-  REPLY="$(printf -- 'VERDICT: APPROVE\nnarration\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.')"
-elif [ -n "${GROK_STUB_LEAD_TOKEN:-}" ]; then
-  # No VERDICT line, and a Blocking section whose finding is a lead-token line rather than a
-  # list item — byte-for-byte the shape of the real codex reply that DERIVED APPROVE over a
-  # genuine attestation defect on 2026-08-27.
-  REPLY="$(printf -- '## Summary\nreview with an unreadable blocking section\n\n## Findings\n### Blocking\n\nblocking\ttests/run.sh:4948\tattestation is not bound to the tested commit\n\n### Advisory\n- None.')"
-elif [ -n "${GROK_STUB_LIE_APPROVE:-}" ]; then
-  # unique explicit APPROVE that contradicts its own findings
-  REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Findings\n### Blocking\n1. a real blocking finding the verdict ignores\n\n### Advisory\n- None.')"
-elif [ -n "${GROK_STUB_LIE_APPROVE_LOWER:-}" ]; then
-  # The canonical-cased lie-approve stub could not see this: the cross-check gate was a
-  # case-sensitive grep while the parser was case-tolerant, so `### blocking` skipped the
-  # check entirely and stamped APPROVE over a real finding.
-  REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Findings\n### blocking\n- a real blocking finding the verdict ignores\n\n### advisory\n- None.')"
-elif [ -n "${GROK_STUB_LATE_VERDICT:-}" ]; then
-  # A SOLE, valid verdict pushed past line 40 by a long preamble. The old scan
-  # window stopped at 40, so this reply read as having no verdict at all.
-  REPLY="$(printf -- 'thinking out loud\n%s\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.' "$(i=0; while [ $i -lt 45 ]; do printf 'preamble line %s\n' "$i"; i=$((i+1)); done)")"
-elif [ -n "${GROK_STUB_DUP_FAR:-}" ]; then
-  # line-1 APPROVE with the contradicting REQUEST_CHANGES beyond line 40. Under the
-  # window only the line-1 APPROVE was visible, so vcount==1 and the broker trusted
-  # it -- a false all-clear that a long enough reply could always produce.
-  REPLY="$(printf -- 'VERDICT: APPROVE\n%s\nVERDICT: REQUEST_CHANGES\n\n## Findings\n### Blocking\n- a real blocking finding\n\n### Advisory\n- None.' "$(i=0; while [ $i -lt 45 ]; do printf 'narration line %s\n' "$i"; i=$((i+1)); done)")"
-elif [ -n "${GROK_STUB_QUOTED_VERDICT:-}" ]; then
-  # A round-N reply QUOTING round N-1 inside a fenced block. Scanning the whole file
-  # without skipping fences would read the quote as a second verdict and go ambiguous.
-  # Quotes a COMPLETE prior review, not just its verdict line. Quoting only the verdict
-  # masked the real path: the verdict scan skipped the fence but the findings parser did
-  # not, so the quoted blocker failed the body cross-check and killed a clean round.
-  REPLY="$(printf -- 'VERDICT: APPROVE\n\n## Prior round\n```\nVERDICT: REQUEST_CHANGES\n### Blocking\n- an OLD blocker from the round before\n```\n\n## Findings\n### Blocking\n- None.\n\n### Advisory\n- None.')"
-elif [ -n "${GROK_STUB_PREAMBLE_NUMBERED:-}" ]; then
-  # the field incident, end to end: preamble pushes the (absent) verdict off
-  # line 1, findings are NUMBERED, and one real item ENDS in "None."
-  REPLY="$(printf -- 'Skill descriptions were shortened to fit context.\nReviewing the handoff now.\n\n## Findings\n### Blocking\n1. helper.sh can incorrectly return None.\n\n### Advisory\n- None.')"
-else
-  REPLY="$(printf -- 'VERDICT: %s\n\n## Summary\nstub review of the handoff\n\n## Findings\n### Blocking\n- none' "${GROK_STUB_VERDICT:-APPROVE}")"
-fi
-printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$(esc "$REPLY")"
-GSTUB
-chmod +x "$STUB_BIN/grok"
 
 RP="$REPO/helpers/runphase.sh"
 run_grok_leg() {  # <msg-path> <run-dir> [env overrides via caller export]
@@ -5026,13 +5012,17 @@ printf '%s\n' "$TR_CONSULT_OUT" | grep -q 'delivered to surface' \
   || fail "consult reclassified as a loop (got: $TR_CONSULT_OUT)"
 TR_LOOP_OUT="$(run_tr_default deliver codex "$TR_LOOPMSG" 2>&1 || true)"
 printf '%s\n' "$TR_LOOP_OUT" | grep -q 'delivered to surface' \
-  && fail "a workflow message took the pane instead of the headless runner" \
-  || ok "a LOOP message goes headless even with a live pane"
+  && fail "a loop took a pane it was not asked for" \
+  || ok "a LOOP message never takes a live pane"
 # "did not reach a surface" is also true of manual pickup and of a spawn failure, so
 # assert the POSITIVE signal. (codex, transport-flip round 2.)
-printf '%s\n' "$TR_LOOP_OUT" | grep -q 'spawned runphase' \
-  && ok "the loop actually spawned a headless runner (criterion 1, pinned directly)" \
-  || fail "loop did not spawn (got: $TR_LOOP_OUT)"
+# The old positive ("it actually spawned headless") needed an agent with BOTH a pane and the
+# headless transport. After step 4 no provider has both, so the surviving guarantee is the
+# NEGATIVE above: a loop never takes a pane. Asserting a spawn here would only re-pin the
+# scenario the removal deleted.
+printf '%s\n' "$TR_LOOP_OUT" | grep -qE 'manual pickup|mailbox' \
+  && ok "a loop with no runner and no ACP says mailbox rather than nudging a pane" \
+  || fail "loop fallback (got: $TR_LOOP_OUT)"
 
 # The regression codex asked for: cmux explicitly requested with NO workspace identity
 # must still surface the picker's specific reason, and must not trip `set -u`.
@@ -5053,8 +5043,8 @@ TR_BARE="$WORK/bare-install"; mkdir -p "$TR_BARE"
 cp "$COMMS" "$TR_BARE/comms.sh"; chmod +x "$TR_BARE/comms.sh"
 [ ! -e "$TR_BARE/runphase.sh" ] && ok "fixture: a helper install with no runphase.sh" || fail "bare fixture"
 TR_BARE_LOOP="$( (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$TR_BARE/comms.sh" transport codex --loop) 2>/dev/null)"
-[ "$TR_BARE_LOOP" = "cmux" ] \
-  && ok "no headless runner + a live pane falls back to cmux, never stranding the loop" \
+[ "$TR_BARE_LOOP" = "mailbox" ] \
+  && ok "no headless runner does NOT fall back to a pane — that is self-send by another name" \
   || fail "missing-runner fallback (got: $TR_BARE_LOOP)"
 TR_BARE_NOPANE="$( (cd "$TR_FIX" && env -u COMMS_DELIVERY -u CMUX_WORKSPACE_ID "$TR_BARE/comms.sh" transport codex --loop) 2>/dev/null)"
 [ "$TR_BARE_NOPANE" = "mailbox" ] \
