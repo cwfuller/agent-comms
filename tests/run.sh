@@ -1256,11 +1256,27 @@ max-rounds: 4
 snapshot dirt probe
 SNAPR
   git add -A && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
-SNAP_CLEAN="$( (cd "$SNAPW" && env COMMS_DELIVERY=mailbox "$COMMS" panel dispatch --to codex r.md) 2>&1 | grep -c 'SYNTHETIC' )"
+# STREAMS SPLIT. Grepping `2>&1` could not tell the stdout marker from the stderr warning, so it
+# would have passed with `synthetic_note` never set — the exact weakness these tests exist to
+# catch. stdout and stderr are captured separately and asserted separately.
+# (codex + grok, staging-safety r3, corroborated.)
+SNAP_CLEAN_O="$( (cd "$SNAPW" && env COMMS_DELIVERY=mailbox "$COMMS" panel dispatch --to codex r.md) 2>/dev/null | grep -c 'SYNTHETIC' )"
 printf 'FOREIGN\n' > "$SNAPW/someone-elses.txt"
-SNAP_DIRTY="$( (cd "$SNAPW" && env COMMS_DELIVERY=mailbox "$COMMS" panel dispatch --to codex r.md) 2>&1 | grep -c 'SYNTHETIC' )"
-[ "$SNAP_CLEAN" = "0" ] && ok "a clean-tree dispatch emits no synthetic-snapshot warning" || fail "synthetic warning fired on a clean tree (always-on warnings are worthless)"
-[ "$SNAP_DIRTY" != "0" ] && ok "a dirty-tree dispatch warns that reviewers will read uncommitted work" || fail "no synthetic-snapshot warning on a dirty tree"
+SNAP_DIRTY_O="$( (cd "$SNAPW" && env COMMS_DELIVERY=mailbox "$COMMS" panel dispatch --to codex r.md) 2>/dev/null | grep -c 'SYNTHETIC' )"
+SNAP_DIRTY_E="$( (cd "$SNAPW" && env COMMS_DELIVERY=mailbox "$COMMS" panel dispatch --to codex r.md) 2>&1 >/dev/null | grep -c 'SYNTHETIC' )"
+[ "$SNAP_CLEAN_O" = "0" ] && ok "a clean-tree dispatch emits no synthetic-snapshot marker" || fail "synthetic marker on a clean tree (always-on warnings are worthless)"
+[ "$SNAP_DIRTY_O" != "0" ] && ok "a dirty-tree dispatch marks STDOUT so a stdout-capturing caller sees it" || fail "no stdout marker on a dirty tree (the S4-4 stderr-only shape)"
+[ "$SNAP_DIRTY_E" != "0" ] && ok "a dirty-tree dispatch also warns on stderr with the paths" || fail "no stderr warning on a dirty tree"
+# THE ACTUAL r2 REGRESSION: dispatching from a LINKED WORKTREE must report THAT worktree's dirt,
+# not the main checkout's. The original fixture was its own toplevel, which is why the wrong-tree
+# bug survived my verification. (codex, r3: "the suite does not pin the two round-2 cases".)
+SNAP_WT="$WORK/snapw-linked"
+( cd "$SNAPW" && git worktree add -q -b snapw-probe "$SNAP_WT" ) >/dev/null 2>&1
+printf 'ONLY-IN-WORKTREE\n' > "$SNAP_WT/wt-only.txt"
+SNAP_WT_E="$( (cd "$SNAP_WT" && env COMMS_DELIVERY=mailbox "$COMMS" panel dispatch --to codex r.md) 2>&1 >/dev/null )"
+printf '%s\n' "$SNAP_WT_E" | grep -q 'wt-only.txt' \
+  && ok "a dispatch from a linked worktree reports THAT worktree's dirty paths" \
+  || fail "worktree dispatch reported the wrong tree (got: $(printf '%s' "$SNAP_WT_E" | head -3 | tr '\n' ' '))"
 
 section "loopspec: conformance fixtures"
 if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then

@@ -1587,7 +1587,9 @@ cmd_panel() {
     # the main checkout's dirt instead, which is both wrong and reassuring in the worst case.
     # (codex + grok, staging-safety r2, corroborated blocking.)
     local dirty_root dirty_list
-    dirty_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    # Mirror cmd_snapshot's OWN resolution, including its fallback — re-querying blind is how the
+    # r2 wrong-tree bug happened. (codex + grok, r3, advisory.)
+    dirty_root="$(git rev-parse --show-toplevel 2>/dev/null || main_repo_root 2>/dev/null || true)"
     # Captured in ONE read, not piped into `head`: under `set -euo pipefail` a `git status |
     # head -10` pipeline returns nonzero when head closes the pipe early, so a tree with more
     # than ten dirty files would have KILLED the dispatch it was meant to warn about.
@@ -4392,6 +4394,17 @@ cmd_send() {
       # (field report #6.)
       local send_pair
       send_pair="$(cmd_snapshot create --with-base 2>/dev/null || true)"
+  # Same synthetic-snapshot warning as panel dispatch: a fresh unpinned workflow send snapshots
+  # too, so reviewers read uncommitted work here as well. Deliberately STDERR ONLY — the
+  # `RESULT:` line is a parsed contract (`tail -1`) and the open `ask` false-failure already
+  # mis-derives outcomes from captured stdout on this path. Scoped as grok put it: "do not touch
+  # RESULT:", not "do not warn". (grok, staging-safety r3.)
+  if [ -n "$send_pair" ]; then
+    _sp_aid="${send_pair%%	*}"; _sp_base="${send_pair#*	}"
+    if [ "$_sp_base" != "$send_pair" ] && [ -n "$_sp_base" ] && [ "$_sp_aid" != "$_sp_base" ]; then
+      echo "warning: this send snapshots a SYNTHETIC artifact — the tree is dirty, so a reviewer reads uncommitted work" >&2
+    fi
+  fi
       send_aid="${send_pair%%	*}"
       send_base="${send_pair#*	}"
       [ "$send_base" = "$send_pair" ] && send_base=""

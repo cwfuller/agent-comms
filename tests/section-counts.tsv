@@ -16,7 +16,7 @@ comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line	3
 runphase step 2: hold, release, and the stalled watchdog	12
 headless delivery: self-pickup suppression and a missing runner	7
 comms.sh: workspace identity (no cmux)	3
-panel dispatch: synthetic-snapshot warning	2
+panel dispatch: synthetic-snapshot warning	4
 loopspec: conformance fixtures	1
 multi-agent: registry contract	15
 multi-agent: sender enforcement + grok inbox round-trip	2
