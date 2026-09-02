@@ -68,14 +68,31 @@ route `runphase` then refused — surfacing as "codex was NOT spawned … likely
 i.e. blaming a broken install for a deliberate change. Transport and runner must be gated on the
 same predicate or they drift.
 
-**Test surgery remaining — 74 assertions across 4 sections**, measured with the code in place:
-- `runphase v0: headless delivery via stubbed codex` — 38 of 45 fail. Mostly DELETE: they specify
-  the self-send prompt, direct CLI argv, child-env propagation, headless routing.
-- `runphase step 2: claude backend, direction pickup, hold, watchdog` — 24 of 33. Same shape.
-- `the coordinator's event log` — 8. These are NOT about the deleted path: the fixtures drive a
-  codex turn and relied on headless to spawn it. RE-POINT to ACP (an acpx stub in PATH) or grok.
-- `comms.sh: transport selection` — 4. Semantics changed on purpose; retarget to assert headless
-  is grok-only and refused for codex.
+**Test surgery: 12 of 74 DONE, 62 remaining.**
+
+Done — and every one of these was RE-POINTED, not deleted, because the coverage was still real:
+- `the coordinator's event log` (8) — criterion 4 is transport-agnostic: it needs A detached
+  runner, not a codex one. Re-pointed to grok, which keeps headless. Added `GROK_STUB_HANG`
+  mirroring `CODEX_STUB_HANG` for the killed-runner fixture. **Green.**
+- `comms.sh: transport selection` (4) — retargeted to grok, PLUS a new assertion that headless is
+  REFUSED for codex, so the new rule is pinned rather than merely un-contradicted. **Green.**
+  One of these four was NOT an obsolete test but a REGRESSION I introduced: removing headless made
+  a codex loop fall through to `cmux`, and a pane nudge is the SAME self-send model in another
+  costume (live agent reads and replies itself, no parent stamp, no pinned artifact). The ladder
+  now returns `mailbox` for an ACP-only provider instead of taking a pane.
+
+**Remaining 62, and the survivor analysis that decides delete-vs-repoint** (do NOT bulk-delete):
+- `runphase v0: headless delivery via stubbed codex` — 38 of 45 fail. The 7 SURVIVORS are:
+  RESULT-no-longer-asserts-headless; headless-never-touches-cmux; await-non-zero-on-failed;
+  failed-turn-shouts-ACTION-NEEDED; await-non-zero-on-timeout; one-shot-creates-no-thread-state;
+  missing-runner-warning-names-the-default. Several of those are about the HEADLESS PATH IN
+  GENERAL, which grok still uses — so deleting the section wholesale would drop grok's coverage of
+  them. The section's SUBJECT (codex headless) is gone; its MECHANICS coverage is not. Prefer
+  re-pointing the section to grok and deleting only the codex-argv / self-send-prompt /
+  child-env assertions.
+- `runphase step 2: claude backend, direction pickup, hold, watchdog` — 24 of 33. The 9 SURVIVORS
+  are hold/release/watchdog and await-non-zero — transport-agnostic and valuable. These MUST be
+  preserved; only the claude-headless-specific assertions go.
 
 **The removal map, computed rather than estimated (2026-09-01).**
 
