@@ -502,7 +502,7 @@ GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_D
 # copy an earlier install left behind — a stale skill left callable is exactly what the
 # RETIRED_* mechanism exists to prevent. Seed one first, or this proves nothing. (S4-3.)
 mkdir -p "$GHOME/skills/read-from-claude" && printf 'stale\n' > "$GHOME/skills/read-from-claude/SKILL.md"
-(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global --yes >/dev/null 2>&1) || true
+(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1) || true
 [ ! -e "$GHOME/skills/read-from-claude" ] && ok "installing REMOVES a retired Codex skill left by an earlier install" || fail "retired Codex skill survived an install"
 # THE REVIEW BAR IS NOW INSTALLED DATA. It used to be read out of the codex self-send SKILL files
 # at runtime, so step 4's deletion of those templates would have silently removed the reviewer's

@@ -35,7 +35,7 @@ runphase: parent-brokered claude and codex legs over ACP	32
 scope-dial template source contract	8
 templates: bare dollar-digit/dollar-star hygiene	1
 /ask canonical template source contract	10
-loopspec: prompt fragments do not drift from docs/loopspec/fragments/	15
+loopspec: prompt fragments do not drift from docs/loopspec/fragments/	10
 comms.sh: bounded reads (lessons)	20
 comms.sh: bounded reads (archive-search)	10
 comms.sh: help prints its whole header	1

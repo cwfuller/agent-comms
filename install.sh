@@ -53,10 +53,10 @@ usage() {
 Usage: install.sh [--scope=local|global|project|both]
 
 Scopes:
-  local    Install commands/skills into the current project, plus project state.
-  global   Install reusable Claude commands and Codex skills into your home dir.
+  local    Install Claude commands into the current project, plus project state.
+  global   Install reusable Claude commands and helpers into your home dir.
   project  Initialize only repo-local state (.comms, .gitignore, .codex/AGENTS.md).
-  both     Install global commands/skills and initialize this project.
+  both     Install global commands and initialize this project.
 
 With curl:
   curl -fsSL $REPO_RAW/install.sh | bash -s -- --scope=both
