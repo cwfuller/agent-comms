@@ -504,20 +504,26 @@ PROTOCOL
 }
 
 # The exact text previous installers wrote. Ownership evidence — do not edit.
+# FROZEN, BYTE-EXACT. This is not documentation — it is ownership EVIDENCE, compared against
+# a user's existing .codex/AGENTS.md to prove a block was written by an older installer of ours
+# before migrating it. Editing a word here makes every previously-installed block unrecognisable
+# and the migration silently declines to touch it. It mentions cmux because older installers
+# wrote cmux; that is history, not a live instruction, and S4-4 deliberately left it alone.
+# (Walked into exactly this during S4-4: three words changed here reddened 3 assertions.)
 legacy_block_body() {
   cat << 'PROTOCOL'
 ## Agent Communication Protocol
 
-This project uses a local file-based message queue for communication between Claude Code and Codex, delivered over ACP.
+This project uses a local file-based message queue for communication between Claude Code and Codex, with optional cmux auto-delivery.
 
 - **Your inbox:** `.comms/to-codex/` — Claude writes review requests and responses here
 - **Your outbox:** `.comms/to-claude/` — Write your findings and feedback here
 
 **Skills:**
 - `$read-from-claude` — Read the latest message from Claude Code and act on it
-- `$send-to-claude` — Write your findings back to Claude Code and deliver it
+- `$send-to-claude` — Write your findings back to Claude Code and auto-deliver via cmux when available
 
-**Delivery:** `$send-to-claude` hands the message to the runner over ACP. If no runner is available, messages are still written to `.comms/` for manual pickup.
+**Auto-delivery:** When `cmux` is available, `$send-to-claude` automatically types `/read-from-codex` into Claude's pane. Without `cmux`, messages are still written to `.comms/` for manual pickup.
 
 When the user asks you to "check for messages from Claude" or "review what Claude did", use `$read-from-claude`. After completing a review, use `$send-to-claude` to send your findings back.
 PROTOCOL
