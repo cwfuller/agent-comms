@@ -502,8 +502,7 @@ Local file-based message queue between Claude Code and Codex.
 
 Review turns are **parent-brokered over ACP**: the driving session spawns the turn, inlines
 the whole prompt (including the verdict discipline), and stamps and delivers the reply. You do
-not need to read the mailbox or send anything yourself, and there are no `$read-from-claude` /
-`$send-to-claude` skills — they were deleted in step 4.
+not need to read the mailbox or send anything yourself — there are no Codex skills to invoke.
 PROTOCOL
 }
 
