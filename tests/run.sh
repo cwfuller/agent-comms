@@ -4740,7 +4740,10 @@ printf '%s\n' "$TR_MBXS" | grep -qi 'NOT spawned' \
 # these five sections once inherited the suite default. Pin WHICH banners may appear inside a cmux
 # window, so the next tests/run.sh edit fails here instead of running under the wrong transport.
 # (grok, S4-1 r1, advisory.)
-TR_WINDOW="$(grep -c '^export COMMS_DELIVERY=mailbox$' "$REPO/tests/run.sh" || true)"
+# NOTE the ^export anchor: this line itself starts with TR_WINDOW=, so the pattern cannot
+# match its own source. (It briefly did match the harness default after a global cmux->mailbox
+# rewrite edited this pattern too — the assertion caught that immediately, which is the point.)
+TR_WINDOW="$(grep -c '^export COMMS_DELIVERY=cmux$' "$REPO/tests/run.sh" || true)"
 [ "$TR_WINDOW" = "0" ] \
   && ok "no cmux transport window survives anywhere in the corpus" || fail "$TR_WINDOW cmux window(s) remain after S4-4"
 
@@ -4850,10 +4853,11 @@ RPSTUB
 chmod +x "$TR_SANDBOX/runphase.sh"
 run_tr_default() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" "$TR_SANDBOX/comms.sh" "$@"); }
 
-TR_CONSULT_OUT="$(run_tr_deliver deliver codex "$TR_CONSULT" 2>&1 || true)"
-printf '%s\n' "$TR_CONSULT_OUT" | grep -q 'delivered to surface' \
-  && ok "a CONSULT with a live pane is nudged, not spawned headless" \
-  || fail "consult reclassified as a loop (got: $TR_CONSULT_OUT)"
+# The old assertion here required a live pane ("delivered to surface"). cmux is deleted (S4-4),
+# so there is no surface to nudge and the scenario cannot be rebuilt. The rule it protected —
+# deliver classifies from the MESSAGE, not a hardcoded --loop — is still covered by the
+# `run_tr_default transport codex --loop` assertion below and by the workflow-classification
+# assertions in this section. Removed rather than re-pointed at something it does not prove.
 TR_LOOP_OUT="$(run_tr_default deliver codex "$TR_LOOPMSG" 2>&1 || true)"
 printf '%s\n' "$TR_LOOP_OUT" | grep -q 'delivered to surface' \
   && fail "a loop took a pane it was not asked for" \
