@@ -122,19 +122,6 @@ peer_of() { case "$1" in claude) echo codex ;; codex) echo claude ;; esac; }
 # files + print_attach); every other agent gets the generic <name>_session_id.
 session_field_of() { case "$1" in claude) echo claude_session_id ;; codex) echo codex_thread_id ;; *) echo "${1}_session_id" ;; esac; }
 
-# skill_file <name> — resolve the Codex skill text the headless peer should
-# follow. Project-local pin wins (matches the install-shadowing convention),
-# then the global install, then the repo checkout's templates.
-skill_file() {
-  local name="$1" main_root="$2" p
-  for p in \
-    "$main_root/.agents/skills/$name/SKILL.md" \
-    "${CODEX_SKILLS_DIR:-$HOME/.codex/skills}/$name/SKILL.md" \
-    "$HELPER_DIR/../templates/codex-skills/$name/SKILL.md"; do
-    [ -f "$p" ] && { printf '%s' "$p"; return 0; }
-  done
-  return 1
-}
 
 # command_file <name.md> — the Claude-side equivalent of skill_file: resolve
 # the command template a headless Claude turn should follow.

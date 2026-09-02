@@ -29,7 +29,12 @@ RETIRED_COMMANDS="auto-plan.md auto-implement.md auto-full.md fleet.md ask-codex
 # Same rule for helpers: an upgrade that stops copying one leaves it on disk, callable and
 # stale. Removing retired surface is part of installing, not a separate chore.
 RETIRED_HELPERS="fleet.sh"
-CODEX_SKILLS="read-from-claude send-to-claude"
+# The reviewer-side Codex skills were DELETED in step 4 (S4-3). Every review turn is
+# parent-brokered over ACP and `build_grok_prompt` inlines what the child needs, so nothing
+# resolved them any more. Listed as RETIRED so an upgrade REMOVES the copies an earlier
+# install left on disk — a stale skill left callable is the same trap RETIRED_COMMANDS exists
+# for. Owner decision (2026-09-02): full deletion, not retirement-in-place.
+RETIRED_CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
 HELPERS="comms.sh runphase.sh acp.sh"
@@ -321,10 +326,8 @@ install_global_assets() {
     [ -f "$CLAUDE_COMMANDS_DIR/$f" ] && { rm -f "$CLAUDE_COMMANDS_DIR/$f"; echo "  removed retired command /${f%.md}"; }
   done
 
-  echo "  installing global Codex skills..."
-  for skill in $CODEX_SKILLS; do
-    mkdir -p "$CODEX_SKILLS_DIR/$skill"
-    install_file "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md" "$CODEX_SKILLS_DIR/$skill/SKILL.md"
+  for skill in $RETIRED_CODEX_SKILLS; do
+    [ -f "$CODEX_SKILLS_DIR/$skill/SKILL.md" ] && { rm -rf "${CODEX_SKILLS_DIR:?}/$skill"; echo "  removed retired Codex skill $skill"; }
   done
 
   echo "  installing shared helpers to $AGENT_COMMS_HOME..."
@@ -354,10 +357,8 @@ install_local_assets() {
     [ -f "$PROJECT_ROOT/.claude/commands/$f" ] && { rm -f "$PROJECT_ROOT/.claude/commands/$f"; echo "  removed retired command /${f%.md}"; }
   done
 
-  echo "  installing project-local Codex skills..."
-  for skill in $CODEX_SKILLS; do
-    mkdir -p "$PROJECT_ROOT/.agents/skills/$skill"
-    install_file "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md" "$PROJECT_ROOT/.agents/skills/$skill/SKILL.md"
+  for skill in $RETIRED_CODEX_SKILLS; do
+    [ -f "$PROJECT_ROOT/.agents/skills/$skill/SKILL.md" ] && { rm -rf "${PROJECT_ROOT:?}/.agents/skills/$skill"; echo "  removed retired Codex skill $skill"; }
   done
 
   # THE REVIEW BAR, pinned locally. Without this a local-only install — which is also the
@@ -397,11 +398,6 @@ warn_local_shadowing() {
     [ -f "$CLAUDE_COMMANDS_DIR/$f" ] && global_present=true && break
   done
   if [ "$global_present" = false ]; then
-    for skill in $CODEX_SKILLS; do
-      [ -f "$CODEX_SKILLS_DIR/$skill/SKILL.md" ] && global_present=true && break
-    done
-  fi
-  if [ "$global_present" = false ]; then
     for f in $LOOPSPEC_FRAGMENTS; do
       [ -f "$AGENT_COMMS_HOME/loopspec-fragments/$f" ] && global_present=true && break
     done
@@ -411,9 +407,6 @@ warn_local_shadowing() {
   local shadowed=""
   for f in $CLAUDE_COMMANDS; do
     [ -f "$PROJECT_ROOT/.claude/commands/$f" ] && shadowed="$shadowed .claude/commands/$f"
-  done
-  for skill in $CODEX_SKILLS; do
-    [ -f "$PROJECT_ROOT/.agents/skills/$skill/SKILL.md" ] && shadowed="$shadowed .agents/skills/$skill/SKILL.md"
   done
   for h in $HELPERS; do
     [ -f "$PROJECT_ROOT/.agent-comms/$h" ] && shadowed="$shadowed .agent-comms/$h"
@@ -661,13 +654,10 @@ install_agents_block() {
 # Download templates if remote and this scope installs reusable assets.
 if needs_templates && [ "$SOURCE" = "remote" ]; then
   echo "  source: remote ($REPO_RAW)"
-  mkdir -p "$TEMPLATE_DIR/claude-commands" "$TEMPLATE_DIR/codex-skills/read-from-claude" "$TEMPLATE_DIR/codex-skills/send-to-claude"
+  mkdir -p "$TEMPLATE_DIR/claude-commands"
 
   for f in $CLAUDE_COMMANDS; do
     curl -fsSL "$REPO_RAW/templates/claude-commands/$f" -o "$TEMPLATE_DIR/claude-commands/$f"
-  done
-  for skill in $CODEX_SKILLS; do
-    curl -fsSL "$REPO_RAW/templates/codex-skills/$skill/SKILL.md" -o "$TEMPLATE_DIR/codex-skills/$skill/SKILL.md"
   done
   mkdir -p "$HELPER_SRC"
   for h in $HELPERS; do

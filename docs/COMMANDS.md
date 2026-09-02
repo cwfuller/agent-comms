@@ -76,19 +76,11 @@ is the only mode that deletes the other agent's unread mail.
 
 ## Codex skills
 
-### `$read-from-claude`
-
-Mirror of `/read-from-codex` for Codex's inbox. In autonomous mode it reviews
-immediately (no user prompt): round 1 = full contextual review; round 2+ = holistic
-re-review with a blank checklist; every round runs the implement checklist
-(auth/state-transitions/entry-points/async/tests); final round adds a broad quality
-sweep. Verdict bar: default `APPROVE`; `REQUEST_CHANGES` only for ship-stopping issues.
-
-### `$send-to-claude`
-
-Write findings (`### Blocking` / `### Advisory` / `### Process`), copy the loop's
-workflow fields + `thread`, set `in-reply-to`, then atomically validate + deliver +
-archive the inbound via `comms.sh send`.
+The reviewer-side skills `$read-from-claude` and `$send-to-claude` were **DELETED** in step 4
+(S4-3). Every review turn is parent-brokered over ACP and `runphase.sh` inlines the whole
+prompt, so nothing resolved them; they described a codex session authoring and sending its own
+reply, which is the self-send model step 4 removed. `install.sh` removes copies an earlier
+install left on disk.
 
 **Codex sandbox note:** delivery goes over ACP and needs no socket allowance, so the
 `workspace-cmux` permission profile — and the `codex-permissions` and `doctor` commands that

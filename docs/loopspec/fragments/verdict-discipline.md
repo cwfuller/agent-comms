@@ -15,3 +15,8 @@ Keep `APPROVE` and include comments when findings are advisory, such as:
 - Minor cleanup or maintainability improvements
 - Style or preference nits
 - Nice-to-have tests on otherwise low-risk changes
+
+A genuinely new mandatory ask beyond the pinned criteria is an explicit criteria amendment to
+propose (or an Advisory note), never a silent widening of `REQUEST_CHANGES` scope — and an
+amendment proposal alone is non-blocking: it gates the verdict only if the underlying issue
+independently satisfies the verdict discipline above.

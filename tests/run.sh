@@ -498,7 +498,12 @@ GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_D
 [ -x "$GHOME/agent-comms/comms.sh" ] && ok "global scope installs executable helpers (env-overridden)" || fail "global scope installs executable helpers"
 [ -f "$GHOME/commands/auto.md" ] && ok "global scope installs commands (env-overridden)" || fail "global scope installs commands"
 [ -f "$GHOME/commands/ask.md" ] && ok "global scope installs /ask" || fail "global scope installs ask.md"
-[ -f "$GHOME/skills/read-from-claude/SKILL.md" ] && ok "global scope installs skills (env-overridden)" || fail "global scope installs skills"
+# The reviewer-side Codex skills were DELETED in step 4 (S4-3). Installing must now REMOVE a
+# copy an earlier install left behind — a stale skill left callable is exactly what the
+# RETIRED_* mechanism exists to prevent. Seed one first, or this proves nothing. (S4-3.)
+mkdir -p "$GHOME/skills/read-from-claude" && printf 'stale\n' > "$GHOME/skills/read-from-claude/SKILL.md"
+(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global --yes >/dev/null 2>&1) || true
+[ ! -e "$GHOME/skills/read-from-claude" ] && ok "installing REMOVES a retired Codex skill left by an earlier install" || fail "retired Codex skill survived an install"
 # THE REVIEW BAR IS NOW INSTALLED DATA. It used to be read out of the codex self-send SKILL files
 # at runtime, so step 4's deletion of those templates would have silently removed the reviewer's
 # standard — a diff that reads like cleanup. Installed from docs/loopspec/fragments/, which is
@@ -3413,11 +3418,15 @@ grep -q 'copied forward VERBATIM' "$RFC" && grep -q 'amended round N' "$RFC" \
   && ok "reply spec copies acceptance criteria forward with explicit amendments" || fail "read-from-codex criteria lifecycle"
 grep -q 'amendment proposal alone' "$RFC" && grep -c 'amended round N' "$RFC" | grep -q '2' \
   && ok "amendment rule present in reply spec AND auto-full handoff" || fail "amendment rule in both handoff paths"
-RFCL="$REPO/templates/codex-skills/read-from-claude/SKILL.md"
-grep -q 'Judge against the pinned' "$RFCL" && grep -q 'does not move with each' "$RFCL" \
-  && ok "reviewer judges against pinned criteria" || fail "read-from-claude pinned-criteria judging"
-grep -q 'amendment proposal alone is non-blocking' "$RFCL" \
-  && ok "reviewer treats amendment proposals as non-blocking" || fail "read-from-claude amendment non-blocking"
+# These two rules used to live ONLY in the deleted read-from-claude SKILL. Re-pointed at their
+# surviving homes rather than dropped: the pinned-criteria rule is in the prompt builder, and
+# the amendment rule was MOVED into verdict-discipline.md — the fragment runphase inlines into
+# every reviewer prompt — because deleting the skill would otherwise have silently removed a
+# review-bar rule that nothing else carried. (S4-3.)
+grep -q 'Judge against the pinned' "$REPO/helpers/runphase.sh" \
+  && ok "reviewer judges against pinned criteria" || fail "pinned-criteria rule lost"
+grep -q 'amendment proposal alone is non-blocking' "$REPO/docs/loopspec/fragments/verdict-discipline.md" \
+  && ok "reviewer treats amendment proposals as non-blocking" || fail "amendment rule lost with the deleted skill"
 
 section "templates: bare dollar-digit/dollar-star hygiene"
 # INTERNALS editing rule made mechanical: Claude Code substitutes bare dollar-digit
@@ -3499,7 +3508,15 @@ for tf in $(tracked_paths 'templates/claude-commands/*.md' 'templates/codex-skil
 done
 for frag in $(tracked_paths 'docs/loopspec/fragments/*.md'); do
   n="$(basename "$frag" .md)"
-  grep -q "^$n$" "$FRAG_SEEN" && ok "fragment $n is embedded by at least one template" || fail "orphan fragment (no template embeds it): $n"
+  # A fragment is USED if a template embeds it OR a helper resolves it by name at runtime.
+  # Before S4-3 the codex skills embedded verdict-discipline and holistic-rereview as text; now
+  # runphase inlines them into every ACP reviewer prompt instead. Checking only for template
+  # embedding would call the live review bar an orphan and invite deleting it. (S4-3.)
+  if grep -q "^$n$" "$FRAG_SEEN" || grep -rq "fragment_text $n\|fragment_file $n" "$REPO/helpers/"; then
+    ok "fragment $n is used (embedded by a template or resolved at runtime)"
+  else
+    fail "orphan fragment (nothing embeds or resolves it): $n"
+  fi
 done
 # Tripwire: fragment signature phrases must never appear in a template OUTSIDE
 # a marked region — an unmarked copy of normative discipline text would silently

@@ -3510,25 +3510,9 @@ cmd_snapshot() {
   if [ "$with_base" = true ]; then printf '%s\t%s\n' "$id" "${parent:-}"; else printf '%s\n' "$id"; fi
 }
 
-# The reviewer-facing instruction surface, in a fixed order. A grade does not
-# carry across an edit to any of these, so rows are PARTITIONED on this hash,
-# never pooled across it. Local pin wins over global, matching every other
-# resolver in this tool.
-prompt_surface_skill() {  # same precedence as runphase's skill_file — a pin edit
-  # that moved the review bar MUST move this hash, so the search order has to be
-  # identical to the one that actually feeds the reviewer. (grok, live 2026-08-22.)
-  local name="$1" root="$2" p
-  for p in \
-    "$root/.agents/skills/$name/SKILL.md" \
-    "${CODEX_SKILLS_DIR:-$HOME/.codex/skills}/$name/SKILL.md" \
-    "$(dirname "$SELF")/../templates/codex-skills/$name/SKILL.md"; do
-    [ -f "$p" ] && { printf '%s' "$p"; return 0; }
-  done
-  return 1
-}
 
 prompt_surface_files() {
-  local root="$1" p rel glob hit name
+  local root="$1" p rel glob
   for p in \
     ".agent-comms/runphase.sh:$HOME/.agent-comms/runphase.sh" \
     ".claude/commands/auto.md:$HOME/.claude/commands/auto.md" \
@@ -3541,11 +3525,10 @@ prompt_surface_files() {
     else printf 'MISSING %s\n' "$rel"
     fi
   done
-  # The reviewer skills carry the verdict discipline itself — the actual bar.
-  for name in read-from-claude send-to-claude; do
-    hit="$(prompt_surface_skill "$name" "$root" || true)"
-    if [ -n "$hit" ]; then printf '%s\n' "$hit"; else printf 'MISSING %s/SKILL.md\n' "$name"; fi
-  done
+  # The reviewer-side Codex skills used to be hashed here because they carried the verdict
+  # discipline. They were DELETED in step 4 (S4-3): every review turn is parent-brokered over
+  # ACP and `build_grok_prompt` inlines what the child needs, so nothing resolved them. Leaving
+  # them in this list would emit a permanent `MISSING` marker rather than measure a real surface.
 }
 
 cmd_prompt_version() {

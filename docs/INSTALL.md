@@ -21,7 +21,7 @@ Run interactively (no `--scope`) and the installer shows a menu:
 
 | scope | installs | where |
 |---|---|---|
-| `global` | 8 Claude commands, 2 Codex skills, 3 helper scripts | `~/.claude/commands/`, `~/.codex/skills/`, `~/.agent-comms/` |
+| `global` | 8 Claude commands, 3 helper scripts | `~/.claude/commands/`, `~/.codex/skills/`, `~/.agent-comms/` |
 | `project` | per-repo state only | `.comms/{to-codex,to-claude,archive}/`, `.gitignore` entries, `.codex/AGENTS.md` protocol note |
 | `both` | global + project | the recommended pair |
 | `local` | pinned copies of everything into the repo | `.claude/commands/`, `.agents/skills/`, `.agent-comms/` + project state |
@@ -85,7 +85,7 @@ AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" 
 | `AGENT_COMMS_REPO_RAW` | this repo's `main` | raw base URL for remote installs |
 | `AGENT_COMMS_HOME` | `~/.agent-comms` | where global helpers land |
 | `CLAUDE_COMMANDS_DIR` | `~/.claude/commands` | where global commands land |
-| `CODEX_SKILLS_DIR` | `~/.codex/skills` | where global Codex skills land |
+| `CODEX_SKILLS_DIR` | `~/.codex/skills` | where retired Codex skills are removed from |
 
 ## From a clone
 

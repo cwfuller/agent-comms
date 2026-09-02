@@ -16,7 +16,6 @@ docs/loopspec/                 the portable review-loop kernel (spec, schemas, f
                                check.sh, prompt fragments) — vendored by other consumers
 templates/
   claude-commands/*.md         Claude Code slash commands (thin prompt wrappers)
-  codex-skills/*/SKILL.md      Codex skills (thin prompt wrappers)
 tests/run.sh                   hermetic harness (mailbox default) — run before every commit
 docs/                          this documentation + ROADMAP/advisories
 ```
