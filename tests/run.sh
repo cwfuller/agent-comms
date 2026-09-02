@@ -5254,17 +5254,22 @@ mkdir -p "$SC_CLAIM"
 # A pid that is guaranteed dead: start one and reap it. A hardcoded number can be recycled.
 ( sleep 0 ) & SC_DEAD=$!; wait "$SC_DEAD" 2>/dev/null || true
 printf '%s' "$SC_DEAD" > "$SC_CLAIM/pid"
+# Driven by GROK. The CLAIM mechanism is transport-agnostic, but codex is ACP-only since
+# step 4, so a non-ACP codex spawn is refused before it ever reaches the claim — which made
+# the reclaim arm below pass VACUOUSLY (a refusal contains no "already running" either).
+# The live-holder negative control caught it. Re-pointed, not deleted.
 SC_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless \
-    PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider codex --message "$SC_MSG") 2>&1 )"
+    PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider grok --message "$SC_MSG") 2>&1 )"
 case "$SC_OUT" in
   *"already running"*) fail "a claim held by a DEAD pid still wedges the message" ;;
-  *) ok "a stale claim from a dead holder is reclaimed, not honoured" ;;
+  *"spawned runphase"*) ok "a stale claim from a dead holder is reclaimed, not honoured" ;;
+  *) fail "spawn neither reclaimed nor refused — it died for an unrelated reason (got: $SC_OUT)" ;;
 esac
 # NEGATIVE CONTROL: the same setup with a LIVE holder must be refused, or the check above
 # is just "spawn always spawns" and proves nothing about claims at all.
 rm -rf "$SC_CLAIM"; mkdir -p "$SC_CLAIM"; printf '%s' "$$" > "$SC_CLAIM/pid"
 SC_OUT2="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless \
-    PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider codex --message "$SC_MSG") 2>&1 )"
+    PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider grok --message "$SC_MSG") 2>&1 )"
 case "$SC_OUT2" in
   *"already running"*) ok "a claim held by a LIVE pid is honoured (the reclaim is selective)" ;;
   *) fail "the claim is ignored outright — reclaim proves nothing (got: $SC_OUT2)" ;;
