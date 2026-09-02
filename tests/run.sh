@@ -1433,6 +1433,18 @@ echo "$GPICK" | grep -q "NOT spawned" && fail "deliberate pickup must not warn N
 GLONELY="$WORK/lonely-grok"
 mkdir -p "$GLONELY"
 cp "$COMMS" "$GLONELY/comms.sh" && chmod +x "$GLONELY/comms.sh"
+# GROK r3 BLOCKER, pinned behaviourally. On the grok-headless path the DRIVER exports
+# COMMS_DELIVERY=headless; the parent's broker then sends the reply to claude/codex. Pickup
+# used to be consulted INSIDE deliver_headless, i.e. AFTER cmd_transport had already died on
+# headless_ok — so the send failed while broker_stamp's copy made the turn look answered.
+# The reply-to-driver direction must be a no-op, never a refusal and never a "re-run
+# install.sh" lie. The control below proves this is pickup, not a blanket exemption.
+GPB="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=claude PATH="$STUB_BIN:$PATH" "$COMMS" deliver claude) 2>&1 )"
+echo "$GPB" | grep -q "written for pickup" && ok "a reply to the driving session is pickup even under COMMS_DELIVERY=headless" || fail "pickup before transport (got: $GPB)"
+echo "$GPB" | grep -qi "re-run install.sh" && fail "the inherited headless flag still produces the install.sh lie" || ok "no re-run-install.sh lie on the reply-to-driver path"
+GPB_CTL="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=grok PATH="$STUB_BIN:$PATH" "$COMMS" deliver claude) 2>&1 )"
+echo "$GPB_CTL" | grep -q "not available for 'claude'" && ok "a non-pickup claude target still refuses headless (pickup is not a blanket exemption)" || fail "pickup control (got: $GPB_CTL)"
+
 GLONE="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$GLONELY/comms.sh" deliver grok) 2>&1 )"
 echo "$GLONE" | grep -q "runphase.sh was not found" && ok "a missing headless runner degrades with an explicit warning" || fail "missing runphase warning (got: $GLONE)"
 # The warning must not blame an env var the operator never set — headless is the default now.
@@ -4464,6 +4476,16 @@ printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="codex"{print $2}' | grep -qv 'r
   && ok "codex was NOT given reviewer-consult-only (that would relax runphase's non-ACP guard)" || fail "registry relaxed for codex"
 printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="claude"{print $2}' | grep -qv 'reviewer-consult-only' \
   && ok "claude was NOT given reviewer-consult-only either" || fail "registry relaxed for claude"
+# CAPABILITY DRIFT, caught independently of cmd_transport. The registry is a SECOND source of
+# routing truth: a caller reading it instead of the selector would infer a direct headless route
+# for claude/codex that headless_ok refuses and runphase rejects. grok must still advertise it.
+# (codex, S4-2 r3, blocking + process.)
+printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="claude"||$1=="codex"{print $2}' | grep -q 'headless' \
+  && fail "the registry still advertises a direct headless route for claude/codex" \
+  || ok "claude and codex are not advertised as direct-headless-capable"
+printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="grok"{print $2}' | grep -q 'headless' \
+  && ok "grok still advertises headless (the one provider that keeps a non-ACP route)" \
+  || fail "grok lost its headless capability"
 
 # Prompt parity is the one thing this command must guarantee: an earlier version
 # stamped review_set/artifact_id/role into a copy, which told the child it was a
@@ -4914,6 +4936,10 @@ printf '%s\n' "$G2_RP" | grep -q 'no non-ACP turn to suppress' \
 G2_SP="$( (cd "$GR2" && env -u CMUX_WORKSPACE_ID COMMS_RUNPHASE_VIA= "$REPO/helpers/runphase.sh" spawn --message "$G2_REQ" --provider codex) 2>&1 )" && G2_SPRC=0 || G2_SPRC=$?
 [ "$G2_SPRC" != "0" ] && ok "spawn refuses an ACP-only provider without --via acp" || fail "spawn accepted a non-ACP codex turn"
 printf '%s\n' "$G2_SP" | grep -q '^spawned runphase' && fail "spawn reported success for a turn that cannot run" || ok "a refused spawn prints no pid line"
+# Non-zero + no pid line is satisfied by ANY earlier die, so pin the refusal to text unique to
+# require_acp_transport — the same hole the --no-deliver pin already closed. (grok, r3.)
+printf '%s\n' "$G2_SP" | grep -q 'unstamped, unmounted reply that still reported success' \
+  && ok "the spawn refusal is require_acp_transport's, not an earlier die" || fail "spawn refusal text (got: $G2_SP)"
 
 section "comms.sh: transport selection (no pane must not strand a consult)"
 TR_FIX="$WORK/transport-repo"; mkdir -p "$TR_FIX"; TR_FIX="$(cd "$TR_FIX" && pwd -P)"

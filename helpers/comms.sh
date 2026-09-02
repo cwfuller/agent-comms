@@ -500,8 +500,11 @@ cmd_agents() {
       registry_agents | tr ' ' '\n' | grep -vx "$1" | paste -sd, - | sed 's/,$//'
       ;;
     --supported)
-      printf '%s\tinteractive,headless\n' claude
-      printf '%s\tinteractive,headless\n' codex
+      # NOT 'headless': headless_ok refuses both, and runphase requires --via acp. A caller
+      # reading the registry instead of cmd_transport would infer a route that fails.
+      # (codex, S4-2 r3, blocking.) Do NOT add reviewer-consult-only here — see below.
+      printf '%s\tinteractive,acp\n' claude
+      printf '%s\tinteractive,acp\n' codex
       printf '%s\theadless,reviewer-consult-only\n' grok
       ;;
     *) die "agents: unknown argument '$1' (expected: default | --supported)" ;;
@@ -3951,10 +3954,9 @@ deliver_headless() {
   # this helper needs a synchronous mode or its turns vanish. (Field report from a codex
   # session, 2026-08-26.)
   local target="$1" msgfile="${2:-}"
-  if [ "$target" = "${COMMS_HEADLESS_PICKUP:-}" ]; then
-    echo "headless mode: reply written for pickup — the driving session reads it when this peer turn ends (no nudge needed)"
-    return 0
-  fi
+  # (pickup is resolved in cmd_deliver, BEFORE transport selection — see the note there.
+  # Duplicating it here would be a second owner for one rule, and the copy that ran after
+  # transport is exactly what let headless_ok die first.)
   local rp="$(dirname "$SELF")/runphase.sh"
   export COMMS_RUNPHASE_VIA="${COMMS_RUNPHASE_VIA:-}"
   if [ ! -x "$rp" ]; then
@@ -4176,6 +4178,21 @@ cmd_transport() {
 cmd_deliver() {
   local target="${1:-}" msgfile="${2:-}"
   require_agent "$target" "deliver"
+  # PICKUP IS DECIDED BEFORE TRANSPORT. A reply addressed to the session driving this turn
+  # needs no nudge at all — it is read when the turn exits — so the transport question is moot.
+  # Asking it first was a LIVE BUG on the grok-headless path the templates advertise: the
+  # driver exports COMMS_DELIVERY=headless, the parent's broker sends to claude or codex, and
+  # `cmd_transport` -> `headless_ok` DIED before deliver_headless could consult pickup.
+  # broker_stamp has already copied the reply into the inbox, so the turn still looked answered
+  # while the send failed — bash 3.2 swallows the die and prints a "re-run install.sh" lie,
+  # 4.4+ fails the send outright. Deleting runphase's `export COMMS_DELIVERY=headless` in r1
+  # only stopped it INTRODUCING the flag; it never unset an INHERITED one, so "0 live exports"
+  # was true and beside the point. ONE check, before routing, so no transport can bypass it.
+  # (grok, S4-2 implement r3, blocking.)
+  if [ "$target" = "${COMMS_HEADLESS_PICKUP:-}" ]; then
+    echo "headless mode: reply written for pickup — the driving session reads it when this peer turn ends (no nudge needed)"
+    return 0
+  fi
   # ONE decision point: `transport` owns the routing rules so deliver, the templates,
   # and the docs cannot drift apart. But the MODE is a property of the message, not of
   # the caller: hardcoding --loop here silently reclassified consults and one-shot

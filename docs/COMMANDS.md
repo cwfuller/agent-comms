@@ -117,7 +117,7 @@ agnostic.
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
 | `verdict <file>` | normalized verdict: whitespace-stripped, uppercased, loopspec synonyms mapped (`pass` → `APPROVE`, `fail` → `REQUEST_CHANGES`) |
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
-| `deliver <claude\|codex> [file]` | routes via `transport`, classifying the MESSAGE: one carrying `workflow:` is a loop (headless-first, `spawned`), anything else is a consult/one-shot (live pane first, then ACP — the `acp` route runs a parent-brokered turn through `runphase --via acp`). Prints `delivered to <surface> (<how>)` / `spawned` / manual-pickup / `blocked` (sandboxed socket) / `FAILED`. `COMMS_DELIVERY=cmux` forces the pane; `=headless` forces the runner and is REFUSED for claude/codex, whose self-send path was deleted in step 4; `=mailbox` forces manual pickup — the file is written and nobody is nudged, which is a deliberate outcome and not a failure |
+| `deliver <claude\|codex> [file]` | routes via `transport`, classifying the MESSAGE: one carrying `workflow:` is a loop (ACP-first, `spawned`), anything else is a consult/one-shot (live pane first, then ACP — the `acp` route runs a parent-brokered turn through `runphase --via acp`). Prints `delivered to <surface> (<how>)` / `spawned` / manual-pickup / `blocked` (sandboxed socket) / `FAILED`. `COMMS_DELIVERY=cmux` forces the pane; `=headless` forces the runner and is REFUSED for claude/codex, whose self-send path was deleted in step 4; `=mailbox` forces manual pickup — the file is written and nobody is nudged, which is a deliberate outcome and not a failure |
 | `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`delivered`/`spawned`/`manual`/`blocked`/`failed`) |
 | `reconcile <message-file\|message-id>` | record a successful external/direct nudge; used as the final guarded segment of `RECOVER:` |
 | `bind <claude\|codex> [surface:N]` | pin which surface delivery targets (show current with no arg); successful deliveries auto-refresh it; ignored if the surface disappears |
@@ -245,7 +245,8 @@ reading the cmux tree, which exists to ride out a contention window observed in 
 Every `COMMS_CMUX_BACKOFF` token must be a complete decimal — one malformed token, or a
 whitespace-only value, falls back to the full default rather than to a partial schedule.
 
-Headless-first falls back to a pane **only** when `runphase.sh` is genuinely missing —
+ACP-first falls back to a pane **only** when `runphase.sh` is genuinely missing, and only
+for a provider that still has a non-ACP route (grok) — claude and codex refuse instead —
 flipping the default must not strand every loop on an install where it never landed.
 
 #### The bounded readers
@@ -296,7 +297,7 @@ Node, unsupported agents, or acpx errors — the mailbox path is always availabl
 
 ### `runphase.sh` (experimental)
 
-Headless peer-turn runner, and the host for ACP turns (`run --via acp`). Loops default to **ACP**; headless is the fallback when ACP is unavailable; cmux is opt-in via `--via cmux` / `COMMS_DELIVERY=cmux`.
+Headless peer-turn runner, and the host for ACP turns (`run --via acp`). Loops default to **ACP**; headless is the fallback for grok ONLY (claude and codex refuse a non-ACP turn).
 `deliver`/`send` call `spawn` for you — `await`, `result`, `hold`, and `release` are
 the operator surface:
 

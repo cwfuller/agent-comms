@@ -497,13 +497,17 @@ than reaching for headless or cmux. Consults follow the same rule.
 **Direction awareness.** Replies TO the driving session are a designed no-op: the
 driver reads them when the peer turn exits, so nothing is spawned for that
 direction. runphase marks it by exporting `COMMS_HEADLESS_PICKUP=<driver>` into the
-child's environment; `deliver` no-ops when the target matches. Either agent can
-drive: a Claude session sending to codex spawns a headless Codex turn whose replies
-are picked up, and an interactive Codex sending to claude spawns a headless Claude
-turn symmetrically.
+child's environment; `deliver` no-ops when the target matches. Either agent can drive, but the SPAWNED side is grok: a Claude or Codex session
+sending to grok spawns a headless grok turn whose replies are picked up. The symmetric
+"headless Codex turn" / "headless Claude turn" this example used to describe is REFUSED
+since step 4 — those providers are reached over ACP, where the parent brokers the reply.
+The pickup rule itself is transport-independent and is resolved in `deliver` BEFORE
+transport selection, so an inherited `COMMS_DELIVERY=headless` cannot make the
+reply-to-driver direction fail. (grok, S4-2 r3, blocking.)
 
-**Claude turns** run with `CLAUDECODE` unset (so the child does not detect itself as
-nested inside the driving session) and a non-bypass permission policy:
+**Claude turns over ACP** run with `CLAUDECODE` unset (so the child does not detect
+itself as nested inside the driving session) and a non-bypass permission policy — these
+knobs no longer drive a direct headless Claude arm, which was deleted in step 4:
 `--permission-mode acceptEdits --allowedTools Bash` by default, overridable via
 `COMMS_RUNPHASE_CLAUDE_PERMISSION_MODE` / `COMMS_RUNPHASE_CLAUDE_ALLOWED_TOOLS` /
 `COMMS_RUNPHASE_CLAUDE_ARGS`. Bypass/danger permission flags
@@ -541,8 +545,9 @@ thread-less one-shot messages (use the no-argument hold for a full stop), and ba
 `deliver` resolves only the newest pending message — a held thread's newest message
 shadows retries for other threads, so pass an explicit file to retry a specific one.
 
-The spawned peer is pre-briefed that its reply `send` will report `RESULT: manual` and
-that this is expected — the driving session picks the reply up when the turn ends.
+The spawned peer is pre-briefed that its reply `send` reports a deliberate pickup
+(`RESULT: manual` on a mailbox route) and that this is expected — the driving session
+picks the reply up when the turn ends.
 
 **The inbox is the system of record; an await is only a convenience.** Where a conforming
 reply is produced at all, it is written into the DRIVER's inbox by the detached runner

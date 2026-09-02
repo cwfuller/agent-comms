@@ -10,7 +10,8 @@ install.sh                     installer (all scopes, local or curl-piped)
 helpers/
   comms.sh                     message engine: workspace/list/validate/archive/deliver/send/state/clean
                                + bounded reads: lessons/archive-search
-  runphase.sh                  headless turn runner (COMMS_DELIVERY=headless): spawn → observe → record
+  runphase.sh                  peer-turn runner — ACP for every provider, direct headless for grok
+                               only (COMMS_DELIVERY=headless): spawn → observe → record
 docs/loopspec/                 the portable review-loop kernel (spec, schemas, fixtures,
                                check.sh, prompt fragments) — vendored by other consumers
 templates/

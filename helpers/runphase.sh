@@ -2174,7 +2174,8 @@ cmd_run() {
   # MOUNTS ARE UNIVERSAL NOW. This used to blank the artifact for any non-ACP non-grok turn,
   # because a SELF-SENDING reviewer read the live tree rather than a pinned snapshot — the one
   # place the product's artifact-bound promise did not hold. That path is gone (step 4, S4-2), so
-  # every review turn is artifact-bound and the suppression has nothing left to suppress.
+  # every STAMPED review retains its artifact binding and the suppression has nothing left to
+  # suppress. (Unstamped reviews still read the live tree — pre-existing, filed separately.)
   msg_artifact="$(frontmatter_field "$msg" artifact_id)"
   # SCOPE NOTE, so the next reader does not mistake this for the whole promise. Deleting the
   # self-send arm removed the place that BLANKED an artifact the message actually carried — the
