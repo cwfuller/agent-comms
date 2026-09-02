@@ -104,9 +104,8 @@ byte-exact ownership evidence used to prove a `.codex/AGENTS.md` block is ours b
 **S4-2 already removed cmux as a LOOP FALLBACK** (a pane nudge is self-send by another name), so
 by the time this runs, cmux should be reachable only where it is explicitly asked for.
 
-**S4-2 REMOVAL: code done, test surgery outstanding (2026-09-01).** The behaviour change is
-written and internally coherent on `worktree-selfsend-removal`; the suite is RED by design and the
-remaining work is enumerated below. Do not land until it is green.
+**S4-2 REMOVAL: DONE and green (2026-09-01), pending its review round.** The behaviour change and
+the full test surgery are on `worktree-selfsend-removal`, suite green at 1454 from 74 failures.
 
 Code, done: the 62-line self-send arm deleted (0 self-send instruction sites remain); the ACP-only
 guard for claude/codex; the artifact suppression removed, so EVERY review turn is now

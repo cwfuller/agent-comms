@@ -4964,7 +4964,11 @@ TR_LOOP_DEFAULT="$(run_tr transport codex --loop 2>/dev/null)"
 if bash "$REPO/helpers/acp.sh" supports codex >/dev/null 2>&1; then
   [ "$TR_LOOP_DEFAULT" = "acp" ] && ok "a loop defaults to acp — the cheapest measured transport" || fail "loop default (got: $TR_LOOP_DEFAULT)"
 else
-  [ "$TR_LOOP_DEFAULT" = "headless" ] && ok "with no ACP, a loop falls back to headless" || fail "loop default (got: $TR_LOOP_DEFAULT)"
+  # codex is ACP-ONLY since step 4, so with no ACP there is nowhere honest to go but mailbox —
+  # NOT headless (its self-send path is gone) and NOT a pane (that is self-send under another
+  # name). This branch is idle where ACP works and would have gone red where it does not.
+  # (grok, S4-2 implement r1, advisory.)
+  [ "$TR_LOOP_DEFAULT" = "mailbox" ] && ok "with no ACP, an ACP-only provider's loop says mailbox" || fail "loop default (got: $TR_LOOP_DEFAULT)"
 fi
 [ "$(run_tr_cmux transport codex --loop 2>/dev/null)" != "cmux" ] \
   && ok "a loop does not take a live pane — cmux is opt-in now" || fail "loop took the pane by default"

@@ -2065,7 +2065,7 @@ cmd_run() {
     # is already parent-brokered can keep the promise.
     case "$("$COMMS" agents --supported 2>/dev/null | awk -v a="$provider" -F'\t' '$1==a {print $2}')" in
       *reviewer-consult-only*) ;;
-      *) die "run: --no-deliver is not available for '$provider' without --via acp — that provider authors and sends its own reply, so delivery cannot be suppressed" ;;
+      *) die "run: --no-deliver is not available for '$provider' without --via acp — that provider is ACP-only since step 4, so there is no non-ACP turn to suppress" ;;
     esac
   fi
   case "$provider" in claude|codex|grok) ;; *) die "run: provider must be claude, codex, or grok" ;; esac
@@ -2454,7 +2454,11 @@ cmd_run() {
   # and only when the suite runs inside a headless turn. (codex, panel r1, blocking.)
   # Only the EXPORTED form is dropped; RP_EXPECT_STATE still carries it to teardown.
   unset COMMS_RUNPHASE_EXPECT_STATE
-  export COMMS_DELIVERY=headless          # the child's own sends stay headless
+  # NO `export COMMS_DELIVERY=headless` here. It kept a SELF-SENDING child's own sends on the
+  # headless transport, and no child sends any more — the parent's broker does. Exported, it now
+  # lands on the DRIVER, whose send target is claude or codex, and trips headless_ok. (grok,
+  # S4-2 implement r1, blocking.) COMMS_HEADLESS_PICKUP below is still wanted: it makes a
+  # reply-to-the-driver a no-op instead of spawning a counter-turn.
   # Replies TO the driver are picked up when this turn exits — the child's
   # deliver must no-op for that direction instead of spawning a counter-turn.
   export COMMS_HEADLESS_PICKUP="$peer"
@@ -2544,8 +2548,7 @@ cmd_run() {
       cmd=(claude -p --verbose --output-format stream-json
            --permission-mode "${COMMS_RUNPHASE_CLAUDE_PERMISSION_MODE:-acceptEdits}"
            --allowedTools "${COMMS_RUNPHASE_CLAUDE_ALLOWED_TOOLS:-Bash}"
-           ${extra_dirs[@]+"${extra_dirs[@]}"}
-           ${instr_dirs[@]+"${instr_dirs[@]}"})
+           ${extra_dirs[@]+"${extra_dirs[@]}"})
       # Deliberate word-splitting of extra args (documented limitation: values
       # with embedded spaces are not supported). noglob so a stray * in the
       # args can't expand against the cwd.
