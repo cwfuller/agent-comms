@@ -45,7 +45,12 @@ case the protocol exists to catch.
 **Only `RC` 0 permits working in the shared checkout.** Every other status isolates or
 stops — there is no "probably fine" branch:
 
-- **`RC` 0** — no live peers; the shared checkout is yours to work in.
+- **`RC` 0** — no REGISTERED live peers. That is not the same as "this tree is exclusively
+  mine": presence answers who has CLAIMED, not whether the working tree is clean. An
+  unregistered session, a human, or an open editor can all have uncommitted work here. **Run
+  `git status` before you stage anything**, and treat anything you did not create as someone
+  else's. (Field report 2026-09-02: a session read this line as permission, ran `git add -A`,
+  and swept two files from another session into its commit.)
 - **`RC` 3 or 4** — peers are present (or liveness is unverifiable, which counts as
   present). Isolate: `helpers/comms.sh worktree new <slug>` and work in that worktree.
 - **anything else** (e.g. 2, an invalid name; or a helper that failed outright) — the
@@ -241,6 +246,16 @@ runtime, quote the assertion count with it or measure both sides yourself.
   `test:`, `chore:`. No trailers, no attribution footers, no generated-by lines.
 - **Commit only your own paths** (`git commit -- <paths>`): peers may have work staged in
   the shared index, and a bare `git commit` sweeps it into your commit.
+- **Never `git add -A` / `git add .` in a shared checkout.** The path-limited commit above
+  protects the COMMIT; it does not protect the INDEX. `git add -A` stages every dirty file in
+  the tree including work you have never seen, and it leaves it staged for whoever commits
+  next. Stage explicit paths (`git add <paths>`), or verify before committing:
+  ```bash
+  git diff --cached --name-only        # must list ONLY files you edited
+  ```
+  A snapshot pins the WHOLE tree, so foreign files also reach your reviewers as part of the
+  artifact — the author of the 2026-09-02 field report had to hand-write a "please ignore" note
+  to a panel that had already read them.
 - Prefer DRY, single-responsibility shell: one accessor per concern, used by every
   consumer. A validation that a second caller can bypass is the bug shape this codebase
   keeps rediscovering.
