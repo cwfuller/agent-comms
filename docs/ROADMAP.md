@@ -97,6 +97,54 @@ before warm-mount landed. This measurement says even the defensible `/ask` figur
 146 warm, 2026-08-20) does not generalise to a state-reading driver turn. Quote neither as
 evidence for a driver design.
 
+### NEXT: sync the loopspec kernel into symphony, then the RunPhase provider (2026-09-02)
+
+**Symphony's vendored review bar is two months stale.** `elixir/priv/loopspec/PIN` reads
+`ref: d053606f923eca2f80248a1463c3315f0d28a293, synced: 2026-07-06`. Its
+`fragments/verdict-discipline.md` is **689 bytes against this repo's 1451** — it is missing
+everything since July, including the two rules rehomed on 2026-09-02 (the amendment rule, and
+"Process feedback never gates the verdict"). Symphony is grading against an older bar than
+agent-comms. `scripts/sync-loopspec.sh` exists for exactly this; run it and re-pin.
+
+**This came out of an owner question — "are we recreating symphony?" — and the answer was YES,
+for the thing I was about to build.** The July 2026-07-05/06 division stands: agent-comms owns the
+loop KERNEL (loopspec, provider turn contract, runphase) and must stay "BRUTALLY SMALL — no new
+runtime/scheduler/tracker"; symphony owns ORCHESTRATION (scheduler, tracker, governor, merge auth).
+"Do NOT merge the repos."
+
+**`comms.sh auto` is therefore DROPPED as the vehicle** (plan round: both reviewers
+REQUEST_CHANGES with five architectural gaps, before scope was even considered). A bash loop
+driver would duplicate `orchestrator.ex` / `orchestrator_supervisor.ex` / `pipeline_runner.ex` /
+`turn_runner.ex` / `agent_runner.ex` — and would have to re-solve checkpointing, supersession and
+duplicate-dispatch serialisation that symphony already handles.
+
+**What survives from that work, and is still true:**
+- The efficiency case: a driving session accumulates ~3-5k tokens/round of loop mechanics on top
+  of ~14k protocol load, and it ACCUMULATES (median 3 rounds ≈ 27-30k). A command returning a
+  verdict costs ~300.
+- The four-arm measurement: a re-invoked driver reading durable state is correct AND cheap
+  (cold 461 vs warm 422 fresh input; a broken session key cost 438). **No warm-session subsystem
+  is needed** — by anyone, symphony included.
+- codex's structural requirements for ANY loop driver (durable checkpoints either side of every
+  effect; resume from events + `panel status`, never conversational memory; never infer success
+  from a missing event; explicit return codes, not `die` through substitution).
+
+**The right shape instead — two steps, in order:**
+1. **Sync the kernel** (`scripts/sync-loopspec.sh`), re-pin, run symphony's vendored `check.sh`.
+   Cheap, and it fixes a live correctness gap in how symphony grades.
+2. **Add a `RunPhase` ExecutionProvider** in symphony. The contract already exists
+   (`execution_provider.ex`: `start_session/2`, `run_turn/4`, `stop_session/1`) with two
+   implementations — `claude.ex` (35 lines) and `codex.ex` (18). A third sits ALONGSIDE them;
+   nothing is replaced. Symphony keeps deciding what runs and when; the turn executes through
+   `runphase`, inheriting ACP, mount/artifact pinning, parent-broker stamping and containment.
+
+**Gap to close for the headless-command story:** symphony builds an escript (`elixir/bin/symphony`,
+present) and `Tracker.Memory` is real (145 lines, 15 public functions) — but its CLI verbs are
+project/tracker plumbing (`doctor init linear list project repo team workflow`). **No `run`
+verb wired to the memory tracker.** That entrypoint — not a second orchestrator — is what makes
+"one skill-wrappable command that runs a loop" real. Step 5's hard gate (trackerless local mode)
+is closer than the July note implies.
+
 ### Open: `ask` reports a FALSE FAILURE after a successful consult (2026-09-02)
 
 **Observed live.** `comms.sh ask --from claude --to codex --wait --file q.txt` completed the
