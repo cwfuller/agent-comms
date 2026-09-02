@@ -22,7 +22,9 @@ had been INHERITING cmux from the global default now ask for it explicitly. The 
 explicit call sites and assumed that was the dependency; it was not — those five inherited it
 silently and would have changed meaning when cmux is deleted.
 
-**S4-2 (delete self-send): planned, NOT yet implemented. The plan round corrected the approach on
+**S4-2 (delete self-send): LANDED 2026-09-02 as `7fe8d2a`** after four review rounds (double
+APPROVE). The historical plan-round notes below are kept because they record WHY the approach
+changed; they are not open work. The plan round corrected the approach on
 two points, and both corrections are load-bearing — do not skip them.**
 
 1. **Deleting the self-send arm ALONE produces false-success turns, not ACP-only behaviour.**

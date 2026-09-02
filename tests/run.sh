@@ -4893,6 +4893,16 @@ TR_CMUX_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux "$COMMS" transport code
   || fail "cmux request not refused (rc=$TR_CMUX_RC, got: $TR_CMUX_OUT)"
 # ...and the refusal is not cmux-specific special-casing: any unknown transport is refused,
 # which is the hole that let COMMS_DELIVERY=foo silently take the default ladder. (grok, r1.)
+# `ask` is gated at the ROUTER because it WRITES a question file before it ever calls cmd_send.
+# The placement was reviewed as correct but untested: prove the refusal happens before the write.
+# (codex, followups r1, advisory.)
+TR_ASK_BEFORE="$(find "$TR_FIX/.comms" -type f 2>/dev/null | wc -l | tr -d ' ')"
+TR_ASK_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" ask --from claude --to codex "probe") 2>&1 )" && TR_ASK_RC=0 || TR_ASK_RC=$?
+[ "$TR_ASK_RC" != "0" ] && printf '%s\n' "$TR_ASK_OUT" | grep -q 'cmux pane transport was REMOVED' \
+  && ok "ask refuses an unknown transport" || fail "ask did not refuse (rc=$TR_ASK_RC, got: $TR_ASK_OUT)"
+[ "$(find "$TR_FIX/.comms" -type f 2>/dev/null | wc -l | tr -d ' ')" = "$TR_ASK_BEFORE" ] \
+  && ok "a refused ask writes no question file" || fail "ask wrote a question file before refusing"
+
 TR_FOO_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=foo "$COMMS" transport codex --loop) 2>&1 )" && TR_FOO_RC=0 || TR_FOO_RC=$?
 [ "$TR_FOO_RC" != "0" ] && printf '%s\n' "$TR_FOO_OUT" | grep -q "not a known transport" \
   && ok "an unknown COMMS_DELIVERY value is refused, not silently defaulted" \
