@@ -53,6 +53,40 @@ are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnos
 equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
 trusting this number if the corpus has moved.
 
+### S4-4 (delete cmux) — measured map, before anyone starts it (2026-09-01)
+
+**Surface:** 92 `cmux` mentions in `helpers/comms.sh`, and 14 functions defined there:
+`cmux_default_socket_path`, `cmux_socket_path`, `cmd_codex_permissions`, `cmd_doctor`,
+`cmux_pace`, `cmux_backoff_valid`, `cmux_tree`, `pick_surface`, `cmd_bind`,
+`print_direct_recovery`, `cmd_reconcile`, `stable_workspace_name`, `cache_path`, `shell_quote`.
+
+**Test rows that go — 47 assertions across 7 sections:** Codex cmux permission preflight (7),
+deliver via stubbed cmux (7), delivery failure is explicit (2), workspace resilience (11),
+surface binding (4), binding survives a flaky tree (4), sandbox block + reconcile (12).
+
+**DO THE S4-2 LESSON FIRST: check what each function is used for OUTSIDE the cmux paths.** In S4-2
+I deleted a 219-line section without that check and took `RUNPHASE` (94 uses), `run_rp`,
+`rundir_of` and `CODEX_STUB_LOG` with it; the suite died on an unbound variable and the resulting
+failures read as a coverage problem for a while. Current counts to check against: `pick_surface`
+9 uses, `shell_quote` 7, `cache_path` 5, `cmux_tree` 3, `stable_workspace_name` 3,
+`print_direct_recovery` 2. `shell_quote` in particular looks general-purpose, not cmux-specific.
+
+**The `repo_workspace_name` trap, verified rather than assumed.** Its `main -> <repo-name>`
+substitution sits INSIDE `if [ -n "${CMUX_WORKSPACE_ID:-}" ]`, and the function ends
+`printf '%s\n' "${ws:-$root_name}"` — so with no cmux, `ws="main"` is non-empty and it already
+prints `main`. **Deleting that guard is therefore behaviour-preserving for every non-cmux user.**
+Do NOT "fix" it by making the substitution unconditional: that would flip every unpinned non-cmux
+repo on `main` from `main` to `<repo-name>`, changing the message-filename prefix and hiding
+pending messages and thread state behind the glob — field report #3's failure mode. Pin the `main`
+case with an assertion (nothing in the corpus covers it today; `tests/run.sh` uses branch
+`feature-helper-tests`).
+
+**Leave `install.sh`'s `legacy_block_body()` alone** despite containing the string "cmux": it is
+byte-exact ownership evidence used to prove a `.codex/AGENTS.md` block is ours before migrating it.
+
+**S4-2 already removed cmux as a LOOP FALLBACK** (a pane nudge is self-send by another name), so
+by the time this runs, cmux should be reachable only where it is explicitly asked for.
+
 **S4-2 REMOVAL: code done, test surgery outstanding (2026-09-01).** The behaviour change is
 written and internally coherent on `worktree-selfsend-removal`; the suite is RED by design and the
 remaining work is enumerated below. Do not land until it is green.
