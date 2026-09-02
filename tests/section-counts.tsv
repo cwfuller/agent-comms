@@ -20,7 +20,7 @@ comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery)	4
 comms.sh v2.2: sandbox block emits direct recovery + state reconciliation	12
 comms.sh v2.1.1: status shouts when a loop stalled undelivered	2
 comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line	3
-runphase step 2: hold, release, and the stalled watchdog	12
+runphase step 2: hold, release, and the stalled watchdog	13
 loopspec: conformance fixtures	1
 multi-agent: registry contract	15
 multi-agent: sender enforcement + grok inbox round-trip	2

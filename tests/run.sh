@@ -1343,6 +1343,27 @@ case "$(echo "$RES_OUT2" | tail -1)" in "RESULT: spawned"*) ok "released thread 
 run_rp await "$(rundir_of "$RES_OUT2")" --timeout-secs 30 >/dev/null 2>&1 || true
 
 # -- global hold blocks everything --
+# A pending message is a PRECONDITION: `deliver` with an empty inbox warns and returns before it
+# ever consults the hold marker, so without this the assertion would pass or fail on inbox state
+# rather than on the hold. The earlier sends archived theirs.
+GH_MSG="$REPO_FIX/.comms/to-grok/feature-helper-tests_2026-06-04T15-09-00_ghold-1.md"
+cat > "$GH_MSG" <<'GHOLDEOF'
+---
+type: review-request
+from: claude
+timestamp: 2026-06-04T15:09:00Z
+message_id: feature-helper-tests_2026-06-04T15-09-00_ghold-1
+workspace: feature-helper-tests
+thread: loop-ghold
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## Plan
+global hold fixture
+GHOLDEOF
 run_rp hold >/dev/null
 GH_OUT="$(run_headless deliver grok)"
 echo "$GH_OUT" | grep -q "HELD:" && ok "global hold blocks all spawns" || fail "global hold (got: $GH_OUT)"
