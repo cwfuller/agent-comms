@@ -9,3 +9,13 @@
 # review artifact — reviewers then see two of every file and cannot tell which is under
 # review. Worktrees are ephemeral working state, never part of an artifact.
 .claude/worktrees/
+
+# Install OUTPUT, not source. `install.sh --scope=local` writes these from templates/ and
+# docs/loopspec/fragments/; checking them in would duplicate the source and invite drift (an
+# audit already caught the installed auto.md 298 bytes behind its template). They must stay on
+# disk — the three-tier resolver deliberately prefers a project pin, and `prompt-version` hashes
+# whichever copy actually resolves — but they are machine-local state, not repository content.
+# Ignoring them also keeps them OUT of review artifacts: snapshot-on-send captures untracked
+# files, so every un-ignored install copy is duplicated into every snapshot a reviewer reads.
+.claude/commands/
+.agents/
