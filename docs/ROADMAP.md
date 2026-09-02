@@ -813,6 +813,26 @@ last delivery wasn't a real nudge.
 
 ## Field-report credits
 
+**2026-09-02, a claude session — presence RC 0 is not tree exclusivity.** Working in the shared
+checkout after `presence` returned RC 0, it ran `git add -A` and swept two files it had never
+touched (a new 456-line `qbo-correct-triangle-ins.ts` and a modified `qbo-post-triangle-ins.ts`,
+another session's uncommitted work) into its commit. It caught this on the diff stat, backed the
+commit out, re-committed only its own eight paths, and verified the foreign files byte-identical
+to a backup — they were left untouched and uncommitted. Two documentation gaps closed as a result:
+`AGENTS.md` promised "the shared checkout is yours to work in" for RC 0 (presence answers who has
+CLAIMED, not whether the tree is clean), and the commit rule covered only a bare `git commit`
+while saying nothing about `git add -A`, which defeats it upstream by staging foreign work into
+the shared index. It also noted the snapshot pins the WHOLE tree, so the foreign files reached its
+reviewers and it had to hand-write a "please ignore" note.
+
+**Known limit of this fix:** it is documentation, and this repo's own rule is that "a validation
+a second caller can bypass is the bug shape this codebase keeps rediscovering." A mechanical guard
+is not obviously available — the tooling cannot know which dirty files are "yours" — so the honest
+state is a rule plus a verification step (`git diff --cached --name-only`), not an enforced
+invariant. Worth revisiting if someone finds a check that does not need that knowledge.
+
+
+
 PR 3 items originate from in-the-field reflections by the agents running these loops
 (thread scoping, reply wake-up, state.json, advisory evaporation, picker fragility,
 reviewer-failure lane) and two Codex reviewers (comms CLI, delivery acks, schema

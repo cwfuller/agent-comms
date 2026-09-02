@@ -49,8 +49,8 @@ stops — there is no "probably fine" branch:
   mine": presence answers who has CLAIMED, not whether the working tree is clean. An
   unregistered session, a human, or an open editor can all have uncommitted work here. **Run
   `git status` before you stage anything**, and treat anything you did not create as someone
-  else's. (Field report 2026-09-02: a session read this line as permission, ran `git add -A`,
-  and swept two files from another session into its commit.)
+  else's. (Field report 2026-09-02, a **claude** session: it read this line as permission, ran
+  `git add -A`, and swept two files from a different session into its commit.)
 - **`RC` 3 or 4** — peers are present (or liveness is unverifiable, which counts as
   present). Isolate: `helpers/comms.sh worktree new <slug>` and work in that worktree.
 - **anything else** (e.g. 2, an invalid name; or a helper that failed outright) — the
@@ -254,8 +254,8 @@ runtime, quote the assertion count with it or measure both sides yourself.
   git diff --cached --name-only        # must list ONLY files you edited
   ```
   A snapshot pins the WHOLE tree, so foreign files also reach your reviewers as part of the
-  artifact — the author of the 2026-09-02 field report had to hand-write a "please ignore" note
-  to a panel that had already read them.
+  artifact — the claude session that filed this had to hand-write a "please ignore"
+  note to a panel that had already read the foreign files.
 - Prefer DRY, single-responsibility shell: one accessor per concern, used by every
   consumer. A validation that a second caller can bypass is the bug shape this codebase
   keeps rediscovering.
