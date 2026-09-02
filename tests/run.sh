@@ -3457,7 +3457,13 @@ grep -A24 'done! installed:' "$REPO/install.sh" | grep -q 'read-from-claude\|sen
 # this, reverting the fragment loop in prompt_surface_files leaves the suite green while grades
 # pool across different review standards. Proven by construction: edit, compare, restore.
 # (codex + grok, S4-3 r2, corroborated advisory — it protects this round's blocker.)
-PV_FRAG="$REPO/docs/loopspec/fragments/verdict-discipline.md"
+# Edit the copy the RESOLVER SELECTS, not a hardcoded path. The three-tier order is project
+# pin -> AGENT_COMMS_HOME -> repo docs/, and earlier sections export AGENT_COMMS_HOME at a temp
+# install, so a hardcoded docs/ path is invisible to the hash and this "lock" would report
+# BAR-BLIND against a working implementation. `--list` prints exactly what gets hashed.
+# (Found by this assertion failing on its own first run.)
+PV_FRAG="$( (cd "$REPO" && "$COMMS" prompt-version --list 2>/dev/null) | grep 'verdict-discipline\.md$' | head -1)"
+[ -n "$PV_FRAG" ] && [ -f "$PV_FRAG" ] || fail "prompt-version does not resolve verdict-discipline at all (got: $PV_FRAG)"
 PV_BAK="$WORK/verdict-discipline.bak"; cp "$PV_FRAG" "$PV_BAK"
 PV_BEFORE="$(cd "$REPO" && "$COMMS" prompt-version 2>/dev/null)"
 printf '\n<!-- prompt-version probe -->\n' >> "$PV_FRAG"
