@@ -70,6 +70,48 @@ live tree and saying so explicitly — either way its own increment, not a rider
 
 The ACP-only entrance rule IS pinned: a direct non-ACP run is refused for both claude and codex.
 
+### S4-3 LANDED (2026-09-02) — reviewer-side Codex skills DELETED
+
+Owner override of the roadmap's retire-in-place plan: they are the only user, so the
+grading-ledger partition the `RETIRED_*` caution existed to avoid does not apply. **That
+caution remains correct for any other consumer.**
+
+Removed: both skill dirs, the orphaned `result-headless-codex-side` fragment, `skill_file()`
+(zero callers since S4-2), `prompt_surface_skill()`, and the skill loop in
+`prompt_surface_files`. `install.sh` lists them as `RETIRED_CODEX_SKILLS` and REMOVES copies an
+earlier install left on disk, globally and from a project-local pin.
+
+**Two rules lived only in the deleted skills.** The amendment rule (*"an amendment proposal
+alone is non-blocking"*) moved to `verdict-discipline.md`; the final-round broad quality sweep
+moved into `build_grok_prompt`, gated on `round >= max-rounds`. Both had been dark on the ACP
+path since S4-2 took `skill_file`'s callers, so this deletion removed the last COPY, not a live
+rule — but the text would have been gone.
+
+**Review caught two blockers, both in surfaces I had not swept:**
+- `install.sh` writes a managed block into `.codex/AGENTS.md` — loaded on every Codex turn —
+  still naming the deleted skills. I had swept `templates/` and `docs/`, never the block the
+  installer GENERATES. A fresh install removed the tools and told the agent to use them.
+- Removing the skills from `prompt_surface_files` made `prompt-version` **bar-blind**: the hash
+  covered no verdict discipline at all, so editing the bar would pool grades across standards.
+  Fixed by hashing both fragments through `fragment_file`'s three-tier precedence, and now
+  LOCKED by an assertion that edits the fragment, compares, and restores.
+
+**Reviewer answers to the open design questions (both agreed):**
+- KEEP the six-file `prompt-version` surface. Driver templates shape the artifact the reviewer
+  is judged against; false partitions from driver churn are cheaper than pooling.
+- LEAVE the orphan check as a textual `fragment_text`/`fragment_file` grep for now. Tightening
+  to the `build_grok_prompt` call chain is a real follow-up (`skill_file` was exactly the dead
+  resolver this shape would bless), but a `fragment_text "$n"` refactor would read as unused and
+  invite deleting a live bar. **Separate increment.**
+- DO NOT parent-inline `comms.sh lessons --surface`. The child is told not to run comms helpers,
+  so the round-1 lessons consult cannot be restored as-is; parent-side bounded selection needs a
+  keyword, a byte budget, and a decision about whether `docs/advisories.md` is in the mount.
+  **Product work, not leftover text.**
+- The "Process feedback never gates the verdict" rule is also unrestored and predates this
+  deletion on the ACP path. **Separate increment.**
+- A project-local pin removal assertion is worth adding when convenient; hand verification plus
+  the global-upgrade warning was judged sufficient to ship.
+
 ### S4-4 LANDED (2026-09-02) — four rounds, both reviewers APPROVE
 
 Deleted: 14 functions, both pane arms of the transport ladder, the inline keystroke delivery,

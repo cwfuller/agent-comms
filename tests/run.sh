@@ -2852,7 +2852,9 @@ check_not "friction rejects a severity outside 1-5" run_fr friction --severity 9
 # Was pointed at the deleted read-from-claude SKILL. A missing file makes `grep` non-zero, so
 # `! grep` was TRUE and this passed without inspecting any reviewer surface at all. Re-pointed
 # at the prompt the child actually receives. (codex + grok, S4-3 r1.)
-grep -q 'friction' "$REPO/helpers/comms.sh" && ! grep -q 'friction' "$REPO/helpers/runphase.sh" \
+# Pin the LOG, not the word: a legitimate "report friction with the comms process" instruction
+# in the prompt is fine, and grepping bare `friction` would fail on it. (grok, S4-3 r2.)
+grep -q 'friction' "$REPO/helpers/comms.sh" && ! grep -q 'friction.tsv' "$REPO/helpers/runphase.sh" \
   && ok "reviewers are never pointed at the friction log" || fail "friction leaked into reviewer context"
 grep -q 'friction --thread' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "the loop tells the driver to record friction as it happens" || fail "friction not wired into the loop"
@@ -3447,6 +3449,27 @@ printf '%s' "$AGB" | grep -q 'read-from-claude\|send-to-claude' \
   || ok "the live AGENTS.md block names no deleted skill"
 printf '%s' "$AGB" | grep -q 'parent-brokered' \
   && ok "the live AGENTS.md block describes the parent-brokered model" || fail "AGENTS.md block does not describe the surviving workflow"
+# The success banner is a second surface that advertised the skills; grep it too. (codex, r2.)
+grep -A24 'done! installed:' "$REPO/install.sh" | grep -q 'read-from-claude\|send-to-claude' \
+  && fail "the installer banner still claims it installed a deleted skill" \
+  || ok "the installer banner claims no deleted skill"
+# THE BAR-BLINDNESS LOCK. prompt-version must move when the verdict discipline moves; without
+# this, reverting the fragment loop in prompt_surface_files leaves the suite green while grades
+# pool across different review standards. Proven by construction: edit, compare, restore.
+# (codex + grok, S4-3 r2, corroborated advisory — it protects this round's blocker.)
+PV_FRAG="$REPO/docs/loopspec/fragments/verdict-discipline.md"
+PV_BAK="$WORK/verdict-discipline.bak"; cp "$PV_FRAG" "$PV_BAK"
+PV_BEFORE="$(cd "$REPO" && "$COMMS" prompt-version 2>/dev/null)"
+printf '\n<!-- prompt-version probe -->\n' >> "$PV_FRAG"
+PV_AFTER="$(cd "$REPO" && "$COMMS" prompt-version 2>/dev/null)"
+cp "$PV_BAK" "$PV_FRAG"
+PV_RESTORED="$(cd "$REPO" && "$COMMS" prompt-version 2>/dev/null)"
+[ -n "$PV_BEFORE" ] && [ "$PV_BEFORE" != "$PV_AFTER" ] \
+  && ok "editing the verdict discipline shifts prompt-version (the bar is hashed)" \
+  || fail "prompt-version is BAR-BLIND: a verdict-discipline edit did not move it ($PV_BEFORE -> $PV_AFTER)"
+[ "$PV_BEFORE" = "$PV_RESTORED" ] \
+  && ok "reverting the fragment restores prompt-version (the probe is not a one-way change)" \
+  || fail "prompt-version did not restore after reverting the probe ($PV_BEFORE -> $PV_RESTORED)"
 
 section "templates: bare dollar-digit/dollar-star hygiene"
 # INTERNALS editing rule made mechanical: Claude Code substitutes bare dollar-digit
