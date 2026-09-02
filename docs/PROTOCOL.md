@@ -485,7 +485,14 @@ provider's CLI in the background — `codex exec --json` for Codex, `claude -p
 `.comms/logs/<message_id>.<epoch>.<pid>/` (`prompt.md`, `events.ndjson` JSONL event
 log, `result.json`, `pid`, `runner.log`), and mirrors the outcome into thread state
 on exit. cmux is never touched; identity is a process handle, not a pane guess.
-A loop is unattended work and should not require an open pane. Since 2026-08-26 the loop default is **ACP** (a warm per-thread session, ~1k fresh input tokens per round against ~115k for a cold headless spawn); headless is the fallback when ACP is unavailable, and cmux is opt-in via `--via cmux` / `COMMS_DELIVERY=cmux`. Consults prefer a live pane and fall back to ACP.
+A loop is unattended work and should not require an open pane. **Since step 4 (2026-09-01), claude
+and codex review turns are ACP-ONLY**: the self-send path they used on the headless transport was
+deleted, so a non-ACP turn for those providers fails closed rather than degrading — it would
+otherwise produce an unstamped, unmounted reply that still reported success. Headless survives for
+**grok only**, which is parent-brokered on its direct path. When ACP is unavailable for claude or
+codex the honest outcome is `mailbox` (written, nobody nudged); a loop is never silently routed to
+a pane, because a pane nudge is the same self-send model under another name. Repair ACP rather
+than reaching for headless or cmux. Consults follow the same rule.
 
 **Direction awareness.** Replies TO the driving session are a designed no-op: the
 driver reads them when the peer turn exits, so nothing is spawned for that

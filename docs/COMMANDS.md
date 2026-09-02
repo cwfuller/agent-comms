@@ -117,7 +117,7 @@ agnostic.
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
 | `verdict <file>` | normalized verdict: whitespace-stripped, uppercased, loopspec synonyms mapped (`pass` → `APPROVE`, `fail` → `REQUEST_CHANGES`) |
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
-| `deliver <claude\|codex> [file]` | routes via `transport`, classifying the MESSAGE: one carrying `workflow:` is a loop (headless-first, `spawned`), anything else is a consult/one-shot (live pane first, then ACP — the `acp` route runs a parent-brokered turn through `runphase --via acp`). Prints `delivered to <surface> (<how>)` / `spawned` / manual-pickup / `blocked` (sandboxed socket) / `FAILED`. `COMMS_DELIVERY=cmux` forces the pane; `=headless` forces the runner; `=mailbox` forces manual pickup — the file is written and nobody is nudged, which is a deliberate outcome and not a failure |
+| `deliver <claude\|codex> [file]` | routes via `transport`, classifying the MESSAGE: one carrying `workflow:` is a loop (headless-first, `spawned`), anything else is a consult/one-shot (live pane first, then ACP — the `acp` route runs a parent-brokered turn through `runphase --via acp`). Prints `delivered to <surface> (<how>)` / `spawned` / manual-pickup / `blocked` (sandboxed socket) / `FAILED`. `COMMS_DELIVERY=cmux` forces the pane; `=headless` forces the runner and is REFUSED for claude/codex, whose self-send path was deleted in step 4; `=mailbox` forces manual pickup — the file is written and nobody is nudged, which is a deliberate outcome and not a failure |
 | `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`delivered`/`spawned`/`manual`/`blocked`/`failed`) |
 | `reconcile <message-file\|message-id>` | record a successful external/direct nudge; used as the final guarded segment of `RECOVER:` |
 | `bind <claude\|codex> [surface:N]` | pin which surface delivery targets (show current with no arg); successful deliveries auto-refresh it; ignored if the surface disappears |
@@ -219,14 +219,14 @@ is not semantic attribution), and any score. Disjoint findings show diversity, n
 quality; converting that into a routing claim needs a human verdict on a sample of the
 findings one reviewer raised and the other did not.
 
-#### Transport selection — loops are headless-first
+#### Transport selection — loops are ACP-first, and ACP-ONLY for claude/codex
 
 `comms.sh transport <agent> [--loop]` is the single decision point; `deliver`, the
 templates, and these docs all read from it rather than each re-deciding.
 
 | context | default | why |
 |---|---|---|
-| **loop** (`auto-*`) | `acp` → `headless` → `cmux` | cost, measured on one real review turn in this repo: cmux ~43–85k fresh input tokens, cold headless ~115k, warm ACP **~1,061**. A cold spawn rebuilds context from nothing each round; a live pane keeps the conversation but still re-sends a large uncached prefix per model call. Only a named per-thread ACP session makes round N pay a delta |
+| **loop** (`auto-*`) | `acp` → `headless` (**grok only**) → `mailbox` | cost, measured on one real review turn in this repo: cmux ~43–85k fresh input tokens, cold headless ~115k, warm ACP **~1,061**. A cold spawn rebuilds context from nothing each round; a live pane keeps the conversation but still re-sends a large uncached prefix per model call. Only a named per-thread ACP session makes round N pay a delta |
 | **consult** (`/ask`) | pane if one is live, else `acp` | a consult is synchronous by nature; ACP needs no pane and warm sessions cost ~1/127 the input tokens |
 
 Opting back into the watchable pane: `--via cmux` on an `auto-*` command, or
