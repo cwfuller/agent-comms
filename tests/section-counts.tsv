@@ -21,6 +21,7 @@ comms.sh v2.2: sandbox block emits direct recovery + state reconciliation	12
 comms.sh v2.1.1: status shouts when a loop stalled undelivered	2
 comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line	3
 runphase step 2: hold, release, and the stalled watchdog	12
+headless delivery: self-pickup suppression and a missing runner	4
 loopspec: conformance fixtures	1
 multi-agent: registry contract	15
 multi-agent: sender enforcement + grok inbox round-trip	2
@@ -51,7 +52,7 @@ grading pilot: shadow role + run identity are stamped, not inferred	3
 grading pilot: snapshot RETAINS the reviewed tree (a hash alone cannot)	8
 grading pilot: prompt-version partitions grades across an instruction edit	8
 grading pilot: shadow reviewer is a MEASUREMENT, structurally unable to gate	51
-grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims)	41
+grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims)	43
 comms.sh: transport selection (no pane must not strand a consult)	47
 panel: N parallel 2-party legs over ONE artifact	56
 ask: the driver-neutral consult verb	23

@@ -1397,6 +1397,47 @@ echo "$$" > "$WD_RUN/pid"
 run_comms stalled 15 | grep -q "runner alive" && ok "watchdog reports a live runner still working" || fail "watchdog alive (got: $(run_comms stalled 15))"
 rm -f "$REPO_FIX/.comms/state/feature-helper-tests_loop-watchdog.json"
 
+section "headless delivery: self-pickup suppression and a missing runner"
+# RESTORED from the deleted `runphase v0` section and re-pointed at GROK, the only provider
+# still on the headless transport after step 4. My tombstone claimed every assertion in that
+# section was dead or vacuous once codex self-send went away. That was TOO BROAD: all three
+# behaviours below still live in `deliver_headless`, and deleting them left the SELF-NUDGE
+# RECURSION GUARD uncovered anywhere in the corpus — a grok peer that nudged itself would
+# spawn turns forever. (grok, S4-2 implement r1, advisory.)
+# Each pair asserts the POSITIVE first: a lone "does not warn X" passes vacuously when
+# delivery failed outright for an unrelated reason.
+PICKV="$REPO_FIX/.comms/to-grok/feature-helper-tests_2026-06-04T18-00-00_pickup-1.md"
+mkdir -p "$REPO_FIX/.comms/to-grok"
+cat > "$PICKV" <<'PICKEOF'
+---
+type: review-request
+from: claude
+timestamp: 2026-06-04T18:00:00Z
+message_id: feature-helper-tests_2026-06-04T18-00-00_pickup-1
+workspace: feature-helper-tests
+thread: loop-pickup
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## Plan
+pickup fixture
+PICKEOF
+
+GPICK="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=grok PATH="$STUB_BIN:$PATH" "$COMMS" deliver grok) 2>&1 )"
+echo "$GPICK" | grep -q "written for pickup" && ok "a headless peer leaves its reply for pickup instead of nudging itself" || fail "self-pickup suppression (got: $GPICK)"
+echo "$GPICK" | grep -q "NOT spawned" && fail "deliberate pickup must not warn NOT spawned" || ok "deliberate pickup is not reported as a failed spawn"
+
+GLONELY="$WORK/lonely-grok"
+mkdir -p "$GLONELY"
+cp "$COMMS" "$GLONELY/comms.sh" && chmod +x "$GLONELY/comms.sh"
+GLONE="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$GLONELY/comms.sh" deliver grok) 2>&1 )"
+echo "$GLONE" | grep -q "runphase.sh was not found" && ok "a missing headless runner degrades with an explicit warning" || fail "missing runphase warning (got: $GLONE)"
+# The warning must not blame an env var the operator never set — headless is the default now.
+echo "$GLONE" | grep -q "COMMS_DELIVERY=headless but" && fail "warning blames an unset env var" || ok "the missing-runner warning does not blame an unset env var"
+
 section "loopspec: conformance fixtures"
 if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then
   ok "loopspec conformance: $(tail -1 "$WORK/loopspec.out")"
@@ -4860,9 +4901,19 @@ G2_SIDE_V="$(cat "$(find "$GR2/.comms/grades/shadow" -path '*g2-ver*' -name 'gro
 case "$G2_LIVE_V" in *upgraded-midrun*) fail "the live row picked up a mid-review CLI upgrade" ;; *) ok "a mid-review CLI upgrade does not reach the row" ;; esac
 
 G2_RP="$( (cd "$GR2" && env -u CMUX_WORKSPACE_ID "$REPO/helpers/runphase.sh" run --message "$G2_REQ" --dir "$WORK/g2rp" --provider codex --no-deliver) 2>&1 )" && G2_RPRC=0 || G2_RPRC=$?
-[ "$G2_RPRC" != "0" ] && ok "runphase refuses --no-deliver for a self-sending provider" || fail "runphase --no-deliver accepted for codex"
-printf '%s\n' "$G2_RP" | grep -q 'authors and sends its own reply' \
+[ "$G2_RPRC" != "0" ] && ok "runphase refuses --no-deliver for an ACP-only provider" || fail "runphase --no-deliver accepted for codex"
+# Pin text UNIQUE to the --no-deliver refusal: a bare 'ACP-only' also matches the guard
+# below it, so this assertion would still pass if the wrong die fired first.
+printf '%s\n' "$G2_RP" | grep -q 'no non-ACP turn to suppress' \
   && ok "the runphase refusal explains why" || fail "runphase refusal message"
+
+# SPAWN must refuse on the SAME condition as run. It execs `run` detached via nohup, so before
+# this guard the operator got `spawned runphase pid=NNN` and exit 0 while the child died on the
+# ACP-only check a second later — a false success at the spawn layer, which is exactly what S4-2
+# exists to remove. One predicate (`require_acp_transport`), two callers. (grok, S4-2 r1.)
+G2_SP="$( (cd "$GR2" && env -u CMUX_WORKSPACE_ID COMMS_RUNPHASE_VIA= "$REPO/helpers/runphase.sh" spawn --message "$G2_REQ" --provider codex) 2>&1 )" && G2_SPRC=0 || G2_SPRC=$?
+[ "$G2_SPRC" != "0" ] && ok "spawn refuses an ACP-only provider without --via acp" || fail "spawn accepted a non-ACP codex turn"
+printf '%s\n' "$G2_SP" | grep -q '^spawned runphase' && fail "spawn reported success for a turn that cannot run" || ok "a refused spawn prints no pid line"
 
 section "comms.sh: transport selection (no pane must not strand a consult)"
 TR_FIX="$WORK/transport-repo"; mkdir -p "$TR_FIX"; TR_FIX="$(cd "$TR_FIX" && pwd -P)"
