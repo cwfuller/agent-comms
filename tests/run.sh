@@ -506,6 +506,14 @@ mkdir -p "$GHOME/skills/send-to-claude" && printf 'stale\n' > "$GHOME/skills/sen
 (cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1) || true
 [ ! -e "$GHOME/skills/read-from-claude" ] && [ ! -e "$GHOME/skills/send-to-claude" ] \
   && ok "installing REMOVES both retired Codex skills left by an earlier install" || fail "a retired Codex skill survived an install"
+# The PROJECT-LOCAL pin is a different rm than the global one ($PROJECT_ROOT/.agents/skills vs
+# $CODEX_SKILLS_DIR), it is the noninteractive default, and it is the copy that used to win the
+# old resolver. Hand-verified during S4-3; pinned here so the upgrade guarantee is durable.
+# (codex + grok, S4-3 r2, advisory.)
+mkdir -p "$INST_FIX/.agents/skills/read-from-claude" && printf 'stale\n' > "$INST_FIX/.agents/skills/read-from-claude/SKILL.md"
+(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=local >/dev/null 2>&1) || true
+[ ! -e "$INST_FIX/.agents/skills/read-from-claude" ] \
+  && ok "a local-scope install removes a project-local pin of a retired skill" || fail "project-local retired pin survived --scope=local"
 # THE REVIEW BAR IS NOW INSTALLED DATA. It used to be read out of the codex self-send SKILL files
 # at runtime, so step 4's deletion of those templates would have silently removed the reviewer's
 # standard — a diff that reads like cleanup. Installed from docs/loopspec/fragments/, which is
@@ -3557,11 +3565,24 @@ for tf in $(tracked_paths 'templates/claude-commands/*.md' 'templates/codex-skil
 done
 for frag in $(tracked_paths 'docs/loopspec/fragments/*.md'); do
   n="$(basename "$frag" .md)"
-  # A fragment is USED if a template embeds it OR a helper resolves it by name at runtime.
-  # Before S4-3 the codex skills embedded verdict-discipline and holistic-rereview as text; now
-  # runphase inlines them into every ACP reviewer prompt instead. Checking only for template
-  # embedding would call the live review bar an orphan and invite deleting it. (S4-3.)
-  if grep -q "^$n$" "$FRAG_SEEN" || grep -rq "fragment_text $n\|fragment_file $n" "$REPO/helpers/"; then
+  # A fragment is USED if a template embeds it OR a helper RESOLVES it at runtime. Checking only
+  # for template embedding would call the live review bar an orphan and invite deleting it (S4-3).
+  # Two holes both reviewers named, now closed: (a) COMMENTS no longer count — the call must be
+  # on a non-comment line; (b) the resolving function must ITSELF be called somewhere non-comment,
+  # so a wholly dead resolver cannot bless a fragment. `skill_file` was exactly that: zero callers,
+  # yet shaped like a live resolver. Residual, accepted: a `fragment_text "$var"` refactor would
+  # read as unused — which is why this stays a usage hint, not a deletion trigger. (grok, S4-3 r2.)
+  FRAG_LIVE=false
+  while IFS=: read -r _f _l _rest; do
+    case "$_rest" in *"#"*) case "${_rest%%#*}" in *"fragment_"*) ;; *) continue ;; esac ;; esac
+    _fn="$(awk -v L="$_l" 'NR<=L && /^[a-z_]+\(\) \{/{f=$1} END{print f}' "$_f")"
+    [ -n "$_fn" ] || continue
+    _fnname="${_fn%%(*}"
+    if grep -rn "\b$_fnname\b" "$REPO/helpers/" | grep -v "^$_f:$_l:" | grep -vE ':[0-9]+: *#' | grep -qv "$_fnname() {"; then
+      FRAG_LIVE=true; break
+    fi
+  done <<< "$(grep -rn "fragment_text $n\|fragment_file $n" "$REPO/helpers/" | grep -vE ':[0-9]+: *#')"
+  if grep -q "^$n$" "$FRAG_SEEN" || [ "$FRAG_LIVE" = true ]; then
     ok "fragment $n is used (embedded by a template or resolved at runtime)"
   else
     fail "orphan fragment (nothing embeds or resolves it): $n"

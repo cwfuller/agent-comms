@@ -20,3 +20,7 @@ A genuinely new mandatory ask beyond the pinned criteria is an explicit criteria
 propose (or an Advisory note), never a silent widening of `REQUEST_CHANGES` scope — and an
 amendment proposal alone is non-blocking: it gates the verdict only if the underlying issue
 independently satisfies the verdict discipline above.
+
+`### Process` feedback is about how the loop itself is being run — request quality, missing
+context, protocol mistakes. It is recorded, and it NEVER gates the verdict: a round is not
+blocked because the process could have been better.

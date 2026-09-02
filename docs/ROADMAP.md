@@ -285,9 +285,10 @@ is otherwise restarted.
 cannot simply be re-pointed at the broker — it dies with the self-send prompt, or it needs a
 per-provider extractor first.
 
-**Still open after S4-2:** S4-3 (retire the reviewer-side codex skills through `RETIRED_*`, not
-deletion — `prompt_surface_files()` hashes those paths, so `prompt-version` shifts and PARTITIONS
-the grading ledger), S4-4 (delete cmux), S4-5 (docs).
+**ALL LANDED (2026-09-02).** S4-3 (codex skills — DELETED outright rather than retired in place,
+owner override: sole user, so the ledger partition the `RETIRED_*` caution guards against does not
+apply; that caution still holds for any other consumer), S4-4 (cmux deleted), S4-5 (docs, folded
+into S4-2 and S4-4). Step 4 is complete and **the product freeze above has lifted.**
 
 
 Decided after independent grok + codex re-evals of the product (local `9c3b10e`,
@@ -328,11 +329,11 @@ exactly; that is not a license to weaken the presence model (see step 7).
 
 ### Sequence (do in this order)
 
-1. **Land `acp-warm-mount`.** The README's "~1k vs ~115k" claim is currently
-   false on the default panel path: mounts go to `$run_dir/tree` while acpx keys
-   identity on `(agent, cwd, name)`, so every mounted turn is cold. Someone is
-   already fixing it. This also makes later token claims measurable. Do not
-   start a second copy.
+1. ~~**Land `acp-warm-mount`.**~~ **DONE.** Mounts are durable per-`(thread, agent)` outside the
+   repo (`mount_alloc` / `acp_mount_ident`), not under `$run_dir/tree`, so acpx's `(agent, cwd,
+   name)` identity is stable across rounds and round N pays only the warm-resume delta. Verified
+   on the S4-4 panel: four rounds produced ONE mount dir per reviewer, not one per round. The
+   README warm-session claim is now true. **Do not start a copy of this — it is finished.**
 
 2. **Cut the suite wall-clock.** Owner, 2026-08-28: five-plus minutes is a
    first-class pain, not a later maintainability leftover. Profiled 2026-08-27

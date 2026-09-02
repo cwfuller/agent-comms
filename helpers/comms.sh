@@ -3840,7 +3840,8 @@ cmd_transport() {
   local caps
   caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
 
-  require_known_transport
+  # NOT gated here: both callers gate first — the router for the CLI verb, and cmd_deliver
+  # at its own top. A third copy would be a rule with three owners. (grok, S4-4 r4.)
 
   # LOOPS ARE ACP-FIRST, then headless (grok only), then mailbox. A loop is unattended work by
   # definition, so it must not depend on an open pane — but the ordering here is
@@ -4628,8 +4629,20 @@ cmd_send() {
 # substitution deeper in the call chain cannot swallow the die on bash 3.2. Read-only verbs
 # are deliberately exempt: an operator with a stale COMMS_DELIVERY must still be able to run
 # `status`/`list` to see what happened. (grok, S4-4 r2.)
+# ONE predicate, and each site has a DISTINCT reason — not four copies of one rule:
+#   cmd_send / cmd_deliver          function entry, so a path that reaches delivery WITHOUT the
+#                                   router (`panel dispatch` calls cmd_send directly) cannot skip
+#                                   it. Both run in their own shell, not inside a command
+#                                   substitution, so bash 3.2 cannot swallow the die.
+#   router `transport`              the CLI verb's only gate now that cmd_transport does not
+#                                   self-check (its other caller, cmd_deliver, gates first).
+#   router `ask` / `panel dispatch` these WRITE before calling cmd_send — a question file, or a
+#                                   snapshot plus attempt markers, roster events, leg files and
+#                                   index rows. Gating at the function would leave that behind.
+# Read-only verbs stay exempt so a stale COMMS_DELIVERY still lets `status`/`list` diagnose.
+# (grok, S4-4 r2 + r4 — collapsed from five sites to four, one reason each.)
 case "${1:-}" in
-  transport|deliver|send|ask) require_known_transport ;;
+  transport|ask) require_known_transport ;;
   panel) case "${2:-}" in dispatch) require_known_transport ;; esac ;;
 esac
 
