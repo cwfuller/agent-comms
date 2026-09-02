@@ -76,7 +76,7 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
 - **Advisories survive.** Un-actioned advisory findings are carried into
   `docs/advisories.md` when a loop ends, so lessons compound instead of evaporating.
 - **ACP is the default transport.** Reviewers run in the background; you do not
-  babysit a pane. `--via cmux` is still available if you want a watchable
+  babysit a pane. The `--via cmux` pane transport was removed; what remains is a watchable
   session. Later rounds on the same thread reuse a stable mount path, so ACP
   can stay warm instead of starting a new session each time.
 
@@ -87,8 +87,7 @@ Message format, loop semantics, and the state model: **[docs/PROTOCOL.md](docs/P
 - A git repository
 - At least two agent CLIs — `claude`, `codex`, and `grok` are supported
 - Node ≥ 22.13 for the ACP transport (or set `ACPX_BIN` to an installed `acpx`)
-- Optional: [cmux](https://cmux.com), if you want loops to run in watchable panes
-  (`--via cmux`)
+- No pane multiplexer is required: loops run over ACP.
 
 ## Docs
 

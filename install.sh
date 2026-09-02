@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # agent-comms installer
-# Sets up Claude Code <-> Codex autonomous communication via cmux
+# Sets up Claude Code <-> Codex autonomous communication over ACP
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash
@@ -163,13 +163,6 @@ echo ""
 choose_scope
 validate_scope
 echo "  scope: $SCOPE"
-
-# Check prerequisites
-if ! command -v cmux &>/dev/null; then
-  echo "  note: cmux not found — that is fine. Loops run over ACP by default and need no"
-  echo "  pane. Install cmux (https://cmux.com) only if you want '--via cmux' delivery."
-  echo ""
-fi
 
 # Find project root (git root)
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
@@ -347,10 +340,7 @@ install_global_assets() {
   for f in $LOOPSPEC_FRAGMENTS; do
     install_file "$FRAGMENT_SRC/$f" "$AGENT_COMMS_HOME/loopspec-fragments/$f"
   done
-  echo "  Loops run over ACP by default — no cmux pane required."
-  echo "  Only if you opt into cmux delivery (--via cmux): run"
-  echo "  '$AGENT_COMMS_HOME/comms.sh codex-permissions' once, apply the printed global"
-  echo "  profile, then restart existing Codex sessions."
+  echo "  Loops run over ACP — no pane multiplexer required."
 }
 
 install_local_assets() {
@@ -518,16 +508,16 @@ legacy_block_body() {
   cat << 'PROTOCOL'
 ## Agent Communication Protocol
 
-This project uses a local file-based message queue for communication between Claude Code and Codex, with optional cmux auto-delivery.
+This project uses a local file-based message queue for communication between Claude Code and Codex, delivered over ACP.
 
 - **Your inbox:** `.comms/to-codex/` — Claude writes review requests and responses here
 - **Your outbox:** `.comms/to-claude/` — Write your findings and feedback here
 
 **Skills:**
 - `$read-from-claude` — Read the latest message from Claude Code and act on it
-- `$send-to-claude` — Write your findings back to Claude Code and auto-deliver via cmux when available
+- `$send-to-claude` — Write your findings back to Claude Code and deliver it
 
-**Auto-delivery:** When `cmux` is available, `$send-to-claude` automatically types `/read-from-codex` into Claude's pane. Without `cmux`, messages are still written to `.comms/` for manual pickup.
+**Delivery:** `$send-to-claude` hands the message to the runner over ACP. If no runner is available, messages are still written to `.comms/` for manual pickup.
 
 When the user asks you to "check for messages from Claude" or "review what Claude did", use `$read-from-claude`. After completing a review, use `$send-to-claude` to send your findings back.
 PROTOCOL
@@ -751,4 +741,4 @@ echo "    Claude: 'implement X, then /send-to-codex'"
 echo "    Codex:  '\$read-from-claude'"
 echo "    Auto:   '/auto build feature X'   (add --plan for a capped approach round)"
 echo ""
-echo "  optional: cmux (https://cmux.com) for auto-delivery between panes"
+echo "  transport: ACP (no pane multiplexer required)"

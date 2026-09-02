@@ -17,7 +17,7 @@ docs/loopspec/                 the portable review-loop kernel (spec, schemas, f
 templates/
   claude-commands/*.md         Claude Code slash commands (thin prompt wrappers)
   codex-skills/*/SKILL.md      Codex skills (thin prompt wrappers)
-tests/run.sh                   hermetic harness (stubbed cmux) — run before every commit
+tests/run.sh                   hermetic harness (mailbox default) — run before every commit
 docs/                          this documentation + ROADMAP/advisories
 ```
 
@@ -106,14 +106,15 @@ took ten review rounds to converge (thread `presence-worktrees-15135`):
 One algorithm, one implementation (`comms.sh workspace`), with an explicit escape
 hatch at the top: a **repo-scoped pin** (`.comms/workspace`, written by
 `workspace set <name>`) IS the mailbox identity when present and beats every
-inferred source below — identity is a naming decision, cmux ids only route
-surfaces, and a valid-but-wrong inferred title otherwise becomes authoritative
-forever (the fwh-backup incident, field report #3). Below the pin: an undecorated
-cmux title is cached under stable `CMUX_WORKSPACE_ID`; that mapping is
-authoritative for the workspace lifetime. Empty or unparseable titles fall back without poisoning the cache;
-status-decorated titles use the git branch (or repository name on a generic default
-branch) to seed or repair it.
-This prevents auto-title spinner frames from changing message and state prefixes.
+inferred source below — identity is a naming decision, and a valid-but-wrong inferred
+title otherwise becomes authoritative forever (the fwh-backup incident, field report #3).
+Below the pin the only remaining source is git: the branch name, or the repository
+directory name when there is no branch. The cmux title cache and its decorated-title
+guard were removed with the transport (S4-4). One rule from that design survives and is
+load-bearing: a generic default branch resolves to the BRANCH name (`main` stays `main`),
+not the repository directory name — substituting the directory name there changes every
+message-filename prefix and hides pending messages behind the glob (field report #3).
+Nothing in the corpus covered that case before S4-4; it is now pinned by assertion.
 An empty scoped listing warns when unmatched files still exist in the physical inbox.
 
 ### Two root resolvers — deliberately not unified
@@ -135,9 +136,9 @@ bug: `--show-toplevel` for the pin misses `<main>/.agent-comms/` and falls throu
 
 `.comms/config` is parsed by `comms.sh` alone (`agents [default|--supported]` is the
 one read API — templates and runphase both consume it). The supported-backend set is
-compiled into the helpers: claude/codex are interactive+headless; **grok is
-reviewer/consult-only and headless-only** — there is no cmux idiom for it, and
-`deliver` routes any non-cmux agent through runphase unconditionally.
+compiled into the helpers: claude/codex are `interactive,acp` — ACP-only for review turns
+since step 4; **grok is reviewer/consult-only and keeps the direct headless route**.
+`deliver` routes every agent through runphase.
 
 The grok leg is a **read-only child with a trusted parent broker**: the child runs
 `grok --prompt-file … --output-format streaming-messages-json --sandbox read-only
@@ -343,19 +344,15 @@ This is the ONLY Node-dependent surface in the repo, and it is opt-in per call.
 
 ## Delivery mechanics
 
-`cmux send`/`send-key` keystroke injection with short settles between steps. The
-Claude-bound nudge performs a vim-mode dance (`escape, i, <text>, escape, enter`);
-the Codex-bound nudge types `$read-from-claude` directly. The whole sequence is wrapped
-so a mid-sequence failure reports `FAILED` explicitly instead of dying tersely. Injected
-commands queue in the target's input box until its current turn ends — that's why "late
-nudges" against an already-emptied inbox are normal and handled.
+`deliver` hands the message to a runner: ACP for every provider, or a direct headless turn
+for grok. **Pickup is resolved before transport** — a reply addressed to the session driving
+the current turn is a no-op, because that session reads it when the turn exits.
 
-When a session cannot access the socket, delivery emits a single `RECOVER:` shell chain.
-Direct `cmux` segments run first; `reconcile` is last behind `&&`, so state changes to
-delivered only after the entire external nudge succeeds. Recovery is for a host-capable
-context, not repeated execution inside the unchanged sandbox. The durable Codex path is
-the global `workspace-cmux` permission profile printed by `comms.sh codex-permissions`;
-`comms.sh doctor` verifies the effective session before a loop depends on it.
+The cmux keystroke injection this section used to describe was deleted in step 4 (S4-4),
+along with `RECOVER:`, `reconcile`, `doctor`, `codex-permissions`, and the
+`workspace-cmux` permission profile. A keystroke nudge is self-send by another name: it
+told a live agent to read and reply itself, with no parent stamping and no pinned artifact.
+Delivery no longer touches any socket, so there is nothing left to be sandbox-blocked on.
 
 ## Test harness
 
@@ -365,11 +362,13 @@ bash tests/run.sh
 
 ~90 assertions covering both helpers and the installer. Design points:
 
-- **Hermetic, or it pokes real agents.** The harness stubs `cmux` with a fake binary
-  (canned `tree`/`list-workspaces` output, a call log, an opt-in failure mode) and runs
-  helper invocations with `env -u CMUX_WORKSPACE_ID`. The first version inherited the
-  live session's cmux and *sent an actual keystroke to a running agent's pane*. Keep
-  every new test hermetic.
+- **Hermetic, or it pokes real agents.** The suite default is `COMMS_DELIVERY=mailbox`:
+  write the file, nudge nobody, no spawned child, no network. The first version of the
+  harness inherited the live session's cmux and *sent an actual keystroke to a running
+  agent's pane*; it later got hermeticity by asking for cmux and stubbing the binary,
+  which made a transport slated for deletion load-bearing for every unrelated section.
+  Rewiring the default to `mailbox` (S4-1) is what let S4-4 delete cmux without unrelated
+  sections starting to spawn real agents. Keep every new test hermetic.
 - Throwaway git-repo fixtures, canonicalized with `pwd -P` (macOS `/var` →
   `/private/var`).
 - Regression style: every reviewer-caught bug lands with a test reproducing it

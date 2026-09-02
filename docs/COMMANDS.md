@@ -6,7 +6,7 @@ prompt-wrappers; the shell logic lives in the installed helpers (see
 
 ## Claude Code commands
 
-### `/auto [--plan] [--reviewers a,b] [--rounds N] [--via cmux] <task>`
+### `/auto [--plan] [--reviewers a,b] [--rounds N] [--via headless] <task>`
 
 Implement → send to Codex → fix blocking findings → repeat until `APPROVE` or `N`
 rounds (default 10). The task text can describe work or reference an existing plan file.
@@ -90,12 +90,11 @@ Write findings (`### Blocking` / `### Advisory` / `### Process`), copy the loop'
 workflow fields + `thread`, set `in-reply-to`, then atomically validate + deliver +
 archive the inbound via `comms.sh send`.
 
-**Codex sandbox note:** set the global `workspace-cmux` permission profile once so every
-new Codex session inherits normal workspace access plus the one cmux Unix socket
-allowance; `comms.sh codex-permissions` prints the exact config and `comms.sh doctor`
-verifies it. No launch flag is required. If an old or managed session reports
-`RESULT: blocked`, Claude was not notified and passive polling is not assumed. Do not
-resend from the unchanged sandbox; use a host-capable `RECOVER:` or one manual pickup.
+**Codex sandbox note:** delivery goes over ACP and needs no socket allowance, so the
+`workspace-cmux` permission profile — and the `codex-permissions` and `doctor` commands that
+managed it — were removed in step 4 (S4-4). If a sandboxed session cannot deliver, Claude was
+not notified and passive polling is not assumed: do not resend from the unchanged sandbox;
+use one manual pickup for the already-persisted message.
 
 ## Helper CLI
 
@@ -108,9 +107,7 @@ agnostic.
 | subcommand | effect |
 |---|---|
 | `root` | print the main repo's `.comms` path (worktree-safe) |
-| `workspace` | print the resolved workspace name (cmux → branch → repo dir) |
-| `doctor` | verify this session can reach cmux; exit 3 plus the persistent setup command when the socket is sandbox-blocked |
-| `codex-permissions [socket]` | print the least-privilege global Codex permission profile for cmux delivery (opt-in since 2026-08-25) |
+| `workspace` | print the resolved workspace name (explicit pin → branch → repo dir) |
 | `agents [default\|--supported]` | registered agents from `.comms/config` (zero-config: `claude codex grok`), the default target, or the supported-backend table |
 | `list --as <agent> [--thread <t>]` | pending inbox messages, newest first; non-zero + "latest archived" hint when empty |
 | `status` | one-screen loop summary: workspace, latest archived message + its loop fields, pending counts per inbox |
@@ -119,8 +116,6 @@ agnostic.
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
 | `deliver <claude\|codex> [file]` | routes via `transport`, classifying the MESSAGE: one carrying `workflow:` is a loop (ACP-first, `spawned`), anything else is a consult/one-shot (live pane first, then ACP — the `acp` route runs a parent-brokered turn through `runphase --via acp`). Prints `delivered to <surface> (<how>)` / `spawned` / manual-pickup / `blocked` (sandboxed socket) / `FAILED`. `COMMS_DELIVERY=cmux` forces the pane; `=headless` forces the runner and is REFUSED for claude/codex, whose self-send path was deleted in step 4; `=mailbox` forces manual pickup — the file is written and nobody is nudged, which is a deliberate outcome and not a failure |
 | `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`delivered`/`spawned`/`manual`/`blocked`/`failed`) |
-| `reconcile <message-file\|message-id>` | record a successful external/direct nudge; used as the final guarded segment of `RECOVER:` |
-| `bind <claude\|codex> [surface:N]` | pin which surface delivery targets (show current with no arg); successful deliveries auto-refresh it; ignored if the surface disappears |
 | `presence claim\|beat\|others\|release\|expire\|with-beat` | advisory multi-session coordination on `.comms/sessions/` — claim-then-check (exit 0 direct-safe / 3 peers / 4 fail-closed ambiguity), whole-file heartbeats (exit 5 = healed, re-check before writing), exact-self release, two-pass byte-identical reap with nonce tombstone covers, and a beat-wrapper for long-running children. See PROTOCOL "Presence & worktrees" |
 | `worktree new [<slug>]` | session worktree under the MAIN root's `.claude/worktrees/` on branch `worktree-<slug>`, from the LOCAL default-branch tip; refuses without ignore coverage |
 | `integrate <branch>` | land on `main`: advisory lease, ff-only, suite (config `suite-cmd = ...`) at the candidate OID in a detached worktree, then CAS `update-ref` — a race loses cleanly, main only ever advances to suite-verified commits. A single clean checkout idling on `main` at the expected tip is self-healed through the landing; `suite-attest-secs = N` config accepts a fresh same-OID `attest-green` record in place of the re-run |
@@ -136,7 +131,7 @@ agnostic.
 | `events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R] [--limit N]` | read the coordinator's append-only log (`.comms/events.tsv`): roster planned → request persisted → dispatched → turn started → provider result → reply validated/refused → reply accepted → turn finished → composition completed. Filters apply before `--limit`; a malformed row is named on stderr, never parsed. See PROTOCOL "Coordinator event log" for the recovery walk |
 | `events append --kind <kind> [--set\|--dispatch\|--thread\|--round\|--agent\|--role\|--artifact\|--request-id\|--message-id\|--run-dir\|--status\|--note]` | the single writer every producer calls; closed kind and role vocabularies, per-column budgets, and a refusal — on EVERY append, against an allowlist of local filesystem types — to write the log where appends are not sound |
 | `snapshot [create\|list] [--with-base]` | retain the tree under review as a durable git object under `refs/agent-comms/artifacts/`; `--with-base` prints `artifact_id<TAB>base_sha` from the one operation |
-| `workspace set <name>` | pin the repo's mailbox identity explicitly (`.comms/workspace`) — beats every inferred source; cmux ids then only route surfaces |
+| `workspace set <name>` | pin the repo's mailbox identity explicitly (`.comms/workspace`) — beats every inferred source |
 | `prompt-version [--list]` | content hash of the reviewer instruction surface |
 
 #### The grading pilot — `findings`, `shadow`, `snapshot`, `prompt-version`
@@ -226,24 +221,21 @@ templates, and these docs all read from it rather than each re-deciding.
 
 | context | default | why |
 |---|---|---|
-| **loop** (`auto-*`) | `acp` → `headless` (**grok only**) → `mailbox` | cost, measured on one real review turn in this repo: cmux ~43–85k fresh input tokens, cold headless ~115k, warm ACP **~1,061**. A cold spawn rebuilds context from nothing each round; a live pane keeps the conversation but still re-sends a large uncached prefix per model call. Only a named per-thread ACP session makes round N pay a delta |
-| **consult** (`/ask`) | pane if one is live, else `acp` | a consult is synchronous by nature; ACP needs no pane and warm sessions cost ~1/127 the input tokens |
+| **loop** (`auto-*`) | `acp` → `headless` (**grok only**) → `mailbox` | cost, measured on one real review turn in this repo: cold headless ~115k fresh input tokens, warm ACP ~1,061 |
+| **consult** (`/ask`) | `acp`, else `mailbox` | a consult is synchronous by nature; ACP needs no pane and warm sessions cost ~1/127 the input tokens |
 
-Opting back into the watchable pane: `--via cmux` on an `auto-*` command, or
-`COMMS_DELIVERY=cmux`. `--via mailbox` / `COMMS_DELIVERY=mailbox` force manual pickup: the file
-is written and nobody is nudged, which is a requested outcome rather than a failure — `deliver` and
-`send` report it as intent; `status` still reports the durable `manual` fact from thread state. `--via headless` / `COMMS_DELIVERY=headless` (grok only since step 4; refused for claude/codex) force the detached
-runner. If cmux is explicitly requested and no surface is live, delivery reports
-`mailbox` rather than silently substituting a transport you did not choose.
+`--via mailbox` / `COMMS_DELIVERY=mailbox` force manual pickup: the file is written and nobody
+is nudged, which is a requested outcome rather than a failure — `deliver` and `send` report it
+as intent; `status` still reports the durable `manual` fact from thread state. `--via headless`
+/ `COMMS_DELIVERY=headless` (grok only since step 4; refused for claude/codex) force the
+detached runner.
 
-Pane-timing knobs, both of which default to the values a REAL terminal needs and should
-only be changed against a stub: `COMMS_CMUX_PACE` (default `1`; set to `0` to skip the
-keystroke pacing between `send` / `escape` / `enter` — a real cmux needs the beat or the
-sequence interleaves and submits a half-typed nudge) and `COMMS_CMUX_BACKOFF` (default
-`0.3 0.7 1.2`; whitespace-separated non-negative decimals giving the retry schedule for
-reading the cmux tree, which exists to ride out a contention window observed in the field).
-Every `COMMS_CMUX_BACKOFF` token must be a complete decimal — one malformed token, or a
-whitespace-only value, falls back to the full default rather than to a partial schedule.
+The `cmux` pane transport was DELETED in step 4 (S4-4), along with its pacing and backoff
+knobs (`COMMS_CMUX_PACE`, `COMMS_CMUX_BACKOFF`) and the `doctor`, `bind`, `reconcile`, and
+`codex-permissions` commands that served it. A keystroke nudge is self-send by another name:
+it tells a live agent to read and reply itself, with no parent stamping and no pinned
+artifact. `COMMS_DELIVERY=cmux` is now an unknown transport and resolves to `mailbox` with a
+warning rather than silently substituting something you did not choose.
 
 ACP-first falls back to **mailbox**, not to a pane. grok is not an `interactive` agent, so
 no pane is eligible for it; claude and codex refuse a non-ACP turn outright. A missing

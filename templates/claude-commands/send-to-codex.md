@@ -52,11 +52,11 @@ message_id: <the filename, without .md>
 <Any additional context that helps the reviewer — links to plans, related issues, constraints>
 ```
 
-4. **Validate and deliver** — `send` refuses malformed messages (frontmatter delimiters, required fields, non-empty body) and degrades to manual pickup without cmux:
+4. **Validate and deliver** — `send` refuses malformed messages (frontmatter delimiters, required fields, non-empty body) and degrades to manual pickup when no runner is available:
    ```bash
    "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
-   On `RESULT: blocked`, execute the exact `RECOVER:` line once; it uses direct cmux
+   On `RESULT: blocked`, execute the exact `RECOVER:` line once; it uses direct
    commands and reconciles state after success. Relay only the final non-`delivered`
    result.
    <!-- loopspec:fragment result-spawned-exception -->

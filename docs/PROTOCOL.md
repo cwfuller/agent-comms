@@ -89,7 +89,7 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
 
 ## Worktrees & branches
 
-Loops often run in a `git worktree` (one per cmux workspace). Two rules
+Loops often run in a `git worktree` (one per concurrent session). Two rules
 keep that safe:
 
 **Message routing is worktree-safe.** Every helper resolves `.comms/` to the **main repo
@@ -128,7 +128,7 @@ to track/push to `main`). When creating a worktree for a loop:
 
 - `workspace` scopes messages when several workspaces share one repo. Resolution:
   the repo-scoped PIN (`.comms/workspace`, written by `comms.sh workspace set`) →
-  cmux workspace name → git branch → repo dir, lowercased/hyphenated — both sides
+  explicit pin → git branch → repo dir, lowercased/hyphenated — both sides
   resolve via the same `comms.sh workspace` so they can never disagree, and the pin
   makes the identity an explicit decision rather than an inference
 - the `<random>` suffix prevents same-second collisions
@@ -410,63 +410,54 @@ re-dispatch a leg that was already paid for. The one thing that is never ambiguo
 
 ## Delivery
 
-With cmux available, `comms.sh deliver <target>` resolves the target surface in order:
+`comms.sh deliver <target>` hands the message to a RUNNER. There is no pane and no surface
+picking: the cmux transport was deleted in step 4 (S4-4) because a keystroke nudge is
+self-send by another name — it tells a live agent to read and reply itself, with no parent
+stamping and no pinned artifact.
 
-1. **binding** — an explicit `comms.sh bind <target> surface:N`, or the surface cached
-   from the last successful delivery. Verified against the live tree when the tree is
-   readable; **if the tree read itself fails, a binding is used optimistically** — a
-   dead surface then fails the send sequence loudly (`RESULT: failed`, retryable),
-   which beats discarding a known target over a transient tree hiccup. Residual risk,
-   accepted: if cmux ever *reuses* a surface id for a different terminal while the tree
-   is unreadable, an optimistic send would land there and report `delivered` — identity
-   simply cannot be verified without a tree
-2. **pane-aware pick** — the *first* terminal surface (tree order = tab order) in a pane
-   other than the caller's, falling back to the first other terminal anywhere
+The routing decision belongs to `comms.sh transport`, which is the single decision point:
 
-Every path that ends in "no surface" emits a stderr diagnostic naming the target,
-workspace id, binding state, and what the tree contained — a manual outcome is always
-explainable. `comms.sh status` adds an `ACTION NEEDED` line whenever the newest thread's
-last delivery wasn't a real nudge.
+- **acp** — the default for every provider. The parent brokers the reply.
+- **headless** — a detached runner, **grok only**.
+- **mailbox** — the honest outcome when no runner can take it: the file is on disk and
+  nobody was nudged. This is a SUCCESS when it was asked for, not a broken install.
 
-Convention when a workspace has several Claude/Codex tabs: **keep the live agent as the
-first tab in its pane**, or set an explicit binding — the picker cannot know agent
-identity from the tree alone. Delivery output names the chosen surface and why
-(`delivered to surface:146 (bound)`), so a wrong target is visible immediately.
+**Pickup is resolved before transport.** A reply addressed to the session driving the current
+turn needs no nudge at all — it is read when the turn exits — so `deliver` short-circuits on
+`COMMS_HEADLESS_PICKUP` ahead of the routing decision. Asking the transport question first was
+a live bug: an inherited `COMMS_DELIVERY=headless` made the routing gate refuse before pickup
+was consulted, killing the broker's own send while the already-copied reply made the turn look
+answered. (grok, S4-2 r3.)
 
-It then types the read command into the chosen surface:
+`comms.sh status` adds an `ACTION NEEDED` line whenever the newest thread's last delivery
+wasn't a real nudge.
 
-- → Codex: `$read-from-claude` + enter
-- → Claude: `escape, i, /read-from-codex, escape, enter` (assumes vim mode)
-
-The cmux path's explicit outcomes, recorded in state by `send` (headless delivery
-adds its own — see [Headless delivery](#headless-delivery-experimental); the full
-enum lives in `loopspec/thread-state.schema.json`):
+Outcomes recorded in state by `send` (the full enum lives in
+`loopspec/thread-state.schema.json`; `delivered`/`blocked`/`failed` are retained for reading
+ARCHIVED state written before step 4, and are no longer produced):
 
 | outcome | meaning | recovery |
 |---|---|---|
-| `delivered` | full keystroke sequence accepted; peer pickup remains asynchronous | `stalled`/`status` expose aged unread files |
-| `manual` | no cmux / no surface — message valid on disk | trigger the read command by hand |
-| `blocked` | this session cannot access `cmux.sock`; peer was not notified | configure the global `workspace-cmux` profile for new sessions; use `RECOVER:` only from a host-capable context, otherwise trigger one manual pickup |
-| `failed` | cmux error mid-sequence | retry with `comms.sh send` (refreshes state); a bare `deliver` retry works but leaves the stale `failed` marker |
+| `pickup` | the reply is for the driving session; it reads it when this turn ends | none needed |
+| `manual` | no runner available — message valid on disk | trigger the read command by hand |
+| `spawned` | a peer turn is running detached; the reply lands in the inbox when it exits | await the printed run dir |
 
 **Atomic send:** `comms.sh send --to <agent> <file> --archive-inbound <inbound>`
 validates the outbound (refusing to deliver or archive if malformed), attempts delivery,
 records state, and only then archives the inbound. A failed nudge still archives — the
 inbound *was* processed; the retry surface is delivery, tracked in state.
 
-`send` always ends with a `RESULT:` line. On `blocked`, it also emits one copy/paste
-`RECOVER:` command composed of direct `cmux` calls plus
-`comms.sh reconcile <message>`. The reconciliation segment runs only after every cmux
-step succeeds, so a host-side fallback cannot leave `last_delivery=blocked`. A blocked
-Codex session must not run the same path repeatedly or claim the peer passively polls:
-configure the global profile printed by `comms.sh codex-permissions`, restart Codex, or
-use one manual pickup for the already-persisted message.
+`send` always ends with a `RESULT:` line. The `RECOVER:` mechanism and `comms.sh reconcile`
+went with the cmux transport (S4-4): there is no socket left to be blocked on. A sandboxed
+session that cannot deliver must not run the same path repeatedly or claim the peer passively
+polls — use one manual pickup for the already-persisted message.
 
-**Identity resilience:** workspace resolution caches one good cmux-derived name per
-cmux workspace (`.comms/.cache/`); if a later `cmux tree` read is unavailable or its
-shape is unparseable, the cached identity is reused instead of flapping to a branch-name
-fallback. The parser accepts the current selection/active markers and UUID-valued
-`CMUX_WORKSPACE_ID`; the tree fetch itself retries before giving up.
+**Identity resilience:** workspace identity comes from an explicit `.comms/workspace` pin if
+one exists, otherwise from the branch name, otherwise the repository directory name. The cmux
+title cache and its decorated-title guard are gone (S4-4). One rule survives from that design
+and is load-bearing: the `main` branch resolves to `main`, NOT to the repository directory
+name — substituting the directory name there would change every message-filename prefix and
+hide pending messages and thread state behind the glob.
 
 **Late nudges are normal.** The injected read command sits in the target's input box
 until its current turn ends — sometimes minutes. If the reply was already consumed by
@@ -484,7 +475,7 @@ provider's CLI in the background — since step 4 that is `grok` alone; the Code
 (`codex exec --json`) and Claude (`claude -p`) direct arms were DELETED — records the run under
 `.comms/logs/<message_id>.<epoch>.<pid>/` (`prompt.md`, `events.ndjson` JSONL event
 log, `result.json`, `pid`, `runner.log`), and mirrors the outcome into thread state
-on exit. cmux is never touched; identity is a process handle, not a pane guess.
+on exit. Identity is a process handle, not a pane guess.
 A loop is unattended work and should not require an open pane. **Since step 4 (2026-09-01), claude
 and codex review turns are ACP-ONLY**: the self-send path they used on the headless transport was
 deleted, so a non-ACP turn for those providers fails closed rather than degrading — it would
@@ -492,7 +483,7 @@ otherwise produce an unstamped, unmounted reply that still reported success. Hea
 **grok only**, which is parent-brokered on its direct path. When ACP is unavailable for claude or
 codex the honest outcome is `mailbox` (written, nobody nudged); a loop is never silently routed to
 a pane, because a pane nudge is the same self-send model under another name. Repair ACP rather
-than reaching for headless or cmux. Consults follow the same rule.
+than reaching for headless. Consults follow the same rule.
 
 **Direction awareness.** Replies TO the driving session are a designed no-op: the
 driver reads them when the peer turn exits, so nothing is spawned for that

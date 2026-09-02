@@ -152,14 +152,12 @@ If the incoming message carries a `## Meta` section requesting process feedback:
 
 ## Sandbox & permissions
 
-Read-only helper commands run directly. The persistent, no-flag delivery fix is a global
-Codex permission profile that extends `:workspace` and allowlists only `cmux.sock`;
-`"$COMMS_SH" codex-permissions` prints the exact config. Apply it once and restart Codex.
+Read-only helper commands run directly. Delivery goes over ACP and needs no socket
+allowance: the cmux transport and its Codex permission profile were removed in step 4.
 
-If an older or managed session returns `RESULT: blocked`, the reply is persisted but
-Claude was **not** notified. Do not claim passive polling, resend, or repeat the same
-sandboxed helper. Execute `RECOVER:` only from a host or separately approved context
-that can reach cmux; otherwise request one manual `/read-from-codex`.
+If a sandboxed session returns `RESULT: blocked`, the reply is persisted but Claude was
+**not** notified. Do not claim passive polling, resend, or repeat the same sandboxed
+helper. Request one manual `/read-from-codex` instead.
 
 ## Message Format
 

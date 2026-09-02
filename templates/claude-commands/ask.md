@@ -37,9 +37,9 @@ unless they asked.
    **With no explicit `--via`, ASK the helper rather than guessing** (resolve
    `COMMS_SH` per step 4 first):
    ```bash
-   TRANSPORT="$("$COMMS_SH" transport "$TARGET")"   # cmux | acp | headless | mailbox
+   TRANSPORT="$("$COMMS_SH" transport "$TARGET")"   # acp | headless | mailbox
    ```
-   - `cmux` / `headless` / `mailbox` → the mailbox path below (steps 4-8).
+   - `headless` / `mailbox` → the mailbox path below (steps 4-8).
    - `acp` → the synchronous ACP path in this step.
 
    The helper prefers a live pane when there is one, and falls back to ACP when there
@@ -124,7 +124,7 @@ message_id: <the filename, without .md>
 
    Write the assembled message with a **non-interpolating file-write tool** (the Write tool or equivalent). This is REQUIRED, not preferred: the payload can contain arbitrary verbatim discussion, so any fixed heredoc delimiter can appear inside it on a line of its own — the heredoc closes early and the shell parses the remainder before `validate` can refuse it. (docs/advisories.md 2026-07-06 also records a live headless heredoc hang where the Write tool succeeded immediately.) A shell heredoc is permitted ONLY as a last resort with a delimiter PROVEN absent from the entire rendered message — generate a unique delimiter and check it against the full content first; never use a fixed delimiter blindly. Either way, sanity-check with `head -3` on the file before sending.
 
-8. **Validate and deliver** — `send` refuses malformed messages and degrades to manual pickup without cmux:
+8. **Validate and deliver** — `send` refuses malformed messages and degrades to manual pickup when no runner is available:
    ```bash
    "$COMMS_SH" send --to "$TARGET" "<path of the message file you wrote>"
    ```

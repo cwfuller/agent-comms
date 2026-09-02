@@ -75,14 +75,14 @@ asked. Do not narrate every dispatch.
      ```
      Validate EVERY name against `"$COMMS_SH" agents`. Hold them as a LIST, never a single
      scalar copied across write paths.
-   - `--via cmux` forces the watchable pane; `--via headless` forces the detached runner —
-     **grok only**. Step 4 made `claude` and `codex` review turns ACP-only, so asking for
-     headless on those providers is REFUSED, not silently downgraded to something else.
+   - `--via headless` forces the detached runner — **grok only**. Step 4 made `claude` and
+     `codex` review turns ACP-only, so asking for headless on those providers is REFUSED,
+     not silently downgraded. The `--via cmux` pane transport was deleted in step 4.
      **Default is ACP** — a warm per-thread session, ~1k fresh input tokens per round
      against ~115k for a cold spawn. Export the choice once, before any `send`/`deliver`:
      ```bash
-     case "$ARGUMENTS" in *"--via cmux"*) export COMMS_DELIVERY=cmux ;; *"--via headless"*) export COMMS_DELIVERY=headless ;; esac
-     "$COMMS_SH" transport "$GATING" --loop   # acp | headless (grok only) | cmux | mailbox
+     case "$ARGUMENTS" in *"--via headless"*) export COMMS_DELIVERY=headless ;; esac
+     "$COMMS_SH" transport "$GATING" --loop   # acp | headless (grok only) | mailbox
      ```
    - Strip every flag from the task text — none may reach the message body.
 
