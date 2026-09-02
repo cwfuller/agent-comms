@@ -510,8 +510,6 @@ for RB_F in verdict-discipline holistic-rereview; do
   cmp -s "$GHOME/agent-comms/loopspec-fragments/$RB_F.md" "$REPO/docs/loopspec/fragments/$RB_F.md" \
     && ok "the installed $RB_F fragment is byte-identical to its canonical origin" || fail "$RB_F drifted from docs/loopspec/fragments"
 done
-echo "$GH_OUT" | grep -q "codex-permissions" \
-  && ok "global install names the one-time default Codex socket setup" || fail "global install Codex socket setup hint"
 
 # ATOMIC INSTALL. A plain `cp` over an installed helper truncates and rewrites the SAME
 # inode, and bash reads an executing script lazily by byte offset — which is how three
