@@ -505,9 +505,11 @@ The pickup rule itself is transport-independent and is resolved in `deliver` BEF
 transport selection, so an inherited `COMMS_DELIVERY=headless` cannot make the
 reply-to-driver direction fail. (grok, S4-2 r3, blocking.)
 
-**Claude turns over ACP** run with `CLAUDECODE` unset (so the child does not detect
-itself as nested inside the driving session) and a non-bypass permission policy — these
-knobs no longer drive a direct headless Claude arm, which was deleted in step 4:
+**Claude turns over ACP** are mode-pinned by the ACP backend (`claude-plan`), which sets the
+permission mode on the session itself. The `CLAUDECODE` unset and the
+`--permission-mode` / `--allowedTools` / `COMMS_RUNPHASE_CLAUDE_*` knobs below describe the
+DELETED direct arm and no longer drive a live turn; they are retained as history because the
+bypass refusal they document still applies to any future direct arm:
 `--permission-mode acceptEdits --allowedTools Bash` by default, overridable via
 `COMMS_RUNPHASE_CLAUDE_PERMISSION_MODE` / `COMMS_RUNPHASE_CLAUDE_ALLOWED_TOOLS` /
 `COMMS_RUNPHASE_CLAUDE_ARGS`. Bypass/danger permission flags

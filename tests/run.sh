@@ -1441,7 +1441,12 @@ cp "$COMMS" "$GLONELY/comms.sh" && chmod +x "$GLONELY/comms.sh"
 # install.sh" lie. The control below proves this is pickup, not a blanket exemption.
 GPB="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=claude PATH="$STUB_BIN:$PATH" "$COMMS" deliver claude) 2>&1 )"
 echo "$GPB" | grep -q "written for pickup" && ok "a reply to the driving session is pickup even under COMMS_DELIVERY=headless" || fail "pickup before transport (got: $GPB)"
-echo "$GPB" | grep -qi "re-run install.sh" && fail "the inherited headless flag still produces the install.sh lie" || ok "no re-run-install.sh lie on the reply-to-driver path"
+# COUPLED to non-empty output: a bare `grep && fail || ok` passes on empty stdout, which is
+# the same vacuous family this section exists to catch. (grok, S4-2 r4, advisory — found in
+# the very assertion added to guard against it.)
+{ [ -n "$GPB" ] && ! printf '%s\n' "$GPB" | grep -qi "re-run install.sh"; } \
+  && ok "no re-run-install.sh lie on the reply-to-driver path" \
+  || fail "the inherited headless flag still produces the install.sh lie (got: $GPB)"
 GPB_CTL="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=grok PATH="$STUB_BIN:$PATH" "$COMMS" deliver claude) 2>&1 )"
 echo "$GPB_CTL" | grep -q "not available for 'claude'" && ok "a non-pickup claude target still refuses headless (pickup is not a blanket exemption)" || fail "pickup control (got: $GPB_CTL)"
 

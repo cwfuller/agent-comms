@@ -245,8 +245,9 @@ reading the cmux tree, which exists to ride out a contention window observed in 
 Every `COMMS_CMUX_BACKOFF` token must be a complete decimal — one malformed token, or a
 whitespace-only value, falls back to the full default rather than to a partial schedule.
 
-ACP-first falls back to a pane **only** when `runphase.sh` is genuinely missing, and only
-for a provider that still has a non-ACP route (grok) — claude and codex refuse instead —
+ACP-first falls back to **mailbox**, not to a pane. grok is not an `interactive` agent, so
+no pane is eligible for it; claude and codex refuse a non-ACP turn outright. A missing
+`runphase.sh` therefore degrades to manual pickup with a warning —
 flipping the default must not strand every loop on an install where it never landed.
 
 #### The bounded readers
