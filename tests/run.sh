@@ -3526,6 +3526,27 @@ for BRK in "codex claude codex_thread_id" "claude codex claude_session_id"; do
     && ok "the $BRK_PROV leg records an acp: session id, proving the ACP arm ran" || fail "$BRK_PROV result.json carries no acp: session id"
 done
 
+# ---- EVERY PUBLIC ENTRANCE, negatively ---- (codex, S4-2 implement r1, blocking + process)
+# Removing the artifact suppression was necessary but not sufficient: `run`/`spawn` are public,
+# so a review with no artifact_id would still have read the LIVE TREE. And the ACP-only rule is
+# only real if no entrance can start a non-ACP claude/codex turn.
+MA_MSG_ARCH="$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+BRK_NOART="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T13-00-00_noart.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-noart/' -e '/^artifact_id:/d' \
+    "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$BRK_NOART"
+BRK_NADIR="$WORK/ma-noart"; mkdir -p "$BRK_NADIR"
+( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+    "$RP" run --message "$BRK_NOART" --dir "$BRK_NADIR" --provider grok ) >/dev/null 2>&1
+grep -q 'no artifact_id' "$BRK_NADIR/result.json" 2>/dev/null \
+  && ok "a review turn with no artifact_id is refused, not run against the live tree" || fail "unstamped review was allowed (got: $(head -c 120 "$BRK_NADIR/result.json" 2>/dev/null))"
+for BRK_E in codex claude; do
+  BRK_EDIR="$WORK/ma-acponly-$BRK_E"; mkdir -p "$BRK_EDIR"
+  BRK_EOUT="$( (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$MA_MSG_ARCH" --dir "$BRK_EDIR" --provider "$BRK_E" ) 2>&1 || true )"
+  printf '%s\n' "$BRK_EOUT" | grep -q 'ACP-only' \
+    && ok "a direct (non-ACP) $BRK_E run is refused at the entrance" || fail "$BRK_E direct run was not refused (got: $(printf '%.90s' "$BRK_EOUT"))"
+done
+
 # ---- ACP FAILURE EQUIVALENTS (S4-2 precondition) ----
 # The headless sections are the ONLY place claude/codex failure reporting is exercised today, and
 # step 4 deletes them. These are the ACP equivalents, added BEFORE the removal so the coverage
