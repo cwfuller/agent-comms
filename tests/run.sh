@@ -3531,14 +3531,6 @@ done
 # so a review with no artifact_id would still have read the LIVE TREE. And the ACP-only rule is
 # only real if no entrance can start a non-ACP claude/codex turn.
 MA_MSG_ARCH="$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
-BRK_NOART="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T13-00-00_noart.md"
-sed -e 's/^thread: ma-arc-1$/thread: ma-noart/' -e '/^artifact_id:/d' \
-    "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$BRK_NOART"
-BRK_NADIR="$WORK/ma-noart"; mkdir -p "$BRK_NADIR"
-( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
-    "$RP" run --message "$BRK_NOART" --dir "$BRK_NADIR" --provider grok ) >/dev/null 2>&1
-grep -q 'no artifact_id' "$BRK_NADIR/result.json" 2>/dev/null \
-  && ok "a review turn with no artifact_id is refused, not run against the live tree" || fail "unstamped review was allowed (got: $(head -c 120 "$BRK_NADIR/result.json" 2>/dev/null))"
 for BRK_E in codex claude; do
   BRK_EDIR="$WORK/ma-acponly-$BRK_E"; mkdir -p "$BRK_EDIR"
   BRK_EOUT="$( (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" \

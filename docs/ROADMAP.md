@@ -53,6 +53,23 @@ are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnos
 equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
 trusting this number if the corpus has moved.
 
+### Open after S4-2: an UNSTAMPED review still reads the live tree (2026-09-01)
+
+Found by codex reviewing S4-2, and it is a correction to a claim I made rather than a regression
+that increment introduced. I said "every review turn is now artifact-bound". Deleting the
+self-send arm removed the place that BLANKED an artifact the message actually carried — real, and
+the one path that took a stamped review and pointed it at the live tree anyway. But `run` and
+`spawn` are public entry points, so a review message that never had an `artifact_id` still reviews
+`main_root`. **That gap is PRE-EXISTING** — it held for ACP and for grok on main too.
+
+**Why it is not fixed in S4-2:** refusing an unstamped review breaks ~28 of this suite's 31
+review-request fixtures (only 3 carry `artifact_id`; `cmd_send` is what normally stamps it). The
+guard was written, measured at **179 failing assertions**, and reverted. Closing this means
+stamping artifacts across the direct-run fixtures, or deciding that direct `run` may review the
+live tree and saying so explicitly — either way its own increment, not a rider.
+
+The ACP-only entrance rule IS pinned: a direct non-ACP run is refused for both claude and codex.
+
 ### S4-4 (delete cmux) — measured map, before anyone starts it (2026-09-01)
 
 **Surface:** 92 `cmux` mentions in `helpers/comms.sh`, and 14 functions defined there:

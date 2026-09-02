@@ -2162,22 +2162,14 @@ cmd_run() {
   # place the product's artifact-bound promise did not hold. That path is gone (step 4, S4-2), so
   # every review turn is artifact-bound and the suppression has nothing left to suppress.
   msg_artifact="$(frontmatter_field "$msg" artifact_id)"
-  # A REVIEW WITHOUT AN ARTIFACT IS REFUSED. Removing the self-send suppression was necessary for
-  # "every review is artifact-bound" but NOT sufficient: `run`/`spawn` are public entry points, so
-  # a review message carrying no `artifact_id` would still proceed with an empty one and review
-  # the LIVE TREE — the exact promise this increment claims to close, left open for anyone who
-  # bypasses `cmd_send` (which normally stamps it). Direct grok did this too.
-  #
-  # One-off QUESTIONS are deliberately still allowed unstamped: a consult is not a review, has no
-  # verdict, and is not what the artifact-bound promise is about. (codex, S4-2 implement r1,
-  # blocking.)
-  if [ -z "$msg_artifact" ] && [ "$(frontmatter_field "$msg" type)" != "question" ]; then
-    update_thread_state "$msg_thread" failed "" "$sfield" || true
-    write_result "$run_dir" failed 1 "" "$msg" "a review turn was given no artifact_id, so it would review the live tree instead of a pinned snapshot — refusing (send through 'comms.sh send', which stamps the artifact, or add artifact_id to the message)"
-    unmount_artifact
-    trap - EXIT
-    exit 1
-  fi
+  # SCOPE NOTE, so the next reader does not mistake this for the whole promise. Deleting the
+  # self-send arm removed the place that BLANKED an artifact the message actually carried — the
+  # one path that took a stamped review and pointed it at the live tree anyway. It does NOT make
+  # every review artifact-bound: `run`/`spawn` are public, and a review message that never had an
+  # `artifact_id` still reviews `main_root`. That gap is PRE-EXISTING (it held for ACP and grok on
+  # main too), and closing it means refusing an unstamped review — which today would refuse ~28 of
+  # this suite's 31 review fixtures, so it is its own increment, not a rider on this one.
+  # (codex, S4-2 implement r1 — blocker accepted against the CLAIM; see docs/ROADMAP.md.)
   # A named-but-unresolvable artifact is a FAILURE, not a reason to fall back to the live
   # tree: the message promises a pinned artifact either way. The earlier guard only
   # covered failures AFTER cat-file succeeded. (codex, panel r1.)
