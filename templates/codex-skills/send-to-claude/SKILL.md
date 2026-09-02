@@ -104,7 +104,7 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
    ```bash
    "$COMMS_SH" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"
    ```
-   If it returns `RESULT: blocked`, follow **Sandbox & permissions** below — the single home for that path.
+   If it reports manual pickup, follow **Sandbox & permissions** below — the single home for that path.
    <!-- loopspec:fragment result-headless-codex-side -->
    Exceptions when a runphase turn is in flight (`acp` or `headless`): `RESULT: manual — headless mode: the reply is on disk...` is EXPECTED when you are the spawned peer (the driving session picks your reply up when your turn ends — do not retry). `RESULT: spawned` means a detached Claude turn is now processing your message: await the printed run dir (`.../runphase.sh await "<run dir>"`), then `$read-from-claude` for the reply; a non-zero await means the turn failed or timed out — check its `result.json` and report that instead of waiting.
    <!-- /loopspec:fragment -->
@@ -117,7 +117,8 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
 `send` and `deliver` write to `.comms/` and hand the message to a runner over ACP. They no
 longer touch any socket: the cmux transport and its permission profile were removed in step 4.
 
-If a sandboxed session returns `RESULT: blocked`, the message is on disk but Claude was
+`RESULT: blocked` is no longer produced (removed with the cmux socket in step 4). If delivery
+reports manual pickup, the message is on disk but Claude was
 **not** notified; do not claim passive `.comms` polling will pick it up. Do not resend or
 repeat the same sandboxed helper. Ask for one manual `/read-from-codex` instead. Read-only
 helper commands remain safe to run directly.

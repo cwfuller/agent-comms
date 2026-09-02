@@ -155,7 +155,8 @@ If the incoming message carries a `## Meta` section requesting process feedback:
 Read-only helper commands run directly. Delivery goes over ACP and needs no socket
 allowance: the cmux transport and its Codex permission profile were removed in step 4.
 
-If a sandboxed session returns `RESULT: blocked`, the reply is persisted but Claude was
+`RESULT: blocked` is no longer produced (it meant "cannot reach the cmux socket", removed in
+step 4). If delivery reports manual pickup, the reply is persisted but Claude was
 **not** notified. Do not claim passive polling, resend, or repeat the same sandboxed
 helper. Request one manual `/read-from-codex` instead.
 

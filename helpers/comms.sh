@@ -110,10 +110,9 @@
 #   prompt-version [--list]     content hash of the reviewer instruction surface; grades
 #                               are partitioned on it, never pooled across an edit
 #
-# Environment (pane timing — defaults are what a REAL terminal needs; override only
-# against a stub, e.g. the test harness):
-#                               complete decimal; one bad token (or whitespace only) falls
-#                               back to the full default, never to a partial schedule.
+# Environment:
+#   COMMS_DELIVERY              acp | headless (grok only) | mailbox. Unset picks the ladder.
+#                               Any other value — including the removed `cmux` — is REFUSED.
 set -euo pipefail
 
 die() { echo "comms.sh: $*" >&2; exit 1; }
@@ -3782,6 +3781,29 @@ headless_ok() {
   return 1
 }
 
+# AN UNKNOWN TRANSPORT IS REFUSED, not degraded. Warn-and-degrade was not self-consistent:
+# `transport` printed `mailbox` on stdout while `COMMS_DELIVERY` stayed `cmux`, so `deliver`
+# and `send` still said "NOT spawned … fix and retry" even with ACP available, and templates
+# that capture stdout never saw the stderr warning. Refusing matches how headless-for-claude
+# already fails, and closes the wider hole that `COMMS_DELIVERY=foo` silently took the default
+# ladder. (codex + grok, S4-4 r1.)
+#
+# ENFORCED AT THE ROUTER TOO, not only here. `cmd_send` does `del_out="$(cmd_deliver …)"` and
+# `cmd_deliver` does `route="$(cmd_transport …)"`; on bash 3.2 — the shell these helpers claim
+# to support, and the macOS default — a `die` in that position is SWALLOWED. Verified: with
+# only this check, `send` printed the refusal on stderr, then continued to "message written for
+# manual pickup", `RESULT: manual … fix and retry`, and exited 0. A validation a second caller
+# can bypass is the bug shape this codebase keeps rediscovering, so the router calls this
+# BEFORE dispatching any routing verb, in the main shell where no substitution can eat it.
+# (grok, S4-4 r2, advisory — a real defect, not a nit.)
+require_known_transport() {
+  case "${COMMS_DELIVERY:-}" in
+    ""|acp|headless|mailbox) return 0 ;;
+    cmux) die "transport: COMMS_DELIVERY=cmux — the cmux pane transport was REMOVED in step 4; unset it, or choose acp | headless (grok only) | mailbox" ;;
+    *)    die "transport: COMMS_DELIVERY='${COMMS_DELIVERY}' is not a known transport — choose acp | headless (grok only) | mailbox" ;;
+  esac
+}
+
 cmd_transport() {
   # transport <agent> [--loop] — print the transport that would actually be used:
   # headless | acp | mailbox.
@@ -3823,18 +3845,7 @@ cmd_transport() {
   local caps
   caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
 
-  # AN UNKNOWN TRANSPORT IS REFUSED, not degraded. Warn-and-degrade was the weaker option and
-  # was not even self-consistent: `transport` printed `mailbox` on stdout while `COMMS_DELIVERY`
-  # stayed `cmux`, so `deliver`/`send` still reported "NOT spawned … fix and retry" even with ACP
-  # available, and templates that capture stdout never saw the stderr warning. Refusing matches
-  # how headless-for-claude already fails (die + name the fix) and closes the wider hole that
-  # `COMMS_DELIVERY=foo` silently took the default ladder. ONE list, checked once, here at the
-  # single decision point. (codex + grok, S4-4 r1, corroborated blocking.)
-  case "${COMMS_DELIVERY:-}" in
-    ""|acp|headless|mailbox) ;;
-    cmux) die "transport: COMMS_DELIVERY=cmux — the cmux pane transport was REMOVED in step 4; unset it, or choose acp | headless (grok only) | mailbox" ;;
-    *)    die "transport: COMMS_DELIVERY='${COMMS_DELIVERY}' is not a known transport — choose acp | headless (grok only) | mailbox" ;;
-  esac
+  require_known_transport
 
   # LOOPS ARE ACP-FIRST, then headless, then a pane. A loop is unattended work by
   # definition, so it must not depend on an open pane — but the ordering here is
@@ -3843,15 +3854,14 @@ cmd_transport() {
   #   headless (cold spawn) ~115,000 fresh input tokens per turn
   #   ACP (warm session)    ~1,061
   #
-  # A cold spawn rebuilds context from nothing every round; only the
-  # conversation but still re-sends a large uncached prefix per model call. Only a
-  # named ACP session makes round N pay a delta. headless stays available
-  # and opt-in (COMMS_DELIVERY / --via).
+  # A cold spawn rebuilds context from nothing every round. Only a named ACP session makes
+  # round N pay a delta rather than re-sending a large uncached prefix per model call.
+  # headless stays available and opt-in (COMMS_DELIVERY / --via), grok only.
   if [ "$mode" = "loop" ]; then
     if acp_supports "$agent"; then printf 'acp\n'; return 0; fi
-    # Fall back to a pane only when the headless runner is genuinely missing:
-    # flipping the default must not strand every loop on an install where
-    # runphase.sh never landed.
+    # Fall back to headless only when ACP is genuinely unavailable: flipping the default
+    # must not strand every loop on an install where runphase.sh never landed. There is no
+    # pane arm below this any more — cmux was deleted in step 4 (S4-4).
     if runphase_available && headless_ok "$agent"; then printf 'headless\n'; return 0; fi
     # A LOOP MUST NOT FALL BACK TO A PANE for a provider whose self-send path is gone. Deleting
     # headless for claude/codex (step 4, S4-2) made this ladder drop straight through to a pane —
@@ -4521,7 +4531,9 @@ cmd_send() {
   route="$(printf '%s\n' "$del_out" | sed -n 's/^spawned runphase .*via=\([a-z][a-z]*\).*/\1/p' | head -1)"
   case "$del_out" in
     *"delivered to"*)     outcome=delivered ;;
-    *"delivery blocked"*) outcome=blocked ;;
+    # `blocked` is UNREACHABLE since S4-4: it meant "this session cannot reach the cmux
+    # socket", and there is no socket. The enum keeps the value so ARCHIVED state written
+    # before the removal still validates and still reads back; nothing produces it now.
     *FAILED*)             outcome=failed ;;
     *"spawned runphase"*) outcome=spawned ;;
     *"already running"*)  outcome=spawned ;;   # headless re-send: turn already in flight
@@ -4587,7 +4599,6 @@ cmd_send() {
     # parenthetical at all. Naming a route we did not observe is the same defect in a new spot.
     spawned)   echo "RESULT: spawned${route:+ ($route)} — a peer turn is running detached; the reply lands in the inbox when it exits. Await it with the runphase.sh command printed above, then read the reply." ;;
     held)      echo "RESULT: held — the thread is paused by a hold marker; nothing was spawned. Release with 'runphase.sh release <thread>', then RE-SEND ('comms.sh send --to $to <file>') — a bare deliver would spawn the turn but leave this thread's state stuck on 'held', blinding status and the stalled watchdog." ;;
-    blocked)   echo "RESULT: blocked — message saved, peer not nudged; use manual pickup" ;;
     pickup)
       # Text deliberately starts "manual —" for the peers' expectations: the
       # spawned peer is pre-briefed that its reply send reports manual.
@@ -4608,6 +4619,14 @@ cmd_send() {
     failed)    echo "RESULT: failed — nudge errored mid-sequence; retry with 'comms.sh send --to $to <file>'" ;;
   esac
 }
+
+# The routing verbs refuse an unknown transport HERE, in the main shell, so a command
+# substitution deeper in the call chain cannot swallow the die on bash 3.2. Read-only verbs
+# are deliberately exempt: an operator with a stale COMMS_DELIVERY must still be able to run
+# `status`/`list` to see what happened. (grok, S4-4 r2.)
+case "${1:-}" in
+  transport|deliver|send|ask) require_known_transport ;;
+esac
 
 case "${1:-}" in
   root)      shift; cmd_root "$@" ;;

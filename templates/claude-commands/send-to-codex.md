@@ -56,9 +56,9 @@ message_id: <the filename, without .md>
    ```bash
    "$COMMS_SH" send --to codex "<path of the message file you wrote>"
    ```
-   On `RESULT: blocked`, the message is on disk but the peer was NOT notified: ask for one
-   manual pickup. The `RECOVER:` line and `comms.sh reconcile` went with the cmux transport
-   in step 4. Relay only the final non-`delivered` result.
+   `RESULT: blocked` is no longer produced (it meant "cannot reach the cmux socket", removed in
+   step 4, along with `RECOVER:` and `comms.sh reconcile`). If delivery reports manual pickup,
+   the message is on disk and the peer was NOT notified. Relay only the final non-`delivered` result.
    <!-- loopspec:fragment result-spawned-exception -->
    Exception — `RESULT: spawned` (a runphase turn, over either `acp` or `headless`; the line names which): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply. `transport` answers which surface a loop uses; `RESULT: spawned` answers how to wait — the wait is the same either way, so do not go looking for a separate ACP protocol.
    <!-- /loopspec:fragment -->

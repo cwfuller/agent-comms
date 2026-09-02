@@ -1207,6 +1207,13 @@ WSI_MAIN="$( cd "$WSI" && "$COMMS" workspace 2>/dev/null )"
 ( cd "$WSI" && git checkout -q -b feature/some-work ) 2>/dev/null
 WSI_BR="$( cd "$WSI" && "$COMMS" workspace 2>/dev/null )"
 [ "$WSI_BR" = "feature-some-work" ] && ok "a branch name still sanitises into the workspace identity" || fail "branch workspace (got: $WSI_BR)"
+# A STALE CMUX_WORKSPACE_ID must change nothing. Old and new repo_workspace_name disagree on
+# exactly this input — the old code substituted the repo directory name on a generic default
+# branch when that env was set. Restoring the guard "to be safe" would flip the mailbox prefix
+# and hide pending mail behind the glob (field report #3). (grok, S4-4 r2, cheap insurance.)
+( cd "$WSI" && git checkout -q main ) 2>/dev/null
+WSI_STALE="$( cd "$WSI" && env CMUX_WORKSPACE_ID=workspace:99 "$COMMS" workspace 2>/dev/null )"
+[ "$WSI_STALE" = "main" ] && ok "a leftover CMUX_WORKSPACE_ID cannot rename the workspace" || fail "stale cmux env changed identity (got: $WSI_STALE)"
 
 section "loopspec: conformance fixtures"
 if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then
@@ -4799,6 +4806,22 @@ TR_CMUX_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux "$COMMS" transport code
   || fail "cmux request not refused (rc=$TR_CMUX_RC, got: $TR_CMUX_OUT)"
 # ...and the refusal is not cmux-specific special-casing: any unknown transport is refused,
 # which is the hole that let COMMS_DELIVERY=foo silently take the default ladder. (grok, r1.)
+# THE REFUSAL MUST HOLD AT EVERY ENTRY POINT, not just `transport`. `cmd_send` runs
+# `del_out="$(cmd_deliver …)"` and `cmd_deliver` runs `route="$(cmd_transport …)"`; on bash 3.2
+# — the macOS default and the shell these helpers claim to support — a `die` in that position
+# is SWALLOWED. Before the router-level gate, `send` printed the refusal on stderr and then
+# continued to "message written for manual pickup" / "RESULT: manual … fix and retry" and
+# exited 0. Run these under /bin/bash explicitly so the 3.2 behaviour is what is measured.
+# (grok, S4-4 r2, advisory — reproduced, then fixed.)
+# No /bin/bash guard: this harness is itself #!/bin/bash, so it cannot run without one.
+TR_SEND_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" send --to codex "$TR_CONSULT") 2>&1 )" && TR_SEND_RC=0 || TR_SEND_RC=$?
+[ "$TR_SEND_RC" != "0" ] && ok "send refuses an unknown transport (the die is not swallowed by command substitution)" \
+  || fail "send swallowed the transport refusal (rc=$TR_SEND_RC, got: $TR_SEND_OUT)"
+printf '%s\n' "$TR_SEND_OUT" | grep -q 'fix and retry' \
+  && fail "send still tells the caller to fix and retry after a refused transport" \
+  || ok "a refused transport does not produce the fix-and-retry lie"
+TR_DEL_RC=0; (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" deliver codex "$TR_CONSULT") >/dev/null 2>&1 || TR_DEL_RC=$?
+[ "$TR_DEL_RC" != "0" ] && ok "deliver refuses an unknown transport too" || fail "deliver swallowed the refusal (rc=$TR_DEL_RC)"
 TR_FOO_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=foo "$COMMS" transport codex --loop) 2>&1 )" && TR_FOO_RC=0 || TR_FOO_RC=$?
 [ "$TR_FOO_RC" != "0" ] && printf '%s\n' "$TR_FOO_OUT" | grep -q "not a known transport" \
   && ok "an unknown COMMS_DELIVERY value is refused, not silently defaulted" \
@@ -4869,8 +4892,13 @@ run_tr_default() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH"
 # pane arm is gone — it could not fail. Assert the POSITIVE outcome a loop must actually
 # produce instead. (grok, S4-4 r1: "the third is still vacuous".)
 TR_LOOP_OUT="$(run_tr_default deliver codex "$TR_LOOPMSG" 2>&1 || true)"
-printf '%s\n' "$TR_LOOP_OUT" | grep -qE 'RESULT: spawned|manual pickup|written for pickup|note: COMMS_DELIVERY=mailbox' \
-  && ok "a LOOP message resolves to a runner or an honest manual pickup" \
+# Narrowed to what THIS fixture produces. The wider alternation was not a tautology but was
+# looser than the setup warrants: `deliver` never prints `RESULT: spawned` (that is `send`),
+# `note: COMMS_DELIVERY=mailbox` cannot match because the helper unsets the env, and
+# `written for pickup` would have accepted a wrong pickup short-circuit. With no acp.sh beside
+# the sandboxed helper, a codex loop must report manual pickup. (grok, S4-4 r2.)
+printf '%s\n' "$TR_LOOP_OUT" | grep -q 'manual pickup' \
+  && ok "a LOOP message with no runner reports an honest manual pickup" \
   || fail "loop delivery produced no recognised outcome (got: $TR_LOOP_OUT)"
 # "did not reach a surface" is also true of manual pickup and of a spawn failure, so
 # assert the POSITIVE signal. (codex, transport-flip round 2.)
@@ -4891,9 +4919,9 @@ printf '%s\n' "$TR_NOWS" | grep -q 'unbound variable' \
 # The mode still comes from the MESSAGE, so `transport` agrees with what deliver did.
 [ "$(run_tr_default transport codex --loop)" != "cmux" ] && ok "loop mode never resolves to a deleted transport" || fail "loop transport"
 
-# Criterion 3: with runphase.sh genuinely absent, a loop must fall back to the pane
-# rather than strand. Untested until grok pointed it out. A bare copy of the helper (no
-# runphase.sh beside it) is the honest way to simulate a partial install.
+# Criterion 3: with runphase.sh genuinely absent, a loop must not strand. It falls back to
+# MAILBOX, never to a pane — cmux is gone (S4-4) and the assertions below reject a pane
+# outcome. A bare copy of the helper (no runphase.sh beside it) simulates a partial install.
 TR_BARE="$WORK/bare-install"; mkdir -p "$TR_BARE"
 cp "$COMMS" "$TR_BARE/comms.sh"; chmod +x "$TR_BARE/comms.sh"
 [ ! -e "$TR_BARE/runphase.sh" ] && ok "fixture: a helper install with no runphase.sh" || fail "bare fixture"
