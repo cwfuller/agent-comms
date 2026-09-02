@@ -24,7 +24,8 @@
 #   deliver <agent> [file]   nudge the target (cmux pane for claude/codex; headless-only agents route via runphase); reports delivered/
 #                               manual-pickup/FAILED explicitly (never hard-fails).
 #                               COMMS_DELIVERY=headless routes to runphase.sh instead
-#                               (detached codex exec / claude -p turn for the target)
+#                               (detached turn; grok only since step 4 — claude and
+#                               codex review turns are ACP-only and refuse headless)
 #   transport <agent> [--loop]  which transport would actually be used right now:
 #                               headless | cmux | acp | mailbox. One decision point, so
 #                               templates never re-implement surface detection.

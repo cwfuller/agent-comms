@@ -232,7 +232,7 @@ templates, and these docs all read from it rather than each re-deciding.
 Opting back into the watchable pane: `--via cmux` on an `auto-*` command, or
 `COMMS_DELIVERY=cmux`. `--via mailbox` / `COMMS_DELIVERY=mailbox` force manual pickup: the file
 is written and nobody is nudged, which is a requested outcome rather than a failure — `deliver` and
-`send` report it as intent; `status` still reports the durable `manual` fact from thread state. `--via headless` / `COMMS_DELIVERY=headless` force the detached
+`send` report it as intent; `status` still reports the durable `manual` fact from thread state. `--via headless` / `COMMS_DELIVERY=headless` (grok only since step 4; refused for claude/codex) force the detached
 runner. If cmux is explicitly requested and no surface is live, delivery reports
 `mailbox` rather than silently substituting a transport you did not choose.
 
@@ -303,7 +303,7 @@ the operator surface:
 | subcommand | effect |
 |---|---|
 | `run --message <file> --dir <run-dir> [--provider ...] [--no-deliver]` | foreground runner. `--no-deliver` produces and validates the reply in the run dir but touches **neither the mailbox nor thread state** — the measurement mode behind `comms.sh shadow` |
-| `spawn --message <file> [--provider codex\|claude] [--sandbox <mode>] [--timeout-secs N]` | detach a peer turn (`codex exec --json` / `claude -p --output-format stream-json`); prints pid + run dir immediately; refuses (`HELD`) while the thread is held; won't double-spawn while a prior runner for the message is alive |
+| `spawn --message <file> [--provider claude\|codex\|grok] [--via acp] [--sandbox <mode>] [--timeout-secs N]` | detach a peer turn — ACP-only for claude/codex since step 4; a non-ACP request for them is refused; prints pid + run dir immediately; refuses (`HELD`) while the thread is held; won't double-spawn while a prior runner for the message is alive |
 | `await <run-dir> [--timeout-secs N]` | block until the turn's `result.json` exists (or the runner dies); prints it; exit 0 only for `status=completed` |
 | `result <run-dir>` | print `result.json` if present |
 | `hold [thread]` | pause: block new spawns for the thread (all threads with no arg); prints the attach commands (`claude --resume <sid>` / `codex resume <tid>`) from state |

@@ -135,7 +135,7 @@ message_id: <the filename, without .md>
 
 ## Notes
 
-- **Headless delivery (experimental).** With `COMMS_DELIVERY=headless` set, `send` spawns the target agent's turn as a detached subprocess instead of nudging a pane.
+- **Headless delivery (grok only).** With `COMMS_DELIVERY=headless` set, `send` spawns the target agent's turn as a detached subprocess instead of nudging a pane. Since step 4 this applies to `grok` alone — `claude` and `codex` review turns are ACP-only and a headless request for them is refused.
   <!-- loopspec:fragment result-spawned-exception -->
   Exception — `RESULT: spawned` (a runphase turn, over either `acp` or `headless`; the line names which): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply. `transport` answers which surface a loop uses; `RESULT: spawned` answers how to wait — the wait is the same either way, so do not go looking for a separate ACP protocol.
   <!-- /loopspec:fragment -->

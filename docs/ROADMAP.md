@@ -108,8 +108,11 @@ by the time this runs, cmux should be reachable only where it is explicitly aske
 the full test surgery are on `worktree-selfsend-removal`, suite green at 1454 from 74 failures.
 
 Code, done: the 62-line self-send arm deleted (0 self-send instruction sites remain); the ACP-only
-guard for claude/codex; the artifact suppression removed, so EVERY review turn is now
-artifact-bound — the self-send path was the one place that promise did not hold; and a single
+guard for claude/codex; the artifact suppression removed, so every STAMPED review
+retains its artifact binding — the self-send path was the one place that promise did not hold.
+This is deliberately NOT "every review turn is artifact-bound": an unstamped review can still
+read the live tree, a gap that predates this branch and is filed as its own increment. (codex,
+S4-2 r2, advisory: the stronger claim contradicted the open-gap section below it.) And a single
 `headless_ok` predicate gating all four headless rungs in `cmd_transport`.
 
 **That last one was a real trap.** Gating only the explicit `COMMS_DELIVERY=headless` input left

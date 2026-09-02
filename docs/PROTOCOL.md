@@ -480,8 +480,8 @@ because of filename order.
 
 `COMMS_DELIVERY=headless` replaces the keystroke nudge with a detached subprocess:
 `deliver <target>` hands the message to `runphase.sh`, which spawns the target
-provider's CLI in the background — `codex exec --json` for Codex, `claude -p
---verbose --output-format stream-json` for Claude — records the run under
+provider's CLI in the background — since step 4 that is `grok` alone; the Codex
+(`codex exec --json`) and Claude (`claude -p`) direct arms were DELETED — records the run under
 `.comms/logs/<message_id>.<epoch>.<pid>/` (`prompt.md`, `events.ndjson` JSONL event
 log, `result.json`, `pid`, `runner.log`), and mirrors the outcome into thread state
 on exit. cmux is never touched; identity is a process handle, not a pane guess.
@@ -518,7 +518,7 @@ Additional delivery outcomes in headless mode:
 | `spawned` | peer turn running detached | `runphase.sh await <run-dir>`; reply appears in the inbox when it exits |
 | `completed` | turn exited 0; reply should be in the inbox | read it |
 | `failed` | provider CLI exited non-zero, or the runner aborted (its exit trap still records the failure) | **`panel status --set <id>` FIRST — a failed turn may already have delivered its reply**; only then inspect `events.ndjson`/`runner.log` and re-send |
-| `timeout` | turn killed after `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800) | **`panel status --set <id>` first, same reason** — a self-sending child can send and then be killed; then raise the limit or investigate, and re-send |
+| `timeout` | turn killed after `COMMS_RUNPHASE_TIMEOUT_SECS` (default 1800) | **`panel status --set <id>` first, same reason** — a turn can have its reply written and then be killed; then raise the limit or investigate, and re-send |
 | `held` | a hold marker paused the thread; nothing spawned | `runphase.sh release <thread>`, then re-send |
 | `pickup` | designed no-op: a peer turn's reply to its driving session (`RESULT:` still reads `manual — …picks it up…` for the peer's expectations) | none — the driver reads the reply when the turn exits |
 
@@ -546,19 +546,20 @@ that this is expected — the driving session picks the reply up when the turn e
 
 **The inbox is the system of record; an await is only a convenience.** Where a conforming
 reply is produced at all, it is written into the DRIVER's inbox by the detached runner
-before `result.json` exists — a self-sending peer sends it itself, a parent-brokered one
-has the broker copy and send it — so a driver that dies mid-turn loses its await, never the
+before `result.json` exists — the broker copies and sends it, every route being
+parent-brokered since step 4 — so a driver that dies mid-turn loses its await, never the
 reply. Two limits on that guarantee, both by design. A `failed`, `timeout` or aborted turn **may**
 have no reply, because there may be no verdict to persist — but "failed" does not imply
 "nothing arrived": the broker writes the reply into the inbox *before* it sends, so a send
-that fails afterwards records `failed` with the reply already there, and a self-sending
-child can send successfully and then exit non-zero. **Check `panel status` before re-sending
+that fails afterwards records `failed` with the reply already there, and a turn can be
+killed after its reply landed. **Check `panel status` before re-sending
 ANY non-completed turn** — `failed`, `timeout` or aborted alike — or a round is paid for
-twice. A self-sending child can send its reply and *then* be killed or trip its exit trap,
-so the outcome label describes how the turn ended, never whether a verdict arrived. Second, on the **self-sending**
-route the runner marks a turn `completed` from the child's exit status alone, so a child
-that exits 0 without sending yields a completed result and an empty inbox; parent-brokered
-routes (grok, ACP) do not have that hole, because the parent performs the write itself. Recovery is
+twice. A turn can have its reply written and *then* be killed or trip its exit trap, so the
+outcome label describes how the turn ended, never whether a verdict arrived. Second — and this
+is now HISTORICAL — the deleted self-send route marked a turn `completed` from the child's exit
+status alone, so a child that exited 0 without sending yielded a completed result and an empty
+inbox. Step 4 removed that route precisely because of this hole; every surviving route is
+parent-brokered, and the parent performs the write itself. Recovery is
 therefore a read, not a re-run: `comms.sh panel status` with no `--set` lists the review
 sets from the durable append-only index, `panel status --set <id>` shows each leg's reply
 and verdict, and `compose --set <id>` gates. Both readers scan the archive and **every
@@ -566,11 +567,12 @@ registered agent's inbox**, so which agent drove the panel does not change what 
 see; a leg is answered by the round + `in-reply-to` + `type` + validation binding, never by
 the directory a message arrived in.
 
-Sandbox: a Codex turn runs `codex exec -s workspace-write` from the message's `cwd` (or
-the main repo root); a Claude turn relies on its permission policy. For worktree turns,
-`.comms/` and the main `.git/` are added via `--add-dir` so the reply and branch
-operations succeed. The spawned turn inherits `COMMS_DELIVERY=headless` so nothing in
-the child can reach for cmux.
+Sandbox: over ACP a Codex turn runs under its own kernel sandbox and a Claude turn under a
+pinned permission mode. For worktree turns, `.comms/` and the main `.git/` are added via
+`--add-dir` so the reply and branch operations succeed. The spawned turn does **not** inherit
+`COMMS_DELIVERY`: exporting `headless` onto the child also landed it on the driver, where it
+tripped the parent's own delivery gate and killed the broker's `send` while the copied reply
+made every leg look answered. (grok, S4-2 r1, blocking.)
 
 ## Archive discipline
 

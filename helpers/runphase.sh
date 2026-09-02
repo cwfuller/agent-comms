@@ -3,11 +3,12 @@
 # grok is reviewer/consult-only: a read-only sandboxed child produces the reply
 # as output and THIS trusted parent persists/validates/sends/archives it.
 #
-# Replaces the cmux keystroke nudge with a detached subprocess (`codex exec` or
-# `claude -p`): the peer turn is spawned, observed (JSONL event log),
+# Replaces the cmux keystroke nudge with a detached subprocess: over ACP for every
+# provider, or a direct `grok` turn. The `codex exec` / `claude -p` self-send arms
+# were DELETED in step 4. The peer turn is spawned, observed (JSONL event log),
 # resumed-or-failed (session id recorded), and recorded (result.json + thread
 # state) — without typing into another terminal. Opt-in per call via
-# COMMS_DELIVERY=headless. Since 2026-08-25 this is the DEFAULT for loops (a loop
+# COMMS_DELIVERY=headless — grok only since step 4. ACP is the loop default (a loop
 # is unattended work and should not require an open pane); cmux is opt-in via
 # --via cmux / COMMS_DELIVERY=cmux. `comms.sh transport` owns the decision.
 #
