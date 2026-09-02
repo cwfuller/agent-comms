@@ -48,8 +48,10 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
 
 1. **Claim then check.** Before touching the tree, a session records its presence
    (`.comms/sessions/<name>-<instance>.json` — role, state, host, optional
-   long-lived pid) and THEN evaluates peers. Exit 0 = no live/ambiguous peers,
-   the shared checkout is free; exit 3/4 = isolate into a session worktree
+   long-lived pid) and THEN evaluates peers. Exit 0 = no live/ambiguous REGISTERED
+   peers — which is not the same as a clean tree: an unregistered session, a human,
+   or an open editor can still hold uncommitted work, so check `git status` before
+   staging; exit 3/4 = isolate into a session worktree
    (`comms.sh worktree new`). Task size never matters; peer presence does.
 2. **Never occupy `main` with WORK.** Every checkout a session works in runs on
    a session branch; `main` is a ref that advances, checked out transiently

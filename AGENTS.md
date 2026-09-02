@@ -249,10 +249,18 @@ runtime, quote the assertion count with it or measure both sides yourself.
 - **Never `git add -A` / `git add .` in a shared checkout.** The path-limited commit above
   protects the COMMIT; it does not protect the INDEX. `git add -A` stages every dirty file in
   the tree including work you have never seen, and it leaves it staged for whoever commits
-  next. Stage explicit paths (`git add <paths>`), or verify before committing:
+  next. Stage explicit paths (`git add <paths>`), and verify before committing:
   ```bash
-  git diff --cached --name-only        # must list ONLY files you edited
+  git diff --cached --name-only        # necessary: must list ONLY files you edited
+  git diff --cached                    # SUFFICIENT: the name check cannot see a foreign
+                                       # HUNK inside a file you also touched
   ```
+  **The name check alone is not enough.** If another session edited the same file, its hunks
+  stage under a filename that looks like yours. Read the staged diff, or stage interactively
+  with `git add -p`. (codex, staging-safety r1, blocking.)
+- **`git commit -a` is the same footgun for TRACKED files.** It needs no `add` at all and would
+  have swept the modified file in the 2026-09-02 report on its own. Named here because a rule
+  that lists only `git add -A` invites it. (grok, staging-safety r1.)
   A snapshot pins the WHOLE tree, so foreign files also reach your reviewers as part of the
   artifact — the claude session that filed this had to hand-write a "please ignore"
   note to a panel that had already read the foreign files.

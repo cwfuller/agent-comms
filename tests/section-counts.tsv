@@ -32,7 +32,7 @@ friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	42
 runphase: parent-brokered claude and codex legs over ACP	32
-scope-dial template source contract	15
+scope-dial template source contract	17
 templates: bare dollar-digit/dollar-star hygiene	1
 /ask canonical template source contract	10
 loopspec: prompt fragments do not drift from docs/loopspec/fragments/	10

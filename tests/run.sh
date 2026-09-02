@@ -3457,6 +3457,36 @@ printf '%s' "$AGB" | grep -q 'read-from-claude\|send-to-claude' \
   || ok "the live AGENTS.md block names no deleted skill"
 printf '%s' "$AGB" | grep -q 'parent-brokered' \
   && ok "the live AGENTS.md block describes the parent-brokered model" || fail "AGENTS.md block does not describe the surviving workflow"
+# THE MECHANICAL GUARD a doc rule could not provide. Ownership of a dirty file is unknowable,
+# but "was the dispatched snapshot SYNTHETIC" is not: cmd_snapshot returns artifact == base for
+# a clean tree and artifact != base when it had to wrap a dirty one. Warn, never refuse.
+# Both arms asserted, because a warning that always fires is worth nothing.
+# (codex + grok, staging-safety r1 — they overturned my "no mechanical guard exists" claim.)
+SNAPW="$WORK/snapw"; rm -rf "$SNAPW"; mkdir -p "$SNAPW/.comms/to-codex"
+( cd "$SNAPW" && git init -q -b main . && printf 'a\n' > a.txt && printf '.comms/\n' > .gitignore
+  cat > r.md <<'SNAPR'
+---
+type: review-request
+from: claude
+timestamp: 2026-09-02T00:00:00Z
+message_id: snapw_2026-09-02T00-00-00_r-1
+workspace: snapw
+thread: snapw
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## Intent
+snapshot dirt probe
+SNAPR
+  git add -A && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
+SNAP_CLEAN="$( (cd "$SNAPW" && env COMMS_DELIVERY=mailbox "$COMMS" panel dispatch --to codex r.md) 2>&1 | grep -c 'SYNTHETIC' )"
+printf 'FOREIGN\n' > "$SNAPW/someone-elses.txt"
+SNAP_DIRTY="$( (cd "$SNAPW" && env COMMS_DELIVERY=mailbox "$COMMS" panel dispatch --to codex r.md) 2>&1 | grep -c 'SYNTHETIC' )"
+[ "$SNAP_CLEAN" = "0" ] && ok "a clean-tree dispatch emits no synthetic-snapshot warning" || fail "synthetic warning fired on a clean tree (always-on warnings are worthless)"
+[ "$SNAP_DIRTY" != "0" ] && ok "a dirty-tree dispatch warns that reviewers will read uncommitted work" || fail "no synthetic-snapshot warning on a dirty tree"
 # The success banner is a second surface that advertised the skills; grep it too. (codex, r2.)
 grep -A24 'done! installed:' "$REPO/install.sh" | grep -q 'read-from-claude\|send-to-claude' \
   && fail "the installer banner still claims it installed a deleted skill" \

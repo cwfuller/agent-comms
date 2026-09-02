@@ -1573,6 +1573,19 @@ cmd_panel() {
   aid="${dispatch_pair%%	*}"
   dispatch_base="${dispatch_pair#*	}"
   [ "$dispatch_base" = "$dispatch_pair" ] && dispatch_base=""
+  # A SYNTHETIC snapshot means the tree was DIRTY at dispatch: the artifact reviewers read is
+  # not any commit you made, and every uncommitted file — including work belonging to another
+  # session in a shared checkout — is inside it. This needs no knowledge of WHOSE files they
+  # are, which is what made it available when a doc rule was not: cmd_snapshot already returns
+  # artifact == base for a clean tree and artifact != base for a synthetic one. Warn, never
+  # refuse — a deliberate dirty dispatch is legitimate, an accidental one is what cost a claude
+  # session a hand-written "please ignore" note to a panel that had already read the files.
+  # (codex + grok, staging-safety r1, corroborated.)
+  if [ -n "$dispatch_base" ] && [ "$aid" != "$dispatch_base" ]; then
+    echo "warning: dispatching a SYNTHETIC snapshot — the tree was dirty, so reviewers will read uncommitted work:" >&2
+    git -C "$(cmd_root)/.." status --porcelain 2>/dev/null | head -10 | sed 's/^/  /' >&2
+    echo "  commit first if that is not what you meant (AGENTS.md: 'commit before dispatching')." >&2
+  fi
   pver="$(cmd_prompt_version 2>/dev/null || true)"
   [ -n "$set_id" ] || set_id="$(printf '%s-%s-r%s-%s' "${base_thread:-panel}" "${phase:-nophase}" "${round:-1}" "$(printf '%s' "$aid" | cut -c1-7)")"
   set_id="$(safe_set_id "$set_id")"
