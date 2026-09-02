@@ -1,27 +1,21 @@
-comms.sh: root/workspace	8
-comms.sh: Codex cmux permission preflight	7
+comms.sh: root/workspace	3
 comms.sh: validate	5
 comms.sh: archive (idempotent, own inbox only)	4
 comms.sh: list	3
 comms.sh: latest archive is direction/thread/time aware	4
-comms.sh: deliver via stubbed cmux	7
 comms.sh: send (atomicity guard)	4
 install.sh: scopes	18
 comms.sh: status smoke	3
 install.sh: local pin gitignored + global scope (overridden HOME dirs)	45
 comms.sh v2: thread filter + verdict normalization + error lane	4
 comms.sh v2: state lifecycle	13
-comms.sh v2: delivery failure is explicit and recorded	2
 comms.sh v2: state hardening (slash thread, garbage epoch, quotes)	5
 comms.sh v2: state dir blocked as a FILE must not break send/archive	3
-comms.sh v2.1: workspace resilience (empty cmux tree must not abort or flap)	11
-comms.sh v2.1: surface binding	4
-comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery)	4
-comms.sh v2.2: sandbox block emits direct recovery + state reconciliation	12
 comms.sh v2.1.1: status shouts when a loop stalled undelivered	2
 comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line	3
 runphase step 2: hold, release, and the stalled watchdog	12
 headless delivery: self-pickup suppression and a missing runner	7
+comms.sh: workspace identity (no cmux)	2
 loopspec: conformance fixtures	1
 multi-agent: registry contract	15
 multi-agent: sender enforcement + grok inbox round-trip	2
@@ -53,7 +47,7 @@ grading pilot: snapshot RETAINS the reviewed tree (a hash alone cannot)	8
 grading pilot: prompt-version partitions grades across an instruction edit	8
 grading pilot: shadow reviewer is a MEASUREMENT, structurally unable to gate	53
 grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims)	44
-comms.sh: transport selection (no pane must not strand a consult)	47
+comms.sh: transport selection (no pane must not strand a consult)	43
 panel: N parallel 2-party legs over ONE artifact	56
 ask: the driver-neutral consult verb	23
 review turns may read history, never publish or rewrite it	44

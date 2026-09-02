@@ -3,14 +3,14 @@
 # grok is reviewer/consult-only: a read-only sandboxed child produces the reply
 # as output and THIS trusted parent persists/validates/sends/archives it.
 #
-# Replaces the cmux keystroke nudge with a detached subprocess: over ACP for every
+# Runs a peer turn as a detached subprocess: over ACP for every
 # provider, or a direct `grok` turn. The `codex exec` / `claude -p` self-send arms
 # were DELETED in step 4. The peer turn is spawned, observed (JSONL event log),
 # resumed-or-failed (session id recorded), and recorded (result.json + thread
 # state) — without typing into another terminal. Opt-in per call via
 # COMMS_DELIVERY=headless — grok only since step 4. ACP is the loop default (a loop
-# is unattended work and should not require an open pane); cmux is opt-in via
-# --via cmux / COMMS_DELIVERY=cmux. `comms.sh transport` owns the decision.
+# is unattended work and should not require an open pane). `comms.sh transport` owns
+# the decision. The cmux pane transport was deleted in step 4 (S4-4).
 #
 # Subcommands:
 #   spawn --message <file> [--provider codex|claude|grok] [--sandbox <mode>] [--timeout-secs N]
@@ -2722,7 +2722,7 @@ cmd_run() {
             # fails the place closed. (codex, r4 + r5.)
             [ -f "$_dst" ] && [ ! -L "$_dst" ] || return 1
           }
-          # Credentials only, copied fresh. NOT the workspace-cmux profile this repo's own
+          # Credentials only, copied fresh. NOT the permission profile this repo's own
           # `codex-permissions` recipe installs: that profile is exactly what makes the agent
           # self-authorise, so no permission request is ever issued and no client-side denial
           # is possible. An isolated home is how the review turn escapes it.

@@ -7,10 +7,8 @@
 #
 # Subcommands:
 #   root                        print the main repo's .comms path (worktree-safe)
-#   workspace [set <name>]      print the mailbox identity (pin > cmux > branch > repo
+#   workspace [set <name>]      print the mailbox identity (pin > branch > repo
 #                               dir); `set` pins it repo-scoped in .comms/workspace
-#   doctor                      verify this session can reach the cmux socket
-#   codex-permissions [socket]  print least-privilege Codex config for cmux delivery
 #   agents [default|--supported|--others <agent>]
 #                                  registered agents from .comms/config; --others lists
 #                                  everyone EXCEPT one (the default panel for its driver).
@@ -21,13 +19,13 @@
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
 #   verdict <file>              normalized (trimmed, uppercased) verdict from frontmatter
 #   archive --as <agent> <file...>   idempotent move to archive/; own inbox only
-#   deliver <agent> [file]   nudge the target (cmux pane for claude/codex; headless-only agents route via runphase); reports delivered/
+#   deliver <agent> [file]   hand the message to a runner (ACP, or headless for grok); reports delivered/
 #                               manual-pickup/FAILED explicitly (never hard-fails).
 #                               COMMS_DELIVERY=headless routes to runphase.sh instead
 #                               (detached turn; grok only since step 4 — claude and
 #                               codex review turns are ACP-only and refuse headless)
 #   transport <agent> [--loop]  which transport would actually be used right now:
-#                               headless | cmux | acp | mailbox. One decision point, so
+#                               headless | acp | mailbox. One decision point, so
 #                               templates never re-implement surface detection.
 #   send --to <agent> <file> [--wait] [--archive-inbound <file>]
 #                               --wait runs the peer turn in the FOREGROUND instead of
@@ -116,9 +114,6 @@
 #
 # Environment (pane timing — defaults are what a REAL terminal needs; override only
 # against a stub, e.g. the test harness):
-#   COMMS_CMUX_PACE             default 1; 0 skips keystroke pacing between send/escape/enter
-#   COMMS_CMUX_BACKOFF          default "0.3 0.7 1.2"; whitespace-separated non-negative
-#                               decimals, the cmux-tree retry schedule. Every token must be a
 #                               complete decimal; one bad token (or whitespace only) falls
 #                               back to the full default, never to a partial schedule.
 set -euo pipefail
@@ -136,77 +131,9 @@ main_repo_root() {
   git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //'
 }
 
-cmux_default_socket_path() {
-  local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
-  printf '%s/cmux/cmux.sock\n' "$state_home"
-}
 
-cmux_socket_path() {
-  if [ -n "${CMUX_SOCKET_PATH:-}" ]; then
-    printf '%s\n' "$CMUX_SOCKET_PATH"
-  else
-    local fallback last_file remembered
-    fallback="$(cmux_default_socket_path)"
-    last_file="$(dirname "$fallback")/last-socket-path"
-    remembered="$(head -1 "$last_file" 2>/dev/null || true)"
-    case "$remembered" in /*) printf '%s\n' "$remembered" ;; *) printf '%s\n' "$fallback" ;; esac
-  fi
-}
 
-cmd_codex_permissions() {
-  local socket="${1:-$(cmux_socket_path)}" fallback
-  fallback="$(cmux_default_socket_path)"
-  case "$socket" in /*) ;; *) die "codex-permissions: socket path must be absolute" ;; esac
-  cat <<EOF
-Codex cmux permission profile (applies to new sessions):
 
-1. In ~/.codex/config.toml, remove any sandbox_mode line and
-   [sandbox_workspace_write] table. Permission profiles do not compose with them.
-2. Add:
-
-default_permissions = "workspace-cmux"
-
-[permissions.workspace-cmux]
-description = "Workspace editing plus agent-comms cmux delivery"
-extends = ":workspace"
-
-[permissions.workspace-cmux.network]
-enabled = true
-
-[permissions.workspace-cmux.network.unix_sockets]
-"$socket" = "allow"
-EOF
-  if [ "$socket" != "$fallback" ]; then
-    printf '"%s" = "allow"\n' "$fallback"
-  fi
-  cat <<'EOF'
-
-3. Restart Codex. Do not launch it with --sandbox, which overrides the profile.
-EOF
-}
-
-cmd_doctor() {
-  command -v cmux >/dev/null 2>&1 || {
-    echo "cmux socket: unavailable (cmux is not installed or not on PATH)"
-    return 1
-  }
-  local errf first
-  errf="$(mktemp 2>/dev/null || echo /tmp/comms-doctor.$$)"
-  if cmux list-workspaces >/dev/null 2>"$errf"; then
-    rm -f "$errf" 2>/dev/null || true
-    echo "cmux socket: reachable"
-    return 0
-  fi
-  first="$(head -1 "$errf" 2>/dev/null || true)"
-  rm -f "$errf" 2>/dev/null || true
-  if printf '%s' "$first" | grep -qiE 'operation not permitted|not permitted|permission denied|sandbox|\.sock'; then
-    echo "cmux socket: blocked ($(cmux_socket_path))"
-    echo "fix: run '$SELF codex-permissions', apply the profile, then restart Codex"
-    return 3
-  fi
-  echo "cmux socket: failed${first:+ — $first}"
-  return 1
-}
 
 cmd_root() {
   local r
@@ -218,22 +145,6 @@ cmd_root() {
 # Filesystem-safe name (defined early — cache paths below need it).
 safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 
-# Single-quote one shell argument for copy/paste recovery commands.
-shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
-
-# Retried cmux tree fetch. A single un-retried call was the root cause of a
-# field incident: under load it intermittently returns empty, which broke
-# Keystroke pacing for a REAL terminal: cmux needs a beat between send / escape / enter or
-# the sequence interleaves and a half-typed nudge is submitted. A STUBBED cmux needs none of
-# it, and the suite pays it on every delivery. ONE accessor, so the two sequences below cannot
-# drift apart — a second copy of this rule is the bug shape this codebase keeps rediscovering.
-# Default is pacing ON; only an explicit COMMS_CMUX_PACE=0 skips it.
-cmux_pace() { [ "${COMMS_CMUX_PACE:-1}" = 0 ] || sleep "$1"; }
-
 # Every token must be a COMPLETE non-negative decimal. Filtering by CHARACTER is not enough,
 # and the first version of this did exactly that: `1..2`, `1.2.3` and `.` are built entirely
 # from permitted characters yet reach `sleep` as invalid operands, and a whitespace-only value
@@ -242,78 +153,22 @@ cmux_pace() { [ "${COMMS_CMUX_PACE:-1}" = 0 ] || sleep "$1"; }
 # to provide. That is fail-OPEN in the one place the delay is load-bearing. The fallback is
 # ATOMIC: one bad token rejects the whole list rather than yielding a half-honoured schedule.
 # (codex, suite-hot-waits r1, blocking.)
-cmux_backoff_valid() {
-  # `for t in $1` is an UNQUOTED expansion, so pathname expansion runs BEFORE validation:
-  # COMMS_CMUX_BACKOFF='*' in a directory that happens to contain a file named `0.1` globs
-  # into a valid-looking schedule and is accepted. That makes this validator's verdict depend
-  # on unrelated filesystem contents — a validator whose entire job is rejecting malformed
-  # input must not be steerable by the caller's cwd. `set -f` suppresses the expansion while
-  # word-splitting still happens, and the previous glob state is restored on every path.
-  # (codex, suite-hot-waits r2, blocking.)
-  local t seen=0 rc=0 had_f=0
-  case "$-" in *f*) had_f=1 ;; esac
-  set -f
-  for t in $1; do
-    case "$t" in
-      ''|*[!0-9.]*|*.*.*|.*|*.) rc=1; break ;;
-    esac
-    seen=1
-  done
-  [ "$had_f" = 1 ] || set +f
-  [ "$rc" = 0 ] && [ "$seen" = 1 ]
-}
 
 # workspace resolution AND surface picking in the same session.
-cmux_tree() {
-  # Backoff matters: a fixed 3x0.3s burst sits inside a single cmux contention
-  # window (observed in the field while a background terminal was attaching);
-  # spreading attempts over ~2.5s survives it.
-  local out delay backoff
-  # No identity means there is nothing to query — return immediately instead of
-  # dereferencing an unset var under `set -u`, which printed "unbound variable"
-  # twice and swallowed the caller's specific diagnostic. Fixed here rather than at
-  # the call site so every caller is covered. (codex, transport-flip round 2.)
-  [ -n "${CMUX_WORKSPACE_ID:-}" ] || return 1
-  command -v cmux >/dev/null 2>&1 || return 1
-  # The delays are overridable so a STUBBED cmux (the suite) need not pay a contention
-  # window that cannot occur — a stub either has a tree or never will, so retrying slower
-  # changes nothing. Default is unchanged and a malformed override falls back to it rather
-  # than reaching `sleep` as garbage, which would abort the caller under errexit.
-  local backoff="${COMMS_CMUX_BACKOFF:-0.3 0.7 1.2}"
-  cmux_backoff_valid "$backoff" || backoff="0.3 0.7 1.2"
-  for delay in $backoff 0; do
-    out="$(cmux tree --workspace "${CMUX_WORKSPACE_ID}" 2>/dev/null)" || out=""
-    if [ -n "$out" ]; then
-      printf '%s\n' "$out"
-      return 0
-    fi
-    [ "$delay" = 0 ] || sleep "$delay"
-  done
-  return 1
-}
 
-cache_path() {  # cache_path <kind> — per-cmux-workspace cache file; fails outside repo/cmux
-  local root
-  root="$(main_repo_root)"
-  [ -n "$root" ] && [ -n "${CMUX_WORKSPACE_ID:-}" ] || return 1
-  echo "$root/.comms/.cache/${1}-$(safe_name "$CMUX_WORKSPACE_ID")"
-}
 
-stable_workspace_name() {
-  # cmux auto-titles busy workspaces from the active surface, including a
-  # rotating leading status glyph. Only undecorated names may seed identity.
-  case "$1" in [[:alnum:]]*) return 0 ;; *) return 1 ;; esac
-}
 
 repo_workspace_name() {
   local ws root_name
   ws="$(git branch --show-current 2>/dev/null | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')"
   root_name="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | sed 's#[/[:space:]]#-#g' | tr '[:upper:]' '[:lower:]')"
-  # An auto-titled cmux workspace on a generic default branch should inherit
-  # the stable repository name, not the UI title currently shown by cmux.
-  if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-    case "$ws" in main|master|trunk|develop|"") ws="$root_name" ;; esac
-  fi
+  # The cmux branch that used to sit here substituted <repo-name> for a generic default
+  # branch, but ONLY when CMUX_WORKSPACE_ID was set — so it was already inert for every
+  # non-cmux user and deleting it is behaviour-preserving. Do NOT make that substitution
+  # unconditional: it would flip every unpinned repo on `main` from `main` to <repo-name>,
+  # changing the message-filename prefix and hiding pending messages and thread state behind
+  # the glob (field report #3). The `${ws:-$root_name}` fallback below is the detached-HEAD
+  # path and is NOT cmux-related — it stays. (S4-4.)
   printf '%s\n' "${ws:-$root_name}"
 }
 
@@ -347,48 +202,10 @@ cmd_workspace() {
       return 0
     fi
   fi
-  local ws="" cached="" cachef="" repair_cache=false
-  if command -v cmux >/dev/null 2>&1 && [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-    cachef="$(cache_path ws || true)"
-    if [ -n "$cachef" ] && [ -f "$cachef" ]; then
-      cached="$(cat "$cachef" 2>/dev/null || true)"
-      if stable_workspace_name "$cached"; then
-        # CMUX_WORKSPACE_ID is the stable identity; its first valid name is an
-        # authoritative mapping. A changing display title must never overwrite it.
-        echo "$cached"
-        return 0
-      fi
-      if [ -n "$cached" ]; then
-        echo "warning: ignoring decorated cached workspace '$cached'" >&2
-        repair_cache=true
-      fi
-    fi
-    # Failure-tolerant parse: an empty or unmatched tree must fall through —
-    # without the || true, pipefail+set -e silently kills the whole helper.
-    ws="$(cmux_tree \
-      | sed -nE 's/.*workspace workspace:[^[:space:]]+[[:space:]]+"([^"]*)".*/\1/p' \
-      | head -1 \
-      | tr ' ' '-' | tr '[:upper:]' '[:lower:]' || true)"
-    if stable_workspace_name "$ws"; then
-      if [ -n "$cachef" ]; then
-        { mkdir -p "$(dirname "$cachef")" && printf '%s' "$ws" > "$cachef"; } 2>/dev/null || true
-      fi
-      echo "$ws"
-      return 0
-    fi
-    if [ -n "$ws" ]; then
-      echo "warning: ignoring decorated cmux workspace title '$ws'" >&2
-      repair_cache=true
-    fi
-  fi
-  ws="$(repo_workspace_name)"
-  if [ -n "${CMUX_WORKSPACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
-    echo "warning: cmux title unavailable, unparseable, or decorated — using repo-derived workspace '$ws'" >&2
-    if [ "$repair_cache" = true ] && [ -n "$cachef" ]; then
-      { mkdir -p "$(dirname "$cachef")" && printf '%s' "$ws" > "$cachef"; } 2>/dev/null || true
-    fi
-  fi
-  echo "$ws"
+  # cmux DELETED (S4-4). This resolved a cmux workspace TITLE through a cache and a
+  # decorated-title guard; with no cmux there is exactly one source left, and the explicit
+  # `.comms/workspace` pin above still wins over it.
+  echo "$(repo_workspace_name)"
 }
 
 # ---------- agent registry (.comms/config) ----------
@@ -3864,89 +3681,14 @@ cmd_archive() {
   done
 }
 
-pick_surface() {  # pick_surface <target> — prints "<surface>\t<how>"
-  # Order of preference:
-  #   1. a bound/remembered surface for this target (set via `bind`, or cached
-  #      from the last successful delivery) — IF it still exists in the tree.
-  #      With several terminal surfaces in a workspace, "some other terminal"
-  #      is a coin toss; agent identity has to come from a binding.
-  #   2. pane-aware pick: the FIRST [terminal] surface (tree order = tab order)
-  #      in a pane OTHER than the one marked "◀ here"; fall back to the first
-  #      other terminal anywhere. Convention: keep the live Claude/Codex as the
-  #      FIRST tab in its pane, or set an explicit binding.
-  local target="$1" tree bound="" cachef
-  cachef="$(cache_path "surface-$target" || true)"
-  [ -n "$cachef" ] && [ -f "$cachef" ] && bound="$(cat "$cachef" 2>/dev/null || true)"
-  tree="$(cmux_tree || true)"
-  if [ -z "$tree" ]; then
-    # Tree unavailable. A known binding must NOT be discarded because of a
-    # flaky tree read — use it optimistically; a dead surface makes the send
-    # sequence fail loudly (RESULT: failed), which is accurate and retryable.
-    if [ -n "$bound" ]; then
-      printf '%s\tbound (tree unavailable — optimistic)\n' "$bound"
-      return 0
-    fi
-    echo "pick_surface: cmux tree unavailable after retries (target=$target, workspace=${CMUX_WORKSPACE_ID:-unset}, no binding cached at ${cachef:-n/a})" >&2
-    return 0   # caller reports not-found
-  fi
-  if [ -n "$bound" ]; then
-    if printf '%s\n' "$tree" | grep -qE "${bound}([^0-9]|\$)"; then
-      printf '%s\tbound\n' "$bound"
-      return 0
-    fi
-    echo "pick_surface: bound $target surface '$bound' not present in current tree — falling back to picker" >&2
-  fi
-  # This is a real script — awk $0 is safe here.
-  local picked
-  picked="$(printf '%s\n' "$tree" | awk '
-    /pane:/ { for (i=1;i<=NF;i++) if ($i ~ /^pane:/) cur_pane=$i }
-    /surface:.*\[terminal\]/ {
-      if (match($0, /surface:[0-9]+/)) {
-        n++; surf[n]=substr($0,RSTART,RLENGTH); pane[n]=cur_pane
-        here[n] = ($0 ~ /◀ here/) ? 1 : 0
-        if (here[n]) here_pane=cur_pane
-      }
-    }
-    END {
-      for (i=1;i<=n;i++) if (!here[i] && pane[i]!=here_pane) { printf "%s\tfirst other-pane terminal\n", surf[i]; exit }
-      for (i=1;i<=n;i++) if (!here[i]) { printf "%s\tfirst other terminal\n", surf[i]; exit }
-    }')"
-  if [ -n "$picked" ]; then
-    printf '%s\n' "$picked"
-    return 0
-  fi
-  # Nothing eligible — say exactly why so a manual outcome is diagnosable.
-  echo "pick_surface: no eligible surface (target=$target, workspace=${CMUX_WORKSPACE_ID:-unset}, [terminal] surfaces in tree: $(printf '%s\n' "$tree" | grep -c '\[terminal\]' || true), binding: ${bound:-none})" >&2
-}
 
-cmd_bind() {  # bind <claude|codex> [surface:N] — set or show the target's surface binding
-  local target="${1:-}" surface="${2:-}"
-  case "$target" in claude|codex) ;; *) die "bind: target must be a cmux-pane agent (claude or codex) — headless-only agents have no surface" ;; esac
-  local f
-  f="$(cache_path "surface-$target")" || die "bind: requires a git repo and CMUX_WORKSPACE_ID"
-  if [ -z "$surface" ]; then
-    if [ -f "$f" ]; then
-      echo "$target bound to $(cat "$f")"
-    else
-      echo "$target not bound (pane-aware picker will choose)"
-    fi
-    return 0
-  fi
-  case "$surface" in
-    surface:[0-9]*) ;;
-    *) die "bind: surface must look like surface:<n> (see 'cmux tree')" ;;
-  esac
-  mkdir -p "$(dirname "$f")"
-  printf '%s' "$surface" > "$f"
-  echo "bound $target -> $surface (ignored automatically if it disappears from the tree)"
-}
 
 # deliver_headless <target> [message-file] — spawn a detached peer turn via
 # runphase.sh instead of typing into a pane. Direction-aware: replies TO the
 # driving session are a designed no-op (the driver reads them when the peer
 # turn exits) — runphase marks that direction in the child's env via
 # COMMS_HEADLESS_PICKUP. Any other target spawns a turn for that provider.
-# Same contract as the cmux path: never hard-fails, always says what happened.
+# Contract: never hard-fails, always says what happened.
 deliver_headless() {
   # <target> [msgfile] — spawn a detached turn, or run it in the FOREGROUND when
   # COMMS_WAIT=1. A detached child can be reaped the moment the managed shell command
@@ -3960,7 +3702,7 @@ deliver_headless() {
   local rp="$(dirname "$SELF")/runphase.sh"
   export COMMS_RUNPHASE_VIA="${COMMS_RUNPHASE_VIA:-}"
   if [ ! -x "$rp" ]; then
-    echo "warning: this loop needs the headless runner but runphase.sh was not found next to comms.sh — message written for manual pickup (re-run install.sh, or use --via cmux / COMMS_DELIVERY=cmux)"
+    echo "warning: this loop needs the headless runner but runphase.sh was not found next to comms.sh — message written for manual pickup (re-run install.sh)"
     return 0
   fi
   if [ -z "$msgfile" ]; then
@@ -3994,29 +3736,6 @@ deliver_headless() {
   fi
 }
 
-print_direct_recovery() {
-  local target="$1" surface="$2" msgfile="${3:-}"
-  local qs qw qself qmsg
-  qs="$(shell_quote "$surface")"
-  qw="$(shell_quote "$CMUX_WORKSPACE_ID")"
-  qself="$(shell_quote "$SELF")"
-  qmsg="$(shell_quote "$msgfile")"
-  printf 'RECOVER: '
-  case "$target" in
-    codex)
-      printf 'cmux send --surface %s --workspace %s %s && sleep 0.5 && cmux send-key --surface %s --workspace %s escape && sleep 0.3 && cmux send-key --surface %s --workspace %s enter' \
-        "$qs" "$qw" "$(shell_quote '$read-from-claude')" "$qs" "$qw" "$qs" "$qw"
-      ;;
-    claude)
-      printf 'cmux send-key --surface %s --workspace %s escape && sleep 0.2 && cmux send --surface %s --workspace %s i && sleep 0.2 && cmux send --surface %s --workspace %s %s && sleep 0.5 && cmux send-key --surface %s --workspace %s escape && sleep 0.3 && cmux send-key --surface %s --workspace %s enter' \
-        "$qs" "$qw" "$qs" "$qw" "$qs" "$qw" "$(shell_quote '/read-from-codex')" "$qs" "$qw" "$qs" "$qw"
-      ;;
-  esac
-  # The final segment runs only if every direct cmux step succeeded. It repairs
-  # advisory state without re-sending or re-archiving the message.
-  [ -n "$msgfile" ] && printf ' && %s reconcile %s' "$qself" "$qmsg"
-  printf '\n'
-}
 
 runphase_available() { [ -x "$(dirname "$SELF")/runphase.sh" ]; }
 
@@ -4067,10 +3786,10 @@ headless_ok() {
 
 cmd_transport() {
   # transport <agent> [--loop] — print the transport that would actually be used:
-  # headless | cmux | acp | mailbox.
+  # headless | acp | mailbox.
   #
   # ONE place decides, so the templates never re-implement surface detection and
-  # the eventual "ACP by default, cmux optional" flip is a reordering here rather
+  # the eventual "ACP by default" flip is a reordering here rather
   # than an edit in every command. `mailbox` is the honest last resort: the file
   # is written and nobody is nudged, which is what stranded a real consult when no
   # Codex pane was running.
@@ -4099,25 +3818,18 @@ cmd_transport() {
   # `mailbox` was only ever an OUTPUT of this function — the honest last resort where the file is
   # written and nobody is nudged. Accepting it as an INPUT gives a caller a way to ask for exactly
   # that, which is what a test harness needs: no pane, no spawned child, no network. The suite
-  # used to get that property by asking for `cmux` and stubbing the binary, which made a transport
-  # slated for deletion load-bearing for every unrelated section. (contraction step 4, S4-1.)
+  # used to get that property by asking for a transport slated for deletion and stubbing its
+  # binary, which made it load-bearing for every unrelated section. (contraction step 4, S4-1.)
   if [ "${COMMS_DELIVERY:-}" = "mailbox" ]; then printf 'mailbox\n'; return 0; fi
 
-  local caps picked
+  local caps
   caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
 
-  # An EXPLICIT request binds in EVERY mode. Honouring it only for loops meant a
-  # consult silently ignored COMMS_DELIVERY=cmux and went to ACP instead — the
-  # caller asked for one transport and quietly got another.
+  # cmux DELETED (S4-4). An explicit COMMS_DELIVERY=cmux is now an unknown transport, and
+  # the rule that survives is the one that mattered: never silently substitute a transport
+  # the caller did not choose. Say mailbox, which is honest and visible to `status`.
   if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
-    case "$caps" in
-      *interactive*)
-        picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
-        [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
-        ;;
-    esac
-    # cmux was asked for and there is none — say mailbox rather than silently
-    # substituting a transport the caller explicitly did not choose.
+    echo "warning: COMMS_DELIVERY=cmux — the cmux transport was removed in step 4; using mailbox" >&2
     printf 'mailbox\n'; return 0
   fi
 
@@ -4125,13 +3837,12 @@ cmd_transport() {
   # definition, so it must not depend on an open pane — but the ordering here is
   # driven by cost, measured on one real review turn in this repo:
   #
-  #   cmux (live pane)      ~43,000-85,000 fresh input tokens per turn
-  #   headless (cold spawn) ~115,000
+  #   headless (cold spawn) ~115,000 fresh input tokens per turn
   #   ACP (warm session)    ~1,061
   #
   # A cold spawn rebuilds context from nothing every round; a live pane keeps the
   # conversation but still re-sends a large uncached prefix per model call. Only a
-  # named ACP session makes round N pay a delta. cmux and headless stay available
+  # named ACP session makes round N pay a delta. headless stays available
   # and opt-in (COMMS_DELIVERY / --via).
   if [ "$mode" = "loop" ]; then
     if acp_supports "$agent"; then printf 'acp\n'; return 0; fi
@@ -4140,28 +3851,13 @@ cmd_transport() {
     # runphase.sh never landed.
     if runphase_available && headless_ok "$agent"; then printf 'headless\n'; return 0; fi
     # A LOOP MUST NOT FALL BACK TO A PANE for a provider whose self-send path is gone. Deleting
-    # headless for claude/codex (step 4, S4-2) made this ladder drop straight through to `cmux` —
-    # which is the SAME self-send model in another costume: a pane nudge tells a live agent to read
-    # and reply itself, with no parent stamping and no pinned artifact. That inverted the rule this
-    # ladder exists to enforce ("a loop must never take a pane it was not asked for") and a test
-    # caught it. Say `mailbox` instead: honest, unattended, and visible to status.
-    if ! headless_ok "$agent"; then printf 'mailbox\n'; return 0; fi
-    case "$caps" in
-      *interactive*)
-        picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
-        [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
-        ;;
-    esac
+    # headless for claude/codex (step 4, S4-2) made this ladder drop straight through to a pane —
+    # the SAME self-send model in another costume: a nudge tells a live agent to read and reply
+    # itself, with no parent stamping and no pinned artifact. cmux is gone entirely now (S4-4);
+    # `mailbox` is the honest, unattended outcome and is visible to status.
     printf 'mailbox\n'; return 0
   fi
-  # A live pane still wins: it is the watchable surface, and switching a visible
-  # workflow out from under someone is not a fallback, it is a surprise.
-  case "$caps" in
-    *interactive*)
-      picked="$(pick_surface "$agent" 2>/dev/null | cut -f1)"
-      [ -z "$picked" ] || { printf 'cmux\n'; return 0; }
-      ;;
-  esac
+  # The live-pane arm that used to win here is gone with cmux (S4-4).
   # No pane. ACP is synchronous and needs none, which beats queueing into an inbox
   # nobody is watching — the exact case that stranded a real consult. Checked BEFORE
   # the headless fallback because a headless-only agent (grok) has no pane by
@@ -4223,80 +3919,20 @@ cmd_deliver() {
       COMMS_RUNPHASE_VIA=acp deliver_headless "$target" "$msgfile"
       return 0
       ;;
-    cmux) ;;
     *)
       if [ "${COMMS_DELIVERY:-}" = "mailbox" ]; then
-        # AN ASKED-FOR MAILBOX IS A SUCCESS, NOT A BROKEN INSTALL. This branch used to be the
-        # catch-all for "nothing could deliver", so once `mailbox` became requestable a caller who
-        # got exactly what they asked for was told to re-run install.sh and retry. Manual pickup is
-        # the POINT here: the file is written and nobody is nudged. (codex, S4-1 r1, blocking.)
+        # AN ASKED-FOR MAILBOX IS A SUCCESS, NOT A BROKEN INSTALL. Manual pickup is the POINT
+        # here: the file is written and nobody is nudged. (codex, S4-1 r1, blocking.)
         echo "note: COMMS_DELIVERY=mailbox — message written for manual pickup, nobody was nudged"
-      elif [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
-        # Re-run the picker purely for its stderr: it distinguishes "tree
-        # unavailable" from "no matching surface", and routing on the summary
-        # alone would throw that away. ONE call — an earlier version ran it twice
-        # and discarded the first. (grok, transport-flip round 1.)
-        pick_surface "$target" 2>&1 >/dev/null | head -2 >&2 || true
-        echo "warning: COMMS_DELIVERY=cmux but no $target surface is live; message written for manual pickup"
       else
-        echo "warning: no headless runner and no $target surface; message written for manual pickup (re-run install.sh)"
+        # cmux DELETED (S4-4). The pane nudge was self-send by another name: it typed a slash
+        # command into someone else's terminal and called that delivery. What is left when no
+        # runner can take the message is the honest outcome — it is on disk, nobody was nudged.
+        echo "warning: no runner available for $target; message written for manual pickup"
       fi
       return 0
       ;;
   esac
-  if ! command -v cmux >/dev/null 2>&1 || [ -z "${CMUX_WORKSPACE_ID:-}" ]; then
-    echo "warning: cmux not available; message written for manual pickup"
-    return 0
-  fi
-  local picked surface how
-  picked="$(pick_surface "$target")"
-  surface="${picked%%	*}"
-  how="${picked#*	}"
-  if [ -z "$surface" ]; then
-    echo "warning: could not find a $target surface; message written for manual pickup"
-    return 0
-  fi
-  # Capture mid-sequence cmux failures explicitly (and their stderr) so a
-  # half-typed nudge surfaces as a diagnosable result, not a terse abort.
-  local seq_ok=true errf
-  errf="$(mktemp 2>/dev/null || echo /tmp/comms-deliver.$$)"
-  case "$target" in
-    codex)
-      { cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '$read-from-claude' && cmux_pace 0.5 \
-        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && cmux_pace 0.3 \
-        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" enter; } 2>"$errf" || seq_ok=false
-      ;;
-    claude)
-      # Claude Code in vim mode: ensure insert mode before typing, then submit.
-      { cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && cmux_pace 0.2 \
-        && cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" 'i' && cmux_pace 0.2 \
-        && cmux send --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" '/read-from-codex' && cmux_pace 0.5 \
-        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" escape && cmux_pace 0.3 \
-        && cmux send-key --surface "$surface" --workspace "$CMUX_WORKSPACE_ID" enter; } 2>"$errf" || seq_ok=false
-      ;;
-  esac
-  if [ "$seq_ok" = true ]; then
-    rm -f "$errf" 2>/dev/null || true
-    # Remember the working surface for this target so the next delivery doesn't
-    # have to guess among multiple terminals.
-    local cachef
-    cachef="$(cache_path "surface-$target" || true)"
-    [ -n "$cachef" ] && { mkdir -p "$(dirname "$cachef")" && printf '%s' "$surface" > "$cachef"; } 2>/dev/null || true
-    echo "delivered to $surface ($how)"
-  else
-    # A nested helper can be sandboxed even when direct cmux commands are
-    # allowlisted by the host. Emit one executable recovery line; its final
-    # segment reconciles state only after every direct nudge step succeeds.
-    if grep -qiE 'operation not permitted|not permitted|permission denied|sandbox|\.sock' "$errf" 2>/dev/null; then
-      echo "warning: delivery blocked — nested helper cannot access cmux; message is safely on disk"
-      echo "  setup: run '$SELF codex-permissions' and restart Codex; retries from this unchanged sandbox will also block"
-      print_direct_recovery "$target" "$surface" "$msgfile"
-    else
-      echo "warning: delivery FAILED mid-sequence to $surface — the message is safely on disk; retry with 'comms.sh send --to $target <file>' (refreshes delivery state) or nudge the pane manually"
-    fi
-    [ -s "$errf" ] && echo "  cmux said: $(head -1 "$errf")"
-    rm -f "$errf" 2>/dev/null || true
-  fi
 }
 
 cmd_status() {
@@ -4357,7 +3993,7 @@ cmd_status() {
          && [ "$deliv" != "completed" ] && [ "$deliv" != "held" ] && [ "$deliv" != "pickup" ]; then
       # NOT keyed on the CURRENT COMMS_DELIVERY. status reports a DURABLE fact from the state
       # file, and the env at read time says nothing about how the delivery actually happened — a
-      # `manual` left by a failed cmux nudge would be excused simply because the operator happens
+      # `manual` left by a failed nudge would be excused simply because the operator happens
       # to be in mailbox mode now. The honest fix is a distinct outcome token recorded AT DELIVERY
       # (grok: "a new outcome token, or status treating requested mailbox like `pickup`"), which
       # is a change to what deliver WRITES, not to what status READS. Filed rather than faked.
@@ -4453,45 +4089,6 @@ state_update_from() {
     || echo "warning: could not write thread state for '$thread' — continuing" >&2
 }
 
-cmd_reconcile() {
-  local ref="${1:-}" mid root dir f tmp now found=false
-  [ -n "$ref" ] || die "reconcile: message file or message_id required"
-  if [ -f "$ref" ]; then
-    mid="$(frontmatter_field "$ref" message_id)"
-    [ -n "$mid" ] || mid="$(basename "$ref" .md)"
-  else
-    mid="$(basename "$ref" .md)"
-  fi
-  root="$(cmd_root)"
-  dir="$root/state"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  for f in "$dir/"*.json; do
-    [ -f "$f" ] || continue
-    [ "$(json_get "$f" last_sent)" = "$mid" ] || continue
-    found=true
-    tmp="$f.reconcile.$$"
-    awk -v now="$now" '
-      /"last_notified_at":/ {
-        printf "  \"last_notified_at\": \"%s\",\n", now
-        seen=1
-        next
-      }
-      /"last_delivery":/ {
-        if (!seen) printf "  \"last_notified_at\": \"%s\",\n", now
-        sub(/"last_delivery": "[^"]*"/, "\"last_delivery\": \"delivered\"")
-      }
-      { print }
-    ' "$f" > "$tmp" && mv "$tmp" "$f" \
-      || { rm -f "$tmp" 2>/dev/null || true; die "reconcile: could not update $f"; }
-  done
-  if [ "$found" = true ]; then
-    echo "RESULT: delivered — external nudge recorded; peer pickup is still asynchronous"
-  else
-    # One-shot messages intentionally have no thread state. The RECOVER chain
-    # still proves every direct cmux command before this segment succeeded.
-    echo "RESULT: delivered — external nudge completed; no workflow state matched '$mid'"
-  fi
-}
 
 cmd_state() {
   local sub="${1:-list}"; shift || true
@@ -4987,23 +4584,20 @@ cmd_send() {
     # parenthetical at all. Naming a route we did not observe is the same defect in a new spot.
     spawned)   echo "RESULT: spawned${route:+ ($route)} — a peer turn is running detached; the reply lands in the inbox when it exits. Await it with the runphase.sh command printed above, then read the reply." ;;
     held)      echo "RESULT: held — the thread is paused by a hold marker; nothing was spawned. Release with 'runphase.sh release <thread>', then RE-SEND ('comms.sh send --to $to <file>') — a bare deliver would spawn the turn but leave this thread's state stuck on 'held', blinding status and the stalled watchdog." ;;
-    blocked)   echo "RESULT: blocked — message saved, peer not nudged; use host/manual pickup or restart with cmux socket permission" ;;
+    blocked)   echo "RESULT: blocked — message saved, peer not nudged; use manual pickup" ;;
     pickup)
       # Text deliberately starts "manual —" for the peers' expectations: the
       # spawned peer is pre-briefed that its reply send reports manual.
       echo "RESULT: manual — headless mode: the reply is on disk; the driving session picks it up when this turn ends"
       ;;
     manual)
-      # Recovery guidance follows the route that was actually attempted. Deriving it
-      # from COMMS_DELIVERY alone told operators to "fix cmux" right after a headless
-      # runner warning, on a default that no longer prefers cmux. (codex, advisory.)
+      # Recovery guidance follows the route that was actually attempted, not COMMS_DELIVERY
+      # alone — that once told operators to fix a transport the run never used. (codex, advisory.)
       if [ "${COMMS_DELIVERY:-}" = "mailbox" ]; then
         # The SAME correction as in deliver: an explicitly requested mailbox got the generic
         # "NOT spawned … fix and retry" recovery text, which tells a caller their successful
         # request is a broken install. (codex, S4-1 r1, blocking.)
         echo "RESULT: manual — mailbox was requested; the message is on disk and $to was deliberately not nudged. Nothing to fix."
-      elif [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
-        echo "RESULT: manual — cmux was requested but $to was NOT nudged; trigger it by hand or fix cmux and re-run 'comms.sh deliver $to'"
       else
         echo "RESULT: manual — $to was NOT spawned (see the warning above; likely runphase.sh missing or an empty inbox); fix and retry 'comms.sh send --to $to <file>'"
       fi
@@ -5016,8 +4610,6 @@ case "${1:-}" in
   root)      shift; cmd_root "$@" ;;
   workspace) shift; cmd_workspace "$@" ;;
   agents)    shift; cmd_agents "$@" ;;
-  doctor)    shift; cmd_doctor "$@" ;;
-  codex-permissions) shift; cmd_codex_permissions "$@" ;;
   list)      shift; cmd_list "$@" ;;
   status)    shift; cmd_status "$@" ;;
   validate)  shift; cmd_validate "$@" ;;
@@ -5026,14 +4618,12 @@ case "${1:-}" in
   deliver)   shift; cmd_deliver "$@" ;;
   transport) shift; cmd_transport "$@" ;;
   send)      shift; cmd_send "$@" ;;
-  reconcile) shift; cmd_reconcile "$@" ;;
   state)     shift; cmd_state "$@" ;;
   presence)  shift; cmd_presence "$@" ;;
   worktree)  shift; cmd_worktree "$@" ;;
   integrate) shift; cmd_integrate "$@" ;;
   attest-green) shift; cmd_attest_green "$@" ;;
   stalled)   shift; cmd_stalled "$@" ;;
-  bind)      shift; cmd_bind "$@" ;;
   clean)     shift; cmd_clean "$@" ;;
   lessons)        shift; cmd_lessons "$@" ;;
   archive-search) shift; cmd_archive_search "$@" ;;

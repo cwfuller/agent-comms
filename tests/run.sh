@@ -1,12 +1,11 @@
 #!/bin/bash
 # agent-comms test harness — repeatable checks for the shared helpers and installer.
-# Stubs cmux with a fake binary (canned tree output + call log) so picker/delivery
-# logic is testable headlessly. Run: bash tests/run.sh   (zsh callers covered too)
+# Run: bash tests/run.sh   (zsh callers covered too)
 set -uo pipefail
 
 # HERMETIC: scrub inherited headless-delivery env — a harness run from INSIDE a
 # headless peer turn (e.g. Codex reviewing this repo) inherits these and would
-# route the baseline cmux tests through headless delivery (observed live: 40
+# route baseline tests through headless delivery (observed live: 40
 # failures). The headless-specific sections set them explicitly per invocation.
 # COMMS_RUNPHASE_EXPECT_STATE joins them for the same reason: inherited from an
 # outer send it makes every direct `runphase.sh run` below wait out the state-file
@@ -14,31 +13,20 @@ set -uo pipefail
 # operator's tuning cannot silently change what the timing assertions measure.
 unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP COMMS_RUNPHASE_VIA \
       COMMS_RUNPHASE_EXPECT_STATE COMMS_RUNPHASE_STATE_WAIT_SECS \
-      COMMS_RUNPHASE_TIMEOUT_SECS COMMS_CMUX_PACE COMMS_CMUX_BACKOFF 2>/dev/null || true
+      COMMS_RUNPHASE_TIMEOUT_SECS 2>/dev/null || true
 # Probe-result flags gate condition-bound skips, so an inherited value would let a skip be
 # cashed before its probe ran. Same class as the scrub above. (grok, panel r7.)
 unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
 
-# Loops became headless-first on 2026-08-25, so the pane path is now OPT-IN. The cmux
-# sections below exercise pane mechanics that still exist and still matter, so they ask
-# for cmux explicitly instead of relying on a default that no longer points at them.
-# Sections that test the DEFAULT routing clear this with `env -u COMMS_DELIVERY`.
-#
-# THE DEFAULT IS `mailbox`, NOT `cmux`. What the harness actually needs from a default is "write
-# the file and nudge nobody" — no pane, no spawned child, no network. It used to get that by
-# asking for cmux and stubbing the binary, which made a transport slated for DELETION load-bearing
-# for every section that never cared about it. Deleting cmux under that arrangement would have
-# started spawning real agents in unrelated sections; the first version of this harness already
-# sent a real keystroke to a live pane once (docs/INTERNALS.md). Sections that genuinely exercise
-# pane mechanics still ask for cmux explicitly, so this rewire must move NO section's count.
-# (contraction step 4, S4-1.)
+# THE DEFAULT IS `mailbox`. What the harness needs from a default is "write the file and
+# nudge nobody" — no spawned child, no network. It used to get that by asking for cmux and
+# stubbing the binary, which made a transport slated for DELETION load-bearing for every
+# section that never cared about it; the first version of this harness sent a real keystroke
+# to a live pane once (docs/INTERNALS.md). S4-1 rewired the default to `mailbox`, which is
+# exactly why S4-4 could then delete cmux without unrelated sections starting to spawn real
+# agents. Sections that test DEFAULT routing clear this with `env -u COMMS_DELIVERY`.
+# (contraction step 4, S4-1 then S4-4.)
 export COMMS_DELIVERY=mailbox
-# cmux is a STUB in this harness. Keystroke pacing exists so a real terminal does not
-# interleave send/escape/enter, and the tree backoff exists to ride out a real contention
-# window — a stub can do neither, so both are pure wall-clock here. Scrubbed above (an
-# inherited value must not decide what the timing assertions measure), then set explicitly.
-# The production DEFAULTS are pinned by assertion in the stubbed-cmux section below.
-export COMMS_CMUX_PACE=0 COMMS_CMUX_BACKOFF=0
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMS="$REPO/helpers/comms.sh"
@@ -293,108 +281,22 @@ mkdir -p "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.co
 # cmux stub: serves canned output, logs every invocation
 STUB_BIN="$WORK/bin"
 mkdir -p "$STUB_BIN"
-export CMUX_STUB_LOG="$WORK/cmux.log"
-export CMUX_STUB_DIR="$WORK/cmux-data"
-mkdir -p "$CMUX_STUB_DIR"
-cat > "$STUB_BIN/cmux" <<'STUB'
-#!/bin/bash
-echo "$*" >> "$CMUX_STUB_LOG"
-cmd="$1"; shift
-ref=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in --workspace) shift; ref="$1" ;; esac
-  shift
-done
-case "$cmd" in
-  tree)
-    [ -n "${CMUX_STUB_TREE_EMPTY:-}" ] && exit 0
-    cat "$CMUX_STUB_DIR/tree-${ref//:/_}.txt" 2>/dev/null ;;
-  list-workspaces)
-    [ -n "${CMUX_STUB_SANDBOX:-}" ] && { echo "Operation not permitted (cmux.sock)" >&2; exit 1; }
-    cat "$CMUX_STUB_DIR/list.txt" 2>/dev/null ;;
-  send)
-    [ -n "${CMUX_STUB_SANDBOX:-}" ] && { echo "Operation not permitted (cmux.sock)" >&2; exit 1; }
-    [ -n "${CMUX_STUB_FAIL:-}" ] && exit 1
-    exit 0 ;;
-  send-key) exit 0 ;;
-esac
-STUB
-chmod +x "$STUB_BIN/cmux"
-
-# Canned control-workspace tree: here-pane (1) + codex pane (2)
-cat > "$CMUX_STUB_DIR/tree-workspace_10.txt" <<'TREE'
-workspace workspace:10 "Test Project"
-├── pane pane:1
-│   └── surface surface:11 [terminal] "⠋ thinking" ◀ here
-└── pane pane:2
-    └── surface surface:22 [terminal] "Codex"
-TREE
-
-# HERMETIC: scrub the live session's CMUX_WORKSPACE_ID — without this, tests
-# inherit a real cmux workspace and "deliver" sends keystrokes to REAL panes.
-run_comms() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+# cmux stub DELETED (S4-4). STUB_BIN above survives: the grok stub and the ACP fixtures
+# still live there. The canned tree/list fixtures and CMUX_STUB_* levers went with the
+# transport they served.
+run_comms() { (cd "$REPO_FIX" && env "$COMMS" "$@"); }
 
 section "comms.sh: root/workspace"
 [ "$(run_comms root)" = "$REPO_FIX/.comms" ] && ok "root resolves main repo .comms" || fail "root resolves main repo .comms"
-[ "$(run_comms workspace)" = "feature-helper-tests" ] && ok "workspace falls back to branch (no cmux)" || fail "workspace falls back to branch (got $(run_comms workspace))"
-WS_CMUX="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" workspace)"
-[ "$WS_CMUX" = "test-project" ] && ok "workspace prefers cmux title (lowercased, hyphenated)" || fail "workspace prefers cmux title (got $WS_CMUX)"
-# Current cmux text includes selection/active markers and callers commonly carry
-# a UUID in CMUX_WORKSPACE_ID even though the tree prints a workspace:N ref.
-MODERN_WS_ID="9F42CB3D-80E6-4189-8705-C3BB065237C7"
-cat > "$CMUX_STUB_DIR/tree-$MODERN_WS_ID.txt" <<'TREE'
-window window:1 [current] ◀ active
-└── workspace workspace:14 "Modern Project" [selected] ◀ active
-    ├── pane pane:26
-    │   └── surface surface:41 [terminal] "Codex" [selected] ◀ here tty=ttys025
-    └── pane pane:27 [focused] ◀ active
-        └── surface surface:42 [terminal] "Claude" [selected] ◀ active tty=ttys046
-TREE
-WS_MODERN="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$MODERN_WS_ID" "$COMMS" workspace)"
-[ "$WS_MODERN" = "modern-project" ] && ok "workspace parses current cmux tree shape with UUID env id" || fail "current cmux tree parse (got $WS_MODERN)"
-# A successful but decorated parse must not overwrite an established identity.
-cat > "$CMUX_STUB_DIR/tree-$MODERN_WS_ID.txt" <<'TREE'
-workspace workspace:14 "⠐ Review Modern Project PRD"
-TREE
-WS_DECORATED="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$MODERN_WS_ID" "$COMMS" workspace)"
-[ "$WS_DECORATED" = "modern-project" ] && ok "cmux spinner title cannot overwrite cached workspace identity" || fail "decorated title changed identity (got $WS_DECORATED)"
-[ "$(cat "$REPO_FIX/.comms/.cache/ws-$MODERN_WS_ID")" = "modern-project" ] && ok "decorated title leaves authoritative cache unchanged" || fail "decorated title poisoned cache"
-SPINNER_MSG="$REPO_FIX/.comms/to-claude/modern-project_spinner-regression.md"
-printf '%s\n' pending > "$SPINNER_MSG"
-SPINNER_LIST="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$MODERN_WS_ID" "$COMMS" list --as claude)"
-[ "$SPINNER_LIST" = "$SPINNER_MSG" ] && ok "spinner title cannot hide a scoped pending message" || fail "spinner title hid pending message (got $SPINNER_LIST)"
-rm -f "$SPINNER_MSG"
+[ "$(run_comms workspace)" = "feature-helper-tests" ] && ok "workspace resolves from the branch name" || fail "workspace falls back to branch (got $(run_comms workspace))"
 if command -v zsh >/dev/null 2>&1; then
-  WS_ZSH="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID zsh -c "\"$COMMS\" workspace")"
+  WS_ZSH="$(cd "$REPO_FIX" && env zsh -c "\"$COMMS\" workspace")"
   [ "$WS_ZSH" = "feature-helper-tests" ] && ok "helper is caller-shell agnostic (zsh)" || fail "helper under zsh (got $WS_ZSH)"
 else
   # Recorded, not dropped: without this the suite silently reports 953 of 954 on a
   # box with no zsh and still attests as a full green run.
   skip zsh-absent "helper is caller-shell agnostic (zsh) — zsh not installed"
 fi
-
-section "comms.sh: Codex cmux permission preflight"
-printf '%s\n' 'workspace:10 Test Project' > "$CMUX_STUB_DIR/list.txt"
-DOC_OK="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" "$COMMS" doctor)"
-[ "$DOC_OK" = "cmux socket: reachable" ] \
-  && ok "doctor confirms a reachable cmux socket" || fail "doctor reachable result (got: $DOC_OK)"
-if DOC_BLOCKED="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_STUB_SANDBOX=1 "$COMMS" doctor 2>&1)"; then
-  DOC_RC=0
-else
-  DOC_RC=$?
-fi
-[ "$DOC_RC" = 3 ] && ok "doctor distinguishes a sandbox-blocked socket" || fail "doctor blocked rc (got: $DOC_RC)"
-echo "$DOC_BLOCKED" | grep -q "codex-permissions" \
-  && ok "doctor points to the persistent Codex fix" || fail "doctor permission-profile hint"
-PERM_OUT="$(env -u CMUX_SOCKET -u CMUX_SOCKET_PATH -u XDG_STATE_HOME HOME=/Users/example "$COMMS" codex-permissions)"
-echo "$PERM_OUT" | grep -q 'default_permissions = "workspace-cmux"' \
-  && ok "codex-permissions selects the profile globally by default" || fail "codex-permissions default profile"
-echo "$PERM_OUT" | grep -q 'extends = ":workspace"' \
-  && ok "codex-permissions preserves the workspace sandbox baseline" || fail "codex-permissions workspace baseline"
-echo "$PERM_OUT" | grep -q '"/Users/example/.local/state/cmux/cmux.sock" = "allow"' \
-  && ok "codex-permissions allowlists only the resolved cmux socket" || fail "codex-permissions socket allowlist"
-echo "$PERM_OUT" | grep -q 'Do not launch it with --sandbox' \
-  && ok "codex-permissions warns that launch overrides defeat the global default" || fail "codex-permissions launch override warning"
 
 section "comms.sh: validate"
 GOOD="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T12-00-00_test-1.md"
@@ -443,11 +345,11 @@ check_not "archiving a file from the OTHER inbox is refused" run_comms archive -
 
 section "comms.sh: list"
 check_not "list exits non-zero on empty inbox" run_comms list --as claude
-LIST_ERR="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as claude) 2>&1 1>/dev/null || true)"
+LIST_ERR="$( (cd "$REPO_FIX" && env "$COMMS" list --as claude) 2>&1 1>/dev/null || true)"
 echo "$LIST_ERR" | grep -q "latest archived" && ok "empty inbox reports latest archived (late-nudge UX)" || fail "empty inbox reports latest archived (got: $LIST_ERR)"
 UNMATCHED="$REPO_FIX/.comms/to-claude/other-workspace_pending.md"
 printf '%s\n' pending > "$UNMATCHED"
-LIST_MISMATCH="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as claude) 2>&1 1>/dev/null || true)"
+LIST_MISMATCH="$( (cd "$REPO_FIX" && env "$COMMS" list --as claude) 2>&1 1>/dev/null || true)"
 echo "$LIST_MISMATCH" | grep -q "OTHER workspace identities" && echo "$LIST_MISMATCH" | grep -q "other-workspace(1)" \
   && ok "empty scoped list NAMES the unmatched identities" || fail "unmatched inbox warning (got: $LIST_MISMATCH)"
 rm -f "$UNMATCHED"
@@ -499,48 +401,20 @@ verdict: APPROVE
 ---
 wrong direction
 MSG
-ARCH_HINT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as codex --thread archive-order) 2>&1 1>/dev/null || true)"
+ARCH_HINT="$( (cd "$REPO_FIX" && env "$COMMS" list --as codex --thread archive-order) 2>&1 1>/dev/null || true)"
 echo "$ARCH_HINT" | grep -q "$(basename "$ARCH_NEW")" && ok "latest archive uses protocol time, not filename order" || fail "protocol-time archive order (got: $ARCH_HINT)"
 echo "$ARCH_HINT" | grep -q "$(basename "$ARCH_WRONG_DIRECTION")" && fail "latest archive crossed reader direction" || ok "latest archive is reader-direction aware"
 # Direction awareness must survive a THIRD agent: the old rule derived the sender
 # as "the other one of exactly two", so registering grok silently turned the hint
 # unfiltered and it started reporting the reader's own message back at it.
 printf 'agents = claude codex grok\n' > "$REPO_FIX/.comms/config"
-ARCH_HINT3="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" list --as codex --thread archive-order) 2>&1 1>/dev/null || true)"
+ARCH_HINT3="$( (cd "$REPO_FIX" && env "$COMMS" list --as codex --thread archive-order) 2>&1 1>/dev/null || true)"
 rm -f "$REPO_FIX/.comms/config"
 echo "$ARCH_HINT3" | grep -q "$(basename "$ARCH_NEW")" \
   && ok "archive hint stays direction-aware with three agents registered" || fail "3-agent archive hint (got: $ARCH_HINT3)"
 echo "$ARCH_HINT3" | grep -q "$(basename "$ARCH_WRONG_DIRECTION")" \
   && fail "3-agent hint crossed reader direction" || ok "3-agent hint excludes the reader's own messages"
 
-section "comms.sh: deliver via stubbed cmux"
-# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
-# suite-wide default, which is how a transport slated for deletion became load-bearing for
-# sections that never mentioned it. (S4-1.)
-export COMMS_DELIVERY=cmux
-# The suite runs with both timing knobs zeroed, so nothing else here would notice if a
-# refactor made 0 the DEFAULT — which would silently drop pacing and backoff for every real
-# user. Pinned at the source, not behaviourally: this suite already has one timing-sensitive
-# section that flakes under load, and a wall-clock assertion here would add another.
-grep -qF 'cmux_pace() { [ "${COMMS_CMUX_PACE:-1}" = 0 ] || sleep "$1"; }' "$COMMS" \
-  && ok "keystroke pacing defaults ON (only an explicit 0 skips it)" \
-  || fail "cmux_pace no longer defaults to pacing"
-grep -qF 'backoff="${COMMS_CMUX_BACKOFF:-0.3 0.7 1.2}"' "$COMMS" \
-  && ok "the cmux tree backoff default is unchanged" \
-  || fail "the cmux tree backoff default changed"
-: > "$CMUX_STUB_LOG"
-OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver codex)"
-echo "$OUT" | grep -q "delivered to surface:22" && ok "picker chose other-pane surface (not ◀ here)" || fail "picker chose other-pane surface (got: $OUT)"
-grep -q 'send --surface surface:22 --workspace workspace:10 $read-from-claude' "$CMUX_STUB_LOG" && ok "codex nudge types \$read-from-claude" || fail "codex nudge types \$read-from-claude"
-: > "$CMUX_STUB_LOG"
-(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver claude) >/dev/null
-grep -q 'send --surface surface:22 --workspace workspace:10 i' "$CMUX_STUB_LOG" && ok "claude nudge includes vim-mode insert" || fail "claude nudge includes vim-mode insert"
-grep -q 'send --surface surface:22 --workspace workspace:10 /read-from-codex' "$CMUX_STUB_LOG" && ok "claude nudge types /read-from-codex" || fail "claude nudge types /read-from-codex"
-OUT="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" deliver codex)"
-echo "$OUT" | grep -q "manual pickup" && ok "deliver without cmux degrades to manual pickup" || fail "deliver without cmux degrades to manual pickup"
-
-# Back to the hermetic default: write the file, nudge nobody. (S4-1.)
-export COMMS_DELIVERY=mailbox
 section "comms.sh: send (atomicity guard)"
 IN2="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T12-02-00_reply-2.md"
 cp "$REPO_FIX/.comms/archive/$(basename "$IN1")" "$IN2"
@@ -935,7 +809,7 @@ sed 's/type: review-feedback/type: error/; /^verdict:/d' "$TA" > "$ERRMSG"
 check "type: error from codex passes without verdict" run_comms validate "$ERRMSG"
 NOTHREAD="$WORK/nothread.md"
 grep -v '^thread:' "$TA" > "$NOTHREAD"
-WARN="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" validate "$NOTHREAD") 2>&1 1>/dev/null )"
+WARN="$( (cd "$REPO_FIX" && env "$COMMS" validate "$NOTHREAD") 2>&1 1>/dev/null )"
 echo "$WARN" | grep -q "no thread field" && ok "workflow message without thread warns (soft, non-fatal)" || fail "thread soft warning (got: $WARN)"
 
 section "comms.sh v2: state lifecycle"
@@ -986,21 +860,6 @@ check "state complete marks thread done" run_comms state complete loop-alpha
 grep -q '"status": "complete"' "$SF" && ok "state complete persists" || fail "state complete persists"
 run_comms stalled 15 | grep -q 'no stalled' && ok "completed thread is not stalled" || fail "completed thread is not stalled"
 
-section "comms.sh v2: delivery failure is explicit and recorded"
-# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
-# suite-wide default, which is how a transport slated for deletion became load-bearing for
-# sections that never mentioned it. (S4-1.)
-export COMMS_DELIVERY=cmux
-DELIV_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_FAIL=1 "$COMMS" deliver codex)"
-echo "$DELIV_OUT" | grep -q "FAILED mid-sequence" && ok "mid-sequence cmux failure reported explicitly" || fail "delivery failure report (got: $DELIV_OUT)"
-# Under stub cmux the RESOLVED workspace (test-project) keys the state file —
-# the helper warns about the frontmatter mismatch and keys on the resolver.
-(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_FAIL=1 "$COMMS" send --to codex "$OUT_WF") >/dev/null 2>&1
-SF_CMUX="$REPO_FIX/.comms/state/test-project_loop-alpha.json"
-grep -q '"last_delivery": "failed"' "$SF_CMUX" && ok "failed delivery recorded in state (resolved-ws key)" || fail "failed delivery recorded in state (state dir: $(ls "$REPO_FIX/.comms/state/" 2>/dev/null))"
-
-# Back to the hermetic default: write the file, nudge nobody. (S4-1.)
-export COMMS_DELIVERY=mailbox
 section "comms.sh v2: state hardening (slash thread, garbage epoch, quotes)"
 SLASH_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-10-00_slash-1.md"
 SLASH_IN="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-09-00_slashin.md"
@@ -1014,7 +873,7 @@ perl -pi -e 's/"awaiting_since_epoch": "\d+"/"awaiting_since_epoch": "garbage"/'
 check "stalled survives a garbage epoch" run_comms stalled 15
 QUOTE_WF="$WORK/quote-wf.md"
 sed 's/phase: implement/phase: fix "login" bug/' "$OUT_WF" > "$QUOTE_WF"
-(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$QUOTE_WF") >/dev/null 2>&1
+(cd "$REPO_FIX" && env "$COMMS" send --to codex "$QUOTE_WF") >/dev/null 2>&1
 grep -q '\\"login\\"' "$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json" && ok "embedded quotes escaped in state JSON" || fail "embedded quotes escaped (got: $(grep phase "$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json"))"
 
 section "comms.sh v2: state dir blocked as a FILE must not break send/archive"
@@ -1024,7 +883,7 @@ BLOCK_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-20-00_blo
 BLOCK_IN="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-19-00_blockedin.md"
 sed 's/round: 2/round: 4/' "$OUT_WF" > "$BLOCK_WF"
 cp "$TA" "$BLOCK_IN"
-BLOCK_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$BLOCK_WF" --archive-inbound "$BLOCK_IN") 2>&1 )"
+BLOCK_OUT="$( (cd "$REPO_FIX" && env "$COMMS" send --to codex "$BLOCK_WF" --archive-inbound "$BLOCK_IN") 2>&1 )"
 BLOCK_RC=$?
 [ "$BLOCK_RC" -eq 0 ] && ok "send succeeds when state dir is blocked (rc=0)" || fail "send succeeds when state dir is blocked (rc=$BLOCK_RC; out: $BLOCK_OUT)"
 [ ! -f "$BLOCK_IN" ] && ok "inbound archived despite blocked state dir (no desync)" || fail "inbound archived despite blocked state dir"
@@ -1032,126 +891,6 @@ echo "$BLOCK_OUT" | grep -q "cannot create state dir" && ok "blocked state dir p
 rm -f "$REPO_FIX/.comms/state"
 mv "$REPO_FIX/.comms/state.bak" "$REPO_FIX/.comms/state"
 
-section "comms.sh v2.1: workspace resilience (empty cmux tree must not abort or flap)"
-rm -f "$REPO_FIX/.comms/.cache/ws-workspace_10"
-WS_EMPTY="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" workspace) 2>/dev/null )"
-WS_EMPTY_RC=$?
-[ "$WS_EMPTY_RC" -eq 0 ] && ok "empty cmux tree does not abort the helper (rc=0)" || fail "empty cmux tree aborts helper (rc=$WS_EMPTY_RC)"
-[ "$WS_EMPTY" = "feature-helper-tests" ] && ok "no-cache fallback resolves branch name" || fail "no-cache fallback (got: $WS_EMPTY)"
-# Prime the cache with a good resolution, then break the tree: identity must stick.
-(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" workspace) >/dev/null
-WS_STICKY="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" workspace) 2>/dev/null )"
-[ "$WS_STICKY" = "test-project" ] && ok "cached identity survives a flaky tree (no cached-name/default-branch flap)" || fail "cached identity sticks (got: $WS_STICKY)"
-# Recover a cache already poisoned by an auto-title spinner. On the fixture's
-# feature branch, the stable repo-derived fallback is feature-helper-tests.
-POISON_WS_ID="workspace:spinner-poison"
-printf '%s' '⠐-review-helper-tests' > "$REPO_FIX/.comms/.cache/ws-workspace_spinner-poison"
-WS_REPAIRED="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID="$POISON_WS_ID" CMUX_STUB_TREE_EMPTY=1 "$COMMS" workspace) 2>/dev/null )"
-[ "$WS_REPAIRED" = "feature-helper-tests" ] && ok "decorated cache is rejected and repaired from repo identity" || fail "decorated cache repair (got: $WS_REPAIRED)"
-[ "$(cat "$REPO_FIX/.comms/.cache/ws-workspace_spinner-poison")" = "feature-helper-tests" ] && ok "repaired identity replaces poisoned cache" || fail "poisoned cache not replaced"
-
-# BLOCKING (codex, suite-hot-waits r1). The first version of the override validated
-# CHARACTERS, not TOKENS: `1..2`, `1.2.3` and `.` are built only from permitted characters yet
-# reach `sleep` as invalid operands, and a whitespace-only value passed the filter while
-# expanding to NO tokens — silently collapsing the retry loop to its final single attempt and
-# removing the contention retries the backoff exists for. A stubbed `sleep` records the
-# schedule that was actually slept, so this pins the behaviour with no wall-clock assertion and
-# no new timing sensitivity (the reason the defaults were only source-pinned before).
-CB_BIN="$WORK/cbbin"; mkdir -p "$CB_BIN"; export CB_LOG="$WORK/cb-sleeps.log"
-printf '#!/bin/bash\nprintf "%%s\\n" "$1" >> "$CB_LOG"\n' > "$CB_BIN/sleep"; chmod +x "$CB_BIN/sleep"
-cb_sleeps() {  # echo the schedule cmux_tree actually slept; with no arg the override is UNSET
-  : > "$CB_LOG"; rm -f "$REPO_FIX/.comms/.cache/ws-workspace_backoff"
-  if [ "$#" -ge 1 ]; then
-    (cd "$REPO_FIX" && PATH="$CB_BIN:$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:backoff \
-       CMUX_STUB_TREE_EMPTY=1 COMMS_CMUX_BACKOFF="$1" "$COMMS" workspace) >/dev/null 2>&1
-  else
-    (cd "$REPO_FIX" && PATH="$CB_BIN:$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:backoff \
-       CMUX_STUB_TREE_EMPTY=1 env -u COMMS_CMUX_BACKOFF "$COMMS" workspace) >/dev/null 2>&1
-  fi
-  tr '\n' ' ' < "$CB_LOG" | sed 's/ *$//'
-}
-[ "$(cb_sleeps)" = "0.3 0.7 1.2" ] \
-  && ok "the default backoff schedule survives the override" || fail "default schedule (got: $(cb_sleeps))"
-[ "$(cb_sleeps '0.1 0.2')" = "0.1 0.2" ] \
-  && ok "a valid backoff override is honored" || fail "valid override (got: $(cb_sleeps '0.1 0.2'))"
-[ "$(cb_sleeps '1..2')" = "0.3 0.7 1.2" ] \
-  && ok "a malformed backoff token falls back to the default" || fail "malformed token (got: $(cb_sleeps '1..2'))"
-[ "$(cb_sleeps '0.3 1..2')" = "0.3 0.7 1.2" ] \
-  && ok "one bad token rejects the WHOLE schedule (atomic fallback)" || fail "partial schedule honored (got: $(cb_sleeps '0.3 1..2'))"
-[ "$(cb_sleeps '   ')" = "0.3 0.7 1.2" ] \
-  && ok "a whitespace-only override cannot collapse the retries" || fail "whitespace collapsed retries (got: $(cb_sleeps '   '))"
-# The validator split its input with an UNQUOTED expansion, so pathname expansion ran BEFORE
-# validation: with a file named `0.1` present, an override of `*` globbed into a valid-looking
-# schedule and was accepted — the verdict depended on the caller's cwd. (codex, r2, blocking.)
-# The pattern must match ONLY the decimal-named file. A bare `*` in this POPULATED fixture also
-# expands to non-decimal names, so the fallback would fire for the wrong reason and this
-# regression would pass even against the bug it exists to catch — a control that proves nothing.
-# (codex, suite-hot-waits r3, advisory.)
-: > "$REPO_FIX/0.987654321"
-[ "$(cb_sleeps '0.98765432*')" = "0.3 0.7 1.2" ] \
-  && ok "a glob override cannot expand into a valid-looking schedule" || fail "glob became a schedule (got: $(cb_sleeps '0.98765432*'))"
-rm -f "$REPO_FIX/0.987654321"
-
-section "comms.sh v2.1: surface binding"
-# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
-# suite-wide default, which is how a transport slated for deletion became load-bearing for
-# sections that never mentioned it. (S4-1.)
-export COMMS_DELIVERY=cmux
-check "bind sets an explicit surface" env -u X bash -c "cd '$REPO_FIX' && PATH='$STUB_BIN:$PATH' CMUX_WORKSPACE_ID=workspace:10 '$COMMS' bind claude surface:11"
-: > "$CMUX_STUB_LOG"
-BOUND_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver claude)"
-echo "$BOUND_OUT" | grep -q "delivered to surface:11 (bound)" && ok "deliver honors the binding over the picker" || fail "deliver honors binding (got: $BOUND_OUT)"
-(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:999) >/dev/null
-BOUND_GONE="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" deliver claude)"
-echo "$BOUND_GONE" | grep -q "delivered to surface:22" && ok "absent bound surface falls back to picker" || fail "absent binding falls back (got: $BOUND_GONE)"
-grep -q "delivered to surface:22" <<<"$BOUND_GONE" && [ "$(cd "$REPO_FIX" && cat .comms/.cache/surface-claude-workspace_10)" = "surface:22" ] && ok "successful delivery refreshes the surface cache" || fail "delivery refreshes surface cache"
-
-section "comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery)"
-# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
-# suite-wide default, which is how a transport slated for deletion became load-bearing for
-# sections that never mentioned it. (S4-1.)
-export COMMS_DELIVERY=cmux
-(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:22) >/dev/null
-: > "$CMUX_STUB_LOG"
-OPT_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" deliver claude)"
-echo "$OPT_OUT" | grep -q "delivered to surface:22 (bound (tree unavailable — optimistic))" && ok "bound surface used when tree is unavailable" || fail "optimistic bound delivery (got: $OPT_OUT)"
-grep -q 'send --surface surface:22' "$CMUX_STUB_LOG" && ok "optimistic delivery actually sent keystrokes" || fail "optimistic delivery sent keystrokes"
-# No binding + no tree -> manual, with a diagnostic naming the why
-rm -f "$REPO_FIX/.comms/.cache/surface-codex-workspace_10"
-DIAG="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_TREE_EMPTY=1 "$COMMS" deliver codex) 2>&1 )"
-echo "$DIAG" | grep -q "manual pickup" && ok "no binding + no tree degrades to manual" || fail "no binding + no tree (got: $DIAG)"
-echo "$DIAG" | grep -q "tree unavailable after retries" && ok "empty-tree manual outcome carries a diagnostic" || fail "empty-tree diagnostic (got: $DIAG)"
-
-section "comms.sh v2.2: sandbox block emits direct recovery + state reconciliation"
-# PANE MECHANICS: this section needs the cmux transport, so it ASKS. It used to inherit it from a
-# suite-wide default, which is how a transport slated for deletion became load-bearing for
-# sections that never mentioned it. (S4-1.)
-export COMMS_DELIVERY=cmux
-(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 "$COMMS" bind claude surface:22) >/dev/null
-SBX="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" deliver claude) 2>&1 )"
-echo "$SBX" | grep -q "nested helper cannot access cmux" && ok "socket failure is classified as nested-helper sandboxing" || fail "sandbox recognition (got: $SBX)"
-echo "$SBX" | grep -q "^RECOVER: cmux send-key" && ok "sandbox failure prints one direct-cmux recovery command" || fail "direct recovery command (got: $SBX)"
-echo "$SBX" | grep -q "/bin/zsh -lc" && fail "obsolete wrapper retry still printed" || ok "sandbox recovery no longer promises wrapper escape"
-echo "$SBX" | grep -q "cmux said:" && ok "sandbox failure echoes the cmux error" || fail "cmux error echoed (got: $SBX)"
-echo "$SBX" | grep -q "retries from this unchanged sandbox will also block" \
-  && ok "sandbox failure stops blind in-session retries" || fail "sandbox retry guidance (got: $SBX)"
-# send classifies the sandbox block as its own outcome (not silent 'manual')
-SBX_SEND_ALL="$( (cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 CMUX_STUB_SANDBOX=1 "$COMMS" send --to claude "$OUT_WF") 2>/dev/null )"
-SBX_SEND="$(echo "$SBX_SEND_ALL" | tail -1)"
-case "$SBX_SEND" in "RESULT: blocked"*) ok "send RESULT is 'blocked' on a sandboxed socket (not 'manual')" ;; *) fail "blocked RESULT (got: $SBX_SEND)" ;; esac
-echo "$SBX_SEND" | grep -q "restart with cmux socket permission" \
-  && ok "blocked RESULT names the persistent fix" || fail "blocked RESULT permission hint (got: $SBX_SEND)"
-echo "$SBX_SEND_ALL" | grep -qF "$COMMS' reconcile '$OUT_WF" && ok "RECOVER chain ends with literal helper+message reconciliation" || fail "RECOVER reconciliation tail (got: $SBX_SEND_ALL)"
-grep -q '"last_delivery": "blocked"' "$SF_CMUX" && ok "blocked send is recorded before recovery" || fail "blocked state before recovery"
-REC_CMD="$(printf '%s\n' "$SBX_SEND_ALL" | sed -n 's/^RECOVER: //p' | head -1)"
-: > "$CMUX_STUB_LOG"
-REC_OUT="$(cd "$REPO_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:10 bash -c "$REC_CMD")"
-echo "$REC_OUT" | grep -q "^RESULT: delivered" && ok "exact RECOVER command nudges and reconciles" || fail "RECOVER execution (got: $REC_OUT)"
-grep -q 'send --surface surface:22' "$CMUX_STUB_LOG" && grep -q 'send-key --surface surface:22' "$CMUX_STUB_LOG" && ok "RECOVER uses direct cmux commands" || fail "RECOVER direct cmux log (got: $(cat "$CMUX_STUB_LOG"))"
-grep -q '"last_delivery": "delivered"' "$SF_CMUX" && grep -q '"last_notified_at":' "$SF_CMUX" && ok "reconcile repairs delivery state with timestamp" || fail "reconciled state (got: $(cat "$SF_CMUX"))"
-
-# Back to the hermetic default: write the file, nudge nobody. (S4-1.)
-export COMMS_DELIVERY=mailbox
 section "comms.sh v2.1.1: status shouts when a loop stalled undelivered"
 perl -pi -e 's/"last_delivery": "[^"]*"/"last_delivery": "manual"/; s/"status": "[^"]*"/"status": "in-progress"/' "$SF"
 ST_OUT="$(run_comms status)"
@@ -1161,12 +900,12 @@ ST_OUT="$(run_comms status)"
 echo "$ST_OUT" | grep -q "ACTION NEEDED" && fail "completed thread must not shout" || ok "completed thread does not shout"
 
 section "comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line"
-RES_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUT_WF") 2>/dev/null )"
+RES_OUT="$( (cd "$REPO_FIX" && env "$COMMS" send --to codex "$OUT_WF") 2>/dev/null )"
 echo "$RES_OUT" | grep -q "^RESULT: manual" && ok "manual outcome includes RESULT: manual" || fail "RESULT line (got: $(echo "$RES_OUT" | tail -1))"
 # The autonomous path (--archive-inbound) must ALSO end with RESULT, not "archived:".
 RES_IN="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T13-30-00_resin.md"
 cp "$TA" "$RES_IN"
-RES_TAIL="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUT_WF" --archive-inbound "$RES_IN") 2>/dev/null | tail -1 )"
+RES_TAIL="$( (cd "$REPO_FIX" && env "$COMMS" send --to codex "$OUT_WF" --archive-inbound "$RES_IN") 2>/dev/null | tail -1 )"
 case "$RES_TAIL" in RESULT:*) ok "tail -1 of send --archive-inbound is the RESULT line" ;; *) fail "final line on archive path (got: $RES_TAIL)" ;; esac
 [ ! -f "$RES_IN" ] && ok "inbound still archived on the RESULT-last path" || fail "inbound archived on RESULT-last path"
 
@@ -1185,8 +924,8 @@ case "$RES_TAIL" in RESULT:*) ok "tail -1 of send --archive-inbound is the RESUL
 export CODEX_STUB_LOG="$WORK/codex.log"
 RUNPHASE="$REPO/helpers/runphase.sh"
 rundir_of() { echo "$1" | sed -n 's/^ *run dir: //p' | head -1; }
-run_rp() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 PATH="$STUB_BIN:$PATH" "$RUNPHASE" "$@"); }
-run_headless() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
+run_rp() { (cd "$REPO_FIX" && env COMMS_DELIVERY=headless COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 PATH="$STUB_BIN:$PATH" "$RUNPHASE" "$@"); }
+run_headless() { (cd "$REPO_FIX" && env COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
 
 # The grok stub is hoisted ABOVE step 2 (step 4, S4-2): headless is now grok-only, so the
 # hold/release coverage below needs a provider that can still spawn on that transport.
@@ -1426,7 +1165,7 @@ max-rounds: 4
 pickup fixture
 PICKEOF
 
-GPICK="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=grok PATH="$STUB_BIN:$PATH" "$COMMS" deliver grok) 2>&1 )"
+GPICK="$( (cd "$REPO_FIX" && env COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=grok PATH="$STUB_BIN:$PATH" "$COMMS" deliver grok) 2>&1 )"
 echo "$GPICK" | grep -q "written for pickup" && ok "a headless peer leaves its reply for pickup instead of nudging itself" || fail "self-pickup suppression (got: $GPICK)"
 echo "$GPICK" | grep -q "NOT spawned" && fail "deliberate pickup must not warn NOT spawned" || ok "deliberate pickup is not reported as a failed spawn"
 
@@ -1439,7 +1178,7 @@ cp "$COMMS" "$GLONELY/comms.sh" && chmod +x "$GLONELY/comms.sh"
 # headless_ok — so the send failed while broker_stamp's copy made the turn look answered.
 # The reply-to-driver direction must be a no-op, never a refusal and never a "re-run
 # install.sh" lie. The control below proves this is pickup, not a blanket exemption.
-GPB="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=claude PATH="$STUB_BIN:$PATH" "$COMMS" deliver claude) 2>&1 )"
+GPB="$( (cd "$REPO_FIX" && env COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=claude PATH="$STUB_BIN:$PATH" "$COMMS" deliver claude) 2>&1 )"
 echo "$GPB" | grep -q "written for pickup" && ok "a reply to the driving session is pickup even under COMMS_DELIVERY=headless" || fail "pickup before transport (got: $GPB)"
 # COUPLED to non-empty output: a bare `grep && fail || ok` passes on empty stdout, which is
 # the same vacuous family this section exists to catch. (grok, S4-2 r4, advisory — found in
@@ -1447,13 +1186,29 @@ echo "$GPB" | grep -q "written for pickup" && ok "a reply to the driving session
 { [ -n "$GPB" ] && ! printf '%s\n' "$GPB" | grep -qi "re-run install.sh"; } \
   && ok "no re-run-install.sh lie on the reply-to-driver path" \
   || fail "the inherited headless flag still produces the install.sh lie (got: $GPB)"
-GPB_CTL="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=grok PATH="$STUB_BIN:$PATH" "$COMMS" deliver claude) 2>&1 )"
+GPB_CTL="$( (cd "$REPO_FIX" && env COMMS_DELIVERY=headless COMMS_HEADLESS_PICKUP=grok PATH="$STUB_BIN:$PATH" "$COMMS" deliver claude) 2>&1 )"
 echo "$GPB_CTL" | grep -q "not available for 'claude'" && ok "a non-pickup claude target still refuses headless (pickup is not a blanket exemption)" || fail "pickup control (got: $GPB_CTL)"
 
-GLONE="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$GLONELY/comms.sh" deliver grok) 2>&1 )"
+GLONE="$( (cd "$REPO_FIX" && env COMMS_DELIVERY=headless "$GLONELY/comms.sh" deliver grok) 2>&1 )"
 echo "$GLONE" | grep -q "runphase.sh was not found" && ok "a missing headless runner degrades with an explicit warning" || fail "missing runphase warning (got: $GLONE)"
 # The warning must not blame an env var the operator never set — headless is the default now.
 echo "$GLONE" | grep -q "COMMS_DELIVERY=headless but" && fail "warning blames an unset env var" || ok "the missing-runner warning does not blame an unset env var"
+
+section "comms.sh: workspace identity (no cmux)"
+# The cmux title/cache/backoff sections are gone with the transport. What SURVIVES is
+# repo_workspace_name, and its `main` case was never covered: the corpus runs on branch
+# `feature-helper-tests`. Deleting the cmux guard around the `main -> <repo-name>` substitution
+# is behaviour-preserving ONLY because `${ws:-$root_name}` still prints a non-empty `$ws`.
+# Making that substitution unconditional would flip every unpinned repo on `main` to the repo
+# name, changing the message-filename prefix and hiding pending messages behind the glob
+# (field report #3). This pins it. (S4-4.)
+WSI="$WORK/wsid/some-repo-name"
+mkdir -p "$WSI" && ( cd "$WSI" && git init -q -b main . && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init ) 2>/dev/null
+WSI_MAIN="$( cd "$WSI" && "$COMMS" workspace 2>/dev/null )"
+[ "$WSI_MAIN" = "main" ] && ok "on 'main' with no pin the workspace stays 'main', not the repo directory name" || fail "main-branch workspace (got: $WSI_MAIN)"
+( cd "$WSI" && git checkout -q -b feature/some-work ) 2>/dev/null
+WSI_BR="$( cd "$WSI" && "$COMMS" workspace 2>/dev/null )"
+[ "$WSI_BR" = "feature-some-work" ] && ok "a branch name still sanitises into the workspace identity" || fail "branch workspace (got: $WSI_BR)"
 
 section "loopspec: conformance fixtures"
 if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then
@@ -1467,7 +1222,7 @@ MA_FIX="$WORK/ma-repo"; mkdir -p "$MA_FIX"; MA_FIX="$(cd "$MA_FIX" && pwd -P)"
 git -C "$MA_FIX" init -q -b feature/ma-tests
 git -C "$MA_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 mkdir -p "$MA_FIX/.comms/to-claude" "$MA_FIX/.comms/to-codex" "$MA_FIX/.comms/archive"
-run_ma() { (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_ma() { (cd "$MA_FIX" && env "$COMMS" "$@"); }
 MA_WS="$(run_ma workspace)"
 
 [ "$(run_ma agents)" = "claude codex grok" ] && ok "zero-config agents default includes grok" || fail "zero-config agents (got: $(run_ma agents))"
@@ -1519,7 +1274,7 @@ max-rounds: 4
 ## Plan
 review this plan
 MAEOF
-check "grok inbox lists the message" bash -c "run_ma() { (cd '$MA_FIX' && env -u CMUX_WORKSPACE_ID '$COMMS' \"\$@\"); }; run_ma list --as grok | grep -q review-req-1"
+check "grok inbox lists the message" bash -c "run_ma() { (cd '$MA_FIX' && env '$COMMS' \"\$@\"); }; run_ma list --as grok | grep -q review-req-1"
 BAD_FROM="$MA_FIX/.comms/to-claude/${MA_WS}_${MA_TS}_badfrom-1.md"
 sed 's/^from: claude$/from: gemini/' "$MA_MSG" > "$BAD_FROM"
 check_not "validate rejects unregistered from:" run_ma validate "$BAD_FROM"
@@ -1529,7 +1284,7 @@ section "multi-agent: grok stub + full-arc runphase legs"
 
 RP="$REPO/helpers/runphase.sh"
 run_grok_leg() {  # <msg-path> <run-dir> [env overrides via caller export]
-  (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" \
+  (cd "$MA_FIX" && env PATH="$STUB_BIN:$PATH" \
      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$1" --dir "$2" --provider grok)
 }
 
@@ -1758,7 +1513,7 @@ chmod +x "$TO_STUB/node"
 MA_MSG15="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-55-00_timeout-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-13/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSG15"
 R15="$WORK/ma-leg15"; mkdir -p "$R15"
-( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$TO_STUB:$PATH" \
+( cd "$MA_FIX" && env PATH="$TO_STUB:$PATH" \
     COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$MA_MSG15" --dir "$R15" \
     --provider grok --via acp --timeout-secs 1 ) >/dev/null 2>&1
 TO_NOTE="$(sed -n 's/.*"note": "\(.*\)".*/\1/p' "$R15/result.json" 2>/dev/null | head -1)"
@@ -1781,7 +1536,7 @@ grep -q 'budget' "$R15/runner.log" 2>/dev/null \
 run_to_leg() { # <thread-suffix> <run-dir-var> <timeout> [env already exported by caller]
   local msg="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-5${1}-00_to-${1}.md"
   sed -e "s/^thread: ma-arc-1\$/thread: ma-arc-to${1}/" "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$msg"
-  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$TO_STUB:$PATH" \
+  ( cd "$MA_FIX" && env PATH="$TO_STUB:$PATH" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$msg" --dir "$2" \
       --provider grok --via acp --timeout-secs "$3" ) >/dev/null 2>&1
 }
@@ -1823,7 +1578,7 @@ TO_STUB_SLEEP=0 TO_STUB_OUT="$(printf 'VERDICT: APPROVE\n\n## Summary\na complet
 
 # A MALFORMED budget must not leak a bash error and must not silently revert the diagnosis.
 R19="$WORK/ma-leg19"; mkdir -p "$R19"
-TO_ERR="$( { ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$TO_STUB:$PATH" \
+TO_ERR="$( { ( cd "$MA_FIX" && env PATH="$TO_STUB:$PATH" \
     COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$MA_MSG15" --dir "$R19" \
     --provider grok --via acp --timeout-secs notanumber ) >/dev/null; } 2>&1 || true)"
 case "$TO_ERR" in
@@ -1970,7 +1725,7 @@ MA_MSGFC="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-45-00_failclosed-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-7/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFC"
 RFC1="$WORK/ma-legfc"; mkdir -p "$RFC1"
 mkdir -p "$WORK/no-bar"
-(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$WORK/no-skills" \
+(cd "$MA_FIX" && env PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$WORK/no-skills" \
    AGENT_COMMS_HOME="$WORK/no-bar" \
    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFC" --dir "$RFC1" --provider grok) >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFC1/result.json" | head -1)" = "failed" ] \
@@ -1981,7 +1736,7 @@ sed -e 's/^type: review-request$/type: question/' -e 's/^thread: ma-arc-1$/threa
     -e '/^workflow:/d' -e '/^phase:/d' -e '/^round:/d' -e '/^max-rounds:/d' \
   "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFQ"
 RFC2="$WORK/ma-legfq"; mkdir -p "$RFC2"
-(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$WORK/no-skills" \
+(cd "$MA_FIX" && env PATH="$STUB_BIN:$PATH" CODEX_SKILLS_DIR="$WORK/no-skills" \
    AGENT_COMMS_HOME="$WORK/no-bar" \
    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFQ" --dir "$RFC2" --provider grok) >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFC2/result.json" | head -1)" = "completed" ] \
@@ -2124,7 +1879,7 @@ grep -q -- '--sandbox read-only' "$GROK_STUB_LOG" \
 MA_MSGSBX="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-49-00_sandbox-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-11/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGSBX"
 mkdir -p "$WORK/ma-legsbx" "$WORK/ma-legsbx2"
-(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$MA_FIX" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    COMMS_RUNPHASE_GROK_SANDBOX=agent-comms-review "$RP" run --message "$MA_MSGSBX" --dir "$WORK/ma-legsbx" --provider grok) >/dev/null 2>&1 || true
 grep -q -- '--sandbox agent-comms-review' "$GROK_STUB_LOG" \
   && ok "operator custom sandbox profile is honored by the runner" || fail "custom sandbox selection"
@@ -2132,7 +1887,7 @@ MA_MSGSBX2="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-50-00_sandbox-2.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-12/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGSBX2"
 for badsbx in off devbox workspace "not a name"; do
   cp "$MA_MSGSBX2" "$MA_MSGSBX2.keep" 2>/dev/null || true
-  OUTSBX="$( (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+  OUTSBX="$( (cd "$MA_FIX" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
       COMMS_RUNPHASE_GROK_SANDBOX="$badsbx" "$RP" run --message "$MA_MSGSBX2" --dir "$WORK/ma-legsbx2" --provider grok) 2>&1 )" && rcs=0 || rcs=$?
   [ "$rcs" -ne 0 ] && echo "$OUTSBX" | grep -qi 'refuse\|must be a bare profile' \
     && ok "sandbox knob refuses '$badsbx'" || fail "sandbox knob refusal for '$badsbx' (rc=$rcs)"
@@ -2149,7 +1904,7 @@ MARKERLESS="$WORK/markerless-home"; mkdir -p "$MARKERLESS/loopspec-fragments"
 MA_MSGFM="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-47-00_markerless-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-9/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFM"
 RFM="$WORK/ma-legfm"; mkdir -p "$RFM"
-(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" AGENT_COMMS_HOME="$MARKERLESS" \
+(cd "$MA_FIX" && env PATH="$STUB_BIN:$PATH" AGENT_COMMS_HOME="$MARKERLESS" \
    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$BARE/runphase.sh" run --message "$MA_MSGFM" --dir "$RFM" --provider grok) >/dev/null 2>&1
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RFM/result.json" | head -1)" = "failed" ] \
   && grep -q 'resolved but is EMPTY' "$RFM/result.json" \
@@ -2266,7 +2021,7 @@ for bad in "COMMS_RUNPHASE_GROK_ARGS=--sandbox workspace" "COMMS_RUNPHASE_GROK_A
            "COMMS_RUNPHASE_GROK_ARGS=$(printf -- '--sandbox\nworkspace')" \
            "COMMS_RUNPHASE_GROK_ARGS=--permission-mode=bypassPermissions" \
            "COMMS_RUNPHASE_GROK_PERMISSION_MODE=bypassPermissions"; do
-  OUT="$( (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+  OUT="$( (cd "$MA_FIX" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
       "$bad" "$RP" run --message "$MA_MSG4" --dir "$R5" --provider grok) 2>&1 )" && rc=0 || rc=$?
   if [ "$rc" -ne 0 ] && echo "$OUT" | grep -qi 'refused'; then
     ok "refused: $bad"
@@ -2294,20 +2049,21 @@ max-rounds: 4
 
 body
 MAEOF
-IDEMP_OUT="$(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUTB" --archive-inbound "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" 2>&1)" && rc=0 || rc=$?
+IDEMP_OUT="$(cd "$MA_FIX" && env "$COMMS" send --to codex "$OUTB" --archive-inbound "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" 2>&1)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && echo "$IDEMP_OUT" | grep -q 'no-op' && ok "already-archived inbound is a no-op success (retry idempotent)" || fail "archive retry idempotency (rc=$rc)"
 # Cross-inbox mismatch: outbound from: claude but inbound sits in to-codex/
 STRAY="$MA_FIX/.comms/to-codex/${MA_WS}_2026-08-20T09-50-00_stray-1.md"
 cp "$OUTB" "$STRAY"
 STATE_ARC1="$MA_FIX/.comms/state/$(echo "$MA_WS" | tr -c 'A-Za-z0-9._-\n' '_')_ma-arc-1.json"
 STATE_BEFORE="$(cat "$STATE_ARC1" 2>/dev/null || true)"
-CMUX_LOG_BEFORE="$(wc -l < "$CMUX_STUB_LOG" 2>/dev/null | tr -d ' ' || echo 0)"
-MISMATCH_OUT="$(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to codex "$OUTB" --archive-inbound "$STRAY" 2>&1)" && rc=0 || rc=$?
+MISMATCH_OUT="$(cd "$MA_FIX" && env "$COMMS" send --to codex "$OUTB" --archive-inbound "$STRAY" 2>&1)" && rc=0 || rc=$?
 [ "$rc" -ne 0 ] && echo "$MISMATCH_OUT" | grep -q 'cross-inbox mismatch' \
   && ok "cross-inbox archive mismatch refused" || fail "cross-inbox mismatch refusal (rc=$rc)"
 echo "$MISMATCH_OUT" | grep -q 'delivered to' && fail "mismatch must refuse BEFORE delivery" || ok "mismatch refusal precedes delivery (nothing nudged)"
-[ "$(wc -l < "$CMUX_STUB_LOG" 2>/dev/null | tr -d ' ' || echo 0)" = "$CMUX_LOG_BEFORE" ] \
-  && ok "mismatch refusal makes zero cmux calls" || fail "mismatch cmux-call atomicity"
+# Was "zero cmux calls", counted from the deleted stub's log — which after S4-4 compared 0 to
+# 0 and could not fail. The durable invariant is that the refusal produced NO outbound record.
+[ -z "$(find "$MA_FIX/.comms/archive" -name "*stray-1*" 2>/dev/null)" ] \
+  && ok "a refused mismatch archives nothing" || fail "mismatch refusal left an archive record"
 [ "$(cat "$STATE_ARC1" 2>/dev/null || true)" = "$STATE_BEFORE" ] \
   && ok "mismatch refusal mutates no thread state" || fail "mismatch state atomicity"
 rm -f "$STRAY" "$OUTB"
@@ -2616,7 +2372,7 @@ narration above, numbered findings below
 - no friction
 LFEOF
 # self-contained: run_tr is defined much later in this file
-run_lf() { (cd "$REPO" && env -u CMUX_WORKSPACE_ID -u COMMS_DELIVERY "$COMMS" "$@"); }
+run_lf() { (cd "$REPO" && env -u COMMS_DELIVERY "$COMMS" "$@"); }
 LF_ROWS="$(run_lf findings "$LF/numbered.md" 2>/dev/null | tail -n +2)"
 [ "$(printf '%s\n' "$LF_ROWS" | grep -c .)" = "2" ] \
   && ok "numbered findings are extracted (1 blocking, 1 advisory)" || fail "numbered list yielded $(printf '%s' "$LF_ROWS" | grep -c .) findings"
@@ -2716,7 +2472,7 @@ git -C "$SA_FIX" init -q -b main
 git -C "$SA_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 mkdir -p "$SA_FIX/.comms/to-codex" "$SA_FIX/.comms/to-claude" "$SA_FIX/.comms/archive"
 printf 'agents = claude codex\ndefault-target = codex\n' > "$SA_FIX/.comms/config"
-run_sa() { (cd "$SA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_sa() { (cd "$SA_FIX" && env "$COMMS" "$@"); }
 SA_HEAD="$(git -C "$SA_FIX" rev-parse HEAD)"
 
 # snapshot --with-base: clean tree -> id == base == HEAD
@@ -2940,21 +2696,16 @@ sed -e "s/^artifact_id: .*/artifact_id: $SA_FAKE/" -e '/^head_sha:/d' \
 run_sa send --to codex "$SA_FK" >/dev/null 2>&1
 grep -q "^head_sha: $SA_FAKE$" "$SA_FK" \
   && ok "subject-collision commit is its OWN base (object-shape synthetic test)" || fail "subject collision (got $(grep '^head_sha:' "$SA_FK"))"
-# pin beats a LIVE cmux identity: the cache file the resolver actually reads
-# (ws-<safe_name(id)>) AND a stub tree title, both claiming fwh-backup. (grok, r3:
-# the earlier fixture poisoned a path nothing reads and seeded no title.)
-mkdir -p "$SA_FIX/.comms/.cache"
-printf 'fwh-backup' > "$SA_FIX/.comms/.cache/ws-workspace_77"
-cat > "$CMUX_STUB_DIR/tree-workspace_77.txt" <<'SATREE'
-workspace workspace:77 "fwh-backup"
-├── pane pane:1
-│   └── surface surface:78 [terminal] "idle" ◀ here
-SATREE
-WS_UNPINNED="$(cd "$SA_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:77 "$COMMS" workspace)"
-[ "$WS_UNPINNED" = "fwh-backup" ] || fail "fixture wiring: cmux identity should win pre-pin (got $WS_UNPINNED)"
+# The PIN BEATS INFERENCE. This used to pit the pin against a live cmux identity and a
+# poisoned cache; cmux is gone (S4-4) but the rule it proved is the load-bearing one and
+# survives — an explicit `.comms/workspace` outranks anything derived from the branch or
+# directory. The fixture-wiring guard establishes the pre-pin value so the assertion cannot
+# pass by both sides happening to agree.
+WS_UNPINNED="$(cd "$SA_FIX" && "$COMMS" workspace)"
+[ -n "$WS_UNPINNED" ] && [ "$WS_UNPINNED" != "pinned-name" ] || fail "fixture wiring: pre-pin identity should differ from the pin (got $WS_UNPINNED)"
 run_sa workspace set pinned-name >/dev/null
-WS_LIVE="$(cd "$SA_FIX" && PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:77 "$COMMS" workspace)"
-[ "$WS_LIVE" = "pinned-name" ] && ok "pin beats a live cmux id and poisoned cache" || fail "pin vs live cmux (got $WS_LIVE)"
+WS_LIVE="$(cd "$SA_FIX" && "$COMMS" workspace)"
+[ "$WS_LIVE" = "pinned-name" ] && ok "an explicit pin beats the inferred identity" || fail "pin vs inference (got $WS_LIVE)"
 rm -f "$SA_FIX/.comms/workspace"
 # prefix-fallback fixtures: the two shapes that previously lied
 rm -f "$SA_FIX/.comms/to-claude/${SA_WS}_2026-08-26T15-20-00_otherthread-1.md"
@@ -3014,7 +2765,7 @@ git -C "$SA2" init -q -b main
 mkdir -p "$SA2/.comms/to-codex" "$SA2/.comms/archive"
 printf 'agents = claude codex\ndefault-target = codex\n' > "$SA2/.comms/config"
 echo content > "$SA2/f.txt"
-run_sa2() { (cd "$SA2" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_sa2() { (cd "$SA2" && env "$COMMS" "$@"); }
 SA2_PAIR="$(run_sa2 snapshot create --with-base)"
 SA2_AID="${SA2_PAIR%%	*}"; SA2_BASE="${SA2_PAIR#*	}"
 [ -n "$SA2_AID" ] && [ -z "$SA2_BASE" ] && ok "parentless snapshot pair has an empty base" || fail "parentless pair (got: $SA2_PAIR)"
@@ -3074,7 +2825,7 @@ section "friction: a one-line seam for reporting harness problems"
 FR="$WORK/friction-repo"; mkdir -p "$FR"; FR="$(cd "$FR" && pwd -P)"
 git -C "$FR" init -q -b main
 git -C "$FR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
-run_fr() { (cd "$FR" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_fr() { (cd "$FR" && env "$COMMS" "$@"); }
 run_fr friction --severity 5 --thread t-1 "compose reported a false all-clear" >/dev/null 2>&1
 [ -s "$FR/.comms/friction.tsv" ] && ok "friction writes a log" || fail "friction.tsv"
 awk -F'\t' 'NR>1 && $5=="5" && $4=="t-1"' "$FR/.comms/friction.tsv" | grep -q . \
@@ -3094,7 +2845,7 @@ grep -q 'friction --thread' "$REPO/templates/claude-commands/read-from-codex.md"
 # repo is invisible to whoever maintains this tool unless a human pastes it — which is
 # exactly how a false all-clear survived a whole loop.
 FRH="$WORK/friction-home"; mkdir -p "$FRH"
-run_fr_h() { (cd "$FR" && env -u CMUX_WORKSPACE_ID AGENT_COMMS_HOME="$FRH" "$COMMS" "$@"); }
+run_fr_h() { (cd "$FR" && env AGENT_COMMS_HOME="$FRH" "$COMMS" "$@"); }
 run_fr_h friction --severity 4 "a note from a client repo" >/dev/null 2>&1
 [ -s "$FRH/friction.tsv" ] && ok "friction rolls up outside the project" || fail "no global rollup"
 grep -q 'a note from a client repo' "$FRH/friction.tsv" && ok "the rollup carries the note" || fail "rollup note"
@@ -3286,7 +3037,7 @@ acp_raw() {  # <payload-file> <n> -> path to the reply-raw.md the ACP path wrote
   sed -e "s/^thread: ma-arc-1\$/thread: ma-arc-parity-$n/" \
       "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$msg"
   dir="$WORK/ma-parity-$n"; mkdir -p "$dir"
-  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$pay" \
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$pay" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$msg" --dir "$dir" \
       --provider grok --via acp --timeout-secs 20 ) >/dev/null 2>&1
   printf '%s' "$dir/reply-raw.md"
@@ -3522,7 +3273,7 @@ run_brokered_leg() {  # <provider> <from> <thread> -> echoes the run dir
       -e "s/_review-req-1\$/_brokered-$prov/" \
       "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$msg"
   dir="$WORK/ma-brokered-$prov"; mkdir -p "$dir"
-  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$BRK_PAY" \
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$BRK_PAY" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$msg" --dir "$dir" \
       --provider "$prov" --via acp --timeout-secs 20 ) >/dev/null 2>&1
   printf '%s' "$dir"
@@ -3591,7 +3342,7 @@ done
 MA_MSG_ARCH="$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
 for BRK_E in codex claude; do
   BRK_EDIR="$WORK/ma-acponly-$BRK_E"; mkdir -p "$BRK_EDIR"
-  BRK_EOUT="$( (cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" \
+  BRK_EOUT="$( (cd "$MA_FIX" && env PATH="$STUB_BIN:$PATH" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$MA_MSG_ARCH" --dir "$BRK_EDIR" --provider "$BRK_E" ) 2>&1 || true )"
   printf '%s\n' "$BRK_EOUT" | grep -q 'ACP-only' \
     && ok "a direct (non-ACP) $BRK_E run is refused at the entrance" || fail "$BRK_E direct run was not refused (got: $(printf '%.90s' "$BRK_EOUT"))"
@@ -3612,9 +3363,9 @@ for BRK_F in codex claude; do
   # `send` first, exactly as a real loop does: it writes the state record before any runner
   # exists. With the suite's mailbox default this nudges nobody, so the ACP turn below is still
   # the only thing that runs.
-  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" send --to "$BRK_F" "$BRK_FMSG" ) >/dev/null 2>&1 || true
+  ( cd "$MA_FIX" && env "$COMMS" send --to "$BRK_F" "$BRK_FMSG" ) >/dev/null 2>&1 || true
   BRK_FDIR="$WORK/ma-brokfail-$BRK_F"; mkdir -p "$BRK_FDIR"
-  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$BRK_PAY" \
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$BRK_PAY" \
       AX_FAIL_RC=7 COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$BRK_FMSG" \
       --dir "$BRK_FDIR" --provider "$BRK_F" --via acp --timeout-secs 20 ) >/dev/null 2>&1
   grep -q '"status": "failed"' "$BRK_FDIR/result.json" 2>/dev/null \
@@ -3793,7 +3544,7 @@ undated body line
 ## 2026-09-09 — appended at the BOTTOM, and newest
 newest body line
 ADV
-les() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" lessons "$@" >"$WORK/l.out" 2>"$WORK/l.err"); }
+les() { (cd "$REPO_FIX" && env "$COMMS" lessons "$@" >"$WORK/l.out" 2>"$WORK/l.err"); }
 les_total() { echo $(( $(wc -c <"$WORK/l.out") + $(wc -c <"$WORK/l.err") )); }
 
 les --file "$LES/adv.md" --bytes 4000; LES_RC=$?
@@ -3860,10 +3611,10 @@ git -C "$WT_MAIN" add -A >/dev/null 2>&1
 git -C "$WT_MAIN" -c user.email=t@t -c user.name=t commit -q -m init
 git -C "$WT_MAIN" worktree add -q -b feat "$WORK/wt-linked" 2>/dev/null
 mkdir -p "$WORK/wt-linked/docs"; echo '## 2026-02-02 — WORKTREE lesson' > "$WORK/wt-linked/docs/advisories.md"
-WT_OUT="$(cd "$WORK/wt-linked" && env -u CMUX_WORKSPACE_ID "$COMMS" lessons 2>/dev/null | head -1)"
+WT_OUT="$(cd "$WORK/wt-linked" && env "$COMMS" lessons 2>/dev/null | head -1)"
 [ "$WT_OUT" = "## 2026-02-02 — WORKTREE lesson" ] \
   && ok "lessons reads the CURRENT worktree's advisories, not the main tree's" || fail "lessons worktree resolution (got: $WT_OUT)"
-WT_ROOT="$(cd "$WORK/wt-linked" && env -u CMUX_WORKSPACE_ID "$COMMS" root)"
+WT_ROOT="$(cd "$WORK/wt-linked" && env "$COMMS" root)"
 [ "$WT_ROOT" = "$WT_MAIN/.comms" ] \
   && ok "comms root stays anchored to the MAIN repo from a linked worktree" || fail "root stays main-anchored (got: $WT_ROOT)"
 
@@ -3888,7 +3639,7 @@ MSG
 }
 mk_arch "zzz-workspace_2026-01-01T00-00-00_old.md"  "2026-01-01T00:00:00Z" "old-thread"  "widget handling notes"
 mk_arch "aaa-workspace_2026-12-31T00-00-00_new.md"  "2026-12-31T00:00:00Z" "new-thread"  "widget handling notes"
-ars() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" archive-search "$@" >"$WORK/a.out" 2>"$WORK/a.err"); }
+ars() { (cd "$REPO_FIX" && env "$COMMS" archive-search "$@" >"$WORK/a.out" 2>"$WORK/a.err"); }
 ars widget
 FIRST_HIT="$(head -1 "$WORK/a.out")"
 case "$FIRST_HIT" in
@@ -3922,7 +3673,7 @@ ars widget --limit 0; [ $? = 2 ] && ok "archive-search rejects --limit 0" || fai
 rm -f "$AS_ARCH/zzz-workspace_2026-01-01T00-00-00_old.md" "$AS_ARCH/aaa-workspace_2026-12-31T00-00-00_new.md"
 
 section "comms.sh: help prints its whole header"
-HELP_OUT="$(cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" help)"
+HELP_OUT="$(cd "$REPO_FIX" && env "$COMMS" help)"
 echo "$HELP_OUT" | grep -q 'archive-search' \
   && ok "help lists the last subcommand (no fixed-range truncation)" || fail "help truncates its own header"
 
@@ -4123,7 +3874,7 @@ printf '.comms/\n.agent-comms/\n' > "$GR_FIX/.gitignore"
 git -C "$GR_FIX" add .gitignore >/dev/null 2>&1
 git -C "$GR_FIX" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$GR_FIX/.comms/archive"
-run_gr() { (cd "$GR_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_gr() { (cd "$GR_FIX" && env "$COMMS" "$@"); }
 
 cat > "$GR_FIX/.comms/archive/gr_2026-08-01T10-00-00_fb-1.md" <<'GREOF'
 ---
@@ -4296,7 +4047,7 @@ GR_HOME="$WORK/grading-home"
 mkdir -p "$GR_HOME"
 mkdir -p "$GR_FIX/.agent-comms" "$GR_FIX/.claude/commands"
 echo "reviewer prompt v1" > "$GR_FIX/.claude/commands/auto.md"
-run_gr_h() { (cd "$GR_FIX" && env -u CMUX_WORKSPACE_ID HOME="$GR_HOME" "$COMMS" "$@"); }
+run_gr_h() { (cd "$GR_FIX" && env HOME="$GR_HOME" "$COMMS" "$@"); }
 PV1="$(run_gr_h prompt-version)"
 printf '%s' "$PV1" | grep -qE '^[0-9a-f]{12}$' && ok "prompt-version prints a short content hash" || fail "prompt-version shape (got $PV1)"
 [ "$PV1" = "$(run_gr_h prompt-version)" ] && ok "prompt-version is stable when nothing changes" || fail "prompt-version unstable"
@@ -4342,7 +4093,7 @@ REPLY="$(printf -- 'VERDICT: REQUEST_CHANGES\n\n## Summary\nshadow pass\n\n## Fi
 printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$(esc "$REPLY")"
 SHSTUB
 chmod +x "$SH_BIN/grok"
-run_sh() { (cd "$SH_FIX" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+run_sh() { (cd "$SH_FIX" && env PATH="$SH_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 
 SH_REQ="$SH_FIX/.comms/to-codex/shadow-repo_2026-08-22T09-00-00_req-1.md"
 cat > "$SH_REQ" <<'SHEOF'
@@ -4502,7 +4253,7 @@ sh_req_for() {  # a distinct request per sub-test — one pairing per thread+pha
   printf '%s' "$f"
 }
 SH_REQ_PARITY="$(sh_req_for parity)"
-(cd "$SH_FIX" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" SHADOW_PROMPT_COPY="$SH_PROMPT" \
+(cd "$SH_FIX" && env PATH="$SH_BIN:$PATH" SHADOW_PROMPT_COPY="$SH_PROMPT" \
   COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" shadow --to grok --review-set parity-set "$SH_REQ_PARITY") >/dev/null 2>&1 || true
 if [ -s "$SH_PROMPT" ]; then
   grep -qE '^(role: shadow|review_set:|artifact_id:|prompt_version:)' "$SH_PROMPT" \
@@ -4532,7 +4283,7 @@ SH_EMPTY_OUT="$(run_sh shadow --to grok --review-set emptybody-set "$(sh_req_for
 
 # An agent that dies is an OPERATIONAL failure. Recording it as a clean review
 # would credit a crashed reviewer with finding nothing.
-SH_FAIL_OUT="$( (cd "$SH_FIX" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" SHADOW_STUB_FAIL=1 \
+SH_FAIL_OUT="$( (cd "$SH_FIX" && env PATH="$SH_BIN:$PATH" SHADOW_STUB_FAIL=1 \
   COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" shadow --to grok "$(sh_req_for crash)") 2>&1 )" && SH_FRC=0 || SH_FRC=$?
 [ "$SH_FRC" != "0" ] && ok "a crashed shadow turn exits non-zero" || fail "failed shadow exit code"
 printf '%s\n' "$SH_FAIL_OUT" | grep -q 'OPERATIONAL FAILURE' \
@@ -4584,7 +4335,7 @@ printf '{"type":"system","subtype":"init","session_id":"stub-retry"}\n'
 printf '{"type":"result","subtype":"success","is_error":false,"result":"VERDICT: APPROVE\\n\\n## Summary\\nretry\\n"}\n'
 SHSTUB4
 chmod +x "$SH_BIN/grok"
-SH_RETRY_OUT="$( (cd "$SH_FIX" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" \
+SH_RETRY_OUT="$( (cd "$SH_FIX" && env PATH="$SH_BIN:$PATH" \
   SHADOW_RETRY_MARK="$SH_RETRY_MARK" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
   "$COMMS" shadow --to grok --review-set noverdict-set "$(sh_req_for noverdict2)") 2>&1 )" && SH_RRC=0 || SH_RRC=$?
 [ "$SH_RRC" != "0" ] && ok "retrying into a set that already holds a result is refused" || fail "retry accepted"
@@ -4657,7 +4408,7 @@ git -C "$GR2" add -A >/dev/null 2>&1
 git -C "$GR2" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$GR2/.comms/to-codex" "$GR2/.comms/to-claude"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$GR2/.comms/config"
-run_g2() { (cd "$GR2" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+run_g2() { (cd "$GR2" && env PATH="$SH_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 
 # a request whose cwd: points somewhere ELSE entirely
 G2_REQ="$GR2/.comms/to-codex/shadow-repo2_2026-08-22T10-00-00_req-1.md"
@@ -4724,7 +4475,7 @@ G2_CWD="$WORK/g2-cwd.txt"; G2_SUBJ="$WORK/g2-subject.txt"
 # baseline run: the mount's CONTENT. (The comment here once claimed a live edit between
 # snapshot and read but performed none — codex caught the dead claim in round 2. The real
 # edit-then-mount case is the shape test below, which mutates before its run.)
-G2_OUT="$( (cd "$GR2" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" \
+G2_OUT="$( (cd "$GR2" && env PATH="$SH_BIN:$PATH" \
   SHADOW_CWD_COPY="$G2_CWD" SHADOW_SUBJECT_COPY="$G2_SUBJ" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
   "$COMMS" shadow --to grok "$G2_REQ") 2>&1 )" && G2_RC=0 || G2_RC=$?
 [ "$G2_RC" = "0" ] && ok "shadow completes against a mounted artifact" || fail "mounted shadow run: $G2_OUT"
@@ -4741,7 +4492,7 @@ G2_REQ2="$GR2/.comms/to-codex/shadow-repo2_req-shape.md"
 sed -e 's|^thread: .*|thread: g2-shape|' -e 's|^message_id: .*|message_id: shadow-repo2_req-shape|' "$G2_REQ" > "$G2_REQ2"
 echo "EDITED AFTER THE FIRST RUN" > "$GR2/subject.txt"
 echo "brand new file" > "$GR2/added.txt"
-(cd "$GR2" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" SHADOW_SHAPE_COPY="$G2_SHAPE" \
+(cd "$GR2" && env PATH="$SH_BIN:$PATH" SHADOW_SHAPE_COPY="$G2_SHAPE" \
   SHADOW_SUBJECT_COPY="$WORK/g2-subject2.txt" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
   "$COMMS" shadow --to grok "$G2_REQ2") >/dev/null 2>&1 || true
 if [ -s "$G2_SHAPE" ]; then
@@ -4765,7 +4516,7 @@ G2_NOCWD="$GR2/.comms/to-codex/shadow-repo2_req-nocwd.md"
 grep -v '^cwd:' "$G2_REQ" | sed -e 's|^thread: .*|thread: g2-nocwd|' -e 's|^message_id: .*|message_id: shadow-repo2_req-nocwd|' > "$G2_NOCWD"
 grep -q '^cwd:' "$G2_NOCWD" && fail "fixture still has cwd" || ok "fixture: a valid request with no cwd: field"
 G2_NOCWD_CWD="$WORK/g2-nocwd-cwd.txt"
-(cd "$GR2" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" SHADOW_CWD_COPY="$G2_NOCWD_CWD" \
+(cd "$GR2" && env PATH="$SH_BIN:$PATH" SHADOW_CWD_COPY="$G2_NOCWD_CWD" \
   COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" shadow --to grok "$G2_NOCWD") >/dev/null 2>&1 || true
 [ -s "$G2_NOCWD_CWD" ] && [ "$(cat "$G2_NOCWD_CWD")" != "$GR2" ] \
   && ok "a request with no cwd: is still run inside the mount" || fail "no-cwd request escaped to the live tree"
@@ -4918,7 +4669,7 @@ chmod +x "$SH_BIN/grok"
 G2_VREQ="$GR2/.comms/to-codex/shadow-repo2_req-ver.md"
 sed -e 's|^thread: .*|thread: g2-ver|' -e 's|^message_id: .*|message_id: shadow-repo2_req-ver|' "$G2_REQ" > "$G2_VREQ"
 G2_VLED="$WORK/g2-ver.tsv"
-(cd "$GR2" && env -u CMUX_WORKSPACE_ID PATH="$SH_BIN:$PATH" GROK_STUB_VERSION_MARK="$WORK/vmark" \
+(cd "$GR2" && env PATH="$SH_BIN:$PATH" GROK_STUB_VERSION_MARK="$WORK/vmark" \
   COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" shadow --to grok --out "$G2_VLED" "$G2_VREQ") >/dev/null 2>&1 || true
 G2_LIVE_V="$(tail -n +2 "$G2_VLED" 2>/dev/null | awk -F'\t' '$12=="shadow" {print $10; exit}')"
 G2_SIDE_V="$(cat "$(find "$GR2/.comms/grades/shadow" -path '*g2-ver*' -name 'grok.version' | head -1)" 2>/dev/null)"
@@ -4927,7 +4678,7 @@ G2_SIDE_V="$(cat "$(find "$GR2/.comms/grades/shadow" -path '*g2-ver*' -name 'gro
   || fail "live row version ($G2_LIVE_V) disagrees with the sidecar ($G2_SIDE_V)"
 case "$G2_LIVE_V" in *upgraded-midrun*) fail "the live row picked up a mid-review CLI upgrade" ;; *) ok "a mid-review CLI upgrade does not reach the row" ;; esac
 
-G2_RP="$( (cd "$GR2" && env -u CMUX_WORKSPACE_ID "$REPO/helpers/runphase.sh" run --message "$G2_REQ" --dir "$WORK/g2rp" --provider codex --no-deliver) 2>&1 )" && G2_RPRC=0 || G2_RPRC=$?
+G2_RP="$( (cd "$GR2" && env "$REPO/helpers/runphase.sh" run --message "$G2_REQ" --dir "$WORK/g2rp" --provider codex --no-deliver) 2>&1 )" && G2_RPRC=0 || G2_RPRC=$?
 [ "$G2_RPRC" != "0" ] && ok "runphase refuses --no-deliver for an ACP-only provider" || fail "runphase --no-deliver accepted for codex"
 # Pin text UNIQUE to the --no-deliver refusal: a bare 'ACP-only' also matches the guard
 # below it, so this assertion would still pass if the wrong die fired first.
@@ -4938,7 +4689,7 @@ printf '%s\n' "$G2_RP" | grep -q 'no non-ACP turn to suppress' \
 # this guard the operator got `spawned runphase pid=NNN` and exit 0 while the child died on the
 # ACP-only check a second later — a false success at the spawn layer, which is exactly what S4-2
 # exists to remove. One predicate (`require_acp_transport`), two callers. (grok, S4-2 r1.)
-G2_SP="$( (cd "$GR2" && env -u CMUX_WORKSPACE_ID COMMS_RUNPHASE_VIA= "$REPO/helpers/runphase.sh" spawn --message "$G2_REQ" --provider codex) 2>&1 )" && G2_SPRC=0 || G2_SPRC=$?
+G2_SP="$( (cd "$GR2" && env COMMS_RUNPHASE_VIA= "$REPO/helpers/runphase.sh" spawn --message "$G2_REQ" --provider codex) 2>&1 )" && G2_SPRC=0 || G2_SPRC=$?
 [ "$G2_SPRC" != "0" ] && ok "spawn refuses an ACP-only provider without --via acp" || fail "spawn accepted a non-ACP codex turn"
 printf '%s\n' "$G2_SP" | grep -q '^spawned runphase' && fail "spawn reported success for a turn that cannot run" || ok "a refused spawn prints no pid line"
 # Non-zero + no pid line is satisfied by ANY earlier die, so pin the refusal to text unique to
@@ -4951,10 +4702,8 @@ TR_FIX="$WORK/transport-repo"; mkdir -p "$TR_FIX"; TR_FIX="$(cd "$TR_FIX" && pwd
 git -C "$TR_FIX" init -q -b main
 git -C "$TR_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
 mkdir -p "$TR_FIX/.comms"
-run_tr() { (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID -u COMMS_DELIVERY "$COMMS" "$@"); }
-run_tr_cmux() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
-run_tr_want_cmux() { (cd "$TR_FIX" && env COMMS_DELIVERY=cmux PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
-run_tr_mailbox() { (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=mailbox "$COMMS" "$@"); }
+run_tr() { (cd "$TR_FIX" && env -u COMMS_DELIVERY "$COMMS" "$@"); }
+run_tr_mailbox() { (cd "$TR_FIX" && env COMMS_DELIVERY=mailbox "$COMMS" "$@"); }
 
 # AN ASKED-FOR MAILBOX IS A SUCCESS. Making `mailbox` requestable put it through a branch that was
 # the catch-all for "nothing could deliver", so a caller who got exactly what they asked for was
@@ -4987,21 +4736,13 @@ printf '%s\n' "$TR_MBXS" | grep -q 'Nothing to fix' \
 printf '%s\n' "$TR_MBXS" | grep -qi 'NOT spawned' \
   && fail "mailbox send still says NOT spawned" || ok "mailbox send does not claim the peer failed to spawn"
 # THE CMUX WINDOWS ARE PROCESS-GLOBAL EXPORTS, not section-scoped: a section inserted between a
-# `COMMS_DELIVERY=cmux` and its restore would silently inherit the pane transport — the exact way
+# `COMMS_DELIVERY=mailbox` and its restore would silently inherit the pane transport — the exact way
 # these five sections once inherited the suite default. Pin WHICH banners may appear inside a cmux
 # window, so the next tests/run.sh edit fails here instead of running under the wrong transport.
 # (grok, S4-1 r1, advisory.)
-TR_WINDOW="$(awk '
-  /^export COMMS_DELIVERY=cmux$/   { inwin=1; next }
-  /^export COMMS_DELIVERY=mailbox$/{ inwin=0; next }
-  inwin && /^section /             { print }
-' "$REPO/tests/run.sh" | grep -cvxF -e 'section "comms.sh: deliver via stubbed cmux"' \
-     -e 'section "comms.sh v2: delivery failure is explicit and recorded"' \
-     -e 'section "comms.sh v2.1: surface binding"' \
-     -e 'section "comms.sh v2.1.1: binding survives a flaky tree (optimistic delivery)"' \
-     -e 'section "comms.sh v2.2: sandbox block emits direct recovery + state reconciliation"')"
+TR_WINDOW="$(grep -c '^export COMMS_DELIVERY=mailbox$' "$REPO/tests/run.sh" || true)"
 [ "$TR_WINDOW" = "0" ] \
-  && ok "no unexpected section runs inside a cmux transport window" || fail "$TR_WINDOW section(s) would inherit cmux unintentionally"
+  && ok "no cmux transport window survives anywhere in the corpus" || fail "$TR_WINDOW cmux window(s) remain after S4-4"
 
 # No cmux surface anywhere: an interactive agent must NOT fall to the mailbox while a
 # synchronous transport is available — that is the case that stranded a real consult.
@@ -5030,17 +4771,12 @@ fi
 # An explicit COMMS_DELIVERY=headless override beats everything — FOR A PROVIDER THAT STILL HAS
 # THE HEADLESS PATH. Since step 4 deleted self-send, that is grok only; codex must be refused
 # rather than handed a route runphase will reject. (S4-2.)
-[ "$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$COMMS" transport grok) 2>/dev/null)" = "headless" ] \
+[ "$( (cd "$TR_FIX" && env COMMS_DELIVERY=headless "$COMMS" transport grok) 2>/dev/null)" = "headless" ] \
   && ok "COMMS_DELIVERY=headless overrides transport selection for a brokered-without-ACP agent" || fail "headless override"
-( cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless "$COMMS" transport codex ) >/dev/null 2>&1 \
+( cd "$TR_FIX" && env COMMS_DELIVERY=headless "$COMMS" transport codex ) >/dev/null 2>&1 \
   && fail "headless was still offered to a provider whose self-send path is gone" \
   || ok "headless is refused for codex — transport never promises a route runphase would reject"
 
-cat > "$CMUX_STUB_DIR/tree-workspace_7.txt" <<'TRTREE'
-workspace:7
-  pane:1
-    surface:23 [terminal] codex
-TRTREE
 # A LOOP is unattended work: it must not require a pane to be open.
 TR_LOOP_DEFAULT="$(run_tr transport codex --loop 2>/dev/null)"
 if bash "$REPO/helpers/acp.sh" supports codex >/dev/null 2>&1; then
@@ -5052,22 +4788,15 @@ else
   # (grok, S4-2 implement r1, advisory.)
   [ "$TR_LOOP_DEFAULT" = "mailbox" ] && ok "with no ACP, an ACP-only provider's loop says mailbox" || fail "loop default (got: $TR_LOOP_DEFAULT)"
 fi
-[ "$(run_tr_cmux transport codex --loop 2>/dev/null)" != "cmux" ] \
-  && ok "a loop does not take a live pane — cmux is opt-in now" || fail "loop took the pane by default"
-[ "$(run_tr_want_cmux transport codex --loop 2>/dev/null)" = "cmux" ] \
-  && ok "COMMS_DELIVERY=cmux opts a loop back into the watchable pane" || fail "cmux opt-in"
-# Asking for cmux when none is live must not silently substitute another transport.
-[ "$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=cmux "$COMMS" transport codex --loop) 2>/dev/null)" = "mailbox" ] \
-  && ok "cmux requested but none live reports mailbox, never a substitute" || fail "cmux-requested fallback"
-
-# A live pane still wins: switching a watchable workflow out from under someone is a
-# surprise, not a fallback.
-[ "$(run_tr_cmux transport codex 2>/dev/null)" = "cmux" ] \
-  && ok "a live pane still wins over acp" || fail "pane preference (got: $(run_tr_cmux transport codex 2>/dev/null))"
+# A REQUEST for the deleted transport must not silently become something else. It resolves to
+# mailbox — honest and visible to `status` — rather than quietly substituting acp. The opt-in
+# and pane-preference assertions that stood here died with the transport (S4-4).
+[ "$( (cd "$TR_FIX" && env COMMS_DELIVERY=mailbox "$COMMS" transport codex --loop) 2>/dev/null)" = "mailbox" ] \
+  && ok "a request for the deleted cmux transport reports mailbox, never a silent substitute" || fail "cmux-requested fallback"
 
 # END-TO-END, not just the selector. `deliver` used to hardcode --loop, so every send
 # was reclassified as a loop and a live-pane CONSULT spawned headless instead of nudging
-# the pane. The suite-wide COMMS_DELIVERY=cmux masked it, so these run with it cleared.
+# the pane. The suite-wide COMMS_DELIVERY=mailbox masked it, so these run with it cleared.
 # (codex, transport-flip round 1.)
 mkdir -p "$TR_FIX/.comms/to-codex"
 TR_CONSULT="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-25T10-00-00_q-1.md"
@@ -5102,10 +4831,10 @@ max-rounds: 4
 loop message
 TRW
 TR_WS="$(basename "$TR_FIX")"
-# Delivery here must NOT spawn a real agent: COMMS_DELIVERY=cmux pins the stubbed
+# Delivery here must NOT spawn a real agent: COMMS_DELIVERY=mailbox pins the stubbed
 # transport. Tests that assert the DEFAULT routing use run_tr, which only asks
 # `transport` and never delivers.
-run_tr_deliver() { (cd "$TR_FIX" && env COMMS_DELIVERY=cmux PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$COMMS" "$@"); }
+run_tr_deliver() { (cd "$TR_FIX" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
 # End-to-end delivery on the REAL default, without spawning a real agent: a copy of the
 # helper beside a STUB runphase.sh. `deliver` resolves runphase next to comms.sh, so the
 # stub is what gets spawned. This is how a default-routing test stays honest and still
@@ -5119,13 +4848,8 @@ echo "spawned runphase pid=stub provider=${3:-codex}"
 exit 0
 RPSTUB
 chmod +x "$TR_SANDBOX/runphase.sh"
-run_tr_default() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$TR_SANDBOX/comms.sh" "$@"); }
+run_tr_default() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" "$TR_SANDBOX/comms.sh" "$@"); }
 
-cat > "$CMUX_STUB_DIR/tree-workspace_7.txt" <<'TRTREE2'
-workspace:7
-  pane:1
-    surface:23 [terminal] codex
-TRTREE2
 TR_CONSULT_OUT="$(run_tr_deliver deliver codex "$TR_CONSULT" 2>&1 || true)"
 printf '%s\n' "$TR_CONSULT_OUT" | grep -q 'delivered to surface' \
   && ok "a CONSULT with a live pane is nudged, not spawned headless" \
@@ -5144,17 +4868,14 @@ printf '%s\n' "$TR_LOOP_OUT" | grep -qE 'manual pickup|mailbox' \
   && ok "a loop with no runner and no ACP says mailbox rather than nudging a pane" \
   || fail "loop fallback (got: $TR_LOOP_OUT)"
 
-# The regression codex asked for: cmux explicitly requested with NO workspace identity
-# must still surface the picker's specific reason, and must not trip `set -u`.
-TR_NOWS="$( (cd "$TR_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=cmux "$COMMS" deliver codex "$TR_CONSULT") 2>&1 || true)"
+# The set -u regression codex asked for survives the transport it was found in: deliver must
+# not trip `set -u` on an absent identity. The picker-reason and pane-preference assertions
+# died with cmux (S4-4) — there is no picker and no pane.
+TR_NOWS="$( (cd "$TR_FIX" && env COMMS_DELIVERY=mailbox "$COMMS" deliver codex "$TR_CONSULT") 2>&1 || true)"
 printf '%s\n' "$TR_NOWS" | grep -q 'unbound variable' \
-  && fail "unset CMUX_WORKSPACE_ID trips set -u" || ok "unset cmux identity does not trip set -u"
-printf '%s\n' "$TR_NOWS" | grep -q 'tree unavailable' \
-  && ok "the picker's specific reason still surfaces with no cmux identity" \
-  || fail "specific reason lost (got: $TR_NOWS)"
-# The mode comes from the MESSAGE, so `transport` agrees with what deliver did.
-[ "$(run_tr_deliver transport codex)" = "cmux" ] && ok "consult mode resolves to the live pane" || fail "consult transport"
-[ "$(run_tr_default transport codex --loop)" != "cmux" ] && ok "loop mode never resolves to the pane by default" || fail "loop transport"
+  && fail "deliver trips set -u with no workspace identity" || ok "deliver does not trip set -u with no workspace identity"
+# The mode still comes from the MESSAGE, so `transport` agrees with what deliver did.
+[ "$(run_tr_default transport codex --loop)" != "cmux" ] && ok "loop mode never resolves to a deleted transport" || fail "loop transport"
 
 # Criterion 3: with runphase.sh genuinely absent, a loop must fall back to the pane
 # rather than strand. Untested until grok pointed it out. A bare copy of the helper (no
@@ -5162,11 +4883,11 @@ printf '%s\n' "$TR_NOWS" | grep -q 'tree unavailable' \
 TR_BARE="$WORK/bare-install"; mkdir -p "$TR_BARE"
 cp "$COMMS" "$TR_BARE/comms.sh"; chmod +x "$TR_BARE/comms.sh"
 [ ! -e "$TR_BARE/runphase.sh" ] && ok "fixture: a helper install with no runphase.sh" || fail "bare fixture"
-TR_BARE_LOOP="$( (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" CMUX_WORKSPACE_ID=workspace:7 "$TR_BARE/comms.sh" transport codex --loop) 2>/dev/null)"
+TR_BARE_LOOP="$( (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH" "$TR_BARE/comms.sh" transport codex --loop) 2>/dev/null)"
 [ "$TR_BARE_LOOP" = "mailbox" ] \
   && ok "no headless runner does NOT fall back to a pane — that is self-send by another name" \
   || fail "missing-runner fallback (got: $TR_BARE_LOOP)"
-TR_BARE_NOPANE="$( (cd "$TR_FIX" && env -u COMMS_DELIVERY -u CMUX_WORKSPACE_ID "$TR_BARE/comms.sh" transport codex --loop) 2>/dev/null)"
+TR_BARE_NOPANE="$( (cd "$TR_FIX" && env -u COMMS_DELIVERY "$TR_BARE/comms.sh" transport codex --loop) 2>/dev/null)"
 [ "$TR_BARE_NOPANE" = "mailbox" ] \
   && ok "no runner and no pane reports mailbox honestly" || fail "bare no-pane (got: $TR_BARE_NOPANE)"
 
@@ -5289,7 +5010,7 @@ printf '%s' "$SC_DEAD" > "$SC_CLAIM/pid"
 # step 4, so a non-ACP codex spawn is refused before it ever reaches the claim — which made
 # the reclaim arm below pass VACUOUSLY (a refusal contains no "already running" either).
 # The live-holder negative control caught it. Re-pointed, not deleted.
-SC_OUT="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless \
+SC_OUT="$( (cd "$REPO_FIX" && env COMMS_DELIVERY=headless \
     PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider grok --message "$SC_MSG") 2>&1 )"
 case "$SC_OUT" in
   *"already running"*) fail "a claim held by a DEAD pid still wedges the message" ;;
@@ -5299,7 +5020,7 @@ esac
 # NEGATIVE CONTROL: the same setup with a LIVE holder must be refused, or the check above
 # is just "spawn always spawns" and proves nothing about claims at all.
 rm -rf "$SC_CLAIM"; mkdir -p "$SC_CLAIM"; printf '%s' "$$" > "$SC_CLAIM/pid"
-SC_OUT2="$( (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless \
+SC_OUT2="$( (cd "$REPO_FIX" && env COMMS_DELIVERY=headless \
     PATH="$STUB_BIN:$PATH" "$RUNPHASE" spawn --provider grok --message "$SC_MSG") 2>&1 )"
 case "$SC_OUT2" in
   *"already running"*) ok "a claim held by a LIVE pid is honoured (the reclaim is selective)" ;;
@@ -5317,7 +5038,7 @@ git -C "$PN_FIX" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$PN_FIX/.comms/to-codex" "$PN_FIX/.comms/to-grok" "$PN_FIX/.comms/to-claude" "$PN_FIX/.comms/archive"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$PN_FIX/.comms/config"
 # Same rule: a panel dispatch delivers to every leg, so it must ride the stub.
-run_pn() { (cd "$PN_FIX" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+run_pn() { (cd "$PN_FIX" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 PN_WS="$(run_pn workspace)"
 PN_REQ="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-00-00_req.md"
 cat > "$PN_REQ" <<PNEOF
@@ -5358,7 +5079,7 @@ PN_CRLEG="$(find "$PN_FIX/.comms/to-codex" -name '*panel-codex*' -type f -newer 
 [ -n "$PN_CRLEG" ] || PN_CRLEG="$(grep -l 'pn-crlf-thread' "$PN_FIX/.comms/to-codex/"*panel-codex* 2>/dev/null | head -1)"
 [ -n "$PN_CRLEG" ] && grep -q $'^artifact_id: .*\r$' "$PN_CRLEG" && grep -q $'^thread: .*\r$' "$PN_CRLEG" \
   && ok "CRLF request dispatches with CRLF on inserted AND rewritten leg fields" || fail "panel CRLF end-to-end"
-(cd "$PN_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" validate "$PN_CRLEG" >/dev/null 2>&1) \
+(cd "$PN_FIX" && env "$COMMS" validate "$PN_CRLEG" >/dev/null 2>&1) \
   && ok "the CRLF leg still validates" || fail "CRLF leg validation"
 
 # A request derived from a prior panel inbound already carries review_set. Dispatch
@@ -5689,7 +5410,7 @@ git -C "$AK" init -q -b main
 git -C "$AK" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 mkdir -p "$AK/.comms/to-codex" "$AK/.comms/to-grok" "$AK/.comms/to-claude"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$AK/.comms/config"
-run_ak() { (cd "$AK" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=cmux PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
+run_ak() { (cd "$AK" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
 # The point of the verb: an agent that is NOT claude can ask, in one call.
 run_ak ask --from codex --to grok "is the retry approach sound?" >/dev/null 2>&1 || true
 AKF="$(find "$AK/.comms/to-grok" -name '*ask-codex-to-grok*' -type f | head -1)"
@@ -5974,7 +5695,7 @@ rm -f "$AXD/childenv"
 # Mount lifecycle again, as grok, so it opts out of the containment refusal explicitly — see
 # the note on wm_turn. The shim is DEFENCE IN DEPTH under an isolation backend, and it is what
 # an operator who sets the override is left with, so it must keep working in exactly this case.
-( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$AXD/payload" \
+( cd "$MA_FIX" && env PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$AXD/payload" \
     ACP_PARITY_PROBE="$AXD/childenv" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
     COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 \
     "$RP" run --message "$SW_MSG" --dir "$SW_DIR" --provider grok --via acp --timeout-secs 20 ) \
@@ -6022,7 +5743,7 @@ wm_artifact() { # <marker> -> commit sha
 }
 WM_A1="$(wm_artifact round-1)"; WM_A2="$(wm_artifact round-2)"
 WM_HEAD="$(git -C "$MA_FIX" rev-parse HEAD)"
-WM_ROOT="$(cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" root)"
+WM_ROOT="$(cd "$MA_FIX" && env "$COMMS" root)"
 if [ -n "$WM_A1" ] && [ -n "$WM_A2" ] && [ "$WM_A1" != "$WM_A2" ] \
    && git -C "$MA_FIX" cat-file -e "${WM_A1}^{commit}" 2>/dev/null \
    && [ ! -e "$MA_FIX/mount-marker.txt" ]; then
@@ -6047,7 +5768,7 @@ wm_turn() { # <thread> <tag> <artifact> [extra env assignments...]
       | sed -e "s|^thread: ma-arc-1\$|thread: $thread|"
   } > "$msg"
   dir="$WM/run-$tag"; mkdir -p "$dir"
-  ( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" \
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" \
       HOME="$WM/home" \
       COMMS_MOUNT_BASE="$WM_STORE" \
       ACP_PARITY_PAYLOAD="$AXD/payload" AX_CWD_LOG="$WM/cwd.log" \
@@ -6308,7 +6029,7 @@ WM_MSG13="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T10-00-00_wm-13.md"
   tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" | sed -e 's|^thread: ma-arc-1$|thread: wm-ephemeral|'
 } > "$WM_MSG13"
 mkdir -p "$WM/run-wm13"
-( cd "$MA_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$AXD/payload" \
+( cd "$MA_FIX" && env PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$AXD/payload" \
     COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$WM_MSG13" --dir "$WM/run-wm13" \
     --provider grok --timeout-secs 20 ) >/dev/null 2>&1
 # Count-in/count-out alone would also pass if the turn never mounted at all, so require
@@ -6620,7 +6341,7 @@ printf '.comms/\n' > "$RELO_FIX/.gitignore"
 git -C "$RELO_FIX" -c user.email=t@t -c user.name=t commit -q -m init 2>/dev/null || \
   { git -C "$RELO_FIX" add -A >/dev/null 2>&1; git -C "$RELO_FIX" -c user.email=t@t -c user.name=t commit -q -m init; }
 mkdir -p "$RELO_FIX/.comms/to-grok" "$RELO_FIX/.comms/to-claude" "$RELO_FIX/.comms/archive"
-RELO_WS="$(cd "$RELO_FIX" && env -u CMUX_WORKSPACE_ID "$COMMS" workspace)"
+RELO_WS="$(cd "$RELO_FIX" && env "$COMMS" workspace)"
 RELO_HEAD="$(git -C "$RELO_FIX" rev-parse HEAD)"
 printf 'relo-marker\n' > "$RELO_FIX/relo.txt"
 RELO_T="$(cd "$RELO_FIX" && GIT_INDEX_FILE="$WORK/relo.idx" git add -A -- . >/dev/null 2>&1; GIT_INDEX_FILE="$WORK/relo.idx" git -C "$RELO_FIX" write-tree)"
@@ -6652,7 +6373,7 @@ max-rounds: 4
 review
 EOF
   mkdir -p "$dir"
-  ( cd "$RELO_FIX" && env -u CMUX_WORKSPACE_ID PATH="$AXB:$PATH" HOME="$RELO_HOME" \
+  ( cd "$RELO_FIX" && env PATH="$AXB:$PATH" HOME="$RELO_HOME" \
       COMMS_MOUNT_BASE="$RELO_STORE" ACP_PARITY_PAYLOAD="$AXD/payload" AX_CWD_LOG="$WORK/relo-cwd.log" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_RUNPHASE_OWNER_WAIT_SECS=3 COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 \
       "$@" "$RP" run --message "$m" --dir "$dir" --provider grok --via acp --timeout-secs 20 ) >/dev/null 2>&1
@@ -6660,7 +6381,7 @@ EOF
 }
 relo_last_cwd() { awk -F'\t' '$2 !~ /sessions (ensure|show|set-mode)/ {print $1}' "$WORK/relo-cwd.log" | sed -n '$p'; }
 relo_status() { sed -n 's/.*"status": "\([a-z]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
-relo_clean() { ( cd "$RELO_FIX" && env -u CMUX_WORKSPACE_ID HOME="$RELO_HOME" COMMS_MOUNT_BASE="$RELO_STORE" "$RP" clean-mounts "$@" 2>&1 ); }
+relo_clean() { ( cd "$RELO_FIX" && env HOME="$RELO_HOME" COMMS_MOUNT_BASE="$RELO_STORE" "$RP" clean-mounts "$@" 2>&1 ); }
 
 printf 'VERDICT: APPROVE\n\n## Summary\nstub\n\n### Blocking\n- None.\n' > "$AXD/payload"
 
@@ -6782,7 +6503,7 @@ relo_clean --yes >/dev/null 2>&1
   || fail "clean-mounts deleted a sibling repo-key's mount"
 
 # A repo-key store whose .root names a DIFFERENT root is refused, never adopted or deleted.
-RELO_CM_MM="$( cd "$RELO_FIX" && env -u CMUX_WORKSPACE_ID HOME="$RELO_HOME" COMMS_MOUNT_BASE="$RELO_STORE" \
+RELO_CM_MM="$( cd "$RELO_FIX" && env HOME="$RELO_HOME" COMMS_MOUNT_BASE="$RELO_STORE" \
   bash -c 'root="$('"$COMMS"' root)"; mr="${root%/.comms}"; mr="$(cd "$mr" && pwd -P)"; key="$(printf "%s" "$mr" | shasum -a 256 | cut -c1-64)"; printf "%s\n" "/somewhere/else" > "'"$RELO_STORE"'/$key/.root" 2>/dev/null; '"$RP"' clean-mounts --yes 2>&1' )"
 printf '%s' "$RELO_CM_MM" | grep -qF '.root does not name this repo' \
   && ok "clean-mounts refuses a store whose .root names a different repo" \
@@ -6864,7 +6585,7 @@ printf '#!/bin/bash\ntest -f a.txt\n' > "$PW/suite.sh"; chmod +x "$PW/suite.sh"
 git -C "$PW" add -A >/dev/null 2>&1
 git -C "$PW" -c user.email=t@t -c user.name=t commit -qm init
 mkdir -p "$PW/.comms"; printf 'suite-cmd = bash ./suite.sh\n' > "$PW/.comms/config"
-run_pw() { (cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" "$@"); }
+run_pw() { (cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" "$@"); }
 PW_SD="$PW/.comms/sessions"
 
 # Claim-then-check + exit contract (AC1).
@@ -6966,7 +6687,7 @@ check_not "worktree new refuses a multiline slug (whole-scalar, not per-line)" r
 (cd "$PW" && git checkout -q -b session-primary)   # never-occupy-main migration
 run_pw worktree new featone >/dev/null 2>&1 && [ -d "$PW/.claude/worktrees/featone" ] \
   && ok "worktree new creates under .claude/worktrees on its own branch" || fail "worktree new"
-(cd "$PW/.claude/worktrees/featone" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" worktree new nested >/dev/null 2>&1)
+(cd "$PW/.claude/worktrees/featone" && env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" worktree new nested >/dev/null 2>&1)
 [ -d "$PW/.claude/worktrees/nested" ] && [ ! -d "$PW/.claude/worktrees/featone/.claude/worktrees/nested" ] \
   && ok "worktree new from inside a worktree anchors on the MAIN root (never nests)" || fail "worktree nesting"
 PW_ST_BEFORE="$(cd "$PW" && git status --porcelain)"
@@ -7007,13 +6728,13 @@ run_pw presence release --name landlord --instance "$PW_I4"
 # Lease restoration on EARLY exit (codex, impl r1: trap installed after the state
 # mutation leaked a live integrating lease on invalid candidates).
 PW_C5="$(run_pw presence claim --name lander --role "landing")"; PW_I5="$(printf '%s' "$PW_C5" | sed -n 's/.*instance: //p')"
-(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=lander COMMS_PRESENCE_INSTANCE="$PW_I5" "$COMMS" integrate no-such-branch) >/dev/null 2>&1
+(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=lander COMMS_PRESENCE_INSTANCE="$PW_I5" "$COMMS" integrate no-such-branch) >/dev/null 2>&1
 grep -q '"state": "working"' "$PW_SD/lander-$PW_I5.json" \
   && ok "an early integrate exit restores the lease (trap precedes mutation)" || fail "lease leaked on early exit: $(grep state "$PW_SD/lander-$PW_I5.json")"
 # Presence-wrapped landing actually lands (grok, impl r1: the 143 path refused
 # green suites; every earlier integrate test ran WITHOUT the presence env).
 (cd "$PW/.claude/worktrees/nested" && git merge -q --ff-only "$(cd "$PW" && git rev-parse main)" 2>/dev/null; echo e > e.txt; git add e.txt; git -c user.email=t@t -c user.name=t commit -qm "feat: e")
-(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=lander COMMS_PRESENCE_INSTANCE="$PW_I5" "$COMMS" integrate worktree-nested) >/dev/null 2>&1; PW_LAND=$?
+(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=lander COMMS_PRESENCE_INSTANCE="$PW_I5" "$COMMS" integrate worktree-nested) >/dev/null 2>&1; PW_LAND=$?
 [ "$PW_LAND" = 0 ] && [ "$(cd "$PW" && git rev-parse main)" = "$(cd "$PW" && git rev-parse worktree-nested)" ] \
   && ok "a presence-wrapped integrate lands a green suite (the 143 regression)" || fail "presence-wrapped landing rc=$PW_LAND"
 run_pw presence release --name lander --instance "$PW_I5"
@@ -7030,10 +6751,10 @@ printf '%s\n' "$PW_CFG2" > "$PW/.comms/config"
 # documented fix-and-re-run recovery hit 'missing but already registered').
 PW_C6="$(run_pw presence claim --name retrier --role landing)"; PW_I6="$(printf '%s' "$PW_C6" | sed -n 's/.*instance: //p')"
 (cd "$PW/.claude/worktrees/nested" && git merge -q --ff-only "$(cd "$PW" && git rev-parse main)" 2>/dev/null; printf '#!/bin/bash\nexit 1\n' > suite.sh; git add suite.sh; git -c user.email=t@t -c user.name=t commit -qm "red suite")
-(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=retrier COMMS_PRESENCE_INSTANCE="$PW_I6" "$COMMS" integrate worktree-nested) >/dev/null 2>&1; PW_RED=$?
+(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=retrier COMMS_PRESENCE_INSTANCE="$PW_I6" "$COMMS" integrate worktree-nested) >/dev/null 2>&1; PW_RED=$?
 [ "$PW_RED" != 0 ] && ok "the red presence-wrapped suite refuses to land" || fail "red suite landed"
 (cd "$PW/.claude/worktrees/nested" && printf '#!/bin/bash\ntest -f a.txt\n' > suite.sh && git add suite.sh && git -c user.email=t@t -c user.name=t commit -qm "green suite")
-(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=retrier COMMS_PRESENCE_INSTANCE="$PW_I6" "$COMMS" integrate worktree-nested) >/dev/null 2>&1; PW_RETRY=$?
+(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=retrier COMMS_PRESENCE_INSTANCE="$PW_I6" "$COMMS" integrate worktree-nested) >/dev/null 2>&1; PW_RETRY=$?
 [ "$PW_RETRY" = 0 ] && [ "$(cd "$PW" && git rev-parse main)" = "$(cd "$PW" && git rev-parse worktree-nested)" ] \
   && ok "the SAME instance retries and lands after a failure (no leaked registration)" || fail "retry after red suite rc=$PW_RETRY"
 grep -q '"state": "working"' "$PW_SD/retrier-$PW_I6.json" \
@@ -7085,11 +6806,11 @@ printf '%s\n' "$PW_OCC_CFG" > "$PW/.comms/config"
 # The opt-in key is KNOWN to the one full-config validation path, and a
 # duplicate (an appended `= 0` that consumers would never reach) is refused.
 printf 'suite-cmd = bash ./suite.sh\nsuite-attest-secs = 600\n' > "$PW/.comms/config"
-PW_CFGWARN="$( (cd "$PW" && env -u CMUX_WORKSPACE_ID "$COMMS" agents) 2>&1 || true)"
+PW_CFGWARN="$( (cd "$PW" && env "$COMMS" agents) 2>&1 || true)"
 printf '%s' "$PW_CFGWARN" | grep -q 'unknown line' \
   && fail "suite-attest-secs warns as an unknown config key" || ok "suite-attest-secs is a known config key"
 printf 'suite-cmd = bash ./suite.sh\nsuite-attest-secs = 600\nsuite-attest-secs = 0\n' > "$PW/.comms/config"
-check_not "a duplicate suite-attest-secs is refused (the disabling line must win)" bash -c "cd '$PW' && env -u CMUX_WORKSPACE_ID '$COMMS' agents"
+check_not "a duplicate suite-attest-secs is refused (the disabling line must win)" bash -c "cd '$PW' && env '$COMMS' agents"
 # The refusal must hold on the CONSUMER that matters: integrate reads the config
 # directly and never calls registry_parse, so validating only there left the
 # landing command consuming the first (enabling) value. (codex, r2 blocking.)
@@ -7107,11 +6828,11 @@ check_not "attest-green refuses a tree with tracked changes" bash -c "cd '$PW/.c
 # The attestation is bound to the commit the RUN was about: a checkout that
 # races the end of a green run must not inherit its result (codex, r1 blocking).
 PW_ATT_OTHER="$(cd "$PW/.claude/worktrees/nested" && git rev-parse HEAD~1)"
-check_not "attest-green refuses when HEAD moved off the verified commit" bash -c "cd '$PW/.claude/worktrees/nested' && env -u CMUX_WORKSPACE_ID '$COMMS' attest-green --expect '$PW_ATT_OTHER'"
+check_not "attest-green refuses when HEAD moved off the verified commit" bash -c "cd '$PW/.claude/worktrees/nested' && env '$COMMS' attest-green --expect '$PW_ATT_OTHER'"
 grep -q "^$PW_ATT_OTHER " "$PW/.comms/cache/suite-attest.log" 2>/dev/null \
   && fail "a refused attestation still wrote a record" || ok "a refused --expect attestation records nothing"
-check_not "attest-green --passed with no value is a usage error, not a crash" bash -c "cd '$PW/.claude/worktrees/nested' && env -u CMUX_WORKSPACE_ID '$COMMS' attest-green --passed"
-(cd "$PW/.claude/worktrees/nested" && env -u CMUX_WORKSPACE_ID "$COMMS" attest-green --passed 7 >/dev/null 2>&1)
+check_not "attest-green --passed with no value is a usage error, not a crash" bash -c "cd '$PW/.claude/worktrees/nested' && env '$COMMS' attest-green --passed"
+(cd "$PW/.claude/worktrees/nested" && env "$COMMS" attest-green --passed 7 >/dev/null 2>&1)
 grep -q "^$(cd "$PW/.claude/worktrees/nested" && git rev-parse HEAD) " "$PW/.comms/cache/suite-attest.log" \
   && ok "attest-green records the checkout's HEAD in the main root's cache" || fail "attestation not recorded"
 # Fresh attestation + a suite-cmd that would FAIL: landing succeeds only if the
@@ -7130,7 +6851,7 @@ printf 'suite-cmd = bash ./suite.sh\n' > "$PW/.comms/config"
 
 # with-beat: a beat lands DURING a blocked child (AC1).
 PW_HB_BEFORE="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
-(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 4) >/dev/null 2>&1
+(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 4) >/dev/null 2>&1
 PW_HB_AFTER="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
 [ "$PW_HB_AFTER" != "$PW_HB_BEFORE" ] && ok "with-beat lands a heartbeat DURING a blocked child" || fail "no beat during block"
 # with-beat rc contract (grok, impl r1: wait-on-SIGTERM'd-beater returned 143 under
@@ -7146,7 +6867,7 @@ run_pw presence with-beat --name alpha --instance "$PW_I1" -- false >/dev/null 2
 # heal write alone satisfied the old assertion).
 rm -f "$PW_SD/alpha-$PW_I1.json"
 PW_WBT0="$(date +%s)"
-PW_WBH="$( (cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 5) 2>&1 )"; PW_WBHRC=$?
+PW_WBH="$( (cd "$PW" && env COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 5) 2>&1 )"; PW_WBHRC=$?
 printf '%s\n' "$PW_WBH" | grep -q 'HEALED a vanished record' \
   && ok "a heal during with-beat surfaces the tenure warning" || fail "heal eaten by the beater"
 [ "$PW_WBHRC" = 0 ] && ok "the healing run still returns the child's status" || fail "heal perturbed rc=$PW_WBHRC"
@@ -7159,7 +6880,7 @@ PW_MARK="$WORK/wb-descendant.$$"
 # exec: the subshell BECOMES the wrapper, so the TERM lands on comms.sh itself —
 # killing the intermediate subshell instead just orphaned the real wrapper and
 # the first version of this test failed against a correct teardown.
-( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- bash -c "sleep 30 & echo \$! > '$PW_MARK'; wait" ) & PW_WRAP=$!
+( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- bash -c "sleep 30 & echo \$! > '$PW_MARK'; wait" ) & PW_WRAP=$!
 sleep 2
 kill -TERM "$PW_WRAP" 2>/dev/null
 PW_SIGRC=0; wait "$PW_WRAP" 2>/dev/null || PW_SIGRC=$?
@@ -7179,7 +6900,7 @@ PW_PIPE="$(echo piped-hello | run_pw presence with-beat --name alpha --instance 
 # SIGINT ignored, and POSIX forbids trapping a signal ignored at entry — the
 # first version of this test no-op'd its own kill and timed out to rc 0.
 set -m
-( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 30 ) & PW_IW=$!
+( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 30 ) & PW_IW=$!
 set +m
 sleep 2; kill -INT "$PW_IW" 2>/dev/null
 PW_IRC=0; wait "$PW_IW" 2>/dev/null || PW_IRC=$?
@@ -7198,7 +6919,7 @@ PW_CANCEL_OUT="$(bash -c '
   false0=0; delivered=0
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     set -m
-    ( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- sleep 0.3 ) 2>/tmp/pwcancel.$$.err & p=$!
+    ( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- sleep 0.3 ) 2>/tmp/pwcancel.$$.err & p=$!
     set +m
     if kill -INT "$p" 2>/dev/null; then
       delivered=$((delivered + 1))
@@ -7219,7 +6940,7 @@ PW_CANCEL_OUT="$(bash -c '
   fastn=0
   for i in 1 2 3 4 5 6 7 8 9 10; do
     set -m
-    ( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- true ) 2>/tmp/pwcancel.$$.err & p=$!
+    ( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- true ) 2>/tmp/pwcancel.$$.err & p=$!
     set +m
     kill -STOP "$p" 2>/dev/null || true
     st="$(ps -p "$p" -o stat= 2>/dev/null || true)"
@@ -7246,7 +6967,7 @@ PW_FALSE0="$(printf '%s\n' "$PW_CANCEL_OUT" | sed -n 's/.*false0=\([0-9]*\).*/\1
 # instantly but parks a TERM-ignoring descendant so the polls run; INT mid-poll
 # must still yield a nonzero wrapper status.
 set -m
-( cd "$PW" && exec env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- bash -c "trap '' TERM; sleep 4 & exit 0" ) & PW_LW=$!
+( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- bash -c "trap '' TERM; sleep 4 & exit 0" ) & PW_LW=$!
 set +m
 sleep 1; kill -INT "$PW_LW" 2>/dev/null
 PW_LRC=0; wait "$PW_LW" 2>/dev/null || PW_LRC=$?
@@ -7298,11 +7019,11 @@ check_not "release refuses an invalid instance" run_pw presence release --name a
 PW_PSBIN="$WORK/psfail"; mkdir -p "$PW_PSBIN"
 printf '#!/bin/bash\nexit 126\n' > "$PW_PSBIN/ps"; chmod +x "$PW_PSBIN/ps"
 printf '{\n  "name": "sandboxed", "instance": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "state": "working", "host": "%s", "pid": "12345", "pid_started": "x", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" > "$PW_SD/sandboxed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
-PW_PSO="$( (cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 PATH="$PW_PSBIN:$PATH" "$COMMS" presence others --name alpha --instance "$PW_I1") || true)"
+PW_PSO="$( (cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 PATH="$PW_PSBIN:$PATH" "$COMMS" presence others --name alpha --instance "$PW_I1") || true)"
 printf '%s\n' "$PW_PSO" | grep -q 'sandboxed' \
   && ok "a ps that cannot answer keeps the record ambiguous (peer, not dead)" || fail "ps failure read as death"
-(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 PATH="$PW_PSBIN:$PATH" "$COMMS" presence expire) >/dev/null 2>&1
-(cd "$PW" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=60 PATH="$PW_PSBIN:$PATH" "$COMMS" presence expire) >/dev/null 2>&1
+(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 PATH="$PW_PSBIN:$PATH" "$COMMS" presence expire) >/dev/null 2>&1
+(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 PATH="$PW_PSBIN:$PATH" "$COMMS" presence expire) >/dev/null 2>&1
 [ -f "$PW_SD/sandboxed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json" ] \
   && ok "expire never reaps under a failing ps" || fail "reaped on ps failure"
 rm -f "$PW_SD/sandboxed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json" "$PW_SD/.reap/sandboxed"-* 2>/dev/null
@@ -7340,7 +7061,7 @@ git -C "$SW" init -q -b feature/sw-tests
 git -C "$SW" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 mkdir -p "$SW/.comms/to-grok" "$SW/.comms/to-claude" "$SW/.comms/archive" "$SW/.comms/state"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$SW/.comms/config"
-SW_WS="$(cd "$SW" && env -u CMUX_WORKSPACE_ID "$COMMS" workspace)"
+SW_WS="$(cd "$SW" && env "$COMMS" workspace)"
 SW_MSG="$SW/.comms/to-grok/${SW_WS}_2026-08-27T10-00-00_sw-1.md"
 cat > "$SW_MSG" <<SWEOF
 ---
@@ -7365,7 +7086,7 @@ SW_SF="$SW/.comms/state/$(echo "$SW_WS" | tr '/' '-')_sw-arc-1.json"
 sw_run() {  # sw_run <rundir> [env assignments...] -- refuses, exits nonzero
   local rd="$1"; shift
   mkdir -p "$rd"
-  ( cd "$SW" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" \
+  ( cd "$SW" && env PATH="$STUB_BIN:$PATH" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$@" \
       "COMMS_RUNPHASE_GROK_ARGS=--sandbox off" \
       "$RP" run --message "$SW_MSG" --dir "$rd" --provider grok ) 2>&1
@@ -7389,7 +7110,7 @@ chmod +x "$SW_BIN/grok"
 sw_turn() {  # sw_turn <rundir> [env assignments...] — a turn that REACHES the provider
   local rd="$1"; shift
   mkdir -p "$rd"
-  ( cd "$SW" && env -u CMUX_WORKSPACE_ID PATH="$SW_BIN:$PATH" \
+  ( cd "$SW" && env PATH="$SW_BIN:$PATH" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$@" \
       "$RP" run --message "$SW_MSG" --dir "$rd" --provider grok ) 2>&1
 }
@@ -7749,7 +7470,7 @@ printf '#!/bin/bash\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n' > "$IP/test
 chmod +x "$IP/tests/silent.sh" "$IP/tests/loud.sh"
 (cd "$IP" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
 (cd "$IP" && git checkout -q -b session-primary)
-run_ip() { (cd "$IP" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_ip() { (cd "$IP" && env "$COMMS" "$@"); }
 run_ip worktree new proofone >/dev/null 2>&1
 (cd "$IP/.claude/worktrees/proofone" && echo x > c.txt && git add c.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: c") >/dev/null 2>&1
@@ -7785,7 +7506,7 @@ rmdir "$IP/.claude/worktrees/.integrate-probe" 2>/dev/null || true
 
 # ...and with the hook inherited, integrate scrubs it, the real suite runs, and it lands.
 printf 'suite-cmd = bash tests/loud.sh\n' > "$IP/.comms/config"
-IP_OUT2="$( (cd "$IP" && env -u CMUX_WORKSPACE_ID BASH_ENV="$WORK/hostile-bashenv.sh" "$COMMS" integrate worktree-proofone) 2>&1 || true )"
+IP_OUT2="$( (cd "$IP" && env BASH_ENV="$WORK/hostile-bashenv.sh" "$COMMS" integrate worktree-proofone) 2>&1 || true )"
 [ "$(cd "$IP" && git rev-parse main)" = "$(cd "$IP" && git rev-parse worktree-proofone)" ] \
   && ok "an inherited startup hook is scrubbed and the real suite still runs" \
   || fail "the startup hook defeated the landing (got: $(printf '%s' "$IP_OUT2" | tail -2))"
@@ -7817,10 +7538,10 @@ chmod +x "$IH/tests/loud.sh"
 printf 'suite-cmd = bash tests/loud.sh\n' > "$IH/.comms/config"
 (cd "$IH" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
 (cd "$IH" && git checkout -q -b session-primary)
-(cd "$IH" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new healone) >/dev/null 2>&1
+(cd "$IH" && env "$COMMS" worktree new healone) >/dev/null 2>&1
 (cd "$IH/.claude/worktrees/healone" && echo z > e.txt && git add e.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: e") >/dev/null 2>&1
-IH_OUT="$( (cd "$IH" && env -u CMUX_WORKSPACE_ID \
+IH_OUT="$( (cd "$IH" && env \
     COMMS_PRESENCE_NAME=no-such-session COMMS_PRESENCE_INSTANCE=00000000000000000000000000000000 \
     "$COMMS" integrate worktree-healone) 2>&1 || true )"
 [ -n "$IH_OUT" ] || fail "integrate died silently under an inherited presence identity with no local record"
@@ -7845,12 +7566,12 @@ printf 'suite-cmd = bash tests/loud.sh\n' > "$IH2/.comms/config"
 git -C "$IH2" init -q -b main
 (cd "$IH2" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
 (cd "$IH2" && git checkout -q -b session-primary)
-(cd "$IH2" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new healtwo) >/dev/null 2>&1
+(cd "$IH2" && env "$COMMS" worktree new healtwo) >/dev/null 2>&1
 (cd "$IH2/.claude/worktrees/healtwo" && echo z > f.txt && git add f.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: f") >/dev/null 2>&1
-IH2_CLAIM="$( (cd "$IH2" && env -u CMUX_WORKSPACE_ID "$COMMS" presence claim --name resident --role holder) 2>&1 || true )"
+IH2_CLAIM="$( (cd "$IH2" && env "$COMMS" presence claim --name resident --role holder) 2>&1 || true )"
 IH2_INST="$(printf '%s' "$IH2_CLAIM" | sed -n 's/.*instance: //p')"
-(cd "$IH2" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_NAME=resident COMMS_PRESENCE_INSTANCE="$IH2_INST" \
+(cd "$IH2" && env COMMS_PRESENCE_NAME=resident COMMS_PRESENCE_INSTANCE="$IH2_INST" \
     "$COMMS" integrate worktree-healtwo) >/dev/null 2>&1 || true
 # Assert the landing FIRST: without it a no-op or early failure would "preserve" the
 # record vacuously and this would pass for the wrong reason. (grok, panel r2.)
@@ -7875,12 +7596,12 @@ chmod +x "$IH5/tests/spoof.sh"
 printf 'suite-cmd = bash tests/spoof.sh\n' > "$IH5/.comms/config"
 (cd "$IH5" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
 (cd "$IH5" && git checkout -q -b session-primary)
-(cd "$IH5" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new spoofone) >/dev/null 2>&1
+(cd "$IH5" && env "$COMMS" worktree new spoofone) >/dev/null 2>&1
 (cd "$IH5/.claude/worktrees/spoofone" && echo s > i.txt && git add i.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: i") >/dev/null 2>&1
-IH5_CLAIM="$( (cd "$IH5" && env -u CMUX_WORKSPACE_ID "$COMMS" presence claim --name liveone --role holder) 2>&1 || true )"
+IH5_CLAIM="$( (cd "$IH5" && env "$COMMS" presence claim --name liveone --role holder) 2>&1 || true )"
 IH5_INST="$(printf '%s' "$IH5_CLAIM" | sed -n 's/.*instance: //p')"
-(cd "$IH5" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_NAME=liveone COMMS_PRESENCE_INSTANCE="$IH5_INST" \
+(cd "$IH5" && env COMMS_PRESENCE_NAME=liveone COMMS_PRESENCE_INSTANCE="$IH5_INST" \
     "$COMMS" integrate worktree-spoofone) >/dev/null 2>&1 || true
 [ "$(cd "$IH5" && git rev-parse main)" = "$(cd "$IH5" && git rev-parse worktree-spoofone)" ] \
   && ok "the spoof fixture actually landed" || fail "IH5 did not land — its record check would be vacuous"
@@ -7902,10 +7623,10 @@ chmod +x "$IH7/tests/slow.sh"
 printf 'suite-cmd = bash tests/slow.sh\n' > "$IH7/.comms/config"
 (cd "$IH7" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
 (cd "$IH7" && git checkout -q -b session-primary)
-(cd "$IH7" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new slowone) >/dev/null 2>&1
+(cd "$IH7" && env "$COMMS" worktree new slowone) >/dev/null 2>&1
 (cd "$IH7/.claude/worktrees/slowone" && echo l > k.txt && git add k.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: k") >/dev/null 2>&1
-(cd "$IH7" && env -u CMUX_WORKSPACE_ID COMMS_PRESENCE_TTL_SECS=3 \
+(cd "$IH7" && env COMMS_PRESENCE_TTL_SECS=3 \
     COMMS_PRESENCE_NAME=slowghost COMMS_PRESENCE_INSTANCE=77777777777777777777777777777777 \
     "$COMMS" integrate worktree-slowone) >/dev/null 2>&1 || true
 [ "$(cd "$IH7" && git rev-parse main)" = "$(cd "$IH7" && git rev-parse worktree-slowone)" ] \
@@ -7931,7 +7652,7 @@ chmod +x "$IH8/tests/detach.sh"
 printf 'suite-cmd = bash tests/detach.sh\n' > "$IH8/.comms/config"
 (cd "$IH8" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
 (cd "$IH8" && git checkout -q -b session-primary)
-(cd "$IH8" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new detachone) >/dev/null 2>&1
+(cd "$IH8" && env "$COMMS" worktree new detachone) >/dev/null 2>&1
 (cd "$IH8/.claude/worktrees/detachone" && echo d > m.txt && git add m.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: m") >/dev/null 2>&1
 # The property is NOT that the run waits for the descendant — supervision TERMs the whole
@@ -7940,7 +7661,7 @@ printf 'suite-cmd = bash tests/detach.sh\n' > "$IH8/.comms/config"
 # against BOTH modes, because waiting is not what quiescence does.)
 IH8_MARKF="$WORK/ih8-descendant-ran"
 rm -f "$IH8_MARKF"
-(cd "$IH8" && env -u CMUX_WORKSPACE_ID IH8_MARK="$IH8_MARKF" \
+(cd "$IH8" && env IH8_MARK="$IH8_MARKF" \
     COMMS_PRESENCE_NAME=detachghost COMMS_PRESENCE_INSTANCE=66666666666666666666666666666666 \
     "$COMMS" integrate worktree-detachone) >/dev/null 2>&1 || true
 [ "$(cd "$IH8" && git rev-parse main)" = "$(cd "$IH8" && git rev-parse worktree-detachone)" ] \
@@ -7972,10 +7693,10 @@ chmod +x "$IH4/tests/red.sh"
 printf 'suite-cmd = bash tests/red.sh\n' > "$IH4/.comms/config"
 (cd "$IH4" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
 (cd "$IH4" && git checkout -q -b session-primary)
-(cd "$IH4" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new redone) >/dev/null 2>&1
+(cd "$IH4" && env "$COMMS" worktree new redone) >/dev/null 2>&1
 (cd "$IH4/.claude/worktrees/redone" && echo r > h.txt && git add h.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: h") >/dev/null 2>&1
-(cd "$IH4" && env -u CMUX_WORKSPACE_ID \
+(cd "$IH4" && env \
     COMMS_PRESENCE_NAME=ghost4 COMMS_PRESENCE_INSTANCE=44444444444444444444444444444444 \
     "$COMMS" integrate worktree-redone) >/dev/null 2>&1 || true
 [ "$(cd "$IH4" && git rev-parse main)" != "$(cd "$IH4" && git rev-parse worktree-redone)" ] \
@@ -8002,7 +7723,7 @@ chmod +x "$IP2/tests/quiet.sh"
 printf 'suite-cmd = bash tests/quiet.sh\n' > "$IP2/.comms/config"
 (cd "$IP2" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
 (cd "$IP2" && git checkout -q -b session-primary)
-(cd "$IP2" && env -u CMUX_WORKSPACE_ID "$COMMS" worktree new forgeone) >/dev/null 2>&1
+(cd "$IP2" && env "$COMMS" worktree new forgeone) >/dev/null 2>&1
 (cd "$IP2/.claude/worktrees/forgeone" && echo y > d.txt && git add d.txt \
   && git -c user.email=t@t -c user.name=t commit -qm "feat: d") >/dev/null 2>&1
 # The forgery prints a line that WOULD satisfy the proof, and never runs the suite.
@@ -8023,11 +7744,11 @@ case "$FORGE_CTL" in
   *"passed: 3"*) ok "an env-function hook does interpose on an unpinned scrub (control)" ;;
   *) fail "the forgery control did not interpose (got: $FORGE_CTL)" ;;
 esac
-FORGE_OUT="$( (cd "$IP2" && env -u CMUX_WORKSPACE_ID BASH_ENV="$WORK/forge-bashenv.sh" "$COMMS" integrate worktree-forgeone) 2>&1 || true )"
+FORGE_OUT="$( (cd "$IP2" && env BASH_ENV="$WORK/forge-bashenv.sh" "$COMMS" integrate worktree-forgeone) 2>&1 || true )"
 [ "$(cd "$IP2" && git rev-parse main)" != "$(cd "$IP2" && git rev-parse worktree-forgeone)" ] \
   && ok "a forged completion line from an interposed scrub does not land" \
   || fail "an env-function forgery landed a candidate whose suite never ran"
-FORGE_ABS_OUT="$( (cd "$IP2" && env -u CMUX_WORKSPACE_ID BASH_ENV="$WORK/forge-abs-bashenv.sh" "$COMMS" integrate worktree-forgeone) 2>&1 || true )"
+FORGE_ABS_OUT="$( (cd "$IP2" && env BASH_ENV="$WORK/forge-abs-bashenv.sh" "$COMMS" integrate worktree-forgeone) 2>&1 || true )"
 [ "$(cd "$IP2" && git rev-parse main)" != "$(cd "$IP2" && git rev-parse worktree-forgeone)" ] \
   && ok "an absolute-path function forgery does not land either" \
   || fail "a /usr/bin/env function forgery landed a candidate whose suite never ran"
@@ -8061,7 +7782,7 @@ git -C "$EV" add -A >/dev/null 2>&1
 git -C "$EV" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$EV/.comms/to-codex" "$EV/.comms/to-grok" "$EV/.comms/to-claude" "$EV/.comms/archive"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV/.comms/config"
-run_ev() { (cd "$EV" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+run_ev() { (cd "$EV" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 EV_LOG="$EV/.comms/events.tsv"
 EV_ROWS() { tail -n +2 "$EV_LOG" 2>/dev/null | grep -c . || true; }
 EV_COL() { awk -F'\t' -v n="$1" 'NR==1{for(i=1;i<=NF;i++) if ($i==n) {print i; exit}}' "$EV_LOG"; }
@@ -8125,7 +7846,7 @@ run_ev events append --kind turn-started --set "$EV_BIG" --dispatch "$EV_BIG" --
 EVT="$WORK/events-torn"; mkdir -p "$EVT"; EVT="$(cd "$EVT" && pwd -P)"
 git -C "$EVT" init -q -b main
 git -C "$EVT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
-run_evt() { (cd "$EVT" && env -u CMUX_WORKSPACE_ID "$COMMS" "$@"); }
+run_evt() { (cd "$EVT" && env "$COMMS" "$@"); }
 EVT_LOG="$EVT/.comms/events.tsv"
 run_evt events append --kind turn-started --set ev-set-1 --thread ev-thread --agent codex --status running >/dev/null
 EV_LOG_MAIN="$EV_LOG"; EV_LOG="$EVT_LOG"
@@ -8159,7 +7880,7 @@ printf 'ts\tnot\ta\theader\tjust\ta\trow\tthat\tstarts\twith\tts\tand\tis\tmalfo
 
 # Back to the shared fixture, whose log is still clean.
 EV_LOG="$EV_LOG_MAIN"
-run_ev() { (cd "$EV" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+run_ev() { (cd "$EV" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 
 EV_N=20
 i=1; while [ "$i" -le "$EV_N" ]; do
@@ -8189,7 +7910,7 @@ EV2="$WORK/events-repo-2"; mkdir -p "$EV2"; EV2="$(cd "$EV2" && pwd -P)"
 git -C "$EV2" init -q -b main
 git -C "$EV2" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 i=1; while [ "$i" -le 8 ]; do
-  (cd "$EV2" && env -u CMUX_WORKSPACE_ID "$COMMS" events append --kind turn-started --thread "h-$i" >/dev/null 2>&1) &
+  (cd "$EV2" && env "$COMMS" events append --kind turn-started --thread "h-$i" >/dev/null 2>&1) &
   i=$((i+1))
 done
 wait
@@ -8201,7 +7922,7 @@ wait
 EV7="$WORK/events-repo-7"; mkdir -p "$EV7"
 git -C "$EV7" init -q -b main; git -C "$EV7" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 mkdir -p "$EV7/.comms"; chmod a-w "$EV7/.comms"
-EV_NOHDR="$( (cd "$EV7" && env -u CMUX_WORKSPACE_ID "$COMMS" events append --kind turn-started --thread h) 2>&1 || true )"
+EV_NOHDR="$( (cd "$EV7" && env "$COMMS" events append --kind turn-started --thread h) 2>&1 || true )"
 chmod u+w "$EV7/.comms"
 printf '%s\n' "$EV_NOHDR" | grep -q 'headerless' && ok "a log whose header cannot be created is refused" || fail "headerless log not refused (got: $EV_NOHDR)"
 # A directory that cannot be created reports and RETURNS, the same as every other refusal —
@@ -8209,12 +7930,12 @@ printf '%s\n' "$EV_NOHDR" | grep -q 'headerless' && ok "a log whose header canno
 EV8="$WORK/events-repo-8"; mkdir -p "$EV8"
 git -C "$EV8" init -q -b main; git -C "$EV8" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 : > "$EV8/.comms"
-EV_NODIR="$( (cd "$EV8" && env -u CMUX_WORKSPACE_ID "$COMMS" events append --kind turn-started --thread d) 2>&1 || true )"
+EV_NODIR="$( (cd "$EV8" && env "$COMMS" events append --kind turn-started --thread d) 2>&1 || true )"
 rm -f "$EV8/.comms"
 printf '%s\n' "$EV_NODIR" | grep -q 'cannot create' && ok "an uncreatable events directory is reported, not a bash error" || fail "uncreatable dir (got: $EV_NODIR)"
 # If the channel that reports skipped rows cannot be created, the evidence of a torn log
 # would vanish and every consumer would trust a file nothing validated. (codex, r4.)
-EV_NOTMP="$( (cd "$EV" && env -u CMUX_WORKSPACE_ID TMPDIR=/nonexistent-tmpdir-for-tests "$COMMS" events --limit 1) 2>&1 >/dev/null || true )"
+EV_NOTMP="$( (cd "$EV" && env TMPDIR=/nonexistent-tmpdir-for-tests "$COMMS" events --limit 1) 2>&1 >/dev/null || true )"
 printf '%s\n' "$EV_NOTMP" | grep -q 'could not be counted' \
   && ok "a reader that cannot record what it skipped refuses to read at all" || fail "reader degraded silently (got: $EV_NOTMP)"
 [ ! -f "$EV7/.comms/events.tsv" ] && ok "the refusal leaves no headerless log behind" || fail "a headerless log was created"
@@ -8248,7 +7969,7 @@ ev_fs_try() { # <df-device> <repo-dir> [env assignments...]
   local dev="$1" dir="$2"; shift 2
   mkdir -p "$dir"; git -C "$dir" init -q -b main
   git -C "$dir" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
-  (cd "$dir" && env -u CMUX_WORKSPACE_ID DF_STUB_FS="$dev" "$@" PATH="$EV_DFB:$PATH" \
+  (cd "$dir" && env DF_STUB_FS="$dev" "$@" PATH="$EV_DFB:$PATH" \
      "$COMMS" events append --kind turn-started --thread fs-1) 2>&1
 }
 ev_fs_case() { # <label> <expect accepted|refused> <df-device> <dir> [env...]
@@ -8280,7 +8001,7 @@ printf '%s\n' "$EV_LOCAL" | grep -q 'refusing' && fail "a local filesystem was r
 # CHECKED ON EVERY APPEND. Judging only at creation left the refusal bypassable for the
 # rest of the log's life by a `.comms` that migrates onto network storage — the silent-loss
 # mode the refusal exists to prevent. (codex + grok, implement r1.)
-EV_MIGRATED="$( (cd "$WORK/events-repo-4" && env -u CMUX_WORKSPACE_ID DF_STUB_FS='fileserver:/export/home' STAT_STUB_TYPE=ext4 PATH="$EV_DFB:$PATH" "$COMMS" events append --kind turn-started --thread migrated-1) 2>&1 >/dev/null || true )"
+EV_MIGRATED="$( (cd "$WORK/events-repo-4" && env DF_STUB_FS='fileserver:/export/home' STAT_STUB_TYPE=ext4 PATH="$EV_DFB:$PATH" "$COMMS" events append --kind turn-started --thread migrated-1) 2>&1 >/dev/null || true )"
 printf '%s\n' "$EV_MIGRATED" | grep -q 'refusing to write' && ok "an EXISTING log that moved onto network storage refuses further appends" || fail "migrated log appended unchecked (got: $EV_MIGRATED)"
 grep -q 'migrated-1' "$WORK/events-repo-4/.comms/events.tsv" && fail "the refused append was written anyway" || ok "a refused append leaves no row"
 # ...and refusing must RETURN, not exit: `die` inside the accessor would take the whole
@@ -8288,7 +8009,7 @@ grep -q 'migrated-1' "$WORK/events-repo-4/.comms/events.tsv" && fail "the refuse
 # policy would silently become fail-closed. (grok, implement r2.)
 EV_FSREPLY="$EV/.comms/to-claude/$(basename "$EV")_2026-08-29T09-40-00_ev-fsreply.md"
 printf -- '---\ntype: review-feedback\nfrom: codex\ntimestamp: 2026-08-29T09:40:00Z\nworkspace: %s\nmessage_id: ev-fsreply-1\nthread: ev-loop\nin-reply-to: ev-req-1\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' "$(basename "$EV")" > "$EV_FSREPLY"
-if (cd "$EV" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 DF_STUB_FS='fileserver:/export/home' STAT_STUB_TYPE=ext4 PATH="$EV_DFB:$STUB_BIN:$PATH" "$COMMS" send --to claude "$EV_FSREPLY") >/dev/null 2>&1; then
+if (cd "$EV" && env COMMS_DELIVERY=mailbox DF_STUB_FS='fileserver:/export/home' STAT_STUB_TYPE=ext4 PATH="$EV_DFB:$STUB_BIN:$PATH" "$COMMS" send --to claude "$EV_FSREPLY") >/dev/null 2>&1; then
   ok "an unsound filesystem refuses the log without killing a reply's delivery"
 else
   fail "a refused log took the reply's send down with it"
@@ -8296,7 +8017,7 @@ fi
 # The same refusal on a REQUEST must still gate: that producer is the fail-closed one.
 EV_FSREQ="$EV/.comms/to-codex/$(basename "$EV")_2026-08-29T09-41-00_ev-fsreq.md"
 printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:41:00Z\nworkspace: %s\nmessage_id: ev-fsreq-1\nthread: ev-fsreq\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV")" > "$EV_FSREQ"
-if (cd "$EV" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 DF_STUB_FS='fileserver:/export/home' STAT_STUB_TYPE=ext4 PATH="$EV_DFB:$STUB_BIN:$PATH" "$COMMS" send --to codex "$EV_FSREQ") >/dev/null 2>&1; then
+if (cd "$EV" && env COMMS_DELIVERY=mailbox DF_STUB_FS='fileserver:/export/home' STAT_STUB_TYPE=ext4 PATH="$EV_DFB:$STUB_BIN:$PATH" "$COMMS" send --to codex "$EV_FSREQ") >/dev/null 2>&1; then
   fail "a request dispatched with no recordable log"
 else
   ok "a request whose persistence cannot be recorded is still refused outright"
@@ -8523,7 +8244,7 @@ git -C "$EV_RF" add -A >/dev/null 2>&1
 git -C "$EV_RF" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$EV_RF/.comms/to-codex" "$EV_RF/.comms/to-grok" "$EV_RF/.comms/to-claude" "$EV_RF/.comms/archive" "$EV_RF/.comms/grades"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV_RF/.comms/config"
-run_evrf() { (cd "$EV_RF" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+run_evrf() { (cd "$EV_RF" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 EV_RFREQ="$EV_RF/.comms/to-codex/$(basename "$EV_RF")_2026-08-29T09-00-00_rf.md"
 printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:00:00Z\nworkspace: %s\nmessage_id: rf-1\nthread: rf-th\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV_RF")" > "$EV_RFREQ"
 EV_RFOUT="$(run_evrf panel dispatch --to codex,grok "$EV_RFREQ" 2>&1 || true)"
@@ -8660,7 +8381,7 @@ git -C "$EV_CRASH" add -A >/dev/null 2>&1
 git -C "$EV_CRASH" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$EV_CRASH/.comms/to-codex" "$EV_CRASH/.comms/to-grok" "$EV_CRASH/.comms/to-claude" "$EV_CRASH/.comms/archive" "$EV_CRASH/.comms/grades"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV_CRASH/.comms/config"
-run_evcr() { (cd "$EV_CRASH" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+run_evcr() { (cd "$EV_CRASH" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 EV_CRREQ="$EV_CRASH/.comms/to-codex/$(basename "$EV_CRASH")_2026-08-29T09-00-00_cr.md"
 printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:00:00Z\nworkspace: %s\nmessage_id: cr-1\nthread: cr-th\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV_CRASH")" > "$EV_CRREQ"
 EV_CROUT="$(run_evcr panel dispatch --to codex,grok "$EV_CRREQ" 2>&1 || true)"
@@ -8718,7 +8439,7 @@ git -C "$EV_SUB" add -A >/dev/null 2>&1
 git -C "$EV_SUB" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$EV_SUB/.comms/to-codex" "$EV_SUB/.comms/to-grok" "$EV_SUB/.comms/to-claude" "$EV_SUB/.comms/archive" "$EV_SUB/.comms/grades"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV_SUB/.comms/config"
-run_evsub() { (cd "$EV_SUB" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+run_evsub() { (cd "$EV_SUB" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 EV_SUBREQ="$EV_SUB/.comms/to-codex/$(basename "$EV_SUB")_2026-08-29T09-00-00_sub.md"
 printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:00:00Z\nworkspace: %s\nmessage_id: sub-1\nthread: sub-th\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV_SUB")" > "$EV_SUBREQ"
 EV_SUBOUT="$(run_evsub panel dispatch --to codex,grok "$EV_SUBREQ" 2>&1 || true)"
@@ -8763,7 +8484,7 @@ git -C "$EV_ART" add -A >/dev/null 2>&1
 git -C "$EV_ART" -c user.email=t@t -c user.name=t commit -q -m init
 mkdir -p "$EV_ART/.comms/to-codex" "$EV_ART/.comms/to-grok" "$EV_ART/.comms/to-claude" "$EV_ART/.comms/archive" "$EV_ART/.comms/grades"
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EV_ART/.comms/config"
-run_evart() { (cd "$EV_ART" && env COMMS_DELIVERY=cmux CMUX_WORKSPACE_ID=workspace:7 PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+run_evart() { (cd "$EV_ART" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 EV_ARTREQ="$EV_ART/.comms/to-codex/$(basename "$EV_ART")_2026-08-29T09-00-00_art.md"
 printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-29T09:00:00Z\nworkspace: %s\nmessage_id: art-1\nthread: art-th\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n---\n\n## What was done\nA change worth reviewing.\n' "$(basename "$EV_ART")" > "$EV_ARTREQ"
 EV_ARTOUT="$(run_evart panel dispatch --to codex,grok --set pinned-set "$EV_ARTREQ" 2>&1 || true)"
@@ -8830,7 +8551,7 @@ printf '%s\ty\tz\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-
 # spawn, so every row below was appended by a process the dispatching shell no longer owns.
 EV_HL="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-10-00_ev-hl.md"
 sed 's/message_id: ev-req-1/message_id: ev-hl-1/; s/thread: ev-loop/thread: ev-headless/' "$EV_REQ" > "$EV_HL"
-run_ev_hl() { (cd "$EV" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
+run_ev_hl() { (cd "$EV" && env COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
 mkdir -p "$EV/.comms/to-grok"
 EV_HLOUT="$(run_ev_hl send --to grok "$EV_HL" 2>/dev/null)"
 EV_HLDIR="$(rundir_of "$EV_HLOUT")"
@@ -8838,7 +8559,7 @@ EV_HLDIR="$(rundir_of "$EV_HLOUT")"
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && $e=="turn-started"' "$EV_LOG" | grep -q . \
   && fail "turn-started was written before any runner ran" \
   || ok "no turn is claimed to have started before its runner runs"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" "$RUNPHASE" await "$EV_HLDIR" --timeout-secs 60 >/dev/null 2>&1) || true
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" "$RUNPHASE" await "$EV_HLDIR" --timeout-secs 60 >/dev/null 2>&1) || true
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && $e=="turn-started"' "$EV_LOG" | grep -q . \
   && ok "the detached runner records that the turn started" || fail "runner turn-started missing"
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-headless" && $e=="provider-result" && $st!=""' "$EV_LOG" | grep -q . \
@@ -8861,14 +8582,14 @@ EV_KOUT="$(GROK_STUB_HANG=30 run_ev_hl send --to grok "$EV_KL" 2>/dev/null)"
 EV_KDIR="$(rundir_of "$EV_KOUT")"
 sleep 2
 kill -9 "$(cat "$EV_KDIR/pid" 2>/dev/null)" 2>/dev/null || true
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" "$RUNPHASE" await "$EV_KDIR" --timeout-secs 30 >/dev/null 2>&1) || true
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" "$RUNPHASE" await "$EV_KDIR" --timeout-secs 30 >/dev/null 2>&1) || true
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-killed" && $e=="turn-finished"' "$EV_LOG" | grep -q . \
   && ok "a killed runner still gets a terminal event, from the awaiting process" || fail "synthetic turn-finished missing"
 
 EV_GMSG="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-30-00_ev-grok.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-1/; s/thread: ev-loop/thread: ev-grok/' "$EV_REQ" > "$EV_GMSG"
 EV_GDIR="$WORK/ev-grok-leg"; mkdir -p "$EV_GDIR"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    GROK_STUB_NO_VERDICT=1 "$RUNPHASE" run --message "$EV_GMSG" --dir "$EV_GDIR" --provider grok) >/dev/null 2>&1 || true
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v n="$C_NOTE" '$t=="ev-grok" && $e=="reply-refused" && $n!=""' "$EV_LOG" | grep -q . \
   && ok "a refused reply records WHY, outside the run dir" || fail "reply-refused missing"
@@ -8880,7 +8601,7 @@ awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-grok" && $e=="reply-accepted"' "$E
 EV_GMSGX="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-34-00_ev-grokx.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-x/; s/thread: ev-loop/thread: ev-noresult/' "$EV_REQ" > "$EV_GMSGX"
 EV_GDIRX="$WORK/ev-grok-legx"; mkdir -p "$EV_GDIRX"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    GROK_STUB_NO_RESULT=1 "$RUNPHASE" run --message "$EV_GMSGX" --dir "$EV_GDIRX" --provider grok) >/dev/null 2>&1 || true
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v n="$C_NOTE" '$t=="ev-noresult" && $e=="reply-refused" && $n ~ /no reply text/' "$EV_LOG" | grep -q . \
   && ok "a reply the extractor could not read is recorded as a refusal, with the reason" || fail "extraction failure left no reply-refused"
@@ -8890,7 +8611,7 @@ awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v n="$C_NOTE" '$t=="ev-noresult" && $e=="r
 EV_GMSG2="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-31-00_ev-grok2.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-2/; s/thread: ev-loop/thread: ev-grok-ok/' "$EV_REQ" > "$EV_GMSG2"
 EV_GDIR2="$WORK/ev-grok-leg2"; mkdir -p "$EV_GDIR2"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    "$RUNPHASE" run --message "$EV_GMSG2" --dir "$EV_GDIR2" --provider grok) >/dev/null 2>&1 || true
 EV_GSEQ="$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-grok-ok" && ($e=="reply-validated" || $e=="reply-accepted"){printf "%s ", $e}' "$EV_LOG")"
 [ "$EV_GSEQ" = "reply-validated reply-accepted " ] \
@@ -8905,7 +8626,7 @@ EV_GMSG4="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-33-00_ev-grok4.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-4/; s/thread: ev-loop/thread: ev-logloss/' "$EV_REQ" > "$EV_GMSG4"
 EV_GDIR4="$WORK/ev-grok-leg4"; mkdir -p "$EV_GDIR4"
 chmod a-w "$EV_LOG"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    "$RUNPHASE" run --message "$EV_GMSG4" --dir "$EV_GDIR4" --provider grok) >/dev/null 2>&1 || true
 chmod u+w "$EV_LOG"
 grep -q 'coordinator log not updated' "$EV_GDIR4/runner.log" \
@@ -8934,7 +8655,7 @@ chmod +x "$EV_SHIM/comms.sh"
 EV_GMSG5="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-35-00_ev-grok5.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-5/; s/thread: ev-loop/thread: ev-logloss2/' "$EV_REQ" > "$EV_GMSG5"
 EV_GDIR5="$WORK/ev-grok-leg5"; mkdir -p "$EV_GDIR5"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    "$EV_SHIM/runphase.sh" run --message "$EV_GMSG5" --dir "$EV_GDIR5" --provider grok) >/dev/null 2>&1 || true
 [ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-logloss2" && $e=="turn-finished"{print $st}' "$EV_LOG")" = "log-incomplete" ] \
   && ok "a turn that lost one of its own events signs off log-incomplete, not completed" || fail "turn-finished did not report the hole"
@@ -8965,7 +8686,7 @@ chmod +x "$EV_SHIM3/comms.sh"
 EV_GMSG6="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-36-00_ev-grok6.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-6/; s/thread: ev-loop/thread: ev-lostaccept/' "$EV_REQ" > "$EV_GMSG6"
 EV_GDIR6="$WORK/ev-grok-leg6"; mkdir -p "$EV_GDIR6"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    "$EV_SHIM3/runphase.sh" run --message "$EV_GMSG6" --dir "$EV_GDIR6" --provider grok) >/dev/null 2>&1 || true
 # The planted row shares the thread, the REQUEST id and the attempt — it differs only in
 # which execution wrote it. Request-plus-attempt was not unique: a re-send runs the same
@@ -8996,7 +8717,7 @@ chmod +x "$EV_SHIM4/comms.sh"
 EV_GMSG7="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-37-00_ev-grok7.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-7/; s/thread: ev-loop/thread: ev-partialrow/' "$EV_REQ" > "$EV_GMSG7"
 EV_GDIR7="$WORK/ev-grok-leg7"; mkdir -p "$EV_GDIR7"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    "$EV_SHIM4/runphase.sh" run --message "$EV_GMSG7" --dir "$EV_GDIR7" --provider grok) >/dev/null 2>&1 || true
 [ "$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v st="$C_ST" '$t=="ev-partialrow" && $e=="turn-finished"{print $st}' "$EV_LOG")" = "log-incomplete" ] \
   && ok "a truncated acceptance row does not satisfy the lookup" || fail "a partial row passed as an acceptance"
@@ -9010,7 +8731,7 @@ sed 's/message_id: ev-req-1/message_id: ev-grok-8/; s/thread: ev-loop/thread: ev
 EV_GDIR8="$WORK/ev-grok-leg8"; mkdir -p "$EV_GDIR8"
 printf '{\n  "provider": "grok",\n  "status": "completed",\n  "TRUNC' > "$EV_GDIR8/result.json.tmp"
 chmod a-w "$EV_GDIR8/result.json.tmp"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    "$RUNPHASE" run --message "$EV_GMSG8" --dir "$EV_GDIR8" --provider grok) >/dev/null 2>&1 || true
 chmod u+w "$EV_GDIR8/result.json.tmp" 2>/dev/null || true
 [ ! -f "$EV_GDIR8/result.json" ] \
@@ -9021,7 +8742,7 @@ grep -q 'TRUNC' "$EV_GDIR8/result.json" 2>/dev/null \
 EV_GMSG3="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-32-00_ev-grok3.md"
 sed 's/message_id: ev-req-1/message_id: ev-grok-3/; s/thread: ev-loop/thread: ev-shadow/' "$EV_REQ" > "$EV_GMSG3"
 EV_GDIR3="$WORK/ev-grok-leg3"; mkdir -p "$EV_GDIR3"
-(cd "$EV" && env -u CMUX_WORKSPACE_ID PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+(cd "$EV" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
    "$RUNPHASE" run --message "$EV_GMSG3" --dir "$EV_GDIR3" --provider grok --no-deliver) >/dev/null 2>&1 || true
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v r="$C_ROLE" '$t=="ev-shadow" && $e=="reply-validated" && $r=="shadow"' "$EV_LOG" | grep -q . \
   && ok "a measurement turn is recorded as shadow, never as the gating leg" || fail "shadow role not recorded"
