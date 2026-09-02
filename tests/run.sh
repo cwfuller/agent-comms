@@ -4819,6 +4819,18 @@ mkdir -p "$TR_FIX/.comms/to-codex"
 TR_CONSULT="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-25T10-00-00_q-1.md"
 cat > "$TR_CONSULT" <<TRQ
 
+---
+type: question
+from: claude
+timestamp: 2026-08-25T10:00:00Z
+workspace: $(basename "$TR_FIX")
+message_id: $(basename "$TR_FIX")_2026-08-25T10-00-00_q-1
+---
+
+## Question
+does a consult still classify as a consult?
+TRQ
+
 # THE REFUSAL MUST HOLD AT EVERY ENTRY POINT, not just `transport`. `cmd_send` runs
 # `del_out="$(cmd_deliver …)"` and `cmd_deliver` runs `route="$(cmd_transport …)"`; on bash 3.2
 # — the macOS default and the shell these helpers claim to support — a `die` in that position
@@ -4849,17 +4861,6 @@ TR_PANEL_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" pan
   && ok "panel dispatch refuses an unknown transport" || fail "panel dispatch did not refuse (rc=$TR_PANEL_RC, got: $TR_PANEL_OUT)"
 [ "$(find "$TR_FIX/.comms" -type f 2>/dev/null | wc -l | tr -d ' ')" = "$TR_PANEL_BEFORE" ] \
   && ok "a refused panel dispatch writes no partial dispatch state" || fail "panel dispatch left durable state behind after refusing"
----
-type: question
-from: claude
-timestamp: 2026-08-25T10:00:00Z
-workspace: $(basename "$TR_FIX")
-message_id: $(basename "$TR_FIX")_2026-08-25T10-00-00_q-1
----
-
-## Question
-does a consult still classify as a consult?
-TRQ
 TR_LOOPMSG="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-25T10-01-00_wf-1.md"
 cat > "$TR_LOOPMSG" <<TRW
 ---
