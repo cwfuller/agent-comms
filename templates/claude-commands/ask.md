@@ -45,9 +45,9 @@ unless they asked.
    The helper routes over ACP (there is no pane transport since step 4), and falls back when there
    is not — because the alternative is writing a message into an inbox nobody is
    watching. That is not hypothetical: a real consult was stranded exactly that way
-   (`RESULT: manual`, no Codex surface running). Say which transport was used when it
+   (`RESULT: manual`, no runner available). Say which transport was used when it
    is mailbox, so an inline answer is never mistaken for a delivered message.
-   Never re-implement surface detection here; one decision point lives in the helper.
+   Never re-implement transport selection here; one decision point lives in the helper.
    - Resolve the helper next to comms.sh: `ACP_SH="$(dirname "$COMMS_SH")/acp.sh"`
      (resolve `COMMS_SH` per step 4 first).
    - Run the consult and present the answer directly — no message file, no
@@ -138,7 +138,7 @@ message_id: <the filename, without .md>
 
 - **Headless delivery (grok only).** With `COMMS_DELIVERY=headless` set, `send` spawns the target agent's turn as a detached subprocess instead of nudging a pane. Since step 4 this applies to `grok` alone — `claude` and `codex` review turns are ACP-only and a headless request for them is refused.
   <!-- loopspec:fragment result-spawned-exception -->
-  Exception — `RESULT: spawned` (a runphase turn, over either `acp` or `headless`; the line names which): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply. `transport` answers which surface a loop uses; `RESULT: spawned` answers how to wait — the wait is the same either way, so do not go looking for a separate ACP protocol.
+  Exception — `RESULT: spawned` (a runphase turn, over either `acp` or `headless`; the line names which): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply. `transport` answers which transport a loop uses; `RESULT: spawned` answers how to wait — the wait is the same either way, so do not go looking for a separate ACP protocol.
   <!-- /loopspec:fragment -->
 - **The reply will use `type: response`** with no verdict — that's the consult-shaped answer. `/read-from-codex` already handles non-workflow messages in standard flow (parse, summarize, archive).
 - **Don't stretch this command into review territory.** If you find yourself adding a "Review focus" section or asking for blocking findings, you want `/send-to-codex` instead.

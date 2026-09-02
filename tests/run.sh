@@ -4806,22 +4806,6 @@ TR_CMUX_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux "$COMMS" transport code
   || fail "cmux request not refused (rc=$TR_CMUX_RC, got: $TR_CMUX_OUT)"
 # ...and the refusal is not cmux-specific special-casing: any unknown transport is refused,
 # which is the hole that let COMMS_DELIVERY=foo silently take the default ladder. (grok, r1.)
-# THE REFUSAL MUST HOLD AT EVERY ENTRY POINT, not just `transport`. `cmd_send` runs
-# `del_out="$(cmd_deliver …)"` and `cmd_deliver` runs `route="$(cmd_transport …)"`; on bash 3.2
-# — the macOS default and the shell these helpers claim to support — a `die` in that position
-# is SWALLOWED. Before the router-level gate, `send` printed the refusal on stderr and then
-# continued to "message written for manual pickup" / "RESULT: manual … fix and retry" and
-# exited 0. Run these under /bin/bash explicitly so the 3.2 behaviour is what is measured.
-# (grok, S4-4 r2, advisory — reproduced, then fixed.)
-# No /bin/bash guard: this harness is itself #!/bin/bash, so it cannot run without one.
-TR_SEND_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" send --to codex "$TR_CONSULT") 2>&1 )" && TR_SEND_RC=0 || TR_SEND_RC=$?
-[ "$TR_SEND_RC" != "0" ] && ok "send refuses an unknown transport (the die is not swallowed by command substitution)" \
-  || fail "send swallowed the transport refusal (rc=$TR_SEND_RC, got: $TR_SEND_OUT)"
-printf '%s\n' "$TR_SEND_OUT" | grep -q 'fix and retry' \
-  && fail "send still tells the caller to fix and retry after a refused transport" \
-  || ok "a refused transport does not produce the fix-and-retry lie"
-TR_DEL_RC=0; (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" deliver codex "$TR_CONSULT") >/dev/null 2>&1 || TR_DEL_RC=$?
-[ "$TR_DEL_RC" != "0" ] && ok "deliver refuses an unknown transport too" || fail "deliver swallowed the refusal (rc=$TR_DEL_RC)"
 TR_FOO_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=foo "$COMMS" transport codex --loop) 2>&1 )" && TR_FOO_RC=0 || TR_FOO_RC=$?
 [ "$TR_FOO_RC" != "0" ] && printf '%s\n' "$TR_FOO_OUT" | grep -q "not a known transport" \
   && ok "an unknown COMMS_DELIVERY value is refused, not silently defaulted" \
@@ -4834,6 +4818,37 @@ TR_FOO_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=foo "$COMMS" transport codex 
 mkdir -p "$TR_FIX/.comms/to-codex"
 TR_CONSULT="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-25T10-00-00_q-1.md"
 cat > "$TR_CONSULT" <<TRQ
+
+# THE REFUSAL MUST HOLD AT EVERY ENTRY POINT, not just `transport`. `cmd_send` runs
+# `del_out="$(cmd_deliver …)"` and `cmd_deliver` runs `route="$(cmd_transport …)"`; on bash 3.2
+# — the macOS default and the shell these helpers claim to support — a `die` in that position
+# is SWALLOWED. Before the router/function gates, `send` printed the refusal on stderr and then
+# continued to "message written for manual pickup" / "RESULT: manual … fix and retry", exit 0.
+#
+# THESE ASSERTIONS WERE WRONG WHEN FIRST ADDED: they ran eighteen lines ABOVE the fixture, so
+# `$TR_CONSULT` was unbound and every one passed on `TR_CONSULT: unbound variable` with rc=1 —
+# never invoking the helper. `rc != 0` was satisfied by the bash error. They now run below the
+# fixture and require the REFUSAL TEXT, not merely a non-zero status. (grok, S4-4 r3.)
+[ "${BASH_VERSINFO[0]}" -eq 3 ] && TR_SWALLOW_SHELL="bash 3.2 (the swallow is live here)" || TR_SWALLOW_SHELL="bash ${BASH_VERSINFO[0]} (3.2 swallow not reproducible on this host)"
+TR_SEND_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" send --to codex "$TR_CONSULT") 2>&1 )" && TR_SEND_RC=0 || TR_SEND_RC=$?
+[ "$TR_SEND_RC" != "0" ] && printf '%s\n' "$TR_SEND_OUT" | grep -q 'cmux pane transport was REMOVED' \
+  && ok "send refuses an unknown transport — the die is not swallowed by command substitution [$TR_SWALLOW_SHELL]" \
+  || fail "send did not refuse with the removal message (rc=$TR_SEND_RC, got: $TR_SEND_OUT)"
+printf '%s\n' "$TR_SEND_OUT" | grep -q 'fix and retry' \
+  && fail "send still tells the caller to fix and retry after a refused transport" \
+  || ok "a refused transport does not produce the fix-and-retry lie"
+TR_DEL_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" deliver codex "$TR_CONSULT") 2>&1 )" && TR_DEL_RC=0 || TR_DEL_RC=$?
+[ "$TR_DEL_RC" != "0" ] && printf '%s\n' "$TR_DEL_OUT" | grep -q 'cmux pane transport was REMOVED' \
+  && ok "deliver refuses an unknown transport too" || fail "deliver did not refuse (rc=$TR_DEL_RC, got: $TR_DEL_OUT)"
+# panel dispatch reaches delivery by calling cmd_send as a FUNCTION, so an argv-only gate misses
+# it — and it writes attempt markers, roster events and leg files BEFORE delivering. Refusal must
+# happen before any of that exists. (codex, S4-4 r3, blocking.)
+TR_PANEL_BEFORE="$(find "$TR_FIX/.comms" -type f 2>/dev/null | wc -l | tr -d ' ')"
+TR_PANEL_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux /bin/bash "$COMMS" panel dispatch --to codex "$TR_CONSULT") 2>&1 )" && TR_PANEL_RC=0 || TR_PANEL_RC=$?
+[ "$TR_PANEL_RC" != "0" ] && printf '%s\n' "$TR_PANEL_OUT" | grep -q 'cmux pane transport was REMOVED' \
+  && ok "panel dispatch refuses an unknown transport" || fail "panel dispatch did not refuse (rc=$TR_PANEL_RC, got: $TR_PANEL_OUT)"
+[ "$(find "$TR_FIX/.comms" -type f 2>/dev/null | wc -l | tr -d ' ')" = "$TR_PANEL_BEFORE" ] \
+  && ok "a refused panel dispatch writes no partial dispatch state" || fail "panel dispatch left durable state behind after refusing"
 ---
 type: question
 from: claude

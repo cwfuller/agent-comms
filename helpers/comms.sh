@@ -3847,7 +3847,7 @@ cmd_transport() {
 
   require_known_transport
 
-  # LOOPS ARE ACP-FIRST, then headless, then a pane. A loop is unattended work by
+  # LOOPS ARE ACP-FIRST, then headless (grok only), then mailbox. A loop is unattended work by
   # definition, so it must not depend on an open pane — but the ordering here is
   # driven by cost, measured on one real review turn in this repo:
   #
@@ -3886,6 +3886,10 @@ cmd_transport() {
 
 cmd_deliver() {
   local target="${1:-}" msgfile="${2:-}"
+  # Gated HERE as well as at the router: `panel dispatch` reaches delivery by calling cmd_send
+  # as a FUNCTION, so an argv-only gate misses it. The right question is "does this path call
+  # cmd_send/cmd_deliver?", not "is the verb in the router list". (grok + codex, S4-4 r3.)
+  require_known_transport
   require_agent "$target" "deliver"
   # PICKUP IS DECIDED BEFORE TRANSPORT. A reply addressed to the session driving this turn
   # needs no nudge at all — it is read when the turn exits — so the transport question is moot.
@@ -4278,6 +4282,10 @@ cmd_clean() {
 }
 
 cmd_send() {
+  # Refuse BEFORE any durable write. `panel dispatch` calls this directly and had already
+  # written its attempt marker, roster events, leg files and index rows before delivery failed —
+  # and its `cmd_send … || echo` swallowed the failure into "incomplete legs". (codex, r3, blocking.)
+  require_known_transport
   local to="" file="" archive_inbound="" as=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -4591,7 +4599,8 @@ cmd_send() {
   fi
   # Loud outcome — emitted LAST so `tail -1` of send is always the RESULT line
   # on every path, including --archive-inbound (the main autonomous path).
-  # On `blocked`, callers execute the emitted RECOVER line once; only a final
+  # `blocked` is unreachable since S4-4 (it meant "cannot reach the cmux socket"); the RECOVER
+      # line went with it. Only a final
   # non-delivered result needs user attention.
   case "$outcome" in
     delivered) echo "RESULT: delivered" ;;
@@ -4626,6 +4635,7 @@ cmd_send() {
 # `status`/`list` to see what happened. (grok, S4-4 r2.)
 case "${1:-}" in
   transport|deliver|send|ask) require_known_transport ;;
+  panel) case "${2:-}" in dispatch) require_known_transport ;; esac ;;
 esac
 
 case "${1:-}" in

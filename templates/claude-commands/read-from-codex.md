@@ -309,7 +309,7 @@ you re-earn at every checkpoint, never tenure.
      in step 4). If delivery reports manual pickup, the message is on disk and the peer was NOT
      notified: ask for one manual pickup. Relay only the final non-`delivered` result.
      <!-- loopspec:fragment result-spawned-exception -->
-     Exception — `RESULT: spawned` (a runphase turn, over either `acp` or `headless`; the line names which): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply. `transport` answers which surface a loop uses; `RESULT: spawned` answers how to wait — the wait is the same either way, so do not go looking for a separate ACP protocol.
+     Exception — `RESULT: spawned` (a runphase turn, over either `acp` or `headless`; the line names which): the peer agent's turn is running detached; await the printed run dir as a background task (`.../runphase.sh await "<run dir>"`), then `/read-from-codex`. A non-zero await means the turn failed or timed out (check its `result.json`) — report that instead of waiting for a reply. `transport` answers which transport a loop uses; `RESULT: spawned` answers how to wait — the wait is the same either way, so do not go looking for a separate ACP protocol.
      <!-- /loopspec:fragment -->
 
 ---
