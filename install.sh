@@ -404,6 +404,15 @@ warn_local_shadowing() {
   fi
   [ "$global_present" = false ] && return
 
+  # A project-local pin of a RETIRED skill is not shadowing — it is stale surface left callable.
+  # The global scope cannot remove it (it only touches CODEX_SKILLS_DIR), so say so rather than
+  # leaving an agent pointed at a skill this installer just deleted. (grok, S4-3 r1.)
+  for skill in $RETIRED_CODEX_SKILLS; do
+    if [ -e "$PROJECT_ROOT/.agents/skills/$skill" ]; then
+      echo "  warning: .agents/skills/$skill is a project-local pin of a RETIRED skill — run install.sh --scope=local here to remove it" >&2
+    fi
+  done
+
   local shadowed=""
   for f in $CLAUDE_COMMANDS; do
     [ -f "$PROJECT_ROOT/.claude/commands/$f" ] && shadowed="$shadowed .claude/commands/$f"
@@ -488,11 +497,13 @@ agents_block_body() {
 
 Local file-based message queue between Claude Code and Codex.
 
-- **Your inbox:** `.comms/to-codex/` — read it with `$read-from-claude`
-- **Your outbox:** `.comms/to-claude/` — write your findings with `$send-to-claude`
+- **Your inbox:** `.comms/to-codex/` — review requests are delivered here
+- **Your outbox:** `.comms/to-claude/` — replies are written here
 
-Those two skills carry the protocol itself (message format, verdicts, delivery,
-recovery). This block only names the entry points.
+Review turns are **parent-brokered over ACP**: the driving session spawns the turn, inlines
+the whole prompt (including the verdict discipline), and stamps and delivers the reply. You do
+not need to read the mailbox or send anything yourself, and there are no `$read-from-claude` /
+`$send-to-claude` skills — they were deleted in step 4.
 PROTOCOL
 }
 
@@ -679,7 +690,7 @@ note_local_pin() {
   echo ""
   echo "  note: project-local copies are pinned — they shadow any global install and"
   echo "  do NOT pick up global updates. Re-run with --scope=local to refresh them, or"
-  echo "  delete the .claude/commands/, .agents/skills/, .agents/loopspec-fragments/, and"
+  echo "  delete the .claude/commands/, .agents/loopspec-fragments/, and"
   echo "  .agent-comms/ copies to fall back to global."
 }
 
@@ -714,11 +725,9 @@ echo "  done! installed:"
 case "$SCOPE" in
   local)
     echo "    Project Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
-    echo "    Project Codex:  \$read-from-claude, \$send-to-claude"
     ;;
   global)
     echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
-    echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
     ;;
   project)
@@ -726,7 +735,6 @@ case "$SCOPE" in
     ;;
   both)
     echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
-    echo "    Global Codex:  \$read-from-claude, \$send-to-claude"
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
     echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
     ;;
@@ -734,7 +742,7 @@ esac
 echo ""
 echo "  usage:"
 echo "    Claude: 'implement X, then /send-to-codex'"
-echo "    Codex:  '\$read-from-claude'"
+echo "    Codex:  reviews are parent-brokered over ACP — nothing to invoke by hand"
 echo "    Auto:   '/auto build feature X'   (add --plan for a capped approach round)"
 echo ""
 echo "  transport: ACP (no pane multiplexer required)"

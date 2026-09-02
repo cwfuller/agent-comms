@@ -586,12 +586,24 @@ PROMPT
     *)
       phase_focus="Focus: correctness, risks, and edge cases of what the message asks you to review." ;;
   esac
+  # FINAL-ROUND BROAD SWEEP. This rule lived only in the deleted read-from-claude SKILL, which
+  # `skill_file` stopped resolving after S4-2 — so ACP reviewers had already lost it before S4-3
+  # deleted the last copy. Restored on the path the child actually reads. (codex + grok, S4-3 r1,
+  # advisory: "neither independently meets the verdict bar — amendment proposal".)
+  local final_sweep=""
+  if [ -n "$GROK_ROUND" ] && [ -n "$GROK_MAXR" ] && [ "$GROK_ROUND" -ge "$GROK_MAXR" ] 2>/dev/null; then
+    final_sweep="
+This is the FINAL round: add a broad quality sweep — test coverage for the changed paths, type
+safety across boundaries, dead or unused imports, and consistency with the conventions already
+in this codebase. Findings there are Advisory unless they independently meet the verdict bar."
+  fi
   if [ -n "$GROK_ROUND" ] && [ "$GROK_ROUND" -gt 1 ] 2>/dev/null; then
     round_note="This is round $GROK_ROUND. $htext
 Judge against the pinned ## Acceptance criteria in the message (the newest copy is canonical) — the bar does not move between rounds; a new mandatory ask beyond it is an amendment to propose or an Advisory, never a silent widening."
   else
     round_note="This is round ${GROK_ROUND:-1} — a full contextual review. If the message carries ## Acceptance criteria, judge against them."
   fi
+  round_note="$round_note$final_sweep"
   local prior prior_block=""
   prior="$(parent_thread_context "$GROK_THREAD")"
   if [ -n "$prior" ]; then

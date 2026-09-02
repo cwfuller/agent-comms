@@ -502,8 +502,10 @@ GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_D
 # copy an earlier install left behind — a stale skill left callable is exactly what the
 # RETIRED_* mechanism exists to prevent. Seed one first, or this proves nothing. (S4-3.)
 mkdir -p "$GHOME/skills/read-from-claude" && printf 'stale\n' > "$GHOME/skills/read-from-claude/SKILL.md"
+mkdir -p "$GHOME/skills/send-to-claude" && printf 'stale\n' > "$GHOME/skills/send-to-claude/SKILL.md"
 (cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1) || true
-[ ! -e "$GHOME/skills/read-from-claude" ] && ok "installing REMOVES a retired Codex skill left by an earlier install" || fail "retired Codex skill survived an install"
+[ ! -e "$GHOME/skills/read-from-claude" ] && [ ! -e "$GHOME/skills/send-to-claude" ] \
+  && ok "installing REMOVES both retired Codex skills left by an earlier install" || fail "a retired Codex skill survived an install"
 # THE REVIEW BAR IS NOW INSTALLED DATA. It used to be read out of the codex self-send SKILL files
 # at runtime, so step 4's deletion of those templates would have silently removed the reviewer's
 # standard — a diff that reads like cleanup. Installed from docs/loopspec/fragments/, which is
@@ -2847,7 +2849,10 @@ run_fr friction "a second note" >/dev/null 2>&1
 check_not "friction requires a note" run_fr friction
 check_not "friction rejects a severity outside 1-5" run_fr friction --severity 9 x
 # it must never reach a reviewer: it is a report about the tool, not a lesson about code
-grep -q 'friction' "$REPO/helpers/comms.sh" && ! grep -q 'friction.tsv' "$REPO/templates/codex-skills/read-from-claude/SKILL.md" \
+# Was pointed at the deleted read-from-claude SKILL. A missing file makes `grep` non-zero, so
+# `! grep` was TRUE and this passed without inspecting any reviewer surface at all. Re-pointed
+# at the prompt the child actually receives. (codex + grok, S4-3 r1.)
+grep -q 'friction' "$REPO/helpers/comms.sh" && ! grep -q 'friction' "$REPO/helpers/runphase.sh" \
   && ok "reviewers are never pointed at the friction log" || fail "friction leaked into reviewer context"
 grep -q 'friction --thread' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "the loop tells the driver to record friction as it happens" || fail "friction not wired into the loop"
@@ -3427,6 +3432,21 @@ grep -q 'Judge against the pinned' "$REPO/helpers/runphase.sh" \
   && ok "reviewer judges against pinned criteria" || fail "pinned-criteria rule lost"
 grep -q 'amendment proposal alone is non-blocking' "$REPO/docs/loopspec/fragments/verdict-discipline.md" \
   && ok "reviewer treats amendment proposals as non-blocking" || fail "amendment rule lost with the deleted skill"
+# Also carried only by the deleted skill, and restored on the path the child reads. Pinned as a
+# CONDITIONAL: it must be gated on the final round, not pasted into every prompt. (S4-3 r1.)
+grep -q 'FINAL round: add a broad quality sweep' "$REPO/helpers/runphase.sh" \
+  && ok "the final-round quality sweep survives the skill deletion" || fail "final-round sweep lost"
+grep -q 'GROK_ROUND" -ge "\$GROK_MAXR' "$REPO/helpers/runphase.sh" \
+  && ok "the final-round sweep is gated on the final round, not every round" || fail "final-round sweep is ungated"
+# The installer-generated Codex contract is loaded on EVERY codex turn. It must not name a
+# surface this installer deletes — the same trap RETIRED_COMMANDS exists to prevent.
+# (codex + grok, S4-3 r1, corroborated blocking.)
+AGB="$(awk '/^agents_block_body\(\)/,/^}/' "$REPO/install.sh")"
+printf '%s' "$AGB" | grep -q 'read-from-claude\|send-to-claude' \
+  && fail "the live AGENTS.md block still tells Codex to call a deleted skill" \
+  || ok "the live AGENTS.md block names no deleted skill"
+printf '%s' "$AGB" | grep -q 'parent-brokered' \
+  && ok "the live AGENTS.md block describes the parent-brokered model" || fail "AGENTS.md block does not describe the surviving workflow"
 
 section "templates: bare dollar-digit/dollar-star hygiene"
 # INTERNALS editing rule made mechanical: Claude Code substitutes bare dollar-digit

@@ -21,10 +21,10 @@ Run interactively (no `--scope`) and the installer shows a menu:
 
 | scope | installs | where |
 |---|---|---|
-| `global` | 8 Claude commands, 3 helper scripts | `~/.claude/commands/`, `~/.codex/skills/`, `~/.agent-comms/` |
+| `global` | 5 Claude commands, 3 helper scripts, 2 loopspec fragments | `~/.claude/commands/`, `~/.agent-comms/` |
 | `project` | per-repo state only | `.comms/{to-codex,to-claude,archive}/`, `.gitignore` entries, `.codex/AGENTS.md` protocol note |
 | `both` | global + project | the recommended pair |
-| `local` | pinned copies of everything into the repo | `.claude/commands/`, `.agents/skills/`, `.agent-comms/` + project state |
+| `local` | pinned copies of everything into the repo | `.claude/commands/`, `.agents/loopspec-fragments/`, `.agent-comms/` + project state |
 
 All scopes are idempotent — re-run freely.
 
@@ -53,7 +53,7 @@ A **local pinned** install copies everything into the repo instead. Pinned copie
 warning. Resolution order everywhere is *local pin first, then global* (commands via the
 CLI's own project-command precedence; helpers via the templates' resolver:
 `<repo>/.agent-comms/comms.sh` then `~/.agent-comms/comms.sh`). To un-pin, delete the
-repo's `.claude/commands/`, `.agents/skills/`, and `.agent-comms/` copies.
+repo's `.claude/commands/`, `.agents/loopspec-fragments/`, and `.agent-comms/` copies.
 
 Stale pins are the classic failure mode: a repo pinned months ago silently runs old
 behavior while every other repo runs current. `install.sh --scope=global` warns when it
@@ -64,7 +64,7 @@ detects local copies that would shadow it.
 - creates `.comms/` (`to-codex/`, `to-claude/`, `archive/`)
 - gitignores `.comms/`, `.codex/AGENTS.md`, `.agent-comms/` (whole-line matched,
   trailing-newline-safe, idempotent)
-- writes the protocol note into `.codex/AGENTS.md` so Codex knows the skills exist
+- writes the protocol note into `.codex/AGENTS.md` so Codex knows review turns are parent-brokered
   (appends a section if the file already exists)
 
 ## Installing from a fork
@@ -85,7 +85,7 @@ AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" 
 | `AGENT_COMMS_REPO_RAW` | this repo's `main` | raw base URL for remote installs |
 | `AGENT_COMMS_HOME` | `~/.agent-comms` | where global helpers land |
 | `CLAUDE_COMMANDS_DIR` | `~/.claude/commands` | where global commands land |
-| `CODEX_SKILLS_DIR` | `~/.codex/skills` | where retired Codex skills are removed from |
+| `CODEX_SKILLS_DIR` | `~/.codex/skills` | where retired Codex skills are removed from (nothing is installed there) |
 
 ## From a clone
 
@@ -97,7 +97,7 @@ cd your-project
 
 ## Upgrading
 
-Re-run the installer with the same scope. Global scope refreshes commands, skills, and
+Re-run the installer with the same scope. Global scope refreshes commands, fragments, and
 helpers in place; running sessions pick the new versions up on their next command
 invocation (slash commands are read from disk each time). In-flight review loops survive
 upgrades — protocol-v2 fields are soft-validated precisely so an older message mid-loop

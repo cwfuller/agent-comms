@@ -3512,7 +3512,7 @@ cmd_snapshot() {
 
 
 prompt_surface_files() {
-  local root="$1" p rel glob
+  local root="$1" p rel glob hit name
   for p in \
     ".agent-comms/runphase.sh:$HOME/.agent-comms/runphase.sh" \
     ".claude/commands/auto.md:$HOME/.claude/commands/auto.md" \
@@ -3525,10 +3525,22 @@ prompt_surface_files() {
     else printf 'MISSING %s\n' "$rel"
     fi
   done
-  # The reviewer-side Codex skills used to be hashed here because they carried the verdict
-  # discipline. They were DELETED in step 4 (S4-3): every review turn is parent-brokered over
-  # ACP and `build_grok_prompt` inlines what the child needs, so nothing resolved them. Leaving
-  # them in this list would emit a permanent `MISSING` marker rather than measure a real surface.
+  # THE BAR THE CHILD ACTUALLY READS. The deleted Codex skills used to carry the verdict
+  # discipline, and hashing them was how `prompt-version` noticed a bar edit. After S4-3 the
+  # bar lives in the loopspec fragments that `build_grok_prompt` inlines at runtime — so they
+  # must be hashed HERE too, or editing the verdict discipline leaves `prompt-version`
+  # unchanged and grades POOL ACROSS DIFFERENT STANDARDS. Same three-tier precedence as
+  # runphase's `fragment_file`, so a project-local or global pin is what gets measured, exactly
+  # like the one the reviewer resolves. (codex, S4-3 r1, blocking; grok concurred.)
+  for name in verdict-discipline holistic-rereview; do
+    hit=""
+    for p in "$root/.agents/loopspec-fragments/$name.md" \
+             "${AGENT_COMMS_HOME:-$HOME/.agent-comms}/loopspec-fragments/$name.md" \
+             "$(dirname "$SELF")/../docs/loopspec/fragments/$name.md"; do
+      [ -f "$p" ] && { hit="$p"; break; }
+    done
+    if [ -n "$hit" ]; then printf '%s\n' "$hit"; else printf 'MISSING %s.md\n' "$name"; fi
+  done
 }
 
 cmd_prompt_version() {
