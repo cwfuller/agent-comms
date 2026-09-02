@@ -92,7 +92,7 @@ archive the inbound via `comms.sh send`.
 
 **Codex sandbox note:** delivery goes over ACP and needs no socket allowance, so the
 `workspace-cmux` permission profile — and the `codex-permissions` and `doctor` commands that
-managed it — were removed in step 4 (S4-4). If a sandboxed session cannot deliver, Claude was
+managed it — were removed in step 4 (S4-4). Nothing needs configuring for delivery. If a sandboxed session cannot deliver, Claude was
 not notified and passive polling is not assumed: do not resend from the unchanged sandbox;
 use one manual pickup for the already-persisted message.
 
@@ -114,7 +114,7 @@ agnostic.
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
 | `verdict <file>` | normalized verdict: whitespace-stripped, uppercased, loopspec synonyms mapped (`pass` → `APPROVE`, `fail` → `REQUEST_CHANGES`) |
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
-| `deliver <claude\|codex> [file]` | routes via `transport`, classifying the MESSAGE: one carrying `workflow:` is a loop (ACP-first, `spawned`), anything else is a consult/one-shot (live pane first, then ACP — the `acp` route runs a parent-brokered turn through `runphase --via acp`). Prints `delivered to <surface> (<how>)` / `spawned` / manual-pickup / `blocked` (sandboxed socket) / `FAILED`. `COMMS_DELIVERY=cmux` forces the pane; `=headless` forces the runner and is REFUSED for claude/codex, whose self-send path was deleted in step 4; `=mailbox` forces manual pickup — the file is written and nobody is nudged, which is a deliberate outcome and not a failure |
+| `deliver <claude\|codex> [file]` | routes via `transport`, classifying the MESSAGE: one carrying `workflow:` is a loop (ACP-first, `spawned`), anything else is a consult/one-shot (ACP — the `acp` route runs a parent-brokered turn through `runphase --via acp`). Prints the chosen route and ww>)` / `spawned` / manual-pickup / `blocked` (sandboxed socket) / `FAILED`. `COMMS_DELIVERY=cmux` forces the pane; `=headless` forces the runner and is REFUSED for claude/codex, whose self-send path was deleted in step 4; `=mailbox` forces manual pickup — the file is written and nobody is nudged, which is a deliberate outcome and not a failure |
 | `send --to <claude\|codex> <file> [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`delivered`/`spawned`/`manual`/`blocked`/`failed`) |
 | `presence claim\|beat\|others\|release\|expire\|with-beat` | advisory multi-session coordination on `.comms/sessions/` — claim-then-check (exit 0 direct-safe / 3 peers / 4 fail-closed ambiguity), whole-file heartbeats (exit 5 = healed, re-check before writing), exact-self release, two-pass byte-identical reap with nonce tombstone covers, and a beat-wrapper for long-running children. See PROTOCOL "Presence & worktrees" |
 | `worktree new [<slug>]` | session worktree under the MAIN root's `.claude/worktrees/` on branch `worktree-<slug>`, from the LOCAL default-branch tip; refuses without ignore coverage |
@@ -234,8 +234,9 @@ The `cmux` pane transport was DELETED in step 4 (S4-4), along with its pacing an
 knobs (`COMMS_CMUX_PACE`, `COMMS_CMUX_BACKOFF`) and the `doctor`, `bind`, `reconcile`, and
 `codex-permissions` commands that served it. A keystroke nudge is self-send by another name:
 it tells a live agent to read and reply itself, with no parent stamping and no pinned
-artifact. `COMMS_DELIVERY=cmux` is now an unknown transport and resolves to `mailbox` with a
-warning rather than silently substituting something you did not choose.
+artifact. `COMMS_DELIVERY=cmux` is now an unknown transport and is **REFUSED** — as is any
+other unrecognised value — rather than silently substituting something you did not choose.
+Unset it, or pick `acp` | `headless` (grok only) | `mailbox`.
 
 ACP-first falls back to **mailbox**, not to a pane. grok is not an `interactive` agent, so
 no pane is eligible for it; claude and codex refuse a non-ACP turn outright. A missing

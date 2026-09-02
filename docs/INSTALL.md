@@ -28,48 +28,20 @@ Run interactively (no `--scope`) and the installer shows a menu:
 
 All scopes are idempotent — re-run freely.
 
-## Codex socket permissions
+## Codex permissions
 
-Codex → Claude auto-delivery uses cmux's local Unix socket **when cmux delivery is selected** — since 2026-08-25 loops default to the headless runner, which needs no socket, and cmux is opt-in via `--via cmux` / `COMMS_DELIVERY=cmux`. This section applies only to the cmux path. A default
-`sandbox_mode = "workspace-write"` session cannot connect to that socket, and wrappers
-or retries launched by the same session remain inside the same boundary. Message files
-still persist, but Claude is not notified and does not passively poll `.comms/`.
+**No socket allowance is required.** Delivery runs over ACP, which needs no network and no
+Unix socket. The `workspace-cmux` permission profile this section used to prescribe — along
+with the `comms.sh codex-permissions` and `comms.sh doctor` commands that printed and verified
+it — was removed in step 4 with the cmux transport itself.
 
-Configure the least-privilege permission profile once in `~/.codex/config.toml`:
+Reviewer turns are contained by Codex's own kernel sandbox (`sandbox_mode = "read-only"` plus
+an isolated `CODEX_HOME`), which `runphase.sh` sets up per turn. Nothing needs configuring in
+`~/.codex/config.toml` for agent-comms to deliver.
 
-```toml
-# Remove any sandbox_mode line and [sandbox_workspace_write] table first.
-default_permissions = "workspace-cmux"
-
-[permissions.workspace-cmux]
-description = "Workspace editing plus agent-comms cmux delivery"
-extends = ":workspace"
-
-[permissions.workspace-cmux.network]
-enabled = true
-
-[permissions.workspace-cmux.network.unix_sockets]
-"/Users/YOU/.local/state/cmux/cmux.sock" = "allow"
-```
-
-The installed helper prints a copy with the current user's resolved path:
-
-```bash
-~/.agent-comms/comms.sh codex-permissions
-```
-
-Restart Codex after changing the global config. No launch parameter is required:
-`default_permissions` applies the profile to every new session. Do not launch Codex
-with `--sandbox`, because that selects the legacy sandbox model and overrides the
-profile. Verify a session with:
-
-```bash
-~/.agent-comms/comms.sh doctor
-```
-
-`cmux socket: reachable` is the required result. A `blocked` result means the message
-queue remains reliable but active peer notification is unavailable in that session.
-Permission profiles are supported by Codex 0.138.0 and later and are currently beta.
+If a sandboxed session still cannot write its reply, the message file persists and Claude is
+**not** notified — do not assume passive polling of `.comms/`. Use one manual pickup rather
+than re-running the same helper from the unchanged sandbox.
 
 ### Global vs local pinning
 

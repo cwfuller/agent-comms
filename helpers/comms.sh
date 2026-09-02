@@ -32,7 +32,6 @@
 #                               detaching — required inside sandboxes that reap the
 #                               children of a finished shell command.
 #                               validate, deliver, update thread state, then archive inbound
-#   reconcile <message-file|message-id>   record a successful external/direct nudge
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
 #   presence <claim|beat|others|release|expire|with-beat>
@@ -53,7 +52,6 @@
 #                               --expect binds the record to the commit the CALLER
 #                               verified: HEAD moving mid-run refuses instead of
 #                               attesting a commit the run was not about
-#   bind <claude|codex> [surface:N]   pin which surface delivery targets (show with no arg)
 #   clean --as <agent> [workspace|all|archive|<file>] [--yes]
 #   clean mounts [--yes] [--orphans]   GC this repo's EXTERNAL mount store (dry-run default;
 #                              refuses the whole repo-key on any live owner; --orphans reports
@@ -175,10 +173,10 @@ repo_workspace_name() {
 cmd_workspace() {
   # `workspace set <name>` writes the explicit repo-scoped pin — the mailbox
   # identity, shared by every session and worktree of this repo. Everything
-  # below it (cmux title, branch, dirname) is INFERENCE, and a valid-but-wrong
+  # below it (branch, dirname) is INFERENCE, and a valid-but-wrong
   # inference (title "fwh-backup" in the fwh-platform repo) was cached as
   # authoritative forever and hid pending replies behind the filename glob.
-  # cmux ids keep routing SURFACES; they no longer get to name the mailbox
+  # a pin is a naming decision and outranks every inferred source
   # once a pin exists. (field report #3.)
   if [ "${1:-}" = "set" ]; then
     local pname="${2:-}" wroot
@@ -190,7 +188,7 @@ cmd_workspace() {
     mkdir -p "$wroot/.comms" 2>/dev/null || usage_err "workspace set: cannot create $wroot/.comms"
     printf '%s\n' "$pname" > "$wroot/.comms/workspace" \
       || usage_err "workspace set: cannot write the pin"
-    echo "workspace pinned to '$pname' — this file ($wroot/.comms/workspace) is now the mailbox identity for every session in this repo; cmux titles only route surfaces"
+    echo "workspace pinned to '$pname' — this file ($wroot/.comms/workspace) is now the mailbox identity for every session in this repo"
     return 0
   fi
   local pinf pinned
@@ -3825,13 +3823,18 @@ cmd_transport() {
   local caps
   caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
 
-  # cmux DELETED (S4-4). An explicit COMMS_DELIVERY=cmux is now an unknown transport, and
-  # the rule that survives is the one that mattered: never silently substitute a transport
-  # the caller did not choose. Say mailbox, which is honest and visible to `status`.
-  if [ "${COMMS_DELIVERY:-}" = "cmux" ]; then
-    echo "warning: COMMS_DELIVERY=cmux — the cmux transport was removed in step 4; using mailbox" >&2
-    printf 'mailbox\n'; return 0
-  fi
+  # AN UNKNOWN TRANSPORT IS REFUSED, not degraded. Warn-and-degrade was the weaker option and
+  # was not even self-consistent: `transport` printed `mailbox` on stdout while `COMMS_DELIVERY`
+  # stayed `cmux`, so `deliver`/`send` still reported "NOT spawned … fix and retry" even with ACP
+  # available, and templates that capture stdout never saw the stderr warning. Refusing matches
+  # how headless-for-claude already fails (die + name the fix) and closes the wider hole that
+  # `COMMS_DELIVERY=foo` silently took the default ladder. ONE list, checked once, here at the
+  # single decision point. (codex + grok, S4-4 r1, corroborated blocking.)
+  case "${COMMS_DELIVERY:-}" in
+    ""|acp|headless|mailbox) ;;
+    cmux) die "transport: COMMS_DELIVERY=cmux — the cmux pane transport was REMOVED in step 4; unset it, or choose acp | headless (grok only) | mailbox" ;;
+    *)    die "transport: COMMS_DELIVERY='${COMMS_DELIVERY}' is not a known transport — choose acp | headless (grok only) | mailbox" ;;
+  esac
 
   # LOOPS ARE ACP-FIRST, then headless, then a pane. A loop is unattended work by
   # definition, so it must not depend on an open pane — but the ordering here is
@@ -3840,7 +3843,7 @@ cmd_transport() {
   #   headless (cold spawn) ~115,000 fresh input tokens per turn
   #   ACP (warm session)    ~1,061
   #
-  # A cold spawn rebuilds context from nothing every round; a live pane keeps the
+  # A cold spawn rebuilds context from nothing every round; only the
   # conversation but still re-sends a large uncached prefix per model call. Only a
   # named ACP session makes round N pay a delta. headless stays available
   # and opt-in (COMMS_DELIVERY / --via).
@@ -3983,7 +3986,7 @@ cmd_status() {
     # consumed the file. An aged file still in the target inbox is stronger
     # evidence than the notification outcome and must remain visible.
     if [ "$st" != "complete" ] && [ -n "$pending" ] && [ "$age_s" -gt 900 ]; then
-      echo "ACTION NEEDED: $(basename "$pending") is still unread after $(( age_s / 60 ))m (last_delivery=$deliv). Nudge $target directly; if socket-blocked, configure 'comms.sh codex-permissions' for a new Codex session."
+      echo "ACTION NEEDED: $(basename "$pending") is still unread after $(( age_s / 60 ))m (last_delivery=$deliv). Nudge $target directly, or re-send with 'comms.sh send'."
     # Live headless outcomes are not operator-action cases: spawned = turn in
     # flight, completed = reply is (or was) in the inbox for the driver to read,
     # held = the operator paused deliberately, pickup = designed reply-to-driver
@@ -3998,7 +4001,7 @@ cmd_status() {
       # (grok: "a new outcome token, or status treating requested mailbox like `pickup`"), which
       # is a change to what deliver WRITES, not to what status READS. Filed rather than faked.
       # (grok, S4-1 r2 — explicitly not this increment's ship gate.)
-      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Do not retry from an unchanged sandbox; use manual pickup or configure 'comms.sh codex-permissions' and restart Codex."
+      echo "ACTION NEEDED: last delivery was '$deliv' — $owes was NOT nudged. Do not retry from an unchanged sandbox; use manual pickup, or re-send with 'comms.sh send'."
     fi
   fi
 }

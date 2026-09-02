@@ -100,7 +100,7 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
 
 5. **Write safely.** Use a heredoc with quoted delimiter (`<<'EOF'`) or write via a tool that does not interpolate shell variables or backticks in the body. Never embed the message body inside an interpolated shell string — Markdown backticks will be evaluated.
 
-6. **Validate, deliver, and archive in one atomic step.** The helper validates your reply (frontmatter delimiters; `type`, `from`, `timestamp`; workflow fields plus `verdict` since the reply is from codex; non-empty body), refuses to deliver or archive if malformed, attempts the cmux nudge, records state, and then archives the processed inbound:
+6. **Validate, deliver, and archive in one atomic step.** The helper validates your reply (frontmatter delimiters; `type`, `from`, `timestamp`; workflow fields plus `verdict` since the reply is from codex; non-empty body), refuses to deliver or archive if malformed, hands the message to the runner, records state, and then archives the processed inbound:
    ```bash
    "$COMMS_SH" send --to claude "<your reply file>" --archive-inbound "<the incoming message file>"
    ```
@@ -108,7 +108,7 @@ verdict: <APPROVE | REQUEST_CHANGES | COMMENT — omit when answering a question
    <!-- loopspec:fragment result-headless-codex-side -->
    Exceptions when a runphase turn is in flight (`acp` or `headless`): `RESULT: manual — headless mode: the reply is on disk...` is EXPECTED when you are the spawned peer (the driving session picks your reply up when your turn ends — do not retry). `RESULT: spawned` means a detached Claude turn is now processing your message: await the printed run dir (`.../runphase.sh await "<run dir>"`), then `$read-from-claude` for the reply; a non-zero await means the turn failed or timed out — check its `result.json` and report that instead of waiting.
    <!-- /loopspec:fragment -->
-   With no runner the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk). A non-sandbox mid-sequence cmux failure is reported as `delivery FAILED`; retry the send once. `send` updates `.comms/state/<workspace>_<thread>.json` automatically for workflow messages.
+   With no runner the helper degrades to "manual pickup" (and still archives the inbound — the reply is verified on disk). A non-sandbox mid-delivery failure is reported as `delivery FAILED`; retry the send once. `send` updates `.comms/state/<workspace>_<thread>.json` automatically for workflow messages.
 
 7. Confirm to the user that the message was verified and delivery attempted.
 

@@ -459,10 +459,11 @@ and is load-bearing: the `main` branch resolves to `main`, NOT to the repository
 name — substituting the directory name there would change every message-filename prefix and
 hide pending messages and thread state behind the glob.
 
-**Late nudges are normal.** The injected read command sits in the target's input box
-until its current turn ends — sometimes minutes. If the reply was already consumed by
-then (e.g. by a file watcher), the late `/read-from-codex` finds an empty inbox; readers
-report "latest archived: X — already processed" instead of a confusing "no messages".
+**Late reads are normal.** A reply can be consumed before the reader that was told about it
+gets there (e.g. by a file watcher, or by a driver picking it up when its turn ends), so a
+later `/read-from-codex` finds an empty inbox; readers report "latest archived: X — already
+processed" instead of a confusing "no messages". The keystroke-injection version of this —
+a nudge queued in a pane's input box — went with cmux in step 4; the empty-inbox case did not.
 That archive hint is filtered by workspace, reader direction, and optional thread, then
 ordered by protocol timestamp with mtime fallback; an unrelated older round cannot win
 because of filename order.

@@ -190,7 +190,7 @@ custom profile — that the named profile actually extends `read-only` and denie
 `**/.comms/**` is a trust assumption about operator-controlled config.
 
 `deny` globs are kernel-enforced for reads and writes. This is the same
-print-it-don't-write-it posture as `comms.sh codex-permissions`: the recipe is
+print-it-don't-write-it posture the removed `codex-permissions` command had: the recipe is
 documented, the operator applies it, and the runner honors the selection.
 
 The parent stamps the ENTIRE

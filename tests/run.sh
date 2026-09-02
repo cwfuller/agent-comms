@@ -4789,11 +4789,20 @@ else
   # (grok, S4-2 implement r1, advisory.)
   [ "$TR_LOOP_DEFAULT" = "mailbox" ] && ok "with no ACP, an ACP-only provider's loop says mailbox" || fail "loop default (got: $TR_LOOP_DEFAULT)"
 fi
-# A REQUEST for the deleted transport must not silently become something else. It resolves to
-# mailbox — honest and visible to `status` — rather than quietly substituting acp. The opt-in
-# and pane-preference assertions that stood here died with the transport (S4-4).
-[ "$( (cd "$TR_FIX" && env COMMS_DELIVERY=mailbox "$COMMS" transport codex --loop) 2>/dev/null)" = "mailbox" ] \
-  && ok "a request for the deleted cmux transport reports mailbox, never a silent substitute" || fail "cmux-requested fallback"
+# A REQUEST for the deleted transport is REFUSED, not silently substituted. This assertion
+# previously set COMMS_DELIVERY=mailbox while claiming to test cmux, so it never touched the
+# path at all — deleting the special case entirely would have left the suite green. It now
+# passes the real value and requires a non-zero exit naming cmux. (codex + grok, S4-4 r1.)
+TR_CMUX_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=cmux "$COMMS" transport codex --loop) 2>&1 )" && TR_CMUX_RC=0 || TR_CMUX_RC=$?
+[ "$TR_CMUX_RC" != "0" ] && printf '%s\n' "$TR_CMUX_OUT" | grep -q 'cmux pane transport was REMOVED' \
+  && ok "a request for the deleted cmux transport is refused, never silently substituted" \
+  || fail "cmux request not refused (rc=$TR_CMUX_RC, got: $TR_CMUX_OUT)"
+# ...and the refusal is not cmux-specific special-casing: any unknown transport is refused,
+# which is the hole that let COMMS_DELIVERY=foo silently take the default ladder. (grok, r1.)
+TR_FOO_OUT="$( (cd "$TR_FIX" && env COMMS_DELIVERY=foo "$COMMS" transport codex --loop) 2>&1 )" && TR_FOO_RC=0 || TR_FOO_RC=$?
+[ "$TR_FOO_RC" != "0" ] && printf '%s\n' "$TR_FOO_OUT" | grep -q "not a known transport" \
+  && ok "an unknown COMMS_DELIVERY value is refused, not silently defaulted" \
+  || fail "unknown transport not refused (rc=$TR_FOO_RC, got: $TR_FOO_OUT)"
 
 # END-TO-END, not just the selector. `deliver` used to hardcode --loop, so every send
 # was reclassified as a loop and a live-pane CONSULT spawned headless instead of nudging
@@ -4811,7 +4820,7 @@ message_id: $(basename "$TR_FIX")_2026-08-25T10-00-00_q-1
 ---
 
 ## Question
-does a consult still reach a live pane?
+does a consult still classify as a consult?
 TRQ
 TR_LOOPMSG="$TR_FIX/.comms/to-codex/$(basename "$TR_FIX")_2026-08-25T10-01-00_wf-1.md"
 cat > "$TR_LOOPMSG" <<TRW
@@ -4856,10 +4865,13 @@ run_tr_default() { (cd "$TR_FIX" && env -u COMMS_DELIVERY PATH="$STUB_BIN:$PATH"
 # deliver classifies from the MESSAGE, not a hardcoded --loop — is still covered by the
 # `run_tr_default transport codex --loop` assertion below and by the workflow-classification
 # assertions in this section. Removed rather than re-pointed at something it does not prove.
+# The old negative here grepped for 'delivered to surface', which cannot appear now that the
+# pane arm is gone — it could not fail. Assert the POSITIVE outcome a loop must actually
+# produce instead. (grok, S4-4 r1: "the third is still vacuous".)
 TR_LOOP_OUT="$(run_tr_default deliver codex "$TR_LOOPMSG" 2>&1 || true)"
-printf '%s\n' "$TR_LOOP_OUT" | grep -q 'delivered to surface' \
-  && fail "a loop took a pane it was not asked for" \
-  || ok "a LOOP message never takes a live pane"
+printf '%s\n' "$TR_LOOP_OUT" | grep -qE 'RESULT: spawned|manual pickup|written for pickup|note: COMMS_DELIVERY=mailbox' \
+  && ok "a LOOP message resolves to a runner or an honest manual pickup" \
+  || fail "loop delivery produced no recognised outcome (got: $TR_LOOP_OUT)"
 # "did not reach a surface" is also true of manual pickup and of a spawn failure, so
 # assert the POSITIVE signal. (codex, transport-flip round 2.)
 # The old positive ("it actually spawned headless") needed an agent with BOTH a pane and the

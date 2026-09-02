@@ -42,7 +42,7 @@ unless they asked.
    - `headless` / `mailbox` → the mailbox path below (steps 4-8).
    - `acp` → the synchronous ACP path in this step.
 
-   The helper prefers a live pane when there is one, and falls back to ACP when there
+   The helper routes over ACP (there is no pane transport since step 4), and falls back when there
    is not — because the alternative is writing a message into an inbox nobody is
    watching. That is not hypothetical: a real consult was stranded exactly that way
    (`RESULT: manual`, no Codex surface running). Say which transport was used when it
@@ -128,8 +128,9 @@ message_id: <the filename, without .md>
    ```bash
    "$COMMS_SH" send --to "$TARGET" "<path of the message file you wrote>"
    ```
-   On `RESULT: blocked`, execute the exact `RECOVER:` line once; relay only the final
-   non-`delivered` result.
+   On `RESULT: blocked`, the message is on disk but the peer was NOT notified: ask for one
+   manual pickup. (The `RECOVER:` line went with the cmux transport in step 4.) Relay only
+   the final non-`delivered` result.
 
 9. Tell the user the message was sent and where to look for the reply (`.comms/to-claude/` — replies come TO claude regardless of target). When the reply arrives, use `/read-from-codex` to surface the answer (it reads any sender). Headless-only targets (e.g. grok) answer via a detached runphase turn automatically.
 

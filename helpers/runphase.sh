@@ -2722,8 +2722,8 @@ cmd_run() {
             # fails the place closed. (codex, r4 + r5.)
             [ -f "$_dst" ] && [ ! -L "$_dst" ] || return 1
           }
-          # Credentials only, copied fresh. NOT the permission profile this repo's own
-          # `codex-permissions` recipe installs: that profile is exactly what makes the agent
+          # Credentials only, copied fresh. NOT the broad workspace permission profile an
+          # operator may have set globally: such a profile is exactly what makes the agent
           # self-authorise, so no permission request is ever issued and no client-side denial
           # is possible. An isolated home is how the review turn escapes it.
           # Reap any `.stage.*` left by a prior death between mktemp and mv (grok, r4, advisory).
