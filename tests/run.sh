@@ -1178,8 +1178,14 @@ case "$RES_TAIL" in RESULT:*) ok "tail -1 of send --archive-inbound is the RESUL
 # and is exercised by the grok leg sections; the ACP equivalents for claude/codex failure
 # reporting were added BEFORE this deletion, in the same branch.
 
-# run_headless outlives that section: step 2 below still needs a headless driver, and headless
-# is now grok-only.
+# These two outlive that section: step 2 below still needs a headless driver and the claude stub's
+# argv log. headless is now grok-only.
+# These outlive the deleted section because later sections still use them. RUNPHASE and rundir_of
+# are transport-neutral; run_headless/run_rp pin headless, which is now grok-only.
+export CODEX_STUB_LOG="$WORK/codex.log"
+RUNPHASE="$REPO/helpers/runphase.sh"
+rundir_of() { echo "$1" | sed -n 's/^ *run dir: //p' | head -1; }
+run_rp() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 PATH="$STUB_BIN:$PATH" "$RUNPHASE" "$@"); }
 run_headless() { (cd "$REPO_FIX" && env -u CMUX_WORKSPACE_ID COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
 
 section "runphase step 2: claude backend, direction pickup, hold, watchdog"
