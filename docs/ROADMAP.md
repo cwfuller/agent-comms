@@ -55,6 +55,48 @@ are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnos
 equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
 trusting this number if the corpus has moved.
 
+### MEASURED: driver warmth is NOT load-bearing (2026-09-02, four-arm test)
+
+Run to decide whether a headless loop DRIVER must hold a warm ACP session. Design is codex's
+(consulted 2026-09-02): correctness first, tokens as a secondary readout, plus a negative control.
+Fixture: a durable checkpoint — one panel leg `completed` with a verdict, one `spawned` without,
+review set `demo-set-r2-abc1234`, round 2 of 6 — and a question that forces a read of `.comms/`
+rather than memory.
+
+| arm | transition | set | fresh input | cache_read |
+|---|---|---|---|---|
+| warm round 1 (named session) | AWAIT | demo-set-r2-abc1234 | 476 | 26,496 |
+| warm round 2 (same session) | AWAIT | demo-set-r2-abc1234 | 422 | 27,008 |
+| cold `--oneshot` (stateless) | AWAIT | demo-set-r2-abc1234 | 461 | 26,752 |
+| changed-cwd control | AWAIT | demo-set-r2-abc1234 | 438 | 26,752 |
+
+**Correctness: unanimous.** Every arm — including the stateless one and the one with a
+deliberately broken session key — independently derived the same next transition FROM DURABLE
+STATE. codex's unsafe condition ("if only the warm arm resumes correctly, ACP context has become
+the coordinator record") does NOT hold. A re-invoked driver is safe.
+
+**Cost: the spread is 422-476 fresh input tokens — noise.** The control is the sharpest result:
+acpx keys identity on `(agent, cwd, name)`, so a changed cwd DOES break the session key — and it
+cost 438, cheaper than warm round 1. `cache_read` sits at ~26-27k in all four arms. **Session
+warmth is not what makes these turns cheap; provider prompt caching on content prefix is, and it
+survives a broken session key.**
+
+**Consequences for a `comms.sh auto` driver:** no session lifecycle, no 300s TTL race, no
+process-keepalive. That subsystem does not need building. It also means `claude -p` per phase is
+viable on cost grounds — its real blocker was exiting while legs were still detached, never tokens.
+
+**SCOPE LIMIT, stated so nobody over-reads this.** The prompt was small (~600 B) against a tiny
+fixture, and ~26k of cache_read suggests system prompt and tools dominate. This shows cold
+re-invocation is cheap FOR A DRIVER READING STATE FILES. It does NOT show that for a turn
+ingesting a large diff — and the judgment turns (implement, triage) are exactly the large-context
+ones. Measure those separately before assuming this generalises.
+
+**It also further undermines the repo's token folklore.** "~1k warm vs ~115k cold" was already
+deleted from README (eea290e) as unverified — undated, from unmounted turns, committed three days
+before warm-mount landed. This measurement says even the defensible `/ask` figure (18,562 cold vs
+146 warm, 2026-08-20) does not generalise to a state-reading driver turn. Quote neither as
+evidence for a driver design.
+
 ### Open: `ask` reports a FALSE FAILURE after a successful consult (2026-09-02)
 
 **Observed live.** `comms.sh ask --from claude --to codex --wait --file q.txt` completed the
