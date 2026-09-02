@@ -1568,7 +1568,7 @@ cmd_panel() {
   done
   roster="${roster# }"
 
-  local aid pver dispatch_pair dispatch_base
+  local aid pver dispatch_pair dispatch_base synthetic_note=""
   dispatch_pair="$(cmd_snapshot create --with-base)" || die "panel dispatch: could not retain the artifact"
   aid="${dispatch_pair%%	*}"
   dispatch_base="${dispatch_pair#*	}"
@@ -1582,9 +1582,23 @@ cmd_panel() {
   # session a hand-written "please ignore" note to a panel that had already read the files.
   # (codex + grok, staging-safety r1, corroborated.)
   if [ -n "$dispatch_base" ] && [ "$aid" != "$dispatch_base" ]; then
+    # THE TREE THAT WAS SNAPSHOTTED, not the main checkout. cmd_snapshot reads `show-toplevel`,
+    # so a dispatch from a worktree snapshots THAT worktree — reporting `$(cmd_root)/..` listed
+    # the main checkout's dirt instead, which is both wrong and reassuring in the worst case.
+    # (codex + grok, staging-safety r2, corroborated blocking.)
+    local dirty_root dirty_list
+    dirty_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    # Captured in ONE read, not piped into `head`: under `set -euo pipefail` a `git status |
+    # head -10` pipeline returns nonzero when head closes the pipe early, so a tree with more
+    # than ten dirty files would have KILLED the dispatch it was meant to warn about.
+    # (codex, r2, blocking.)
+    dirty_list=""
+    [ -n "$dirty_root" ] && dirty_list="$(git -C "$dirty_root" status --porcelain 2>/dev/null || true)"
     echo "warning: dispatching a SYNTHETIC snapshot — the tree was dirty, so reviewers will read uncommitted work:" >&2
-    git -C "$(cmd_root)/.." status --porcelain 2>/dev/null | head -10 | sed 's/^/  /' >&2
+    printf '%s\n' "$dirty_list" | sed -n '1,10p' | sed 's/^/  /' >&2
+    [ "$(printf '%s\n' "$dirty_list" | grep -c .)" -gt 10 ] && echo "  … and more" >&2
     echo "  commit first if that is not what you meant (AGENTS.md: 'commit before dispatching')." >&2
+    synthetic_note=" [SYNTHETIC snapshot: dirty tree]"
   fi
   pver="$(cmd_prompt_version 2>/dev/null || true)"
   [ -n "$set_id" ] || set_id="$(printf '%s-%s-r%s-%s' "${base_thread:-panel}" "${phase:-nophase}" "${round:-1}" "$(printf '%s' "$aid" | cut -c1-7)")"
@@ -1689,7 +1703,7 @@ cmd_panel() {
     cmd_send --to "$ag" "$leg_file" || echo "  warning: leg for '$ag' did not deliver — the set is incomplete"
     n=$((n + 1))
   done
-  echo "panel: $set_id dispatched to $n reviewer(s); compose with 'comms.sh panel status --set $set_id'"
+  echo "panel: $set_id dispatched to $n reviewer(s)$synthetic_note; compose with 'comms.sh panel status --set $set_id'"
 }
 
 cmd_compose() {

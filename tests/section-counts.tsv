@@ -16,6 +16,7 @@ comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line	3
 runphase step 2: hold, release, and the stalled watchdog	12
 headless delivery: self-pickup suppression and a missing runner	7
 comms.sh: workspace identity (no cmux)	3
+panel dispatch: synthetic-snapshot warning	2
 loopspec: conformance fixtures	1
 multi-agent: registry contract	15
 multi-agent: sender enforcement + grok inbox round-trip	2
@@ -32,7 +33,7 @@ friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	42
 runphase: parent-brokered claude and codex legs over ACP	32
-scope-dial template source contract	17
+scope-dial template source contract	15
 templates: bare dollar-digit/dollar-star hygiene	1
 /ask canonical template source contract	10
 loopspec: prompt fragments do not drift from docs/loopspec/fragments/	10

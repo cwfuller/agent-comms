@@ -825,11 +825,17 @@ while saying nothing about `git add -A`, which defeats it upstream by staging fo
 the shared index. It also noted the snapshot pins the WHOLE tree, so the foreign files reached its
 reviewers and it had to hand-write a "please ignore" note.
 
-**Known limit of this fix:** it is documentation, and this repo's own rule is that "a validation
-a second caller can bypass is the bug shape this codebase keeps rediscovering." A mechanical guard
-is not obviously available — the tooling cannot know which dirty files are "yours" — so the honest
-state is a rule plus a verification step (`git diff --cached --name-only`), not an enforced
-invariant. Worth revisiting if someone finds a check that does not need that knowledge.
+**A mechanical guard WAS available, and both reviewers found it.** I claimed none was, on the
+grounds that the tooling cannot know which dirty files are "yours". True, and the wrong question:
+ownership is unknowable, but *"was the dispatched snapshot SYNTHETIC"* is not — `cmd_snapshot`
+already returns `artifact == base` for a clean tree and `artifact != base` when it wrapped a dirty
+one. `panel dispatch` now WARNS on a synthetic snapshot (never refuses — a deliberate dirty
+dispatch is legitimate), lists the dirty paths of the tree it actually snapshotted, and marks the
+stdout dispatch line so a stdout-capturing caller cannot miss it. Pinned with BOTH arms.
+
+What remains documentation is the HUNK case: a foreign hunk inside a file you also edited stages
+under a filename that looks like yours. `git diff --cached` is the step that closes it; there is
+no enforcement, because that one does need to know which changes are yours.
 
 
 

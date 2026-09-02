@@ -256,8 +256,10 @@ runtime, quote the assertion count with it or measure both sides yourself.
                                        # HUNK inside a file you also touched
   ```
   **The name check alone is not enough.** If another session edited the same file, its hunks
-  stage under a filename that looks like yours. Read the staged diff, or stage interactively
-  with `git add -p`. (codex, staging-safety r1, blocking.)
+  stage under a filename that looks like yours. **`git diff --cached` is the step that actually
+  closes it** — read the staged diff before committing. (`git add -p` also works but needs a
+  TTY, so it is a human option, not something an agent can run.)
+  (codex + grok, staging-safety r1/r2.)
 - **`git commit -a` is the same footgun for TRACKED files.** It needs no `add` at all and would
   have swept the modified file in the 2026-09-02 report on its own. Named here because a rule
   that lists only `git add -A` invites it. (grok, staging-safety r1.)
