@@ -1287,7 +1287,10 @@ XS="$WORK/xsev"; rm -rf "$XS"; mkdir -p "$XS/.comms/archive"
 ( cd "$XS" && git init -q -b main . && printf 'x\n' > s.txt && printf '.comms/\n' > .gitignore
   git add -A && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
 xs_reply() { # <agent> <minute> <blocking-anchors csv|-> <advisory-anchors csv|->
-  local ag="$1" mi="$2" bl="$3" ad="$4" f="$XS/.comms/archive/xsev_2026-08-26T12-3${mi}-00_${ag}-reply.md"
+  # TWO statements: bash expands every argument to `local` BEFORE any assignment takes effect,
+  # so `f=...${mi}...` on the same line reads an unbound `mi` under `set -u`.
+  local ag="$1" mi="$2" bl="$3" ad="$4"
+  local f="$XS/.comms/archive/xsev_2026-08-26T12-3${mi}-00_${ag}-reply.md"
   { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T12:3%s:00Z\nworkspace: xsev\nmessage_id: xsev-%s-reply\nthread: xsev-%s\nin-reply-to: xsev-req\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: REQUEST_CHANGES\n---\n\n### Blocking\n' "$ag" "$mi" "$ag" "$ag"
     [ "$bl" = "-" ] || { IFS=,; for a in $bl; do printf -- '- `%s` — %s blocking.\n' "$a" "$ag"; done; unset IFS; }
     printf -- '\n### Advisory\n'
