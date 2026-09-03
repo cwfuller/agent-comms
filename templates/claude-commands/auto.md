@@ -210,6 +210,11 @@ verdict format. The cycle continues until APPROVE or max rounds.
    ```
    It clusters the union by SUPPORT and drops nothing:
    - **Corroborated** (an anchor two reviewers independently flagged) — these gate.
+   - **Flagged by more than one reviewer at different severities** — two reviewers landed
+     on the SAME anchor but rated it differently (one blocking, one advisory). It does NOT
+     gate, but it is STRONGER evidence than a lone blocker, not weaker: read this section
+     before Uncorroborated. Two reviewers finding the same thing is the signal; the severity
+     they each assigned is not.
    - **Uncorroborated** — cross-check before spending a round on it. A lone unsupported
      blocker is not obeyed automatically; that is what stops one noisy reviewer holding
      the loop hostage, and it is the token discipline that keeps a panel affordable.

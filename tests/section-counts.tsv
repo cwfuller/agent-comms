@@ -17,7 +17,7 @@ runphase step 2: hold, release, and the stalled watchdog	12
 headless delivery: self-pickup suppression and a missing runner	7
 comms.sh: workspace identity (no cmux)	3
 panel dispatch: synthetic-snapshot warning	4
-compose: cross-severity corroboration	11
+compose: cross-severity corroboration	13
 loopspec: conformance fixtures	1
 multi-agent: registry contract	15
 multi-agent: sender enforcement + grok inbox round-trip	2

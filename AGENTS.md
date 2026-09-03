@@ -149,7 +149,11 @@ were live.)
    always "obey": composition gates on blockers that are **corroborated** or raised by the
    **gating reviewer**; a lone uncorroborated blocker is meant to be cross-checked, not
    automatically obeyed — that rule is what stops one noisy reviewer holding the loop
-   hostage. What you may never do is silently drop one. If you disagree, say so in the next
+   hostage. Support is counted per DISTINCT REVIEWER at an anchor, ACROSS severities, so a
+   defect one reviewer filed blocking and another filed advisory prints under *flagged at
+   different severities*: it does not gate, but do not read it as weaker than a lone
+   blocker — it is the corroborated case the detector was blind to until 2026-09-03.
+   What you may never do is silently drop one. If you disagree, say so in the next
    round's request and argue it.
 6. Repeat until the **gating reviewer** (first in the roster) approves *and* the panel is
    composed. Then `round-note` each reply, archive them, mark threads complete, and

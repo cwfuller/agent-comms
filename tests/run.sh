@@ -1333,7 +1333,14 @@ xs_reply() { # <agent> <minute> <blocking csv|-> <advisory csv|->
   rid="$(grep -m1 '^message_id:' "$leg" | sed 's/^message_id: //')"
   f="$XS/.comms/archive/${XS_WS}_2026-08-26T12-3${mi}-00_${ag}-reply.md"
   { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T12:3%s:00Z\nworkspace: %s\nmessage_id: xsev-%s-reply\nthread: %s\nin-reply-to: %s\nreview_set: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: REQUEST_CHANGES\n---\n\n### Blocking\n' "$ag" "$mi" "$XS_WS" "$ag" "$th" "$rid" "$XS_SET"
-    [ "$bl" = "-" ] || { IFS=,; for a in $bl; do printf -- '- `%s` — %s blocking.\n' "$a" "$ag"; done; unset IFS; }
+    # A leading '~' emits an UNANCHORED finding — no backticked span, so `findings_extract`
+    # records an empty anchor. That is the input the `$14!=""` guard exists for.
+    [ "$bl" = "-" ] || { IFS=,; for a in $bl; do
+        case "$a" in
+          '~'*) printf -- '- %s prose blocker with no anchor.\n' "$ag" ;;
+          *)    printf -- '- `%s` — %s blocking.\n' "$a" "$ag" ;;
+        esac
+      done; unset IFS; }
     printf -- '\n### Advisory\n'
     [ "$ad" = "-" ] || { IFS=,; for a in $ad; do printf -- '- `%s` — %s advisory.\n' "$a" "$ag"; done; unset IFS; }
   } > "$f"
@@ -1350,8 +1357,13 @@ xs_reply() { # <agent> <minute> <blocking csv|-> <advisory csv|->
 # whatever the reviewer typed. The classifier must not recover anchors by splitting a composite
 # key. (codex, implement r1, blocking — pre-fix this row was DROPPED: 9 findings in, 8 out.)
 XS_FS="sub$(printf '\034')b.txt:1"
-xs_reply codex 0 "mix.txt:1,gate.txt:1,solo.txt:1,$XS_FS" "gate.txt:1,adv.txt:1"
-xs_reply grok  1 "gate.txt:1"                      "mix.txt:1,adv.txt:1"
+# Each reviewer also files an UNANCHORED blocker. They are UNRELATED defects and must never
+# corroborate each other: without `$14!=""` on the classifier they would both group under the
+# empty key and manufacture a gate nobody voted for — a false POSITIVE, which is worse than
+# the false negative this whole change fixes. grok blocked plan r1 for dropping that guard,
+# and flagged at implement r2 that the guard had no fixture. It has one now.
+xs_reply codex 0 "mix.txt:1,gate.txt:1,solo.txt:1,$XS_FS,~c" "gate.txt:1,adv.txt:1"
+xs_reply grok  1 "gate.txt:1,~g"                   "mix.txt:1,adv.txt:1"
 XSC="$(run_xs compose --set "$XS_SET" 2>&1 || true)"
 xs_sec() { printf '%s\n' "$XSC" | awk -v h="$1" 'index($0,h)==1{f=1;next} /^## /{f=0} f'; }
 xs_sec '## Gates'          | grep -q 'gate.txt:1' && ok "a gated anchor survives one reviewer also filing advisory there" || fail "the existing gate was lost"
@@ -1371,6 +1383,12 @@ XS_OUT="$(printf '%s\n' "$XSC" | grep -ac '^- \[' || true)"
 [ -n "$XS_IN" ] && [ "$XS_IN" = "$XS_OUT" ] \
   && ok "every parsed finding is rendered somewhere — composition drops nothing ($XS_OUT/$XS_IN)" \
   || fail "composition dropped findings (parsed $XS_IN, rendered $XS_OUT)"
+[ "$(xs_sec '## Unanchored' | grep -c '^- \[')" = "2" ] \
+  && ok "both unanchored blockers are carried, not discarded" \
+  || fail "unanchored blockers lost (got $(xs_sec '## Unanchored' | grep -c '^- \['))"
+printf '%s\n' "$XSC" | grep -q 'MORE THAN ONE reviewer: 1' \
+  && ok "two UNRELATED unanchored blockers do not manufacture a gate" \
+  || fail "the empty anchor clustered — false gate (got: $(printf '%s\n' "$XSC" | grep -i 'MORE THAN ONE' | head -1))"
 
 section "loopspec: conformance fixtures"
 if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then

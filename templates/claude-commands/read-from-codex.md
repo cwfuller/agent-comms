@@ -167,7 +167,9 @@ never a re-derived one.
   leg you just read, say which reviewers are still out, and stop — the loop resumes when
   the set completes.
 - **When it composes, work the composition, not the union.** Fix the **corroborated**
-  findings, the gating reviewer's blockers, and any uncorroborated blocker that
+  findings, the gating reviewer's blockers, anything **flagged by more than one reviewer at
+  different severities** (it does not gate, but two reviewers on one anchor is corroboration
+  — the severity split is not a reason to discount it), and any uncorroborated blocker that
   independently meets verdict discipline. **Do NOT auto-address every blocking bullet from
   every reviewer** — that is `any-blocks` through the back door, and it is how one noisy
   reviewer holds the loop hostage.
