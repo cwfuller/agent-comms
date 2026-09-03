@@ -55,6 +55,64 @@ are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnos
 equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
 trusting this number if the corpus has moved.
 
+### DESIGNED, NOT BUILT: session-lifecycle retirement (2026-09-03, plan r1+r2)
+
+**Why it exists.** A cleanup pass removed **29 session worktrees, 49 mount worktrees and 39
+branches**, oldest dating to 2026-08-28. Every creation verb has no retirement counterpart:
+`integrate` cleans up its OWN throwaway verification worktree but leaves the SOURCE branch and
+worktree behind, so each landing leaks a pair.
+
+**Both reviewers say DO THE SUITE FIRST.** codex: *"Prioritize suite wall-clock reduction before
+implementing lifecycle retirement."* Measured cost of the loop: ~10 min suite + 5-15 min panel per
+round, 2-4 rounds per increment. Lifecycle cleanup is an annoyance hit once; suite duration taxes
+every change. **This design is approved-but-unbuilt on purpose.**
+
+**Two facts I had wrong in r1, corrected by both:**
+- `clean mounts` ALREADY EXISTS — a documented external-store GC, dry-run default, `--orphans`,
+  delegating to `runphase clean-mounts`, alongside `unmount_artifact`/`mount_ident`. I grepped for
+  `reap`/`prune` rather than reading the help banner.
+- Mounts are keyed `<slug>-<hash12>-<agent>` via `acp_mount_ident` (hash over canonical root, raw
+  thread, agent) — NOT `<thread>-<agent>`. Targeting needs the ident, not a name match.
+
+**The design, if someone builds it later.** `integrate` attempts a conservative retire AFTER the
+CAS and NEVER fails the landing on it — but prints `LANDED; RETIRE SKIPPED: <reason>` so a skip is
+loud, not silent (codex). Retire only when ALL hold, re-checked at retire time:
+1. the input was a BRANCH name, not a SHA/tag/commit-ish (`integrate` takes any revision expr);
+2. the branch tip still equals the `cand` that landed — `cand` is captured BEFORE a ~10-minute
+   suite, so another process can advance it inside that window;
+3. `main` contains it;
+4. the worktree is MANAGED — mechanically defined: branch shape `worktree-<slug>` AND registered
+   path `.claude/worktrees/<slug>`;
+5. the worktree is clean — **no `--force`, ever**;
+6. **the worktree is quiescent, exclusively owned, and is NOT `cwd` nor contains `cwd`**
+   (`remove` without `--force` catches dirty, not a concurrent writer, and not deleting the tree
+   you are standing in).
+
+**Ref deletion must itself be COMPARE-AND-SWAP** (codex, blocking): after the worktree is removed
+the branch is unlocked, so another process can advance it before the delete. And **never
+`git branch -d`** (grok, blocking): `-d` asks *"merged into HEAD?"*, not *"contained in main?"* —
+after a landing the primary is commonly ON main, so it coincidentally passes while asking the
+wrong question.
+
+**Mount reaping COMPOSES with `clean mounts`** — a `--thread`/ident filter computing exact
+identities through `acp_mount_ident`, reusing its validated-store, repo-key scope, physical-path
+and `.root` checks. **Not** hung off `state complete`: completion is not terminal. If wired there
+at all, mark complete FIRST so a cleanup failure is retryable.
+
+**Abandoned work has NO proof event** (`auto-driver` is the live example), so nothing may
+auto-delete it. `worktree list` as a first-class dry-run inventory — managed path, branch,
+ahead/dirty/diverged — is the whole intervention for that case.
+
+**Prune operates on ONE resolved target at a time and re-enumerates before selecting the next.**
+Never from a precomputed list: the 2026-09-02 cleanup script computed orphans BEFORE removing
+worktrees, and the removals created 28 new orphans it had already decided to skip.
+
+**Tests to write first:** dirty source refused · tip moved past `cand` after resolve, CAS lands,
+retire skipped, exit 0 · non-branch input lands and retires nothing · prune never touches the
+primary checkout or a mount · reopened thread re-mounts cold and succeeds · retire failure does
+not change integrate's exit status · active writer during retirement · branch advancing between
+worktree removal and ref deletion · symlinked managed-path component · two threads sharing a mount.
+
 ### MEASURED: driver warmth is NOT load-bearing (2026-09-02, four-arm test)
 
 Run to decide whether a headless loop DRIVER must hold a warm ACP session. Design is codex's
