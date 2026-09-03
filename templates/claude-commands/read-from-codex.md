@@ -167,12 +167,16 @@ never a re-derived one.
   leg you just read, say which reviewers are still out, and stop — the loop resumes when
   the set completes.
 - **When it composes, work the composition, not the union.** Fix the **corroborated**
-  findings, the gating reviewer's blockers, anything **flagged by more than one reviewer at
-  different severities** (it does not gate, but two reviewers on one anchor is corroboration
-  — the severity split is not a reason to discount it), and any uncorroborated blocker that
+  findings, the gating reviewer's blockers, and any uncorroborated blocker that
   independently meets verdict discipline. **Do NOT auto-address every blocking bullet from
   every reviewer** — that is `any-blocks` through the back door, and it is how one noisy
   reviewer holds the loop hostage.
+- **Read *flagged by more than one reviewer at different severities* BEFORE the uncorroborated
+  section** — two reviewers landing on one anchor is more corroborative evidence than a lone
+  report, so it earns your attention first. It does NOT gate, and READING FIRST IS NOT FIXING
+  FIRST: fix one only when the gating reviewer raised it as blocking, or when it independently
+  meets verdict discipline. Treating the section as must-fix would widen the gate exactly the
+  way auto-addressing every blocker does.
 - **Still split after one confirmation round → escalate to the user**, same lane as
   max-rounds. The human is the only adjudicator this protocol admits.
 - **Round N+1 re-dispatches the whole panel** with `panel dispatch`, at the new round.
