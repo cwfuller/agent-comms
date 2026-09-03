@@ -1283,35 +1283,79 @@ section "compose: cross-severity corroboration"
 # defect one reviewer filed blocking and another filed advisory at the SAME anchor contributed one
 # row and never reached m>1. Filed 2026-08-27, recurred 2026-09-03 (fwh-platform), confirmed here:
 # 8 consecutive warm-acp-mount panels and every panel of 2026-09-02/03 reported 0.
-XS="$WORK/xsev"; rm -rf "$XS"; mkdir -p "$XS/.comms/archive"
-( cd "$XS" && git init -q -b main . && printf 'x\n' > s.txt && printf '.comms/\n' > .gitignore
-  git add -A && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
-xs_reply() { # <agent> <minute> <blocking-anchors csv|-> <advisory-anchors csv|->
+#
+# The fixture DISPATCHES A REAL PANEL rather than dropping replies in the archive. compose reads
+# the findings-set index and the plan snapshot, so a set that was never dispatched composes to
+# nothing at all — and every "does not appear" assertion then passes on empty output. An earlier
+# revision of this section did exactly that: 5 assertions failed and the 3 that "passed" were
+# vacuous. Control-checked against the pre-fix helper: assertions 2, 4, 7 and 8 below FLIP (they
+# fail on the old code); 1, 5 and 6 are regression guards that must stay green in both.
+XS="$WORK/xsev"; mkdir -p "$XS"; XS="$(cd "$XS" && pwd -P)"
+git -C "$XS" init -q -b main
+printf '.comms/\n' > "$XS/.gitignore"; echo subject > "$XS/s.txt"
+git -C "$XS" add -A >/dev/null 2>&1
+git -C "$XS" -c user.email=t@t -c user.name=t commit -q -m init
+mkdir -p "$XS/.comms/to-codex" "$XS/.comms/to-grok" "$XS/.comms/to-claude" "$XS/.comms/archive"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$XS/.comms/config"
+run_xs() { (cd "$XS" && env COMMS_DELIVERY=mailbox COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
+XS_WS="$(run_xs workspace)"
+XS_REQ="$XS/.comms/to-codex/${XS_WS}_2026-08-26T12-00-00_req.md"
+cat > "$XS_REQ" <<XSEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-08-26T12:00:00Z
+head_sha: $(git -C "$XS" rev-parse HEAD)
+workspace: $XS_WS
+message_id: xs-req-1
+thread: xs-thread
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## What was done
+cross-severity fixture
+XSEOF
+run_xs panel dispatch --to codex,grok --set xsev-set "$XS_REQ" >/dev/null 2>&1
+XS_LEG_C="$(find "$XS/.comms/to-codex" -name '*panel-codex*' -type f | head -1)"
+XS_SET="$(grep -m1 '^review_set:' "$XS_LEG_C" 2>/dev/null | sed 's/^review_set: //')"
+[ -n "$XS_SET" ] && ok "the cross-severity fixture dispatched a real set to compose against" \
+  || fail "no set dispatched — every assertion below would pass on empty compose output"
+xs_reply() { # <agent> <minute> <blocking csv|-> <advisory csv|->
   # TWO statements: bash expands every argument to `local` BEFORE any assignment takes effect,
   # so `f=...${mi}...` on the same line reads an unbound `mi` under `set -u`.
   local ag="$1" mi="$2" bl="$3" ad="$4"
-  local f="$XS/.comms/archive/xsev_2026-08-26T12-3${mi}-00_${ag}-reply.md"
-  { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T12:3%s:00Z\nworkspace: xsev\nmessage_id: xsev-%s-reply\nthread: xsev-%s\nin-reply-to: xsev-req\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: REQUEST_CHANGES\n---\n\n### Blocking\n' "$ag" "$mi" "$ag" "$ag"
+  local leg th rid f a
+  leg="$(find "$XS/.comms/to-$ag" -name "*panel-$ag*" -type f | head -1)"
+  th="$(grep -m1 '^thread:' "$leg" | sed 's/^thread: //')"
+  rid="$(grep -m1 '^message_id:' "$leg" | sed 's/^message_id: //')"
+  f="$XS/.comms/archive/${XS_WS}_2026-08-26T12-3${mi}-00_${ag}-reply.md"
+  { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T12:3%s:00Z\nworkspace: %s\nmessage_id: xsev-%s-reply\nthread: %s\nin-reply-to: %s\nreview_set: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: REQUEST_CHANGES\n---\n\n### Blocking\n' "$ag" "$mi" "$XS_WS" "$ag" "$th" "$rid" "$XS_SET"
     [ "$bl" = "-" ] || { IFS=,; for a in $bl; do printf -- '- `%s` — %s blocking.\n' "$a" "$ag"; done; unset IFS; }
     printf -- '\n### Advisory\n'
     [ "$ad" = "-" ] || { IFS=,; for a in $ad; do printf -- '- `%s` — %s advisory.\n' "$a" "$ag"; done; unset IFS; }
   } > "$f"
 }
-# (a) blocking+advisory one anchor -> Mixed. (b) 2 blocking + 1 advisory -> GATES (regression
-# guard for the rule that would have REMOVED an existing gate). (c) two advisory -> Advisory.
-# (d) lone blocking -> Uncorroborated. (g) two UNANCHORED blockers must NOT cluster.
-xs_reply codex 0 "mix.txt:1,gate.txt:1,solo.txt:1" "adv.txt:1"
+# gate.txt:1 — both reviewers blocking, and codex ALSO files advisory there. The advisory row must
+#   not demote a gated anchor. (Only claude/codex/grok are registerable and claude drives, so two
+#   reviewers is the ceiling; this is the 2-reviewer expression of "a third advisory vote must not
+#   remove an existing gate".)
+# mix.txt:1  — codex blocking, grok advisory -> Mixed. This is the anchor the detector never saw.
+# solo.txt:1 — codex alone, blocking -> Uncorroborated.
+# adv.txt:1  — both advisory, no blocking vote -> Advisory.
+xs_reply codex 0 "mix.txt:1,gate.txt:1,solo.txt:1" "gate.txt:1,adv.txt:1"
 xs_reply grok  1 "gate.txt:1"                      "mix.txt:1,adv.txt:1"
-xs_reply claude 2 "gate.txt:1"                     "-"
-XSC="$( (cd "$XS" && "$COMMS" compose --set xsev-set) 2>&1 || true)"
+XSC="$(run_xs compose --set "$XS_SET" 2>&1 || true)"
 xs_sec() { printf '%s\n' "$XSC" | awk -v h="$1" 'index($0,h)==1{f=1;next} /^## /{f=0} f'; }
-xs_sec '## Gates'        | grep -q 'gate.txt:1' && ok "2 blocking + 1 advisory still GATES (no regression)" || fail "the existing gate was lost"
+xs_sec '## Gates'          | grep -q 'gate.txt:1' && ok "a gated anchor survives one reviewer also filing advisory there" || fail "the existing gate was lost"
 xs_sec '## Flagged by more' | grep -q 'mix.txt:1' && ok "blocking+advisory at one anchor is surfaced, not buried" || fail "cross-severity anchor still invisible"
-xs_sec '## Flagged by more' | grep -q 'gate.txt:1' && fail "a gated anchor also appears under mixed" || ok "a gated anchor does not also appear under mixed"
+xs_sec '## Flagged by more' | grep -q 'gate.txt:1' && fail "a gated anchor also appears under mixed" || ok "classification is exclusive — a gated anchor is not also mixed"
 xs_sec '## Uncorroborated' | grep -q 'mix.txt:1' && fail "mixed anchor left under the suspicion heading" || ok "a mixed anchor leaves Uncorroborated"
 xs_sec '## Uncorroborated' | grep -q 'solo.txt:1' && ok "a lone blocker stays Uncorroborated" || fail "lone blocker misclassified"
-xs_sec '## Advisory'      | grep -q 'adv.txt:1' && ok "two advisories with no blocking vote stay Advisory" || fail "advisory-only anchor promoted"
-xs_sec '## Advisory'      | grep -q 'gate.txt:1' && fail "a gated anchor's advisory row leaked into Advisory" || ok "a gated anchor prints its dissent inside Gates only"
+xs_sec '## Advisory'       | grep -q 'adv.txt:1' && ok "two advisories with no blocking vote stay Advisory" || fail "advisory-only anchor promoted"
+xs_sec '## Advisory'       | grep -q 'gate.txt:1' && fail "a gated anchor's advisory row leaked into Advisory, detached from its anchor" || ok "a gated anchor prints its dissent inside Gates only"
 printf '%s\n' "$XSC" | grep -q 'differing severity: 1' && ok "the dashboard counts mixed anchors" || fail "mixed count wrong (got: $(printf '%s\n' "$XSC" | grep -i 'differing severity' | head -1))"
 
 section "loopspec: conformance fixtures"

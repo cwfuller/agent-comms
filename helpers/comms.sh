@@ -1934,13 +1934,16 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
       if ($13=="blocking") { blk[$14 SUBSEP $9]=1 }
     }
     END{
-      for (k in seen){ split(k,a,SUBSEP); nrev[a[1]]++ }
-      for (k in blk){ split(k,a,SUBSEP); nblk[a[1]]++ }
-      for (a in nrev){
-        if (nblk[a] > 1)                       print a "\tgates"
-        else if (nrev[a] > 1 && nblk[a] > 0)   print a "\tmixed"
-        else if (nblk[a] > 0)                  print a "\tuncorroborated"
-        else                                   print a "\tadvisory"
+      # `parts` and `anc` must be DIFFERENT names: awk refuses to use one identifier as
+      # both a split() array and a scalar loop variable, and it fails at RUNTIME, not parse
+      # time — so a shared name dies only once findings actually carry anchors.
+      for (k in seen){ split(k,parts,SUBSEP); nrev[parts[1]]++ }
+      for (k in blk){ split(k,parts,SUBSEP); nblk[parts[1]]++ }
+      for (anc in nrev){
+        if (nblk[anc] > 1)                       print anc "\tgates"
+        else if (nrev[anc] > 1 && nblk[anc] > 0) print anc "\tmixed"
+        else if (nblk[anc] > 0)                  print anc "\tuncorroborated"
+        else                                     print anc "\tadvisory"
       }
     }' "$tmp" > "$cls"
   corroborated="$(awk -F'\t' '$2=="gates"' "$cls" | grep -c . || true)"
