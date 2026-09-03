@@ -83,8 +83,12 @@
 #                               the recovery surface after an await dies with its session.
 #   compose --set <id> [--out F]
 #                               cluster every leg's findings and label them by SUPPORT:
-#                               corroborated (gates), uncorroborated (cross-check first),
-#                               unanchored, advisory. Drops nothing; no model arbitrates.
+#                               corroborated (gates), flagged-at-differing-severities (2+
+#                               reviewers, mixed severity — does NOT gate), uncorroborated
+#                               (cross-check first), unanchored, advisory. Support is counted
+#                               per DISTINCT REVIEWER at an anchor, across severities: a
+#                               blocking and an advisory report of one defect are two
+#                               reviewers, not one. Drops nothing; no model arbitrates.
 #   events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R]
 #          [--request-id Q] [--message-id M] [--limit N]
 #           events append --kind <kind> [--set|--thread|--round|--agent|--role|--artifact|
@@ -1928,18 +1932,23 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   # false negative by shipping a false positive. (grok, plan r3, blocking.)
   local cls; cls="$(mktemp "${TMPDIR:-/tmp}/agent-comms-cls.XXXXXX")" \
     || die "compose: cannot classify findings — refusing to publish a composition that was never verified"
+  # THE ANCHOR IS NEVER RECOVERED BY SPLITTING A COMPOSITE KEY. `anchor SUBSEP reviewer`
+  # is written only to de-duplicate one reviewer's repeated findings; the per-anchor tallies
+  # are incremented at read time under the ORIGINAL `$14`. An earlier revision recovered the
+  # anchor with `split(k,parts,SUBSEP)`, which silently truncated any anchor CONTAINING the
+  # SUBSEP byte (0x1c) — `findings_extract` strips tabs but permits it inside a backticked
+  # anchor. `$cls` then held the truncated anchor while every renderer looked up the full
+  # one, so the row matched no class, was anchored so it missed the unanchored sections, and
+  # vanished from the output entirely. A DROPPED FINDING, which is the one thing composition
+  # promises never to do. (codex, implement r1, blocking.)
   awk -F'\t' '
     $14!="" {
-      seen[$14 SUBSEP $9]=1
-      if ($13=="blocking") { blk[$14 SUBSEP $9]=1 }
+      anchors[$14]=1
+      if (!(($14 SUBSEP $9) in seen)) { seen[$14 SUBSEP $9]=1; nrev[$14]++ }
+      if ($13=="blocking" && !(($14 SUBSEP $9) in blk)) { blk[$14 SUBSEP $9]=1; nblk[$14]++ }
     }
     END{
-      # `parts` and `anc` must be DIFFERENT names: awk refuses to use one identifier as
-      # both a split() array and a scalar loop variable, and it fails at RUNTIME, not parse
-      # time — so a shared name dies only once findings actually carry anchors.
-      for (k in seen){ split(k,parts,SUBSEP); nrev[parts[1]]++ }
-      for (k in blk){ split(k,parts,SUBSEP); nblk[parts[1]]++ }
-      for (anc in nrev){
+      for (anc in anchors){
         if (nblk[anc] > 1)                       print anc "\tgates"
         else if (nrev[anc] > 1 && nblk[anc] > 0) print anc "\tmixed"
         else if (nblk[anc] > 0)                  print anc "\tuncorroborated"

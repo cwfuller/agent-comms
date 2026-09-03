@@ -1345,7 +1345,12 @@ xs_reply() { # <agent> <minute> <blocking csv|-> <advisory csv|->
 # mix.txt:1  — codex blocking, grok advisory -> Mixed. This is the anchor the detector never saw.
 # solo.txt:1 — codex alone, blocking -> Uncorroborated.
 # adv.txt:1  — both advisory, no blocking vote -> Advisory.
-xs_reply codex 0 "mix.txt:1,gate.txt:1,solo.txt:1" "gate.txt:1,adv.txt:1"
+# sub<FS>.txt:1 carries awk's SUBSEP byte (0x1c). `findings_extract` strips tabs but permits
+# this one inside a backticked anchor, and an anchor is attacker-adjacent text: it comes from
+# whatever the reviewer typed. The classifier must not recover anchors by splitting a composite
+# key. (codex, implement r1, blocking — pre-fix this row was DROPPED: 9 findings in, 8 out.)
+XS_FS="sub$(printf '\034')b.txt:1"
+xs_reply codex 0 "mix.txt:1,gate.txt:1,solo.txt:1,$XS_FS" "gate.txt:1,adv.txt:1"
 xs_reply grok  1 "gate.txt:1"                      "mix.txt:1,adv.txt:1"
 XSC="$(run_xs compose --set "$XS_SET" 2>&1 || true)"
 xs_sec() { printf '%s\n' "$XSC" | awk -v h="$1" 'index($0,h)==1{f=1;next} /^## /{f=0} f'; }
@@ -1357,6 +1362,15 @@ xs_sec '## Uncorroborated' | grep -q 'solo.txt:1' && ok "a lone blocker stays Un
 xs_sec '## Advisory'       | grep -q 'adv.txt:1' && ok "two advisories with no blocking vote stay Advisory" || fail "advisory-only anchor promoted"
 xs_sec '## Advisory'       | grep -q 'gate.txt:1' && fail "a gated anchor's advisory row leaked into Advisory, detached from its anchor" || ok "a gated anchor prints its dissent inside Gates only"
 printf '%s\n' "$XSC" | grep -q 'differing severity: 1' && ok "the dashboard counts mixed anchors" || fail "mixed count wrong (got: $(printf '%s\n' "$XSC" | grep -i 'differing severity' | head -1))"
+xs_sec '## Uncorroborated' | grep -aq "$XS_FS" && ok "an anchor containing SUBSEP is classified, not truncated" || fail "the SUBSEP anchor lost its class"
+# The general invariant the SUBSEP bug violated: composition MOVES findings between sections,
+# it never removes one. Counting rendered rows against the parsed finding count catches the
+# whole family, not just the one byte that exposed it.
+XS_IN="$(printf '%s\n' "$XSC" | sed -n 's/.*all answered\. \([0-9][0-9]*\) findings.*/\1/p' | head -1)"
+XS_OUT="$(printf '%s\n' "$XSC" | grep -ac '^- \[' || true)"
+[ -n "$XS_IN" ] && [ "$XS_IN" = "$XS_OUT" ] \
+  && ok "every parsed finding is rendered somewhere — composition drops nothing ($XS_OUT/$XS_IN)" \
+  || fail "composition dropped findings (parsed $XS_IN, rendered $XS_OUT)"
 
 section "loopspec: conformance fixtures"
 if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then

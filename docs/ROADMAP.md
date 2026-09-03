@@ -55,9 +55,9 @@ are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnos
 equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
 trusting this number if the corpus has moved.
 
-### NEXT UP: the corroboration detector has never fired (2026-09-03, sev 4, THIRD report)
+### RESOLVED 2026-09-03: the corroboration detector had never fired (sev 4, THIRD report)
 
-**The loop's headline safety rule is unreachable.** `compose` gates on blockers that are
+**The loop's headline safety rule was unreachable.** `compose` gates on blockers that are
 CORROBORATED or raised by the gating reviewer. Measured: **8 consecutive `warm-acp-mount` panels
 reported `Anchored blocking findings supported by MORE THAN ONE reviewer: 0`**, as did every panel
 composed on 2026-09-02/03 (staging-safety r2/r3, lifecycle plan r1/r2), as did all four rounds of
@@ -79,11 +79,30 @@ landed under that same label for the same reason, and were only caught by hand c
 **History:** first filed 2026-08-27 (dot-lifecycle thread), recurred 2026-09-03 (fwh-platform),
 independently confirmed 2026-09-03 (agent-comms). **Three sessions, three repos, never fixed.**
 
-**Where to look:** `compose`'s clustering keys on an exact `path:line` anchor
-(`helpers/comms.sh` ~:1877-1907) and it already admits two findings at one anchor may not be the
-same defect. The severity dimension is the new part: clustering must consider a finding
-corroborated when the SUBSTANCE matches, independent of the severity each reviewer assigned.
-Note the existing warning that an anchor is a weak identity — do not make it weaker.
+**The defect:** `corroborated` filtered `$13=="blocking"` BEFORE clustering, so a finding one
+reviewer filed blocking and another filed advisory at the same anchor contributed a single row
+and never reached `m>1`. Corroboration across severities was structurally unreachable.
+
+**Fixed:** one per-anchor classifier now counts support by DISTINCT REVIEWER across severities and
+writes `<anchor>\t<class>`; the dashboard counts and all four renderers read that one file, so the
+count and the printer can no longer disagree — which is how this survived three reports. A fifth
+class, *flagged by more than one reviewer at different severities*, surfaces the previously
+invisible case without gating on it: an anchor still gates only on 2+ BLOCKING reviewers, so the
+gate was widened in visibility, not in strictness.
+
+Anchor identity is unchanged and deliberately not made weaker: clustering is still exact
+`path:line`. What changed is that severity no longer partitions the reviewers at that anchor.
+
+**Found while fixing it, both caught by review rather than by the suite:**
+- The classifier recovered anchors with `split(key, parts, SUBSEP)`, which truncated any anchor
+  CONTAINING the SUBSEP byte (0x1c) — permitted inside a backticked anchor. The row then matched
+  no class and was DROPPED from the output entirely: 9 findings in, 8 rendered. Composition's one
+  promise is that it drops nothing. Anchors are now tallied under the original key and never
+  recovered by splitting. (codex, implement r1, blocking.)
+- The section's original fixture wrote replies into `.comms/archive` but never dispatched a panel,
+  so `compose` emitted nothing and three "passing" assertions passed on empty text. The suite now
+  pins rendered-rows == parsed-findings, which catches the whole dropped-finding family rather
+  than the one byte that exposed it.
 
 ### OPEN: `integrate` cannot verify a non-hoisted monorepo (2026-09-03, sev 4, fwh-platform)
 
