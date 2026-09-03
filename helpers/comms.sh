@@ -1909,11 +1909,53 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   local compose_buf; compose_buf="$(mktemp "${TMPDIR:-/tmp}/agent-comms-composed.XXXXXX")" \
     || die "compose: cannot buffer the composition — refusing to publish one that was never verified"
   printf '%s\n' "$rows" | awk -F'\t' 'NF>5 && $15 != ""' > "$tmp"
-  local total blocking corroborated unique
+  local total blocking corroborated mixed unique
   total="$(grep -c . "$tmp" || true)"
   blocking="$(awk -F'\t' '$13=="blocking"' "$tmp" | grep -c . || true)"
-  corroborated="$(awk -F'\t' '$13=="blocking" && $14!=""{k[$14]=k[$14] " " $9} END{n=0; for (a in k){c=split(k[a],p," "); u=""; for(i=1;i<=c;i++){if (index(u," " p[i] " ")==0) u=u " " p[i] " "}; m=split(u,q," "); if (m>1) n++} print n+0}' "$tmp")"
+
+  # ONE per-anchor classification, computed ONCE and shared by the counts and every renderer.
+  # Repeating the distinct-reviewer logic across separate awk expressions is how the bug this
+  # fixes survived three reports: the count and the printer must never disagree. (codex, plan r2.)
+  #
+  # THE BUG: `corroborated` filtered `$13=="blocking"` BEFORE clustering, so a finding one
+  # reviewer filed blocking and another filed advisory AT THE SAME ANCHOR contributed a single
+  # row and never reached m>1. Corroboration across DIFFERENT SEVERITIES was structurally
+  # invisible, and no panel in the record ever scored a corroborated blocker. Filed 2026-08-27,
+  # recurred 2026-09-03 (fwh-platform), confirmed here.
+  #
+  # `$14!=""` is kept on BOTH passes. Without it every unanchored finding groups under the empty
+  # key, so two reviewers with UNRELATED prose blockers would falsely corroborate — fixing a
+  # false negative by shipping a false positive. (grok, plan r3, blocking.)
+  local cls; cls="$(mktemp "${TMPDIR:-/tmp}/agent-comms-cls.XXXXXX")" \
+    || die "compose: cannot classify findings — refusing to publish a composition that was never verified"
+  awk -F'\t' '
+    $14!="" {
+      seen[$14 SUBSEP $9]=1
+      if ($13=="blocking") { blk[$14 SUBSEP $9]=1 }
+    }
+    END{
+      for (k in seen){ split(k,a,SUBSEP); nrev[a[1]]++ }
+      for (k in blk){ split(k,a,SUBSEP); nblk[a[1]]++ }
+      for (a in nrev){
+        if (nblk[a] > 1)                       print a "\tgates"
+        else if (nrev[a] > 1 && nblk[a] > 0)   print a "\tmixed"
+        else if (nblk[a] > 0)                  print a "\tuncorroborated"
+        else                                   print a "\tadvisory"
+      }
+    }' "$tmp" > "$cls"
+  corroborated="$(awk -F'\t' '$2=="gates"' "$cls" | grep -c . || true)"
+  mixed="$(awk -F'\t' '$2=="mixed"' "$cls" | grep -c . || true)"
   unique=$(( ${blocking:-0} - 0 ))
+
+  # <section> — every row for the anchors in that class, with reviewer AND severity, so a gated
+  # anchor's advisory dissent prints INSIDE its own section and nowhere else. One section per
+  # anchor. (codex + grok, plan r3, blocking: the earlier spec contradicted itself here.)
+  _compose_rows() {
+    awk -F'\t' -v want="$1" -v clsf="$cls" '
+      BEGIN{ while ((getline line < clsf) > 0){ split(line,c,"\t"); klass[c[1]]=c[2] } }
+      $14!="" && klass[$14]==want { k[$14]=k[$14] "\n- [" $9 "] (" $13 ") " $15 }
+      END{ for (a in k) printf "### %s%s\n\n", a, k[a] }' "$tmp"
+  }
 
   {
     printf '# Panel composition — review set %s\n\n' "$set_id"
@@ -1921,19 +1963,24 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
     # Printed WITH the counts, not above them: the warning qualifies these numbers, and a
     # reader who takes the count without the caveat is the failure being prevented.
     [ -n "$unread" ] && printf '%s\n' "${unread# }"
-    printf 'Anchored blocking findings supported by MORE THAN ONE reviewer: %s\n\n' "${corroborated:-0}"
+    printf 'Anchored blocking findings supported by MORE THAN ONE reviewer: %s\n' "${corroborated:-0}"
+    printf 'Anchors flagged by 2+ reviewers with differing severity: %s\n\n' "${mixed:-0}"
     printf '## Gates (corroborated — an anchor two reviewers independently flagged)\n\n'
-    awk -F'\t' '$13=="blocking" && $14!=""{k[$14]=k[$14] "\n- [" $9 "] " $15; who[$14]=who[$14] " " $9}
-      END{for (a in k){c=split(who[a],p," "); u=""; for(i=1;i<=c;i++){if (index(u," " p[i] " ")==0) u=u " " p[i] " "}; m=split(u,q," ");
-        if (m>1) printf "### %s\n%s\n\n", a, k[a]}}' "$tmp"
+    _compose_rows gates
+    # Deliberately contains neither "Gates" nor "corroborated": those words mean GATING
+    # everywhere else in this output, and this class does not gate. It sits ABOVE
+    # Uncorroborated because it is stronger evidence, not weaker. (grok, plan r2.)
+    printf '## Flagged by more than one reviewer at different severities (does not gate)\n\n'
+    _compose_rows mixed
     printf '## Uncorroborated blocking findings (cross-check before spending a round)\n\n'
-    awk -F'\t' '$13=="blocking" && $14!=""{k[$14]=k[$14] "\n- [" $9 "] " $15; who[$14]=who[$14] " " $9}
-      END{for (a in k){c=split(who[a],p," "); u=""; for(i=1;i<=c;i++){if (index(u," " p[i] " ")==0) u=u " " p[i] " "}; m=split(u,q," ");
-        if (m==1) printf "### %s\n%s\n\n", a, k[a]}}' "$tmp"
+    _compose_rows uncorroborated
     printf '## Unanchored blocking findings (no anchor — cannot be clustered)\n\n'
     awk -F'\t' '$13=="blocking" && $14==""{printf "- [%s] %s\n", $9, $15}' "$tmp"
     printf '\n## Advisory (never gates)\n\n'
-    awk -F'\t' '$13=="advisory"{printf "- [%s] %s%s\n", $9, ($14!="" ? "`" $14 "` — " : ""), $15}' "$tmp"
+    awk -F'\t' -v clsf="$cls" '
+      BEGIN{ while ((getline line < clsf) > 0){ split(line,c,"\t"); klass[c[1]]=c[2] } }
+      $13=="advisory" && ($14=="" || klass[$14]=="advisory") {
+        printf "- [%s] %s%s\n", $9, ($14!="" ? "`" $14 "` — " : ""), $15 }' "$tmp"
   } | {
     # No /dev/stdout reopen: managed sandboxes deny it, failing ordinary
     # composition even with every leg answered. Plain cat IS stdout; a file
@@ -1946,7 +1993,7 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
     # (codex, implement r8, blocking.)
     cat > "$compose_buf"
   }
-  rm -f "$tmp"
+  rm -f "$tmp" "$cls"
   # Composition is the last coordinator act of a round, so it closes the trace the roster
   # event opened: a set with a panel-planned and no composition-* is a round nobody gated.
   # A newer attempt may have landed while this composition was being built. Recording a
@@ -1978,7 +2025,7 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   if [ -n "$out" ]; then cat "$compose_buf" > "$out"; else cat "$compose_buf"; fi
   rm -f "$compose_buf" 2>/dev/null || true
   cmd_events append --kind composition-completed --set "$set_id" --dispatch "$compose_dispatch" --status composed \
-    --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0}" \
+    --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0} mixed=${mixed:-0}" \
     || echo "warning: coordinator log not updated (composition-completed)" >&2
   [ -z "$out" ] || echo "compose: wrote ${out#"$root"/}"
 }

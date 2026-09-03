@@ -1278,6 +1278,39 @@ printf '%s\n' "$SNAP_WT_E" | grep -q 'wt-only.txt' \
   && ok "a dispatch from a linked worktree reports THAT worktree's dirty paths" \
   || fail "worktree dispatch reported the wrong tree (got: $(printf '%s' "$SNAP_WT_E" | head -3 | tr '\n' ' '))"
 
+section "compose: cross-severity corroboration"
+# THE DETECTOR HAD NEVER FIRED. `corroborated` filtered `$13=="blocking"` BEFORE clustering, so a
+# defect one reviewer filed blocking and another filed advisory at the SAME anchor contributed one
+# row and never reached m>1. Filed 2026-08-27, recurred 2026-09-03 (fwh-platform), confirmed here:
+# 8 consecutive warm-acp-mount panels and every panel of 2026-09-02/03 reported 0.
+XS="$WORK/xsev"; rm -rf "$XS"; mkdir -p "$XS/.comms/archive"
+( cd "$XS" && git init -q -b main . && printf 'x\n' > s.txt && printf '.comms/\n' > .gitignore
+  git add -A && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
+xs_reply() { # <agent> <minute> <blocking-anchors csv|-> <advisory-anchors csv|->
+  local ag="$1" mi="$2" bl="$3" ad="$4" f="$XS/.comms/archive/xsev_2026-08-26T12-3${mi}-00_${ag}-reply.md"
+  { printf -- '---\ntype: review-feedback\nfrom: %s\ntimestamp: 2026-08-26T12:3%s:00Z\nworkspace: xsev\nmessage_id: xsev-%s-reply\nthread: xsev-%s\nin-reply-to: xsev-req\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: REQUEST_CHANGES\n---\n\n### Blocking\n' "$ag" "$mi" "$ag" "$ag"
+    [ "$bl" = "-" ] || { IFS=,; for a in $bl; do printf -- '- `%s` — %s blocking.\n' "$a" "$ag"; done; unset IFS; }
+    printf -- '\n### Advisory\n'
+    [ "$ad" = "-" ] || { IFS=,; for a in $ad; do printf -- '- `%s` — %s advisory.\n' "$a" "$ag"; done; unset IFS; }
+  } > "$f"
+}
+# (a) blocking+advisory one anchor -> Mixed. (b) 2 blocking + 1 advisory -> GATES (regression
+# guard for the rule that would have REMOVED an existing gate). (c) two advisory -> Advisory.
+# (d) lone blocking -> Uncorroborated. (g) two UNANCHORED blockers must NOT cluster.
+xs_reply codex 0 "mix.txt:1,gate.txt:1,solo.txt:1" "adv.txt:1"
+xs_reply grok  1 "gate.txt:1"                      "mix.txt:1,adv.txt:1"
+xs_reply claude 2 "gate.txt:1"                     "-"
+XSC="$( (cd "$XS" && "$COMMS" compose --set xsev-set) 2>&1 || true)"
+xs_sec() { printf '%s\n' "$XSC" | awk -v h="$1" 'index($0,h)==1{f=1;next} /^## /{f=0} f'; }
+xs_sec '## Gates'        | grep -q 'gate.txt:1' && ok "2 blocking + 1 advisory still GATES (no regression)" || fail "the existing gate was lost"
+xs_sec '## Flagged by more' | grep -q 'mix.txt:1' && ok "blocking+advisory at one anchor is surfaced, not buried" || fail "cross-severity anchor still invisible"
+xs_sec '## Flagged by more' | grep -q 'gate.txt:1' && fail "a gated anchor also appears under mixed" || ok "a gated anchor does not also appear under mixed"
+xs_sec '## Uncorroborated' | grep -q 'mix.txt:1' && fail "mixed anchor left under the suspicion heading" || ok "a mixed anchor leaves Uncorroborated"
+xs_sec '## Uncorroborated' | grep -q 'solo.txt:1' && ok "a lone blocker stays Uncorroborated" || fail "lone blocker misclassified"
+xs_sec '## Advisory'      | grep -q 'adv.txt:1' && ok "two advisories with no blocking vote stay Advisory" || fail "advisory-only anchor promoted"
+xs_sec '## Advisory'      | grep -q 'gate.txt:1' && fail "a gated anchor's advisory row leaked into Advisory" || ok "a gated anchor prints its dissent inside Gates only"
+printf '%s\n' "$XSC" | grep -q 'differing severity: 1' && ok "the dashboard counts mixed anchors" || fail "mixed count wrong (got: $(printf '%s\n' "$XSC" | grep -i 'differing severity' | head -1))"
+
 section "loopspec: conformance fixtures"
 if bash "$REPO/docs/loopspec/check.sh" --comms "$COMMS" > "$WORK/loopspec.out" 2>&1; then
   ok "loopspec conformance: $(tail -1 "$WORK/loopspec.out")"
@@ -5414,7 +5447,10 @@ mk_leg_reply grok  "$PN_TG" "s.txt:1" "s.txt:3" 1 "$PN_MID_G"
 PN_COMP="$(run_pn compose --set "$PN_SC" 2>&1)"
 printf '%s\n' "$PN_COMP" | grep -q '2 legs, all answered' && ok "compose reports full-panel coverage" || fail "compose coverage (got: $(printf '%s' "$PN_COMP" | head -2))"
 # The corroborated anchor gates.
-printf '%s\n' "$PN_COMP" | awk '/^## Gates/,/^## Uncorroborated/' | grep -q 's.txt:1' \
+# Range NARROWED to Gates -> the next heading. Mixed now sits between Gates and Uncorroborated,
+# so the old `/^## Gates/,/^## Uncorroborated/` span would also match a MIXED anchor and call it
+# gated. (codex, corroboration plan r3.)
+printf '%s\n' "$PN_COMP" | awk '/^## Gates/{f=1;next} /^## /{f=0} f' | grep -q 's.txt:1' \
   && ok "an anchor two reviewers independently flagged is a GATE" || fail "corroborated finding not gated"
 # Unique findings are PRESERVED, not dropped — grok's core objection to condensing.
 printf '%s\n' "$PN_COMP" | grep -q 's.txt:2' && printf '%s\n' "$PN_COMP" | grep -q 's.txt:3' \
