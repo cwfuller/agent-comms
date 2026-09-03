@@ -55,6 +55,58 @@ are path-specific**, i.e. ~42 die with the behaviour and ~36 are transport-agnos
 equivalents BEFORE the removal. That experiment is cheap and repeatable; do it again rather than
 trusting this number if the corpus has moved.
 
+### NEXT UP: the corroboration detector has never fired (2026-09-03, sev 4, THIRD report)
+
+**The loop's headline safety rule is unreachable.** `compose` gates on blockers that are
+CORROBORATED or raised by the gating reviewer. Measured: **8 consecutive `warm-acp-mount` panels
+reported `Anchored blocking findings supported by MORE THAN ONE reviewer: 0`**, as did every panel
+composed on 2026-09-02/03 (staging-safety r2/r3, lifecycle plan r1/r2), as did all four rounds of
+an independent fwh-platform loop. **No panel in the record has ever scored a corroborated blocker.**
+
+**The mechanism, diagnosed by the fwh-platform session:** corroboration across DIFFERENT SEVERITIES
+never anchors. When one reviewer files a finding blocking and the other files the SAME finding
+advisory, they do not cluster — so the detector is blindest exactly when one reviewer rates
+something higher than the other, which is also when the finding is most likely to be real.
+
+**Concrete false negative from this repo, S4-2 implement r3:** codex filed the `docs/PROTOCOL.md`
+symmetric-headless-Codex/Claude example as BLOCKING; grok filed the same defect as advisory in the
+same round. The driver's own summary said "both reviewers converge". `compose` scored it
+**0 corroborated** and routed it to *"Uncorroborated — cross-check before spending a round"* — the
+label that means treat this with suspicion. Two of the fwh loop's highest-value findings (an
+untrusted sender reaching the SheetJS parser; history rendering "0 missing" for a failed sweep)
+landed under that same label for the same reason, and were only caught by hand cross-reading.
+
+**History:** first filed 2026-08-27 (dot-lifecycle thread), recurred 2026-09-03 (fwh-platform),
+independently confirmed 2026-09-03 (agent-comms). **Three sessions, three repos, never fixed.**
+
+**Where to look:** `compose`'s clustering keys on an exact `path:line` anchor
+(`helpers/comms.sh` ~:1877-1907) and it already admits two findings at one anchor may not be the
+same defect. The severity dimension is the new part: clustering must consider a finding
+corroborated when the SUBSTANCE matches, independent of the severity each reviewer assigned.
+Note the existing warning that an anchor is a weak identity — do not make it weaker.
+
+### OPEN: `integrate` cannot verify a non-hoisted monorepo (2026-09-03, sev 4, fwh-platform)
+
+`integrate` runs `suite-cmd` in a detached worktree under `.claude/worktrees/`, which has **no
+per-package `node_modules`**. In fwh-platform `@aws-sdk/*` lives in
+`packages/functions/node_modules` and is not hoisted, so typecheck fails **TS2307 on every AWS SDK
+import in files the branch never touched**. `attest-green` cannot cover for it either: it demands
+a clean tracked tree, and that session had work in flight. **Between them there was no supported
+way to land** — the session ran `suite-cmd` in the primary checkout and fast-forwarded by hand.
+
+**The gate behaved correctly given what it saw** — it refused and left `main` untouched. The gap
+is that the verification worktree cannot reproduce the project's install. Any fix must not weaken
+the "suite passed AT the candidate commit" guarantee, which is the whole point of the detached run.
+
+### OPEN: workspace identity follows the branch name (2026-09-03, sev 2, fwh-platform)
+
+Taking a session branch mints a NEW mailbox identity, so `list`/`archive` warn about messages
+pending under previous identities — 38 messages across three prior identities in that report.
+Individually harmless; the cost is that **it trains operators to ignore the one warning that
+might matter.** There IS a documented workaround (`workspace set <name>` BEFORE switching
+branches, which pins identity so a branch switch cannot flap the prefix) but `worktree new` mints
+a branch, so the default path defeats the guidance.
+
 ### DESIGNED, NOT BUILT: session-lifecycle retirement (2026-09-03, plan r1+r2)
 
 **Why it exists.** A cleanup pass removed **29 session worktrees, 49 mount worktrees and 39
