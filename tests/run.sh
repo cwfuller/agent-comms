@@ -8158,11 +8158,19 @@ printf '%s\n' "$FC_OUT" | grep -q 'provision its own prerequisites' \
   || fail "the diagnostic does not say suite-cmd must provision"
 
 # (2) a wrapper that provisions into an IGNORED path -> LANDS.
+# Pinned on main == THE CANDIDATE, plus the success line — not merely "main moved". `!=` would
+# stay true if a future edit put `suite-attest-secs` in this config and the landing came from a
+# recorded attestation rather than from the wrapper actually working in the fresh tree, which is
+# the only thing this direction exists to prove. (codex + grok, implement r1.)
 printf 'suite-cmd = bash ci/provision.sh\n' > "$FC/.comms/config"
+FC_CAND="$(git -C "$FC" rev-parse --verify session-fc)"
 FC_OUT2="$(run_fc integrate session-fc 2>&1 || true)"
-[ "$(fc_main)" != "$FC_BEFORE" ] \
-  && ok "a self-contained suite-cmd provisions in the fresh tree and LANDS" \
+[ "$(fc_main)" = "$FC_CAND" ] \
+  && ok "a self-contained suite-cmd provisions in the fresh tree and LANDS at the candidate" \
   || fail "a provisioning suite-cmd still could not land (got: $(printf '%s\n' "$FC_OUT2" | tail -1))"
+printf '%s\n' "$FC_OUT2" | grep -q 'suite green at the landed OID' \
+  && ok "the landing was earned by the suite running, not by a recorded attestation" \
+  || fail "no 'suite green at the landed OID' line — the landing may not have run the suite"
 
 # (3) a PASSING suite that leaves git-visible output -> still REFUSED. Ignored output is the
 # intended shape; untracked-but-unignored is not, and this is the wrapper an operator writes
@@ -8181,6 +8189,22 @@ printf '%s\n' "$FC_OUT3" | grep -q 'MAY create IGNORED files' \
 printf '%s\n' "$FC_OUT3" | grep -q 'untracked-artifact.txt' \
   && ok "the dirty-tree refusal names what actually dirtied the tree" \
   || fail "the refusal does not print the offending path"
+
+# (3b) MODIFIED TRACKED file, the shape a real package manager produces when it rewrites a
+# lockfile. Same non-empty-porcelain branch as (3) today, so this is insurance, not new
+# coverage: if anyone ever aligns this check with attest-green's `-uno`, (3) would keep
+# refusing while a rewritten tracked lockfile landed silently. (grok, implement r1.)
+printf '#!/bin/bash\nprintf mutated > s.txt\necho ok\n' > "$FC/ci/lockfile.sh"
+chmod +x "$FC/ci/lockfile.sh"
+(cd "$FC" && git checkout -q session-fc && git add ci/lockfile.sh \
+  && git -c user.email=t@t -c user.name=t commit -qm "ci: lockfile rewriter" \
+  && git checkout -q main) >/dev/null 2>&1
+printf 'suite-cmd = bash ci/lockfile.sh\n' > "$FC/.comms/config"
+FC_AT2="$(fc_main)"
+FC_OUT4="$(run_fc integrate session-fc 2>&1 || true)"
+[ "$(fc_main)" = "$FC_AT2" ] \
+  && ok "a green suite that rewrites a TRACKED file cannot land either" \
+  || fail "a modified tracked file landed anyway"
 
 section "the coordinator's event log: a durable record that is not the mailbox"
 # Contraction step 3, criteria 1 and 4. The log's value is that it SURVIVES things — a

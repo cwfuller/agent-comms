@@ -64,8 +64,9 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    staging; exit 3/4 = isolate into a session worktree
    (`comms.sh worktree new`). Task size never matters; peer presence does.
 2. **Never occupy `main` with WORK.** Every checkout a session works in runs on
-   a session branch; `main` is a ref that advances, checked out transiently
-   inside `integrate`'s throwaway verification worktree. One exception is now
+   a session branch; `main` is a ref that advances and is normally checked out
+   nowhere — `integrate`'s verification worktree is DETACHED at the candidate,
+   not on `main`. One exception is now
    supported (2026-08-27): the primary checkout may IDLE on `main` as the
    owner's console — integrate self-heals it through each landing (rule 3), so
    it always shows landed reality. The moment work happens there, it is an
@@ -75,8 +76,8 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    `git checkout -b`.
 3. **Landing = `comms.sh integrate <branch>`.** Advisory lease, ff-only, the suite
    runs at the CANDIDATE OID in a throwaway detached worktree — a FRESH checkout carrying
-   tracked content only, so `suite-cmd` must provision whatever it needs and may leave
-   ignored files but no git-visible changes (see `suite-cmd` below) — and `main` moves by
+   tracked content only, so `suite-cmd` must provision its own prerequisites and may leave
+   ignored files but no git-visible changes (see the config block above) — and `main` moves by
    compare-and-swap `update-ref` — a race loses cleanly, an untested or non-ff OID
    cannot land, and main never points at a commit the suite has not passed at.
    Integrate small and often: isolation removes collision, but cross-session
