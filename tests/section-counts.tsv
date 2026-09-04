@@ -41,7 +41,7 @@ loopspec: prompt fragments do not drift from docs/loopspec/fragments/	10
 comms.sh: bounded reads (lessons)	20
 comms.sh: bounded reads (archive-search)	10
 comms.sh: help prints its whole header	1
-install.sh: .codex/AGENTS.md managed block	45
+install.sh: .codex/AGENTS.md managed block	47
 grading pilot: findings extraction (the single-reviewer baseline)	15
 grading pilot: --out ledger is append-only and idempotent	4
 grading pilot: shadow role + run identity are stamped, not inferred	3

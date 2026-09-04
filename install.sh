@@ -288,10 +288,10 @@ stat_mode() {  # <file> -> octal mode incl. special bits, or empty
   # %Mp%Lp, not %Lp: Darwin's %Lp drops the special nibble, so 4755 would come back 755 and
   # quietly lose setuid/setgid/sticky. GNU's %a already carries it.
   if v="$(stat -c '%a' "$1" 2>/dev/null)"; then
-    case "$v" in ???|????) case "$v" in *[!0-7]*) ;; *) printf '%s' "$v"; return 0 ;; esac ;; esac
+    case "$v" in ?|??|???|????) case "$v" in *[!0-7]*) ;; *) printf '%s' "$v"; return 0 ;; esac ;; esac
   fi
   if v="$(stat -f '%Mp%Lp' "$1" 2>/dev/null)"; then
-    case "$v" in ???|????) case "$v" in *[!0-7]*) ;; *) printf '%s' "$v"; return 0 ;; esac ;; esac
+    case "$v" in ?|??|???|????) case "$v" in *[!0-7]*) ;; *) printf '%s' "$v"; return 0 ;; esac ;; esac
   fi
   return 0
 }

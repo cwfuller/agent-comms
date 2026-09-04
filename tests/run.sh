@@ -4035,6 +4035,27 @@ ST_E2E_OUT="$( ( PATH="$ST_BIN/linux:$PATH"
 printf '%s\n' "$ST_E2E_OUT" | grep -q 'cannot restore owner/group' \
   && [ "$(cat "$ST_E2E/dest")" = old ] \
   && ok "install_file over an existing destination refuses rather than publishing wrong ownership" || fail "e2e replacement did not fail closed: $ST_E2E_OUT"
+# ...and the happy path, which the refusal case cannot show: a stub reporting THIS process's own
+# ids, so the chown is a no-op it is allowed to make. Without this, "fails closed" could be the
+# only behaviour and the test would still be green. (codex, install-ux r2, advisory.)
+ST_OK="$WORK/stat-e2e-ok"; mkdir -p "$ST_OK/bin"
+printf 'old\n' > "$ST_OK/dest"; chmod 640 "$ST_OK/dest"; printf 'new\n' > "$ST_OK/src"
+printf '#!/bin/sh\ncase "$1$2" in "-c%%u:%%g") echo "%s:%s";; "-c%%a") echo "640";; "-f"*) echo "  File: junk"; exit 1;; esac\nexit 0\n' \
+  "$(id -u)" "$(id -g)" > "$ST_OK/bin/stat"; chmod +x "$ST_OK/bin/stat"
+ST_OK_OUT="$( ( PATH="$ST_OK/bin:$PATH"
+    eval "$ST_FN"
+    eval "$(sed -n '/^install_has_acl() {/,/^}/p' "$REPO/install.sh")"
+    eval "$(sed -n '/^install_file() {/,/^}/p' "$REPO/install.sh")"
+    install_file "$ST_OK/src" "$ST_OK/dest" 2>&1 ) || true )"
+[ "$(cat "$ST_OK/dest")" = new ] && [ "$(stat -f '%Lp' "$ST_OK/dest" 2>/dev/null || stat -c '%a' "$ST_OK/dest")" = 640 ] \
+  && ok "a Linux-shaped stat completes the upgrade and preserves the destination's mode" || fail "e2e upgrade did not publish: $ST_OK_OUT"
+# A one-digit mode is legitimate GNU output and must not read as "cannot read the mode".
+mkdir -p "$ST_BIN/shortmode"
+printf '#!/bin/sh\ncase "$1$2" in "-c%%u:%%g") echo "1234:5678";; "-c%%a") echo "0";; esac\nexit 0\n' \
+  > "$ST_BIN/shortmode/stat"; chmod +x "$ST_BIN/shortmode/stat"
+ST_SHORT="$( ( PATH="$ST_BIN/shortmode:$PATH"; eval "$ST_FN"; stat_mode /etc/hosts ) )"
+[ "$ST_SHORT" = 0 ] \
+  && ok "a short but valid octal mode is accepted, not refused as unreadable" || fail "short mode rejected: '$ST_SHORT'"
 
 # THE COLLAPSE ITSELF (2026-09-04). The note used to be copied into every project, which
 # made a per-repo copy of PROSE while the code stayed single-sourced — so the copies drifted
