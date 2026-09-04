@@ -2612,6 +2612,59 @@ the mount and reach the network with git credentials; that is an operator decisi
 session's. f8c8866 landed on the gating reviewer alone, by explicit operator choice, with grok
 recorded as MECHANICALLY UNAVAILABLE rather than silent.
 
+## Panel degradation when a reviewer is UNAVAILABLE (2026-09-04, owner-directed — do this next)
+
+**Owner direction, 2026-09-04:** build this next, and dogfood it against the live condition —
+grok is out of weekly token quota, so the degraded case is reproducible right now rather than
+hypothetical. This is the one exception to the Contraction freeze; it was directed, not inferred.
+
+**What happens today.** grok hit its weekly quota mid-panel and the leg failed SILENTLY:
+
+- the run left only `.comms/logs/.spawn-<message-id>/` containing a `pid` — no `result.json`,
+  no `reply-raw.md`, no reply;
+- the coordinator's event log nevertheless recorded `turn-started`, `provider-result` AND
+  `turn-finished` for that leg, so **the log claimed the turn finished while the filesystem held
+  nothing**. Those two must not be able to disagree;
+- `panel status` showed the leg unanswered with a blank verdict;
+- `compose --set` correctly refused the whole set as partial and would not gate.
+
+Net: the round was lost, the driver was stuck, and NOTHING said why. There is no quota,
+rate-limit, or exhaustion handling anywhere in `runphase.sh` — grep confirms the words do not
+appear. The failure is indistinguishable from a hung provider or a crashed child.
+
+**The prerequisite, and it is the real bug.** A leg that produces no reply must still write a
+`result.json` saying why. Until that exists nothing downstream can tell an UNAVAILABLE reviewer
+(quota, auth, no verified isolation backend) from one that ANSWERED BADLY (a reply that failed
+the verdict contract). The first is a roster fact and is not the reviewer's fault; the second is
+a review fact and already has a lane. Conflating them is what makes today's failure mute.
+
+**Then, in order:**
+
+1. **Classify.** `unavailable` vs `failed`, decided from the captured provider result, never
+   from silence. Absence of a reply is evidence of nothing — that is the same rule the presence
+   work just re-learned: staleness is not death, and a missing file is not a verdict.
+2. **Record it.** An events kind (`leg-unavailable`) carrying the reason, so the coordinator log
+   remains the source of truth. A roster that shrank must be a WRITTEN fact, never inferred.
+3. **A third composition outcome.** Today `compose` is binary: complete, or refuse. Add
+   `composed-degraded`, valid ONLY when a recorded roster reduction covers exactly the missing
+   legs. It must never be reachable by a leg simply not answering.
+4. **Carry it into the verdict.** A degraded approval names which reviewers were present. It is
+   NOT the same artifact as a full-panel approval and must not read as one later — the archive is
+   the evidence trail, and "approved" with no roster is how a one-reviewer result gets quoted as
+   a panel result six weeks on.
+5. **Headed prompt (the owner's ask).** In headed mode the driver bubbles the unavailable
+   reviewer up and asks: continue degraded with the reviewers that answered, or pause until the
+   reviewer returns. The question names WHO is missing and WHY.
+
+**Headless must never auto-degrade.** An unattended loop that silently proceeds with fewer
+reviewers lowers the bar this tool exists to hold, and does it invisibly. Headless refuses and
+escalates, exactly as `compose` does today. The freeze on that rule is the point of the feature,
+not an obstacle to it.
+
+**Precedent for the interim.** f8c8866 (2026-08-30) landed on the gating reviewer alone with grok
+recorded as MECHANICALLY UNAVAILABLE, by explicit operator choice, rather than silently. This
+change is the same decision made mechanical, so an operator is asked rather than having to know.
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 **Superseded 2026-08-28** by [Contraction (2026-08-28)](#contraction-2026-08-28--current-program).
