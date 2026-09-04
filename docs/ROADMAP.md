@@ -2665,6 +2665,30 @@ not an obstacle to it.
 recorded as MECHANICALLY UNAVAILABLE, by explicit operator choice, rather than silently. This
 change is the same decision made mechanical, so an operator is asked rather than having to know.
 
+### OPEN: the re-send lifecycle wants a SECOND reviewer (2026-09-04)
+
+Panel degradation landed at `c3e8dcb` after five rounds, **all of them degraded to codex alone**
+because grok was out of weekly quota throughout. Codex found SEVEN variants of one defect and
+then diagnosed the arc itself: the recurring weak point was never the fingerprint comparison,
+it was the lifecycle assumption about **which durable event marks an attempt beginning and end**.
+
+Its closing words, recorded verbatim because they are the reason this item exists: the
+implementation is *"not proven — only increasingly well-tested"*, and landing without a second
+reviewer was *"a conscious degraded-review decision rather than corroborated approval"*. The
+owner made that decision explicitly on 2026-09-04.
+
+**What a second reviewer should challenge**, in codex's own framing: which durable event
+constitutes the authoritative beginning and end of a re-send, **including append failures and
+runner death between those boundaries**. The current answer is `request-persisted` (fail-closed,
+written before delivery) rather than `turn-started` (advisory, and its loss would hide a live
+re-send). That choice has had exactly one opinion.
+
+**Blocked on:** grok's weekly quota resetting. Re-probed 2026-09-04 after the landing — still
+exhausted, same signature: exit 1 in 4s with zero bytes.
+
+**When it resets:** one round against `main`, scoped to the boundary question above. Not a
+re-review of the whole feature — the other six variants each have a regression.
+
 ## Priorities (2026-08-20, user-confirmed order)
 
 **Superseded 2026-08-28** by [Contraction (2026-08-28)](#contraction-2026-08-28--current-program).
