@@ -7041,6 +7041,10 @@ claim_pwq() { local hp="$1"; shift; (cd "$PWQ" && env CLAUDE_PID="$hp" COMMS_PRE
 PWQ_SD="$PWQ/.comms/sessions"
 PWQ_INST() { printf '%s' "$1" | sed -n 's/.*instance: //p'; }
 
+# A pid VERIFIED ABSENT right now, floored so a pathological ps that answers for every
+# argument fails the fixture loudly instead of spinning forever. (grok, implement r2.)
+PWQ_GONE=99999990
+while [ "$PWQ_GONE" -gt 99990000 ] && ps -p "$PWQ_GONE" -o pid= >/dev/null 2>&1; do PWQ_GONE=$((PWQ_GONE-1)); done
 PWQ_A="$(PWQ_INST "$(claim_pwq $$ presence claim --name harness --role r 2>/dev/null)")"
 grep -q "\"pid\": \"$$\"" "$PWQ_SD/harness-$PWQ_A.json" \
   && ok "claim adopts the harness session pid when no --pid is given" || fail "harness pid not adopted"
@@ -7056,7 +7060,7 @@ PWQ_C="$(PWQ_INST "$(claim_pwq 'not-a-number' presence claim --name badpid --rol
 [ -n "$PWQ_C" ] && grep -q '"pid": ""' "$PWQ_SD/badpid-$PWQ_C.json" \
   && ok "a non-numeric harness pid is ignored, and the claim still succeeds" || fail "non-numeric harness pid not ignored"
 run_pwq presence release --name badpid --instance "$PWQ_C" >/dev/null 2>&1
-PWQ_D="$(PWQ_INST "$(claim_pwq 99999999 presence claim --name gonepid --role r 2>/dev/null)")"
+PWQ_D="$(PWQ_INST "$(claim_pwq "$PWQ_GONE" presence claim --name gonepid --role r 2>/dev/null)")"
 [ -n "$PWQ_D" ] && grep -q '"pid": ""' "$PWQ_SD/gonepid-$PWQ_D.json" \
   && ok "a harness pid naming no live process is ignored (never self-condemn)" || fail "unverified harness pid was recorded"
 run_pwq presence release --name gonepid --instance "$PWQ_D" >/dev/null 2>&1
@@ -7064,8 +7068,7 @@ run_pwq presence release --name gonepid --instance "$PWQ_D" >/dev/null 2>&1
 # Reap AT CLAIM, two-pass by construction: the first claim to see a dead record may
 # only OBSERVE it. Nothing a claim has not already watched for a full TTL can vanish,
 # so a merely suspended or mid-write session is never collected.
-PWQ_DEAD=99999999
-while ps -p "$PWQ_DEAD" -o pid= >/dev/null 2>&1; do PWQ_DEAD=$((PWQ_DEAD-1)); done   # never a pid that happens to exist
+PWQ_DEAD="$PWQ_GONE"
 printf '{\n  "name": "departed", "instance": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "state": "working", "host": "%s", "pid": "%s", "pid_started": "gone", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" "$PWQ_DEAD" > "$PWQ_SD/departed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
 printf '{\n  "name": "nohandle", "instance": "abababababababababababababababab", "state": "working", "host": "%s", "pid": "", "pid_started": "", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" > "$PWQ_SD/nohandle-abababababababababababababababab.json"
 PWQ_O1="$(run_pwq presence claim --name w1 --role r 2>/dev/null)"
@@ -7098,8 +7101,6 @@ run_pwq presence release --name w3 --instance "$(PWQ_INST "$PWQ_O3")" >/dev/null
 # session named by an exited one — which now evaluates dead, gets collected, and then
 # reads as a free field to the next claimer. Strictly worse than the immortality this
 # change fixes, and reachable ONLY because records became reapable.
-PWQ_GONE=99999990
-while ps -p "$PWQ_GONE" -o pid= >/dev/null 2>&1; do PWQ_GONE=$((PWQ_GONE-1)); done  # verified-absent, never a live pid
 # A FRESH heartbeat masks this: presence_eval returns live by age before it ever reads
 # the pid, so the fixture must be stale for the hazard to be visible at all — which is
 # precisely why it survived the author's own attack list.
@@ -7137,6 +7138,37 @@ PWQ_G="$(PWQ_INST "$( (cd "$PWQ" && env COMMS_PRESENCE_PID="$PWQ_GONE" CLAUDE_PI
 grep -q "\"pid\": \"$$\"" "$PWQ_SD/fallthrough-$PWQ_G.json" \
   && ok "an unverifiable override falls THROUGH to the next source, never shadows it" || fail "stale override shadowed a good handle"
 run_pwq presence release --name fallthrough --instance "$PWQ_G" >/dev/null 2>&1
+# THE PRE-FIRST-BEAT RESUME WINDOW (codex, implement r2, blocking). `others` is the
+# MANDATORY post-resume re-check, and it used to refresh nothing — so a session that
+# resumed, ran only `others`, and worked on stayed named by the exited harness and was
+# collectable while alive. The regression codex asked for: an ALREADY-AGED observation
+# exists before the resume, so the very next claim would otherwise reap it outright.
+PWQ_H="$(PWQ_INST "$(claim_pwq $$ presence claim --name recheck --role r 2>/dev/null)")"
+perl -pi -e "s/\"pid\": \"[0-9]*\"/\"pid\": \"$PWQ_GONE\"/; s/\"pid_started\": \"[^\"]*\"/\"pid_started\": \"exited\"/" "$PWQ_SD/recheck-$PWQ_H.json"
+PWQ_STALE "$PWQ_SD/recheck-$PWQ_H.json"
+run_pwq presence expire >/dev/null 2>&1                       # pass 1: the observation exists
+perl -pi -e 's/^#obs \d+/"#obs " . (time()-99999)/e' "$PWQ_SD/.reap/recheck-$PWQ_H.obs"
+# The resumed session now reaches its documented checkpoint BEFORE any beat.
+claim_pwq $$ presence others --name recheck --instance "$PWQ_H" >/dev/null 2>&1
+grep -q "\"pid\": \"$$\"" "$PWQ_SD/recheck-$PWQ_H.json" \
+  && ok "the mandatory re-check RE-PINS the resumed session's handle before any beat" || fail "others left the exited pid in place"
+PWQ_RC="$(run_pwq presence claim --name newcomer --role r 2>/dev/null)"; PWQ_RCR=$?
+[ -f "$PWQ_SD/recheck-$PWQ_H.json" ] \
+  && ok "a claim with an aged observation cannot collect the re-pinned session" || fail "resumed session reaped in the pre-beat window"
+[ "$PWQ_RCR" = 3 ] \
+  && ok "and the newcomer is told to isolate rather than shown a free field" || fail "newcomer saw a free field (rc=$PWQ_RCR)"
+run_pwq presence release --name newcomer --instance "$(PWQ_INST "$PWQ_RC")" >/dev/null 2>&1
+run_pwq presence release --name recheck --instance "$PWQ_H" >/dev/null 2>&1
+# A recycled pid keeps its NUMBER while its start time changes, and a claim whose lstart
+# probe failed stored a pid with an EMPTY start that stale eval reads ambiguous forever.
+# Comparing only the number left both unrepaired. (grok, implement r2.)
+PWQ_I="$(PWQ_INST "$(claim_pwq $$ presence claim --name samepid --role r 2>/dev/null)")"
+perl -pi -e 's/"pid_started": "[^"]*"/"pid_started": ""/' "$PWQ_SD/samepid-$PWQ_I.json"
+claim_pwq $$ presence beat --name samepid --instance "$PWQ_I" >/dev/null 2>&1
+grep -q '"pid_started": ""' "$PWQ_SD/samepid-$PWQ_I.json" \
+  && fail "an unchanged pid NUMBER skipped the repair, leaving an empty start time" \
+  || ok "the handle is repaired even when the pid number did not change"
+run_pwq presence release --name samepid --instance "$PWQ_I" >/dev/null 2>&1
 
 # worktree new (AC4/AC6): grammar, ignore-gate, local tip, main-root anchoring.
 check_not "worktree new refuses a bad slug" run_pw worktree new 'Bad/Slug'

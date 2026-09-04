@@ -2784,6 +2784,25 @@ presence_self_pid() {  # -> this session's long-lived pid, or EMPTY. Never fails
   return 0
 }
 
+presence_resolve_handle() {  # <explicit-pid> <recorded-pid> <recorded-start>
+  # Sets PRESENCE_HANDLE_PID / PRESENCE_HANDLE_START to the handle that should be
+  # RECORDED: a freshly verified one when one is available, otherwise exactly what was
+  # already recorded. It never blanks a recorded handle — doing so would manufacture the
+  # pid-less immortal record this whole mechanism exists to stop.
+  #
+  # It also never compares only the pid NUMBER. A recycled pid keeps its number while its
+  # start time changes, and a claim whose lstart probe failed recorded a pid with an EMPTY
+  # start that stale evaluation reads as ambiguous forever; a number-only check left both
+  # unrepaired. Writing the verified pair unconditionally repairs both. (grok, implement r2.)
+  PRESENCE_HANDLE_PID="$2"; PRESENCE_HANDLE_START="$3"
+  local xpid="$1" newpid newstart
+  if [ -n "$xpid" ]; then newpid="$xpid"; else newpid="$(presence_self_pid)"; fi
+  [ -n "$newpid" ] || return 0
+  newstart="$(ps -p "$newpid" -o lstart= 2>/dev/null)" || newstart=""
+  [ -n "$newstart" ] || return 0
+  PRESENCE_HANDLE_PID="$newpid"; PRESENCE_HANDLE_START="$newstart"
+}
+
 presence_write() {  # <dest> <name> <instance> <role> <state> <pid> <pid_started> <started>
   # Whole-file temp+mv, temps OUT of the readers' record glob (.tmp/). A beat is a
   # full rewrite, never an update — a deleted record heals on the next beat, and the
@@ -2980,15 +2999,9 @@ cmd_presence() {
       # by grok.)
       #
       # Refresh ONLY with a pid that verifies right now; otherwise keep what is recorded.
-      # Blanking on an unverifiable probe would manufacture the pid-less zombie this
-      # whole change exists to stop. An explicit --pid still wins, as at claim.
-      local newpid=""
-      if [ -n "$pid" ]; then newpid="$pid"; else newpid="$(presence_self_pid)"; fi
-      if [ -n "$newpid" ] && [ "$newpid" != "$opid" ]; then
-        local newstart
-        newstart="$(ps -p "$newpid" -o lstart= 2>/dev/null)" || newstart=""
-        if [ -n "$newstart" ]; then opid="$newpid"; opstart="$newstart"; fi
-      fi
+      # An explicit --pid still wins, as at claim.
+      presence_resolve_handle "$pid" "$opid" "$opstart"
+      opid="$PRESENCE_HANDLE_PID"; opstart="$PRESENCE_HANDLE_START"
       presence_write "$rec" "$name" "$instance" "$orole" "$ostate" "$opid" "$opstart" "$ostarted" \
         || { echo "presence beat: write failed" >&2; return 4; }
       if [ "$healed" = 1 ]; then
@@ -3001,6 +3014,27 @@ cmd_presence() {
       presence_validate_ids "$name" "$instance" || usage_err "presence others: invalid name/instance"
       [ -d "$dir" ] || return 0
       [ -r "$dir" ] || { echo "presence: sessions dir unreadable — ISOLATE" >&2; return 4; }
+      # RE-PIN ON THE CHECKPOINT. `others` is the MANDATORY post-wait, post-resume
+      # re-check (PROTOCOL rule 4), and it was the one surviving path that refreshed
+      # nothing. A session that resumed under a new harness process, ran only `others`,
+      # and worked on was still named by the exited one — dead to every reader, and
+      # collectable alive in the window before its first beat, after which the field
+      # read free to the next claimer. Re-pinning here closes that window at the exact
+      # point the protocol already requires a session to check in.
+      # (codex, implement r1 and r2, blocking; `others` named by grok as the last
+      # non-re-pinning path.)
+      #
+      # An EXISTING exact-self record only. A vanished record is never manufactured
+      # here: healing is `beat`'s exit-5 path, which a session must reach deliberately
+      # and which tells it that tenure is gone. Failure to re-pin is never fatal to the
+      # check — the peer evaluation below is what the caller came for.
+      local orec="$dir/$name-$instance.json"
+      if [ -f "$orec" ]; then
+        presence_resolve_handle "" "$(presence_field "$orec" pid)" "$(presence_field "$orec" pid_started)"
+        presence_write "$orec" "$name" "$instance" "$(presence_field "$orec" role)" \
+          "$(presence_field "$orec" state)" "$PRESENCE_HANDLE_PID" "$PRESENCE_HANDLE_START" \
+          "$(presence_field "$orec" started)" || true
+      fi
       presence_peers "$name" "$instance"
       ;;
     release)

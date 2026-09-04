@@ -113,7 +113,12 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    field by the next claimer. That is strictly worse than the immortality this rule
    fixes, and it is reachable only because records became reapable. A beat refreshes
    the handle only with a pid that verifies, and otherwise keeps what is recorded;
-   blanking it would manufacture the immortal record all over again.
+   blanking it would manufacture the immortal record all over again. **`others` re-pins
+   too**, because rule 4's re-check is the first thing a resumed session runs and would
+   otherwise leave a window, before that session's first heartbeat, in which it is dead
+   to every reader and collectable while alive. `others` refreshes an EXISTING exact-self
+   record only; a vanished one is never manufactured there, since healing is `beat`'s
+   exit-5 path and a session is meant to learn its tenure is gone.
 6. **`claim` collects the provably dead.** Reaping is not a verb anyone remembers
    to run, so `claim` runs it, before recording itself and before evaluating
    peers — the exit status a session acts on then describes the field as it is,

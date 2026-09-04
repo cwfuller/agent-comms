@@ -2142,6 +2142,15 @@ presence system, which is exactly what it was supposed to surface.
 > independently corroborated by grok, neither of which the author's own attack list had reached:
 > it asked about the two-`ps` window at claim and never about the identity going stale later.
 > `beat` now re-pins the handle when it verifies, and keeps the recorded one when it does not.
+>
+> **And it took a second round to close.** Re-pinning on `beat` alone still left the window BEFORE a
+> resumed session's first heartbeat: `presence others` — the re-check the protocol makes mandatory
+> after every wait, and therefore the first verb a resumed session runs — refreshed nothing, so a
+> newcomer's claim could collect the record and read the field as free while the session worked on.
+> codex blocked on it twice; grok named `others` as the last non-re-pinning path in the same round.
+> One resolver (`presence_resolve_handle`) now serves `claim`, `beat` and `others`, and it compares
+> the whole handle rather than the pid NUMBER, which also repairs a recycled pid and a claim whose
+> `lstart` probe had failed.
 
 `presence_expire`'s reap loop is gated on `[ "$(presence_eval "$f")" = "dead" ]`, and
 `presence_eval` can only reach "dead" through a pid check. `--pid` was OPTIONAL at claim
