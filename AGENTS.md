@@ -81,6 +81,15 @@ and leaves stdout empty — so "no peer lines" reads as "the field is free" in p
 fail-closed case. `presence others` also requires both flags and, unlike `send` / `await` /
 `integrate`, does *not* read them from the environment.
 
+**`others` can now answer `RC` 5, and it is not informational.** The re-check is also what
+re-pins this session's liveness identity, so it WRITES: a successful re-check counts as a
+heartbeat of self. When it finds this session's own record gone — collected because the
+identity went stale across a resume, or removed by an operator — it says so and exits 5.
+That means tenure is lost, not that the field is free: `others` cannot count your own
+absence as an absence of peers. Re-claim before writing anything to the shared checkout.
+`RC` 4 from `others` now also covers a re-pin that could not be written, which is the same
+ISOLATE answer as an unreadable sessions dir.
+
 A session that claimed `RC` 0, waited out a panel, and wrote without re-checking will
 collide with the peer that arrived during the wait. A `beat` returning exit 5 healed a
 vanished record and demands the same re-check.

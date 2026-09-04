@@ -46,6 +46,9 @@ asked. Do not narrate every dispatch.
      ambiguity, not an error.
    - **After EVERY wait** (a reviewer round, an await, a resume): re-run
      `"$COMMS_SH" presence others --name ... --instance ...` BEFORE the next write
+     (it re-pins this session's liveness identity as well as reporting peers, and
+     exits 5 if this session's own record is gone — tenure lost, re-claim, never
+     "the field is free")
      to the shared checkout — starting direct-safe is not tenure. A `beat` that
      exits 5 healed a vanished record: same rule, re-check before writing.
    - Long runs beat via `"$COMMS_SH" presence with-beat ... -- <cmd>`; `send` and
