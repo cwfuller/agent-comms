@@ -21,6 +21,13 @@ else
 fi
 CLAUDE_COMMANDS_DIR="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
+# The Codex protocol note lives ONCE, in the user's global Codex instructions. It used to
+# be written into every project's .codex/AGENTS.md, which made a copy of PROSE per repo
+# while the code stayed single-sourced — so the copies drifted and the old ones kept naming
+# skills this installer had already deleted. Measured on the author's machine before the
+# change: 20 projects, three different variants, none current, and the two oldest had no
+# managed markers at all, so no reinstall could ever have found them to update.
+CODEX_AGENTS_FILE="${CODEX_AGENTS_FILE:-$HOME/.codex/AGENTS.md}"
 CLAUDE_COMMANDS="send-to-codex.md read-from-codex.md ask.md auto.md clean-comms.md"
 # Commands this project used to install. An upgrade that only stops COPYING them leaves
 # them on disk and callable, so the agent keeps being told to use surfaces that no longer
@@ -55,7 +62,7 @@ Usage: install.sh [--scope=local|global|project|both]
 Scopes:
   local    Install Claude commands into the current project, plus project state.
   global   Install reusable Claude commands and helpers into your home dir.
-  project  Initialize only repo-local state (.comms, .gitignore, .codex/AGENTS.md).
+  project  Initialize only repo-local state (.comms, .gitignore).
   both     Install global commands and initialize this project.
 
 With curl:
@@ -343,6 +350,8 @@ install_global_assets() {
   for f in $LOOPSPEC_FRAGMENTS; do
     install_file "$FRAGMENT_SRC/$f" "$AGENT_COMMS_HOME/loopspec-fragments/$f"
   done
+  echo "  installing the Codex protocol note to $CODEX_AGENTS_FILE..."
+  install_agents_block "$CODEX_AGENTS_FILE"
   echo "  Loops run over ACP — no pane multiplexer required."
 }
 
@@ -441,7 +450,6 @@ init_project_state() {
   mkdir -p "$PROJECT_ROOT/.comms/to-codex"
   mkdir -p "$PROJECT_ROOT/.comms/to-claude"
   mkdir -p "$PROJECT_ROOT/.comms/archive"
-  mkdir -p "$PROJECT_ROOT/.codex"
 
   # Add .comms/ (and the installer-managed Codex protocol note) to .gitignore.
   # Whole-line match so substrings like "docs/.comms/notes" don't false-positive.
@@ -463,7 +471,7 @@ init_project_state() {
       done
       echo "  added to .gitignore:$( printf ' %s' $MISSING )"
     else
-      echo "  .gitignore already covers .comms/ and .codex/AGENTS.md"
+      echo "  .gitignore already covers .comms/ and the retired .codex/AGENTS.md"
     fi
   else
     {
@@ -475,8 +483,6 @@ init_project_state() {
     } > "$PROJECT_ROOT/.gitignore"
     echo "  created .gitignore with .comms/, .codex/AGENTS.md, .agent-comms/, .claude/worktrees/"
   fi
-
-  install_agents_block "$PROJECT_ROOT/.codex/AGENTS.md"
 }
 
 # --- .codex/AGENTS.md managed block -----------------------------------------
@@ -495,7 +501,8 @@ agents_block_body() {
   cat << 'PROTOCOL'
 ## Agent Communication Protocol
 
-Local file-based message queue between Claude Code and Codex.
+Local file-based message queue between Claude Code and Codex. It applies in a repository
+that has a `.comms/` directory, and nowhere else — this note is global, the mailbox is not.
 
 - **Your inbox:** `.comms/to-codex/` — review requests are delivered here
 - **Your outbox:** `.comms/to-claude/` — replies are written here
@@ -578,7 +585,7 @@ install_agents_block() {
 
   if [ ! -f "$f" ]; then
     { echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"; } > "$f"
-    echo "  created .codex/AGENTS.md with the managed agent-comms block"
+    echo "  created $f with the managed agent-comms block"
     return 0
   fi
 
@@ -597,7 +604,7 @@ install_agents_block() {
   # An unclosed fence makes "inside or outside a code block" undecidable, so
   # every marker below it is ambiguous. Fail safe rather than guess.
   if printf '%s\n' "$scan" | grep -qx 'UNCLOSED'; then
-    echo "  WARNING: .codex/AGENTS.md has an unclosed fenced code block — left untouched."
+    echo "  WARNING: $f has an unclosed fenced code block — left untouched."
     echo "           Close the fence, then re-run install."
     return 0
   fi
@@ -616,9 +623,9 @@ install_agents_block() {
       sed -n "$((end_n + 1)),\$p" "$f"
     } > "$tmp"
     if cmp -s "$tmp" "$f"; then
-      rm -f "$tmp"; echo "  .codex/AGENTS.md block already current (no-op)"
+      rm -f "$tmp"; echo "  $f block already current (no-op)"
     else
-      mv "$tmp" "$f"; echo "  refreshed the managed block in .codex/AGENTS.md"
+      mv "$tmp" "$f"; echo "  refreshed the managed block in $f"
     fi
     return 0
   fi
@@ -626,7 +633,7 @@ install_agents_block() {
   # Any other marker shape — one-sided, duplicated, nested, or out of order —
   # is ambiguous. Guessing eats user content, so nothing is written.
   if [ "$begin_ct" -gt 0 ] || [ "$end_ct" -gt 0 ]; then
-    echo "  WARNING: .codex/AGENTS.md has an ambiguous agent-comms marker shape" \
+    echo "  WARNING: $f has an ambiguous agent-comms marker shape" \
          "(begin=$begin_ct end=$end_ct) — left untouched."
     echo "           Leave exactly one begin marker above exactly one end marker,"
     echo "           each on its own line, then re-run install."
@@ -638,7 +645,7 @@ install_agents_block() {
   start_n="$(marker_scan '## Agent Communication Protocol' "$(printf '\001')" "$f" | grep '^B' | head -1 | tr -d 'B' || true)"
   if [ -z "$start_n" ]; then
     { echo ""; echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"; } >> "$f"
-    echo "  added the managed agent-comms block to .codex/AGENTS.md"
+    echo "  added the managed agent-comms block to $f"
     return 0
   fi
 
@@ -653,9 +660,9 @@ install_agents_block() {
       sed -n "${next_n},\$p" "$f"
     } > "$tmp"
     mv "$tmp" "$f"
-    echo "  migrated the legacy .codex/AGENTS.md section to a managed block"
+    echo "  migrated the legacy section in $f to a managed block"
   else
-    echo "  NOTE: .codex/AGENTS.md's protocol section has been hand-edited — left untouched."
+    echo "  NOTE: the protocol section in $f has been hand-edited — left untouched."
     echo "        To adopt the smaller managed block, wrap or replace that section with:"
     echo "          $AGENTS_BEGIN ... $AGENTS_END"
   fi
@@ -702,11 +709,6 @@ case "$SCOPE" in
   global)
     install_global_assets
     warn_local_shadowing
-    # Global scope installs reusable assets only — it never touches a project's
-    # files, so an existing .codex/AGENTS.md keeps whatever block it has.
-    echo ""
-    echo "  note: .codex/AGENTS.md is per-project and was not touched."
-    echo "        Re-run with --scope=project (or both) inside a repo to migrate it."
     ;;
   project)
     init_project_state
@@ -730,12 +732,12 @@ case "$SCOPE" in
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
     ;;
   project)
-    echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
+    echo "    Project state: .comms/, .gitignore"
     ;;
   both)
     echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
-    echo "    Project state: .comms/, .gitignore, .codex/AGENTS.md"
+    echo "    Project state: .comms/, .gitignore"
     ;;
 esac
 echo ""

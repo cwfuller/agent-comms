@@ -240,6 +240,10 @@ export COMMS_MOUNT_BASE="$WORK/suite-mounts/agent-comms/mounts"
 # exists to collect. Suite-wide default; individual tests still override it explicitly.
 export AGENT_COMMS_HOME="$WORK/global-home"
 mkdir -p "$AGENT_COMMS_HOME"
+# The Codex protocol note is now a GLOBAL asset, so an unsandboxed --scope=global run in this
+# corpus would rewrite the developer's own ~/.codex/AGENTS.md. Suite-wide default, set beside
+# the other global-asset redirections; the block section still overrides it per fixture.
+export CODEX_AGENTS_FILE="$WORK/global-home/codex-AGENTS.md"
 # THE REVIEW BAR IS AN INSTALLED ASSET, so the suite must PROVIDE it rather than inherit whatever
 # the developer happens to have installed. Every fixture that runs a review turn through a copied
 # or shimmed runphase.sh resolves the bar through this home: the repo tier is
@@ -3941,14 +3945,47 @@ section "install.sh: .codex/AGENTS.md managed block"
 AG="$WORK/agents"; mkdir -p "$AG"
 AG_B='<!-- agent-comms:begin -->'
 AG_E='<!-- agent-comms:end -->'
-ag_install() { (cd "$1" && bash "$REPO/install.sh" --scope=project >"$WORK/ag.out" 2>&1); }
+# The protocol note is now installed ONCE, into the user's global Codex instructions, so
+# these fixtures sandbox that file per case instead of using a per-project one. The
+# ownership logic under test is unchanged; only where it writes moved.
+ag_file() { printf '%s' "$AG/$1/.codex/AGENTS.md"; }
+ag_install() { (cd "$AG/$1" && env CODEX_AGENTS_FILE="$(ag_file "$1")" \
+  CLAUDE_COMMANDS_DIR="$AG/$1/ghome/commands" CODEX_SKILLS_DIR="$AG/$1/ghome/skills" \
+  AGENT_COMMS_HOME="$AG/$1/ghome/agent-comms" \
+  bash "$REPO/install.sh" --scope=global >"$WORK/ag.out" 2>&1); }
 ag_repo() { mkdir -p "$AG/$1" && git -C "$AG/$1" init -q -b main && mkdir -p "$AG/$1/.codex"; }
 
-ag_repo fresh; ag_install "$AG/fresh"
+# THE COLLAPSE ITSELF (2026-09-04). The note used to be copied into every project, which
+# made a per-repo copy of PROSE while the code stayed single-sourced — so the copies drifted
+# and the oldest ones still named skills the installer had already deleted. Pin BOTH halves:
+# global scope writes it, and project/local scope never does.
+AGX="$WORK/agents-scope"; mkdir -p "$AGX"; git -C "$AGX" init -q -b main
+(cd "$AGX" && env CODEX_AGENTS_FILE="$AGX/gh/AGENTS.md" CLAUDE_COMMANDS_DIR="$AGX/gh/commands" \
+  CODEX_SKILLS_DIR="$AGX/gh/skills" AGENT_COMMS_HOME="$AGX/gh/ac" \
+  bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
+grep -q 'agent-comms:begin' "$AGX/gh/AGENTS.md" 2>/dev/null \
+  && ok "global scope installs the Codex protocol note once, at the global path" || fail "global scope did not write the note"
+for AGX_S in project local; do
+  AGX_D="$WORK/agents-$AGX_S"; mkdir -p "$AGX_D"; git -C "$AGX_D" init -q -b main
+  (cd "$AGX_D" && env CODEX_AGENTS_FILE="$AGX_D/gh/AGENTS.md" CLAUDE_COMMANDS_DIR="$AGX_D/gh/commands" \
+    CODEX_SKILLS_DIR="$AGX_D/gh/skills" AGENT_COMMS_HOME="$AGX_D/gh/ac" \
+    bash "$REPO/install.sh" --scope="$AGX_S" >/dev/null 2>&1)
+  [ ! -e "$AGX_D/.codex/AGENTS.md" ] \
+    && ok "--scope=$AGX_S writes no per-project Codex note" || fail "--scope=$AGX_S still wrote a per-project note"
+done
+# It is read in EVERY repo now, so it must say where it applies or it describes a mailbox
+# that is not there.
+AGX_BODY="$(awk '/^agents_block_body\(\)/,/^}/' "$REPO/install.sh")"
+printf '%s' "$AGX_BODY" | grep -q '`.comms/` directory' \
+  && ok "the global note scopes itself to repositories that have a mailbox" || fail "the global note claims to apply everywhere"
+# The path must stay overridable, or this suite rewrites the developer's own instructions.
+grep -q 'CODEX_AGENTS_FILE="${CODEX_AGENTS_FILE:-' "$REPO/install.sh" \
+  && ok "the global note path is env-overridable (the suite depends on it)" || fail "CODEX_AGENTS_FILE is hardcoded"
+ag_repo fresh; ag_install fresh
 grep -q 'agent-comms:begin' "$AG/fresh/.codex/AGENTS.md" \
   && ok "AGENTS.md is created with a marked managed block" || fail "AGENTS.md created marked"
 AG_SUM="$(cat "$AG/fresh/.codex/AGENTS.md")"
-ag_install "$AG/fresh"
+ag_install fresh
 [ "$AG_SUM" = "$(cat "$AG/fresh/.codex/AGENTS.md")" ] \
   && ok "a repeat install leaves AGENTS.md byte-identical (no-op diff)" || fail "AGENTS.md repeat install no-op"
 
@@ -3970,7 +4007,7 @@ When the user asks you to "check for messages from Claude" or "review what Claud
 
 ag_repo legacy; printf '%s\n' "$AG_LEGACY" > "$AG/legacy/.codex/AGENTS.md"
 AG_BEFORE="$(wc -c <"$AG/legacy/.codex/AGENTS.md")"
-ag_install "$AG/legacy"
+ag_install legacy
 grep -q 'agent-comms:begin' "$AG/legacy/.codex/AGENTS.md" \
   && ok "an exact legacy block is migrated to a managed block" || fail "legacy migration"
 [ "$(wc -c <"$AG/legacy/.codex/AGENTS.md")" -lt "$AG_BEFORE" ] \
@@ -3982,7 +4019,7 @@ ag_repo handedited
 { printf '%s\n' "$AG_LEGACY"; echo; echo '- MY OWN RULE: always run the full suite before replying'; } \
   > "$AG/handedited/.codex/AGENTS.md"
 cp "$AG/handedited/.codex/AGENTS.md" "$WORK/handedited.bak"
-ag_install "$AG/handedited"
+ag_install handedited
 cmp -s "$AG/handedited/.codex/AGENTS.md" "$WORK/handedited.bak" \
   && ok "a HAND-EDITED protocol section is left byte-identical (no data loss)" || fail "hand-edited AGENTS.md was rewritten"
 grep -qi 'hand-edited' "$WORK/ag.out" \
@@ -3994,7 +4031,7 @@ grep -qi 'hand-edited' "$WORK/ag.out" \
 ag_marker_safe() { # ag_marker_safe <name> <must-survive-string>
   local name="$1" keep="$2"
   cp "$AG/$name/.codex/AGENTS.md" "$WORK/$name.bak"
-  ag_install "$AG/$name"
+  ag_install "$name"
   if cmp -s "$AG/$name/.codex/AGENTS.md" "$WORK/$name.bak"; then
     ok "AGENTS.md $name marker shape is fail-safe (byte-identical)"
   else
@@ -4033,7 +4070,7 @@ ag_repo inline
   echo 'Example: `<!-- agent-comms:begin -->` opens the block.'
   echo '- USER KEEP inline private rule'
   echo 'Example: `<!-- agent-comms:end -->` closes it.'; } > "$AG/inline/.codex/AGENTS.md"
-ag_install "$AG/inline"
+ag_install inline
 grep -qF 'USER KEEP inline private rule' "$AG/inline/.codex/AGENTS.md" \
   && ok "AGENTS.md inline marker EXAMPLES never count as ownership" || fail "AGENTS.md inline example destroyed user content"
 grep -qF 'Example: `<!-- agent-comms:begin -->` opens the block.' "$AG/inline/.codex/AGENTS.md" \
@@ -4047,7 +4084,7 @@ ag_fenced() { # ag_fenced <name> <sentinel>
   local name="$1" keep="$2" orig
   orig="$(wc -l <"$AG/$name/.codex/AGENTS.md")"
   cp "$AG/$name/.codex/AGENTS.md" "$WORK/$name.bak"
-  ag_install "$AG/$name"
+  ag_install "$name"
   if head -n "$orig" "$AG/$name/.codex/AGENTS.md" | cmp -s - "$WORK/$name.bak"; then
     ok "AGENTS.md $name fence: every original line survives verbatim"
   else
@@ -4084,7 +4121,7 @@ ag_repo fenceunclosed
 { echo '# Documentation'; echo '```markdown'; echo "$AG_B"; echo 'USER KEEP unclosed fence'; } \
   > "$AG/fenceunclosed/.codex/AGENTS.md"
 cp "$AG/fenceunclosed/.codex/AGENTS.md" "$WORK/fenceunclosed.bak"
-ag_install "$AG/fenceunclosed"
+ag_install fenceunclosed
 cmp -s "$AG/fenceunclosed/.codex/AGENTS.md" "$WORK/fenceunclosed.bak" \
   && ok "AGENTS.md an unclosed fence is fail-safe (byte-identical)" || fail "AGENTS.md unclosed fence rewrote the file"
 grep -qi 'unclosed' "$WORK/ag.out" \
@@ -4094,7 +4131,7 @@ grep -qi 'unclosed' "$WORK/ag.out" \
 # one documentation, one live. A second install must resolve to the live one and
 # be a no-op, or fence awareness has merely moved the ambiguity.
 cp "$AG/fencedbt/.codex/AGENTS.md" "$WORK/fencedbt.after1"
-ag_install "$AG/fencedbt"
+ag_install fencedbt
 cmp -s "$AG/fencedbt/.codex/AGENTS.md" "$WORK/fencedbt.after1" \
   && ok "AGENTS.md stays idempotent when a fenced marker example sits beside the live block" \
   || fail "AGENTS.md second install changed the file next to a fenced example"
@@ -4104,7 +4141,7 @@ grep -qF 'USER KEEP fenced backtick' "$AG/fencedbt/.codex/AGENTS.md" \
 # Fence awareness must not break the real thing.
 ag_repo realblock
 { echo "$AG_B"; echo 'stale generated text'; echo "$AG_E"; } > "$AG/realblock/.codex/AGENTS.md"
-ag_install "$AG/realblock"
+ag_install realblock
 grep -q 'Local file-based message queue' "$AG/realblock/.codex/AGENTS.md" \
   && ok "a genuine marked block is still refreshed after the fence fix" || fail "fence fix broke real block management"
 
@@ -4112,7 +4149,7 @@ ag_repo mixed
 { echo '# Project AGENTS'; echo; echo '## House rules'; echo '- run mix format'; echo;
   printf '%s\n' "$AG_LEGACY"; echo; echo '## Deploy'; echo '- fly deploy'; } \
   > "$AG/mixed/.codex/AGENTS.md"
-ag_install "$AG/mixed"
+ag_install mixed
 if grep -q 'House rules' "$AG/mixed/.codex/AGENTS.md" \
    && grep -q 'run mix format' "$AG/mixed/.codex/AGENTS.md" \
    && grep -q 'Deploy' "$AG/mixed/.codex/AGENTS.md" \

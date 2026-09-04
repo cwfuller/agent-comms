@@ -426,7 +426,11 @@ path since S4-2 took `skill_file`'s callers, so this deletion removed the last C
 rule — but the text would have been gone.
 
 **Review caught two blockers, both in surfaces I had not swept:**
-- `install.sh` writes a managed block into `.codex/AGENTS.md` — loaded on every Codex turn —
+- `install.sh` writes a managed block into the Codex instructions — loaded on every Codex turn —
+  *(2026-09-04: that block moved from a per-project `.codex/AGENTS.md` to the GLOBAL
+  `~/.codex/AGENTS.md`. Per-project copies were prose duplicated per repo while the code stayed
+  single-sourced; measured on the author's machine, 20 projects carried three variants, none
+  current, and the two oldest predated the managed markers so no reinstall could ever find them.)*
   still naming the deleted skills. I had swept `templates/` and `docs/`, never the block the
   installer GENERATES. A fresh install removed the tools and told the agent to use them.
 - Removing the skills from `prompt_surface_files` made `prompt-version` **bar-blind**: the hash

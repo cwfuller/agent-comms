@@ -21,8 +21,8 @@ Run interactively (no `--scope`) and the installer shows a menu:
 
 | scope | installs | where |
 |---|---|---|
-| `global` | 5 Claude commands, 3 helper scripts, 2 loopspec fragments | `~/.claude/commands/`, `~/.agent-comms/` |
-| `project` | per-repo state only | `.comms/{to-codex,to-claude,archive}/`, `.gitignore` entries, `.codex/AGENTS.md` protocol note |
+| `global` | 5 Claude commands, 3 helper scripts, 2 loopspec fragments, the Codex protocol note | `~/.claude/commands/`, `~/.agent-comms/`, `~/.codex/AGENTS.md` |
+| `project` | per-repo state only | `.comms/{to-codex,to-claude,archive}/`, `.gitignore` entries |
 | `both` | global + project | the recommended pair |
 | `local` | pinned copies of everything into the repo | `.claude/commands/`, `.agents/loopspec-fragments/`, `.agent-comms/` + project state |
 
@@ -63,9 +63,14 @@ detects local copies that would shadow it.
 
 - creates `.comms/` (`to-codex/`, `to-claude/`, `archive/`)
 - gitignores `.comms/`, `.codex/AGENTS.md`, `.agent-comms/` (whole-line matched,
-  trailing-newline-safe, idempotent)
-- writes the protocol note into `.codex/AGENTS.md` so Codex knows review turns are parent-brokered
-  (appends a section if the file already exists)
+  trailing-newline-safe, idempotent). `.codex/AGENTS.md` is still ignored because older
+  installs wrote one there; nothing writes it any more.
+- writes NO Codex instructions. The protocol note is a GLOBAL asset (`~/.codex/AGENTS.md`,
+  overridable with `CODEX_AGENTS_FILE`) installed by the `global` scope, because a copy of
+  prose per repository is the one thing here that reliably drifts: the code was always
+  single-sourced, the note was not, and the oldest copies went on naming Codex skills this
+  installer had already deleted. The note names the condition it applies under — a
+  repository with a `.comms/` directory — so it is inert everywhere else.
 
 ## Installing from a fork
 
