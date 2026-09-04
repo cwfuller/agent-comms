@@ -145,8 +145,10 @@ diagnostics and coverage — not a new config key:
   "immutable detached worktree" wording directly contradicted it) and `docs/COMMANDS.md`,
   including that `suite-cmd` is whitespace-split into argv with NO shell — so `npm ci && tsc`
   cannot work and the value must point at a committed script.
-- Eight assertions pin three directions: ignored-dep-without-provisioning refuses, self-contained
-  provisioning lands, and a PASSING suite that leaves git-visible output still refuses.
+- Eleven assertions pin four directions: ignored-dep-without-provisioning refuses, self-contained
+  provisioning lands at the candidate (pinned on the OID and the suite-green line, not merely a
+  moved ref), and a PASSING suite still refuses when it leaves git-visible output — in BOTH
+  forms the diagnostic names, untracked-but-unignored and modified-tracked.
 
 **Rejected: a `suite-prepare-cmd` config key.** It would add a second arbitrary-command execution
 surface inside the landing gate for no capability the wrapper lacks, and could not reuse a

@@ -8192,8 +8192,13 @@ printf '%s\n' "$FC_OUT3" | grep -q 'untracked-artifact.txt' \
 
 # (3b) MODIFIED TRACKED file, the shape a real package manager produces when it rewrites a
 # lockfile. Same non-empty-porcelain branch as (3) today, so this is insurance, not new
-# coverage: if anyone ever aligns this check with attest-green's `-uno`, (3) would keep
-# refusing while a rewritten tracked lockfile landed silently. (grok, implement r1.)
+# coverage. It is the DUAL of (3): the regression it pins is a future check that looks only at
+# UNTRACKED files (`git ls-files --others`, `grep '^??'`), under which a rewritten tracked
+# lockfile would land silently while (3) kept refusing.
+#
+# An earlier version of this comment named `attest-green`'s `-uno` as the hazard and had it
+# exactly backwards: `-uno` HIDES untracked and still reports tracked, so that narrowing is the
+# one (3) catches, not (3b). (codex + grok, implement r2 — corroborated.)
 printf '#!/bin/bash\nprintf mutated > s.txt\necho ok\n' > "$FC/ci/lockfile.sh"
 chmod +x "$FC/ci/lockfile.sh"
 (cd "$FC" && git checkout -q session-fc && git add ci/lockfile.sh \
@@ -8205,6 +8210,13 @@ FC_OUT4="$(run_fc integrate session-fc 2>&1 || true)"
 [ "$(fc_main)" = "$FC_AT2" ] \
   && ok "a green suite that rewrites a TRACKED file cannot land either" \
   || fail "a modified tracked file landed anyway"
+# WITHOUT this, the assertion above is satisfied by any refusal at all — a suite that FAILED
+# because the script was missing from the candidate leaves main untouched too, and the fixture
+# would count as insurance while proving nothing. Grep the offending path, as (3) does.
+# (grok, implement r2.)
+printf '%s\n' "$FC_OUT4" | grep -q 's.txt' \
+  && ok "the tracked-file refusal is the DIRTY-TREE one, not an unrelated failure" \
+  || fail "main was untouched for some other reason (got: $(printf '%s\n' "$FC_OUT4" | tail -1))"
 
 section "the coordinator's event log: a durable record that is not the mailbox"
 # Contraction step 3, criteria 1 and 4. The log's value is that it SURVIVES things — a

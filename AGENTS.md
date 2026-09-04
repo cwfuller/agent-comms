@@ -109,7 +109,7 @@ Task size is not the criterion. Peer presence is.
   fresh checkout lacks (installed dependencies, a gitignored `.npmrc` or `.env`, a build cache)
   is simply absent, and a suite that passes in your working checkout can fail here for that
   reason alone. This is why a non-hoisted monorepo appeared unlandable in a 2026-09-03 field
-  report: the fix is a `suite-cmd` that installs first, not a change to the gate.
+  report: the fix is a `suite-cmd` that provisions first, not a change to the gate.
 - **It may leave IGNORED files; it may not leave git-visible changes.** An installed dependency
   tree under a gitignored path is the intended shape. Modified tracked files and
   untracked-but-unignored output both fail the post-suite cleanliness check — including a

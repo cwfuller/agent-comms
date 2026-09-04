@@ -64,9 +64,10 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    staging; exit 3/4 = isolate into a session worktree
    (`comms.sh worktree new`). Task size never matters; peer presence does.
 2. **Never occupy `main` with WORK.** Every checkout a session works in runs on
-   a session branch; `main` is a ref that advances and is normally checked out
-   nowhere — `integrate`'s verification worktree is DETACHED at the candidate,
-   not on `main`. One exception is now
+   a session branch; `main` is a ref that advances and never carries WORK. It may
+   be checked out only by the supported idle-console exception below —
+   `integrate`'s verification worktree is DETACHED at the candidate and never has
+   `main` checked out. That exception is now
    supported (2026-08-27): the primary checkout may IDLE on `main` as the
    owner's console — integrate self-heals it through each landing (rule 3), so
    it always shows landed reality. The moment work happens there, it is an
