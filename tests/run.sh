@@ -8116,7 +8116,7 @@ section "integrate: the verification tree is a FRESH checkout"
 # fails in the verification tree — and the tool's own error (TS2307 there) gives no reason to
 # suspect the TREE. A suite-cmd that provisions first lands today with no change to the gate.
 #
-# Three directions, because two would teach a wrapper that then fails for a DIFFERENT reason:
+# Four directions, because two would teach a wrapper that then fails for a DIFFERENT reason:
 # the post-suite cleanliness check refuses git-visible dirt, and that refusal had NO corpus
 # coverage at all before this section. (grok, plan r1.)
 FC="$WORK/freshco"; mkdir -p "$FC"; FC="$(cd "$FC" && pwd -P)"
@@ -8214,7 +8214,7 @@ FC_OUT4="$(run_fc integrate session-fc 2>&1 || true)"
 # because the script was missing from the candidate leaves main untouched too, and the fixture
 # would count as insurance while proving nothing. Grep the offending path, as (3) does.
 # (grok, implement r2.)
-printf '%s\n' "$FC_OUT4" | grep -q 's.txt' \
+printf '%s\n' "$FC_OUT4" | grep -q ' M s.txt' \
   && ok "the tracked-file refusal is the DIRTY-TREE one, not an unrelated failure" \
   || fail "main was untouched for some other reason (got: $(printf '%s\n' "$FC_OUT4" | tail -1))"
 
