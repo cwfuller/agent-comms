@@ -2755,6 +2755,29 @@ presence_field() {
   { sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" 2>/dev/null || true; } | head -1
 }
 
+presence_self_pid() {  # -> this session's long-lived pid, or EMPTY. Never fails.
+  # A pid is the ONLY thing that can ever prove a record dead: presence_eval reaches
+  # "dead" solely through a ps probe, so a pid-less record is unreapable AT ANY AGE
+  # and lingers as a permanent ambiguous peer. Every abandoned record this repo
+  # accumulated was pid-less, which is why `expire` had nothing to collect.
+  #
+  # A tool shell's own $$ is useless here — it dies within seconds and would make a
+  # LIVE session's record read as a phantom. What is wanted is the agent harness's
+  # own session process, which the harness publishes in the environment.
+  #
+  # ADOPTED ONLY IF VERIFIED PRESENT. An unverified pid is strictly WORSE than none:
+  # a record naming a process that does not exist evaluates `dead` immediately, so
+  # the next reap would collect a LIVE session's claim out from under it. Numeric,
+  # then confirmed by ps; every other case yields empty, which is exactly today's
+  # pid-less behaviour (ambiguous, isolate) — the fail-closed direction.
+  local p="${COMMS_PRESENCE_PID:-${CLAUDE_PID:-}}"
+  case "$p" in ''|*[!0-9]*) return 0 ;; esac
+  # A ps that cannot answer (EPERM in a sandbox) must also yield empty, not a pid
+  # we could not confirm. Guarded so errexit cannot abort the caller.
+  ps -p "$p" -o pid= >/dev/null 2>&1 || return 0
+  printf '%s' "$p"
+}
+
 presence_write() {  # <dest> <name> <instance> <role> <state> <pid> <pid_started> <started>
   # Whole-file temp+mv, temps OUT of the readers' record glob (.tmp/). A beat is a
   # full rewrite, never an update — a deleted record heals on the next beat, and the
@@ -2896,6 +2919,23 @@ cmd_presence() {
       presence_validate_ids "$name" \
         || usage_err "presence claim: invalid name '$(clip "$name")'"
       case "$pid" in *[!0-9]*) usage_err "presence claim: --pid must be numeric" ;; esac
+      # An explicit --pid always wins; otherwise adopt the harness's own session pid
+      # so this record can ever be proven dead. See presence_self_pid.
+      [ -n "$pid" ] || pid="$(presence_self_pid)"
+      # Collect provably-dead records BEFORE recording this claim, so the peer rows
+      # below — and this claim's EXIT STATUS, which IS the isolation decision —
+      # describe the field as it actually is, not as a departed session left it.
+      # `expire` is otherwise a verb nobody invokes, which is why dead records
+      # survived indefinitely even once they were collectable.
+      # Two-pass by construction: this call can only OBSERVE a record it has not
+      # seen before, and collects only on a later claim a full TTL afterwards with
+      # the record byte-identical throughout. A claim therefore cannot reap a
+      # session that is merely suspended or mid-write.
+      # NEVER fails the claim: a reap that cannot run leaves the records in place,
+      # which is the fail-closed direction (more peers, never fewer). Its output is
+      # stderr so this claim's stdout stays exactly the claimed:/peer: contract that
+      # every documented caller parses.
+      presence_expire "$dir" "" >&2 || true
       instance="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
       [ -n "$instance" ] || { echo "presence: could not mint an instance token — ISOLATE" >&2; return 4; }
       local pstart=""

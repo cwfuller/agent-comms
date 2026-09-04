@@ -57,8 +57,8 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
 `comms.sh presence` (see COMMANDS.md):
 
 1. **Claim then check.** Before touching the tree, a session records its presence
-   (`.comms/sessions/<name>-<instance>.json` — role, state, host, optional
-   long-lived pid) and THEN evaluates peers. Exit 0 = no live/ambiguous REGISTERED
+   (`.comms/sessions/<name>-<instance>.json` — role, state, host, long-lived pid)
+   and THEN evaluates peers. Exit 0 = no live/ambiguous REGISTERED
    peers — which is not the same as a clean tree: an unregistered session, a human,
    or an open editor can still hold uncommitted work, so check `git status` before
    staging; exit 3/4 = isolate into a session worktree
@@ -96,7 +96,27 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
 4. **Direct is re-earned, never tenure.** After every wait (reviewer round, await,
    resume) a direct session re-runs `presence others` before its next write; a
    `beat` that heals a vanished record (exit 5) demands the same re-check.
-5. **Fail closed.** Corrupt records, foreign hosts, unverifiable pids, an
+5. **The liveness handle is recorded automatically.** A record can only ever be
+   proven dead through its pid, so a pid-less one is unreapable at any age and
+   lingers as a permanent ambiguous peer — which is how a field of abandoned
+   records accumulates until isolation becomes unconditional. `claim` therefore
+   adopts the agent harness's own session pid (`CLAUDE_PID`, or
+   `COMMS_PRESENCE_PID` for a harness that publishes none) when the caller passes
+   no `--pid`. It is adopted ONLY if numeric and confirmed present by `ps`: a pid
+   naming no process is worse than none, because such a record evaluates dead
+   immediately and the next reap would collect a live session's own claim. Any
+   unverifiable value falls back to pid-less, which is the fail-closed direction.
+6. **`claim` collects the provably dead.** Reaping is not a verb anyone remembers
+   to run, so `claim` runs it, before recording itself and before evaluating
+   peers — the exit status a session acts on then describes the field as it is,
+   not as a departed session left it. This does not weaken rule 7: a claim may
+   only OBSERVE a record it has not seen before, and collects only on a later
+   claim a full TTL afterwards with the bytes unchanged throughout, so a
+   suspended or mid-write session is never taken. A reap that cannot run leaves
+   every record in place. Its output goes to stderr, so claim's stdout stays the
+   `claimed:`/`peer:` contract that callers parse. Collection is not instant
+   release: the nonce tombstone still reads as a peer until the cover ages out.
+7. **Fail closed.** Corrupt records, foreign hosts, unverifiable pids, an
    unwritable sessions dir, and freshly-reaped covers all read as peers.
    Staleness alone never implies death (suspend); only `expire`'s two-pass
    byte-identical reap with confident-death evidence removes another session's

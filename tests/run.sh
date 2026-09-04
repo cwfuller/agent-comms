@@ -17,6 +17,12 @@ unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP COMMS_RUNPHASE_VIA \
 # Probe-result flags gate condition-bound skips, so an inherited value would let a skip be
 # cashed before its probe ran. Same class as the scrub above. (grok, panel r7.)
 unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
+# The harness's OWN session pid, which `presence claim` adopts as a record's liveness
+# handle. Inherited, it would make every claim below record a pid on a developer's
+# machine and none in CI — the corpus would describe a different system in each. The
+# section that tests adoption sets it explicitly per invocation. (Same class as the
+# scrub above.)
+unset CLAUDE_PID COMMS_PRESENCE_PID 2>/dev/null || true
 
 # THE DEFAULT IS `mailbox`. What the harness needs from a default is "write the file and
 # nudge nobody" — no spawned child, no network. It used to get that by asking for cmux and
@@ -7020,6 +7026,71 @@ run_pw presence expire >/dev/null 2>&1
 run_pw presence release --name ghost2 --instance bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 run_pw presence expire >/dev/null 2>&1
 [ ! -f "$PW_TOMB" ] && ok "an old recordless cover is GC'd (old AND no record)" || fail "old cover survived"
+
+# The liveness handle, and reaping AT CLAIM (2026-09-03). Every record this repo
+# accumulated was pid-less, and a pid-less record can NEVER evaluate dead — so
+# `expire` had nothing to collect and, being a verb nobody invoked, ran never.
+# Both halves are needed: a pid makes death provable, and claim is what runs the
+# collector. Own field, so exit statuses here are not perturbed by the block above.
+PWQ="$WORK/presence-pid"; mkdir -p "$PWQ"; PWQ="$(cd "$PWQ" && pwd -P)"
+git -C "$PWQ" init -q -b main; git -C "$PWQ" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$PWQ/.comms"
+run_pwq() { (cd "$PWQ" && env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" "$@"); }
+# <harness-pid> <args...> — claim with the environment a real agent session has.
+claim_pwq() { local hp="$1"; shift; (cd "$PWQ" && env CLAUDE_PID="$hp" COMMS_PRESENCE_TTL_SECS=60 "$COMMS" "$@"); }
+PWQ_SD="$PWQ/.comms/sessions"
+PWQ_INST() { printf '%s' "$1" | sed -n 's/.*instance: //p'; }
+
+PWQ_A="$(PWQ_INST "$(claim_pwq $$ presence claim --name harness --role r 2>/dev/null)")"
+grep -q "\"pid\": \"$$\"" "$PWQ_SD/harness-$PWQ_A.json" \
+  && ok "claim adopts the harness session pid when no --pid is given" || fail "harness pid not adopted"
+run_pwq presence release --name harness --instance "$PWQ_A" >/dev/null 2>&1
+PWQ_B="$(PWQ_INST "$(claim_pwq $$ presence claim --name explicitpid --role r --pid 99999999 2>/dev/null)")"
+grep -q '"pid": "99999999"' "$PWQ_SD/explicitpid-$PWQ_B.json" \
+  && ok "an explicit --pid beats the harness environment" || fail "--pid did not win"
+rm -f "$PWQ_SD/explicitpid-$PWQ_B.json"
+# A pid that cannot be VERIFIED is worse than none: a record naming a process that
+# does not exist evaluates `dead` at once, so the next reap would collect a LIVE
+# session's own claim. Both unverifiable shapes must fall back to pid-less.
+PWQ_C="$(PWQ_INST "$(claim_pwq 'not-a-number' presence claim --name badpid --role r 2>/dev/null)")"
+[ -n "$PWQ_C" ] && grep -q '"pid": ""' "$PWQ_SD/badpid-$PWQ_C.json" \
+  && ok "a non-numeric harness pid is ignored, and the claim still succeeds" || fail "non-numeric harness pid not ignored"
+run_pwq presence release --name badpid --instance "$PWQ_C" >/dev/null 2>&1
+PWQ_D="$(PWQ_INST "$(claim_pwq 99999999 presence claim --name gonepid --role r 2>/dev/null)")"
+[ -n "$PWQ_D" ] && grep -q '"pid": ""' "$PWQ_SD/gonepid-$PWQ_D.json" \
+  && ok "a harness pid naming no live process is ignored (never self-condemn)" || fail "unverified harness pid was recorded"
+run_pwq presence release --name gonepid --instance "$PWQ_D" >/dev/null 2>&1
+
+# Reap AT CLAIM, two-pass by construction: the first claim to see a dead record may
+# only OBSERVE it. Nothing a claim has not already watched for a full TTL can vanish,
+# so a merely suspended or mid-write session is never collected.
+printf '{\n  "name": "departed", "instance": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "state": "working", "host": "%s", "pid": "99999999", "pid_started": "gone", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" > "$PWQ_SD/departed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+printf '{\n  "name": "nohandle", "instance": "abababababababababababababababab", "state": "working", "host": "%s", "pid": "", "pid_started": "", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" > "$PWQ_SD/nohandle-abababababababababababababababab.json"
+PWQ_O1="$(run_pwq presence claim --name w1 --role r 2>/dev/null)"
+[ -f "$PWQ_SD/departed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json" ] \
+  && [ -f "$PWQ_SD/.reap/departed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.obs" ] \
+  && ok "the first claim to see a dead record only OBSERVES it" || fail "claim reaped on first sight"
+PWQ_LEAK="$(printf '%s\n' "$PWQ_O1" | grep -vE '^(claimed|peer):' | grep -c . || true)"
+[ -n "$PWQ_O1" ] && [ "$PWQ_LEAK" = 0 ] \
+  && ok "claim stdout stays the claimed:/peer: contract (reap output is stderr)" \
+  || fail "the reap leaked $PWQ_LEAK non-contract line(s) onto claim stdout"
+run_pwq presence release --name w1 --instance "$(PWQ_INST "$PWQ_O1")" >/dev/null 2>&1
+perl -pi -e 's/^#obs \d+/"#obs " . (time()-99999)/e' "$PWQ_SD/.reap/departed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.obs"
+PWQ_O2="$(run_pwq presence claim --name w2 --role r 2>/dev/null)"
+[ ! -f "$PWQ_SD/departed-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json" ] \
+  && ok "a later claim, grace served, collects the dead record" || fail "claim never reaps"
+[ -f "$PWQ_SD/nohandle-abababababababababababababababab.json" ] \
+  && printf '%s\n' "$PWQ_O2" | grep -q 'nohandle.*ambig' \
+  && ok "a claim never reaps a pid-less record — it is not provably dead" || fail "pid-less record reaped"
+run_pwq presence release --name w2 --instance "$(PWQ_INST "$PWQ_O2")" >/dev/null 2>&1
+# The payoff: the field actually frees. A reap leaves a tombstone cover that still
+# reads as a peer, so isolation persists until the cover itself ages out.
+rm -f "$PWQ_SD/nohandle-abababababababababababababababab.json"
+PWQ_TOMB="$(ls "$PWQ_SD/.reap/"departed-*.tomb.* 2>/dev/null | head -1)"
+[ -n "$PWQ_TOMB" ] && perl -pi -e 's/^#tomb \d+/"#tomb 1"/e' "$PWQ_TOMB"
+PWQ_O3="$(run_pwq presence claim --name w3 --role r 2>/dev/null)"; PWQ_R3=$?
+[ "$PWQ_R3" = 0 ] && ok "once the cover ages out the field is free again (exit 0)" || fail "field never freed (rc=$PWQ_R3)"
+run_pwq presence release --name w3 --instance "$(PWQ_INST "$PWQ_O3")" >/dev/null 2>&1
 
 # worktree new (AC4/AC6): grammar, ignore-gate, local tip, main-root anchoring.
 check_not "worktree new refuses a bad slug" run_pw worktree new 'Bad/Slug'

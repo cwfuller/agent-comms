@@ -2125,12 +2125,20 @@ Candidate formalizations to weigh at the reflection (minimal-first):
 Found by the `suite-perf` session on its first claim — the first outside use of the
 presence system, which is exactly what it was supposed to surface.
 
+> **RESOLVED 2026-09-03 — and the premise below was wrong.** A Claude session DOES publish a
+> stable long-lived pid to its tool shells: `CLAUDE_PID`, which matches the messaging socket
+> name (`/tmp/cc-socks/<pid>.sock`). The `agent-comms-a7` record had already found it by hand
+> and written the socket trick into its own note; nobody generalized it. `claim` now adopts it
+> (verified by `ps`, never trusted unchecked) and runs the reap itself. Measured before the fix,
+> in a scratch field: two records abandoned identically and aged identically, the pid-bearing one
+> collected and the pid-less one immortal. Seven abandoned records had accumulated in this repo
+> by then, forcing every claim to isolate.
+
 `presence_expire`'s reap loop is gated on `[ "$(presence_eval "$f")" = "dead" ]`, and
-`presence_eval` can only reach "dead" through a pid check. `--pid` is OPTIONAL at claim
-time, and a Claude session has no stable long-lived pid to give it (every Bash call is a
-fresh process), so its record carries `"pid": ""` and can never evaluate dead — **not
-"stale enough to reap eventually", but unreapable by construction, at any age.** Observed:
-a record 111 minutes past a 2700s TTL, still listed as an ambiguous peer.
+`presence_eval` can only reach "dead" through a pid check. `--pid` was OPTIONAL at claim
+time and nothing supplied one, so records carried `"pid": ""` and could never evaluate
+dead — **not "stale enough to reap eventually", but unreapable by construction, at any
+age.** Observed: a record 111 minutes past a 2700s TTL, still listed as an ambiguous peer.
 
 The design anticipated the case (`--force` is commented "explicit operator path for
 forever-ambiguous entries (foreign host, no pid)"), so this is an ERGONOMICS gap, not a
@@ -2141,18 +2149,23 @@ accumulate, every later claim sees peers, and isolation becomes permanent — de
 Candidates, none decided:
 - [ ] Say it at the point of pain: when `others` reports a peer that is past TTL AND
   pid-less, print the `expire --force <name>` line. The escape hatch exists and nobody
-  knows it does.
+  knows it does. *(Still open, and now the residual case: records predating the pid
+  default, and providers that publish no session pid.)*
 - [ ] Make abandonment self-healing for the pid-less case only: the two-pass
   byte-identical observation over a full TTL is itself evidence that nothing is writing
   the record. Weigh against the founding rule that staleness never implies death — a
   SUSPENDED session also stops beating, and reaping it is the failure this design refused
   to risk. If adopted, it must be a distinct, narrower rule, not a loosening of the
   general one.
-- [ ] Have long-lived drivers claim under `with-beat` so the record cannot go stale while
-  the session lives, making abandonment mean what it looks like.
-- [ ] Legacy records predating the instance scheme (`agent-comms-7b`, `-a2`, `-a7`, `-be`)
+- [x] **DONE 2026-09-03: record the pid, and reap at claim.** Both halves were needed and
+  neither works alone — a pid makes death provable, and `claim` is the only verb run often
+  enough to be the collector. `with-beat` is no longer the answer to abandonment: a beat
+  cannot outlive the session that emits it, whereas an absent process is proof.
+- [x] Legacy records predating the instance scheme (`agent-comms-7b`, `-a2`, `-a7`, `-be`)
   have no `instance` field, print malformed (`peer: name-  state=`), and are ambiguous by
-  the same rule. Force-clean them once their owners confirm — never unilaterally.
+  the same rule. **Removed 2026-09-03 on the owner's explicit instruction**, after checking
+  that each one's work had landed: `-be`'s "close-out a9fc622 awaiting merge" names a commit
+  on no branch, but every line of it is already on `main`, so it was superseded, not lost.
 
 Also observed: a session's harness NAME and its presence NAME are unrelated, so a peer
 cannot map a record to a session. The suite-perf session correctly refused to infer which
