@@ -652,7 +652,12 @@ set would otherwise authorize dropping a leg that has since been redispatched an
 be running, so the lookup is bound to the current dispatch and to a row whose status is
 `failed`. Binding to the dispatch is still not sufficient on its own: a re-send of a failed
 leg KEEPS that dispatch, so the leg's LATEST turn must be the failed one. A turn that has
-started and not yet reported is a reviewer working right now, and is never droppable. A turn killed at its budget (`rc=3`) is deliberately NOT marked: it was working
+started and not yet reported is a reviewer working right now, and is never droppable. Because
+"latest" is a sample, each dropped leg's turn history is fingerprinted when the drop is accepted
+and re-verified immediately before the composition is published, beside the dispatch
+supersession check. **A residual remains and is not closable in shell**: the gap between that
+final check and the write itself. Closing it would need locking; it is recorded here rather
+than chased. A turn killed at its budget (`rc=3`) is deliberately NOT marked: it was working
 and may answer with more budget, which is a retry, not a roster reduction. And the operator
 gate is procedural, not authenticated — the CLI cannot tell an operator from an agent, so
 "a human chose this" is a rule the driver keeps, not one the tool enforces.

@@ -5682,6 +5682,29 @@ printf '%s\n' "$PN_DG4_C" | grep -qE 'no recorded evidence|turn history moved' \
   && ! printf '%s\n' "$PN_DG4_C" | grep -q 'DEGRADED PANEL' \
   && ok "a leg whose turn history moves is never published as dropped" || fail "a re-sent leg was still dropped"
 
+# FINGERPRINT SATURATION. The accessor used a capped read, so a leg with 50+ boundary events
+# pinned count=50 and history could move with every sampled field identical. Prove the
+# unbounded read by moving history PAST the cap and then changing it. (codex, implement r4.)
+PN_DG5_I=0
+while [ "$PN_DG5_I" -lt 56 ]; do
+  run_pn events append --kind turn-started --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
+    --role gating --status running --note "churn $PN_DG5_I" >/dev/null 2>&1
+  run_pn events append --kind provider-result --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
+    --role gating --status failed --note "exit=1 via=acp reason=no-output churn $PN_DG5_I" >/dev/null 2>&1
+  PN_DG5_I=$((PN_DG5_I + 1))
+done
+PN_DG5_A="$(run_pn compose --set "$PN_DG4_SET" --degrade grok >/dev/null 2>&1; echo done)"
+PN_DG5_S1="$( eval "$(sed -n '/^degrade_boundary_state() {/,/^}/p' "$COMMS")"
+              cmd_events() { (cd "$PN_FIX" && "$COMMS" events "$@"); }
+              degrade_boundary_state "$PN_DG4_SET" "$PN_DG4_DSP" grok )"
+run_pn events append --kind provider-result --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
+  --role gating --status failed --note "exit=1 via=acp reason=no-output churn final" >/dev/null 2>&1
+PN_DG5_S2="$( eval "$(sed -n '/^degrade_boundary_state() {/,/^}/p' "$COMMS")"
+              cmd_events() { (cd "$PN_FIX" && "$COMMS" events "$@"); }
+              degrade_boundary_state "$PN_DG4_SET" "$PN_DG4_DSP" grok )"
+[ -n "$PN_DG5_S1" ] && [ "$PN_DG5_S1" != "$PN_DG5_S2" ] \
+  && ok "the boundary fingerprint still moves past the reader's default row cap" || fail "fingerprint saturated: '$PN_DG5_S1' vs '$PN_DG5_S2'"
+
 # A reduction that empties the roster is not a degraded panel, it is an unreviewed change.
 PN_DG_REQ2="$PN_FIX/.comms/to-grok/$(basename "$PN_FIX")_2026-08-26T12-04-00_req-dg2.md"
 sed -e 's/^message_id: .*/message_id: pn-req-dg2/' -e 's/^thread: .*/thread: pn-dg2-thread/' "$PN_REQ" > "$PN_DG_REQ2"

@@ -1719,11 +1719,22 @@ cmd_panel() {
 # TOCTOU, because another process can re-send the leg while the composition is being built and
 # the live reviewer would still be dropped. (codex, implement r3, blocking — the concurrency
 # form of the same stale-evidence defect, found after the dispatch and re-send forms.)
-degrade_boundary_state() {  # <set> <dispatch> <agent> -> "<count>|<last-ts>|<last-kind>|<last-status>"
-  cmd_events --set "$1" --dispatch "$2" --agent "$3" 2>/dev/null \
+degrade_boundary_state() {  # <set> <dispatch> <agent> -> a comparable state string
+  # `--all`, because this is a CORRECTNESS read. The default cap is 50 rows: once a leg had
+  # that many boundary events, appending another dropped one from the window and left the
+  # count pinned at 50, so history could move with every sampled field identical.
+  # (codex, implement r4, blocking.)
+  #
+  # The fingerprint identifies the terminal row ITSELF — run dir, request and message id, and
+  # the note — not just its shape. A one-second timestamp resolution plus a re-send that lands
+  # and finishes with the same kind and status would otherwise compare equal, and a failed
+  # result WITHOUT the marker could replace qualifying evidence undetected.
+  cmd_events --all --set "$1" --dispatch "$2" --agent "$3" 2>/dev/null \
     | awk -F'\t' '
-        NR>1 && ($3=="turn-started" || $3=="provider-result") { n++; ts=$1; k=$3; st=$14 }
-        END { printf "%d|%s|%s|%s", n+0, ts, k, st }'
+        NR>1 && ($3=="turn-started" || $3=="provider-result") {
+          n++; ts=$1; k=$3; st=$14; rd=$13; rq=$11; mid=$12; note=$15
+        }
+        END { printf "%d|%s|%s|%s|%s|%s|%s|%s", n+0, ts, k, st, rd, rq, mid, note }'
 }
 
 cmd_compose() {
@@ -2058,23 +2069,6 @@ $ag_d	$(degrade_boundary_state "$set_id" "$compose_dispatch" "$ag_d")"
   }
 
   {
-    # LAST-MOMENT RE-CHECK. Between accepting the drop and publishing, a re-send can have
-    # started under the same dispatch. Refuse rather than publish a composition that silently
-    # excludes a reviewer who is working right now.
-    if [ -n "$DEGRADED_STATE" ]; then
-      local dst_ag dst_want dst_now
-      while IFS="$(printf '\t')" read -r dst_ag dst_want; do
-        [ -n "$dst_ag" ] || continue
-        dst_now="$(degrade_boundary_state "$set_id" "$compose_dispatch" "$dst_ag")"
-        if [ "$dst_now" != "$dst_want" ]; then
-          echo "compose: '$dst_ag' changed while this composition was being built ($dst_want -> $dst_now) — refusing to drop a leg whose turn history moved" >&2
-          cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" --status partial \
-            --note "degrade superseded: $dst_ag turn history moved during composition" \
-            || echo "warning: coordinator log not updated (composition-refused)" >&2
-          return 3
-        fi
-      done <<< "$DEGRADED_STATE"
-    fi
     printf '# Panel composition — review set %s\n\n' "$set_id"
     if [ -n "$DEGRADED_AGENTS" ]; then
       # Say it FIRST and say who. A degraded approval quoted later as "the panel approved"
@@ -2144,6 +2138,25 @@ $ag_d	$(degrade_boundary_state "$set_id" "$compose_dispatch" "$ag_d")"
     [ "$recheck_rc" = 0 ] && [ "$recheck_disp" = "$compose_dispatch" ] || recheck_bad=1
   else
     [ "$recheck_rc" = 3 ] || recheck_bad=1
+  fi
+  # THE DEGRADATION RE-CHECK BELONGS HERE, beside the dispatch one and AFTER the buffer is
+  # built. Checking it at the top of the producer left the whole rendering pass — and the plan
+  # re-read below — outside the window, so a re-send starting during either was still invisible.
+  # (codex, implement r4, blocking.) A residual check-to-write race remains and cannot be
+  # closed without locking; it is documented rather than chased.
+  if [ "$recheck_bad" = 0 ] && [ -n "$DEGRADED_STATE" ]; then
+    local dst_ag dst_want dst_now
+    while IFS="$(printf '\t')" read -r dst_ag dst_want; do
+      [ -n "$dst_ag" ] || continue
+      dst_now="$(degrade_boundary_state "$set_id" "$compose_dispatch" "$dst_ag")"
+      [ "$dst_now" = "$dst_want" ] && continue
+      echo "compose: '$dst_ag' changed while this composition was being built — refusing to publish a panel that drops a leg whose turn history moved"
+      cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" \
+        --status superseded --note "degrade superseded: $dst_ag turn history moved during composition" \
+        || echo "warning: coordinator log not updated (composition-refused)" >&2
+      rm -f "$compose_buf" 2>/dev/null || true
+      return 3
+    done <<< "$DEGRADED_STATE"
   fi
   if [ "$recheck_bad" = 1 ]; then
     echo "compose: the attempt this composition was built from (${compose_dispatch:-legacy}) is no longer the current one (${recheck_disp:-unreadable}) — refusing to publish or record it"
