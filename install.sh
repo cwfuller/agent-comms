@@ -255,8 +255,12 @@ install_has_acl() {
   [ "$("$ls_bin" -ld "$1" 2>/dev/null | cut -c11)" = "+" ]
 }
 
-install_file() { # install_file <src> <dest> [exec]
-  local src="$1" dest="$2" want_exec="${3:-}" tmp link hops=0 destmode destown
+install_file() { # install_file <src> <dest> [exec] [expected-signature]
+  # The optional 4th argument is a content signature captured by the CALLER before it began
+  # deciding what to write. It is verified immediately before the rename below — after every
+  # copy, chown, chmod and ACL probe — because those steps are themselves a window in which a
+  # concurrent editor can save. (codex, implement r2, blocking.)
+  local src="$1" dest="$2" want_exec="${3:-}" expect="${4:-}" tmp link hops=0 destmode destown
   while [ -L "$dest" ]; do
     hops=$((hops + 1))
     if [ "$hops" -gt 16 ]; then
@@ -318,6 +322,17 @@ install_file() { # install_file <src> <dest> [exec]
   fi
   if [ -n "$want_exec" ]; then
     chmod +x "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  if [ -n "$expect" ]; then
+    local nowsig
+    nowsig="$(agents_sig "$dest")" || {
+      echo "install: cannot re-read $dest to confirm it is unchanged — refusing to replace it" >&2
+      rm -f "$tmp"; return 1; }
+    if [ "$nowsig" != "$expect" ]; then
+      echo "install: $dest changed while this installer was preparing it — left untouched." >&2
+      echo "         Re-run the installer to apply the change." >&2
+      rm -f "$tmp"; return 1
+    fi
   fi
   mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
 }
@@ -591,26 +606,43 @@ norm_block() {
 # an editor saving in between would be silently overwritten. That race existed before, but a
 # generated per-project file is not one anyone edits, and a global instructions file is.
 agents_publish() {  # <tmp> <dest> <signature-at-read-time>
-  local tmp="$1" dest="$2" want="$3" now
-  now="$(agents_sig "$dest")"
-  if [ "$now" != "$want" ]; then
+  local tmp="$1" dest="$2" want="$3"
+  # An unusable signature refuses outright: without one there is no way to tell a concurrent
+  # save from an unchanged file, and guessing "unchanged" is the failure that loses the edit.
+  if [ -z "$want" ]; then
     rm -f "$tmp"
-    echo "  WARNING: $dest changed while this installer was reading it — left untouched." >&2
-    echo "           Re-run the installer to apply the managed block." >&2
+    echo "  WARNING: could not read $dest to compare against — left untouched." >&2
     return 1
   fi
-  install_file "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+  # The comparison happens INSIDE install_file, immediately before its rename. Checking here
+  # was not "immediately before publication": install_file still had to copy, resolve
+  # ownership, chown, read and apply the mode and probe ACLs, and a save inside THAT window
+  # was still discarded. This branch also builds a whole-file snapshot now (it used to append
+  # in place), so a stale snapshot would clobber more than it used to. (codex, implement r2,
+  # blocking.)
+  install_file "$tmp" "$dest" "" "$want" || { rm -f "$tmp"; return 1; }
   rm -f "$tmp" 2>/dev/null || true
 }
-agents_sig() {  # <file> — content signature, or the empty string when absent
-  [ -f "$1" ] || return 0
-  shasum "$1" 2>/dev/null | awk '{print $1}' || true
+agents_sig() {  # <file> — prints ABSENT, or a content hash. NON-ZERO means "cannot tell".
+  # FAILS CLOSED. The first cut returned the empty string for every failure, so a host
+  # without `shasum` — Linux commonly ships only `sha256sum` — produced empty on both sides,
+  # compared equal, and published over whatever the user had just saved. An unreadable file
+  # did the same. "I could not hash it" is not "it is unchanged", and it is not "it is
+  # absent" either, so all three are now distinct. (codex, implement r2, blocking.)
+  local h
+  [ -e "$1" ] || { printf 'ABSENT'; return 0; }
+  h="$(shasum "$1" 2>/dev/null | awk '{print $1}')" || h=""
+  [ -n "$h" ] || h="$(sha256sum "$1" 2>/dev/null | awk '{print $1}')" || h=""
+  [ -n "$h" ] || return 1
+  printf '%s' "$h"
 }
 
 install_agents_block() {
   local f="$1" tmp begin_n end_n start_n next_n sig
   mkdir -p "$(dirname "$f")"
-  sig="$(agents_sig "$f")"
+  # errexit reaches command substitution, and agents_sig returns non-zero on purpose when it
+  # cannot hash. Capture the failure as an EMPTY signature, which agents_publish refuses.
+  sig="$(agents_sig "$f")" || sig=""
 
   if [ ! -f "$f" ]; then
     tmp="$(dirname "$f")/.agent-comms-agents.$$"

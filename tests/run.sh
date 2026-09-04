@@ -3989,34 +3989,6 @@ AGY="$WORK/agents-meta"; mkdir -p "$AGY/repo" "$AGY/real"; git -C "$AGY/repo" in
 agy_install() { (cd "$AGY/repo" && env CODEX_AGENTS_FILE="$1" CLAUDE_COMMANDS_DIR="$AGY/gh/c" \
   CODEX_SKILLS_DIR="$AGY/gh/s" AGENT_COMMS_HOME="$AGY/gh/a" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1); }
 agy_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
-printf 'my own global notes\n' > "$AGY/real/AGENTS.md"; ln -s "$AGY/real/AGENTS.md" "$AGY/link.md"
-agy_install "$AGY/link.md"
-[ -L "$AGY/link.md" ] && grep -q 'agent-comms:begin' "$AGY/real/AGENTS.md" \
-  && grep -q 'my own global notes' "$AGY/real/AGENTS.md" \
-  && ok "a symlinked instructions file is written THROUGH, not replaced" || fail "the symlink was clobbered or the target missed the block"
-printf 'notes\n' > "$AGY/mode.md"; chmod 640 "$AGY/mode.md"; agy_install "$AGY/mode.md"
-[ "$(agy_mode "$AGY/mode.md")" = 640 ] \
-  && ok "a deliberate mode on the instructions file survives the refresh" || fail "mode reset to $(agy_mode "$AGY/mode.md")"
-# LOST UPDATE. The installer reads, decides, then writes back; an editor saving in between
-# would be silently overwritten. Deterministic here by publishing against a stale signature.
-eval "$(sed -n '/^agents_publish() {/,/^}/p' "$REPO/install.sh")"
-eval "$(sed -n '/^agents_sig() {/,/^}/p' "$REPO/install.sh")"
-eval "$(sed -n '/^install_file() {/,/^}/p' "$REPO/install.sh")"
-eval "$(sed -n '/^install_has_acl() {/,/^}/p' "$REPO/install.sh")"
-printf 'v1\n' > "$AGY/race.md"; AGY_SIG="$(agents_sig "$AGY/race.md")"
-printf 'v2 saved by the user\n' > "$AGY/race.md"          # the editor wins the race
-printf 'installer output\n' > "$AGY/race.tmp"
-agents_publish "$AGY/race.tmp" "$AGY/race.md" "$AGY_SIG" >/dev/null 2>&1; AGY_RC=$?
-[ "$AGY_RC" != 0 ] && grep -q 'v2 saved by the user' "$AGY/race.md" \
-  && ok "a file edited between read and write is refused, never clobbered" || fail "lost update went through (rc=$AGY_RC)"
-ag_repo fresh; ag_install fresh
-grep -q 'agent-comms:begin' "$AG/fresh/.codex/AGENTS.md" \
-  && ok "AGENTS.md is created with a marked managed block" || fail "AGENTS.md created marked"
-AG_SUM="$(cat "$AG/fresh/.codex/AGENTS.md")"
-ag_install fresh
-[ "$AG_SUM" = "$(cat "$AG/fresh/.codex/AGENTS.md")" ] \
-  && ok "a repeat install leaves AGENTS.md byte-identical (no-op diff)" || fail "AGENTS.md repeat install no-op"
-
 # Legacy text an older installer wrote — safe to migrate because it is provably ours.
 AG_LEGACY='## Agent Communication Protocol
 
@@ -4032,6 +4004,55 @@ This project uses a local file-based message queue for communication between Cla
 **Auto-delivery:** When `cmux` is available, `$send-to-claude` automatically types `/read-from-codex` into Claude'"'"'s pane. Without `cmux`, messages are still written to `.comms/` for manual pickup.
 
 When the user asks you to "check for messages from Claude" or "review what Claude did", use `$read-from-claude`. After completing a review, use `$send-to-claude` to send your findings back.'
+
+# SEED THE REPLACEMENT PATHS, not the append one. An unmarked file appends, and appending
+# already wrote through a symlink and kept its mode — so testing that shape would pass even
+# with the bare `mv` restored in the two branches that actually REPLACE the file. Marked
+# refresh and legacy migration are those branches. (codex, implement r2, advisory.)
+{ printf 'my own global notes\n\n'; echo '<!-- agent-comms:begin -->'
+  echo '## Agent Communication Protocol'; echo 'stale body an older installer wrote'
+  echo '<!-- agent-comms:end -->'; } > "$AGY/real/AGENTS.md"
+ln -s "$AGY/real/AGENTS.md" "$AGY/link.md"
+agy_install "$AGY/link.md"
+[ -L "$AGY/link.md" ] && grep -q 'parent-brokered' "$AGY/real/AGENTS.md" \
+  && grep -q 'my own global notes' "$AGY/real/AGENTS.md" \
+  && ok "a marked-block REFRESH writes through a symlink instead of replacing it" || fail "the symlink was clobbered on the refresh path"
+printf '%s\n' "$AG_LEGACY" > "$AGY/mode.md"; chmod 640 "$AGY/mode.md"; agy_install "$AGY/mode.md"
+[ "$(agy_mode "$AGY/mode.md")" = 640 ] && grep -q 'agent-comms:begin' "$AGY/mode.md" \
+  && ok "a legacy MIGRATION preserves the file's deliberate mode" || fail "migration reset the mode to $(agy_mode "$AGY/mode.md")"
+# LOST UPDATE. The installer reads, decides, then writes back; an editor saving in between
+# would be silently overwritten. Deterministic here by publishing against a stale signature.
+eval "$(sed -n '/^agents_publish() {/,/^}/p' "$REPO/install.sh")"
+eval "$(sed -n '/^agents_sig() {/,/^}/p' "$REPO/install.sh")"
+eval "$(sed -n '/^install_file() {/,/^}/p' "$REPO/install.sh")"
+eval "$(sed -n '/^install_has_acl() {/,/^}/p' "$REPO/install.sh")"
+printf 'v1\n' > "$AGY/race.md"; AGY_SIG="$(agents_sig "$AGY/race.md")"
+printf 'v2 saved by the user\n' > "$AGY/race.md"          # the editor wins the race
+printf 'installer output\n' > "$AGY/race.tmp"
+agents_publish "$AGY/race.tmp" "$AGY/race.md" "$AGY_SIG" >/dev/null 2>&1; AGY_RC=$?
+[ "$AGY_RC" != 0 ] && grep -q 'v2 saved by the user' "$AGY/race.md" \
+  && ok "a file edited between read and write is refused, never clobbered" || fail "lost update went through (rc=$AGY_RC)"
+# HASHING MUST FAIL CLOSED. With no hash command on PATH the first cut returned empty on both
+# sides, compared equal, and published over the user's save. (codex, implement r2, blocking.)
+AGY_NOHASH="$WORK/agents-nohash-bin"; mkdir -p "$AGY_NOHASH"
+for AGY_C in awk sed cat cp mv rm chmod chown stat dirname basename mkdir ls printf grep; do
+  AGY_P="$(command -v "$AGY_C" 2>/dev/null)" && ln -sf "$AGY_P" "$AGY_NOHASH/$AGY_C"
+done
+printf 'v1\n' > "$AGY/nohash.md"
+AGY_HRC=0
+( PATH="$AGY_NOHASH"; AGY_S="$(agents_sig "$AGY/nohash.md")" || AGY_S=""
+  printf 'new\n' > "$AGY/nohash.tmp"
+  agents_publish "$AGY/nohash.tmp" "$AGY/nohash.md" "$AGY_S" ) >/dev/null 2>&1 || AGY_HRC=$?
+[ "$AGY_HRC" != 0 ] && grep -q '^v1$' "$AGY/nohash.md" \
+  && ok "a host with no usable hash command refuses to publish, rather than assuming unchanged" || fail "publication proceeded without a signature (rc=$AGY_HRC)"
+ag_repo fresh; ag_install fresh
+grep -q 'agent-comms:begin' "$AG/fresh/.codex/AGENTS.md" \
+  && ok "AGENTS.md is created with a marked managed block" || fail "AGENTS.md created marked"
+AG_SUM="$(cat "$AG/fresh/.codex/AGENTS.md")"
+ag_install fresh
+[ "$AG_SUM" = "$(cat "$AG/fresh/.codex/AGENTS.md")" ] \
+  && ok "a repeat install leaves AGENTS.md byte-identical (no-op diff)" || fail "AGENTS.md repeat install no-op"
+
 
 ag_repo legacy; printf '%s\n' "$AG_LEGACY" > "$AG/legacy/.codex/AGENTS.md"
 AG_BEFORE="$(wc -c <"$AG/legacy/.codex/AGENTS.md")"
