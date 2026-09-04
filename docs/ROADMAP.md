@@ -159,6 +159,48 @@ monorepo is a shared cache OUTSIDE the worktree, plus `suite-attest-secs` for in
 tracked work differs from HEAD would claim evidence for code other than the recorded commit;
 ignored installed dependencies do not violate it. (Both reviewers, plan r1.)
 
+### OPEN: the mixed-severity class has no suite guard (2026-09-03, sev 3, corroboration r4)
+
+**Left open deliberately at `max-rounds`, so it is recorded here rather than lost in friction.**
+The corroboration arc added a *flagged by more than one reviewer at different severities* class
+that does NOT gate, and taught the driver copy to read it before Uncorroborated. At implement r3
+the gating reviewer blocked a version of that copy which told drivers to **fix** the class —
+turning a non-gating class into a mandatory round, i.e. `any-blocks` arriving through prose.
+
+**Why the suite did not catch it.** `tests/run.sh` greps `templates/claude-commands/read-from-codex.md`
+for `not auto-address every blocking`. That sentence never LEFT the file during the bad edit — it
+only moved to the wrong bullet — so the guard stayed green through the defect it exists to catch.
+Nothing asserts that mixed-severity is **absent** from the must-fix list, nor that
+`READING FIRST IS NOT FIXING FIRST` is **present**.
+
+**Consequence:** a future edit can re-widen the gate exactly the way r3 did and the suite passes.
+The prose is correct as landed (`418e527`); the guard is missing.
+
+**Where to look:** the reader-hostage-guard assertion in `tests/run.sh`. A positive assertion on
+the reading-vs-fixing sentence plus a negative one on the must-fix bullet is the shape; both are
+string assertions on committed template text, so this is cheap. (grok, corroboration implement r4.)
+
+### OPEN: an exported containment override does not reach the spawned turn (2026-09-03, sev 2)
+
+`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` is the documented escape hatch for grok on Darwin, where
+there is no verified isolation backend and a mounted review turn is refused. Exporting it from
+an interactive shell profile (`~/.zshrc`) does NOT make it reach a leg spawned from a
+non-interactive tool shell, which never sources that profile.
+
+**The failure is silent and points the wrong way.** The operator's own shell shows the override
+as set; the leg still dies seconds after spawn with `refused: no verified isolation backend`, and
+`panel status` simply reports that reviewer unanswered. Observed 2026-09-03: two grok legs were
+diagnosed as SIGTERMed by a dispatching shell exiting, which was wrong — both had fail-closed on
+containment, and the real cause was only found by reading `result.json`.
+
+**A security override that looks active but is not is worse than one plainly off**, because the
+operator stops looking. The roadmap names this flag in four places, all as the working override.
+
+**Where to look:** `runphase.sh` reads it from the environment only. Reading it from
+`.comms/config` as well would make it a property of the project rather than of whichever shell
+happened to spawn the turn. Whatever the fix, the refusal should say that the variable was not
+seen in the child's environment — that one line would have saved the misdiagnosis above.
+
 ### OPEN: workspace identity follows the branch name (2026-09-03, sev 2, fwh-platform)
 
 Taking a session branch mints a NEW mailbox identity, so `list`/`archive` warn about messages
