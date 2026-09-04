@@ -3223,7 +3223,7 @@ cmd_attest_green() {
 
 cmd_integrate() {
   # integrate <branch> — land a session branch on main: advisory lease, ff-only,
-  # suite at the CANDIDATE OID in an immutable detached worktree, then the CAS
+  # suite at the CANDIDATE OID in a throwaway detached worktree, then the CAS
   # update-ref. The lease is an economizer; the CAS is the safety. main never
   # holds WORK: it moves by ref, verified first. One clean checkout may idle on
   # it as a console — that one is healed through the landing, not refused.
@@ -3438,7 +3438,19 @@ cmd_integrate() {
       rc=${PIPESTATUS[0]}
     fi
     set -e
-    [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log"
+    # THE FRESH-CHECKOUT HINT. The verification tree is materialized by `git worktree add`,
+    # so it carries TRACKED CONTENT ONLY — no untracked and no ignored files. A suite-cmd that
+    # passes in the operator's checkout and fails here is usually depending on something that
+    # checkout has and this one does not, and the tool's own error (a missing-module code, say)
+    # gives no reason to suspect the TREE. Deliberately generic: naming any one ecosystem's
+    # directory would teach this tool what `node_modules` is, and the same shape covers an
+    # ignored `.npmrc`, a `.env`, or a build cache. Worded as a LIKELY cause, not a verdict —
+    # most suite failures really are just failures. (codex + grok, plan r1.)
+    [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log
+integrate: note — the verification tree is a FRESH checkout of the candidate: untracked and
+integrate: ignored files are absent. If this suite passes in your working checkout, the likely
+integrate: cause is suite-cmd depending on something only that checkout has; suite-cmd must
+integrate: provision its own prerequisites. Read $suite_log for the underlying failure."
     # POSITIVE PROOF, not merely an absence of failure. A scrub is a blocklist and the
     # next startup hook will not be on it, so require evidence the suite actually RAN:
     # its completion line, with counts matching the contract committed AT THE CANDIDATE.
@@ -3470,7 +3482,18 @@ cmd_integrate() {
     tw_head="$(git -C "$tw" rev-parse HEAD 2>/dev/null)" || die "integrate: cannot read the verification tree's HEAD — refusing"
     [ "$tw_head" = "$cand" ] || die "integrate: the verification tree is at $tw_head, not the candidate $cand — the suite result is not about this landing; refusing"
     tw_status="$(git -C "$tw" status --porcelain 2>/dev/null)" || die "integrate: cannot read the verification tree's status — refusing"
-    [ -z "$tw_status" ] || die "integrate: the suite dirtied the verification tree — refusing to trust the result"
+    # SIBLING OF THE HINT ABOVE, and the one an operator acting on that hint hits next: told to
+    # provision prerequisites, they write a wrapper, and it lands here if its output is
+    # git-VISIBLE. Ignored output is fine — an installed dependency tree is the intended shape.
+    # Untracked-but-unignored files and modified tracked files are not, and a package manager
+    # that rewrites a tracked lockfile produces exactly the latter. Print the dirt: "refusing to
+    # trust the result" without saying WHAT dirtied it is a refusal nobody can act on.
+    # (grok, plan r1 — worth more here than on the suite-FAILED path.)
+    [ -z "$tw_status" ] || die "integrate: the suite dirtied the verification tree — refusing to trust the result
+integrate: note — suite-cmd MAY create IGNORED files (an installed dependency tree is fine); it
+integrate: may NOT leave git-visible changes. Modified tracked files and untracked-but-unignored
+integrate: output both land here. Dirt:
+$tw_status"
   fi
   # Final occupancy guard — a checkout could have moved onto main DURING the
   # suite; the CAS must still never move a ref under a live working tree.

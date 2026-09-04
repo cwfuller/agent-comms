@@ -8109,6 +8109,79 @@ GK_OK="$( (FAIL=0; SKIP=0; SKIP_USED=" "; GRP_PRESERVE_OK=1; skip group-no-secon
 GK_NO="$( (FAIL=0; SKIP=0; SKIP_USED=" "; GRP_PRESERVE_OK=0; skip group-no-secondary "failed" >/dev/null 2>&1; echo "$SKIP") )"
 [ "$GK_NO" = 1 ] && ok "the group skip is permitted on a confirmed failed probe" || fail "a confirmed failed group probe refused its skip"
 
+section "integrate: the verification tree is a FRESH checkout"
+# THE 2026-09-03 FIELD REPORT (fwh-platform, sev 4) read as "integrate cannot verify a
+# non-hoisted monorepo". Measured: it can. `git worktree add` materializes TRACKED CONTENT
+# ONLY, so a suite-cmd depending on a gitignored install passes in the operator's checkout and
+# fails in the verification tree — and the tool's own error (TS2307 there) gives no reason to
+# suspect the TREE. A suite-cmd that provisions first lands today with no change to the gate.
+#
+# Three directions, because two would teach a wrapper that then fails for a DIFFERENT reason:
+# the post-suite cleanliness check refuses git-visible dirt, and that refusal had NO corpus
+# coverage at all before this section. (grok, plan r1.)
+FC="$WORK/freshco"; mkdir -p "$FC"; FC="$(cd "$FC" && pwd -P)"
+git -C "$FC" init -q -b main
+printf '.comms/\n.claude/worktrees/\nvendor/\n' > "$FC/.gitignore"
+mkdir -p "$FC/.comms" "$FC/ci"
+# stands in for a typecheck against a dependency that is NOT hoisted and IS gitignored
+printf '#!/bin/bash\ntest -f vendor/dep.js || { echo "E_NO_MODULE: cannot find vendor/dep"; exit 2; }\necho ok\n' > "$FC/ci/check.sh"
+printf '#!/bin/bash\nmkdir -p vendor && printf x > vendor/dep.js\nexec bash ci/check.sh\n' > "$FC/ci/provision.sh"
+# a wrapper whose output is git-VISIBLE: passes, then dirties the tree
+printf '#!/bin/bash\nprintf x > untracked-artifact.txt\necho ok\n' > "$FC/ci/dirty.sh"
+chmod +x "$FC/ci/check.sh" "$FC/ci/provision.sh" "$FC/ci/dirty.sh"
+printf 'suite-cmd = bash ci/check.sh\n' > "$FC/.comms/config"
+(cd "$FC" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+# the ignored dependency exists ONLY in the primary checkout — exactly the reported shape
+mkdir -p "$FC/vendor" && printf 'primary\n' > "$FC/vendor/dep.js"
+(cd "$FC" && git checkout -q -b session-fc && printf 'x\n' > s.txt && git add s.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: s") >/dev/null 2>&1
+(cd "$FC" && git checkout -q main)
+run_fc() { (cd "$FC" && env "$COMMS" "$@"); }
+fc_main() { git -C "$FC" rev-parse --verify refs/heads/main; }
+
+# The premise: it really does pass where the operator runs it.
+(cd "$FC" && bash ci/check.sh >/dev/null 2>&1) \
+  && ok "the suite passes in the primary checkout, where the ignored dep exists" \
+  || fail "fixture premise broken — the suite must pass in the primary checkout"
+
+# (1) ignored dep, no provisioning -> REFUSED. This is the field report.
+FC_BEFORE="$(fc_main)"
+FC_OUT="$(run_fc integrate session-fc 2>&1 || true)"
+[ "$(fc_main)" = "$FC_BEFORE" ] \
+  && ok "a suite-cmd depending on an ignored file cannot land — main untouched" \
+  || fail "a fresh-checkout suite failure still moved main"
+printf '%s\n' "$FC_OUT" | grep -q 'FRESH checkout of the candidate' \
+  && ok "the refusal explains that the verification tree is a fresh checkout" \
+  || fail "no fresh-checkout diagnostic (got: $(printf '%s\n' "$FC_OUT" | tail -1))"
+printf '%s\n' "$FC_OUT" | grep -q 'provision its own prerequisites' \
+  && ok "the refusal names the fix rather than only the symptom" \
+  || fail "the diagnostic does not say suite-cmd must provision"
+
+# (2) a wrapper that provisions into an IGNORED path -> LANDS.
+printf 'suite-cmd = bash ci/provision.sh\n' > "$FC/.comms/config"
+FC_OUT2="$(run_fc integrate session-fc 2>&1 || true)"
+[ "$(fc_main)" != "$FC_BEFORE" ] \
+  && ok "a self-contained suite-cmd provisions in the fresh tree and LANDS" \
+  || fail "a provisioning suite-cmd still could not land (got: $(printf '%s\n' "$FC_OUT2" | tail -1))"
+
+# (3) a PASSING suite that leaves git-visible output -> still REFUSED. Ignored output is the
+# intended shape; untracked-but-unignored is not, and this is the wrapper an operator writes
+# next after acting on the hint from (1).
+(cd "$FC" && git checkout -q session-fc && printf 'y\n' > s2.txt && git add s2.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: s2" && git checkout -q main) >/dev/null 2>&1
+printf 'suite-cmd = bash ci/dirty.sh\n' > "$FC/.comms/config"
+FC_AT="$(fc_main)"
+FC_OUT3="$(run_fc integrate session-fc 2>&1 || true)"
+[ "$(fc_main)" = "$FC_AT" ] \
+  && ok "a green suite that dirties the verification tree still cannot land" \
+  || fail "git-visible dirt landed anyway"
+printf '%s\n' "$FC_OUT3" | grep -q 'MAY create IGNORED files' \
+  && ok "the dirty-tree refusal distinguishes ignored output from git-visible output" \
+  || fail "no ignored-vs-visible guidance (got: $(printf '%s\n' "$FC_OUT3" | tail -1))"
+printf '%s\n' "$FC_OUT3" | grep -q 'untracked-artifact.txt' \
+  && ok "the dirty-tree refusal names what actually dirtied the tree" \
+  || fail "the refusal does not print the offending path"
+
 section "the coordinator's event log: a durable record that is not the mailbox"
 # Contraction step 3, criteria 1 and 4. The log's value is that it SURVIVES things — a
 # driver that dies mid-panel, a broker that refuses, N runners appending at once — so it is

@@ -103,6 +103,22 @@ Task size is not the criterion. Peer presence is.
 - `.comms/config` must carry a single non-empty `suite-cmd` line or `integrate` refuses to
   land unverified; in this repo that value is `bash tests/run.sh`. Duplicate `suite-cmd`
   or `suite-attest-secs` lines are refused outright rather than resolved by precedence.
+- **`suite-cmd` runs in a FRESH checkout and must provision its own prerequisites.** The
+  verification worktree is materialized by `git worktree add` at the candidate, so it carries
+  tracked content only — no untracked files, no ignored ones. Anything your suite needs that a
+  fresh checkout lacks (installed dependencies, a gitignored `.npmrc` or `.env`, a build cache)
+  is simply absent, and a suite that passes in your working checkout can fail here for that
+  reason alone. This is why a non-hoisted monorepo appeared unlandable in a 2026-09-03 field
+  report: the fix is a `suite-cmd` that installs first, not a change to the gate.
+- **It may leave IGNORED files; it may not leave git-visible changes.** An installed dependency
+  tree under a gitignored path is the intended shape. Modified tracked files and
+  untracked-but-unignored output both fail the post-suite cleanliness check — including a
+  package manager that rewrites a tracked lockfile.
+- **`suite-cmd` is split on whitespace into argv with NO shell**, so `npm ci && tsc` does not
+  work: `&&` is passed as an argument. Commit a script and point at it (`suite-cmd = bash
+  ci/verify.sh`). Provisioning need not be a cold install every time — a cache OUTSIDE the
+  worktree is the intended cost lever, since the suite runs once pre-flight and again inside
+  `integrate` unless `suite-attest-secs` covers the second.
 
 ## The review loop (required for code changes)
 

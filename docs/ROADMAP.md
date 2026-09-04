@@ -104,18 +104,58 @@ Anchor identity is unchanged and deliberately not made weaker: clustering is sti
   pins rendered-rows == parsed-findings, which catches the whole dropped-finding family rather
   than the one byte that exposed it.
 
-### OPEN: `integrate` cannot verify a non-hoisted monorepo (2026-09-03, sev 4, fwh-platform)
+### RESOLVED 2026-09-04: "`integrate` cannot verify a non-hoisted monorepo" was MISDIAGNOSED
 
-`integrate` runs `suite-cmd` in a detached worktree under `.claude/worktrees/`, which has **no
-per-package `node_modules`**. In fwh-platform `@aws-sdk/*` lives in
-`packages/functions/node_modules` and is not hoisted, so typecheck fails **TS2307 on every AWS SDK
-import in files the branch never touched**. `attest-green` cannot cover for it either: it demands
-a clean tracked tree, and that session had work in flight. **Between them there was no supported
-way to land** — the session ran `suite-cmd` in the primary checkout and fast-forwarded by hand.
+**Filed 2026-09-03 (sev 4, fwh-platform).** `integrate` runs `suite-cmd` in a detached worktree
+under `.claude/worktrees/`, which has **no per-package `node_modules`**. In fwh-platform
+`@aws-sdk/*` lives in `packages/functions/node_modules` and is not hoisted, so typecheck failed
+**TS2307 on every AWS SDK import in files the branch never touched**. `attest-green` could not
+cover for it either: it demands a clean tracked tree, and that session had work in flight. The
+session ran `suite-cmd` in the primary checkout and fast-forwarded by hand.
 
-**The gate behaved correctly given what it saw** — it refused and left `main` untouched. The gap
-is that the verification worktree cannot reproduce the project's install. Any fix must not weaken
-the "suite passed AT the candidate commit" guarantee, which is the whole point of the detached run.
+**The gate behaved correctly** — it refused and left `main` untouched. But the original entry
+concluded *"the verification worktree cannot reproduce the project's install"*, and that is
+**false**. Measured 2026-09-04 on a fixture reproducing the reported shape:
+
+| scenario | result |
+|---|---|
+| `suite-cmd` needs a gitignored dep, primary checkout | passes |
+| same, inside integrate's verification worktree | `TS2307`, main untouched — **the report** |
+| `suite-cmd` = committed wrapper that provisions, then checks | **LANDS** |
+
+`suite-cmd` already runs with cwd INSIDE the detached worktree at the candidate and can write
+there. A `suite-cmd` that provisions before it tests worked with no change to the gate. That
+provisioning happens at the candidate, driven by the CANDIDATE's own manifests — strictly
+stronger than linking the primary checkout's `node_modules`, because a branch that changes a
+lockfile then gets the deps it actually declares.
+
+**So this was a discoverability defect, not a capability one**, and the fix is documentation,
+diagnostics and coverage — not a new config key:
+
+- Both refusal paths now explain themselves. The suite-FAILED path says the verification tree is
+  a FRESH checkout carrying tracked content only, names "provision its own prerequisites" as the
+  fix, and points at the retained log — worded as a LIKELY cause, since most suite failures are
+  just failures. Deliberately generic: naming one ecosystem's directory would teach this tool
+  what `node_modules` is, and the same shape covers an ignored `.npmrc`, `.env` or build cache.
+- The post-suite cleanliness path — the one an operator hits NEXT, after acting on that hint —
+  now distinguishes ignored output (fine, that is the intended shape) from git-visible dirt
+  (never), and prints what actually dirtied the tree. **That refusal had zero corpus coverage
+  before this change.** (grok, plan r1.)
+- The contract is stated at all three definition sites: `AGENTS.md`, `docs/PROTOCOL.md` (whose
+  "immutable detached worktree" wording directly contradicted it) and `docs/COMMANDS.md`,
+  including that `suite-cmd` is whitespace-split into argv with NO shell — so `npm ci && tsc`
+  cannot work and the value must point at a committed script.
+- Eight assertions pin three directions: ignored-dep-without-provisioning refuses, self-contained
+  provisioning lands, and a PASSING suite that leaves git-visible output still refuses.
+
+**Rejected: a `suite-prepare-cmd` config key.** It would add a second arbitrary-command execution
+surface inside the landing gate for no capability the wrapper lacks, and could not reuse a
+primary-checkout install without inheriting the wrong lockfile. The cost lever for a large
+monorepo is a shared cache OUTSIDE the worktree, plus `suite-attest-secs` for integrate's re-run.
+
+**Not a separate defect:** `attest-green`'s clean-tracked-tree requirement. Attesting while
+tracked work differs from HEAD would claim evidence for code other than the recorded commit;
+ignored installed dependencies do not violate it. (Both reviewers, plan r1.)
 
 ### OPEN: workspace identity follows the branch name (2026-09-03, sev 2, fwh-platform)
 

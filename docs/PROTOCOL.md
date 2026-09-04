@@ -23,12 +23,22 @@ agent runs from):
   state/       per-thread loop state, JSON (written by comms.sh send)
 ```
 
-The **agent registry** (`.comms/config`, line-oriented) declares who participates:
+The **agent registry** (`.comms/config`, line-oriented) declares who participates, and carries
+the landing gate's suite keys:
 
 ```
 agents = claude codex grok
 default-target = codex
+suite-cmd = bash ci/verify.sh
+suite-attest-secs = 600
 ```
+
+`suite-cmd` is what `integrate` runs at the candidate OID. It is **split on whitespace into
+argv with no shell**, so `npm ci && tsc` does not work — commit a script and point at it. It
+runs in a FRESH checkout (tracked content only: no untracked files, no ignored ones), so it
+must provision its own prerequisites; it may leave ignored files but no git-visible changes.
+`suite-attest-secs = N` lets a fresh same-OID `attest-green` record stand in for integrate's
+re-run. Both keys are single-valued: duplicates are refused rather than resolved by precedence.
 
 Names are `[a-z][a-z0-9-]{1,15}` and must have a supported backend
 (`comms.sh agents --supported`); duplicates, multi-word defaults, and unsupported
@@ -64,7 +74,9 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    (pins mailbox identity so the branch switch cannot flap prefixes), then
    `git checkout -b`.
 3. **Landing = `comms.sh integrate <branch>`.** Advisory lease, ff-only, the suite
-   runs at the CANDIDATE OID in an immutable detached worktree, and `main` moves by
+   runs at the CANDIDATE OID in a throwaway detached worktree — a FRESH checkout carrying
+   tracked content only, so `suite-cmd` must provision whatever it needs and may leave
+   ignored files but no git-visible changes (see `suite-cmd` below) — and `main` moves by
    compare-and-swap `update-ref` — a race loses cleanly, an untested or non-ff OID
    cannot land, and main never points at a commit the suite has not passed at.
    Integrate small and often: isolation removes collision, but cross-session
