@@ -118,7 +118,13 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    otherwise leave a window, before that session's first heartbeat, in which it is dead
    to every reader and collectable while alive. `others` refreshes an EXISTING exact-self
    record only; a vanished one is never manufactured there, since healing is `beat`'s
-   exit-5 path and a session is meant to learn its tenure is gone.
+   exit-5 path and a session is meant to learn its tenure is gone. **`others` is therefore
+   a write, not a read** — a successful re-check is a heartbeat of self, so
+   `last_heartbeat` means "last beat or re-check". And it **fails closed**: a checkpoint
+   whose own record is absent, or bears a reap tombstone, or cannot be re-written, answers
+   exit 5 (tenure lost, re-claim) or exit 4 (isolate) rather than direct-safe. Without
+   that, a session that was collected and whose collector then released would be shown a
+   free field by the very verb that exists to stop it writing.
 6. **`claim` collects the provably dead.** Reaping is not a verb anyone remembers
    to run, so `claim` runs it, before recording itself and before evaluating
    peers — the exit status a session acts on then describes the field as it is,

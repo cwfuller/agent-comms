@@ -7152,6 +7152,9 @@ perl -pi -e 's/^#obs \d+/"#obs " . (time()-99999)/e' "$PWQ_SD/.reap/recheck-$PWQ
 claim_pwq $$ presence others --name recheck --instance "$PWQ_H" >/dev/null 2>&1
 grep -q "\"pid\": \"$$\"" "$PWQ_SD/recheck-$PWQ_H.json" \
   && ok "the mandatory re-check RE-PINS the resumed session's handle before any beat" || fail "others left the exited pid in place"
+# Re-stale FIRST: a clock-only write would satisfy both assertions below by age alone, so
+# only this makes them depend on the re-pinned IDENTITY. (grok, implement r3.)
+PWQ_STALE "$PWQ_SD/recheck-$PWQ_H.json"
 PWQ_RC="$(run_pwq presence claim --name newcomer --role r 2>/dev/null)"; PWQ_RCR=$?
 [ -f "$PWQ_SD/recheck-$PWQ_H.json" ] \
   && ok "a claim with an aged observation cannot collect the re-pinned session" || fail "resumed session reaped in the pre-beat window"
@@ -7169,6 +7172,36 @@ grep -q '"pid_started": ""' "$PWQ_SD/samepid-$PWQ_I.json" \
   && fail "an unchanged pid NUMBER skipped the repair, leaving an empty start time" \
   || ok "the handle is repaired even when the pid number did not change"
 run_pwq presence release --name samepid --instance "$PWQ_I" >/dev/null 2>&1
+# THE CHECKPOINT MUST FAIL CLOSED (codex, implement r3, blocking). Codex's ordering, which
+# the r2 regression had backwards: the claimer WINS — it collects the record and releases —
+# and only then does the resumed session reach its mandatory re-check. `presence_peers`
+# excludes the caller's own tombstone, so a checkpoint that answered normally here would
+# hand a live, record-less session a free field. Impossible while records were immortal;
+# owned by this change because they are not.
+PWQ_J="$(PWQ_INST "$(claim_pwq $$ presence claim --name victim --role r 2>/dev/null)")"
+perl -pi -e "s/\"pid\": \"[0-9]*\"/\"pid\": \"$PWQ_GONE\"/; s/\"pid_started\": \"[^\"]*\"/\"pid_started\": \"exited\"/" "$PWQ_SD/victim-$PWQ_J.json"
+PWQ_STALE "$PWQ_SD/victim-$PWQ_J.json"
+run_pwq presence expire >/dev/null 2>&1
+perl -pi -e 's/^#obs \d+/"#obs " . (time()-99999)/e' "$PWQ_SD/.reap/victim-$PWQ_J.obs"
+PWQ_K="$(PWQ_INST "$(run_pwq presence claim --name reaper --role r 2>/dev/null)")"   # the claimer wins
+run_pwq presence release --name reaper --instance "$PWQ_K" >/dev/null 2>&1
+[ ! -f "$PWQ_SD/victim-$PWQ_J.json" ] \
+  && ok "the claimer collects the record before the resumed session re-checks (codex's ordering)" || fail "fixture did not reap — the sequence is unproven"
+claim_pwq $$ presence others --name victim --instance "$PWQ_J" >/dev/null 2>&1; PWQ_LT=$?
+[ "$PWQ_LT" = 5 ] \
+  && ok "a re-check whose own record was collected reports LOST TENURE, never direct-safe" || fail "others answered $PWQ_LT on a collected record"
+[ ! -f "$PWQ_SD/victim-$PWQ_J.json" ] \
+  && ok "and it does not resurrect the record — healing stays beat's deliberate exit-5 path" || fail "others silently healed a collected record"
+run_pwq presence expire --force victim >/dev/null 2>&1
+# A re-pin that cannot be written must ISOLATE, not answer normally: a silent failure
+# would leave the dead handle, keep the session invisible to itself, and still return 0.
+PWQ_L="$(PWQ_INST "$(claim_pwq $$ presence claim --name unwritable --role r 2>/dev/null)")"
+rm -rf "$PWQ_SD/.tmp"; : > "$PWQ_SD/.tmp"          # a FILE where presence_write needs a directory
+claim_pwq $$ presence others --name unwritable --instance "$PWQ_L" >/dev/null 2>&1; PWQ_WF=$?
+rm -f "$PWQ_SD/.tmp"
+[ "$PWQ_WF" = 4 ] \
+  && ok "a re-pin that cannot be written fails closed (ISOLATE), never direct-safe" || fail "unwritable re-pin answered $PWQ_WF"
+run_pwq presence release --name unwritable --instance "$PWQ_L" >/dev/null 2>&1
 
 # worktree new (AC4/AC6): grammar, ignore-gate, local tip, main-root anchoring.
 check_not "worktree new refuses a bad slug" run_pw worktree new 'Bad/Slug'

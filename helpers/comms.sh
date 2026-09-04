@@ -3028,14 +3028,43 @@ cmd_presence() {
       # here: healing is `beat`'s exit-5 path, which a session must reach deliberately
       # and which tells it that tenure is gone. Failure to re-pin is never fatal to the
       # check — the peer evaluation below is what the caller came for.
-      local orec="$dir/$name-$instance.json"
-      if [ -f "$orec" ]; then
-        presence_resolve_handle "" "$(presence_field "$orec" pid)" "$(presence_field "$orec" pid_started)"
-        presence_write "$orec" "$name" "$instance" "$(presence_field "$orec" role)" \
-          "$(presence_field "$orec" state)" "$PRESENCE_HANDLE_PID" "$PRESENCE_HANDLE_START" \
-          "$(presence_field "$orec" started)" || true
+      #
+      # AND IT MUST FAIL CLOSED. A checkpoint that finds its OWN record gone cannot report
+      # direct-safe: the session is alive, holds no record, and `presence_peers` excludes
+      # its own tombstone — so a reaped-then-released field reads FREE to the very session
+      # that was collected. That sequence was impossible while pid-less records were
+      # immortal; it is reachable only because they became collectable, so this change owns
+      # it. Lost tenure is reported the way `beat` reports a heal: exit 5, re-claim before
+      # writing. (codex, implement r3, blocking.)
+      local orec="$dir/$name-$instance.json" obase="$name-$instance" prc=0
+      # Returns 0 deliberately: a non-zero return from a bare call would trip errexit
+      # before the caller could turn it into the exit-5 answer.
+      presence_lost_tenure() {   # peers are still worth printing; the STATUS is the answer
+        presence_peers "$name" "$instance" || true
+        echo "presence: this session's record is GONE (collected, or removed by an operator) — tenure is NOT restored; re-claim before the next shared-checkout write" >&2
+        return 0
+      }
+      # A tombstone bearing our own name is proof of collection no matter what the record
+      # looks like now — including one THIS call could have recreated in the race below.
+      if ls "$dir/.reap/$obase".tomb.* >/dev/null 2>&1 || [ ! -f "$orec" ]; then
+        presence_lost_tenure; return 5
       fi
-      presence_peers "$name" "$instance"
+      presence_resolve_handle "" "$(presence_field "$orec" pid)" "$(presence_field "$orec" pid_started)"
+      # NOT optional. A re-pin that silently failed would leave the dead handle in place,
+      # keep this session invisible to itself, and still answer direct-safe. (codex, r3.)
+      presence_write "$orec" "$name" "$instance" "$(presence_field "$orec" role)" \
+        "$(presence_field "$orec" state)" "$PRESENCE_HANDLE_PID" "$PRESENCE_HANDLE_START" \
+        "$(presence_field "$orec" started)" \
+        || { echo "presence: could not re-pin this session's record — ambiguous environment, ISOLATE" >&2; return 4; }
+      # `expire` writes its tombstone BEFORE it unlinks, so re-reading covers AFTER the
+      # write catches the unlink-between-check-and-write race — in which `presence_write`
+      # would otherwise RECREATE the record, silently healing what this verb promises never
+      # to heal. (codex, implement r3, blocking.)
+      if ls "$dir/.reap/$obase".tomb.* >/dev/null 2>&1; then
+        presence_lost_tenure; return 5
+      fi
+      presence_peers "$name" "$instance" || prc=$?
+      return $prc
       ;;
     release)
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence release: --name and --instance required"
