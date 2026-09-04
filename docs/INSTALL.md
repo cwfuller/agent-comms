@@ -73,8 +73,13 @@ detects local copies that would shadow it.
   repository with a `.comms/` directory — so it is inert everywhere else. Because that file is
   the user's own, the block is published through the same path as every other installed file:
   a symlinked destination is written THROUGH rather than replaced, the existing mode and owner
-  are preserved, an ACL that cannot survive a replacement is reported, and a file that changed
-  between the installer reading it and writing it back is refused rather than overwritten.
+  are preserved, an ACL that cannot survive a replacement is reported, and a file that changed while the
+  installer was preparing the write is detected immediately before the atomic replacement and
+  refused rather than overwritten. That last one is best-effort, not absolute: the check sits as
+  close to the rename as a shell can put it, but a save inside the remaining comparison-and-rename
+  interval is still lost, an edit that returns the file to identical bytes reads as unchanged, and
+  a symlink retargeted between the check and the rename to a different same-content target is not
+  detected.
 
 ## Installing from a fork
 
