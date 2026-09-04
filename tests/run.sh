@@ -3981,6 +3981,34 @@ printf '%s' "$AGX_BODY" | grep -q '`.comms/` directory' \
 # The path must stay overridable, or this suite rewrites the developer's own instructions.
 grep -q 'CODEX_AGENTS_FILE="${CODEX_AGENTS_FILE:-' "$REPO/install.sh" \
   && ok "the global note path is env-overridable (the suite depends on it)" || fail "CODEX_AGENTS_FILE is hardcoded"
+# The block's home is now the user's OWN global instructions, which may be a dotfiles symlink
+# and may carry a deliberate mode. A bare `mv` would replace the link and reset the mode —
+# protections install_file already implements, which the block writer used to bypass because
+# it only ever wrote a file this installer had generated. (codex, implement r1, blocking.)
+AGY="$WORK/agents-meta"; mkdir -p "$AGY/repo" "$AGY/real"; git -C "$AGY/repo" init -q -b main
+agy_install() { (cd "$AGY/repo" && env CODEX_AGENTS_FILE="$1" CLAUDE_COMMANDS_DIR="$AGY/gh/c" \
+  CODEX_SKILLS_DIR="$AGY/gh/s" AGENT_COMMS_HOME="$AGY/gh/a" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1); }
+agy_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
+printf 'my own global notes\n' > "$AGY/real/AGENTS.md"; ln -s "$AGY/real/AGENTS.md" "$AGY/link.md"
+agy_install "$AGY/link.md"
+[ -L "$AGY/link.md" ] && grep -q 'agent-comms:begin' "$AGY/real/AGENTS.md" \
+  && grep -q 'my own global notes' "$AGY/real/AGENTS.md" \
+  && ok "a symlinked instructions file is written THROUGH, not replaced" || fail "the symlink was clobbered or the target missed the block"
+printf 'notes\n' > "$AGY/mode.md"; chmod 640 "$AGY/mode.md"; agy_install "$AGY/mode.md"
+[ "$(agy_mode "$AGY/mode.md")" = 640 ] \
+  && ok "a deliberate mode on the instructions file survives the refresh" || fail "mode reset to $(agy_mode "$AGY/mode.md")"
+# LOST UPDATE. The installer reads, decides, then writes back; an editor saving in between
+# would be silently overwritten. Deterministic here by publishing against a stale signature.
+eval "$(sed -n '/^agents_publish() {/,/^}/p' "$REPO/install.sh")"
+eval "$(sed -n '/^agents_sig() {/,/^}/p' "$REPO/install.sh")"
+eval "$(sed -n '/^install_file() {/,/^}/p' "$REPO/install.sh")"
+eval "$(sed -n '/^install_has_acl() {/,/^}/p' "$REPO/install.sh")"
+printf 'v1\n' > "$AGY/race.md"; AGY_SIG="$(agents_sig "$AGY/race.md")"
+printf 'v2 saved by the user\n' > "$AGY/race.md"          # the editor wins the race
+printf 'installer output\n' > "$AGY/race.tmp"
+agents_publish "$AGY/race.tmp" "$AGY/race.md" "$AGY_SIG" >/dev/null 2>&1; AGY_RC=$?
+[ "$AGY_RC" != 0 ] && grep -q 'v2 saved by the user' "$AGY/race.md" \
+  && ok "a file edited between read and write is refused, never clobbered" || fail "lost update went through (rc=$AGY_RC)"
 ag_repo fresh; ag_install fresh
 grep -q 'agent-comms:begin' "$AG/fresh/.codex/AGENTS.md" \
   && ok "AGENTS.md is created with a marked managed block" || fail "AGENTS.md created marked"

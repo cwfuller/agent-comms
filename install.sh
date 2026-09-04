@@ -579,12 +579,43 @@ norm_block() {
             for (i = s; i <= e; i++) print l[i] }'
 }
 
+# Publish a rewritten AGENTS file THROUGH install_file, never by bare mv.
+#
+# The block used to land in a per-project file this installer generated, where replacing the
+# inode cost nothing. Its home is now the user's own global Codex instructions, which may be a
+# dotfiles SYMLINK, may carry a deliberate mode, and is edited by hand. A bare `mv` would
+# replace the link instead of writing through it, reset the mode, and drop ACLs — protections
+# install_file already implements and warns about. (codex, implement r1, blocking.)
+#
+# It also refuses on a LOST UPDATE. We read the file, spend time deciding, then write it back;
+# an editor saving in between would be silently overwritten. That race existed before, but a
+# generated per-project file is not one anyone edits, and a global instructions file is.
+agents_publish() {  # <tmp> <dest> <signature-at-read-time>
+  local tmp="$1" dest="$2" want="$3" now
+  now="$(agents_sig "$dest")"
+  if [ "$now" != "$want" ]; then
+    rm -f "$tmp"
+    echo "  WARNING: $dest changed while this installer was reading it — left untouched." >&2
+    echo "           Re-run the installer to apply the managed block." >&2
+    return 1
+  fi
+  install_file "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp" 2>/dev/null || true
+}
+agents_sig() {  # <file> — content signature, or the empty string when absent
+  [ -f "$1" ] || return 0
+  shasum "$1" 2>/dev/null | awk '{print $1}' || true
+}
+
 install_agents_block() {
-  local f="$1" tmp begin_n end_n start_n next_n
+  local f="$1" tmp begin_n end_n start_n next_n sig
   mkdir -p "$(dirname "$f")"
+  sig="$(agents_sig "$f")"
 
   if [ ! -f "$f" ]; then
-    { echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"; } > "$f"
+    tmp="$(dirname "$f")/.agent-comms-agents.$$"
+    { echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"; } > "$tmp" || { rm -f "$tmp"; return 1; }
+    agents_publish "$tmp" "$f" "$sig" || return 1
     echo "  created $f with the managed agent-comms block"
     return 0
   fi
@@ -625,7 +656,8 @@ install_agents_block() {
     if cmp -s "$tmp" "$f"; then
       rm -f "$tmp"; echo "  $f block already current (no-op)"
     else
-      mv "$tmp" "$f"; echo "  refreshed the managed block in $f"
+      agents_publish "$tmp" "$f" "$sig" || return 1
+      echo "  refreshed the managed block in $f"
     fi
     return 0
   fi
@@ -644,7 +676,10 @@ install_agents_block() {
   # documentation fence is an example, not the project's live instructions.
   start_n="$(marker_scan '## Agent Communication Protocol' "$(printf '\001')" "$f" | grep '^B' | head -1 | tr -d 'B' || true)"
   if [ -z "$start_n" ]; then
-    { echo ""; echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"; } >> "$f"
+    tmp="$(dirname "$f")/.agent-comms-agents.$$"
+    { cat "$f"; echo ""; echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"; } > "$tmp" \
+      || { rm -f "$tmp"; return 1; }
+    agents_publish "$tmp" "$f" "$sig" || return 1
     echo "  added the managed agent-comms block to $f"
     return 0
   fi
@@ -659,7 +694,7 @@ install_agents_block() {
       echo "$AGENTS_BEGIN"; agents_block_body; echo "$AGENTS_END"
       sed -n "${next_n},\$p" "$f"
     } > "$tmp"
-    mv "$tmp" "$f"
+    agents_publish "$tmp" "$f" "$sig" || return 1
     echo "  migrated the legacy section in $f to a managed block"
   else
     echo "  NOTE: the protocol section in $f has been hand-edited — left untouched."

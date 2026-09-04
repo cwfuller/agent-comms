@@ -70,7 +70,11 @@ detects local copies that would shadow it.
   prose per repository is the one thing here that reliably drifts: the code was always
   single-sourced, the note was not, and the oldest copies went on naming Codex skills this
   installer had already deleted. The note names the condition it applies under — a
-  repository with a `.comms/` directory — so it is inert everywhere else.
+  repository with a `.comms/` directory — so it is inert everywhere else. Because that file is
+  the user's own, the block is published through the same path as every other installed file:
+  a symlinked destination is written THROUGH rather than replaced, the existing mode and owner
+  are preserved, an ACL that cannot survive a replacement is reported, and a file that changed
+  between the installer reading it and writing it back is refused rather than overwritten.
 
 ## Installing from a fork
 
