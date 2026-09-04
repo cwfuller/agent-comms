@@ -83,7 +83,7 @@
 #   panel status [--set <id>]   with --set: which legs have answered, and with what
 #                               verdict. Bare: every recorded review set, newest first —
 #                               the recovery surface after an await dies with its session.
-#   compose --set <id> [--out F]
+#   compose --set <id> [--out F] [--degrade <agent>[,<agent>]]
 #                               cluster every leg's findings and label them by SUPPORT:
 #                               corroborated (gates), flagged-at-differing-severities (2+
 #                               reviewers, mixed severity — does NOT gate), uncorroborated
@@ -1727,9 +1727,18 @@ cmd_compose() {
   # The gate is CORROBORATION, deliberately neither of the two obvious rules:
   #   any-blocks      — one noisy reviewer holds every loop hostage
   #   primary-only    — unique findings never gate, which wastes the panel entirely
-  local set_id="" out=""
+  #
+  # DEGRADATION is opt-in, explicit, and evidence-gated. `--degrade a,b` drops named legs and
+  # composes over the rest, but ONLY for a leg the coordinator's own log shows could not
+  # review at all (`provider-result ... reason=no-output`: the provider exited non-zero
+  # having produced zero bytes). A leg that is merely slow, or that answered unusably, is
+  # never droppable — the first will still arrive and the second is a review, not an absence.
+  # The reduction is written to the log before anything is composed, so a degraded verdict is
+  # never reconstructible as a full-panel one.
+  local set_id="" out="" degrade="" DEGRADED_AGENTS=""
   while [ $# -gt 0 ]; do
     case "$1" in
+      --degrade) shift; degrade="${1:-}" ;;
       --set) shift; set_id="${1:-}" ;;
       --out) shift; out="${1:-}" ;;
       -?*)   usage_err "compose: unknown option '$(clip "$1")'" ;;
@@ -1807,7 +1816,7 @@ cmd_compose() {
   fi
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
-  local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread="" blind=""
+  local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread="" blind="" answered_agents=""
   while IFS=$'\t' read -r ag th rnd req_mid; do
     [ -n "$ag" ] || continue
     n_legs=$((n_legs + 1))
@@ -1837,7 +1846,7 @@ cmd_compose() {
       reply="$cand"; break
     done
     if [ -z "$reply" ]; then pending="$pending $ag"; continue; fi
-    n_answered=$((n_answered + 1))
+    n_answered=$((n_answered + 1)); answered_agents="$answered_agents $ag"
     # A panel must never print a finding count over content it could not read. The broker
     # refuses to STAMP such a reply, but a leg can reach compose by other routes (a
     # self-sending agent authors its own envelope), and a partially-unreadable lane is not
@@ -1882,12 +1891,60 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   # An unanswered leg is NOT an approval. A panel that quietly composes over a missing
   # voice is worse than one reviewer, because it looks like more.
   if [ -n "$pending" ]; then
-    echo "compose: INCOMPLETE — no reply yet from:$pending ($n_answered of $n_legs legs answered)"
-    echo "compose: refusing to gate on a partial panel; re-run when the set is complete"
-    cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" --status partial \
-      --note "$n_answered of $n_legs legs answered; no reply yet from:$pending" \
-      || echo "warning: coordinator log not updated (composition-refused)" >&2
-    return 3
+    # A DEGRADED composition is allowed only when the operator named the missing legs AND
+    # the log proves each one could not review. Both halves matter: naming alone would let a
+    # slow leg be discarded, and evidence alone would let silence lower the bar by itself.
+    local degraded_ok="" degrade_bad="" ag_d p_d
+    if [ -n "$degrade" ]; then
+      for ag_d in $(printf '%s' "$degrade" | tr ',' ' '); do
+        case " $(printf '%s' "$pending" | tr -s ' ') " in
+          *" $ag_d "*) ;;
+          *) degrade_bad="$degrade_bad
+compose: '$ag_d' is not a missing leg in this set — refusing to drop a reviewer that is not absent"; continue ;;
+        esac
+        if cmd_events --set "$set_id" --agent "$ag_d" --kind provider-result 2>/dev/null \
+             | grep -q 'reason=no-output'; then
+          degraded_ok="$degraded_ok $ag_d"
+        else
+          degrade_bad="$degrade_bad
+compose: '$ag_d' has no recorded evidence it could not review (no provider-result carrying reason=no-output) — it may still answer, so it is not droppable"
+        fi
+      done
+    fi
+    # Every missing leg must be covered, or this is still a partial panel wearing a flag.
+    local uncovered=""
+    for p_d in $(printf '%s' "$pending" | tr -s ' '); do
+      case " $degraded_ok " in *" $p_d "*) ;; *) uncovered="$uncovered $p_d" ;; esac
+    done
+    if [ -n "$degrade" ] && [ -z "$degrade_bad" ] && [ -z "$uncovered" ] && [ "$n_answered" -eq 0 ]; then
+      echo "compose: --degrade would drop EVERY leg, leaving no reviewer at all — that is not a degraded panel, it is an unreviewed change"
+      cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" --status partial \
+        --note "degrade would empty the roster; 0 of $n_legs legs answered" \
+        || echo "warning: coordinator log not updated (composition-refused)" >&2
+      return 3
+    fi
+    if [ -n "$degrade" ] && [ -z "$degrade_bad" ] && [ -z "$uncovered" ]; then
+      for ag_d in $degraded_ok; do
+        cmd_events append --kind leg-unavailable --set "$set_id" --dispatch "$compose_dispatch" \
+          --agent "$ag_d" --role gating --status unavailable \
+          --note "produced no output at all; roster reduced by explicit operator decision before composing" \
+          || echo "warning: coordinator log not updated (leg-unavailable for $ag_d)" >&2
+      done
+      DEGRADED_AGENTS="$degraded_ok"
+    else
+      [ -n "$degrade_bad" ] && printf '%s\n' "$degrade_bad"
+      echo "compose: INCOMPLETE — no reply yet from:$pending ($n_answered of $n_legs legs answered)"
+      if [ -n "$degrade" ] && [ -n "$uncovered" ]; then
+        echo "compose: --degrade did not name every missing leg; still missing:$uncovered"
+      elif [ -z "$degrade" ]; then
+        echo "compose: refusing to gate on a partial panel; re-run when the set is complete"
+        echo "compose: if a reviewer cannot answer at all, an operator may drop it explicitly with --degrade <agent>"
+      fi
+      cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" --status partial \
+        --note "$n_answered of $n_legs legs answered; no reply yet from:$pending" \
+        || echo "warning: coordinator log not updated (composition-refused)" >&2
+      return 3
+    fi
   fi
 
   # A leg whose zero-blocking count is a FAILED READ is not an answer either, for the same
@@ -1973,7 +2030,22 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
 
   {
     printf '# Panel composition — review set %s\n\n' "$set_id"
-    printf '%s legs, all answered. %s findings (%s blocking).\n' "$n_legs" "${total:-0}" "${blocking:-0}"
+    if [ -n "$DEGRADED_AGENTS" ]; then
+      # Say it FIRST and say who. A degraded approval quoted later as "the panel approved"
+      # is exactly the drift the archive exists to prevent.
+      printf 'DEGRADED PANEL — composed WITHOUT:%s (each produced no output; dropped by explicit operator decision).\n' "$DEGRADED_AGENTS"
+      printf 'Reviewers present:%s. Read every verdict below as theirs alone, not the panel'"'"'s.\n' \
+        "$answered_agents"
+    fi
+    # The undegraded line is unchanged, deliberately: it is the common case and other
+    # readers already match on it. Only a degraded panel gets different words, because only
+    # a degraded panel means something different.
+    if [ -n "$DEGRADED_AGENTS" ]; then
+      printf '%s of %s legs answered, the rest dropped. %s findings (%s blocking).\n' \
+        "$n_answered" "$n_legs" "${total:-0}" "${blocking:-0}"
+    else
+      printf '%s legs, all answered. %s findings (%s blocking).\n' "$n_legs" "${total:-0}" "${blocking:-0}"
+    fi
     # Printed WITH the counts, not above them: the warning qualifies these numbers, and a
     # reader who takes the count without the caveat is the failure being prevented.
     [ -n "$unread" ] && printf '%s\n' "${unread# }"
@@ -2038,8 +2110,9 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
   # Still current: publish, THEN record.
   if [ -n "$out" ]; then cat "$compose_buf" > "$out"; else cat "$compose_buf"; fi
   rm -f "$compose_buf" 2>/dev/null || true
-  cmd_events append --kind composition-completed --set "$set_id" --dispatch "$compose_dispatch" --status composed \
-    --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0} mixed=${mixed:-0}" \
+  cmd_events append --kind composition-completed --set "$set_id" --dispatch "$compose_dispatch" \
+    --status "$([ -n "$DEGRADED_AGENTS" ] && echo composed-degraded || echo composed)" \
+    --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0} mixed=${mixed:-0}${DEGRADED_AGENTS:+ degraded-without:$DEGRADED_AGENTS}" \
     || echo "warning: coordinator log not updated (composition-completed)" >&2
   [ -z "$out" ] || echo "compose: wrote ${out#"$root"/}"
 }
@@ -2079,7 +2152,7 @@ EVENT_W_AGENT=24; EVENT_W_ARTIFACT=44; EVENT_W_REQID=72; EVENT_W_MID=72; EVENT_W
 EVENT_W_STATUS=32
 # A CLOSED vocabulary. An open one lets a typo mint a kind no reader ever selects for,
 # which is a hole that reads exactly like a turn that never happened.
-EVENT_KINDS=" panel-planned request-persisted request-dispatched message-dispatched turn-started provider-result turn-finished reply-validated reply-refused reply-accepted composition-completed composition-refused "
+EVENT_KINDS=" panel-planned request-persisted request-dispatched message-dispatched turn-started provider-result turn-finished reply-validated reply-refused reply-accepted leg-unavailable composition-completed composition-refused "
 EVENT_ROLES=" gating shadow "
 EVENTS_HEADER="ts	workspace	event	review_set	dispatch	thread	round	agent	role	artifact_id	request_id	message_id	run_dir	status	note"
 

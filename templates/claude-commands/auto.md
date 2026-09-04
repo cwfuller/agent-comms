@@ -211,6 +211,26 @@ verdict format. The cycle continues until APPROVE or max rounds.
    ```bash
    "$COMMS_SH" compose --set "<review_set id>"
    ```
+
+   **If compose says INCOMPLETE, STOP AND ASK THE HUMAN — never decide this yourself.**
+   A reviewer can be unable to answer at all: out of quota, mid-outage, no isolation
+   backend on this OS. Compose refuses such a panel, and that refusal is correct — a
+   missing voice is not an approval. When it names a leg that cannot answer (the
+   coordinator log records `reason=no-output` for a provider that exited having produced
+   nothing), put the choice to the human in one message: **continue with the reviewers who
+   did answer, or pause until the missing one is back.** Say who is missing and that the
+   reason is not knowable from here.
+
+   Only after they choose "continue" may you drop it:
+   ```bash
+   "$COMMS_SH" compose --set "<review_set id>" --degrade <agent>
+   ```
+   That records the roster reduction before composing, and the composition is labelled
+   DEGRADED and names who was actually present. **Never run `--degrade` on your own
+   judgement, never to get past a slow leg, and never to unstick yourself.** A degraded
+   approval is a weaker artifact than a full-panel one, and the human is the only one who
+   may accept that trade. If you are running unattended with nobody to ask, stop and
+   escalate instead.
    It clusters the union by SUPPORT and drops nothing:
    - **Corroborated** (an anchor two reviewers independently flagged) — these gate.
    - **Flagged by more than one reviewer at different severities** — two reviewers landed

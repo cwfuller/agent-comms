@@ -629,6 +629,24 @@ registered agent's inbox**, so which agent drove the panel does not change what 
 see; a leg is answered by the round + `in-reply-to` + `type` + validation binding, never by
 the directory a message arrived in.
 
+**A reviewer that cannot answer at all.** Quota exhaustion, an outage, or a provider with no
+verified isolation backend all end the same way: the child exits non-zero having produced
+zero bytes, and the provider says nothing about why — the case this was built against
+reported only `RUNTIME QUEUE_RUNTIME_PROMPT_FAILED Internal error`. The runner therefore
+records what it OBSERVED, not a diagnosis: `reason: no-output` in `result.json` and on the
+`provider-result` event. That is a fact about the ROSTER, distinct from a reply that arrived
+and failed the verdict contract, which is a fact about the REVIEW.
+
+`compose` still refuses such a panel by default, because a missing voice is not an approval.
+An operator — never the driver on its own judgement — may then drop the leg with
+`compose --set <id> --degrade <agent>`. It is gated on evidence, not on the flag: the named
+agent must actually be missing, the log must carry its `reason=no-output`, every missing leg
+must be named, and a reduction that would leave NO reviewer is refused outright, because
+that is not a degraded panel but an unreviewed change. Accepting one writes `leg-unavailable`
+per dropped agent BEFORE composing, closes as `composed-degraded`, and labels the output
+DEGRADED with the reviewers who were actually present. A degraded approval must never be
+reconstructible as a full-panel one.
+
 Sandbox: over ACP a Codex turn runs under its own kernel sandbox and a Claude turn under a
 pinned permission mode. For worktree turns, `.comms/` and the main `.git/` are added via
 `--add-dir` so the reply and branch operations succeed. The spawned turn does **not** inherit

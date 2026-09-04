@@ -261,12 +261,23 @@ log_event() {
   [ -n "$RUN_DIR" ] && echo "warning: coordinator log not updated ($kind)" >> "$RUN_DIR/runner.log" 2>/dev/null
   return 0
 }
-write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <message-file> <note>
-  local dir="$1" status="$2" rc="$3" sid="$4" mf="$5" note="$6"
+write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <message-file> <note> [reason]
+  # `reason` is a NEW FIELD, deliberately not a new `status` value: every existing consumer
+  # of `status` keeps its exact meaning, and nothing has to learn a third word to stay
+  # correct. It classifies HOW a turn failed, for the one distinction the panel needs and
+  # could not previously make — a reviewer that never spoke at all versus one that answered
+  # unusably. The first is a fact about the ROSTER, the second about the REVIEW.
+  #
+  # It never claims to know WHY. A provider out of quota, mid-outage, or misconfigured all
+  # exit non-zero having produced nothing, and none of them says so: the live case this was
+  # built against reported only `RUNTIME QUEUE_RUNTIME_PROMPT_FAILED Internal error`. So the
+  # recorded reason is `no-output`, which is exactly what was observed, and the operator is
+  # asked rather than told.
+  local dir="$1" status="$2" rc="$3" sid="$4" mf="$5" note="$6" reason="${7:-}"
   [ "$RESULT_WRITTEN" = true ] && return 0
   local RESULT_COMPOSED=1
-  printf '{\n  "provider": "'"$RUN_PROVIDER"'",\n  "status": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s"\n}\n' \
-    "$(json_escape "$status")" "$(json_escape "$rc")" "$(json_escape "$sid")" \
+  printf '{\n  "provider": "'"$RUN_PROVIDER"'",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s"\n}\n' \
+    "$(json_escape "$status")" "$(json_escape "$reason")" "$(json_escape "$rc")" "$(json_escape "$sid")" \
     "$(json_escape "$mf")" "$(json_escape "$dir")" \
     "$(json_escape "${STARTED_AT:-}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(json_escape "$note")" \
@@ -2584,7 +2595,7 @@ cmd_run() {
   # auto-approved so the turn can actually inspect the tree, and anything that would
   # write is denied outright, because prompting is impossible in a detached turn.
   if [ "$via" = "acp" ]; then
-    local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim=""
+    local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim="" acp_reason=""
     local -a acp_iso=()          # isolation env, applied to EVERY owner-spawning invocation
     local acp_iso_backend=none acp_iso_home=""
     # The mode id the backend must hold, carried as DATA because it is PROVIDER VOCABULARY, not a
@@ -2964,7 +2975,7 @@ ABORT_NOTE="refused: could not confirm '$provider' is pinned to '$acp_iso_mode' 
     # broker runs. Emitting it from write_result put it AFTER every reply event on this
     # path and relabelled a broker refusal as a provider failure. (codex, plan r1.)
     log_event provider-result "$([ "$acp_rc" -eq 0 ] && echo completed || echo failed)" \
-      "exit=$acp_rc elapsed=${acp_elapsed}s budget=${timeout}s via=acp"
+      "exit=$acp_rc elapsed=${acp_elapsed}s budget=${timeout}s via=acp$([ -s "$run_dir/reply-raw.md" ] || printf ' reason=no-output')"
     # acpx hands back the answer as TEXT, so the streaming extractor is skipped
     # entirely and only the stamping half of the broker applies.
     # Whether the turn OUTRAN ITS BUDGET is a fact about the turn, not about how many bytes
@@ -3049,9 +3060,14 @@ ABORT_NOTE="refused: could not confirm '$provider' is pinned to '$acp_iso_mode' 
       # Still carries the elapsed/budget tail: a non-zero acpx exit near the budget is
       # worth seeing, it just is not evidence of a kill.
       acp_note="${GROK_BROKER_NOTE:-acpx exited $acp_rc — see runner.log} (after ${acp_elapsed}s of a ${timeout}s budget)"
+      # THE REVIEWER NEVER SPOKE. Zero bytes back and a non-zero exit is not a review this
+      # parser failed to read — there is nothing to read. That distinction is what lets a
+      # panel offer to proceed without this reviewer instead of stalling forever on a leg
+      # that will never answer, and it is recorded as an observation, never as a diagnosis.
+      [ -s "$run_dir/reply-raw.md" ] || acp_reason=no-output
     fi
     update_thread_state "$msg_thread" "$acp_status" "acp:$acp_session" "$sfield" || true
-    write_result "$run_dir" "$acp_status" "$acp_rc" "acp:$acp_session" "$msg" "$acp_note"
+    write_result "$run_dir" "$acp_status" "$acp_rc" "acp:$acp_session" "$msg" "$acp_note" "${acp_reason:-}"
     unmount_artifact
     trap - EXIT
     [ "$acp_status" = completed ]

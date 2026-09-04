@@ -5577,6 +5577,57 @@ PN_AGR_COMP="$(run_pn compose --set "$PN_AGR_SET" 2>&1)" && PN_AGR_RC=0 || PN_AG
   && ok "compose agrees — the same older valid reply completes the leg" \
   || fail "status and compose disagree on an invalid-then-valid candidate (rc=$PN_AGR_RC)"
 
+
+# DEGRADATION when a reviewer cannot answer AT ALL (2026-09-04). Built against a live case:
+# grok out of weekly quota exits non-zero having produced zero bytes, and says nothing about
+# why — only `RUNTIME QUEUE_RUNTIME_PROMPT_FAILED Internal error`. So the roster fact is
+# recorded as what was OBSERVED (`reason=no-output`), and the operator is asked, never told.
+PN_DG_REQ="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-03-00_req-dg.md"
+sed -e 's/^message_id: .*/message_id: pn-req-dg/' -e 's/^thread: .*/thread: pn-dg-thread/' "$PN_REQ" > "$PN_DG_REQ"
+PN_DG_OUT="$(run_pn panel dispatch --to codex,grok --set pn-dg "$PN_DG_REQ" 2>&1 || true)"
+PN_DG_SET="$(printf '%s\n' "$PN_DG_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+PN_DG_MC="$(find "$PN_FIX/.comms/to-codex" -type f | xargs grep -l '^thread: pn-dg-thread-codex' 2>/dev/null | head -1)"
+PN_DG_MIDC="$(grep -m1 '^message_id:' "$PN_DG_MC" | sed 's/^message_id: //')"
+# codex answers; grok never does.
+{ printf -- '---\ntype: review-feedback\nfrom: codex\ntimestamp: 2026-08-26T12:50:00Z\nworkspace: %s\nmessage_id: codex-dg-reply\nthread: pn-dg-thread-codex\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' \
+    "$PN_WS" "$PN_DG_MIDC"; } > "$PN_FIX/.comms/archive/${PN_WS}_2026-08-26T12-50-00_codex-dg.md"
+# Default: still refuses, and now points at the operator escape hatch.
+PN_DG_C1="$(run_pn compose --set "$PN_DG_SET" 2>&1 || true)"
+printf '%s\n' "$PN_DG_C1" | grep -q 'INCOMPLETE' \
+  && printf '%s\n' "$PN_DG_C1" | grep -q -- '--degrade' \
+  && ok "a partial panel still refuses, and names the operator escape hatch" || fail "compose lost its refusal or its hint"
+# WITHOUT recorded evidence the drop is refused: silence alone may never reduce the roster.
+PN_DG_C2="$(run_pn compose --set "$PN_DG_SET" --degrade grok 2>&1 || true)"
+printf '%s\n' "$PN_DG_C2" | grep -q 'no recorded evidence' \
+  && ok "--degrade is refused for a leg that merely has not answered yet" || fail "a slow leg was droppable without evidence"
+# Naming a leg that is NOT missing is refused too.
+PN_DG_C3="$(run_pn compose --set "$PN_DG_SET" --degrade codex 2>&1 || true)"
+printf '%s\n' "$PN_DG_C3" | grep -q 'not a missing leg' \
+  && ok "--degrade refuses to drop a reviewer that actually answered" || fail "an answering reviewer was droppable"
+# Now record the evidence the runner would have written, and the drop becomes available.
+run_pn events append --kind provider-result --set "$PN_DG_SET" --agent grok --role gating \
+  --status failed --note "exit=1 elapsed=6s budget=600s via=acp reason=no-output" >/dev/null 2>&1
+PN_DG_C4="$(run_pn compose --set "$PN_DG_SET" --degrade grok 2>&1 || true)"
+printf '%s\n' "$PN_DG_C4" | grep -q 'DEGRADED PANEL' \
+  && printf '%s\n' "$PN_DG_C4" | grep -q 'WITHOUT: grok' \
+  && ok "with recorded no-output evidence the operator may compose degraded" || fail "evidence-backed degrade was refused"
+printf '%s\n' "$PN_DG_C4" | grep -q 'Reviewers present: codex' \
+  && ok "a degraded composition names only the reviewers who actually answered" || fail "the degraded header misnames the roster"
+grep -qE "leg-unavailable.*$PN_DG_SET.*grok" "$PN_FIX/.comms/events.tsv" \
+  && ok "the roster reduction is WRITTEN to the coordinator log, never inferred" || fail "no leg-unavailable event recorded"
+awk -F'\t' -v s="$PN_DG_SET" '$3=="composition-completed" && $4==s && $14=="composed-degraded"' "$PN_FIX/.comms/events.tsv" | grep -q . \
+  && ok "the set closes as composed-degraded, so it cannot be read as a full panel later" || fail "degraded composition closed as an ordinary one"
+# A reduction that empties the roster is not a degraded panel, it is an unreviewed change.
+PN_DG_REQ2="$PN_FIX/.comms/to-grok/$(basename "$PN_FIX")_2026-08-26T12-04-00_req-dg2.md"
+sed -e 's/^message_id: .*/message_id: pn-req-dg2/' -e 's/^thread: .*/thread: pn-dg2-thread/' "$PN_REQ" > "$PN_DG_REQ2"
+PN_DG2_OUT="$(run_pn panel dispatch --to grok --set pn-dg2 "$PN_DG_REQ2" 2>&1 || true)"
+PN_DG2_SET="$(printf '%s\n' "$PN_DG2_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+run_pn events append --kind provider-result --set "$PN_DG2_SET" --agent grok --role gating \
+  --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
+PN_DG_C5="$(run_pn compose --set "$PN_DG2_SET" --degrade grok 2>&1 || true)"
+printf '%s\n' "$PN_DG_C5" | grep -q 'no reviewer at all' \
+  && ok "dropping EVERY leg is refused — an empty roster is not a degraded panel" || fail "degrade emptied the roster"
+
 grep -q "^review_set: $PN_ST_SET$" "$PN_ST_LEG" 2>/dev/null \
   && ok "dispatch REPLACES an inherited review_set with the set it actually dispatched" \
   || fail "leg kept the stale set ($(grep -m1 '^review_set:' "$PN_ST_LEG"))"
