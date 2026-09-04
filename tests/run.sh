@@ -4002,6 +4002,39 @@ printf '#!/bin/sh\necho "not a mode at all"\nexit 0\n' > "$ST_BIN/junk/stat"; ch
 ST_J="$(ST_PROBE "$ST_BIN/junk")"
 [ "$ST_J" = "|" ] \
   && ok "an unrecognisable stat yields EMPTY rather than a plausible-looking wrong value" || fail "junk stat yielded '$ST_J'"
+# A LIAR: shape-valid output, non-zero exit. Validating stdout alone accepted it, and `|| true`
+# had erased the status that would have caught it — so a partial write would have been handed to
+# chown/chmod. (codex, install-ux r1, blocking.)
+mkdir -p "$ST_BIN/liar"
+printf '#!/bin/sh\ncase "$1$2" in "-c%%u:%%g"|"-f%%u:%%g") echo "1234:5678";; "-c%%a"|"-f%%Mp%%Lp") echo "4755";; esac\nexit 1\n' \
+  > "$ST_BIN/liar/stat"; chmod +x "$ST_BIN/liar/stat"
+ST_LIAR="$(ST_PROBE "$ST_BIN/liar")"
+[ "$ST_LIAR" = "|" ] \
+  && ok "a stat that prints a valid-looking answer and THEN fails is rejected, not trusted" || fail "a failing stat's output was accepted: '$ST_LIAR'"
+# A half-formed owner is not the documented uid:gid shape and has its own chown semantics.
+mkdir -p "$ST_BIN/halfowner"
+printf '#!/bin/sh\ncase "$1$2" in "-c%%u:%%g") echo ":5678";; "-c%%a") echo "640";; esac\nexit 0\n' \
+  > "$ST_BIN/halfowner/stat"; chmod +x "$ST_BIN/halfowner/stat"
+ST_HALF="$( ( PATH="$ST_BIN/halfowner:$PATH"; eval "$ST_FN"; stat_owner /etc/hosts ) )"
+[ -z "$ST_HALF" ] \
+  && ok "an owner missing its uid or gid is refused, never passed to chown" || fail "half-formed owner accepted: '$ST_HALF'"
+# END TO END, which is what the regression was actually about: install_file over an EXISTING
+# destination under the Linux-shaped stat. The probe tests alone would still pass if the caller
+# were wired up wrong. (codex, install-ux r1, advisory.)
+ST_E2E="$WORK/stat-e2e"; mkdir -p "$ST_E2E"
+printf 'old\n' > "$ST_E2E/dest"; chmod 640 "$ST_E2E/dest"
+printf 'new\n' > "$ST_E2E/src"
+ST_E2E_OUT="$( ( PATH="$ST_BIN/linux:$PATH"
+    eval "$ST_FN"
+    eval "$(sed -n '/^install_has_acl() {/,/^}/p' "$REPO/install.sh")"
+    # the stub reports uid:gid 1234:5678, which this test user cannot chown to — so the real
+    # assertion is that it FAILS CLOSED and refuses, exactly as install_file promises, rather
+    # than replacing the file under the wrong ownership.
+    eval "$(sed -n '/^install_file() {/,/^}/p' "$REPO/install.sh")"
+    install_file "$ST_E2E/src" "$ST_E2E/dest" 2>&1 ) || true )"
+printf '%s\n' "$ST_E2E_OUT" | grep -q 'cannot restore owner/group' \
+  && [ "$(cat "$ST_E2E/dest")" = old ] \
+  && ok "install_file over an existing destination refuses rather than publishing wrong ownership" || fail "e2e replacement did not fail closed: $ST_E2E_OUT"
 
 # THE COLLAPSE ITSELF (2026-09-04). The note used to be copied into every project, which
 # made a per-repo copy of PROSE while the code stayed single-sourced — so the copies drifted

@@ -268,27 +268,31 @@ install_has_acl() {
 # Fixed by ORDER — GNU first, which fails cleanly on macOS (`illegal option -- c`, no stdout) —
 # and by SHAPE, so neither probe can poison the result even if a third platform behaves a
 # fourth way. Empty means "could not read it", which every caller already treats as fatal.
+# BOTH halves are required: the invocation must SUCCEED, and its output must be shape-valid.
+# Validating stdout alone accepted a probe that printed something plausible and then failed —
+# and `|| true` had erased the very status that would have caught it, so a partial write like
+# `1234:5678` would have been handed to chown. `if v="$(...)"` keeps the status without
+# tripping errexit. (codex, install-ux r1, blocking — the exact hole its review ask asked about.)
 stat_owner() {  # <file> -> "uid:gid", or empty
   local v
-  for v in "$(stat -c '%u:%g' "$1" 2>/dev/null || true)" "$(stat -f '%u:%g' "$1" 2>/dev/null || true)"; do
-    case "$v" in
-      ''|*[!0-9:]*) continue ;;
-      *:*:*) continue ;;
-      *:*) printf '%s' "$v"; return 0 ;;
-    esac
-  done
+  if v="$(stat -c '%u:%g' "$1" 2>/dev/null)"; then
+    case "$v" in [0-9]*:[0-9]*) case "$v" in *:*:*|*[!0-9:]*) ;; *) printf '%s' "$v"; return 0 ;; esac ;; esac
+  fi
+  if v="$(stat -f '%u:%g' "$1" 2>/dev/null)"; then
+    case "$v" in [0-9]*:[0-9]*) case "$v" in *:*:*|*[!0-9:]*) ;; *) printf '%s' "$v"; return 0 ;; esac ;; esac
+  fi
   return 0
 }
 stat_mode() {  # <file> -> octal mode incl. special bits, or empty
   local v
   # %Mp%Lp, not %Lp: Darwin's %Lp drops the special nibble, so 4755 would come back 755 and
   # quietly lose setuid/setgid/sticky. GNU's %a already carries it.
-  for v in "$(stat -c '%a' "$1" 2>/dev/null || true)" "$(stat -f '%Mp%Lp' "$1" 2>/dev/null || true)"; do
-    case "$v" in
-      ''|*[!0-7]*) continue ;;
-      ????|???) printf '%s' "$v"; return 0 ;;
-    esac
-  done
+  if v="$(stat -c '%a' "$1" 2>/dev/null)"; then
+    case "$v" in ???|????) case "$v" in *[!0-7]*) ;; *) printf '%s' "$v"; return 0 ;; esac ;; esac
+  fi
+  if v="$(stat -f '%Mp%Lp' "$1" 2>/dev/null)"; then
+    case "$v" in ???|????) case "$v" in *[!0-7]*) ;; *) printf '%s' "$v"; return 0 ;; esac ;; esac
+  fi
   return 0
 }
 

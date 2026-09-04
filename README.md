@@ -106,8 +106,10 @@ Message format, loop semantics, and the state model: **[docs/PROTOCOL.md](docs/P
 - No pane multiplexer is required: loops run over ACP.
 
 **A reviewer runs against a mounted copy of your tree, so it has to be contained.** `claude`
-and `codex` have verified isolation backends and are contained automatically. **`grok` does
-not, on any platform** — so a mounted grok review turn is refused rather than run
+and `codex` have verified isolation backends and are constrained automatically — though not
+identically: `codex` runs under its own kernel sandbox, while `claude`'s backend is measured
+write-contained but still reaches the network, so treat it as "cannot modify your machine"
+rather than "cannot phone home". **`grok` has no verified backend on any platform** — so a mounted grok review turn is refused rather than run
 unconstrained, and a default panel including it will not complete. Two ways forward:
 
 - narrow the roster: `/auto --reviewers codex`, or drop `grok` from `agents` in `.comms/config`
