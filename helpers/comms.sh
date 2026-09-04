@@ -1902,14 +1902,21 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
           *) degrade_bad="$degrade_bad
 compose: '$ag_d' is not a missing leg in this set — refusing to drop a reviewer that is not absent"; continue ;;
         esac
-        # BOUND TO THIS ATTEMPT, and to a FAILED one. Scoping by set and agent alone let a
-        # previous attempt's marker authorize dropping a leg that had since been redispatched
-        # and might still be running — the review ask's own retry hole, found by codex.
-        # Requiring the row's status to be `failed` closes the second half: a completed turn
-        # is never evidence that its reviewer was unavailable, whatever it produced.
-        if cmd_events --set "$set_id" --dispatch "$compose_dispatch" --agent "$ag_d" \
-             --kind provider-result 2>/dev/null \
-             | awk -F'\t' 'NR>1 && $14=="failed" && $15 ~ /reason=no-output/ {found=1} END{exit !found}'; then
+        # THE LEG'S LATEST TURN MUST BE THE FAILED ONE. Binding to the dispatch was still not
+        # enough: recovery deliberately allows re-sending a failed leg, and a re-send KEEPS the
+        # dispatch identity — so the sequence "turn fails, marker recorded, operator re-sends,
+        # new turn still running" let the stale marker drop a leg that was actively reviewing.
+        # (codex, implement r2, blocking; the r1 fix closed only the cross-dispatch half.)
+        #
+        # The log is append-only, so its order IS chronological. Walk this leg's turn boundaries
+        # and look at the LAST one: a provider-result that failed with the marker is evidence;
+        # a turn-started with no terminal row after it means a turn is running RIGHT NOW and the
+        # leg is not droppable at all; anything else is not evidence.
+        if cmd_events --set "$set_id" --dispatch "$compose_dispatch" --agent "$ag_d" 2>/dev/null \
+             | awk -F'\t' '
+                 NR>1 && $3=="turn-started"    { last="running"; next }
+                 NR>1 && $3=="provider-result" { last=($14=="failed" && $15 ~ /(^| )reason=no-output( |$)/) ? "evidence" : "other"; next }
+                 END { exit (last=="evidence") ? 0 : 1 }'; then
           degraded_ok="$degraded_ok $ag_d"
         else
           degrade_bad="$degrade_bad

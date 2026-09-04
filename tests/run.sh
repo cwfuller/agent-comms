@@ -5626,6 +5626,12 @@ sed -e 's/^message_id: .*/message_id: pn-req-dg3/' -e 's/^thread: .*/thread: pn-
 PN_DG3_OUT="$(run_pn panel dispatch --to codex,grok --set pn-dg3 "$PN_DG_REQ3" 2>&1 || true)"
 PN_DG3_SET="$(printf '%s\n' "$PN_DG3_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
 PN_DG3_DSP="$(awk -F'\t' -v s="$PN_DG3_SET" '$3=="panel-planned" && $4==s {d=$5} END{print d}' "$PN_FIX/.comms/events.tsv")"
+# codex must ANSWER here, or a valid drop would be refused by the empty-roster guard and
+# these assertions would pass for the wrong reason.
+PN_DG3_MC="$(find "$PN_FIX/.comms/to-codex" -type f | xargs grep -l '^thread: pn-dg3-thread-codex' 2>/dev/null | head -1)"
+PN_DG3_MIDC="$(grep -m1 '^message_id:' "$PN_DG3_MC" | sed 's/^message_id: //')"
+{ printf -- '---\ntype: review-feedback\nfrom: codex\ntimestamp: 2026-08-26T12:55:00Z\nworkspace: %s\nmessage_id: codex-dg3-reply\nthread: pn-dg3-thread-codex\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' \
+    "$PN_WS" "$PN_DG3_MIDC"; } > "$PN_FIX/.comms/archive/${PN_WS}_2026-08-26T12-55-00_codex-dg3.md"
 run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok --role gating \
   --status completed --note "exit=0 via=acp reason=no-output" >/dev/null 2>&1
 printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
@@ -5636,6 +5642,19 @@ run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "stal
   --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
 printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
   && ok "evidence from another dispatch does not authorize dropping this attempt's leg" || fail "stale cross-dispatch evidence was accepted"
+
+# A RE-SEND KEEPS THE DISPATCH, so binding to the dispatch alone still let a stale marker drop
+# a leg that was actively reviewing again. The leg's LATEST turn must be the failed one.
+# (codex, implement r2, blocking.)
+run_pn events append --kind turn-started --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok \
+  --role gating --status running --note "re-sent after the failure" >/dev/null 2>&1
+printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
+  && ok "a leg re-sent under the same dispatch is not droppable while its new turn runs" || fail "a running re-send was dropped on a stale marker"
+# ...and once THAT turn also fails with no output, it becomes evidence again.
+run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok \
+  --role gating --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
+printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'DEGRADED PANEL' \
+  && ok "the re-sent turn failing the same way restores droppability" || fail "a genuinely failed re-send stayed undroppable"
 
 # A reduction that empties the roster is not a degraded panel, it is an unreviewed change.
 PN_DG_REQ2="$PN_FIX/.comms/to-grok/$(basename "$PN_FIX")_2026-08-26T12-04-00_req-dg2.md"

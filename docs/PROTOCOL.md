@@ -650,7 +650,9 @@ reconstructible as a full-panel one.
 The evidence must belong to THIS attempt: a marker left by an earlier dispatch of the same
 set would otherwise authorize dropping a leg that has since been redispatched and may still
 be running, so the lookup is bound to the current dispatch and to a row whose status is
-`failed`. A turn killed at its budget (`rc=3`) is deliberately NOT marked: it was working
+`failed`. Binding to the dispatch is still not sufficient on its own: a re-send of a failed
+leg KEEPS that dispatch, so the leg's LATEST turn must be the failed one. A turn that has
+started and not yet reported is a reviewer working right now, and is never droppable. A turn killed at its budget (`rc=3`) is deliberately NOT marked: it was working
 and may answer with more budget, which is a retry, not a roster reduction. And the operator
 gate is procedural, not authenticated — the CLI cannot tell an operator from an agent, so
 "a human chose this" is a rule the driver keeps, not one the tool enforces.
