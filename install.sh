@@ -255,6 +255,43 @@ install_has_acl() {
   [ "$("$ls_bin" -ld "$1" 2>/dev/null | cut -c11)" = "+" ]
 }
 
+# stat is NOT portable, and its failure is not clean. `stat -f FMT FILE` is a BSD format read,
+# but on Linux (GNU and BusyBox alike) -f means "filesystem status" and FMT is taken as another
+# FILENAME: the command exits non-zero AND still prints a statfs dump for FILE. So a
+# BSD-probe-first `stat -f ... || stat -c ...` captured the dump AND the good value together,
+# and every mode/owner comparison downstream saw garbage.
+#
+# The visible symptom was that UPGRADES failed on Linux while fresh installs worked, because the
+# preservation branch only runs when the destination already exists. Reproduced in a container:
+# `--scope=local` over an existing pin refused every file with "cannot restore owner/group".
+#
+# Fixed by ORDER — GNU first, which fails cleanly on macOS (`illegal option -- c`, no stdout) —
+# and by SHAPE, so neither probe can poison the result even if a third platform behaves a
+# fourth way. Empty means "could not read it", which every caller already treats as fatal.
+stat_owner() {  # <file> -> "uid:gid", or empty
+  local v
+  for v in "$(stat -c '%u:%g' "$1" 2>/dev/null || true)" "$(stat -f '%u:%g' "$1" 2>/dev/null || true)"; do
+    case "$v" in
+      ''|*[!0-9:]*) continue ;;
+      *:*:*) continue ;;
+      *:*) printf '%s' "$v"; return 0 ;;
+    esac
+  done
+  return 0
+}
+stat_mode() {  # <file> -> octal mode incl. special bits, or empty
+  local v
+  # %Mp%Lp, not %Lp: Darwin's %Lp drops the special nibble, so 4755 would come back 755 and
+  # quietly lose setuid/setgid/sticky. GNU's %a already carries it.
+  for v in "$(stat -c '%a' "$1" 2>/dev/null || true)" "$(stat -f '%Mp%Lp' "$1" 2>/dev/null || true)"; do
+    case "$v" in
+      ''|*[!0-7]*) continue ;;
+      ????|???) printf '%s' "$v"; return 0 ;;
+    esac
+  done
+  return 0
+}
+
 install_file() { # install_file <src> <dest> [exec] [expected-signature]
   # The optional 4th argument is a content signature captured by the CALLER before it began
   # deciding what to write. It is verified immediately before the rename below — after every
@@ -288,7 +325,7 @@ install_file() { # install_file <src> <dest> [exec] [expected-signature]
     # it is a no-op chown to the values already there — so applying it after the mode
     # silently undid the special bits this block had just restored. Verified live:
     # `chown $(stat -f '%u:%g' f) f` turned 4755 into 0755. (codex + grok, panel round 3.)
-    destown="$(stat -f '%u:%g' "$dest" 2>/dev/null || stat -c '%u:%g' "$dest" 2>/dev/null || true)"
+    destown="$(stat_owner "$dest")"
     if [ -z "$destown" ]; then
       echo "install: cannot read the owner of $dest — refusing to replace it" >&2
       rm -f "$tmp"; return 1
@@ -303,9 +340,7 @@ install_file() { # install_file <src> <dest> [exec] [expected-signature]
       echo "         (a replaced file would be published under this directory's group instead)" >&2
       rm -f "$tmp"; return 1
     fi
-    # %Mp%Lp, not %Lp: Darwin's %Lp drops the special nibble, so a 4755 destination would
-    # come back 755 and quietly lose setuid/setgid/sticky. GNU's %a already carries it.
-    destmode="$(stat -f '%Mp%Lp' "$dest" 2>/dev/null || stat -c '%a' "$dest" 2>/dev/null || true)"
+    destmode="$(stat_mode "$dest")"
     if [ -z "$destmode" ]; then
       # Preservation is the entire point of this branch. Widening the file to the temp's
       # umask-derived mode because a stat failed is the silent regression, not a fallback.
@@ -455,7 +490,15 @@ warn_local_shadowing() {
     for path in $shadowed; do
       echo "    $path"
     done
-    echo "  remove these if you want global updates to apply automatically."
+    # NAME THE REFRESH FIRST. This used to offer deletion as the only way forward, which reads
+    # as "there is no supported way to update a pin" — and sends people to hand-copy the files,
+    # bypassing every protection install_file provides (symlink resolution, mode and owner
+    # preservation, ACL warning, refusal instead of clobbering). Walked into exactly that on
+    # 2026-09-04: a stale pin was refreshed with `cp`, which silently did nothing the first time
+    # because `cp` was shell-aliased to interactive.
+    echo "  these are PINS, and they are still supported — refresh them in place with:"
+    echo "      install.sh --scope=local        (run from $PROJECT_ROOT)"
+    echo "  or delete them if you would rather this project follow the global install."
   fi
 }
 

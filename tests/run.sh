@@ -3955,6 +3955,54 @@ ag_install() { (cd "$AG/$1" && env CODEX_AGENTS_FILE="$(ag_file "$1")" \
   bash "$REPO/install.sh" --scope=global >"$WORK/ag.out" 2>&1); }
 ag_repo() { mkdir -p "$AG/$1" && git -C "$AG/$1" init -q -b main && mkdir -p "$AG/$1/.codex"; }
 
+
+# STAT IS NOT PORTABLE AND ITS FAILURE IS NOT CLEAN. `stat -f FMT FILE` is a BSD format read; on
+# Linux -f means "filesystem status" and FMT is taken as another FILENAME, so the command exits
+# non-zero AND still prints a statfs dump for FILE. A BSD-first probe therefore captured the dump
+# together with the fallback's good value, and every mode/owner comparison saw garbage — which
+# refused every UPGRADE on Linux while fresh installs worked, because the preservation branch
+# only runs when the destination already exists. Reproduced in a container 2026-09-04.
+#
+# The suite only ever runs on ONE of those platforms, so both are stubbed here. This is the only
+# assertion that can see the other OS's behaviour at all.
+ST_BIN="$WORK/stat-stubs"; mkdir -p "$ST_BIN/linux" "$ST_BIN/macos"
+cat > "$ST_BIN/linux/stat" <<'STUB'
+#!/bin/sh
+# BusyBox/GNU shape: -c formats; -f is statfs and prints a dump to STDOUT before failing.
+case "$1" in
+  -c) case "$2" in '%u:%g') echo "1234:5678";; '%a') echo "640";; *) exit 1;; esac; exit 0 ;;
+  -f) echo "  File: \"$3\""; echo "    ID: deadbeef Namelen: 255"; exit 1 ;;
+esac
+exit 1
+STUB
+cat > "$ST_BIN/macos/stat" <<'STUB'
+#!/bin/sh
+# BSD shape: no -c at all; -f formats.
+case "$1" in
+  -c) echo "stat: illegal option -- c" >&2; exit 1 ;;
+  -f) case "$2" in '%u:%g') echo "1234:5678";; '%Mp%Lp') echo "0640";; *) exit 1;; esac; exit 0 ;;
+esac
+exit 1
+STUB
+chmod +x "$ST_BIN/linux/stat" "$ST_BIN/macos/stat"
+ST_FN="$(sed -n '/^stat_owner() {/,/^}/p' "$REPO/install.sh"; sed -n '/^stat_mode() {/,/^}/p' "$REPO/install.sh")"
+ST_PROBE() { # <stub-dir> -> "owner|mode"
+  ( PATH="$1:$PATH"; eval "$ST_FN"; printf '%s|%s' "$(stat_owner /etc/hosts)" "$(stat_mode /etc/hosts)" )
+}
+ST_L="$(ST_PROBE "$ST_BIN/linux")"
+[ "$ST_L" = "1234:5678|640" ] \
+  && ok "the owner/mode probes survive a stat whose BSD form prints junk THEN fails (Linux)" || fail "linux-shaped stat yielded '$ST_L'"
+ST_M="$(ST_PROBE "$ST_BIN/macos")"
+[ "$ST_M" = "1234:5678|0640" ] \
+  && ok "the owner/mode probes survive a stat with no GNU form at all (macOS)" || fail "macos-shaped stat yielded '$ST_M'"
+# A stat that answers with garbage on BOTH forms must yield EMPTY, which every caller treats as
+# fatal — never a value that looks plausible enough to chown/chmod with.
+mkdir -p "$ST_BIN/junk"
+printf '#!/bin/sh\necho "not a mode at all"\nexit 0\n' > "$ST_BIN/junk/stat"; chmod +x "$ST_BIN/junk/stat"
+ST_J="$(ST_PROBE "$ST_BIN/junk")"
+[ "$ST_J" = "|" ] \
+  && ok "an unrecognisable stat yields EMPTY rather than a plausible-looking wrong value" || fail "junk stat yielded '$ST_J'"
+
 # THE COLLAPSE ITSELF (2026-09-04). The note used to be copied into every project, which
 # made a per-repo copy of PROSE while the code stayed single-sourced — so the copies drifted
 # and the oldest ones still named skills the installer had already deleted. Pin BOTH halves:

@@ -20,6 +20,17 @@ loop, automated.
 curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=both
 ```
 
+Piping a script into a shell means running code you have not read. If you would rather look
+first — and you should — clone it and run it from disk. The result is identical:
+
+```bash
+git clone https://github.com/cwfuller/agent-comms ~/src/agent-comms
+less ~/src/agent-comms/install.sh     # with --scope=both it writes ~/.claude/commands,
+                                      # ~/.agent-comms, ~/.codex/AGENTS.md, and in the project
+                                      # .comms/ plus .gitignore entries. Nothing else.
+cd /path/to/your/project && bash ~/src/agent-comms/install.sh --scope=both
+```
+
 Then, in Claude Code:
 
 ```
@@ -88,10 +99,23 @@ Message format, loop semantics, and the state model: **[docs/PROTOCOL.md](docs/P
 ## Requirements
 
 - A git repository
-- At least two agent CLIs — `claude`, `codex`, and `grok` are supported
+- At least two agent CLIs. **`claude` and `codex` work out of the box.** `grok` is registered
+  by default, but read the containment note below before relying on it.
 - Node ≥ 22.13 for the ACP transport. Setting `ACPX_BIN` to an already-installed `acpx` skips
   the `npx` download, but the Node floor still applies.
 - No pane multiplexer is required: loops run over ACP.
+
+**A reviewer runs against a mounted copy of your tree, so it has to be contained.** `claude`
+and `codex` have verified isolation backends and are contained automatically. **`grok` does
+not, on any platform** — so a mounted grok review turn is refused rather than run
+unconstrained, and a default panel including it will not complete. Two ways forward:
+
+- narrow the roster: `/auto --reviewers codex`, or drop `grok` from `agents` in `.comms/config`
+- or accept an uncontained reviewer deliberately: `export COMMS_RUNPHASE_ALLOW_UNCONTAINED=1`
+
+Understand the second before using it. An uncontained turn can write outside its mount and
+reach the network with your git credentials. That is a fair trade for reviewing your own code
+on your own machine, and a poor one for anything you did not write.
 
 ## Docs
 

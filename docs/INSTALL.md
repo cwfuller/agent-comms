@@ -28,6 +28,13 @@ Run interactively (no `--scope`) and the installer shows a menu:
 
 All scopes are idempotent — re-run freely.
 
+**Upgrading a project that has local pins.** `--scope=global` and `--scope=both` deliberately
+leave `.claude/commands/`, `.agents/loopspec-fragments/` and `.agent-comms/` alone — pinning is
+the whole point of them. To bring those pins up to date, re-run `--scope=local` in that
+project. Do not hand-copy the files: the installer resolves symlinks, preserves mode and owner,
+reports an ACL it cannot carry, and refuses rather than overwriting a file that changed
+underneath it.
+
 ## Codex permissions
 
 **No socket allowance is required.** Delivery runs over ACP, which needs no network and no
