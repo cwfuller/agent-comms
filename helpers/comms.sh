@@ -1714,6 +1714,18 @@ cmd_panel() {
   echo "panel: $set_id dispatched to $n reviewer(s)$synthetic_note; compose with 'comms.sh panel status --set $set_id'"
 }
 
+# The state of a leg's turn history, as one comparable string. Used to accept a degradation
+# and then to RE-CHECK it immediately before publishing: "latest turn" sampled once is a
+# TOCTOU, because another process can re-send the leg while the composition is being built and
+# the live reviewer would still be dropped. (codex, implement r3, blocking — the concurrency
+# form of the same stale-evidence defect, found after the dispatch and re-send forms.)
+degrade_boundary_state() {  # <set> <dispatch> <agent> -> "<count>|<last-ts>|<last-kind>|<last-status>"
+  cmd_events --set "$1" --dispatch "$2" --agent "$3" 2>/dev/null \
+    | awk -F'\t' '
+        NR>1 && ($3=="turn-started" || $3=="provider-result") { n++; ts=$1; k=$3; st=$14 }
+        END { printf "%d|%s|%s|%s", n+0, ts, k, st }'
+}
+
 cmd_compose() {
   # compose --set <id> [--out F] — read every leg's findings, cluster them, and say what
   # the panel actually gates on.
@@ -1735,7 +1747,7 @@ cmd_compose() {
   # never droppable — the first will still arrive and the second is a review, not an absence.
   # The reduction is written to the log before anything is composed, so a degraded verdict is
   # never reconstructible as a full-panel one.
-  local set_id="" out="" degrade="" DEGRADED_AGENTS=""
+  local set_id="" out="" degrade="" DEGRADED_AGENTS="" DEGRADED_STATE=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --degrade) shift; degrade="${1:-}" ;;
@@ -1944,6 +1956,10 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt (n
           || echo "warning: coordinator log not updated (leg-unavailable for $ag_d)" >&2
       done
       DEGRADED_AGENTS="$degraded_ok"
+      for ag_d in $degraded_ok; do
+        DEGRADED_STATE="$DEGRADED_STATE
+$ag_d	$(degrade_boundary_state "$set_id" "$compose_dispatch" "$ag_d")"
+      done
     else
       [ -n "$degrade_bad" ] && printf '%s\n' "$degrade_bad"
       echo "compose: INCOMPLETE — no reply yet from:$pending ($n_answered of $n_legs legs answered)"
@@ -2042,6 +2058,23 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt (n
   }
 
   {
+    # LAST-MOMENT RE-CHECK. Between accepting the drop and publishing, a re-send can have
+    # started under the same dispatch. Refuse rather than publish a composition that silently
+    # excludes a reviewer who is working right now.
+    if [ -n "$DEGRADED_STATE" ]; then
+      local dst_ag dst_want dst_now
+      while IFS="$(printf '\t')" read -r dst_ag dst_want; do
+        [ -n "$dst_ag" ] || continue
+        dst_now="$(degrade_boundary_state "$set_id" "$compose_dispatch" "$dst_ag")"
+        if [ "$dst_now" != "$dst_want" ]; then
+          echo "compose: '$dst_ag' changed while this composition was being built ($dst_want -> $dst_now) — refusing to drop a leg whose turn history moved" >&2
+          cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" --status partial \
+            --note "degrade superseded: $dst_ag turn history moved during composition" \
+            || echo "warning: coordinator log not updated (composition-refused)" >&2
+          return 3
+        fi
+      done <<< "$DEGRADED_STATE"
+    fi
     printf '# Panel composition — review set %s\n\n' "$set_id"
     if [ -n "$DEGRADED_AGENTS" ]; then
       # Say it FIRST and say who. A degraded approval quoted later as "the panel approved"

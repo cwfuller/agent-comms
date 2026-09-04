@@ -5656,6 +5656,32 @@ run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "$PN_
 printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'DEGRADED PANEL' \
   && ok "the re-sent turn failing the same way restores droppability" || fail "a genuinely failed re-send stayed undroppable"
 
+# THE CONCURRENCY FORM: "latest turn" sampled once is a TOCTOU. Between accepting the drop and
+# publishing, another process can re-send the leg — and the live reviewer would still be
+# dropped. Forced deterministically by moving the leg's history through a compose whose
+# acceptance already happened. (codex, implement r3, blocking.)
+PN_DG4_REQ="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-06-00_req-dg4.md"
+sed -e 's/^message_id: .*/message_id: pn-req-dg4/' -e 's/^thread: .*/thread: pn-dg4-thread/' "$PN_REQ" > "$PN_DG4_REQ"
+PN_DG4_OUT="$(run_pn panel dispatch --to codex,grok --set pn-dg4 "$PN_DG4_REQ" 2>&1 || true)"
+PN_DG4_SET="$(printf '%s\n' "$PN_DG4_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+PN_DG4_DSP="$(awk -F'\t' -v s="$PN_DG4_SET" '$3=="panel-planned" && $4==s {d=$5} END{print d}' "$PN_FIX/.comms/events.tsv")"
+PN_DG4_MC="$(find "$PN_FIX/.comms/to-codex" -type f | xargs grep -l '^thread: pn-dg4-thread-codex' 2>/dev/null | head -1)"
+PN_DG4_MIDC="$(grep -m1 '^message_id:' "$PN_DG4_MC" | sed 's/^message_id: //')"
+{ printf -- '---\ntype: review-feedback\nfrom: codex\ntimestamp: 2026-08-26T12:56:00Z\nworkspace: %s\nmessage_id: codex-dg4-reply\nthread: pn-dg4-thread-codex\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' \
+    "$PN_WS" "$PN_DG4_MIDC"; } > "$PN_FIX/.comms/archive/${PN_WS}_2026-08-26T12-56-00_codex-dg4.md"
+run_pn events append --kind provider-result --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
+  --role gating --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
+# Sanity: droppable right now.
+printf '%s\n' "$(run_pn compose --set "$PN_DG4_SET" --degrade grok 2>&1 || true)" | grep -q 'DEGRADED PANEL' \
+  && ok "the concurrency fixture is droppable before anything moves" || fail "dg4 fixture is not droppable — the next assertion would be vacuous"
+# Now a re-send lands. The very same command must refuse instead of publishing.
+run_pn events append --kind turn-started --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
+  --role gating --status running --note "re-sent while composing" >/dev/null 2>&1
+PN_DG4_C="$(run_pn compose --set "$PN_DG4_SET" --degrade grok 2>&1 || true)"
+printf '%s\n' "$PN_DG4_C" | grep -qE 'no recorded evidence|turn history moved' \
+  && ! printf '%s\n' "$PN_DG4_C" | grep -q 'DEGRADED PANEL' \
+  && ok "a leg whose turn history moves is never published as dropped" || fail "a re-sent leg was still dropped"
+
 # A reduction that empties the roster is not a degraded panel, it is an unreviewed change.
 PN_DG_REQ2="$PN_FIX/.comms/to-grok/$(basename "$PN_FIX")_2026-08-26T12-04-00_req-dg2.md"
 sed -e 's/^message_id: .*/message_id: pn-req-dg2/' -e 's/^thread: .*/thread: pn-dg2-thread/' "$PN_REQ" > "$PN_DG_REQ2"
