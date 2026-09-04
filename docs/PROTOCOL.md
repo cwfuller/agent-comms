@@ -647,6 +647,14 @@ per dropped agent BEFORE composing, closes as `composed-degraded`, and labels th
 DEGRADED with the reviewers who were actually present. A degraded approval must never be
 reconstructible as a full-panel one.
 
+The evidence must belong to THIS attempt: a marker left by an earlier dispatch of the same
+set would otherwise authorize dropping a leg that has since been redispatched and may still
+be running, so the lookup is bound to the current dispatch and to a row whose status is
+`failed`. A turn killed at its budget (`rc=3`) is deliberately NOT marked: it was working
+and may answer with more budget, which is a retry, not a roster reduction. And the operator
+gate is procedural, not authenticated — the CLI cannot tell an operator from an agent, so
+"a human chose this" is a rule the driver keeps, not one the tool enforces.
+
 Sandbox: over ACP a Codex turn runs under its own kernel sandbox and a Claude turn under a
 pinned permission mode. For worktree turns, `.comms/` and the main `.git/` are added via
 `--add-dir` so the reply and branch operations succeed. The spawned turn does **not** inherit

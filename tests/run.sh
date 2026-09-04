@@ -5605,7 +5605,8 @@ PN_DG_C3="$(run_pn compose --set "$PN_DG_SET" --degrade codex 2>&1 || true)"
 printf '%s\n' "$PN_DG_C3" | grep -q 'not a missing leg' \
   && ok "--degrade refuses to drop a reviewer that actually answered" || fail "an answering reviewer was droppable"
 # Now record the evidence the runner would have written, and the drop becomes available.
-run_pn events append --kind provider-result --set "$PN_DG_SET" --agent grok --role gating \
+PN_DG_DSP="$(awk -F'\t' -v s="$PN_DG_SET" '$3=="panel-planned" && $4==s {d=$5} END{print d}' "$PN_FIX/.comms/events.tsv")"
+run_pn events append --kind provider-result --set "$PN_DG_SET" --dispatch "$PN_DG_DSP" --agent grok --role gating \
   --status failed --note "exit=1 elapsed=6s budget=600s via=acp reason=no-output" >/dev/null 2>&1
 PN_DG_C4="$(run_pn compose --set "$PN_DG_SET" --degrade grok 2>&1 || true)"
 printf '%s\n' "$PN_DG_C4" | grep -q 'DEGRADED PANEL' \
@@ -5617,12 +5618,32 @@ grep -qE "leg-unavailable.*$PN_DG_SET.*grok" "$PN_FIX/.comms/events.tsv" \
   && ok "the roster reduction is WRITTEN to the coordinator log, never inferred" || fail "no leg-unavailable event recorded"
 awk -F'\t' -v s="$PN_DG_SET" '$3=="composition-completed" && $4==s && $14=="composed-degraded"' "$PN_FIX/.comms/events.tsv" | grep -q . \
   && ok "the set closes as composed-degraded, so it cannot be read as a full panel later" || fail "degraded composition closed as an ordinary one"
+# A turn that SUCCEEDED is never evidence its reviewer was unavailable, whatever it produced.
+# The first cut derived the marker from emptiness alone, so a clean empty result authorized
+# the drop. (codex, implement r1, blocking.)
+PN_DG_REQ3="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-05-00_req-dg3.md"
+sed -e 's/^message_id: .*/message_id: pn-req-dg3/' -e 's/^thread: .*/thread: pn-dg3-thread/' "$PN_REQ" > "$PN_DG_REQ3"
+PN_DG3_OUT="$(run_pn panel dispatch --to codex,grok --set pn-dg3 "$PN_DG_REQ3" 2>&1 || true)"
+PN_DG3_SET="$(printf '%s\n' "$PN_DG3_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+PN_DG3_DSP="$(awk -F'\t' -v s="$PN_DG3_SET" '$3=="panel-planned" && $4==s {d=$5} END{print d}' "$PN_FIX/.comms/events.tsv")"
+run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok --role gating \
+  --status completed --note "exit=0 via=acp reason=no-output" >/dev/null 2>&1
+printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
+  && ok "a COMPLETED provider-result is never evidence of an unavailable reviewer" || fail "a successful empty turn authorized a drop"
+# Evidence from a DIFFERENT dispatch of the same set must not authorize this attempt: the
+# leg may have been redispatched and still be running. (codex, implement r1, blocking.)
+run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "stale-$PN_DG3_DSP" --agent grok --role gating \
+  --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
+printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
+  && ok "evidence from another dispatch does not authorize dropping this attempt's leg" || fail "stale cross-dispatch evidence was accepted"
+
 # A reduction that empties the roster is not a degraded panel, it is an unreviewed change.
 PN_DG_REQ2="$PN_FIX/.comms/to-grok/$(basename "$PN_FIX")_2026-08-26T12-04-00_req-dg2.md"
 sed -e 's/^message_id: .*/message_id: pn-req-dg2/' -e 's/^thread: .*/thread: pn-dg2-thread/' "$PN_REQ" > "$PN_DG_REQ2"
 PN_DG2_OUT="$(run_pn panel dispatch --to grok --set pn-dg2 "$PN_DG_REQ2" 2>&1 || true)"
 PN_DG2_SET="$(printf '%s\n' "$PN_DG2_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
-run_pn events append --kind provider-result --set "$PN_DG2_SET" --agent grok --role gating \
+PN_DG2_DSP="$(awk -F'\t' -v s="$PN_DG2_SET" '$3=="panel-planned" && $4==s {d=$5} END{print d}' "$PN_FIX/.comms/events.tsv")"
+run_pn events append --kind provider-result --set "$PN_DG2_SET" --dispatch "$PN_DG2_DSP" --agent grok --role gating \
   --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
 PN_DG_C5="$(run_pn compose --set "$PN_DG2_SET" --degrade grok 2>&1 || true)"
 printf '%s\n' "$PN_DG_C5" | grep -q 'no reviewer at all' \

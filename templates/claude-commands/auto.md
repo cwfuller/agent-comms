@@ -231,6 +231,12 @@ verdict format. The cycle continues until APPROVE or max rounds.
    approval is a weaker artifact than a full-panel one, and the human is the only one who
    may accept that trade. If you are running unattended with nobody to ask, stop and
    escalate instead.
+
+   Be clear about what enforces this: **nothing in the CLI can tell an operator from an
+   agent.** The evidence gates are mechanical — a leg must really be missing, its failure
+   must really be recorded under this attempt, and an empty roster is refused outright — but
+   "a human chose this" is a rule you keep, not one the tool checks. That is why it is
+   written here rather than assumed.
    It clusters the union by SUPPORT and drops nothing:
    - **Corroborated** (an anchor two reviewers independently flagged) — these gate.
    - **Flagged by more than one reviewer at different severities** — two reviewers landed

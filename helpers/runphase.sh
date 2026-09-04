@@ -2974,8 +2974,20 @@ ABORT_NOTE="refused: could not confirm '$provider' is pinned to '$acp_iso_mode' 
     # THE PROVIDER'S OWN RESULT, recorded where the provider actually exits — before the
     # broker runs. Emitting it from write_result put it AFTER every reply event on this
     # path and relabelled a broker refusal as a provider failure. (codex, plan r1.)
+    # THE REVIEWER NEVER SPOKE — computed ONCE, here, and used by both the event below and
+    # result.json. Three conditions, all required:
+    #   non-zero exit   — a SUCCESSFUL turn that produced nothing is not an unavailable
+    #                     reviewer, and marking it so let a clean empty result authorize
+    #                     dropping its leg. (codex, implement r1, blocking.)
+    #   not rc=3        — that is acpx reporting its own TIMEOUT. A reviewer killed at the
+    #                     budget was working and may well answer with more of it; that is a
+    #                     turn to retry, not a roster to reduce.
+    #   zero bytes back — nothing to read, as opposed to something unreadable.
+    if [ "$acp_rc" -ne 0 ] && [ "$acp_rc" -ne 3 ] && [ ! -s "$run_dir/reply-raw.md" ]; then
+      acp_reason=no-output
+    fi
     log_event provider-result "$([ "$acp_rc" -eq 0 ] && echo completed || echo failed)" \
-      "exit=$acp_rc elapsed=${acp_elapsed}s budget=${timeout}s via=acp$([ -s "$run_dir/reply-raw.md" ] || printf ' reason=no-output')"
+      "exit=$acp_rc elapsed=${acp_elapsed}s budget=${timeout}s via=acp${acp_reason:+ reason=$acp_reason}"
     # acpx hands back the answer as TEXT, so the streaming extractor is skipped
     # entirely and only the stamping half of the broker applies.
     # Whether the turn OUTRAN ITS BUDGET is a fact about the turn, not about how many bytes
@@ -3060,11 +3072,6 @@ ABORT_NOTE="refused: could not confirm '$provider' is pinned to '$acp_iso_mode' 
       # Still carries the elapsed/budget tail: a non-zero acpx exit near the budget is
       # worth seeing, it just is not evidence of a kill.
       acp_note="${GROK_BROKER_NOTE:-acpx exited $acp_rc — see runner.log} (after ${acp_elapsed}s of a ${timeout}s budget)"
-      # THE REVIEWER NEVER SPOKE. Zero bytes back and a non-zero exit is not a review this
-      # parser failed to read — there is nothing to read. That distinction is what lets a
-      # panel offer to proceed without this reviewer instead of stalling forever on a leg
-      # that will never answer, and it is recorded as an observation, never as a diagnosis.
-      [ -s "$run_dir/reply-raw.md" ] || acp_reason=no-output
     fi
     update_thread_state "$msg_thread" "$acp_status" "acp:$acp_session" "$sfield" || true
     write_result "$run_dir" "$acp_status" "$acp_rc" "acp:$acp_session" "$msg" "$acp_note" "${acp_reason:-}"

@@ -1902,12 +1902,18 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
           *) degrade_bad="$degrade_bad
 compose: '$ag_d' is not a missing leg in this set — refusing to drop a reviewer that is not absent"; continue ;;
         esac
-        if cmd_events --set "$set_id" --agent "$ag_d" --kind provider-result 2>/dev/null \
-             | grep -q 'reason=no-output'; then
+        # BOUND TO THIS ATTEMPT, and to a FAILED one. Scoping by set and agent alone let a
+        # previous attempt's marker authorize dropping a leg that had since been redispatched
+        # and might still be running — the review ask's own retry hole, found by codex.
+        # Requiring the row's status to be `failed` closes the second half: a completed turn
+        # is never evidence that its reviewer was unavailable, whatever it produced.
+        if cmd_events --set "$set_id" --dispatch "$compose_dispatch" --agent "$ag_d" \
+             --kind provider-result 2>/dev/null \
+             | awk -F'\t' 'NR>1 && $14=="failed" && $15 ~ /reason=no-output/ {found=1} END{exit !found}'; then
           degraded_ok="$degraded_ok $ag_d"
         else
           degrade_bad="$degrade_bad
-compose: '$ag_d' has no recorded evidence it could not review (no provider-result carrying reason=no-output) — it may still answer, so it is not droppable"
+compose: '$ag_d' has no recorded evidence it could not review in THIS attempt (no failed provider-result carrying reason=no-output under dispatch $compose_dispatch) — it may still answer, so it is not droppable"
         fi
       done
     fi
