@@ -209,9 +209,11 @@ error reply routes to that leg's reviewer alone.)
 **Presence re-check after the wait — single-reviewer and panel alike.** A read
 happens after a reviewer wait by definition: if this session works DIRECT in the
 shared checkout, re-run `"$COMMS_SH" presence others --name "$COMMS_PRESENCE_NAME"
---instance "$COMMS_PRESENCE_INSTANCE"` BEFORE the next write there — a peer that
-arrived during the wait means finish this loop from a worktree. Direct is a state
-you re-earn at every checkpoint, never tenure.
+--instance "$COMMS_PRESENCE_INSTANCE"` BEFORE the next write there. **Capture `RC`
+and branch on the STATUS, never on stdout** — 0 keeps the shared checkout, 3 or 4
+means finish this loop from a worktree, and 5 means this session's own record is
+gone (tenure lost: re-claim, and never read your own absence as an empty field).
+Direct is a state you re-earn at every checkpoint, never tenure.
 
 **Check termination conditions first:**
 

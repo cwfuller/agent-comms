@@ -35,6 +35,8 @@
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
 #   presence <claim|beat|others|release|expire|with-beat>
+#                               `others` re-pins self and so WRITES: 0 direct-safe /
+#                               3 peers / 4 isolate / 5 tenure lost (own record gone)
 #                               advisory multi-session coordination on .comms/sessions/
 #                               (claim-then-check: 0 direct-safe / 3 peers / 4 isolate;
 #                               beat exit 5 = healed, re-check before writing)
@@ -3012,7 +3014,14 @@ cmd_presence() {
     others)
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence others: --name and --instance required"
       presence_validate_ids "$name" "$instance" || usage_err "presence others: invalid name/instance"
-      [ -d "$dir" ] || return 0
+      # A MISSING sessions dir cannot be direct-safe for an identity that already
+      # claimed: the caller's own record is necessarily gone with it, which is the
+      # lost-tenure case, not an empty field. This shortcut ran BEFORE that check and
+      # answered 0. (codex, implement r4, blocking; grok named the same state.)
+      if [ ! -d "$dir" ]; then
+        echo "presence: the sessions dir is GONE, so this session's record is too — tenure is NOT restored; re-claim before the next shared-checkout write" >&2
+        return 5
+      fi
       [ -r "$dir" ] || { echo "presence: sessions dir unreadable — ISOLATE" >&2; return 4; }
       # RE-PIN ON THE CHECKPOINT. `others` is the MANDATORY post-wait, post-resume
       # re-check (PROTOCOL rule 4), and it was the one surviving path that refreshed
@@ -3026,8 +3035,7 @@ cmd_presence() {
       #
       # An EXISTING exact-self record only. A vanished record is never manufactured
       # here: healing is `beat`'s exit-5 path, which a session must reach deliberately
-      # and which tells it that tenure is gone. Failure to re-pin is never fatal to the
-      # check — the peer evaluation below is what the caller came for.
+      # and which tells it that tenure is gone.
       #
       # AND IT MUST FAIL CLOSED. A checkpoint that finds its OWN record gone cannot report
       # direct-safe: the session is alive, holds no record, and `presence_peers` excludes
@@ -3192,7 +3200,7 @@ presence_expire() {  # <dir> [force-name] — the ONLY verb that deletes OTHERS'
   # unlink, carries its own clock, and GC unlinks only the exact nonce file it
   # observed — a paused GC cannot clobber a newer generation. Cover GC is
   # "old AND no record" ONLY: a cover is never deleted because a record exists.
-  local dir="$1" force="$2" reap="$dir/.reap" now f base obs oepoch nonce tomb tepoch
+  local dir="$1" force="$2" reap="$dir/.reap" now f base obs oepoch nonce tomb tepoch staged
   now="$(date +%s)"
   mkdir -p "$reap" 2>/dev/null || { echo "expire: cannot use $reap" >&2; return 1; }
   if [ -n "$force" ]; then
@@ -3230,15 +3238,29 @@ presence_expire() {  # <dir> [force-name] — the ONLY verb that deletes OTHERS'
     oepoch="$({ sed -n 's/^#obs \([0-9]*\).*/\1/p' "$obs" 2>/dev/null || true; } | head -1)"
     case "$oepoch" in ''|*[!0-9]*) rm -f "$obs"; continue ;; esac
     [ $((now - oepoch)) -ge "$PRESENCE_TTL_SECS" ] || continue     # grace not served
-    if ! tail -n +2 "$obs" | cmp -s - "$f"; then
-      rm -f "$obs" 2>/dev/null; continue          # a beat intervened — abort in-progress reap
+    # CLAIM THE RECORD BY RENAME, THEN COMPARE. Comparing in place left a window
+    # between the cmp and the unlink in which the record was still readable, so a
+    # concurrent re-check could re-pin it, see no tombstone yet, and answer direct-safe
+    # while this pass went on to delete it — two sessions authorized at once. Renaming
+    # first means the whole decision happens while the record is ABSENT, and absence is
+    # the state that now fails closed (exit 5, tenure lost). A rename we lose means
+    # another pass got there first. (codex, implement r4, blocking; grok scoped the cure
+    # to expire rather than to another re-pin.)
+    staged="$reap/.staging.$$.$RANDOM"
+    command mv -f "$f" "$staged" 2>/dev/null || { rm -f "$obs" 2>/dev/null; continue; }
+    if ! tail -n +2 "$obs" | cmp -s - "$staged"; then
+      # A beat intervened. Put it back and abort — restoring is what keeps this
+      # non-destructive for a record that turned out to be alive.
+      command mv -f "$staged" "$f" 2>/dev/null || true
+      rm -f "$obs" 2>/dev/null; continue
     fi
-    # Reap: tombstone BEFORE unlink (r9), nonce-named (r10), then the record.
+    # Reap: tombstone BEFORE the staged copy goes (r9), nonce-named (r10).
     nonce="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
     tomb="$reap/$base.tomb.$nonce"
     printf '#tomb %s\n' "$now" > "$reap/.tmp.$$" 2>/dev/null \
-      && command mv -f "$reap/.tmp.$$" "$tomb" 2>/dev/null || { rm -f "$obs"; continue; }
-    rm -f "$f" 2>/dev/null
+      && command mv -f "$reap/.tmp.$$" "$tomb" 2>/dev/null \
+      || { command mv -f "$staged" "$f" 2>/dev/null || true; rm -f "$obs"; continue; }
+    rm -f "$staged" 2>/dev/null
     rm -f "$obs" 2>/dev/null                      # observation is spent; the TOMB is the cover
     echo "reaped: $base (cover $nonce holds for $((PRESENCE_TTL_SECS * 2))s)"
   done
@@ -3253,6 +3275,14 @@ presence_expire() {  # <dir> [force-name] — the ONLY verb that deletes OTHERS'
     [ $(( $(date +%s) - tepoch )) -gt $((PRESENCE_TTL_SECS * 2)) ] || continue
     [ -f "$dir/$base.json" ] && continue          # re-check after age read
     rm -f "$tomb" 2>/dev/null
+  done
+  # A pass killed between the rename and the tombstone parks a record under a staging
+  # name. The owning session already fails closed (its record is absent, so its next
+  # re-check answers exit 5), but the file must not accumulate. Only long-dead ones.
+  for staged in "$reap"/.staging.*; do
+    [ -f "$staged" ] || continue
+    [ -n "$(find "$staged" -mmin +$(( (PRESENCE_TTL_SECS * 2) / 60 + 1 )) 2>/dev/null)" ] || continue
+    rm -f "$staged" 2>/dev/null
   done
   return 0
 }

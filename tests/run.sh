@@ -7202,6 +7202,39 @@ rm -f "$PWQ_SD/.tmp"
 [ "$PWQ_WF" = 4 ] \
   && ok "a re-pin that cannot be written fails closed (ISOLATE), never direct-safe" || fail "unwritable re-pin answered $PWQ_WF"
 run_pwq presence release --name unwritable --instance "$PWQ_L" >/dev/null 2>&1
+# The tombstone check must stand on its OWN, not on the record being absent: grok
+# observed that the r4 "does not resurrect" assertion would pass even without it,
+# because the old code already skipped a write when the file was gone at entry. A
+# cover beside an EXISTING record is the state only this guard catches — and it is
+# what the unlink-between-check-and-write race leaves behind.
+PWQ_M="$(PWQ_INST "$(claim_pwq $$ presence claim --name covered --role r 2>/dev/null)")"
+mkdir -p "$PWQ_SD/.reap"; printf '#tomb %s\n' "$(date +%s)" > "$PWQ_SD/.reap/covered-$PWQ_M.tomb.feedface"
+claim_pwq $$ presence others --name covered --instance "$PWQ_M" >/dev/null 2>&1; PWQ_CT=$?
+[ "$PWQ_CT" = 5 ] && [ -f "$PWQ_SD/covered-$PWQ_M.json" ] \
+  && ok "a reap cover beside an existing record still reports LOST TENURE" || fail "covered re-check answered $PWQ_CT"
+rm -f "$PWQ_SD/.reap/covered-$PWQ_M.tomb.feedface"
+run_pwq presence release --name covered --instance "$PWQ_M" >/dev/null 2>&1
+# A sessions dir that is GONE cannot be an empty field for an identity that claimed:
+# the caller's own record went with it. This shortcut ran before the tenure check.
+PWQ_N="$(PWQ_INST "$(claim_pwq $$ presence claim --name dirless --role r 2>/dev/null)")"
+mv "$PWQ_SD" "$PWQ_SD.away"
+claim_pwq $$ presence others --name dirless --instance "$PWQ_N" >/dev/null 2>&1; PWQ_ND=$?
+mv "$PWQ_SD.away" "$PWQ_SD"
+[ "$PWQ_ND" = 5 ] \
+  && ok "a missing sessions dir is lost tenure, never a free field" || fail "missing sessions dir answered $PWQ_ND"
+run_pwq presence release --name dirless --instance "$PWQ_N" >/dev/null 2>&1
+# The reap decides while the record is ABSENT (renamed aside), so a concurrent
+# re-check can never observe a record this pass is about to delete.
+PWQ_O="$(PWQ_INST "$(claim_pwq $$ presence claim --name staged --role r 2>/dev/null)")"
+perl -pi -e "s/\"pid\": \"[0-9]*\"/\"pid\": \"$PWQ_GONE\"/; s/\"pid_started\": \"[^\"]*\"/\"pid_started\": \"exited\"/" "$PWQ_SD/staged-$PWQ_O.json"
+PWQ_STALE "$PWQ_SD/staged-$PWQ_O.json"
+run_pwq presence expire >/dev/null 2>&1
+perl -pi -e 's/^#obs \d+/"#obs " . (time()-99999)/e' "$PWQ_SD/.reap/staged-$PWQ_O.obs"
+run_pwq presence beat --name staged --instance "$PWQ_O" >/dev/null 2>&1   # bytes change under the pass
+run_pwq presence expire >/dev/null 2>&1
+[ -f "$PWQ_SD/staged-$PWQ_O.json" ] && ! ls "$PWQ_SD/.reap/".staging.* >/dev/null 2>&1 \
+  && ok "a record that changed under the reap is RESTORED, leaving no staged orphan" || fail "the staged record was lost or orphaned"
+run_pwq presence release --name staged --instance "$PWQ_O" >/dev/null 2>&1
 
 # worktree new (AC4/AC6): grammar, ignore-gate, local tip, main-root anchoring.
 check_not "worktree new refuses a bad slug" run_pw worktree new 'Bad/Slug'

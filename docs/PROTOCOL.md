@@ -124,7 +124,14 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    whose own record is absent, or bears a reap tombstone, or cannot be re-written, answers
    exit 5 (tenure lost, re-claim) or exit 4 (isolate) rather than direct-safe. Without
    that, a session that was collected and whose collector then released would be shown a
-   free field by the very verb that exists to stop it writing.
+   free field by the very verb that exists to stop it writing. A **missing** sessions
+   directory is the same answer, not an empty field: an identity that already claimed
+   lost its record along with the directory.
+   `expire` supports this by deciding while the record is ABSENT — it renames the record
+   aside, compares the moved copy against its observation, and either drops it or puts it
+   back. Comparing in place left the record readable between the comparison and the
+   unlink, so a concurrent re-check could re-pin it, see no cover yet, and answer
+   direct-safe while the pass deleted it.
 6. **`claim` collects the provably dead.** Reaping is not a verb anyone remembers
    to run, so `claim` runs it, before recording itself and before evaluating
    peers — the exit status a session acts on then describes the field as it is,
