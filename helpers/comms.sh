@@ -1729,9 +1729,16 @@ degrade_boundary_state() {  # <set> <dispatch> <agent> -> a comparable state str
   # the note — not just its shape. A one-second timestamp resolution plus a re-send that lands
   # and finishes with the same kind and status would otherwise compare equal, and a failed
   # result WITHOUT the marker could replace qualifying evidence undetected.
+  # `request-persisted` is a BOUNDARY too, and it is the load-bearing one. `turn-started` is
+  # written through advisory `log_event`: if that append fails the review still runs, with
+  # LOG_INCOMPLETE=1 — so a re-send could leave the OLD no-output result as the latest visible
+  # boundary and both fingerprints would match while a reviewer worked. `request-persisted` is
+  # appended FAIL-CLOSED before delivery, so a re-send cannot happen without one.
+  # (codex, implement r5, blocking — and its own diagnosis of the whole arc: the recurring weak
+  # point was never the comparison, it was which durable event marks an attempt beginning.)
   cmd_events --all --set "$1" --dispatch "$2" --agent "$3" 2>/dev/null \
     | awk -F'\t' '
-        NR>1 && ($3=="turn-started" || $3=="provider-result") {
+        NR>1 && ($3=="request-persisted" || $3=="turn-started" || $3=="provider-result") {
           n++; ts=$1; k=$3; st=$14; rd=$13; rq=$11; mid=$12; note=$15
         }
         END { printf "%d|%s|%s|%s|%s|%s|%s|%s", n+0, ts, k, st, rd, rq, mid, note }'
@@ -1931,13 +1938,15 @@ compose: '$ag_d' is not a missing leg in this set — refusing to drop a reviewe
         # new turn still running" let the stale marker drop a leg that was actively reviewing.
         # (codex, implement r2, blocking; the r1 fix closed only the cross-dispatch half.)
         #
-        # The log is append-only, so its order IS chronological. Walk this leg's turn boundaries
-        # and look at the LAST one: a provider-result that failed with the marker is evidence;
-        # a turn-started with no terminal row after it means a turn is running RIGHT NOW and the
-        # leg is not droppable at all; anything else is not evidence.
+        # The log is append-only, so its order IS chronological. Walk this leg's attempt
+        # boundaries and look at the LAST one: a provider-result that failed with the marker is
+        # evidence; a `request-persisted` or `turn-started` with no terminal row after it means
+        # an attempt is UNDERWAY and the leg is not droppable at all; anything else is not
+        # evidence. `request-persisted` counts because it is written fail-closed before
+        # delivery, whereas `turn-started` is advisory and its loss would hide a live re-send.
         if cmd_events --set "$set_id" --dispatch "$compose_dispatch" --agent "$ag_d" 2>/dev/null \
              | awk -F'\t' '
-                 NR>1 && $3=="turn-started"    { last="running"; next }
+                 NR>1 && ($3=="request-persisted" || $3=="turn-started") { last="running"; next }
                  NR>1 && $3=="provider-result" { last=($14=="failed" && $15 ~ /(^| )reason=no-output( |$)/) ? "evidence" : "other"; next }
                  END { exit (last=="evidence") ? 0 : 1 }'; then
           degraded_ok="$degraded_ok $ag_d"

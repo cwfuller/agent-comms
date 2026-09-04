@@ -651,8 +651,11 @@ The evidence must belong to THIS attempt: a marker left by an earlier dispatch o
 set would otherwise authorize dropping a leg that has since been redispatched and may still
 be running, so the lookup is bound to the current dispatch and to a row whose status is
 `failed`. Binding to the dispatch is still not sufficient on its own: a re-send of a failed
-leg KEEPS that dispatch, so the leg's LATEST turn must be the failed one. A turn that has
-started and not yet reported is a reviewer working right now, and is never droppable. Because
+leg KEEPS that dispatch, so the leg's LATEST turn must be the failed one. An attempt that has
+begun and not yet reported is a reviewer working right now, and is never droppable. "Begun"
+counts `request-persisted` as well as `turn-started`, and that choice is load-bearing:
+`turn-started` is advisory, so losing it would hide a live re-send, while the request event is
+written fail-closed before delivery and therefore cannot be missing from one. Because
 "latest" is a sample, each dropped leg's turn history is fingerprinted when the drop is accepted
 and re-verified immediately before the composition is published, beside the dispatch
 supersession check. **A residual remains and is not closable in shell**: the gap between that

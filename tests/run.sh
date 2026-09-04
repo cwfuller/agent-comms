@@ -5682,6 +5682,18 @@ printf '%s\n' "$PN_DG4_C" | grep -qE 'no recorded evidence|turn history moved' \
   && ! printf '%s\n' "$PN_DG4_C" | grep -q 'DEGRADED PANEL' \
   && ok "a leg whose turn history moves is never published as dropped" || fail "a re-sent leg was still dropped"
 
+# THE ADVISORY-EVENT HOLE. `turn-started` is written through advisory log_event: if that append
+# fails the review still runs. A re-send would then leave the OLD no-output result as the latest
+# visible boundary and a live reviewer would be dropped. `request-persisted` is appended
+# FAIL-CLOSED before delivery, so it is the boundary that cannot be missing.
+# (codex, implement r5, blocking.)
+run_pn events append --kind request-persisted --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
+  --role gating --status persisted --note "re-sent; turn-started never made it to the log" >/dev/null 2>&1
+PN_DG6_C="$(run_pn compose --set "$PN_DG4_SET" --degrade grok 2>&1 || true)"
+printf '%s\n' "$PN_DG6_C" | grep -q 'no recorded evidence' \
+  && ! printf '%s\n' "$PN_DG6_C" | grep -q 'DEGRADED PANEL' \
+  && ok "a re-send known only by its fail-closed request event still blocks the drop" || fail "an advisory-event gap let a live re-send be dropped"
+
 # FINGERPRINT SATURATION. The accessor used a capped read, so a leg with 50+ boundary events
 # pinned count=50 and history could move with every sampled field identical. Prove the
 # unbounded read by moving history PAST the cap and then changing it. (codex, implement r4.)
