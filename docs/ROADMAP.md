@@ -2133,6 +2133,15 @@ presence system, which is exactly what it was supposed to surface.
 > in a scratch field: two records abandoned identically and aged identically, the pid-bearing one
 > collected and the pid-less one immortal. Seven abandoned records had accumulated in this repo
 > by then, forcing every claim to isolate.
+>
+> **The half that review caught.** Making records reapable opened a failure strictly WORSE than
+> the immortality it fixed, and it lived in `beat`, not in `claim`. A resumed session is a new
+> harness process; `beat` preserved the recorded pid, so a live resumed session kept a record
+> naming the exited one, evaluated `dead`, and could be collected while working — after which
+> the field read free to the next claimer. Found by codex as the round-1 blocker, mechanism
+> independently corroborated by grok, neither of which the author's own attack list had reached:
+> it asked about the two-`ps` window at claim and never about the identity going stale later.
+> `beat` now re-pins the handle when it verifies, and keeps the recorded one when it does not.
 
 `presence_expire`'s reap loop is gated on `[ "$(presence_eval "$f")" = "dead" ]`, and
 `presence_eval` can only reach "dead" through a pid check. `--pid` was OPTIONAL at claim

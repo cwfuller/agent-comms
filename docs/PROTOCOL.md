@@ -105,7 +105,15 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    no `--pid`. It is adopted ONLY if numeric and confirmed present by `ps`: a pid
    naming no process is worse than none, because such a record evaluates dead
    immediately and the next reap would collect a live session's own claim. Any
-   unverifiable value falls back to pid-less, which is the fail-closed direction.
+   unverifiable value falls back to pid-less, which is the fail-closed direction. Each
+   source is TRIED rather than merely preferred, so a stale override cannot shadow a
+   good handle. **`beat` re-pins it.** A resumed session runs under a NEW harness
+   process, so a heartbeat that merely preserved the recorded pid would leave a live
+   session named by an exited one — collected while alive, and then read as a free
+   field by the next claimer. That is strictly worse than the immortality this rule
+   fixes, and it is reachable only because records became reapable. A beat refreshes
+   the handle only with a pid that verifies, and otherwise keeps what is recorded;
+   blanking it would manufacture the immortal record all over again.
 6. **`claim` collects the provably dead.** Reaping is not a verb anyone remembers
    to run, so `claim` runs it, before recording itself and before evaluating
    peers — the exit status a session acts on then describes the field as it is,

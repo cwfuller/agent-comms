@@ -2770,12 +2770,18 @@ presence_self_pid() {  # -> this session's long-lived pid, or EMPTY. Never fails
   # the next reap would collect a LIVE session's claim out from under it. Numeric,
   # then confirmed by ps; every other case yields empty, which is exactly today's
   # pid-less behaviour (ambiguous, isolate) — the fail-closed direction.
-  local p="${COMMS_PRESENCE_PID:-${CLAUDE_PID:-}}"
-  case "$p" in ''|*[!0-9]*) return 0 ;; esac
-  # A ps that cannot answer (EPERM in a sandbox) must also yield empty, not a pid
-  # we could not confirm. Guarded so errexit cannot abort the caller.
-  ps -p "$p" -o pid= >/dev/null 2>&1 || return 0
-  printf '%s' "$p"
+  # Each source is TRIED, not merely preferred: a stale COMMS_PRESENCE_PID that no
+  # longer verifies must not shadow a good CLAUDE_PID. First one that verifies wins.
+  # (grok, implement r1.)
+  local p
+  for p in "${COMMS_PRESENCE_PID:-}" "${CLAUDE_PID:-}"; do
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    # A ps that cannot answer (EPERM in a sandbox) must also yield empty, not a pid
+    # we could not confirm. Guarded so errexit cannot abort the caller.
+    ps -p "$p" -o pid= >/dev/null 2>&1 || continue
+    printf '%s' "$p"; return 0
+  done
+  return 0
 }
 
 presence_write() {  # <dest> <name> <instance> <role> <state> <pid> <pid_started> <started>
@@ -2965,6 +2971,24 @@ cmd_presence() {
       fi
       [ -n "$state" ] && ostate="$state"
       [ -n "$role" ] && orole="$role"
+      # RE-PIN THE LIVENESS IDENTITY. A resumed session is a NEW harness process, so a
+      # beat that merely preserved the recorded pid would leave a LIVE session named by
+      # an exited one — which now evaluates `dead` and gets collected out from under it,
+      # and then reads as a free field to the next claimer. That is strictly worse than
+      # the immortality this change set out to fix, and it is reachable only because
+      # records became reapable. (codex, implement r1, blocking; mechanism corroborated
+      # by grok.)
+      #
+      # Refresh ONLY with a pid that verifies right now; otherwise keep what is recorded.
+      # Blanking on an unverifiable probe would manufacture the pid-less zombie this
+      # whole change exists to stop. An explicit --pid still wins, as at claim.
+      local newpid=""
+      if [ -n "$pid" ]; then newpid="$pid"; else newpid="$(presence_self_pid)"; fi
+      if [ -n "$newpid" ] && [ "$newpid" != "$opid" ]; then
+        local newstart
+        newstart="$(ps -p "$newpid" -o lstart= 2>/dev/null)" || newstart=""
+        if [ -n "$newstart" ]; then opid="$newpid"; opstart="$newstart"; fi
+      fi
       presence_write "$rec" "$name" "$instance" "$orole" "$ostate" "$opid" "$opstart" "$ostarted" \
         || { echo "presence beat: write failed" >&2; return 4; }
       if [ "$healed" = 1 ]; then
