@@ -83,8 +83,26 @@ took ten review rounds to converge (thread `presence-worktrees-15135`):
   dead claim). The nonce-named tombstone is written BEFORE the unlink and GC'd only
   when old AND recordless — never because a record exists, and only the exact nonce
   file observed (a paused GC cannot clobber a newer generation).
-- **Readers go records-first, then covers** — with tombstone-before-unlink, every
-  expire interleaving shows a reader at least one of the two.
+- **The reap decides while the record is ABSENT** — expire renames the record into
+  the reap dir under a staging name, compares the MOVED copy against its
+  observation, then either drops it (tombstone first) or moves it back. Comparing
+  in place left the record readable between the comparison and the unlink, so a
+  concurrent re-check could re-pin it, see no cover yet, and answer direct-safe
+  while the pass went on to delete it — two sessions authorized at once. Absence is
+  the state that fails closed, so the dangerous window no longer reads as free.
+- **Readers go records-first, then covers** — but this no longer means every
+  interleaving shows a reader one of the two. Rename-first deliberately opens a
+  brief interval that is RECORDLESS and COVERLESS. Safety there comes from the
+  owner detecting its own absence (exit 5, tenure lost) and from the claiming
+  session having written its own record, not from the reader always seeing a
+  cover. A pass killed inside that interval parks the bytes under the staging
+  name; the owner fails closed and re-claims, and cover GC collects staging files
+  older than 2I so a pass about to move one back is never collected.
+- **Restoring is last-writer-wins, deliberately** — if a beat writes a replacement
+  record while expire is moving a mismatched staged copy back, the restore
+  overwrites that newer heartbeat. It stays conservative because the beat observed
+  absence, returned exit 5, and already owes a re-check; the cost is a stale
+  heartbeat on a record whose owner has been told to re-claim.
 - **Beats are whole-file rewrites** — a lost unlink race heals on the next beat,
   and healing restores PRESENCE, never direct tenure (exit 5 forces re-check).
 - **The documented residual:** a falsely-reaped DIRECT session that performs no
