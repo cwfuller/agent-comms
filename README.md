@@ -1,7 +1,7 @@
 # agent-comms
 
 Autonomous code-review loops between AI coding agents. One agent implements, one or more
-review, and the loop runs until they approve — no copy-paste, no babysitting.
+review, and the loop runs until they approve. No babysitting.
 
 It exists because asking one agent to write code, then asking another to critique it, then
 feeding the critique back produces markedly better results than either alone. This is that
@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.s
 ```
 
 Piping a script into a shell means running code you have not read. If you would rather look
-first — and you should — clone it and run it from disk. The result is identical:
+first (and you should), clone it and run it from disk. The result is identical:
 
 ```bash
 git clone https://github.com/cwfuller/agent-comms ~/src/agent-comms
@@ -59,10 +59,10 @@ over ACP in the background.
 ```
 
 **When to reach for `--plan`:** only when a wrong *approach* would be expensive to discover
-after implementing — novel architecture, high blast radius, safety-critical. Most work
+after implementing: novel architecture, high blast radius, safety-critical. Most work
 should let the implementation speak for itself.
 
-**A panel is the default.** This tool is for work that wants that bar — every
+**A panel is the default.** This tool is for work that wants that bar: every
 registered agent except the driver reviews the same pinned artifact. They find
 different things. A blocking finding two of them raise (same `path:line`) gates
 the loop; a finding only one raises is flagged for you to cross-check rather than
@@ -74,7 +74,7 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
 ## What makes the loops trustworthy
 
 - **Every reviewer reads the same thing.** The tree is snapshotted when the request is sent
-  and mounted for the reviewer, so a review is about a pinned artifact — not whatever you
+  and mounted for the reviewer, so a review is about a pinned artifact, not whatever you
   happened to be typing while it ran.
 - **Messages are validated before delivery.** Malformed messages are refused, never
   half-processed. A failed delivery says so and is recoverable; it never looks like "the
@@ -85,11 +85,11 @@ Full reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
   reviewer who made it. An unanswered panel leg blocks the gate rather than counting as
   approval.
 - **Advisories survive.** On an approval, un-actioned advisory findings are appended to
-  `docs/advisories.md` — a closing step in the loop's own instructions rather than something a
-  helper enforces — and `comms.sh lessons` reads that file back into later rounds, so lessons
+  `docs/advisories.md` (a closing step in the loop's own instructions rather than something a
+  helper enforces), and `comms.sh lessons` reads that file back into later rounds, so lessons
   compound instead of evaporating.
 - **ACP is the default transport.** Reviewers run in the background; you do not babysit a
-  pane. The `--via cmux` pane transport was deleted — asking for it is refused outright rather
+  pane. The `--via cmux` pane transport was deleted; asking for it is refused outright rather
   than silently downgraded to something you did not choose. Later rounds on the same thread
   reuse a stable mount path, so ACP can stay warm instead of starting a new session each time.
   A running turn is watchable in its run dir (`.comms/logs/<message>.<ts>.<pid>/runner.log`).
@@ -106,11 +106,11 @@ Message format, loop semantics, and the state model: **[docs/PROTOCOL.md](docs/P
 - No pane multiplexer is required: loops run over ACP.
 
 **A reviewer runs against a mounted copy of your tree, so it has to be contained.** `claude`
-and `codex` have verified isolation backends and are constrained automatically — though not
+and `codex` have verified isolation backends and are constrained automatically, though not
 identically: `codex` runs under its own kernel sandbox, while `claude`'s backend is measured
 write-contained but still reaches the network. Read that as "was unable to modify the machine
-in our write probes" rather than a kernel boundary — it is behavioural defence, and it does not
-stop the reviewer phoning home. **`grok` has no verified backend on any platform** — so a mounted grok review turn is refused rather than run
+in our write probes" rather than a kernel boundary. It is behavioural defence, and it does not
+stop the reviewer phoning home. **`grok` has no verified backend on any platform**, so a mounted grok review turn is refused rather than run
 unconstrained, and a default panel including it will not complete. Two ways forward:
 
 - narrow the roster: `/auto --reviewers codex`, or drop `grok` from `agents` in `.comms/config`
@@ -124,13 +124,13 @@ on your own machine, and a poor one for anything you did not write.
 
 | | |
 |---|---|
-| [docs/COMMANDS.md](docs/COMMANDS.md) | the Claude Code commands and the helper CLI (not exhaustive — `panel`, `compose`, `round-note` and `friction` live only in `comms.sh help`) |
+| [docs/COMMANDS.md](docs/COMMANDS.md) | the Claude Code commands and the helper CLI (not exhaustive: `panel`, `compose`, `round-note` and `friction` live only in `comms.sh help`) |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | message format, transports, state, archive discipline |
 | [docs/loopspec/SPEC.md](docs/loopspec/SPEC.md) | the portable review-loop contract: verdicts, rounds, schemas, fixtures |
 | [docs/INSTALL.md](docs/INSTALL.md) | install scopes, local pinning, upgrading |
 | [docs/INTERNALS.md](docs/INTERNALS.md) | architecture, the template/helper split, test harness |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | decisions, field reports, what's next |
-| [AGENTS.md](AGENTS.md) | contributing to agent-comms itself — for AI agents working on this repo (`CLAUDE.md` symlinks here) |
+| [AGENTS.md](AGENTS.md) | contributing to agent-comms itself, for AI agents working on this repo (`CLAUDE.md` symlinks here) |
 
 ## License
 
