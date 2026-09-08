@@ -1,6 +1,6 @@
 comms.sh: root/workspace	3
 comms.sh: validate	5
-comms.sh: error-envelope (a provider API error is not an answer)	8
+comms.sh: error-envelope (a provider API error is not an answer)	9
 comms.sh: archive (idempotent, own inbox only)	4
 comms.sh: list	3
 comms.sh: latest archive is direction/thread/time aware	4
@@ -34,7 +34,7 @@ stamped authorities: workspace pin (#3) + send-time git metadata (#6)	37
 friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	44
-runphase: parent-brokered claude and codex legs over ACP	37
+runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15
 templates: bare dollar-digit/dollar-star hygiene	1
 /ask canonical template source contract	10

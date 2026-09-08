@@ -383,6 +383,12 @@ printf -- '---\ntype: response\nfrom: codex\n---\n\n' > "$ENV_D/stamped.md"; cat
   && ok "acpx's trailing token-usage line does not hide the envelope" || fail "tokens line hid the envelope"
 "$COMMS" error-envelope "$ENV_D/absent.txt" >/dev/null 2>&1 && rc=0 || rc=$?
 [ "$rc" -eq 2 ] && ok "an unreadable file is a usage failure (rc 2), never an answer" || fail "unreadable file rc=$rc"
+# The message is printed as ONE clean line: json.loads decodes `\t`, `\r`, `\n` and ``
+# into real control characters, which would otherwise flow into a per-line JSON note.
+printf '{"type":"error","status":400,"error":{"type":"x","message":"bad\\tmodel\\r\\nnamed\\u0001here"}}\n' > "$ENV_D/ctrl.txt"
+ENV_OUT="$("$COMMS" error-envelope "$ENV_D/ctrl.txt" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$ENV_OUT" = "x: bad model named here" ] \
+  && ok "decoded control characters in the message collapse to single spaces" || fail "control chars leaked (rc=$rc, out: $(printf '%q' "$ENV_OUT"))"
 
 section "comms.sh: archive (idempotent, own inbox only)"
 IN1="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T12-01-00_reply-1.md"
@@ -3679,6 +3685,28 @@ BRK_OK_DIR="$(run_brokered_question codex claude ma-consult-prose "$WORK/brokere
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$BRK_OK_DIR/result.json" 2>/dev/null | head -1)" = "completed" ] \
   && ok "a consult whose answer merely talks about an error completes (the check is structural)" \
   || fail "prose consult refused (see $BRK_OK_DIR/result.json)"
+# PROVIDER-CONTROLLED TEXT REACHES result.json. A message with `\t` / `\r` / `\n` escapes
+# decodes to real control characters; the old json_escape handled only backslash and quote,
+# so the note wrote INVALID JSON. Parse the file, do not grep it. (codex, r1, blocking.)
+BRK_CTRL_PAY="$WORK/brokered-ctrl-payload.txt"
+printf '{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"bad\\tmodel\\r\\n\\"quoted\\" here"}}\n' > "$BRK_CTRL_PAY"
+BRK_CTRL_DIR="$(run_brokered_question codex claude ma-consult-ctrl "$BRK_CTRL_PAY")"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["status"]=="failed" else 1)' "$BRK_CTRL_DIR/result.json" 2>/dev/null \
+  && ok "result.json stays valid JSON when the provider's message carries control characters and quotes" \
+  || fail "result.json corrupted by a provider message (see $BRK_CTRL_DIR/result.json)"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if "bad model \"quoted\" here" in d["note"] else 1)' "$BRK_CTRL_DIR/result.json" 2>/dev/null \
+  && ok "the note carries the message as one clean line" || fail "note text mangled (see $BRK_CTRL_DIR/result.json)"
+# The escaper itself, extracted and run: a literal tab, CR, LF and quote must yield a value
+# python can decode back to the input. And the two helpers carry the SAME definition — a
+# fix that lands in one file and not the other is exactly how this bug would come back.
+JE_RP="$(sed -n '/^json_escape() {/,/^}/p' "$REPO/helpers/runphase.sh")"
+JE_CS="$(sed -n '/^json_escape() {/,/^}/p' "$REPO/helpers/comms.sh")"
+JE_IN="$(printf 'a\tb\rc\nd"e\\f')"
+JE_OUT="$(eval "$JE_RP"; json_escape "$JE_IN")"
+python3 -c 'import json,sys; sys.exit(0 if json.loads("\"%s\"" % sys.argv[1]) == sys.argv[2] else 1)' "$JE_OUT" "$JE_IN" 2>/dev/null \
+  && ok "json_escape round-trips tab, CR, LF, quote and backslash through a JSON decoder" || fail "json_escape output does not decode (got: $(printf '%q' "$JE_OUT"))"
+[ -n "$JE_RP" ] && [ "$JE_RP" = "$JE_CS" ] \
+  && ok "runphase.sh and comms.sh carry byte-identical json_escape definitions" || fail "json_escape drifted between helpers"
 
 section "scope-dial template source contract"
 # Scope-dial trio: the load-bearing new prose, pinned mechanically.

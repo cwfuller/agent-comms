@@ -93,7 +93,19 @@ COMMS="$HELPER_DIR/comms.sh"
 [ -x "$COMMS" ] || die "comms.sh not found next to runphase.sh ($HELPER_DIR) — re-run install.sh"
 
 safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
-json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+json_escape() {
+  # COMPLETE string escaping for the one-key-per-line JSON our writers emit and json_get
+  # reads back with a per-line regex. The old one-liner handled only backslash and quote, so
+  # a value carrying a DECODED control character — a provider's error message with a `\t`
+  # or `\r` escape, decoded by the envelope predicate — wrote invalid JSON into result.json
+  # (codex, consult-error-envelope r1, blocking). Tab, CR and LF become their escapes; any
+  # other C0 control (never legitimate in a note) is dropped rather than left to corrupt
+  # the file. Lines are joined as `\n` so a value stays on ONE line for json_get.
+  printf '%s' "$1" \
+    | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g; s/'"$(printf '\t')"'/\\t/g; s/'"$(printf '\r')"'/\\r/g' \
+    | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
+    | LC_ALL=C awk 'BEGIN{ORS=""} NR>1{print "\\n"} {print}'
+}
 # || true: head exiting early can SIGPIPE sed under pipefail — a lookup must
 # yield empty, never a non-zero status that set -e turns into a dead runner.
 json_get() { { sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" | head -1; } 2>/dev/null || true; }

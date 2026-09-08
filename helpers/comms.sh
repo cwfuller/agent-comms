@@ -4018,7 +4018,7 @@ cmd_error_envelope() {
     src="$tmp"
   fi
   python3 - "$src" <<'PYENV' || rc=$?
-import json, sys
+import json, re, sys
 try:
     text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 except OSError:
@@ -4053,7 +4053,11 @@ if set(obj) - {"error", "type", "status", "code", "request_id"}:
     sys.exit(1)
 if "type" in obj and obj["type"] != "error":
     sys.exit(1)
-msg = err["message"].strip().replace("\n", " ")
+# ONE clean line: json.loads has DECODED escapes, so the message may carry tabs, CRs or
+# any other control character. The note this feeds is written into result.json and read
+# back per line, so every control/whitespace run collapses to a single space here as well
+# as being escaped by the writer. (codex, r1, blocking.)
+msg = " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", err["message"]).split())
 etype = err.get("type")
 print(f"{etype}: {msg}" if isinstance(etype, str) and etype else msg)
 sys.exit(0)
@@ -4520,7 +4524,19 @@ state_dir() { echo "$(cmd_root)/state"; }
 
 # Minimal JSON string escaping so embedded quotes/backslashes can't produce
 # invalid state files.
-json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+json_escape() {
+  # COMPLETE string escaping for the one-key-per-line JSON our writers emit and json_get
+  # reads back with a per-line regex. The old one-liner handled only backslash and quote, so
+  # a value carrying a DECODED control character — a provider's error message with a `\t`
+  # or `\r` escape, decoded by the envelope predicate — wrote invalid JSON into result.json
+  # (codex, consult-error-envelope r1, blocking). Tab, CR and LF become their escapes; any
+  # other C0 control (never legitimate in a note) is dropped rather than left to corrupt
+  # the file. Lines are joined as `\n` so a value stays on ONE line for json_get.
+  printf '%s' "$1" \
+    | LC_ALL=C sed 's/\\/\\\\/g; s/"/\\"/g; s/'"$(printf '\t')"'/\\t/g; s/'"$(printf '\r')"'/\\r/g' \
+    | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
+    | LC_ALL=C awk 'BEGIN{ORS=""} NR>1{print "\\n"} {print}'
+}
 
 json_get() {  # json_get <file> <key> — one key per line in our writer, so sed suffices
   sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" | head -1
