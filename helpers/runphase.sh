@@ -892,13 +892,18 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
   # rc 3 (no python3) is UNDECIDABLE and is logged, not treated as either answer or error:
   # refusing every turn on a host without python3 would regress the ACP path, which needs it
   # for nothing else, while the streaming broker already refuses there on its own.
-  local env_msg="" env_rc=0
-  env_msg="$("$COMMS" error-envelope "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log")" || env_rc=$?
+  # ONE decoder, THREE codes. reply-check returns 10 (answer) / 11 (provider API error, message on
+  # stdout after a `verdict: error` line) / 12 (UNDECIDABLE — python3 missing, classifier did not
+  # complete, unreadable). Undecidable now REFUSES rather than trusting the body: "cannot decide"
+  # is never "this is a clean reply". (codex, acp-compat-gate plan r2, A1.)
+  local env_out="" env_rc=0
+  env_out="$("$COMMS" reply-check "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log")" || env_rc=$?
   case "$env_rc" in
-    0) GROK_BROKER_NOTE="the provider returned an API error instead of an answer (${env_msg:-no message}) — refusing to stamp it as a reply; fix the provider's model/CLI configuration and re-send"
-       return 1 ;;
-    1) ;;
-    *) echo "note: error-envelope check undecidable (rc=$env_rc) — the reply is trusted as an answer" >>"$run_dir/runner.log" ;;
+    10) ;;
+    11) GROK_BROKER_NOTE="the provider returned an API error instead of an answer ($(printf '%s\n' "$env_out" | tail -n +2)) — refusing to stamp it as a reply; fix the provider's model/CLI configuration and re-send"
+        return 1 ;;
+    *)  GROK_BROKER_NOTE="could not verify the reply is not a provider API error (reply-check undecidable, rc=$env_rc — see runner.log) — refusing to stamp an unverified body; install python3 or re-send"
+        return 1 ;;
   esac
   # NOTHING is normalised here either. unwrap_reply used to strip a whole-answer fence, but
   # that made a model-authored delimiter authoritative BEFORE the shared lexer: a reply
@@ -2061,6 +2066,72 @@ mount_degrade() {  # <reason for the log>
 #       sets CODEX_HOME, not HOME, so applying it to `sessions show` does not move acpx's own
 #       session store (which lives under $HOME/.acpx) — the show still finds the record.
 # Reads acp_iso/acp_launch/acp_shim by dynamic scope, as unmount_artifact reads mount_dir.
+# acp_confirm_mode <workdir> <profile> <session> <mode> <run-dir> <label> — re-pin the session mode
+# and prove it held, reading ONLY stdout (a rejected set_mode interpolates the requested id into its
+# error, so a loose match passes on the refusal too). rc 0 = pinned. The mode is mutable session
+# state re-sent per turn, so it is confirmed immediately before EACH prompt — before the canary AND
+# again before the real prompt, because the canary is itself a model turn that could move it.
+# (grok, plan r4; codex, acp-compat-gate plan r2 B1.) Reads acp_iso/acp_launch/acp_shim by dynamic
+# scope through acp_exec, exactly as the caller does.
+acp_confirm_mode() {
+  local wd="$1" prof="$2" sess="$3" mode="$4" rd="$5" label="$6" out="" rc=0
+  out="$( acp_exec "$wd" --format text "$prof" -s "$sess" set-mode "$mode" 2>>"$rd/runner.log" )" || rc=$?
+  printf 'set-mode %s (%s): rc=%s out=[%s]\n' "$mode" "$label" "$rc" "$out" >>"$rd/runner.log"
+  [ "$rc" -eq 0 ] && [ "$out" = "mode set: $mode" ]
+}
+
+# acp_canary <workdir> <profile> <session> <run-dir> <secs> — prove the session's runtime serves its
+# configured model BEFORE the real prompt, by prompting the SAME session through the SAME argv shape
+# (the caller passes the identical option vector). It sets, never echoes, two globals:
+#   ACP_CANARY_REASON  — "" on pass, else runtime-incompatible|canary-timeout|canary-exit-N|
+#                        canary-unexpected|reply-unverifiable
+#   ACP_CANARY_NOTE    — a human line for result.json / the refusal, wording that MATCHES the evidence
+#                        (a timeout or an off-script answer makes NO compatibility claim).
+# The canary reply is classified by comms.sh reply-check, the same decoder the broker uses, so the
+# three transports cannot disagree. A NONZERO transport exit refuses even if stdout contains PONG.
+# (codex, acp-compat-gate plan r2/r3.) The option vector arrives via ACP_CANARY_OPTS (name-ref-free
+# for bash 3.2): the caller exports it before the call.
+acp_canary() {
+  local wd="$1" prof="$2" sess="$3" rd="$4" secs="$5"
+  ACP_CANARY_REASON=""; ACP_CANARY_NOTE=""
+  local out="" rc=0
+  out="$( acp_exec "$wd" ${ACP_CANARY_OPTS[@]+"${ACP_CANARY_OPTS[@]}"} \
+          --timeout "$secs" --format quiet "$prof" -s "$sess" \
+          "Reply with exactly the single word PONG and nothing else." 2>>"$rd/runner.log" )" || rc=$?
+  printf 'canary: rc=%s bytes=%s\n' "$rc" "${#out}" >>"$rd/runner.log"
+  if [ "$rc" -eq 3 ]; then
+    ACP_CANARY_REASON="canary-timeout"
+    ACP_CANARY_NOTE="the compatibility canary timed out after ${secs}s (COMMS_ACP_CANARY_SECS) — the runtime may be slow or unreachable; no compatibility claim is made"
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    # Every other nonzero transport exit refuses, even with PONG in stdout. (codex r3.)
+    ACP_CANARY_REASON="canary-exit-$rc"
+    ACP_CANARY_NOTE="the compatibility canary exited $rc before answering (see runner.log) — no compatibility claim is made"
+    return 1
+  fi
+  local chk="" crc=0
+  chk="$(printf '%s' "$out" | "$COMMS" reply-check - 2>>"$rd/runner.log")" || crc=$?
+  case "$crc" in
+    11) ACP_CANARY_REASON="runtime-incompatible"
+        ACP_CANARY_NOTE="the session runtime returned a provider API error for the canary ($(printf '%s\n' "$chk" | tail -n +2)) — it cannot serve the configured model"
+        return 1 ;;
+    12) ACP_CANARY_REASON="reply-unverifiable"
+        ACP_CANARY_NOTE="could not verify the canary reply (reply-check undecidable — see runner.log) — no compatibility claim is made"
+        return 1 ;;
+  esac
+  # crc 10 (answer): strip only known framing, then require the WHOLE remainder to equal PONG.
+  local norm; norm="$(printf '%s' "$out" \
+      | sed -e '/^Warning:/d' -e '/^\[acpx\] tokens:/d' \
+      | tr -d '[:space:]')"
+  case "$norm" in
+    [Pp][Oo][Nn][Gg]) return 0 ;;
+    *) ACP_CANARY_REASON="canary-unexpected"
+       ACP_CANARY_NOTE="the session answered the canary but not as instructed ($(printf '%.200s' "$out" | tr '\n' ' ')) — no compatibility claim is made"
+       return 1 ;;
+  esac
+}
+
 acp_exec() {  # <cwd> [acpx args...]
   local _cwd="$1"; shift
   ( cd "$_cwd" && PATH="${acp_shim:+$acp_shim:}$PATH" \
@@ -2959,7 +3030,6 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       acp_perm=(--approve-reads --non-interactive-permissions deny)
     fi
     local acp_t0 acp_elapsed
-    acp_t0="$(date +%s)"
     # A MOUNTED turn asks the queue owner to retire quickly. The next round rebuilds this
     # directory and must not do so under a live owner, and the only safe way to know it is
     # gone is to let it exit ITSELF — its pid cannot be authenticated well enough to
@@ -2970,32 +3040,61 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # replays through the prompt cache, which is where the saving actually comes from.
     local -a acp_ttl=()
     [ -n "$mount_dir" ] && acp_ttl=(--ttl "${COMMS_RUNPHASE_OWNER_TTL_SECS:-20}")
-    # RE-PIN THE MODE IMMEDIATELY BEFORE THE PROMPT, and refuse if it will not hold.
-    # INITIAL_AGENT_MODE is read once, when the adapter builds sessionState — it is not a
-    # process-lifetime lock. `setSessionMode` accepts any of [ReadOnly, Agent,
-    # AgentFullAccess] with no allowlist, the sandbox policy is sent per turn from the
-    # CURRENT mode, and `--ttl` owner reuse means a later round talks to an owner that was
-    # started under whatever mode was last set. So a turn that raised its own mode would
-    # leave the next round unconfined. Setting it here, every round, is what makes the
-    # backend hold across owner reuse. (grok, plan r4, blocking.)
+
+    # ONE launch-option vector for BOTH the canary and the real prompt, built once so they cannot
+    # drift in permission shape or owner TTL. A canary that spawned the owner under a different TTL
+    # would leave the next round's quiescence wait facing a longer-lived owner. (codex, plan r2 B2.)
+    local -a acp_prompt_opts=( "${acp_perm[@]}" ${acp_ttl[@]+"${acp_ttl[@]}"} )
+
+    # RE-PIN THE MODE, and refuse if it will not hold. INITIAL_AGENT_MODE is read once when the
+    # adapter builds sessionState — it is not a process-lifetime lock, and `--ttl` owner reuse means
+    # a later round talks to an owner started under whatever mode was last set. It is confirmed
+    # immediately before EACH prompt (the canary AND the real turn), because the canary is itself a
+    # model turn that could move it and PONG does not attest the mode survived. (grok, plan r4;
+    # codex, acp-compat-gate plan r2 B1.)
+    acp_refuse() {  # <reason> <note> — write the failed result with a reason, unmount, unwind
+      acp_status=failed
+      ABORT_NOTE="refused: $2"
+      update_thread_state "$msg_thread" failed "acp:$acp_session" "$sfield" || true
+      write_result "$run_dir" failed 1 "acp:$acp_session" "$msg" "$2" "$1"
+      unmount_artifact; trap - EXIT
+    }
     if [ -n "$mount_dir" ] && [ -n "$acp_iso_mode" ]; then
-      # The confirmation is EXACT, and it reads ONLY stdout. A glob for "read-only" over
-      # stdout+stderr passes on the adapter's REJECTION too: a refused set_mode throws
-      # `Agent rejected session/set_mode for mode "read-only": …`, which interpolates the
-      # requested id and so contains the very string a loose match looks for — leaving a
-      # reused owner stuck in AgentFullAccess prompted anyway, the exact case this pin exists
-      # to stop. Require rc 0 AND stdout equal to acpx's success line. (grok, implement r1, blocking.)
-      local acp_mode_out="" acp_mode_rc=0
-      acp_mode_out="$( acp_exec "$workdir" --format text \
-          "$acp_profile" -s "$acp_session" set-mode "$acp_iso_mode" 2>>"$run_dir/runner.log" )" && acp_mode_rc=0 || acp_mode_rc=$?
-      printf 'set-mode %s: rc=%s out=[%s]\n' "$acp_iso_mode" "$acp_mode_rc" "$acp_mode_out" >>"$run_dir/runner.log"
-      if [ "$acp_mode_rc" -ne 0 ] || [ "$acp_mode_out" != "mode set: $acp_iso_mode" ]; then
-ABORT_NOTE="refused: could not confirm '$provider' is pinned to '$acp_iso_mode' before the prompt — containment unconfirmed"
-                die "run: could not pin '$provider' to '$acp_iso_mode' before the prompt (rc=$acp_mode_rc, out='$(printf '%.120s' "$acp_mode_out")') — refusing to send a review turn whose containment is unconfirmed"
+      if ! acp_confirm_mode "$workdir" "$acp_profile" "$acp_session" "$acp_iso_mode" "$run_dir" "pre-canary"; then
+        acp_refuse containment-unconfirmed "could not confirm '$provider' is pinned to '$acp_iso_mode' before the canary — containment unconfirmed"
+        return 1
       fi
     fi
+
+    # COMPATIBILITY CANARY: prove the session runtime serves its configured model BEFORE the real
+    # prompt is spent on it. Same session, same argv shape; the reply is classified by the shared
+    # comms.sh reply-check so all three transports agree. Per-turn, no cache: mounted owners are new
+    # each round anyway, and a cache needs storage/atomicity/invalidation this slice deliberately
+    # avoids. (codex, acp-compat-gate plan r2/r3.)
+    local canary_secs; canary_secs="$(sane_secs "${COMMS_ACP_CANARY_SECS:-60}")"; [ -n "$canary_secs" ] || canary_secs=60
+    ACP_CANARY_OPTS=( "${acp_prompt_opts[@]}" )
+    if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
+      local canary_note="$ACP_CANARY_NOTE"
+      if [ "$ACP_CANARY_REASON" = runtime-incompatible ]; then
+        local pcli; pcli="$("$provider" --version 2>/dev/null | head -1)"
+        canary_note="$canary_note${pcli:+; PATH $provider is: $pcli}. Retire the session (\`acpx $acp_profile sessions close $acp_session\` in $workdir; a fresh send re-creates it against the current adapter), or set CODEX_PATH, then re-send"
+      fi
+      acp_refuse "$ACP_CANARY_REASON" "$canary_note"
+      return 1
+    fi
+
+    if [ -n "$mount_dir" ] && [ -n "$acp_iso_mode" ]; then
+      if ! acp_confirm_mode "$workdir" "$acp_profile" "$acp_session" "$acp_iso_mode" "$run_dir" "post-canary"; then
+        acp_refuse containment-unconfirmed "could not confirm '$provider' is pinned to '$acp_iso_mode' after the canary — containment unconfirmed"
+        return 1
+      fi
+    fi
+
+    # THE REAL-TURN TIMER STARTS HERE, after the canary, so a slow-but-successful canary cannot make
+    # a completed review look truncated. (codex, plan r3 advisory.)
+    acp_t0="$(date +%s)"
     ( acp_exec "$workdir" \
-        "${acp_perm[@]}" "${acp_ttl[@]+"${acp_ttl[@]}"}" \
+        ${acp_prompt_opts[@]+"${acp_prompt_opts[@]}"} \
         --timeout "$timeout" --format quiet \
         "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
       > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" || acp_rc=$?

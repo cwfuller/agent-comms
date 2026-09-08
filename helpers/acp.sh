@@ -115,6 +115,17 @@ cmd_doctor() {
   fi
   echo "acpx: pinned @$ACPX_VERSION via npx (cached after first use)"
   echo "agents: codex claude grok enabled ($(for a in codex claude grok; do printf '%s=%s ' "$a" "$(profile_for "$a")"; done))"
+  # Reply verification needs python3 (comms.sh reply-check). Without it every reply is UNDECIDABLE
+  # and refused rather than trusted, so name it here rather than leaving the operator to discover it
+  # mid-consult. (codex, acp-compat-gate plan r2.)
+  if command -v python3 >/dev/null 2>&1; then
+    echo "reply-check: python3 present ($(python3 --version 2>&1)) — replies are verified"
+  else
+    echo "reply-check: python3 MISSING — every reply is undecidable and will be refused; install python3"
+  fi
+  echo "guarantee: every reply (including --oneshot) is verified by comms.sh reply-check and refused"
+  echo "           when it is a provider API error or cannot be verified; named sessions are also"
+  echo "           pre-qualified by an in-session canary before each prompt."
 }
 
 cmd_consult() {
@@ -209,17 +220,17 @@ cmd_consult() {
          if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
            die_fb "consult: acpx exited 0 but returned no answer (a dropped or empty turn)"
          fi
-         # SAME HOLE, ONE DOOR: rc 0 with the provider's API error as the whole answer (a
-         # rejected `model` does exactly this — reproduced 2026-09-08). The predicate lives in
-         # comms.sh so this path and runphase's broker cannot drift; a sibling comms.sh that
-         # is missing or cannot decide (no python3) is reported and the answer passed through,
-         # never silently refused.
-         local env_msg="" env_rc=0
-         env_msg="$(printf '%s\n' "$out" | comms_sibling error-envelope -)" || env_rc=$?
+         # SAME DECODER, ONE DOOR: reply-check classifies the body 10 (answer) / 11 (provider API
+         # error) / 12 (UNDECIDABLE — python3 missing or the classifier did not complete). It lives
+         # in comms.sh so this path, runphase's broker, and the compatibility canary cannot drift.
+         # Undecidable now REFUSES with the mailbox fallback rather than passing an unverified
+         # answer through: "cannot decide" is never "this is a clean answer". (codex, plan r2 A1.)
+         local env_out="" env_rc=0
+         env_out="$(printf '%s\n' "$out" | comms_sibling reply-check -)" || env_rc=$?
          case "$env_rc" in
-           0) die_fb "consult: acpx exited 0 but the answer is a provider API error (${env_msg:-no message}) — fix the agent's model/CLI configuration" ;;
-           1) ;;
-           *) echo "acp.sh: consult: error-envelope check undecidable (rc=$env_rc) — answer passed through unchecked" >&2 ;;
+           10) ;;
+           11) die_fb "consult: acpx exited 0 but the answer is a provider API error ($(printf '%s\n' "$env_out" | tail -n +2)) — fix the agent's model/CLI configuration" ;;
+           *)  die_fb "consult: could not verify the reply is not a provider API error (reply-check undecidable, rc=$env_rc) — install python3 beside comms.sh, or re-run" ;;
          esac
          return 0 ;;
     2)   die_fb "consult: acpx usage error (exit 2) — likely an acp.sh bug; report it" ;;

@@ -390,6 +390,31 @@ ENV_OUT="$("$COMMS" error-envelope "$ENV_D/ctrl.txt" 2>/dev/null)" && rc=0 || rc
 [ "$rc" -eq 0 ] && [ "$ENV_OUT" = "x: bad model named here" ] \
   && ok "decoded control characters in the message collapse to single spaces" || fail "control chars leaked (rc=$rc, out: $(printf '%q' "$ENV_OUT"))"
 
+section "comms.sh: reply-check (completion-evidence contract: 10 answer / 11 error / 12 undecidable)"
+# reply-check is the ONE decoder the broker, the consult, and the compatibility canary share, with a
+# PAIRED exit-status/sentinel so a crashed or truncated classifier can never read as a clean answer.
+RC_D="$WORK/replycheck"; mkdir -p "$RC_D"
+printf 'Warning: x\n\n{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"needs a newer CLI"}}\n' > "$RC_D/err.txt"
+RC_OUT="$("$COMMS" reply-check "$RC_D/err.txt")"; RC_RC=$?
+[ "$RC_RC" -eq 11 ] && printf '%s' "$RC_OUT" | head -1 | grep -qx 'verdict: error' && printf '%s' "$RC_OUT" | grep -q 'needs a newer CLI' \
+  && ok "a provider API error is exit 11 with a 'verdict: error' sentinel and the message" || fail "reply-check error contract (rc=$RC_RC)"
+printf 'a normal answer\n' | "$COMMS" reply-check - >/dev/null 2>&1; RC_RC=$?
+[ "$RC_RC" -eq 10 ] && ok "a plain answer is exit 10 (completion via exit status; no error message emitted)" || fail "reply-check answer contract (rc=$RC_RC)"
+{ echo "codex said:"; cat "$RC_D/err.txt"; } | "$COMMS" reply-check - >/dev/null 2>&1
+[ "$?" -eq 10 ] && ok "prose that QUOTES an error envelope is an answer (structural, not a substring)" || fail "quoted error misread"
+# The stdin form must SEE its input (the classifier reads a materialised temp, not the heredoc-fed stdin).
+printf 'answer via stdin\n' | "$COMMS" reply-check - >/dev/null 2>&1
+[ "$?" -eq 10 ] && ok "the stdin form (-) sees the piped body" || fail "stdin form blind to its input"
+# COMPLETION EVIDENCE: a python3 that is missing, or runs but does not honour the exit/sentinel
+# pairing, is UNDECIDABLE (12), never a trusted answer. (codex, plan r2 A1.)
+RC_STUB="$WORK/rc-nopy"; mkdir -p "$RC_STUB"
+printf '#!/bin/sh\nexit 1\n' > "$RC_STUB/python3"; chmod +x "$RC_STUB/python3"
+printf 'x\n' | PATH="$RC_STUB:$PATH" "$COMMS" reply-check - >/dev/null 2>&1
+[ "$?" -eq 12 ] && ok "an executable python3 that exits 1 without the sentinel is undecidable (12), not an answer" || fail "silent python exit-1 was trusted"
+printf '#!/bin/sh\necho garbage; exit 10\n' > "$RC_STUB/python3"; chmod +x "$RC_STUB/python3"
+printf 'x\n' | PATH="$RC_STUB:$PATH" "$COMMS" reply-check - >/dev/null 2>&1
+[ "$?" -eq 12 ] && ok "exit 10 without the matching sentinel is undecidable (the pair must agree)" || fail "exit/sentinel mismatch trusted"
+
 section "comms.sh: archive (idempotent, own inbox only)"
 IN1="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T12-01-00_reply-1.md"
 sed 's/from: claude/from: codex/; s/^---$/---/; ' "$GOOD" > "$IN1"
@@ -1732,6 +1757,9 @@ cat > "$TO_STUB/npx" <<'TSTUB'
 #!/bin/bash
 case " $* " in
   *" sessions ensure "*) echo "stub-session (created)"; exit 0 ;;
+  *" sessions show "*) printf 'name: s\ncwd: %s\n' "$(pwd -P)"; exit 0 ;;
+  *" set-mode "*) for tm in "$@"; do tmode="$tm"; done; printf 'mode set: %s\n' "$tmode"; exit 0 ;;
+  *"single word PONG"*) printf 'PONG\n'; exit 0 ;;    # the compatibility canary passes
 esac
 printf '%s\n' "$*" >> "${TO_STUB_ARGV:-/dev/null}"
 [ "${TO_STUB_SLEEP:-2}" != "0" ] && sleep "${TO_STUB_SLEEP:-2}"   # outlive the 1s budget below
@@ -3247,6 +3275,34 @@ case " $* " in
     printf 'name: stub\n'
     printf 'cwd: %s\n' "${AX_LIE_CWD:-$(pwd -P)}"
     exit 0 ;;
+  *" set-mode "*)
+    # set-mode <mode> — echo acpx's success line. AX_SETMODE_CT counts calls; AX_SETMODE_FAIL_ON
+    # names the 1-based call that must REJECT (2 = the post-canary re-pin), and a rejection
+    # interpolates the requested id exactly as acpx does, so a loose stdout match would pass on it.
+    ax_mode=""; for ax_a in "$@"; do ax_mode="$ax_a"; done
+    if [ -n "${AX_SETMODE_CT:-}" ]; then
+      ax_c=0; [ -f "$AX_SETMODE_CT" ] && ax_c="$(cat "$AX_SETMODE_CT" 2>/dev/null || echo 0)"
+      ax_c=$((ax_c + 1)); printf '%s' "$ax_c" > "$AX_SETMODE_CT"
+      if [ -n "${AX_SETMODE_FAIL_ON:-}" ] && [ "$ax_c" = "$AX_SETMODE_FAIL_ON" ]; then
+        printf 'Agent rejected session/set_mode for mode "%s": denied\n' "$ax_mode"; exit 1
+      fi
+    fi
+    printf 'mode set: %s\n' "$ax_mode"; exit 0 ;;
+esac
+# --- compatibility canary: a bare -s prompt (no --file). The real prompt has --file and falls
+# through to the payload below. AX_CANARY selects the outcome. (compat-gate tests.)
+case " $* " in
+  *" --file "*) : ;;                       # real prompt -> payload
+  *" -s "*)
+    case "${AX_CANARY:-pong}" in
+      pong)    printf 'PONG\n' ;;
+      error)   printf 'Warning: stale\n\n{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"the runtime cannot serve this model"}}\n' ;;
+      timeout) exit 3 ;;
+      exit)    printf 'PONG\n'; printf '[acpx] tokens: input=1 output=1 cache_read=0 total=2\n'; exit "${AX_CANARY_EXIT:-5}" ;;
+      junk)    printf 'I cannot return just PONG.\n' ;;
+    esac
+    printf '[acpx] tokens: input=1 output=1 cache_read=0 total=2\n'
+    exit 0 ;;
 esac
 if [ -n "${ACP_PARITY_PROBE:-}" ]; then
   { printf 'git=%s\n' "$(command -v git)"; printf 'PATH=%s\n' "$PATH"; } > "$ACP_PARITY_PROBE"
@@ -3484,6 +3540,130 @@ grep -q 'Parse BOTH transport modifiers out' "$REPO/templates/claude-commands/as
   && grep -q 'if and only if the user' "$REPO/templates/claude-commands/ask.md" \
   && ok "ask.md parses and conditionally forwards --oneshot" || fail "ask.md oneshot forwarding contract"
 grep -q 'acp.sh' "$REPO/install.sh" && ok "installer ships acp.sh" || fail "installer acp.sh"
+
+section "runphase: the compatibility canary gates every ACP turn"
+# A canary — a bare `Reply with PONG` prompt into the SAME session, same argv shape — must run and
+# pass before the real prompt is spent. It proves the session runtime can serve its model, catching
+# a stale bundled adapter (the 2026-09-08 field cause) BEFORE the expensive review turn. grok has no
+# isolation mode, so these turns exercise the canary WITHOUT the mode-confirm noise; a codex turn
+# below adds the double mode-confirm. All turns are mounted under the suite throwaway store.
+CANARY_PAY="$WORK/canary-payload.md"
+cat > "$CANARY_PAY" <<'CPAY'
+VERDICT: APPROVE
+
+## Summary
+the real review turn ran because the canary passed
+
+## Findings
+### Blocking
+- None.
+
+### Advisory
+- None.
+CPAY
+run_canary_turn() {  # <tag> <AX_CANARY value> [extra env kv...] -> echoes the run dir
+  local tag="$1" canary="$2"; shift 2
+  local msg dir
+  mkdir -p "$MA_FIX/.comms/to-grok"
+  msg="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T12-00-00_canary-$tag.md"
+  sed -e "s/^thread: ma-arc-1\$/thread: ma-canary-$tag/" \
+      "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$msg"
+  dir="$WORK/canary-$tag"; mkdir -p "$dir"
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$CANARY_PAY" \
+      AX_CANARY="$canary" COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$@" \
+      "$RP" run --message "$msg" --dir "$dir" --provider grok --via acp --timeout-secs 20 ) >/dev/null 2>&1
+  printf '%s' "$dir"
+}
+cn_status() { sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
+cn_reason() { sed -n 's/.*"reason": "\([^"]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
+
+# PASS: a healthy runtime answers PONG, the canary passes, and the real review turn runs.
+CN_OK="$(run_canary_turn pong pong)"
+[ "$(cn_status "$CN_OK")" = "completed" ] && grep -q 'the real review turn ran' "$CN_OK/reply-raw.md" 2>/dev/null \
+  && ok "a passing canary lets the real review turn run" || fail "healthy canary blocked the turn (status=$(cn_status "$CN_OK"))"
+grep -q '^canary: rc=0' "$CN_OK/runner.log" 2>/dev/null \
+  && ok "the canary actually ran before the prompt (recorded in runner.log)" || fail "no canary was recorded"
+
+# ERROR: the runtime returns a provider API error for the canary -> refuse BEFORE the prompt.
+CN_ERR="$(run_canary_turn err error)"
+[ "$(cn_status "$CN_ERR")" = "failed" ] && [ "$(cn_reason "$CN_ERR")" = "runtime-incompatible" ] \
+  && ok "an API-error canary fails the turn with reason=runtime-incompatible" || fail "error canary status=$(cn_status "$CN_ERR") reason=$(cn_reason "$CN_ERR")"
+grep -q 'cannot serve the configured model' "$CN_ERR/result.json" 2>/dev/null \
+  && ok "the refusal note names the runtime as unable to serve the model" || fail "note lacks the compatibility cause"
+[ ! -s "$CN_ERR/reply-raw.md" ] || ! grep -q 'the real review turn ran' "$CN_ERR/reply-raw.md" 2>/dev/null \
+  && ok "the real review prompt never ran after an incompatible canary" || fail "the review prompt ran despite a failed canary"
+
+# TIMEOUT: acpx exit 3 on the canary is a timeout, distinct from incompatibility, and makes NO claim.
+CN_TO="$(run_canary_turn to timeout)"
+[ "$(cn_status "$CN_TO")" = "failed" ] && [ "$(cn_reason "$CN_TO")" = "canary-timeout" ] \
+  && ok "a canary timeout fails with reason=canary-timeout, not runtime-incompatible" || fail "timeout canary reason=$(cn_reason "$CN_TO")"
+grep -q 'no compatibility claim is made' "$CN_TO/result.json" 2>/dev/null \
+  && ok "a timeout makes no compatibility claim" || fail "timeout note overclaims"
+
+# UNEXPECTED: a non-PONG answer refuses, and the whole normalized answer must equal PONG.
+CN_JUNK="$(run_canary_turn junk junk)"
+[ "$(cn_status "$CN_JUNK")" = "failed" ] && [ "$(cn_reason "$CN_JUNK")" = "canary-unexpected" ] \
+  && ok "an off-script canary answer fails with reason=canary-unexpected" || fail "junk canary reason=$(cn_reason "$CN_JUNK")"
+
+# NONZERO EXIT WITH PONG IN STDOUT: a transport failure refuses even when the body contains PONG.
+CN_EX="$(run_canary_turn ex exit AX_CANARY_EXIT=5)"
+[ "$(cn_status "$CN_EX")" = "failed" ] && case "$(cn_reason "$CN_EX")" in canary-exit-*) true;; *) false;; esac \
+  && ok "a nonzero canary transport exit refuses even with PONG in stdout" || fail "exit-with-pong reason=$(cn_reason "$CN_EX")"
+
+# ARGV PARITY: the canary and the real prompt share the option vector, INCLUDING the owner --ttl,
+# so a canary cannot spawn an owner under a different lifetime than the round expects. Recorded via
+# AX_CWD_LOG's argv column: both a `-s ... PONG` line and a `-s ... --file` line must carry --ttl.
+CN_PAR="$WORK/canary-parity.log"
+run_canary_turn parity pong AX_CWD_LOG="$CN_PAR" >/dev/null
+# The option vector = the argv up to the profile name, minus --timeout (which legitimately differs).
+cn_opts() { awk -F'\t' -v pat="$1" '$2 ~ pat {print $2}' "$CN_PAR" | head -1 \
+    | sed -E 's/ --timeout [0-9]+//; s/ (grok-build|codex|claude) .*$//'; }
+CN_CANOPT="$(cn_opts 'Reply with exactly')"; CN_PROMPTOPT="$(cn_opts ' --file ')"
+[ -n "$CN_CANOPT" ] && ok "the canary invocation was recorded" || fail "no canary invocation logged"
+[ -n "$CN_CANOPT" ] && [ "$CN_CANOPT" = "$CN_PROMPTOPT" ] \
+  && ok "the canary and the real prompt share ONE option vector (perm shape and any --ttl), differing only in --timeout" \
+  || fail "canary/prompt option vectors differ (canary=[$CN_CANOPT] prompt=[$CN_PROMPTOPT])"
+
+# CODEX DOUBLE MODE-CONFIRM: the mode is confirmed before AND after the canary. A stub that accepts
+# the pre-canary set-mode but REJECTS the post-canary one must block the real prompt, with a note
+# that says "after the canary". A codex turn must be CONTAINED (mounted) for set-mode to run, so it
+# gets a dedicated external mount base and a test acpx HOME store. (codex, acp-compat-gate plan r2 B1.)
+CN_CT="$WORK/setmode.ct"; rm -f "$CN_CT"
+CN_MHOME="$WORK/canary-home"; mkdir -p "$CN_MHOME/.acpx/sessions" "$CN_MHOME/.acpx/queues"; : > "$CN_MHOME/.acpx-test-store"
+CN_MBASE="$WORK/canary-mbase"; mkdir -p "$CN_MBASE"; CN_MBASE="$(cd "$CN_MBASE" && pwd -P)"
+CN_MHEAD="$(git -C "$MA_FIX" rev-parse HEAD)"
+CN_MODE_DIR="$WORK/canary-modeflip"; mkdir -p "$CN_MODE_DIR"
+CN_MODE_MSG="$MA_FIX/.comms/to-codex/${MA_WS}_2026-08-20T12-10-00_canary-modeflip.md"
+mkdir -p "$MA_FIX/.comms/to-codex"
+{ head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+  printf 'artifact_id: %s\nhead_sha: %s\n' "$CN_MHEAD" "$CN_MHEAD"
+  tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" \
+    | sed -e "s/^thread: ma-arc-1\$/thread: ma-canary-modeflip/" -e "s/^from: claude\$/from: grok/"
+} > "$CN_MODE_MSG"
+( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$CN_MHOME" COMMS_MOUNT_BASE="$CN_MBASE" \
+    ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=pong AX_SETMODE_CT="$CN_CT" AX_SETMODE_FAIL_ON=2 \
+    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$CN_MODE_MSG" --dir "$CN_MODE_DIR" \
+    --provider codex --via acp --timeout-secs 20 ) >/dev/null 2>&1
+# Prove the turn actually MOUNTED and reached the double set-mode (else the premise is untested).
+CN_SETMODE_N=0; [ -f "$CN_CT" ] && CN_SETMODE_N="$(cat "$CN_CT" 2>/dev/null || echo 0)"
+[ "$CN_SETMODE_N" -ge 2 ] \
+  && ok "a contained codex turn confirms the mode twice (once before, once after the canary)" || fail "the codex turn did not reach the double set-mode (calls=$CN_SETMODE_N; mounted?)"
+[ "$(cn_status "$CN_MODE_DIR")" = "failed" ] \
+  && ok "a mode that fails to re-pin AFTER the canary blocks the real prompt" || fail "post-canary mode-flip did not block (status=$(cn_status "$CN_MODE_DIR"))"
+grep -q 'after the canary' "$CN_MODE_DIR/result.json" 2>/dev/null \
+  && ok "the containment refusal names the post-canary confirmation" || fail "refusal note does not say 'after the canary'"
+[ ! -s "$CN_MODE_DIR/reply-raw.md" ] || ! grep -q 'the real review turn ran' "$CN_MODE_DIR/reply-raw.md" 2>/dev/null \
+  && ok "the review prompt never ran after a lost post-canary containment" || fail "the review prompt ran with unconfirmed containment"
+
+# NOT DEGRADE EVIDENCE: a canary refusal must never let compose drop the leg. reason=runtime-
+# incompatible / canary-* is a DISTINCT token from reason=no-output, which is the only reason
+# compose accepts as evidence a reviewer could not speak. Assert none of them equals no-output.
+CN_LEAK=0
+for CN_D in "$CN_ERR" "$CN_TO" "$CN_JUNK" "$CN_EX"; do
+  [ "$(cn_reason "$CN_D")" = "no-output" ] && CN_LEAK=1
+done
+[ "$CN_LEAK" -eq 0 ]   && ok "no canary refusal is recorded as no-output (so compose cannot read one as degrade evidence)" || fail "a canary refusal used the degrade-evidence reason"
 
 section "runphase: parent-brokered claude and codex legs over ACP"
 # THE GAP THIS CLOSES: every other `--via acp` fixture in this corpus pins `--provider grok`,
@@ -9908,10 +10088,13 @@ sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -q 'acp_iso_mode="
   && ok "the claude arm pins claude's own read-only analogue (plan), not codex's mode id" || fail "claude arm does not pin plan"
 # The mode is DATA. Hardcoding read-only is what made claude look uncontainable, because
 # `set-mode read-only` returns `Internal error` for the claude adapter.
-grep -q 'set-mode "$acp_iso_mode"' "$ISO_RP" \
-  && ok "the verified re-pin uses the backend's own mode id, not a hardcoded one" || fail "re-pin is still hardcoded to one provider's mode"
-grep -q 'mode set: $acp_iso_mode' "$ISO_RP" \
+grep -q 'set-mode "$mode"' "$ISO_RP" && grep -q 'acp_confirm_mode "$workdir" "$acp_profile" "$acp_session" "$acp_iso_mode"' "$ISO_RP" \
+  && ok "the verified re-pin uses the backend's own mode id (via acp_confirm_mode), not a hardcoded one" || fail "re-pin is still hardcoded to one provider's mode"
+grep -q 'mode set: $mode' "$ISO_RP" \
   && ok "the re-pin still requires an EXACT success line, now per-mode" || fail "per-mode confirmation is not exact"
+# The mode is confirmed TWICE around the canary: a model turn can move it and PONG is no proof.
+grep -q 'pre-canary' "$ISO_RP" && grep -q 'post-canary' "$ISO_RP" \
+  && ok "containment is re-confirmed after the canary, not only before it" || fail "the post-canary re-pin is missing"
 grep -q 'if \[ -n "$mount_dir" \] && \[ -n "$acp_iso_mode" \]' "$ISO_RP" \
   && ok "any backend carrying a mode is re-pinned, not just codex's" || fail "re-pin gate is still backend-specific"
 # A claude turn must no longer fall through to the no-backend refusal.
@@ -9976,10 +10159,10 @@ grep -q 'env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR' "$ISO_RP" \
 # process-lifetime lock, and `set_mode` accepts AgentFullAccess with no allowlist. With --ttl
 # owner reuse, a turn that raised its own mode would leave the NEXT round unconfined. Re-pinning
 # before every prompt is what makes the backend survive owner reuse.
-grep -q 'set-mode "$acp_iso_mode"' "$ISO_RP" \
-  && ok "the mode is re-pinned immediately before every prompt" || fail "no per-prompt mode pin"
-awk '/set-mode "\$acp_iso_mode"/{m=NR} /refusing to send a review turn whose containment is unconfirmed/{if (NR>m && m) f=1} END{exit !f}' "$ISO_RP" \
-  && ok "an unconfirmed mode refuses the turn instead of sending it" || fail "an unpinnable mode still sends"
+grep -q 'set-mode "$mode"' "$ISO_RP" && grep -q 'acp_confirm_mode "$workdir" "$acp_profile" "$acp_session" "$acp_iso_mode".*pre-canary' "$ISO_RP" \
+  && ok "the mode is re-pinned (via acp_confirm_mode) immediately before every prompt" || fail "no per-prompt mode pin"
+awk '/acp_confirm_mode "\$workdir".*pre-canary/{m=NR} /acp_refuse containment-unconfirmed/{if (NR>m && m) f=1} END{exit !f}' "$ISO_RP" \
+  && ok "an unconfirmed mode refuses the turn (acp_refuse) instead of sending it" || fail "an unpinnable mode still sends"
 # THE PERMISSION SHAPE IS PART OF THE BOUNDARY for an in-process pin. Measured: under
 # --approve-all the child was auto-approved out of `plan` via ExitPlanMode and its next write
 # LANDED ON DISK; under --approve-reads + non-interactive deny, a forced ExitPlanMode call is
@@ -10001,13 +10184,13 @@ grep -qi 'ExitPlanMode' "$ISO_RP" \
 # match looks for —
 # which would leave a reused owner in a write mode still prompted. Assert the check requires the
 # exact success line AND rc 0, and does NOT fold stderr into the match. (grok, implement r1, blocking.)
-grep -q '\[ "\$acp_mode_out" != "mode set: \$acp_iso_mode" \]' "$ISO_RP" \
+grep -q '\[ "\$out" = "mode set: \$mode" \]' "$ISO_RP" \
   && ok "the mode confirmation is the exact acpx success line, not a substring" \
   || fail "the mode confirmation is a loose match a rejection error would satisfy"
-grep -q '\$acp_mode_rc" -ne 0' "$ISO_RP" \
+grep -q '\[ "\$rc" -eq 0 \] && \[ "\$out" = "mode set: \$mode" \]' "$ISO_RP" \
   && ok "the mode confirmation also requires a zero exit status" || fail "the mode confirmation ignores rc"
 # The set-mode capture must send stderr to the LOG, not into the matched output.
-awk '/set-mode "\$acp_iso_mode" 2>>/{f=1} END{exit !f}' "$ISO_RP" \
+awk '/set-mode "\$mode" 2>>/{f=1} END{exit !f}' "$ISO_RP" \
   && ok "set-mode stderr goes to the log, never into the confirmation match" \
   || fail "set-mode still folds stderr into the matched output (2>&1)"
 # The isolated home is refused if it is a symlink, and its realpath must be the intended sibling.
