@@ -3625,10 +3625,11 @@ CN_CANOPT="$(cn_opts 'Reply with exactly')"; CN_PROMPTOPT="$(cn_opts ' --file ')
   && ok "the canary and the real prompt share ONE option vector (perm shape and any --ttl), differing only in --timeout" \
   || fail "canary/prompt option vectors differ (canary=[$CN_CANOPT] prompt=[$CN_PROMPTOPT])"
 
-# CODEX DOUBLE MODE-CONFIRM: the mode is confirmed before AND after the canary. A stub that accepts
-# the pre-canary set-mode but REJECTS the post-canary one must block the real prompt, with a note
-# that says "after the canary". A codex turn must be CONTAINED (mounted) for set-mode to run, so it
-# gets a dedicated external mount base and a test acpx HOME store. (codex, acp-compat-gate plan r2 B1.)
+# CODEX SINGLE MODE-PIN, before the canary. A rejected pin blocks the turn before any prompt runs.
+# (The plan asked for a second pin after the canary, but the live adapter returns "Internal error"
+# on a repeat set-mode; the single pre-canary pin holds because the mode is persistent owner state a
+# contained canary cannot move — live finding, 2026-09-08.) A codex turn must be CONTAINED (mounted)
+# for set-mode to run, so it gets a dedicated external mount base and a test acpx HOME store.
 CN_CT="$WORK/setmode.ct"; rm -f "$CN_CT"
 CN_MHOME="$WORK/canary-home"; mkdir -p "$CN_MHOME/.acpx/sessions" "$CN_MHOME/.acpx/queues"; : > "$CN_MHOME/.acpx-test-store"
 CN_MBASE="$WORK/canary-mbase"; mkdir -p "$CN_MBASE"; CN_MBASE="$(cd "$CN_MBASE" && pwd -P)"
@@ -3642,19 +3643,20 @@ mkdir -p "$MA_FIX/.comms/to-codex"
     | sed -e "s/^thread: ma-arc-1\$/thread: ma-canary-modeflip/" -e "s/^from: claude\$/from: grok/"
 } > "$CN_MODE_MSG"
 ( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$CN_MHOME" COMMS_MOUNT_BASE="$CN_MBASE" \
-    ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=pong AX_SETMODE_CT="$CN_CT" AX_SETMODE_FAIL_ON=2 \
+    ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=pong AX_SETMODE_CT="$CN_CT" AX_SETMODE_FAIL_ON=1 \
     COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$CN_MODE_MSG" --dir "$CN_MODE_DIR" \
     --provider codex --via acp --timeout-secs 20 ) >/dev/null 2>&1
-# Prove the turn actually MOUNTED and reached the double set-mode (else the premise is untested).
+# Prove the turn MOUNTED and pinned the mode EXACTLY ONCE (no impossible post-canary re-pin), before
+# the canary — a rejected pin here blocks the turn before any prompt runs. (single-pin, live finding.)
 CN_SETMODE_N=0; [ -f "$CN_CT" ] && CN_SETMODE_N="$(cat "$CN_CT" 2>/dev/null || echo 0)"
-[ "$CN_SETMODE_N" -ge 2 ] \
-  && ok "a contained codex turn confirms the mode twice (once before, once after the canary)" || fail "the codex turn did not reach the double set-mode (calls=$CN_SETMODE_N; mounted?)"
+[ "$CN_SETMODE_N" = "1" ] \
+  && ok "a contained codex turn pins the mode exactly once, before the canary (no repeat set-mode)" || fail "the codex turn did not pin exactly once (calls=$CN_SETMODE_N; mounted?)"
 [ "$(cn_status "$CN_MODE_DIR")" = "failed" ] \
-  && ok "a mode that fails to re-pin AFTER the canary blocks the real prompt" || fail "post-canary mode-flip did not block (status=$(cn_status "$CN_MODE_DIR"))"
-grep -q 'after the canary' "$CN_MODE_DIR/result.json" 2>/dev/null \
-  && ok "the containment refusal names the post-canary confirmation" || fail "refusal note does not say 'after the canary'"
+  && ok "a mode that fails to pin before the canary blocks the turn" || fail "pre-canary mode failure did not block (status=$(cn_status "$CN_MODE_DIR"))"
+grep -q 'before the canary' "$CN_MODE_DIR/result.json" 2>/dev/null \
+  && ok "the containment refusal names the pre-canary confirmation" || fail "refusal note does not say 'before the canary'"
 [ ! -s "$CN_MODE_DIR/reply-raw.md" ] || ! grep -q 'the real review turn ran' "$CN_MODE_DIR/reply-raw.md" 2>/dev/null \
-  && ok "the review prompt never ran after a lost post-canary containment" || fail "the review prompt ran with unconfirmed containment"
+  && ok "neither the canary nor the review prompt ran with unconfirmed containment" || fail "a prompt ran with unconfirmed containment"
 
 # NOT DEGRADE EVIDENCE: a canary refusal must never let compose drop the leg. reason=runtime-
 # incompatible / canary-* is a DISTINCT token from reason=no-output, which is the only reason
@@ -10092,9 +10094,11 @@ grep -q 'set-mode "$mode"' "$ISO_RP" && grep -q 'acp_confirm_mode "$workdir" "$a
   && ok "the verified re-pin uses the backend's own mode id (via acp_confirm_mode), not a hardcoded one" || fail "re-pin is still hardcoded to one provider's mode"
 grep -q 'mode set: $mode' "$ISO_RP" \
   && ok "the re-pin still requires an EXACT success line, now per-mode" || fail "per-mode confirmation is not exact"
-# The mode is confirmed TWICE around the canary: a model turn can move it and PONG is no proof.
-grep -q 'pre-canary' "$ISO_RP" && grep -q 'post-canary' "$ISO_RP" \
-  && ok "containment is re-confirmed after the canary, not only before it" || fail "the post-canary re-pin is missing"
+# The mode is pinned ONCE, before the canary: the live adapter returns "Internal error" on a repeat
+# set-mode after any prompt, so a post-canary re-pin is impossible; the single pin holds because the
+# mode is persistent owner state and a contained canary cannot move it. (live finding, 2026-09-08.)
+grep -q '"pre-canary"' "$ISO_RP" && ! grep -q '"post-canary"' "$ISO_RP" && grep -q 'Internal error' "$ISO_RP" \
+  && ok "the mode is pinned once before the canary (a post-canary re-pin is impossible on the live adapter)" || fail "the single pre-canary pin / live rationale is missing"
 grep -q 'if \[ -n "$mount_dir" \] && \[ -n "$acp_iso_mode" \]' "$ISO_RP" \
   && ok "any backend carrying a mode is re-pinned, not just codex's" || fail "re-pin gate is still backend-specific"
 # A claude turn must no longer fall through to the no-backend refusal.

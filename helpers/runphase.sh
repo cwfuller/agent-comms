@@ -3083,13 +3083,18 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       return 1
     fi
 
-    if [ -n "$mount_dir" ] && [ -n "$acp_iso_mode" ]; then
-      if ! acp_confirm_mode "$workdir" "$acp_profile" "$acp_session" "$acp_iso_mode" "$run_dir" "post-canary"; then
-        acp_refuse containment-unconfirmed "could not confirm '$provider' is pinned to '$acp_iso_mode' after the canary — containment unconfirmed"
-        return 1
-      fi
-    fi
-
+    # NO SECOND set-mode. The plan (codex r2 B1) asked to re-pin AFTER the canary too, on the
+    # premise that a model turn can move the mode. LIVE VALIDATION refuted the MECHANISM: the codex
+    # and claude adapters return "Internal error" on a repeat `set-mode` once any prompt has run in
+    # the session (reproduced 2026-09-08: set-mode read-only -> prompt -> set-mode read-only =>
+    # Internal error), so a post-canary re-pin cannot succeed and would fail every real review turn
+    # (it did — this request's own reviewer turn failed `containment-unconfirmed after the canary`).
+    # The single PRE-canary pin is sufficient: the mode is persistent OWNER state (the very reason
+    # the original code re-pins per turn across `--ttl` reuse), so it holds from before the canary
+    # through the real prompt; and a CONTAINED canary cannot move it — codex runs under a read-only
+    # kernel sandbox (CODEX_HOME) that holds regardless of mode, and claude runs under `plan` +
+    # `--approve-reads --non-interactive-permissions deny`, which REFUSES the ExitPlanMode escalation
+    # (the measured claude boundary). So pinning once, before the canary, contains both prompts.
     # THE REAL-TURN TIMER STARTS HERE, after the canary, so a slow-but-successful canary cannot make
     # a completed review look truncated. (codex, plan r3 advisory.)
     acp_t0="$(date +%s)"
