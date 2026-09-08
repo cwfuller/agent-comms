@@ -896,13 +896,15 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
   # stdout after a `verdict: error` line) / 12 (UNDECIDABLE — python3 missing, classifier did not
   # complete, unreadable). Undecidable now REFUSES rather than trusting the body: "cannot decide"
   # is never "this is a clean reply". (codex, acp-compat-gate plan r2, A1.)
-  local env_out="" env_rc=0
-  env_out="$("$COMMS" reply-check "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log")" || env_rc=$?
+  local env_out="" env_err="" env_rc=0
+  env_out="$("$COMMS" reply-check "$run_dir/reply-raw.md" 2>"$run_dir/reply-check.err")" || env_rc=$?
+  env_err="$(tr '\n' ' ' <"$run_dir/reply-check.err" 2>/dev/null | sed 's/  */ /g; s/ *$//')"
+  cat "$run_dir/reply-check.err" >>"$run_dir/runner.log" 2>/dev/null || true
   case "$env_rc" in
     10) ;;
     11) GROK_BROKER_NOTE="the provider returned an API error instead of an answer ($(printf '%s\n' "$env_out" | tail -n +2)) — refusing to stamp it as a reply; fix the provider's model/CLI configuration and re-send"
         return 1 ;;
-    *)  GROK_BROKER_NOTE="could not verify the reply is not a provider API error (reply-check undecidable, rc=$env_rc — see runner.log) — refusing to stamp an unverified body; install python3 or re-send"
+    *)  GROK_BROKER_NOTE="could not verify the reply is not a provider API error (reply-check ${env_err:-did not complete: status $env_rc}) — refusing to stamp an unverified body; resolve the cause and re-send"
         return 1 ;;
   esac
   # NOTHING is normalised here either. unwrap_reply used to strip a whole-answer fence, but
@@ -2068,11 +2070,12 @@ mount_degrade() {  # <reason for the log>
 # Reads acp_iso/acp_launch/acp_shim by dynamic scope, as unmount_artifact reads mount_dir.
 # acp_confirm_mode <workdir> <profile> <session> <mode> <run-dir> <label> — re-pin the session mode
 # and prove it held, reading ONLY stdout (a rejected set_mode interpolates the requested id into its
-# error, so a loose match passes on the refusal too). rc 0 = pinned. The mode is mutable session
-# state re-sent per turn, so it is confirmed immediately before EACH prompt — before the canary AND
-# again before the real prompt, because the canary is itself a model turn that could move it.
-# (grok, plan r4; codex, acp-compat-gate plan r2 B1.) Reads acp_iso/acp_launch/acp_shim by dynamic
-# scope through acp_exec, exactly as the caller does.
+# error, so a loose match passes on the refusal too). rc 0 = pinned. It is called ONCE per turn,
+# before the canary (which is the turn's first prompt); the pin then holds through the canary and the
+# real prompt against the same owner, because the mode is persistent owner state a CONTAINED canary
+# cannot move. A repeat set-mode after any prompt returns "Internal error" on the live adapter, so a
+# second confirmation is impossible — see the call site. (grok, plan r4; codex, plan r2 B1; live
+# finding, 2026-09-08.) Reads acp_iso/acp_launch/acp_shim by dynamic scope through acp_exec.
 acp_confirm_mode() {
   local wd="$1" prof="$2" sess="$3" mode="$4" rd="$5" label="$6" out="" rc=0
   out="$( acp_exec "$wd" --format text "$prof" -s "$sess" set-mode "$mode" 2>>"$rd/runner.log" )" || rc=$?
@@ -2110,20 +2113,30 @@ acp_canary() {
     ACP_CANARY_NOTE="the compatibility canary exited $rc before answering (see runner.log) — no compatibility claim is made"
     return 1
   fi
-  local chk="" crc=0
-  chk="$(printf '%s' "$out" | "$COMMS" reply-check - 2>>"$rd/runner.log")" || crc=$?
+  # Classify the reply with the shared decoder. ONLY status 10 (a verified answer) may proceed to the
+  # PONG check; 11 is the provider error; and 12 AND EVERY OTHER STATUS — a checker that failed to
+  # invoke (126/127), died on a signal, or otherwise did not return its contract — are UNVERIFIABLE
+  # and refuse. Falling through on an unrecognised status would let a PONG pass without ever being
+  # verified. (codex, impl r1, blocking.) The checker's own cause (its stderr) is carried into the
+  # durable note rather than reduced to "see runner.log". (codex, impl r1, advisory.)
+  local chk="" cerr="" crc=0
+  chk="$(printf '%s' "$out" | "$COMMS" reply-check - 2>"$rd/canary-check.err")" || crc=$?
+  cerr="$(tr '\n' ' ' <"$rd/canary-check.err" 2>/dev/null | sed 's/  */ /g; s/ *$//')"
+  cat "$rd/canary-check.err" >>"$rd/runner.log" 2>/dev/null || true
   case "$crc" in
+    10) ;;   # a verified answer — fall through to the PONG check below
     11) ACP_CANARY_REASON="runtime-incompatible"
         ACP_CANARY_NOTE="the session runtime returned a provider API error for the canary ($(printf '%s\n' "$chk" | tail -n +2)) — it cannot serve the configured model"
         return 1 ;;
-    12) ACP_CANARY_REASON="reply-unverifiable"
-        ACP_CANARY_NOTE="could not verify the canary reply (reply-check undecidable — see runner.log) — no compatibility claim is made"
+    *)  ACP_CANARY_REASON="reply-unverifiable"
+        ACP_CANARY_NOTE="could not verify the canary reply (reply-check ${cerr:-did not complete: status $crc}) — no compatibility claim is made"
         return 1 ;;
   esac
-  # crc 10 (answer): strip only known framing, then require the WHOLE remainder to equal PONG.
+  # A verified answer must be EXACTLY PONG. Strip framing only at the boundaries, trim each line, drop
+  # blanks, and require a SINGLE remaining line equal to PONG — so "P O N G", an embedded framing
+  # line, or any trailing prose all refuse. (codex, impl r1, advisory.)
   local norm; norm="$(printf '%s' "$out" \
-      | sed -e '/^Warning:/d' -e '/^\[acpx\] tokens:/d' \
-      | tr -d '[:space:]')"
+      | awk '!/^Warning:/ && !/^\[acpx\] tokens:/ { gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 != "") print }')"
   case "$norm" in
     [Pp][Oo][Nn][Gg]) return 0 ;;
     *) ACP_CANARY_REASON="canary-unexpected"
@@ -3076,8 +3089,15 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
       local canary_note="$ACP_CANARY_NOTE"
       if [ "$ACP_CANARY_REASON" = runtime-incompatible ]; then
-        local pcli; pcli="$("$provider" --version 2>/dev/null | head -1)"
-        canary_note="$canary_note${pcli:+; PATH $provider is: $pcli}. Retire the session (\`acpx $acp_profile sessions close $acp_session\` in $workdir; a fresh send re-creates it against the current adapter), or set CODEX_PATH, then re-send"
+        # BEST-EFFORT and GUARDED: an adapter-bundled runtime need not have a provider CLI on PATH, and
+        # an unguarded failing command substitution under `set -euo pipefail` would abort the runner
+        # BEFORE acp_refuse — losing the runtime-incompatible reason and the provider message. The
+        # `|| pcli=""` keeps it a diagnostic. (codex, impl r1, blocking.)
+        local pcli=""; pcli="$("$provider" --version 2>/dev/null | head -1)" || pcli=""
+        # CODEX_PATH is codex-only, and it does not replace an already-running owner. Tailor per provider.
+        local retire_hint="Retire the session (\`acpx $acp_profile sessions close $acp_session\` in $workdir; a fresh send re-creates it against the current adapter — a running owner keeps its runtime until retired"
+        case "$provider" in codex) retire_hint="$retire_hint, so setting CODEX_PATH alone does not) or set CODEX_PATH" ;; *) retire_hint="$retire_hint)" ;; esac
+        canary_note="$canary_note${pcli:+; PATH $provider is: $pcli}. $retire_hint, then re-send"
       fi
       acp_refuse "$ACP_CANARY_REASON" "$canary_note"
       return 1

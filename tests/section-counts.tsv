@@ -35,7 +35,7 @@ stamped authorities: workspace pin (#3) + send-time git metadata (#6)	37
 friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	44
-runphase: the compatibility canary gates every ACP turn	16
+runphase: the compatibility canary gates every ACP turn	21
 runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15
 templates: bare dollar-digit/dollar-star hygiene	1

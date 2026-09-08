@@ -123,9 +123,10 @@ cmd_doctor() {
   else
     echo "reply-check: python3 MISSING — every reply is undecidable and will be refused; install python3"
   fi
-  echo "guarantee: every reply (including --oneshot) is verified by comms.sh reply-check and refused"
-  echo "           when it is a provider API error or cannot be verified; named sessions are also"
-  echo "           pre-qualified by an in-session canary before each prompt."
+  echo "guarantee: every consult reply (warm or --oneshot) is verified by comms.sh reply-check and"
+  echo "           refused when it is a provider API error or cannot be verified — the consult's own"
+  echo "           reply IS its compatibility probe. (The in-session PONG canary that pre-qualifies a"
+  echo "           session before an expensive REVIEW prompt runs in runphase, not on this path.)"
 }
 
 cmd_consult() {
@@ -225,12 +226,14 @@ cmd_consult() {
          # in comms.sh so this path, runphase's broker, and the compatibility canary cannot drift.
          # Undecidable now REFUSES with the mailbox fallback rather than passing an unverified
          # answer through: "cannot decide" is never "this is a clean answer". (codex, plan r2 A1.)
-         local env_out="" env_rc=0
-         env_out="$(printf '%s\n' "$out" | comms_sibling reply-check -)" || env_rc=$?
+         local env_out="" env_err="" env_rc=0
+         env_err="$(mktemp "${TMPDIR:-/tmp}/consult-rc.XXXXXX" 2>/dev/null)"
+         env_out="$(printf '%s\n' "$out" | comms_sibling reply-check - 2>"${env_err:-/dev/null}")" || env_rc=$?
+         local env_cause=""; [ -n "$env_err" ] && env_cause="$(tr '\n' ' ' <"$env_err" | sed 's/  */ /g; s/ *$//')" && rm -f "$env_err"
          case "$env_rc" in
            10) ;;
            11) die_fb "consult: acpx exited 0 but the answer is a provider API error ($(printf '%s\n' "$env_out" | tail -n +2)) — fix the agent's model/CLI configuration" ;;
-           *)  die_fb "consult: could not verify the reply is not a provider API error (reply-check undecidable, rc=$env_rc) — install python3 beside comms.sh, or re-run" ;;
+           *)  die_fb "consult: could not verify the reply is not a provider API error (reply-check ${env_cause:-did not complete: status $env_rc})" ;;
          esac
          return 0 ;;
     2)   die_fb "consult: acpx usage error (exit 2) — likely an acp.sh bug; report it" ;;

@@ -3594,6 +3594,15 @@ grep -q 'cannot serve the configured model' "$CN_ERR/result.json" 2>/dev/null \
 [ ! -s "$CN_ERR/reply-raw.md" ] || ! grep -q 'the real review turn ran' "$CN_ERR/reply-raw.md" 2>/dev/null \
   && ok "the real review prompt never ran after an incompatible canary" || fail "the review prompt ran despite a failed canary"
 
+# THE PATH-CLI DIAGNOSTIC IS BEST-EFFORT: an incompatible canary whose provider has no CLI on PATH
+# must STILL record runtime-incompatible. An unguarded `$provider --version` under set -euo pipefail
+# would abort the runner before acp_refuse, replacing the reason with a generic note. Force the CLI
+# absent with a minimal PATH (node/npx live in $AXB). (codex, impl r1, blocking.)
+CN_MINPATH="$AXB:$(dirname "$(command -v git)"):/usr/bin:/bin"
+CN_ERR2="$(run_canary_turn err_nopath error PATH="$CN_MINPATH")"
+[ "$(cn_status "$CN_ERR2")" = "failed" ] && [ "$(cn_reason "$CN_ERR2")" = "runtime-incompatible" ] \
+  && ok "an incompatible canary still records runtime-incompatible when the provider CLI is absent from PATH" || fail "runtime-incompatible lost when PATH CLI absent (status=$(cn_status "$CN_ERR2") reason=$(cn_reason "$CN_ERR2"))"
+
 # TIMEOUT: acpx exit 3 on the canary is a timeout, distinct from incompatibility, and makes NO claim.
 CN_TO="$(run_canary_turn to timeout)"
 [ "$(cn_status "$CN_TO")" = "failed" ] && [ "$(cn_reason "$CN_TO")" = "canary-timeout" ] \
@@ -3610,6 +3619,19 @@ CN_JUNK="$(run_canary_turn junk junk)"
 CN_EX="$(run_canary_turn ex exit AX_CANARY_EXIT=5)"
 [ "$(cn_status "$CN_EX")" = "failed" ] && case "$(cn_reason "$CN_EX")" in canary-exit-*) true;; *) false;; esac \
   && ok "a nonzero canary transport exit refuses even with PONG in stdout" || fail "exit-with-pong reason=$(cn_reason "$CN_EX")"
+
+# UNVERIFIABLE CHECK MUST NOT PASS A PONG: if reply-check cannot classify the canary reply (here its
+# python3 is unavailable, so it returns 12), the canary refuses reply-unverifiable EVEN THOUGH the
+# body is exactly PONG. Before the fix only statuses 11/12 were handled and every other status fell
+# through to the PONG check, qualifying an unverified reply. (codex, impl r1, blocking.)
+CN_NOPY="$WORK/canary-nopy-bin"; mkdir -p "$CN_NOPY"
+printf '#!/bin/sh\nexit 127\n' > "$CN_NOPY/python3"; chmod +x "$CN_NOPY/python3"
+CN_UV="$(run_canary_turn uv pong PATH="$CN_NOPY:$AXB:$PATH")"
+[ "$(cn_status "$CN_UV")" = "failed" ] && [ "$(cn_reason "$CN_UV")" = "reply-unverifiable" ] \
+  && ok "a PONG canary whose reply-check cannot run refuses reply-unverifiable, never passes" || fail "unverifiable canary status=$(cn_status "$CN_UV") reason=$(cn_reason "$CN_UV")"
+# The canary classifier proceeds ONLY on a verified answer (status 10); no other status falls through.
+awk '/^acp_canary\(\)/{f=1} f&&/case "\$crc" in/{c=1} c&&/10\) ;;/{ten=1} c&&/esac/{exit} END{exit !ten}' "$RP" \
+  && ok "the canary switch falls through to the PONG check only on reply-check status 10" || fail "the canary switch can fall through on an unrecognised status"
 
 # ARGV PARITY: the canary and the real prompt share the option vector, INCLUDING the owner --ttl,
 # so a canary cannot spawn an owner under a different lifetime than the round expects. Recorded via
@@ -3642,7 +3664,8 @@ mkdir -p "$MA_FIX/.comms/to-codex"
   tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" \
     | sed -e "s/^thread: ma-arc-1\$/thread: ma-canary-modeflip/" -e "s/^from: claude\$/from: grok/"
 } > "$CN_MODE_MSG"
-( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$CN_MHOME" COMMS_MOUNT_BASE="$CN_MBASE" \
+CN_FLOG="$WORK/canary-modeflip.argv"
+( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$CN_MHOME" COMMS_MOUNT_BASE="$CN_MBASE" AX_CWD_LOG="$CN_FLOG" \
     ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=pong AX_SETMODE_CT="$CN_CT" AX_SETMODE_FAIL_ON=1 \
     COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$CN_MODE_MSG" --dir "$CN_MODE_DIR" \
     --provider codex --via acp --timeout-secs 20 ) >/dev/null 2>&1
@@ -3655,8 +3678,34 @@ CN_SETMODE_N=0; [ -f "$CN_CT" ] && CN_SETMODE_N="$(cat "$CN_CT" 2>/dev/null || e
   && ok "a mode that fails to pin before the canary blocks the turn" || fail "pre-canary mode failure did not block (status=$(cn_status "$CN_MODE_DIR"))"
 grep -q 'before the canary' "$CN_MODE_DIR/result.json" 2>/dev/null \
   && ok "the containment refusal names the pre-canary confirmation" || fail "refusal note does not say 'before the canary'"
-[ ! -s "$CN_MODE_DIR/reply-raw.md" ] || ! grep -q 'the real review turn ran' "$CN_MODE_DIR/reply-raw.md" 2>/dev/null \
-  && ok "neither the canary nor the review prompt ran with unconfirmed containment" || fail "a prompt ran with unconfirmed containment"
+# INSPECT INVOCATION RECORDS, not the reply file: a blocked pin means NO prompt (canary or real) was
+# ever sent. (codex, impl r1 advisory — reply-raw.md cannot prove the canary never ran.)
+awk -F'\t' '$2 ~ /Reply with exactly/ || $2 ~ / --file /' "$CN_FLOG" 2>/dev/null | grep -q . \
+  && fail "a prompt was sent despite the pre-canary pin failing" || ok "no prompt (canary or review) was sent after the pin was rejected"
+
+# POSITIVE SEQUENCING: a contained codex turn whose pin holds must pin ONCE, then send the canary,
+# then the real prompt — in that order — and complete. A double-pin implementation could pass the
+# rejection test above (it exits before a 2nd pin); only this proves the successful single-pin path.
+# (codex, impl r1 advisory.)
+CN_CT2="$WORK/setmode.ct2"; rm -f "$CN_CT2"
+CN_OK_LOG="$WORK/canary-ok.argv"; CN_OK_DIR="$WORK/canary-modeok"; mkdir -p "$CN_OK_DIR"
+CN_OK_MSG="$MA_FIX/.comms/to-codex/${MA_WS}_2026-08-20T12-12-00_canary-modeok.md"
+{ head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+  printf 'artifact_id: %s\nhead_sha: %s\n' "$CN_MHEAD" "$CN_MHEAD"
+  tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" \
+    | sed -e "s/^thread: ma-arc-1\$/thread: ma-canary-modeok/" -e "s/^from: claude\$/from: grok/"
+} > "$CN_OK_MSG"
+( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$CN_MHOME" COMMS_MOUNT_BASE="$CN_MBASE" AX_CWD_LOG="$CN_OK_LOG" \
+    ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=pong AX_SETMODE_CT="$CN_CT2" \
+    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$CN_OK_MSG" --dir "$CN_OK_DIR" \
+    --provider codex --via acp --timeout-secs 20 ) >/dev/null 2>&1
+CN_OK_N=0; [ -f "$CN_CT2" ] && CN_OK_N="$(cat "$CN_CT2" 2>/dev/null || echo 0)"
+[ "$(cn_status "$CN_OK_DIR")" = "completed" ] && [ "$CN_OK_N" = "1" ] \
+  && ok "a contained codex turn whose pin holds completes with exactly one set-mode" || fail "successful single-pin turn: status=$(cn_status "$CN_OK_DIR") setmode=$CN_OK_N"
+# Order: the (only) set-mode precedes the canary, which precedes the real --file prompt.
+CN_ORDER="$(awk -F'\t' '$2 ~ / set-mode /{print "M"} $2 ~ /Reply with exactly/{print "C"} $2 ~ / --file /{print "P"}' "$CN_OK_LOG" 2>/dev/null | tr -d '\n')"
+[ "$CN_ORDER" = "MCP" ] \
+  && ok "the successful sequence is set-mode -> canary -> real prompt, in that order" || fail "canary sequence order wrong (got: $CN_ORDER)"
 
 # NOT DEGRADE EVIDENCE: a canary refusal must never let compose drop the leg. reason=runtime-
 # incompatible / canary-* is a DISTINCT token from reason=no-output, which is the only reason

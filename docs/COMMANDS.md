@@ -105,6 +105,7 @@ agnostic.
 | `status` | one-screen loop summary: workspace, latest archived message + its loop fields, pending counts per inbox |
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
 | `error-envelope <file\|->` | exit 0 (printing the provider's message) iff the whole body is a provider API error envelope rather than an answer; 1 for an answer, 3 when undecidable (no python3). Structural, never a substring match: a body that quotes an error is an answer. The one predicate runphase's broker and `acp.sh consult` both use |
+| `reply-check <file\|->` | the completion-evidence form of the same check, and the decoder the broker, the consult, and the compatibility canary all share: exit 10 = answer, 11 = provider API error (its message on stdout after a `verdict: error` line), 12 = undecidable (python3 missing, the classifier did not complete, or unreadable — cause on stderr). The exit status and the stdout sentinel are a PAIR, so a crashed classifier reads as 12, never as a clean answer. `error-envelope` is a thin adapter over it |
 | `verdict <file>` | normalized verdict: whitespace-stripped, uppercased, loopspec synonyms mapped (`pass` → `APPROVE`, `fail` → `REQUEST_CHANGES`) |
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
 | `deliver <claude\|codex\|grok> [file]` | routes via `transport`, classifying the MESSAGE: one carrying `workflow:` is a loop, anything else is a consult/one-shot. Both resolve to `acp` (a parent-brokered turn through `runphase --via acp`), to `headless` for grok, or to `mailbox`. Prints the chosen route and outcome: `spawned` / `no nudge needed` (pickup) / manual pickup. An unknown `COMMS_DELIVERY` — including the removed `cmux` — is REFUSED, not degraded. |
@@ -288,6 +289,21 @@ with the fallback rather than returned as an answer.
 ### `runphase.sh` (experimental)
 
 Headless peer-turn runner, and the host for ACP turns (`run --via acp`). Loops default to **ACP**; headless is the fallback for grok ONLY (claude and codex refuse a non-ACP turn).
+
+**The compatibility canary.** Before every ACP review prompt, `run` pins the session mode once, then
+sends a one-word `PONG` canary INTO the same session (same option vector as the real prompt) and
+classifies the reply with `comms.sh reply-check`. It proves the session's runtime can serve its
+configured model before the expensive review turn is spent — catching a stale bundled adapter that
+would otherwise return a provider API error. A canary that is an error, times out, exits nonzero,
+answers off-script, or cannot be verified refuses the turn BEFORE the real prompt, with a distinct
+`reason` in `result.json` (`runtime-incompatible` / `canary-timeout` / `canary-exit-N` /
+`canary-unexpected` / `reply-unverifiable`), none of which is `no-output`, so `compose` never reads
+one as a droppable-leg signal. The mode is pinned ONCE (before the canary): a repeat `set-mode` after
+any prompt returns "Internal error" on the live adapter, and the single pin holds through both
+prompts because the mode is persistent owner state a contained canary cannot move. It runs per turn,
+with no cache (`COMMS_ACP_CANARY_SECS`, default 60). Consults do not run a separate canary — a
+consult's own reply is its probe, verified by the same `reply-check`.
+
 `deliver`/`send` call `spawn` for you — `await`, `result`, `hold`, and `release` are
 the operator surface:
 
