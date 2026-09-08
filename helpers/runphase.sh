@@ -889,9 +889,8 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
   # line and fell into the no-structure refusal, which named the wrong cause. One structural
   # predicate, in comms.sh, decides it for every transport and for acp.sh's consult alike;
   # checked BEFORE the reply-type fork so both types refuse with the same, true reason.
-  # rc 3 (no python3) is UNDECIDABLE and is logged, not treated as either answer or error:
-  # refusing every turn on a host without python3 would regress the ACP path, which needs it
-  # for nothing else, while the streaming broker already refuses there on its own.
+  # An UNDECIDABLE result (python3 missing, or the classifier did not complete) is REFUSED, not
+  # trusted: "cannot decide" is never "this is a clean reply". (codex, acp-compat-gate plan r2 A1.)
   # ONE decoder, THREE codes. reply-check returns 10 (answer) / 11 (provider API error, message on
   # stdout after a `verdict: error` line) / 12 (UNDECIDABLE — python3 missing, classifier did not
   # complete, unreadable). Undecidable now REFUSES rather than trusting the body: "cannot decide"
@@ -3067,12 +3066,14 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # would leave the next round's quiescence wait facing a longer-lived owner. (codex, plan r2 B2.)
     local -a acp_prompt_opts=( "${acp_perm[@]}" ${acp_ttl[@]+"${acp_ttl[@]}"} )
 
-    # RE-PIN THE MODE, and refuse if it will not hold. INITIAL_AGENT_MODE is read once when the
-    # adapter builds sessionState — it is not a process-lifetime lock, and `--ttl` owner reuse means
-    # a later round talks to an owner started under whatever mode was last set. It is confirmed
-    # immediately before EACH prompt (the canary AND the real turn), because the canary is itself a
-    # model turn that could move it and PONG does not attest the mode survived. (grok, plan r4;
-    # codex, acp-compat-gate plan r2 B1.)
+    # RE-PIN THE MODE ONCE, before the canary (the turn's first prompt), and refuse if it will not
+    # hold. INITIAL_AGENT_MODE is read once when the adapter builds sessionState — not a
+    # process-lifetime lock, and `--ttl` owner reuse means a later round talks to an owner started
+    # under whatever mode was last set, so each turn re-pins before its first prompt. The pin then
+    # holds through the canary AND the real prompt: the mode is persistent owner state a CONTAINED
+    # canary cannot move, and a repeat set-mode after any prompt is "Internal error" on the live
+    # adapter, so a second confirmation is impossible. (grok, plan r4; codex, plan r2 B1; live
+    # finding, 2026-09-08.)
     acp_refuse() {  # <reason> <note> — write the failed result with a reason, unmount, unwind
       acp_status=failed
       ABORT_NOTE="refused: $2"

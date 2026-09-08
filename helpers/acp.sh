@@ -234,7 +234,7 @@ cmd_consult() {
          env_err="$(mktemp "${TMPDIR:-/tmp}/consult-rc.XXXXXX" 2>/dev/null || true)"
          env_out="$(printf '%s\n' "$out" | comms_sibling reply-check - 2>"${env_err:-/dev/null}")" || env_rc=$?
          if [ -n "$env_err" ] && [ -f "$env_err" ]; then
-           env_cause="$(tr '\n' ' ' <"$env_err" | sed 's/  */ /g; s/ *$//')"; rm -f "$env_err" 2>/dev/null || true
+           env_cause="$(tr '\n' ' ' <"$env_err" 2>/dev/null | sed 's/  */ /g; s/ *$//' || true)"; rm -f "$env_err" 2>/dev/null || true
          fi
          case "$env_rc" in
            10) ;;

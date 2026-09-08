@@ -3655,6 +3655,10 @@ awk -F'\t' '$2 ~ / --file /' "$CN_UVLOG" 2>/dev/null | grep -q . \
   && fail "the real review prompt was sent after an unverifiable canary" || ok "no real review prompt was sent after an unverifiable canary"
 # The classifier proceeds ONLY on status 10, and EVERY other status hits an explicit reply-unverifiable
 # refusal — asserted on the catch-all arm itself, so deleting that arm fails this test. (codex r2.)
+# LIMITATION (codex r3, acknowledged): reply-check always normalizes to 10/11/12, so the behavioural
+# fixture above drives the reachable unverifiable case (12 with PONG present). A genuinely
+# noncontractual status (126/127/signal) arises only if reply-check fails to EXECUTE, which a working
+# comms.sh cannot be made to do from here; the catch-all covers it, proven structurally not behaviourally.
 awk '/^acp_canary\(\)/{f=1} f&&/case "\$crc" in/{c=1} c&&/^    10\) ;;/{ten=1} c&&/^    \*\)  *ACP_CANARY_REASON="reply-unverifiable"/{star=1} c&&/esac/{exit} END{exit !(ten && star)}' "$RP" \
   && ok "the canary switch passes only on status 10 and refuses every other status via an explicit catch-all" || fail "the canary switch lacks the status-10-only / catch-all-refuse shape"
 
