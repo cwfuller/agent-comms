@@ -1795,6 +1795,21 @@ clearest evidence so far that a panel of two is not redundant.
 
 ### Found in the field, not yet fixed
 
+- [x] **A provider's API error was delivered as a consult answer — FIXED 2026-09-08.** Field
+  report: with `~/.codex/config.toml` naming a model the installed codex-cli rejects, an `/ask`
+  over ACP came back as `{"type":"error","status":400,"error":{...}}`, runphase stamped it into a
+  normal `type: response`, recorded `status: completed`, and nothing flagged it; the driver noticed
+  only by reading the reply. Reproduced live: acpx exits 0, and even its json stream closes the
+  turn `stopReason: end_turn` — the only provider-native marker is a codex-private
+  `threadStatus: systemError` meta event the quiet transport never surfaces. Reviews escaped by
+  accident (no VERDICT line → the no-structure refusal, naming the wrong cause). Fix: ONE
+  structural predicate, `comms.sh error-envelope`, checked in `broker_stamp` before the reply-type
+  fork and in `acp.sh consult` after the rc-0 blank guard; both refuse with the provider's message
+  and leave the inbound unarchived. Not done: switching the ACP turn to `--format json` to read
+  the meta event — it would change reply extraction for every provider to catch a signal only
+  codex emits. Same report: approved threads stayed `awaiting` for ten hours because `/auto`
+  never said to run `state complete` — now step 8 of `auto.md`, and the panel bullet in
+  `read-from-codex.md` names the LEG threads, which are the ones that carry state.
 - [ ] **Dispatch should refuse an already-answered `(thread, phase, round)`.** A second
   round-1 review arrived 80 minutes after the first, `in-reply-to` the same request and
   reviewing the same commit, after round 2 had superseded it. Nothing broke — it was

@@ -264,3 +264,19 @@ verdict format. The cycle continues until APPROVE or max rounds.
 7. **Notify the user** (status line first — see "Talking to the user"): e.g.
    "Waiting on codex and grok." Then one line of detail if useful. If the loop
    goes quiet, `"$COMMS_SH" stalled` lists threads still awaiting a reply.
+
+8. **Close the thread when the loop ends on an APPROVE.** Nothing does this for you: a
+   reply flips the thread to "awaiting the driver", and only `state complete` moves it
+   off that. An approved loop left there is reported by `stalled` for as long as the
+   state file exists (field report 2026-09-08: two approved threads, ten hours). Archive
+   the approval FIRST, then close the state — for one reviewer the thread itself, for a
+   panel EVERY leg thread (`<thread>-<agent>`; the legs are what carry state, the base
+   thread has none):
+   ```bash
+   "$COMMS_SH" archive --as "$SELF" <approval files>
+   "$COMMS_SH" state complete "<thread>"            # single reviewer
+   for AG in ${REVIEWERS//,/ }; do "$COMMS_SH" state complete "<thread>-$AG"; done   # panel
+   ```
+   Do this ONLY on the terminal approval. A `--plan` approval continues on the same
+   thread (step 3), and a max-rounds stop or a split is genuinely unfinished — leave those
+   awaiting so `stalled` keeps showing them to the human.

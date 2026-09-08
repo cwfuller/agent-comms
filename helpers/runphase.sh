@@ -870,6 +870,24 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
     return 1
   fi
   [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="the child produced no reply text"; return 1; }
+  # A PROVIDER'S ERROR ENVELOPE IS NOT AN ANSWER. Over acpx a rejected model exits 0 with the
+  # API error JSON as the whole reply, and for a consult (`type: response`) nothing below
+  # inspects the body — so the error was stamped, delivered and recorded `completed`
+  # (field report 2026-09-08). Reviews only escaped by accident: an error body has no VERDICT
+  # line and fell into the no-structure refusal, which named the wrong cause. One structural
+  # predicate, in comms.sh, decides it for every transport and for acp.sh's consult alike;
+  # checked BEFORE the reply-type fork so both types refuse with the same, true reason.
+  # rc 3 (no python3) is UNDECIDABLE and is logged, not treated as either answer or error:
+  # refusing every turn on a host without python3 would regress the ACP path, which needs it
+  # for nothing else, while the streaming broker already refuses there on its own.
+  local env_msg="" env_rc=0
+  env_msg="$("$COMMS" error-envelope "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log")" || env_rc=$?
+  case "$env_rc" in
+    0) GROK_BROKER_NOTE="the provider returned an API error instead of an answer (${env_msg:-no message}) — refusing to stamp it as a reply; fix the provider's model/CLI configuration and re-send"
+       return 1 ;;
+    1) ;;
+    *) echo "note: error-envelope check undecidable (rc=$env_rc) — the reply is trusted as an answer" >>"$run_dir/runner.log" ;;
+  esac
   # NOTHING is normalised here either. unwrap_reply used to strip a whole-answer fence, but
   # that made a model-authored delimiter authoritative BEFORE the shared lexer: a reply
   # consisting solely of a fenced prior review was unwrapped, promoting that quote's verdict

@@ -344,6 +344,46 @@ BAD_EMPTY="$WORK/empty-body.md"
 awk '/^## /{exit} {print}' "$GOOD" > "$BAD_EMPTY"
 check_not "empty body is rejected" run_comms validate "$BAD_EMPTY"
 
+section "comms.sh: error-envelope (a provider API error is not an answer)"
+# The LIVE shape (codex-cli 0.153.4 rejecting the configured model over acpx, 2026-09-08): a
+# Warning preamble, a blank line, one compact JSON object, exit 0. It reached a driver as a
+# `type: response` reply recorded `status: completed`.
+ENV_D="$WORK/envelope"; mkdir -p "$ENV_D"
+cat > "$ENV_D/live.txt" <<'ENVLIVE'
+Warning: Model metadata for `gpt-6-astra` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+
+{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6-astra' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."}}
+
+ENVLIVE
+ENV_OUT="$("$COMMS" error-envelope "$ENV_D/live.txt" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && echo "$ENV_OUT" | grep -q "requires a newer version of Codex" \
+  && ok "the live codex error envelope is recognised and its message surfaced" || fail "live envelope (rc=$rc, out: $ENV_OUT)"
+# The generic OpenAI shape, pretty-printed: no `type` member, several lines.
+printf '{\n  "error": {\n    "message": "quota exceeded",\n    "type": "insufficient_quota"\n  }\n}\n' > "$ENV_D/bare.txt"
+"$COMMS" error-envelope "$ENV_D/bare.txt" >/dev/null 2>&1 \
+  && ok "a bare pretty-printed {error:{message}} envelope is recognised" || fail "bare envelope"
+# STRUCTURAL, NOT A SUBSTRING: an answer that QUOTES the same error is an answer.
+{ echo "Codex returned this when I asked:"; cat "$ENV_D/live.txt"; } > "$ENV_D/quoted.txt"
+"$COMMS" error-envelope "$ENV_D/quoted.txt" >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -eq 1 ] && ok "prose that quotes an error envelope is an answer (rc 1)" || fail "quoted envelope misread as an error (rc=$rc)"
+printf '{"answer":"yes","error":null}\n' > "$ENV_D/json.txt"
+"$COMMS" error-envelope "$ENV_D/json.txt" >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -eq 1 ] && ok "a JSON answer whose error member is not an object is an answer" || fail "non-error JSON misread (rc=$rc)"
+# `-` reads the payload from stdin. The first cut read sys.stdin AFTER the interpreter had
+# consumed its own heredoc script from it, so every piped body was "an answer" and the
+# negative controls above passed vacuously. The POSITIVE stdin case is what catches that.
+"$COMMS" error-envelope - < "$ENV_D/live.txt" >/dev/null 2>&1 \
+  && ok "the stdin form (-) sees the piped body" || fail "stdin form is blind to its input"
+# A stamped message is checked at its BODY, so one file reads the same on both sides of the broker.
+printf -- '---\ntype: response\nfrom: codex\n---\n\n' > "$ENV_D/stamped.md"; cat "$ENV_D/live.txt" >> "$ENV_D/stamped.md"
+"$COMMS" error-envelope "$ENV_D/stamped.md" >/dev/null 2>&1 \
+  && ok "a stamped reply is checked at its body, past the frontmatter" || fail "stamped envelope missed"
+{ cat "$ENV_D/live.txt"; echo "[acpx] tokens: input=1 output=1 cache_read=0 total=2"; } > "$ENV_D/tokens.txt"
+"$COMMS" error-envelope "$ENV_D/tokens.txt" >/dev/null 2>&1 \
+  && ok "acpx's trailing token-usage line does not hide the envelope" || fail "tokens line hid the envelope"
+"$COMMS" error-envelope "$ENV_D/absent.txt" >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -eq 2 ] && ok "an unreadable file is a usage failure (rc 2), never an answer" || fail "unreadable file rc=$rc"
+
 section "comms.sh: archive (idempotent, own inbox only)"
 IN1="$REPO_FIX/.comms/to-claude/feature-helper-tests_2026-06-04T12-01-00_reply-1.md"
 sed 's/from: claude/from: codex/; s/^---$/---/; ' "$GOOD" > "$IN1"
@@ -3288,6 +3328,10 @@ case " $* " in
   *" sessions ensure "*) [ -n "${ACP_STUB_ENSURE_FAIL:-}" ] && { echo "ensure diagnostic on stdout"; exit 4; }
      echo "stub-session-id (created)" ;;
   *" exec "*|*" -s "*) [ -n "${ACP_STUB_EMPTY:-}" ] && exit 0
+     # ACP_STUB_API_ERROR is the live 2026-09-08 shape: a rejected model, exit 0, the API error
+     # as the whole answer. ACP_STUB_ERRORISH is its negative control — prose that QUOTES one.
+     [ -n "${ACP_STUB_API_ERROR:-}" ] && { printf 'Warning: Model metadata for `gpt-6-astra` not found.\n\n{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The model requires a newer version of Codex."}}\n\n'; exit 0; }
+     [ -n "${ACP_STUB_ERRORISH:-}" ] && { echo 'stub answer: what you saw was {"error":{"message":"x"}} - a config problem'; echo "[acpx] tokens: input=1 output=1 cache_read=0 total=2"; exit 0; }
      [ -n "${ACP_STUB_OUT_THEN_FAIL:-}" ] && { echo "partial before failure"; exit 5; }
      echo "stub answer"; echo "[acpx] tokens: input=100 output=5 cache_read=25000 total=25105" ;;
   *) echo "stub answer"; echo "[acpx] tokens: input=100 output=5 cache_read=25000 total=25105" ;;
@@ -3319,6 +3363,17 @@ OUT="$(ACP_STUB_EMPTY=1 run_acp consult codex --oneshot hello 2>&1)" && rc=0 || 
 [ "$rc" -ne 0 ] && echo "$OUT" | grep -qi 'no answer' && echo "$OUT" | grep -qi 'mailbox' \
   && ok "a rc-0 consult with an empty answer is refused, not passed as success" \
   || fail "an empty consult answer read as success (rc=$rc, out: $(echo "$OUT" | head -1))"
+# rc 0 with the provider's API ERROR as the whole answer — the same hole one layer up (field
+# report 2026-09-08). Refused with the provider's message and the fallback; and because the
+# predicate is structural, an answer that merely quotes such an envelope still passes.
+OUT="$(ACP_STUB_API_ERROR=1 run_acp consult codex --oneshot hello 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'provider API error' && echo "$OUT" | grep -q 'newer version of Codex' \
+  && echo "$OUT" | grep -qi 'mailbox' \
+  && ok "a rc-0 consult whose answer is the provider's API error is refused, naming the error" \
+  || fail "an API-error consult answer read as success (rc=$rc, out: $(echo "$OUT" | head -1))"
+OUT="$(ACP_STUB_ERRORISH=1 run_acp consult codex --oneshot hello 2>&1)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && echo "$OUT" | grep -q 'config problem' \
+  && ok "an answer that merely quotes an error envelope passes through" || fail "error-quoting answer refused (rc=$rc)"
 # A malformed --timeout budget falls back to the default rather than taking the turn down.
 : > "$ACP_STUB_LOG"
 COMMS_ACP_CONSULT_TIMEOUT_SECS=notanumber run_acp consult codex ping >/dev/null 2>&1
@@ -3585,6 +3640,45 @@ for BRK_F in codex claude; do
   [ -z "$BRK_FLEAK" ] && [ ! -f "$BRK_FDIR/reply.md" ] \
     && ok "a failed $BRK_F ACP turn stamps no reply — nothing to mistake for a review" || fail "$BRK_F ACP failure leaked a reply: ${BRK_FLEAK:-$BRK_FDIR/reply.md}"
 done
+
+# A CONSULT TURN WHOSE ANSWER IS THE PROVIDER'S API ERROR. Field report 2026-09-08: a rejected
+# `model` made acpx exit 0 with the error JSON as the whole reply; `type: response` has no
+# structure check, so the parent stamped it, delivered it and recorded `completed`. The
+# question-type fixture below is the shape that hit the field, through the real ACP leg.
+BRK_ERR_PAY="$WORK/brokered-error-payload.txt"
+printf 'Warning: Model metadata for `gpt-6-astra` not found. Defaulting to fallback metadata.\n\n{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The gpt-6-astra model requires a newer version of Codex."}}\n\n' > "$BRK_ERR_PAY"
+run_brokered_question() {  # <provider> <from> <thread> <payload> -> echoes the run dir
+  local prov="$1" from="$2" thr="$3" pay="$4" msg dir
+  mkdir -p "$MA_FIX/.comms/to-$prov"
+  msg="$MA_FIX/.comms/to-$prov/${MA_WS}_2026-08-20T11-05-00_$thr.md"
+  sed -e "s/^thread: ma-arc-1\$/thread: $thr/" -e "s/^from: claude\$/from: $from/" \
+      -e "s/_review-req-1\$/_$thr/" -e 's/^type: review-request$/type: question/' \
+      -e '/^workflow:/d' -e '/^phase:/d' -e '/^round:/d' -e '/^max-rounds:/d' \
+      "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$msg"
+  dir="$WORK/$thr"; mkdir -p "$dir"
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" ACP_PARITY_PAYLOAD="$pay" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$msg" --dir "$dir" \
+      --provider "$prov" --via acp --timeout-secs 20 ) >/dev/null 2>&1
+  printf '%s' "$dir"
+}
+BRK_REPLIES_BEFORE="$(find "$MA_FIX/.comms/to-claude" -name "*codex-reply*" -type f 2>/dev/null | wc -l | tr -d ' ')"
+BRK_ERR_DIR="$(run_brokered_question codex claude ma-consult-apierror "$BRK_ERR_PAY")"
+BRK_ERR_MSG="$MA_FIX/.comms/to-codex/${MA_WS}_2026-08-20T11-05-00_ma-consult-apierror.md"
+BRK_ERR_ST="$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$BRK_ERR_DIR/result.json" 2>/dev/null | head -1)"
+[ "$BRK_ERR_ST" = "failed" ] \
+  && ok "a consult turn whose reply is the provider's API error is recorded FAILED, not completed" \
+  || fail "API-error consult recorded as '${BRK_ERR_ST:-none}' (see $BRK_ERR_DIR/result.json)"
+grep -q 'requires a newer version of Codex' "$BRK_ERR_DIR/result.json" 2>/dev/null \
+  && ok "the result note carries the provider's own error message" || fail "result note lacks the provider message"
+[ "$(find "$MA_FIX/.comms/to-claude" -name "*codex-reply*" -type f 2>/dev/null | wc -l | tr -d ' ')" = "$BRK_REPLIES_BEFORE" ] \
+  && ok "no reply was persisted into the driver's inbox for the error" || fail "an error envelope reached to-claude as a reply"
+[ -f "$BRK_ERR_MSG" ] && ok "the inbound stays unarchived so the consult can be re-sent" || fail "the inbound was archived under a refused reply"
+# POSITIVE CONTROL: a consult whose prose merely talks about an error still completes.
+printf '## Summary\nthe failure was a config error, not a bug\n\n## Codex Take\ncheck the model line in config.toml; the {"error":{"message":"..."}} you saw is the provider refusing the model\n' > "$WORK/brokered-prose-payload.txt"
+BRK_OK_DIR="$(run_brokered_question codex claude ma-consult-prose "$WORK/brokered-prose-payload.txt")"
+[ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$BRK_OK_DIR/result.json" 2>/dev/null | head -1)" = "completed" ] \
+  && ok "a consult whose answer merely talks about an error completes (the check is structural)" \
+  || fail "prose consult refused (see $BRK_OK_DIR/result.json)"
 
 section "scope-dial template source contract"
 # Scope-dial trio: the load-bearing new prose, pinned mechanically.
@@ -6089,6 +6183,14 @@ run_pn panel status --set "$PN_CXSET" >/dev/null 2>&1 \
 printf 'truncated-set\tonly-two-fields\n' >> "$PN_FIX/.comms/grades/sets.tsv"
 run_pn panel status 2>/dev/null | awk -F'\t' 'NR>1 && $1=="truncated-set"' | grep -q . \
   && fail "the listing counted a truncated row as a set" || ok "the listing ignores a truncated sets.tsv row"
+
+section "templates: the loop closes its thread state on the terminal approval"
+# Field report 2026-09-08: two approved threads sat `awaiting claude` for ten hours because the
+# /auto skill never said to run `state complete`; only the contributor doc (AGENTS.md) did.
+grep -q 'state complete "<thread>"' "$REPO/templates/claude-commands/auto.md" \
+  && ok "auto.md tells the driver to close the thread's state on the terminal APPROVE" || fail "auto.md lacks the state complete step"
+grep -q 'state complete "<thread>-' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "read-from-codex.md closes every panel LEG thread, which are the ones that carry state" || fail "read-from-codex.md lacks the per-leg state complete"
 
 section "ask: the driver-neutral consult verb"
 AK="$WORK/ask-repo"; mkdir -p "$AK"; AK="$(cd "$AK" && pwd -P)"

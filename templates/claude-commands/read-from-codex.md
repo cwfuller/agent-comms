@@ -183,6 +183,11 @@ never a re-derived one.
   Never reply to one leg and leave the others on the old artifact: `compose` is
   round-scoped, so a half-advanced set reports incomplete forever.
 - Record a `round-note` per leg, not one for the panel — performance is per reviewer.
+- **When the composition is the terminal APPROVE, close every leg's state.** Archive the
+  legs, then `"$COMMS_SH" state complete "<thread>-<agent>"` for each reviewer in the roster:
+  the legs are the threads that carry state (the base thread has none), and a leg left
+  awaiting is reported by `stalled` until someone closes it by hand (field report
+  2026-09-08). Same rule as the single-reviewer approval below; never on max-rounds or a split.
 
 ### Autonomous flow — `workflow` field present
 

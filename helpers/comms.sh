@@ -17,6 +17,8 @@
 #   list --as <agent> [--thread <t>]   pending inbox messages, newest first
 #   status                      one-screen loop state: latest archive, verdict, pending counts
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
+#   error-envelope <file|->     exit 0 (printing the provider's message) iff the body is a provider
+#                               API error envelope rather than an answer; 1 = an answer; 3 = undecidable
 #   verdict <file>              normalized (trimmed, uppercased) verdict from frontmatter
 #   archive --as <agent> <file...>   idempotent move to archive/; own inbox only
 #   deliver <agent> [file]   hand the message to a runner (ACP, or headless for grok); reports delivered/
@@ -3976,6 +3978,90 @@ cmd_prompt_version() {
   } | hash_stdin
 }
 
+# error-envelope <file|-> — is this reply body a provider API ERROR rather than an answer?
+# Exit 0 (and print the provider's message) when it is; 1 when it is an answer; 2 on a
+# usage/read failure; 3 when it cannot be decided here (no python3).
+#
+# WHY A BODY CHECK, AND WHY IT IS STRUCTURAL. Reproduced live 2026-09-08 (codex-cli 0.153.4
+# with an unrecognised `model`): acpx exits 0 and hands back, as the whole answer,
+#   Warning: Model metadata for `gpt-6-astra` not found. ...
+#   {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"..."}}
+# and even acpx's json stream closes the turn with `stopReason: end_turn` — the only
+# provider-native marker is a codex-private `threadStatus: systemError` meta event that the
+# quiet transport never surfaces. So the reply text IS the only signal both transports share,
+# and a consult (`type: response`) has no structure check to catch it: runphase recorded
+# `status: completed` and delivered the error JSON as a normal reply (field report 2026-09-08).
+#
+# The test is the SHAPE of the whole body, never a substring: after dropping leading
+# `Warning:` lines and a trailing `[acpx] tokens:` line, what remains must parse as ONE JSON
+# object whose `error` member is an object carrying a string `message`, with no top-level
+# keys beyond the envelope's own (`type`, `status`, `code`, `request_id`). An answer that
+# QUOTES an error, or any prose at all around one, is an answer. `-` reads stdin; a stamped
+# message (leading `---` frontmatter) is skipped to its body so the check reads the same
+# file on every side of the broker.
+cmd_error_envelope() {
+  local src="${1:-}"
+  [ -n "$src" ] || die "error-envelope: file argument (or -) required"
+  if [ "$src" != "-" ] && [ ! -r "$src" ]; then
+    echo "comms.sh: error-envelope: cannot read '$src'" >&2; return 2
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "comms.sh: error-envelope: python3 unavailable — undecidable" >&2; return 3
+  fi
+  # `-` is MATERIALISED before python runs: the interpreter's own script arrives on stdin
+  # (the heredoc below), so reading the payload from sys.stdin would see EOF and call every
+  # piped body "an answer" — which is exactly what the first cut of this verb did.
+  local tmp="" rc=0
+  if [ "$src" = "-" ]; then
+    tmp="$(mktemp "${TMPDIR:-/tmp}/comms-envelope.XXXXXX")" || return 2
+    cat > "$tmp" || { rm -f "$tmp"; return 2; }
+    src="$tmp"
+  fi
+  python3 - "$src" <<'PYENV' || rc=$?
+import json, sys
+try:
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except OSError:
+    sys.exit(2)
+lines = text.replace("\r\n", "\n").split("\n")
+# A stamped message: skip the frontmatter, the body is what the reader sees.
+if lines and lines[0].strip() == "---":
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            lines = lines[i + 1:]
+            break
+    else:
+        sys.exit(1)
+# Codex prefixes a model-metadata warning; acp.sh's stub appends the acpx usage line.
+while lines and (lines[0].strip() == "" or lines[0].startswith("Warning:")):
+    lines.pop(0)
+while lines and (lines[-1].strip() == "" or lines[-1].startswith("[acpx] tokens:")):
+    lines.pop()
+body = "\n".join(lines).strip()
+if not body:
+    sys.exit(1)
+try:
+    obj = json.loads(body)
+except ValueError:
+    sys.exit(1)
+if not isinstance(obj, dict):
+    sys.exit(1)
+err = obj.get("error")
+if not isinstance(err, dict) or not isinstance(err.get("message"), str):
+    sys.exit(1)
+if set(obj) - {"error", "type", "status", "code", "request_id"}:
+    sys.exit(1)
+if "type" in obj and obj["type"] != "error":
+    sys.exit(1)
+msg = err["message"].strip().replace("\n", " ")
+etype = err.get("type")
+print(f"{etype}: {msg}" if isinstance(etype, str) and etype else msg)
+sys.exit(0)
+PYENV
+  [ -n "$tmp" ] && rm -f "$tmp"
+  return "$rc"
+}
+
 cmd_validate() {
   local file="${1:-}"
   [ -n "$file" ] || die "validate: file argument required"
@@ -5073,6 +5159,7 @@ case "${1:-}" in
   list)      shift; cmd_list "$@" ;;
   status)    shift; cmd_status "$@" ;;
   validate)  shift; cmd_validate "$@" ;;
+  error-envelope) shift; cmd_error_envelope "$@" ;;
   verdict)   shift; cmd_verdict "$@" ;;
   archive)   shift; cmd_archive "$@" ;;
   deliver)   shift; cmd_deliver "$@" ;;

@@ -40,6 +40,13 @@ NODE_MIN_MAJOR=22
 NODE_MIN_MINOR=13
 
 die() { echo "acp.sh: $*" >&2; exit 1; }
+# The comms.sh installed beside this script — the home of the reply-body predicates this
+# helper shares with runphase. Absent means undecidable (exit 3), reported by the caller.
+comms_sibling() {
+  local c; c="$(dirname "${BASH_SOURCE[0]}")/comms.sh"
+  [ -x "$c" ] || { echo "acp.sh: no comms.sh beside $(basename "${BASH_SOURCE[0]}")" >&2; return 3; }
+  "$c" "$@"
+}
 # Every failure names the fallback, uniformly — the template's contract is
 # "do NOT retry the ACP path on the same failure; the mailbox always works".
 FALLBACK="The mailbox path (/ask without --via acp) always works — switch to it; do not re-run the ACP call."
@@ -202,6 +209,18 @@ cmd_consult() {
          if [ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]; then
            die_fb "consult: acpx exited 0 but returned no answer (a dropped or empty turn)"
          fi
+         # SAME HOLE, ONE DOOR: rc 0 with the provider's API error as the whole answer (a
+         # rejected `model` does exactly this — reproduced 2026-09-08). The predicate lives in
+         # comms.sh so this path and runphase's broker cannot drift; a sibling comms.sh that
+         # is missing or cannot decide (no python3) is reported and the answer passed through,
+         # never silently refused.
+         local env_msg="" env_rc=0
+         env_msg="$(printf '%s\n' "$out" | comms_sibling error-envelope -)" || env_rc=$?
+         case "$env_rc" in
+           0) die_fb "consult: acpx exited 0 but the answer is a provider API error (${env_msg:-no message}) — fix the agent's model/CLI configuration" ;;
+           1) ;;
+           *) echo "acp.sh: consult: error-envelope check undecidable (rc=$env_rc) — answer passed through unchecked" >&2 ;;
+         esac
          return 0 ;;
     2)   die_fb "consult: acpx usage error (exit 2) — likely an acp.sh bug; report it" ;;
     3)   die_fb "consult: timed out (exit 3)" ;;
