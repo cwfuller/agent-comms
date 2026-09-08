@@ -226,10 +226,16 @@ cmd_consult() {
          # in comms.sh so this path, runphase's broker, and the compatibility canary cannot drift.
          # Undecidable now REFUSES with the mailbox fallback rather than passing an unverified
          # answer through: "cannot decide" is never "this is a clean answer". (codex, plan r2 A1.)
-         local env_out="" env_err="" env_rc=0
-         env_err="$(mktemp "${TMPDIR:-/tmp}/consult-rc.XXXXXX" 2>/dev/null)"
+         # The diagnostic temp file is BEST-EFFORT: its allocation must not abort the consult before the
+         # refusal + fallback fire (mktemp can fail on an unwritable/full TMPDIR). Guard it; a missing
+         # file just means the specific cause is unavailable, not that classification is skipped.
+         # (codex, impl r2, blocking.)
+         local env_out="" env_err="" env_cause="" env_rc=0
+         env_err="$(mktemp "${TMPDIR:-/tmp}/consult-rc.XXXXXX" 2>/dev/null || true)"
          env_out="$(printf '%s\n' "$out" | comms_sibling reply-check - 2>"${env_err:-/dev/null}")" || env_rc=$?
-         local env_cause=""; [ -n "$env_err" ] && env_cause="$(tr '\n' ' ' <"$env_err" | sed 's/  */ /g; s/ *$//')" && rm -f "$env_err"
+         if [ -n "$env_err" ] && [ -f "$env_err" ]; then
+           env_cause="$(tr '\n' ' ' <"$env_err" | sed 's/  */ /g; s/ *$//')"; rm -f "$env_err" 2>/dev/null || true
+         fi
          case "$env_rc" in
            10) ;;
            11) die_fb "consult: acpx exited 0 but the answer is a provider API error ($(printf '%s\n' "$env_out" | tail -n +2)) — fix the agent's model/CLI configuration" ;;

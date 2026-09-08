@@ -2132,11 +2132,19 @@ acp_canary() {
         ACP_CANARY_NOTE="could not verify the canary reply (reply-check ${cerr:-did not complete: status $crc}) — no compatibility claim is made"
         return 1 ;;
   esac
-  # A verified answer must be EXACTLY PONG. Strip framing only at the boundaries, trim each line, drop
-  # blanks, and require a SINGLE remaining line equal to PONG — so "P O N G", an embedded framing
-  # line, or any trailing prose all refuse. (codex, impl r1, advisory.)
-  local norm; norm="$(printf '%s' "$out" \
-      | awk '!/^Warning:/ && !/^\[acpx\] tokens:/ { gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 != "") print }')"
+  # A verified answer must be EXACTLY PONG. Normalize CRLF (so `PONG\r\n` passes), then strip framing
+  # ONLY at the boundaries — leading `Warning:` lines from the top, a trailing `[acpx] tokens:` line and
+  # trailing blanks from the end — never mid-body, so `PONG` followed by `Warning: ...` does NOT pass.
+  # Trim each surviving line and require a SINGLE remaining line equal to PONG: "P O N G", an embedded
+  # framing line, or trailing prose all refuse. (codex, impl r1/r2, advisory.)
+  local norm; norm="$(printf '%s' "$out" | awk '
+    { sub(/\r$/, ""); lines[NR] = $0 }
+    END {
+      n = NR; lo = 1; hi = n
+      while (lo <= hi && (lines[lo] ~ /^[ \t]*$/ || lines[lo] ~ /^Warning:/)) lo++
+      while (hi >= lo && (lines[hi] ~ /^[ \t]*$/ || lines[hi] ~ /^\[acpx\] tokens:/)) hi--
+      for (i = lo; i <= hi; i++) { s = lines[i]; gsub(/^[ \t]+|[ \t]+$/, "", s); print s }
+    }')"
   case "$norm" in
     [Pp][Oo][Nn][Gg]) return 0 ;;
     *) ACP_CANARY_REASON="canary-unexpected"
@@ -3089,15 +3097,14 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
       local canary_note="$ACP_CANARY_NOTE"
       if [ "$ACP_CANARY_REASON" = runtime-incompatible ]; then
-        # BEST-EFFORT and GUARDED: an adapter-bundled runtime need not have a provider CLI on PATH, and
-        # an unguarded failing command substitution under `set -euo pipefail` would abort the runner
-        # BEFORE acp_refuse — losing the runtime-incompatible reason and the provider message. The
-        # `|| pcli=""` keeps it a diagnostic. (codex, impl r1, blocking.)
-        local pcli=""; pcli="$("$provider" --version 2>/dev/null | head -1)" || pcli=""
-        # CODEX_PATH is codex-only, and it does not replace an already-running owner. Tailor per provider.
+        # NO `$provider --version` probe here: it is optional diagnostic value, but a hanging or slow
+        # provider CLI would delay or (unguarded) abort the refusal publication, and an adapter-bundled
+        # runtime need not have a provider CLI on PATH at all. The provider's OWN error message (already
+        # in the note) is the authoritative signal; the remediation names session retirement. CODEX_PATH
+        # is codex-only and does NOT replace an already-running owner. (codex, impl r1/r2.)
         local retire_hint="Retire the session (\`acpx $acp_profile sessions close $acp_session\` in $workdir; a fresh send re-creates it against the current adapter — a running owner keeps its runtime until retired"
         case "$provider" in codex) retire_hint="$retire_hint, so setting CODEX_PATH alone does not) or set CODEX_PATH" ;; *) retire_hint="$retire_hint)" ;; esac
-        canary_note="$canary_note${pcli:+; PATH $provider is: $pcli}. $retire_hint, then re-send"
+        canary_note="$canary_note. $retire_hint, then re-send"
       fi
       acp_refuse "$ACP_CANARY_REASON" "$canary_note"
       return 1

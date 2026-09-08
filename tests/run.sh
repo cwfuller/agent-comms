@@ -3296,6 +3296,8 @@ case " $* " in
   *" -s "*)
     case "${AX_CANARY:-pong}" in
       pong)    printf 'PONG\n' ;;
+      crlf)    printf 'PONG\r\n' ;;                       # a compliant answer with CRLF line endings
+      trailwarn) printf 'PONG\nWarning: ignore me\n' ;;   # framing AFTER the answer must NOT be stripped
       error)   printf 'Warning: stale\n\n{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"the runtime cannot serve this model"}}\n' ;;
       timeout) exit 3 ;;
       exit)    printf 'PONG\n'; printf '[acpx] tokens: input=1 output=1 cache_read=0 total=2\n'; exit "${AX_CANARY_EXIT:-5}" ;;
@@ -3436,6 +3438,13 @@ OUT="$(ACP_STUB_API_ERROR=1 run_acp consult codex --oneshot hello 2>&1)" && rc=0
 OUT="$(ACP_STUB_ERRORISH=1 run_acp consult codex --oneshot hello 2>&1)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && echo "$OUT" | grep -q 'config problem' \
   && ok "an answer that merely quotes an error envelope passes through" || fail "error-quoting answer refused (rc=$rc)"
+# The reply-check DIAGNOSTIC temp file is best-effort: if its allocation fails (an unwritable TMPDIR),
+# the consult must STILL refuse an API-error answer with the mailbox fallback — never abort silently
+# before die_fb under set -e. (codex, impl r2, blocking.)
+OUT="$(TMPDIR=/no/such/dir/for/consult ACP_STUB_API_ERROR=1 run_acp consult codex --oneshot hello 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'provider API error' && echo "$OUT" | grep -qi 'mailbox' \
+  && ok "an API-error consult still refuses (with fallback) when the diagnostic temp file cannot be allocated" \
+  || fail "an unwritable TMPDIR aborted the consult before its refusal (rc=$rc, out: $(echo "$OUT" | head -1))"
 # A malformed --timeout budget falls back to the default rather than taking the turn down.
 : > "$ACP_STUB_LOG"
 COMMS_ACP_CONSULT_TIMEOUT_SECS=notanumber run_acp consult codex ping >/dev/null 2>&1
@@ -3615,6 +3624,16 @@ CN_JUNK="$(run_canary_turn junk junk)"
 [ "$(cn_status "$CN_JUNK")" = "failed" ] && [ "$(cn_reason "$CN_JUNK")" = "canary-unexpected" ] \
   && ok "an off-script canary answer fails with reason=canary-unexpected" || fail "junk canary reason=$(cn_reason "$CN_JUNK")"
 
+# CRLF: a compliant `PONG\r\n` answer must PASS (line endings normalized). (codex, impl r2 advisory.)
+CN_CRLF="$(run_canary_turn crlf crlf)"
+[ "$(cn_status "$CN_CRLF")" = "completed" ] \
+  && ok "a PONG answer with CRLF line endings passes the canary" || fail "CRLF PONG refused (status=$(cn_status "$CN_CRLF"))"
+# TRAILING FRAMING: `PONG` followed by a Warning line is off-script — framing is stripped only at the
+# boundaries, so a mid-body warning does NOT rescue it. (codex, impl r2 advisory.)
+CN_TW="$(run_canary_turn tw trailwarn)"
+[ "$(cn_status "$CN_TW")" = "failed" ] && [ "$(cn_reason "$CN_TW")" = "canary-unexpected" ] \
+  && ok "PONG followed by a trailing Warning line is canary-unexpected (framing stripped only at boundaries)" || fail "trailing-warning PONG wrongly accepted (status=$(cn_status "$CN_TW") reason=$(cn_reason "$CN_TW"))"
+
 # NONZERO EXIT WITH PONG IN STDOUT: a transport failure refuses even when the body contains PONG.
 CN_EX="$(run_canary_turn ex exit AX_CANARY_EXIT=5)"
 [ "$(cn_status "$CN_EX")" = "failed" ] && case "$(cn_reason "$CN_EX")" in canary-exit-*) true;; *) false;; esac \
@@ -3626,12 +3645,18 @@ CN_EX="$(run_canary_turn ex exit AX_CANARY_EXIT=5)"
 # through to the PONG check, qualifying an unverified reply. (codex, impl r1, blocking.)
 CN_NOPY="$WORK/canary-nopy-bin"; mkdir -p "$CN_NOPY"
 printf '#!/bin/sh\nexit 127\n' > "$CN_NOPY/python3"; chmod +x "$CN_NOPY/python3"
-CN_UV="$(run_canary_turn uv pong PATH="$CN_NOPY:$AXB:$PATH")"
+CN_UVLOG="$WORK/canary-uv.argv"
+CN_UV="$(run_canary_turn uv pong PATH="$CN_NOPY:$AXB:$PATH" AX_CWD_LOG="$CN_UVLOG")"
 [ "$(cn_status "$CN_UV")" = "failed" ] && [ "$(cn_reason "$CN_UV")" = "reply-unverifiable" ] \
   && ok "a PONG canary whose reply-check cannot run refuses reply-unverifiable, never passes" || fail "unverifiable canary status=$(cn_status "$CN_UV") reason=$(cn_reason "$CN_UV")"
-# The canary classifier proceeds ONLY on a verified answer (status 10); no other status falls through.
-awk '/^acp_canary\(\)/{f=1} f&&/case "\$crc" in/{c=1} c&&/10\) ;;/{ten=1} c&&/esac/{exit} END{exit !ten}' "$RP" \
-  && ok "the canary switch falls through to the PONG check only on reply-check status 10" || fail "the canary switch can fall through on an unrecognised status"
+# NO REAL PROMPT was sent: the canary ran (its bare prompt is logged) but the --file review prompt was
+# never reached. (codex, impl r2 advisory — assert the real prompt was not sent.)
+awk -F'\t' '$2 ~ / --file /' "$CN_UVLOG" 2>/dev/null | grep -q . \
+  && fail "the real review prompt was sent after an unverifiable canary" || ok "no real review prompt was sent after an unverifiable canary"
+# The classifier proceeds ONLY on status 10, and EVERY other status hits an explicit reply-unverifiable
+# refusal — asserted on the catch-all arm itself, so deleting that arm fails this test. (codex r2.)
+awk '/^acp_canary\(\)/{f=1} f&&/case "\$crc" in/{c=1} c&&/^    10\) ;;/{ten=1} c&&/^    \*\)  *ACP_CANARY_REASON="reply-unverifiable"/{star=1} c&&/esac/{exit} END{exit !(ten && star)}' "$RP" \
+  && ok "the canary switch passes only on status 10 and refuses every other status via an explicit catch-all" || fail "the canary switch lacks the status-10-only / catch-all-refuse shape"
 
 # ARGV PARITY: the canary and the real prompt share the option vector, INCLUDING the owner --ttl,
 # so a canary cannot spawn an owner under a different lifetime than the round expects. Recorded via
