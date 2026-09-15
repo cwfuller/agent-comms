@@ -53,11 +53,14 @@
 #   worktree new [<slug>]       session worktree under the MAIN root, local-tip base
 #   integrate <branch>          land on main: lease + ff + suite at the candidate OID
 #                               in a detached worktree + CAS update-ref (suite-cmd
-#                               config required). A clean checkout idling on main at
-#                               the expected tip is self-healed through the landing;
-#                               suite-attest-secs = N config accepts a fresh
-#                               attest-green record for the candidate OID in place
-#                               of the re-run
+#                               config required). A prose-only tree diff (README.md,
+#                               LICENSE, top-level docs/*.md) skips the suite and
+#                               does not mint an attestation. Nested docs (the
+#                               review bar) and AGENTS.md are not prose. A clean
+#                               checkout idling on main at the expected tip is
+#                               self-healed through the landing; suite-attest-secs
+#                               = N config accepts a fresh attest-green record for
+#                               the candidate OID in place of the re-run
 #   attest-green [--passed N] [--expect <oid>]
 #                               record "suite green at this exact HEAD" (clean
 #                               tracked tree required) for integrate's opt-in skip.
@@ -3643,6 +3646,30 @@ cmd_attest_green() {
   echo "attest-green: recorded $oid"
 }
 
+
+integrate_is_docs_only() {  # <root> <base-oid> <cand-oid> — 0 iff every changed path is prose
+  # Prose = README.md, LICENSE, or a top-level docs/*.md file. Nested docs
+  # (docs/loopspec — the installed review bar) and AGENTS.md (the onboarding
+  # contract) are load-bearing and must still pay the suite. Empty diffs are
+  # not a skip: identical trees fall through to attest/suite. The skip does
+  # not mint an attestation.
+  local root="$1" base="$2" cand="$3" paths p
+  paths="$(git -C "$root" diff --name-only "$base" "$cand")" || return 1
+  [ -n "$paths" ] || return 1
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in
+      README.md|LICENSE) continue ;;
+      docs/*/*) return 1 ;;
+      docs/*) continue ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$paths
+EOF
+  return 0
+}
+
 cmd_integrate() {
   # integrate <branch> — land a session branch on main: advisory lease, ff-only,
   # suite at the CANDIDATE OID in a throwaway detached worktree, then the CAS
@@ -3763,15 +3790,24 @@ cmd_integrate() {
     trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
     echo "integrate: healed — detached clean main occupant $occ for the landing"
   fi
+  # DOCS-ONLY SKIP. A tree diff that is only README.md, LICENSE, or top-level
+  # docs/*.md cannot change helper/protocol behavior. Nested docs (docs/loopspec,
+  # the installed review bar) and AGENTS.md are not in that set. The skip does
+  # not mint an attestation — a later code change on the same OID window still
+  # has to earn a real green. (operator, 2026-09-15: the suite is ~14 minutes.)
+  local attest_secs attest_age="" skip_suite=""
+  if integrate_is_docs_only "$root" "$expected" "$cand"; then
+    skip_suite=docs
+    echo "integrate: docs-only candidate — skipping the suite"
+  fi
   # ATTESTED GREEN: when .comms/config opts in (suite-attest-secs = N), a fresh
   # attest-green record for EXACTLY this candidate OID stands in for the re-run —
   # the tree cannot have changed under an identical commit id, so the second run
   # proves nothing the first did not. Absent, stale, or wrong-OID attestations
   # fall through to the full suite; with no config the behavior is unchanged.
-  local attest_secs attest_age="" skip_suite=""
   attest_secs="$(config_scalar "$root" suite-attest-secs)"
   case "$attest_secs" in ''|*[!0-9]*) attest_secs=0 ;; esac
-  if [ "$attest_secs" -gt 0 ] && [ -f "$root/.comms/cache/suite-attest.log" ]; then
+  if [ -z "$skip_suite" ] && [ "$attest_secs" -gt 0 ] && [ -f "$root/.comms/cache/suite-attest.log" ]; then
     local att_epoch
     att_epoch="$(LC_ALL=C awk -v c="$cand" '$1==c && $2 ~ /^[0-9]+$/ {e=$2} END{if (e != "") print e}' "$root/.comms/cache/suite-attest.log" 2>/dev/null || true)"
     if [ -n "$att_epoch" ]; then
@@ -3950,7 +3986,9 @@ $tw_status"
     "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
   fi
   trap - EXIT
-  if [ -n "$skip_suite" ]; then
+  if [ "$skip_suite" = docs ]; then
+    echo "integrate: LANDED $cand as main (was $expected); docs-only skip, suite not run"
+  elif [ -n "$skip_suite" ]; then
     echo "integrate: LANDED $cand as main (was $expected); green by attestation (${attest_age}s old)"
   else
     echo "integrate: LANDED $cand as main (was $expected); suite green at the landed OID"

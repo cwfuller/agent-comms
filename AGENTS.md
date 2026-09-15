@@ -102,7 +102,10 @@ Task size is not the criterion. Peer presence is.
 - Work on a session branch; land with `helpers/comms.sh integrate <branch>`.
 - `integrate` takes an advisory lease, verifies fast-forward, runs the suite **at the
   candidate commit** in a throwaway worktree, and moves `main` by compare-and-swap. A race
-  loses cleanly; `main` only ever points at a commit the suite passed at.
+  loses cleanly; `main` only ever points at a commit the suite passed at, **except** a
+  prose-only tree diff (`README.md`, `LICENSE`, top-level `docs/*.md`) skips the suite
+  and does not mint an attestation. Nested docs (`docs/loopspec/`, the installed review
+  bar) and `AGENTS.md` are not prose: they still pay the suite. A mixed diff pays it too.
 - A single clean checkout idling on `main` is fine — `integrate` detaches it, lands, and
   re-attaches it at the new tip. It refuses when that checkout has uncommitted work, when
   its HEAD is not the current `main` tip, or when more than one worktree holds `main`. To

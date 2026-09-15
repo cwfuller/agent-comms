@@ -9460,6 +9460,84 @@ printf '%s\n' "$FC_OUT4" | grep -q ' M s.txt' \
   && ok "the tracked-file refusal is the DIRTY-TREE one, not an unrelated failure" \
   || fail "main was untouched for some other reason (got: $(printf '%s\n' "$FC_OUT4" | tail -1))"
 
+
+section "integrate: docs-only skip"
+# A red suite-cmd proves the skip is the only way these landings succeed.
+# Nested docs (the review bar) and AGENTS.md still pay the suite.
+DO="$WORK/int-docs"; mkdir -p "$DO"; DO="$(cd "$DO" && pwd -P)"
+git -C "$DO" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$DO/.gitignore"
+mkdir -p "$DO/.comms" "$DO/docs/loopspec" "$DO/helpers"
+printf 'hello\n' > "$DO/README.md"
+printf 'mit\n' > "$DO/LICENSE"
+printf 'install\n' > "$DO/docs/INSTALL.md"
+printf 'bar\n' > "$DO/docs/loopspec/SPEC.md"
+printf 'fn\n' > "$DO/helpers/x.sh"
+printf 'agents\n' > "$DO/AGENTS.md"
+printf '#!/bin/bash\nexit 1\n' > "$DO/suite.sh"
+chmod +x "$DO/suite.sh"
+printf 'suite-cmd = bash ./suite.sh\n' > "$DO/.comms/config"
+(cd "$DO" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$DO" && git checkout -q -b session-primary)
+run_do() { (cd "$DO" && env "$COMMS" "$@"); }
+run_do worktree new docskip >/dev/null 2>&1
+do_reset() { git -C "$DO/.claude/worktrees/docskip" reset --hard "$(git -C "$DO" rev-parse main)" >/dev/null 2>&1; }
+do_commit() { # usage: do_commit "msg" <file>
+  local msg="$1" f="$2"
+  do_reset
+  (cd "$DO/.claude/worktrees/docskip" && printf 'x\n' >> "$f" && mkdir -p "$(dirname "$f")" && git add -- "$f" \
+    && git -c user.email=t@t -c user.name=t commit -qm "$msg") >/dev/null 2>&1
+}
+
+do_commit "docs: readme" README.md
+DO_OUT="$(run_do integrate worktree-docskip 2>&1 || true)"
+printf '%s\n' "$DO_OUT" | grep -q 'docs-only candidate — skipping the suite' \
+  && ok "a README-only candidate skips the suite" || fail "README-only did not skip (got: $(printf '%s' "$DO_OUT" | tail -2))"
+[ "$(git -C "$DO" rev-parse main)" = "$(git -C "$DO" rev-parse worktree-docskip)" ] \
+  && ok "the README-only candidate landed" || fail "README-only did not land"
+
+do_commit "fix: helper" helpers/x.sh
+DO_MAIN="$(git -C "$DO" rev-parse main)"
+DO_OUT2="$(run_do integrate worktree-docskip 2>&1 || true)"
+printf '%s\n' "$DO_OUT2" | grep -q 'docs-only candidate' \
+  && fail "a helper change took the docs-only skip" || ok "a helper change does not take the docs-only skip"
+[ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
+  && ok "a helper change with a red suite does not land" || fail "helper change landed"
+
+do_commit "docs: agents" AGENTS.md
+DO_MAIN="$(git -C "$DO" rev-parse main)"
+run_do integrate worktree-docskip >/dev/null 2>&1 || true
+[ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
+  && ok "an AGENTS.md change still pays the suite and does not land on a red suite" || fail "AGENTS.md change landed"
+
+do_commit "docs: loopspec" docs/loopspec/SPEC.md
+DO_MAIN="$(git -C "$DO" rev-parse main)"
+run_do integrate worktree-docskip >/dev/null 2>&1 || true
+[ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
+  && ok "a docs/loopspec change still pays the suite" || fail "loopspec change landed"
+
+do_commit "docs: install" docs/INSTALL.md
+DO_OUT3="$(run_do integrate worktree-docskip 2>&1 || true)"
+[ "$(git -C "$DO" rev-parse main)" = "$(git -C "$DO" rev-parse worktree-docskip)" ] \
+  && ok "a top-level docs/*.md candidate lands via the skip" || fail "docs/INSTALL.md did not land (got: $(printf '%s' "$DO_OUT3" | tail -2))"
+
+do_reset
+(cd "$DO/.claude/worktrees/docskip" && printf 'x\n' >> README.md && printf 'y\n' >> helpers/x.sh \
+  && git add README.md helpers/x.sh && git -c user.email=t@t -c user.name=t commit -qm "mixed") >/dev/null 2>&1
+DO_MAIN="$(git -C "$DO" rev-parse main)"
+run_do integrate worktree-docskip >/dev/null 2>&1 || true
+[ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
+  && ok "a mixed prose+helper diff still pays the suite" || fail "mixed diff landed"
+
+mkdir -p "$DO/.claude/worktrees/docskip/docs/extra"
+do_reset
+(cd "$DO/.claude/worktrees/docskip" && mkdir -p docs/extra && printf 'n\n' > docs/extra/nested.md \
+  && git add docs/extra/nested.md && git -c user.email=t@t -c user.name=t commit -qm "docs: nested") >/dev/null 2>&1
+DO_MAIN="$(git -C "$DO" rev-parse main)"
+run_do integrate worktree-docskip >/dev/null 2>&1 || true
+[ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
+  && ok "a nested docs/ path is not treated as prose" || fail "nested docs path landed"
+
 section "the coordinator's event log: a durable record that is not the mailbox"
 # Contraction step 3, criteria 1 and 4. The log's value is that it SURVIVES things — a
 # driver that dies mid-panel, a broker that refuses, N runners appending at once — so it is
