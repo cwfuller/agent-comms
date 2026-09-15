@@ -8,6 +8,15 @@ emits whole `## ` sections up to a byte budget, ordered by the date in each head
 physical order here may be mixed and writers may append or prepend freely. A section
 whose heading carries no `YYYY-MM-DD` sorts last (but is never dropped).
 
+## 2026-09-15 — thread `any-agent-auto-driver-19880` (auto, Codex-only r2, APPROVE)
+
+`/auto` as a driver for Grok and Codex. Codex approved aea5f72. Carry-over:
+
+- **Local vs global Codex skills can both appear.** `docs/INSTALL.md` and the installer
+  pin note say local copies shadow global. Codex's skill docs say same-name skills can
+  both show in selectors. Qualify that promise for Codex so a user with
+  `.agents/skills/auto` and `~/.codex/skills/auto` knows to pick the intended copy.
+
 ## 2026-08-27 — thread `stamped-authorities-19085` (auto panel codex+grok, implement r5/5, double APPROVE)
 
 Field items #3 (workspace identity pinning) + #6 (helper-stamped git metadata) shipped
