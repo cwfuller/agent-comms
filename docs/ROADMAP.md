@@ -1841,13 +1841,14 @@ others — **and/or another instance of itself** — on the panel.
 Most of the plumbing is already agent-neutral: the registry, `inbox_for`, `transport`,
 `peer_of`, the verdict rule binding by TYPE not sender, and `panel dispatch`. What is not:
 
-- [ ] **The LOOP surface is Claude-only.** `/auto` installs into `.claude/commands/`; a
-  driving Codex or grok has no equivalent loop verb. *(Narrowed 2026-08-26: the CONSULT
-  half shipped as driver-neutral `comms.sh ask --from X --to Y [--wait]`, d80c213 —
-  the quoted field-report complaint is fixed. What remains is the loop verb.)* The loop
-  logic already lives in `comms.sh`; what is missing is a per-agent thin surface over it.
-- [ ] **`from:` is written by the template, not derived.** A driver-neutral flow has to
-  learn its own identity rather than hardcode `from: claude`.
+- [x] **The LOOP surface is Claude-only.** `/auto` now installs for Claude
+  (`~/.claude/commands/`), Grok (`~/.grok/commands/`), and Codex
+  (`~/.codex/skills/auto/SKILL.md`). Same five command bodies; Codex gets a SKILL.md
+  wrapper at install time, not a second origin. *(Consult half shipped 2026-08-26 as
+  `comms.sh ask --from X --to Y [--wait]`, d80c213; loop verb shipped with `whoami`.)*
+- [x] **`from:` is written by the template, not derived.** `comms.sh whoami` is the
+  single identity accessor (COMMS_SELF → session env → ancestor executable, fail closed,
+  never defaults to claude). Templates paste its output into `from:` / `--as`.
 - [ ] **Agent-named internals.** `send-to-codex` / `read-from-codex` bake a peer into the
   name; they should be `send` / `read` over `$REVIEWER` / `$SELF`, which the helper
   already is underneath.

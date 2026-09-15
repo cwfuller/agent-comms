@@ -8,9 +8,10 @@ feeding the critique back produces markedly better results than either alone. Th
 loop, automated.
 
 ```
-                 ┌─────────► codex ──┐
-  claude ────────┤  same artifact    ├────► one composed verdict ──► fix ──► repeat
- (implement)     └─────────► grok  ──┘        until approved
+                 ┌─────────► other registered agents ──┐
+  any driver ────┤  same artifact                      ├────► one composed verdict ──► fix ──► repeat
+  (claude,       └─────────► on the panel              ┘        until approved
+   codex, grok)
 ```
 
 ## Quick start
@@ -26,18 +27,19 @@ first (and you should), clone it and run it from disk. The result is identical:
 ```bash
 git clone https://github.com/cwfuller/agent-comms ~/src/agent-comms
 less ~/src/agent-comms/install.sh     # with --scope=both it writes ~/.claude/commands,
-                                      # ~/.agent-comms, ~/.codex/AGENTS.md, and in the project
-                                      # .comms/ plus .gitignore entries. Nothing else.
+                                      # ~/.grok/commands, ~/.codex/skills, ~/.agent-comms,
+                                      # ~/.codex/AGENTS.md, and in the project .comms/ plus
+                                      # .gitignore entries. Nothing else.
 cd /path/to/your/project && bash ~/src/agent-comms/install.sh --scope=both
 ```
 
-Then, in Claude Code:
+Then, in Claude Code, Grok, or Codex:
 
 ```
 /auto add rate limiting to the API
 ```
 
-That's it. Claude implements, snapshots the tree, and every other registered agent
+That's it. The driving agent implements, snapshots the tree, and every other registered agent
 reviews **that same pinned artifact**. Shared blockers gate the next round; unique
 ones are flagged for you. It repeats until they approve or it hits the round cap
 (default 10 per phase).
@@ -124,7 +126,7 @@ on your own machine, and a poor one for anything you did not write.
 
 | | |
 |---|---|
-| [docs/COMMANDS.md](docs/COMMANDS.md) | the Claude Code commands and the helper CLI (not exhaustive: `panel`, `compose`, `round-note` and `friction` live only in `comms.sh help`) |
+| [docs/COMMANDS.md](docs/COMMANDS.md) | the driver commands (Claude, Grok, Codex) and the helper CLI (not exhaustive: `panel`, `compose`, `round-note` and `friction` live only in `comms.sh help`) |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | message format, transports, state, archive discipline |
 | [docs/loopspec/SPEC.md](docs/loopspec/SPEC.md) | the portable review-loop contract: verdicts, rounds, schemas, fixtures |
 | [docs/INSTALL.md](docs/INSTALL.md) | install scopes, local pinning, upgrading |

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # agent-comms installer
-# Sets up Claude Code <-> Codex autonomous communication over ACP
+# Sets up autonomous communication between registered agents (claude, codex, grok) over ACP
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash
@@ -20,6 +20,7 @@ else
   SCRIPT_DIR=""
 fi
 CLAUDE_COMMANDS_DIR="${CLAUDE_COMMANDS_DIR:-$HOME/.claude/commands}"
+GROK_COMMANDS_DIR="${GROK_COMMANDS_DIR:-$HOME/.grok/commands}"
 CODEX_SKILLS_DIR="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
 # The Codex protocol note lives ONCE, in the user's global Codex instructions. It used to
 # be written into every project's .codex/AGENTS.md, which made a copy of PROSE per repo
@@ -169,7 +170,7 @@ else
   trap 'rm -rf "$TEMPLATE_DIR"' EXIT
 fi
 
-echo "agent-comms: installing Claude <-> Codex communication protocol"
+echo "agent-comms: installing the agent-comms protocol (claude, codex, grok)"
 echo ""
 
 choose_scope
@@ -376,15 +377,58 @@ install_file() { # install_file <src> <dest> [exec] [expected-signature]
   mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
 }
 
+# Codex skills are SKILL.md inside a named directory. The body is the same driver
+# command as Claude/Grok get; the wrapper is install-time, not a second origin.
+install_codex_driver_skill() { # <src.md> <skills_root> <name>
+  local src="$1" root="$2" name="$3" dest wrap desc
+  mkdir -p "$root/$name"
+  dest="$root/$name/SKILL.md"
+  wrap="$(dirname "$dest")/.agent-comms-skillwrap.$$.md"
+  desc="$(head -1 "$src")"
+  desc="$(printf '%s' "$desc" | sed 's/"/\\"/g')"
+  {
+    echo "---"
+    echo "name: $name"
+    echo "description: \"$desc\""
+    echo "---"
+    echo ""
+    cat "$src"
+  } > "$wrap" || { rm -f "$wrap"; return 1; }
+  if install_file "$wrap" "$dest"; then
+    rm -f "$wrap"
+    return 0
+  fi
+  rm -f "$wrap"
+  return 1
+}
+
+install_driver_commands() { # <claude_dir> [grok_dir] [codex_skills_dir]
+  local claude_dir="$1" grok_dir="${2:-}" codex_dir="${3:-}" f
+  mkdir -p "$claude_dir"
+  for f in $CLAUDE_COMMANDS; do
+    install_file "$TEMPLATE_DIR/claude-commands/$f" "$claude_dir/$f"
+  done
+  if [ -n "$grok_dir" ]; then
+    mkdir -p "$grok_dir"
+    for f in $CLAUDE_COMMANDS; do
+      install_file "$TEMPLATE_DIR/claude-commands/$f" "$grok_dir/$f"
+    done
+  fi
+  if [ -n "$codex_dir" ]; then
+    mkdir -p "$codex_dir"
+    for f in $CLAUDE_COMMANDS; do
+      install_codex_driver_skill "$TEMPLATE_DIR/claude-commands/$f" "$codex_dir" "${f%.md}"
+    done
+  fi
+}
+
 install_global_assets() {
   echo ""
-  echo "  installing global Claude commands..."
-  mkdir -p "$CLAUDE_COMMANDS_DIR"
-  for f in $CLAUDE_COMMANDS; do
-    install_file "$TEMPLATE_DIR/claude-commands/$f" "$CLAUDE_COMMANDS_DIR/$f"
-  done
+  echo "  installing global driver commands (Claude, Grok, Codex)..."
+  install_driver_commands "$CLAUDE_COMMANDS_DIR" "$GROK_COMMANDS_DIR" "$CODEX_SKILLS_DIR"
   for f in $RETIRED_COMMANDS; do
     [ -f "$CLAUDE_COMMANDS_DIR/$f" ] && { rm -f "$CLAUDE_COMMANDS_DIR/$f"; echo "  removed retired command /${f%.md}"; }
+    [ -n "$GROK_COMMANDS_DIR" ] && [ -f "$GROK_COMMANDS_DIR/$f" ] && { rm -f "$GROK_COMMANDS_DIR/$f"; echo "  removed retired Grok command /${f%.md}"; }
   done
 
   for skill in $RETIRED_CODEX_SKILLS; do
@@ -411,13 +455,14 @@ install_global_assets() {
 
 install_local_assets() {
   echo ""
-  echo "  installing project-local Claude commands..."
-  mkdir -p "$PROJECT_ROOT/.claude/commands"
-  for f in $CLAUDE_COMMANDS; do
-    install_file "$TEMPLATE_DIR/claude-commands/$f" "$PROJECT_ROOT/.claude/commands/$f"
-  done
+  echo "  installing project-local driver commands (Claude, Grok, Codex)..."
+  install_driver_commands \
+    "$PROJECT_ROOT/.claude/commands" \
+    "$PROJECT_ROOT/.grok/commands" \
+    "$PROJECT_ROOT/.codex/skills"
   for f in $RETIRED_COMMANDS; do
     [ -f "$PROJECT_ROOT/.claude/commands/$f" ] && { rm -f "$PROJECT_ROOT/.claude/commands/$f"; echo "  removed retired command /${f%.md}"; }
+    [ -f "$PROJECT_ROOT/.grok/commands/$f" ] && { rm -f "$PROJECT_ROOT/.grok/commands/$f"; echo "  removed retired Grok command /${f%.md}"; }
   done
 
   for skill in $RETIRED_CODEX_SKILLS; do
@@ -479,6 +524,8 @@ warn_local_shadowing() {
   local shadowed=""
   for f in $CLAUDE_COMMANDS; do
     [ -f "$PROJECT_ROOT/.claude/commands/$f" ] && shadowed="$shadowed .claude/commands/$f"
+    [ -f "$PROJECT_ROOT/.grok/commands/$f" ] && shadowed="$shadowed .grok/commands/$f"
+    [ -f "$PROJECT_ROOT/.codex/skills/${f%.md}/SKILL.md" ] && shadowed="$shadowed .codex/skills/${f%.md}"
   done
   for h in $HELPERS; do
     [ -f "$PROJECT_ROOT/.agent-comms/$h" ] && shadowed="$shadowed .agent-comms/$h"
@@ -511,6 +558,7 @@ init_project_state() {
   echo "  creating project state..."
   mkdir -p "$PROJECT_ROOT/.comms/to-codex"
   mkdir -p "$PROJECT_ROOT/.comms/to-claude"
+  mkdir -p "$PROJECT_ROOT/.comms/to-grok"
   mkdir -p "$PROJECT_ROOT/.comms/archive"
 
   # Add .comms/ (and the installer-managed Codex protocol note) to .gitignore.
@@ -563,15 +611,12 @@ agents_block_body() {
   cat << 'PROTOCOL'
 ## Agent Communication Protocol
 
-Local file-based message queue between Claude Code and Codex. It applies in a repository
+Local file-based message queue between registered agents (claude, codex, grok). It applies in a repository
 that has a `.comms/` directory, and nowhere else — this note is global, the mailbox is not.
 
-- **Your inbox:** `.comms/to-codex/` — review requests are delivered here
-- **Your outbox:** `.comms/to-claude/` — replies are written here
-
-Review turns are **parent-brokered over ACP**: the driving session spawns the turn, inlines
-the whole prompt (including the verdict discipline), and stamps and delivers the reply. You do
-not need to read the mailbox or send anything yourself — there are no Codex skills to invoke.
+- **Your inbox:** `.comms/to-codex/` — messages addressed to you land here
+- **Driving:** `$auto` is the implement+review loop; `$ask` is a one-off consult. `from:` is the output of `comms.sh whoami` — never a copied name. The default panel is every other registered agent.
+- **Reviewing:** turns are parent-brokered over ACP. The driving session inlines the prompt, stamps, and delivers the reply. Do not read the mailbox or send a reply yourself.
 PROTOCOL
 }
 
@@ -810,8 +855,8 @@ note_local_pin() {
   echo ""
   echo "  note: project-local copies are pinned — they shadow any global install and"
   echo "  do NOT pick up global updates. Re-run with --scope=local to refresh them, or"
-  echo "  delete the .claude/commands/, .agents/loopspec-fragments/, and"
-  echo "  .agent-comms/ copies to fall back to global."
+  echo "  delete the .claude/commands/, .grok/commands/, .codex/skills/,"
+  echo "  .agents/loopspec-fragments/, and .agent-comms/ copies to fall back to global."
 }
 
 case "$SCOPE" in
@@ -839,10 +884,12 @@ echo ""
 echo "  done! installed:"
 case "$SCOPE" in
   local)
-    echo "    Project Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
+    echo "    Project Claude/Grok/Codex: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
     ;;
   global)
     echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
+    echo "    Global Grok:   /auto, /ask, /clean-comms in $GROK_COMMANDS_DIR"
+    echo "    Global Codex:  \$auto, \$ask, \$clean-comms in $CODEX_SKILLS_DIR"
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
     ;;
   project)
@@ -850,14 +897,15 @@ case "$SCOPE" in
     ;;
   both)
     echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
+    echo "    Global Grok:   /auto, /ask, /clean-comms in $GROK_COMMANDS_DIR"
+    echo "    Global Codex:  \$auto, \$ask, \$clean-comms in $CODEX_SKILLS_DIR"
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
     echo "    Project state: .comms/, .gitignore"
     ;;
 esac
 echo ""
 echo "  usage:"
-echo "    Claude: 'implement X, then /send-to-codex'"
-echo "    Codex:  reviews are parent-brokered over ACP — nothing to invoke by hand"
-echo "    Auto:   '/auto build feature X'   (add --plan for a capped approach round)"
+echo "    Claude / Grok / Codex: '/auto build feature X'  (add --plan for a capped approach round)"
+echo "    Review turns you RECEIVE stay parent-brokered over ACP — nothing to invoke by hand"
 echo ""
 echo "  transport: ACP (no pane multiplexer required)"

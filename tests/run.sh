@@ -22,7 +22,7 @@ unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
 # machine and none in CI — the corpus would describe a different system in each. The
 # section that tests adoption sets it explicitly per invocation. (Same class as the
 # scrub above.)
-unset CLAUDE_PID COMMS_PRESENCE_PID 2>/dev/null || true
+unset CLAUDE_PID COMMS_PRESENCE_PID COMMS_SELF GROK_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT CODEX_SANDBOX CODEX_THREAD_ID 2>/dev/null || true
 
 # THE DEFAULT IS `mailbox`. What the harness needs from a default is "write the file and
 # nudge nobody" — no spawned child, no network. It used to get that by asking for cmux and
@@ -575,7 +575,7 @@ echo "$ST" | grep -q "pending in to-claude:" && ok "status prints pending counts
 section "install.sh: local pin gitignored + global scope (overridden HOME dirs)"
 grep -qxF '.agent-comms/' "$INST_FIX/.gitignore" && ok "local install gitignores .agent-comms/" || fail "local install gitignores .agent-comms/"
 GHOME="$WORK/ghome"
-GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global 2>&1)"
+GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" GROK_COMMANDS_DIR="$GHOME/grok-commands" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global 2>&1)"
 [ -x "$GHOME/agent-comms/comms.sh" ] && ok "global scope installs executable helpers (env-overridden)" || fail "global scope installs executable helpers"
 [ -f "$GHOME/commands/auto.md" ] && ok "global scope installs commands (env-overridden)" || fail "global scope installs commands"
 [ -f "$GHOME/commands/ask.md" ] && ok "global scope installs /ask" || fail "global scope installs ask.md"
@@ -584,7 +584,7 @@ GH_OUT="$(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_D
 # RETIRED_* mechanism exists to prevent. Seed one first, or this proves nothing. (S4-3.)
 mkdir -p "$GHOME/skills/read-from-claude" && printf 'stale\n' > "$GHOME/skills/read-from-claude/SKILL.md"
 mkdir -p "$GHOME/skills/send-to-claude" && printf 'stale\n' > "$GHOME/skills/send-to-claude/SKILL.md"
-(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1) || true
+(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" GROK_COMMANDS_DIR="$GHOME/grok-commands" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1) || true
 [ ! -e "$GHOME/skills/read-from-claude" ] && [ ! -e "$GHOME/skills/send-to-claude" ] \
   && ok "installing REMOVES both retired Codex skills left by an earlier install" || fail "a retired Codex skill survived an install"
 # The PROJECT-LOCAL pin is a different rm than the global one ($PROJECT_ROOT/.agents/skills vs
@@ -592,7 +592,7 @@ mkdir -p "$GHOME/skills/send-to-claude" && printf 'stale\n' > "$GHOME/skills/sen
 # old resolver. Hand-verified during S4-3; pinned here so the upgrade guarantee is durable.
 # (codex + grok, S4-3 r2, advisory.)
 mkdir -p "$INST_FIX/.agents/skills/read-from-claude" && printf 'stale\n' > "$INST_FIX/.agents/skills/read-from-claude/SKILL.md"
-(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=local >/dev/null 2>&1) || true
+(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" GROK_COMMANDS_DIR="$GHOME/grok-commands" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=local >/dev/null 2>&1) || true
 [ ! -e "$INST_FIX/.agents/skills/read-from-claude" ] \
   && ok "a local-scope install removes a project-local pin of a retired skill" || fail "project-local retired pin survived --scope=local"
 # THE REVIEW BAR IS NOW INSTALLED DATA. It used to be read out of the codex self-send SKILL files
@@ -614,7 +614,7 @@ done
 # destination a NEW inode, so a reader already inside the old one finishes on it.
 INO1="$(command ls -di "$GHOME/agent-comms/comms.sh" | awk '{print $1}')"
 printf '#x\n' >> "$GHOME/agent-comms/comms.sh"   # differ from source, so no content-skip can hide the write
-(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
+(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" GROK_COMMANDS_DIR="$GHOME/grok-commands" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
 INO2="$(command ls -di "$GHOME/agent-comms/comms.sh" | awk '{print $1}')"
 [ "$INO1" != "$INO2" ] \
   && ok "reinstall replaces the helper inode (a running reader survives)" || fail "reinstall replaces the helper inode"
@@ -625,7 +625,7 @@ cmp -s "$GHOME/agent-comms/comms.sh" "$REPO/helpers/comms.sh" \
 # Commands are rewritten the same way; a stale command file is the same failure class.
 CINO1="$(command ls -di "$GHOME/commands/auto.md" | awk '{print $1}')"
 printf '\n' >> "$GHOME/commands/auto.md"
-(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
+(cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GHOME/commands" CODEX_SKILLS_DIR="$GHOME/skills" GROK_COMMANDS_DIR="$GHOME/grok-commands" AGENT_COMMS_HOME="$GHOME/agent-comms" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
 CINO2="$(command ls -di "$GHOME/commands/auto.md" | awk '{print $1}')"
 [ "$CINO1" != "$CINO2" ] && ok "reinstall replaces the command inode too" || fail "reinstall replaces the command inode too"
 # NEGATIVE CONTROL: the inode assertions above are evidence only if they CAN fail.
@@ -660,6 +660,7 @@ mode_of() { local m; m="$(stat -f '%Mp%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
 gh_install() { # gh_install <home> [extra-env...]  — a global install into an arbitrary home
   local gh="$1"; shift
   (cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$gh/commands" CODEX_SKILLS_DIR="$gh/skills" \
+     GROK_COMMANDS_DIR="$gh/grok-commands" \
      AGENT_COMMS_HOME="$gh/agent-comms" "$@" bash "$REPO/install.sh" --scope=global 2>&1)
 }
 # MODE, UPGRADE: an existing destination kept its own mode under `cp`. A literal 755
@@ -826,6 +827,7 @@ printf '#!/bin/sh\nexit 1\n' > "$FAILBIN/chown"; chmod +x "$FAILBIN/chown"
 CHOWN_FIRST="$GH_GRP/commands/$(printf '%s\n' $CLAUDE_COMMANDS_LIST | head -1)"
 CHOWN_INO1="$(command ls -di "$CHOWN_FIRST" | awk '{print $1}')"
 CHOWN_OUT="$( (cd "$INST_FIX" && CLAUDE_COMMANDS_DIR="$GH_GRP/commands" CODEX_SKILLS_DIR="$GH_GRP/skills" \
+   GROK_COMMANDS_DIR="$GH_GRP/grok-commands" \
    AGENT_COMMS_HOME="$GH_GRP/agent-comms" PATH="$FAILBIN:$PATH" bash "$REPO/install.sh" --scope=global 2>&1) || true)"
 printf '%s\n' "$CHOWN_OUT" | grep -q 'cannot restore owner/group' \
   && ok "an unrestorable owner/group refuses the replacement loudly" || fail "chown failure was not fatal (got: $(printf '%s' "$CHOWN_OUT" | tail -2))"
@@ -4333,6 +4335,7 @@ AG_E='<!-- agent-comms:end -->'
 ag_file() { printf '%s' "$AG/$1/.codex/AGENTS.md"; }
 ag_install() { (cd "$AG/$1" && env CODEX_AGENTS_FILE="$(ag_file "$1")" \
   CLAUDE_COMMANDS_DIR="$AG/$1/ghome/commands" CODEX_SKILLS_DIR="$AG/$1/ghome/skills" \
+  GROK_COMMANDS_DIR="$AG/$1/ghome/grok-commands" \
   AGENT_COMMS_HOME="$AG/$1/ghome/agent-comms" \
   bash "$REPO/install.sh" --scope=global >"$WORK/ag.out" 2>&1); }
 ag_repo() { mkdir -p "$AG/$1" && git -C "$AG/$1" init -q -b main && mkdir -p "$AG/$1/.codex"; }
@@ -4445,14 +4448,14 @@ ST_SHORT="$( ( PATH="$ST_BIN/shortmode:$PATH"; eval "$ST_FN"; stat_mode /etc/hos
 # global scope writes it, and project/local scope never does.
 AGX="$WORK/agents-scope"; mkdir -p "$AGX"; git -C "$AGX" init -q -b main
 (cd "$AGX" && env CODEX_AGENTS_FILE="$AGX/gh/AGENTS.md" CLAUDE_COMMANDS_DIR="$AGX/gh/commands" \
-  CODEX_SKILLS_DIR="$AGX/gh/skills" AGENT_COMMS_HOME="$AGX/gh/ac" \
+  CODEX_SKILLS_DIR="$AGX/gh/skills" GROK_COMMANDS_DIR="$AGX/gh/grok-commands" AGENT_COMMS_HOME="$AGX/gh/ac" \
   bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
 grep -q 'agent-comms:begin' "$AGX/gh/AGENTS.md" 2>/dev/null \
   && ok "global scope installs the Codex protocol note once, at the global path" || fail "global scope did not write the note"
 for AGX_S in project local; do
   AGX_D="$WORK/agents-$AGX_S"; mkdir -p "$AGX_D"; git -C "$AGX_D" init -q -b main
   (cd "$AGX_D" && env CODEX_AGENTS_FILE="$AGX_D/gh/AGENTS.md" CLAUDE_COMMANDS_DIR="$AGX_D/gh/commands" \
-    CODEX_SKILLS_DIR="$AGX_D/gh/skills" AGENT_COMMS_HOME="$AGX_D/gh/ac" \
+    CODEX_SKILLS_DIR="$AGX_D/gh/skills" GROK_COMMANDS_DIR="$AGX_D/gh/grok-commands" AGENT_COMMS_HOME="$AGX_D/gh/ac" \
     bash "$REPO/install.sh" --scope="$AGX_S" >/dev/null 2>&1)
   [ ! -e "$AGX_D/.codex/AGENTS.md" ] \
     && ok "--scope=$AGX_S writes no per-project Codex note" || fail "--scope=$AGX_S still wrote a per-project note"
@@ -4471,7 +4474,7 @@ grep -q 'CODEX_AGENTS_FILE="${CODEX_AGENTS_FILE:-' "$REPO/install.sh" \
 # it only ever wrote a file this installer had generated. (codex, implement r1, blocking.)
 AGY="$WORK/agents-meta"; mkdir -p "$AGY/repo" "$AGY/real"; git -C "$AGY/repo" init -q -b main
 agy_install() { (cd "$AGY/repo" && env CODEX_AGENTS_FILE="$1" CLAUDE_COMMANDS_DIR="$AGY/gh/c" \
-  CODEX_SKILLS_DIR="$AGY/gh/s" AGENT_COMMS_HOME="$AGY/gh/a" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1); }
+  CODEX_SKILLS_DIR="$AGY/gh/s" GROK_COMMANDS_DIR="$AGY/gh/g" AGENT_COMMS_HOME="$AGY/gh/a" bash "$REPO/install.sh" --scope=global >/dev/null 2>&1); }
 agy_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
 # Legacy text an older installer wrote — safe to migrate because it is provably ours.
 AG_LEGACY='## Agent Communication Protocol
@@ -10379,6 +10382,87 @@ grep -q 'deny writes and non-git execs while still allowing' "$REPO/docs/ROADMAP
 grep -q 'open security item' "$REPO/docs/ROADMAP.md" \
   && ok "the open security item stays open while a dispatched provider is uncontained" \
   || fail "the security item was closed while grok remains uncontained"
+
+section "any-agent driver surface"
+# /auto was Claude-only: templates wrote `from: claude`, the installer copied into
+# `.claude/commands/`, and a grok/codex driver had no loop verb. whoami + per-runtime
+# install is the remaining half of "Any agent drives" (the consult verb already was).
+WH="$WORK/whoami-repo"
+mkdir -p "$WH/.comms"
+git -C "$WH" init -q -b main
+git -C "$WH" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+run_wh() { (cd "$WH" && env COMMS_DELIVERY=mailbox "$@"); }
+[ "$(run_wh COMMS_SELF=grok "$COMMS" whoami 2>/dev/null)" = grok ] \
+  && ok "whoami honours COMMS_SELF=grok" || fail "whoami COMMS_SELF=grok"
+[ "$(run_wh COMMS_SELF=codex "$COMMS" whoami 2>/dev/null)" = codex ] \
+  && ok "whoami honours COMMS_SELF=codex" || fail "whoami COMMS_SELF=codex"
+[ "$(run_wh COMMS_SELF=claude "$COMMS" whoami 2>/dev/null)" = claude ] \
+  && ok "whoami honours COMMS_SELF=claude" || fail "whoami COMMS_SELF=claude"
+run_wh COMMS_SELF=nope "$COMMS" whoami >/dev/null 2>&1 \
+  && fail "whoami accepted an unregistered COMMS_SELF" || ok "whoami refuses an unregistered COMMS_SELF"
+WHPS="$WORK/whoami-ps"; mkdir -p "$WHPS/empty" "$WHPS/grok"
+printf '%s\n' '#!/bin/sh' 'case "$*" in *-o*args=*) echo; exit 0;; *-o*ppid=*) echo 1; exit 0;; esac; exit 1' > "$WHPS/empty/ps"
+printf '%s\n' '#!/bin/sh' 'case "$*" in *-o*args=*) echo /usr/bin/grok; exit 0;; *-o*ppid=*) echo 1; exit 0;; esac; exit 1' > "$WHPS/grok/ps"
+chmod +x "$WHPS/empty/ps" "$WHPS/grok/ps"
+wh_env() { (cd "$WH" && env -u COMMS_SELF -u GROK_AGENT -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_PID -u CODEX_SANDBOX -u CODEX_THREAD_ID "$@"); }
+[ "$(wh_env GROK_AGENT=1 PATH="$WHPS/empty:$PATH" "$COMMS" whoami 2>/dev/null)" = grok ] \
+  && ok "GROK_AGENT=1 detects grok" || fail "GROK_AGENT=1 detect"
+[ "$(wh_env CLAUDECODE=1 PATH="$WHPS/empty:$PATH" "$COMMS" whoami 2>/dev/null)" = claude ] \
+  && ok "CLAUDECODE detects claude" || fail "CLAUDECODE detect"
+[ "$(wh_env CLAUDE_CODE_ENTRYPOINT=x PATH="$WHPS/empty:$PATH" "$COMMS" whoami 2>/dev/null)" = claude ] \
+  && ok "CLAUDE_CODE_ENTRYPOINT detects claude" || fail "CLAUDE_CODE_ENTRYPOINT detect"
+[ "$(wh_env CLAUDE_PID=1 PATH="$WHPS/empty:$PATH" "$COMMS" whoami 2>/dev/null)" = claude ] \
+  && ok "CLAUDE_PID detects claude" || fail "CLAUDE_PID detect"
+[ "$(wh_env CODEX_SANDBOX=seatbelt PATH="$WHPS/empty:$PATH" "$COMMS" whoami 2>/dev/null)" = codex ] \
+  && ok "CODEX_SANDBOX detects codex" || fail "CODEX_SANDBOX detect"
+[ "$(wh_env GROK_AGENT=1 COMMS_SELF=codex PATH="$WHPS/empty:$PATH" "$COMMS" whoami 2>/dev/null)" = codex ] \
+  && ok "COMMS_SELF wins over GROK_AGENT" || fail "COMMS_SELF override"
+wh_env GROK_AGENT=codex PATH="$WHPS/empty:$PATH" "$COMMS" whoami >/dev/null 2>&1 \
+  && fail "GROK_AGENT=<agent-name> was treated as the TUI flag" || ok "GROK_AGENT=<agent-name> is not the TUI flag"
+wh_env PATH="$WHPS/empty:$PATH" "$COMMS" whoami >/dev/null 2>&1 \
+  && fail "whoami defaulted when it had no signal" || ok "whoami fails closed with no signal"
+[ "$(wh_env PATH="$WHPS/grok:$PATH" "$COMMS" whoami 2>/dev/null)" = grok ] \
+  && ok "whoami reads a grok ancestor executable" || fail "whoami ancestor grok"
+"$COMMS" help | grep -q whoami && ok "help lists whoami" || fail "help lists whoami"
+grep -qF '"$COMMS_SH" whoami' "$REPO/templates/claude-commands/auto.md" \
+  && ok "auto.md calls whoami" || fail "auto.md calls whoami"
+grep -q 'SELF=claude' "$REPO/templates/claude-commands/auto.md" \
+  && fail "auto.md still hardcodes SELF=claude" || ok "auto.md does not hardcode SELF=claude"
+grep -q '^from: claude$' "$REPO/templates/claude-commands/auto.md" \
+  && fail "auto.md still hardcodes from: claude" || ok "auto.md does not hardcode from: claude"
+for tf in ask.md send-to-codex.md read-from-codex.md clean-comms.md; do
+  grep -qF '"$COMMS_SH" whoami' "$REPO/templates/claude-commands/$tf" \
+    && ok "$tf calls whoami" || fail "$tf calls whoami"
+done
+grep -q '^from: claude$' "$REPO/templates/claude-commands/ask.md" \
+  && fail "ask.md still hardcodes from: claude" || ok "ask.md does not hardcode from: claude"
+grep -q '^from: claude$' "$REPO/templates/claude-commands/send-to-codex.md" \
+  && fail "send-to-codex.md still hardcodes from: claude" || ok "send-to-codex.md does not hardcode from: claude"
+grep -q -- '--as claude' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && fail "read-from-codex.md still lists --as claude" || ok "read-from-codex.md does not list --as claude"
+grep -q -- '--as claude' "$REPO/templates/claude-commands/clean-comms.md" \
+  && fail "clean-comms.md still lists --as claude" || ok "clean-comms.md does not list --as claude"
+AA="$WORK/any-agent-install"; mkdir -p "$AA"; git -C "$AA" init -q -b main
+AA_G="$AA/ghome"
+aa_env() { env CLAUDE_COMMANDS_DIR="$AA_G/commands" CODEX_SKILLS_DIR="$AA_G/skills" \
+  GROK_COMMANDS_DIR="$AA_G/grok-commands" AGENT_COMMS_HOME="$AA_G/agent-comms" \
+  CODEX_AGENTS_FILE="$AA_G/AGENTS.md" "$@"; }
+(cd "$AA" && aa_env bash "$REPO/install.sh" --scope=both >/dev/null 2>&1)
+cmp -s "$AA_G/grok-commands/auto.md" "$REPO/templates/claude-commands/auto.md" \
+  && ok "global grok /auto matches the template" || fail "global grok /auto matches the template"
+[ -f "$AA_G/grok-commands/ask.md" ] && ok "global grok /ask is installed" || fail "global grok /ask is installed"
+[ -f "$AA_G/skills/auto/SKILL.md" ] && ok "global Codex auto skill is installed" || fail "global Codex auto skill is installed"
+grep -q '^name: auto$' "$AA_G/skills/auto/SKILL.md" \
+  && ok "Codex auto skill has name frontmatter" || fail "Codex auto skill name frontmatter"
+grep -qF '"$COMMS_SH" whoami' "$AA_G/skills/auto/SKILL.md" \
+  && ok "Codex auto skill carries whoami" || fail "Codex auto skill carries whoami"
+[ -d "$AA/.comms/to-grok" ] && ok "project init creates to-grok" || fail "project init creates to-grok"
+grep -qF '$auto' "$AA_G/AGENTS.md" && ok "Codex protocol note names \$auto" || fail "Codex protocol note names \$auto"
+grep -A30 'done! installed:' "$REPO/install.sh" | grep -q 'Global Grok' \
+  && ok "installer banner names Grok" || fail "installer banner names Grok"
+(cd "$AA" && aa_env bash "$REPO/install.sh" --scope=local >/dev/null 2>&1)
+[ -f "$AA/.grok/commands/auto.md" ] && ok "local pin installs grok /auto" || fail "local pin installs grok /auto"
+[ -f "$AA/.codex/skills/auto/SKILL.md" ] && ok "local pin installs Codex auto" || fail "local pin installs Codex auto"
 
 section "comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture"
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"

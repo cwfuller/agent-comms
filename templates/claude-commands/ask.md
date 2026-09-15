@@ -77,7 +77,8 @@ unless they asked.
    [ -x "$COMMS_SH" ] || echo "warning: agent-comms helpers not installed — re-run install.sh (global or local scope)" >&2
    COMMS_ROOT="$("$COMMS_SH" root)"
    WORKSPACE="$("$COMMS_SH" workspace)"
-   echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE"
+   SELF="$("$COMMS_SH" whoami)"
+   echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE  SELF=$SELF"
    ```
 
 5. **Explicit question — build the body.** Detect optional flags first:
@@ -111,7 +112,7 @@ unless they asked.
 ```markdown
 ---
 type: question
-from: claude
+from: <whoami output — paste the word; a quoted write will not expand $SELF>
 timestamp: <ISO 8601>
 branch: <current branch>
 workspace: <workspace name>
@@ -132,7 +133,7 @@ message_id: <the filename, without .md>
    step 4). If delivery reports manual pickup, the message is on disk and the peer was NOT
    notified: ask for one manual pickup. Relay only the final non-`delivered` result.
 
-9. Tell the user the message was sent and where to look for the reply (`.comms/to-claude/` — replies come TO claude regardless of target). When the reply arrives, use `/read-from-codex` to surface the answer (it reads any sender). Headless-only targets (e.g. grok) answer via a detached runphase turn automatically.
+9. Tell the user the message was sent and where to look for the reply (`.comms/to-$SELF/` — replies come TO the driving agent). When the reply arrives, use `/read-from-codex` to surface the answer (it reads any sender). Headless-only targets (e.g. grok) answer via a detached runphase turn automatically.
 
 ## Notes
 

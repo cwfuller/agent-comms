@@ -9,20 +9,21 @@ Delete messages from `.comms/` directories.
    [ -x "$COMMS_SH" ] || echo "warning: agent-comms helpers not installed — re-run install.sh (global or local scope)" >&2
    COMMS_ROOT="$("$COMMS_SH" root)"
    WORKSPACE="$("$COMMS_SH" workspace)"
-   echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE"
+   SELF="$("$COMMS_SH" whoami)"
+   echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE  SELF=$SELF"
    ```
 
 2. **Dry-run the requested mode** — the helper enforces inbox scoping in code (no hand-rolled `rm`):
    ```bash
-   "$COMMS_SH" clean --as claude <mode>
+   "$COMMS_SH" clean --as "$SELF" <mode>
    ```
-   Modes: **no argument / `workspace`** (this workspace's files from your inbox `to-claude/` + `archive/` only — never Codex's unread mail), **`all`** (everything in both inboxes + archive — the only mode that touches the other agent's inbox), **`archive`** (archive/ only), or **a specific filename**.
+   Modes: **no argument / `workspace`** (this workspace's files from your inbox `to-$SELF/` + `archive/` only — never another agent's unread mail), **`all`** (everything in both inboxes + archive — the only mode that touches the other agent's inbox), **`archive`** (archive/ only), or **a specific filename**.
 
 3. Show the dry-run's "would delete" list to the user and confirm.
 
 4. On confirmation, re-run with `--yes`:
    ```bash
-   "$COMMS_SH" clean --as claude <mode> --yes
+   "$COMMS_SH" clean --as "$SELF" <mode> --yes
    ```
 
 5. Report how many files were cleaned up (the helper prints the count).

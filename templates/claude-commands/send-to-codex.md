@@ -1,4 +1,4 @@
-Send a structured handoff message to Codex via `.comms/to-codex/` and auto-deliver it.
+Send a structured handoff message to the default reviewer via `.comms/to-<target>/` and auto-deliver it.
 
 ## Instructions
 
@@ -16,19 +16,26 @@ Send a structured handoff message to Codex via `.comms/to-codex/` and auto-deliv
    [ -x "$COMMS_SH" ] || echo "warning: agent-comms helpers not installed — re-run install.sh (global or local scope)" >&2
    COMMS_ROOT="$("$COMMS_SH" root)"
    WORKSPACE="$("$COMMS_SH" workspace)"
-   echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE"
+   SELF="$("$COMMS_SH" whoami)"
+   TARGET="$("$COMMS_SH" agents default)"
+   if [ "$TARGET" = "$SELF" ]; then
+     TARGET="$("$COMMS_SH" agents --others "$SELF")"
+     TARGET="${TARGET%%,*}"
+   fi
+   echo "COMMS_ROOT=$COMMS_ROOT  WORKSPACE=$WORKSPACE  SELF=$SELF  TARGET=$TARGET"
    ```
-   **ALWAYS write messages to `$COMMS_ROOT/to-codex/`** — this lands in the main repo's `.comms/` even when running from a worktree.
+   **ALWAYS write messages to `$COMMS_ROOT/to-$TARGET/`** — this lands in the main repo's `.comms/` even when running from a worktree. The target is the registry default unless that is you, in which case the first other registered agent.
 
-3. **Write the message file** to `$COMMS_ROOT/to-codex/`:
+3. **Write the message file** to `$COMMS_ROOT/to-$TARGET/`:
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_<short-slug>-$RANDOM.md` (the `$RANDOM` suffix prevents same-second filename collisions)
    - Write with a quoted heredoc (`<<'EOF'`) or a non-interpolating tool so backticks and dollar signs in the body are never evaluated
+   - `from:` is the exact word `whoami` printed. A quoted heredoc will not expand `$SELF` — paste the word. Never copy a name out of this file.
    - Content structure:
 
 ```markdown
 ---
 type: review-request
-from: claude
+from: <whoami output>
 timestamp: <ISO 8601>
 branch: <current branch>
 workspace: <workspace name from step 2>
@@ -54,7 +61,7 @@ message_id: <the filename, without .md>
 
 4. **Validate and deliver** — `send` refuses malformed messages (frontmatter delimiters, required fields, non-empty body) and degrades to manual pickup when no runner is available:
    ```bash
-   "$COMMS_SH" send --to codex "<path of the message file you wrote>"
+   "$COMMS_SH" send --to "$TARGET" "<path of the message file you wrote>"
    ```
    `RESULT: blocked` is no longer produced (it meant "cannot reach the cmux socket", removed in
    step 4, along with `RECOVER:` and `comms.sh reconcile`). If delivery reports manual pickup,

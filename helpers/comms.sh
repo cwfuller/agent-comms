@@ -14,6 +14,8 @@
 #                                  everyone EXCEPT one (the default panel for its driver).
 #                                  (zero-config
 #                                  default: claude codex / target codex)
+#   whoami                      print the driving agent (COMMS_SELF → session env →
+#                               ancestor executable). Fails closed; never defaults to claude.
 #   list --as <agent> [--thread <t>]   pending inbox messages, newest first
 #   status                      one-screen loop state: latest archive, verdict, pending counts
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
@@ -309,6 +311,50 @@ registry_has() {  # <name> — 0 iff registered; a MALFORMED config exits hard
 require_agent() {  # <name> [context] — die unless registered
   [ -n "${1:-}" ] || die "${2:-agent}: agent name required (registered: $(registry_agents))"
   registry_has "$1" || die "${2:-agent}: unknown agent '$1' (registered: $(registry_agents))"
+}
+
+# Detect the driving agent. Templates MUST call this rather than writing a
+# literal name: copying `from: claude` is how a grok or codex driver impersonates
+# Claude, and dispatch then fans the request back at the driver.
+#
+# Order: COMMS_SELF (explicit override) → session env → ancestor executable →
+# fail closed. Never default to claude. GROK_AGENT is the Grok TUI's session
+# flag (value "1"); runphase uses the same variable as the child agent NAME, so
+# only the TUI's "1" counts here.
+whoami_from_ancestors() {
+  local pid exe base hops=0
+  pid="${PPID:-}"
+  while [ -n "$pid" ] && [ "$pid" != 0 ] && [ "$pid" != 1 ] && [ "$hops" -lt 16 ]; do
+    hops=$((hops + 1))
+    exe="$(ps -p "$pid" -o args= 2>/dev/null | awk '{print $1}')"
+    [ -n "$exe" ] || return 1
+    base="$(basename "$exe")"
+    case "$base" in
+      grok|grok-*) printf '%s\n' grok; return 0 ;;
+      claude)      printf '%s\n' claude; return 0 ;;
+      codex)       printf '%s\n' codex; return 0 ;;
+    esac
+    pid="$(ps -p "$pid" -o ppid= 2>/dev/null | awk '{print $1}')"
+  done
+  return 1
+}
+
+cmd_whoami() {
+  local me="${COMMS_SELF:-}"
+  if [ -z "$me" ]; then
+    if [ "${GROK_AGENT:-}" = "1" ]; then
+      me=grok
+    elif [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${CLAUDE_PID:-}" ]; then
+      me=claude
+    elif [ -n "${CODEX_SANDBOX:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; then
+      me=codex
+    else
+      me="$(whoami_from_ancestors || true)"
+    fi
+  fi
+  [ -n "$me" ] || die "whoami: cannot detect the driving agent — set COMMS_SELF to a registered name"
+  require_agent "$me" "whoami"
+  printf '%s\n' "$me"
 }
 
 cmd_agents() {
@@ -5206,6 +5252,7 @@ case "${1:-}" in
   root)      shift; cmd_root "$@" ;;
   workspace) shift; cmd_workspace "$@" ;;
   agents)    shift; cmd_agents "$@" ;;
+  whoami)    shift; cmd_whoami "$@" ;;
   list)      shift; cmd_list "$@" ;;
   status)    shift; cmd_status "$@" ;;
   validate)  shift; cmd_validate "$@" ;;

@@ -71,11 +71,14 @@ asked. Do not narrate every dispatch.
      (`--reviewers codex`). Derive the default from the registry — never hardcode a
      roster, or adding an agent silently leaves it out:
      ```bash
-     SELF=claude                                          # whoever is driving this loop
-     REVIEWERS="$("$COMMS_SH" agents --others "$SELF")"    # e.g. codex,grok
+     SELF="$("$COMMS_SH" whoami)"                          # never write a literal agent name
+     REVIEWERS="$("$COMMS_SH" agents --others "$SELF")"    # every registered agent except the driver
      # ...unless --reviewers was passed, in which case use it verbatim
      GATING="${REVIEWERS%%,*}"                            # first reviewer gates the loop
      ```
+     `whoami` fails closed if it cannot tell which agent is driving; set `COMMS_SELF`
+     only as an override. Copying `from: claude` out of an old example impersonates
+     Claude — dispatch then fans the request back at you.
      Validate EVERY name against `"$COMMS_SH" agents`. Hold them as a LIST, never a single
      scalar copied across write paths.
    - `--via headless` forces the detached runner — **grok only**. Step 4 made `claude` and
@@ -135,13 +138,16 @@ asked. Do not narrate every dispatch.
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-$RANDOM.md`
    - Write with a quoted heredoc (`<<'EOF'`) so backticks and dollar signs are never
      evaluated.
+   - `from:` is the exact word `whoami` printed (one of `claude`, `codex`, `grok`). A
+     quoted heredoc will not expand `$SELF` — paste the word. Never copy a name out of
+     this file.
    - `thread` names this loop and is constant across every message in it; `message_id` is
      the filename sans `.md`.
 
 ```markdown
 ---
 type: review-request
-from: claude
+from: <whoami output>
 timestamp: <ISO 8601>
 branch: <current branch>
 workspace: <workspace>

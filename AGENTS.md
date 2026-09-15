@@ -156,16 +156,17 @@ were live.)
    (`panel dispatch` refuses a request whose `from:` appears in `--to`, so a literal
    `codex,grok` breaks the moment a non-claude agent drives):
    ```bash
-   ME=<your-registered-agent-name>              # claude | codex | grok — must EQUAL the request's `from:`
+   ME="$(helpers/comms.sh whoami)"              # never write a literal name; must EQUAL the request's `from:`
    ROSTER="$(helpers/comms.sh agents --others "$ME")"    # already one comma-separated line
    COMMS_RUNPHASE_TIMEOUT_SECS=3600 helpers/comms.sh panel dispatch --to "$ROSTER" <request-file>
    ```
-   Substitute your OWN agent name — do not copy a literal `claude` here, and do not copy
-   `from: claude` out of an example request either. Dispatch refuses a roster containing
-   the author, so impersonating another agent fails loudly; the quieter damage is a review
-   attributed to an agent that did not write it. `ME` is the *registered agent* name, not
-   the presence name from the section above; they are unrelated. Dispatch prints an
-   `await:` command per leg, and every leg reviews the same snapshot.
+   `whoami` is the identity accessor (`COMMS_SELF` → session env → ancestor). Do not copy
+   a literal `claude` here, and do not copy `from: claude` out of an example request
+   either. Dispatch refuses a roster containing the author, so impersonating another
+   agent fails loudly; the quieter damage is a review attributed to an agent that did
+   not write it. `ME` is the *registered agent* name, not the presence name from the
+   section above; they are unrelated. Dispatch prints an `await:` command per leg, and
+   every leg reviews the same snapshot.
 4. **Wait for every leg, then compose** — `helpers/comms.sh compose --set <id>` (the set
    id is printed by dispatch; `panel status --set <id>` shows who has answered). Compose
    refuses a partial panel and labels findings by corroboration. A lone approval is not

@@ -1,14 +1,19 @@
 # Command & helper reference
 
-Every Claude Code command, Codex skill, and helper subcommand. Commands are thin
+Every driver command, Codex skill, and helper subcommand. Commands are thin
 prompt-wrappers; the shell logic lives in the installed helpers (see
 [INTERNALS.md](INTERNALS.md) for why).
 
-## Claude Code commands
+The same five commands install for Claude (`~/.claude/commands/`), Grok
+(`~/.grok/commands/`), and Codex (`~/.codex/skills/<name>/SKILL.md`). `/auto` is
+the loop verb in all three. Identity is `comms.sh whoami`, never a hardcoded
+`from: claude`.
+
+## Driver commands
 
 ### `/auto [--plan] [--reviewers a,b] [--rounds N] [--via headless] <task>`
 
-Implement → send to Codex → fix blocking findings → repeat until `APPROVE` or `N`
+Implement → send to the other registered agents → fix blocking findings → repeat until `APPROVE` or `N`
 rounds (default 10). The task text can describe work or reference an existing plan file.
 Round messages keep stable context (latest findings bundle + `git diff --stat` +
 validation results), never per-finding fix narration.
@@ -76,8 +81,13 @@ is the only mode that deletes the other agent's unread mail.
 
 ## Codex skills
 
+Driver skills `$auto`, `$ask`, `$send-to-codex`, `$read-from-codex`, and `$clean-comms`
+install into `~/.codex/skills/` (and `.codex/skills/` for a local pin). They are the
+same loop surface Claude and Grok get. A Codex session driving `/auto` uses
+`comms.sh whoami` (or `COMMS_SELF=codex`) so `from:` is `codex`, not a copied Claude name.
+
 The reviewer-side skills `$read-from-claude` and `$send-to-claude` were **DELETED** in step 4
-(S4-3). Every review turn is parent-brokered over ACP and `runphase.sh` inlines the whole
+(S4-3). Every review turn you *receive* is parent-brokered over ACP and `runphase.sh` inlines the whole
 prompt, so nothing resolved them; they described a codex session authoring and sending its own
 reply, which is the self-send model step 4 removed. `install.sh` removes copies an earlier
 install left on disk.
@@ -101,6 +111,7 @@ agnostic.
 | `root` | print the main repo's `.comms` path (worktree-safe) |
 | `workspace` | print the resolved workspace name (explicit pin → branch → repo dir) |
 | `agents [default\|--supported]` | registered agents from `.comms/config` (zero-config: `claude codex grok`), the default target, or the supported-backend table |
+| `whoami` | print the driving agent: `COMMS_SELF` → session env (`GROK_AGENT=1`, `CLAUDECODE`, `CODEX_SANDBOX`, …) → ancestor executable. Fails closed; never defaults to `claude` |
 | `list --as <agent> [--thread <t>]` | pending inbox messages, newest first; non-zero + "latest archived" hint when empty |
 | `status` | one-screen loop summary: workspace, latest archived message + its loop fields, pending counts per inbox |
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |

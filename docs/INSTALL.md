@@ -21,15 +21,15 @@ Run interactively (no `--scope`) and the installer shows a menu:
 
 | scope | installs | where |
 |---|---|---|
-| `global` | 5 Claude commands, 3 helper scripts, 2 loopspec fragments, the Codex protocol note | `~/.claude/commands/`, `~/.agent-comms/`, `~/.codex/AGENTS.md` |
-| `project` | per-repo state only | `.comms/{to-codex,to-claude,archive}/`, `.gitignore` entries |
+| `global` | 5 driver commands for Claude, Grok, and Codex; 3 helper scripts; 2 loopspec fragments; the Codex protocol note | `~/.claude/commands/`, `~/.grok/commands/`, `~/.codex/skills/`, `~/.agent-comms/`, `~/.codex/AGENTS.md` |
+| `project` | per-repo state only | `.comms/{to-codex,to-claude,to-grok,archive}/`, `.gitignore` entries |
 | `both` | global + project | the recommended pair |
-| `local` | pinned copies of everything into the repo | `.claude/commands/`, `.agents/loopspec-fragments/`, `.agent-comms/` + project state |
+| `local` | pinned copies of everything into the repo | `.claude/commands/`, `.grok/commands/`, `.codex/skills/`, `.agents/loopspec-fragments/`, `.agent-comms/` + project state |
 
 All scopes are idempotent — re-run freely.
 
 **Upgrading a project that has local pins.** `--scope=global` and `--scope=both` deliberately
-leave `.claude/commands/`, `.agents/loopspec-fragments/` and `.agent-comms/` alone — pinning is
+leave `.claude/commands/`, `.grok/commands/`, `.codex/skills/`, `.agents/loopspec-fragments/` and `.agent-comms/` alone — pinning is
 the whole point of them. To bring those pins up to date, re-run `--scope=local` in that
 project. Do not hand-copy the files: the installer resolves symlinks, preserves mode and owner,
 reports an ACL it cannot carry, and refuses rather than overwriting a file that changed
@@ -60,7 +60,7 @@ A **local pinned** install copies everything into the repo instead. Pinned copie
 warning. Resolution order everywhere is *local pin first, then global* (commands via the
 CLI's own project-command precedence; helpers via the templates' resolver:
 `<repo>/.agent-comms/comms.sh` then `~/.agent-comms/comms.sh`). To un-pin, delete the
-repo's `.claude/commands/`, `.agents/loopspec-fragments/`, and `.agent-comms/` copies.
+repo's `.claude/commands/`, `.grok/commands/`, `.codex/skills/`, `.agents/loopspec-fragments/`, and `.agent-comms/` copies.
 
 Stale pins are the classic failure mode: a repo pinned months ago silently runs old
 behavior while every other repo runs current. `install.sh --scope=global` warns when it
@@ -68,7 +68,7 @@ detects local copies that would shadow it.
 
 ### What project init does
 
-- creates `.comms/` (`to-codex/`, `to-claude/`, `archive/`)
+- creates `.comms/` (`to-codex/`, `to-claude/`, `to-grok/`, `archive/`)
 - gitignores `.comms/`, `.codex/AGENTS.md`, `.agent-comms/` (whole-line matched,
   trailing-newline-safe, idempotent). `.codex/AGENTS.md` is still ignored because older
   installs wrote one there; nothing writes it any more.
@@ -105,8 +105,9 @@ AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" 
 |---|---|---|
 | `AGENT_COMMS_REPO_RAW` | this repo's `main` | raw base URL for remote installs |
 | `AGENT_COMMS_HOME` | `~/.agent-comms` | where global helpers land |
-| `CLAUDE_COMMANDS_DIR` | `~/.claude/commands` | where global commands land |
-| `CODEX_SKILLS_DIR` | `~/.codex/skills` | where retired Codex skills are removed from (nothing is installed there) |
+| `CLAUDE_COMMANDS_DIR` | `~/.claude/commands` | where global Claude commands land |
+| `GROK_COMMANDS_DIR` | `~/.grok/commands` | where global Grok commands land |
+| `CODEX_SKILLS_DIR` | `~/.codex/skills` | where Codex driver skills land, and where retired reviewer skills are removed from |
 
 ## From a clone
 

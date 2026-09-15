@@ -1,4 +1,4 @@
-Read and act on messages from Codex in `.comms/to-claude/`.
+Read and act on messages in your inbox (`.comms/to-<whoami>/`).
 
 ## Talking to the user
 
@@ -26,14 +26,15 @@ asked. Do not narrate every dispatch.
    [ -x "$COMMS_SH" ] || COMMS_SH="$HOME/.agent-comms/comms.sh"
    [ -x "$COMMS_SH" ] || echo "warning: agent-comms helpers not installed — re-run install.sh (global or local scope)" >&2
    COMMS_ROOT="$("$COMMS_SH" root)"
+   SELF="$("$COMMS_SH" whoami)"
    ```
 
 2. **List pending messages** for this workspace, newest first:
    ```bash
-   "$COMMS_SH" list --as claude
+   "$COMMS_SH" list --as "$SELF"
    ```
-   When continuing a specific loop, scope the read to that loop's thread so concurrent loops in this workspace can't consume each other's replies: `"$COMMS_SH" list --as claude --thread <thread>`.
-   On an empty inbox the helper exits non-zero and reports the latest archived message on stderr — a late delivery nudge for an already-processed reply is common (the injected `/read-from-codex` queues in Claude's input box while a turn is running and submits minutes later). If that's the case, tell the user: "No pending messages — [filename] was already processed (likely a late delivery nudge for it; harmless)." Otherwise tell the user there are no messages from Codex for this workspace.
+   When continuing a specific loop, scope the read to that loop's thread so concurrent loops in this workspace can't consume each other's replies: `"$COMMS_SH" list --as "$SELF" --thread <thread>`.
+   On an empty inbox the helper exits non-zero and reports the latest archived message on stderr — a late delivery nudge for an already-processed reply is common (the injected `/read-from-codex` queues in the driver's input box while a turn is running and submits minutes later). If that's the case, tell the user: "No pending messages — [filename] was already processed (likely a late delivery nudge for it; harmless)." Otherwise tell the user there are no messages for this workspace.
 
 3. Read the newest pending message for each thread, not only the globally newest
    file. For multiple rounds in one thread, process the newest valid round and archive
@@ -67,9 +68,9 @@ asked. Do not narrate every dispatch.
 ### Standard (manual) flow — no `workflow` field
 
 1. Parse the message and summarize what Codex is saying
-2. **Auto-archive — your inbox only** (the helper refuses files outside `to-claude/` and is idempotent):
+2. **Auto-archive — your inbox only** (the helper refuses files outside `to-$SELF/` and is idempotent):
    ```bash
-   "$COMMS_SH" archive --as claude <files-you-just-read>
+   "$COMMS_SH" archive --as "$SELF" <files-you-just-read>
    ```
 3. Ask the user how to proceed:
    - "Address all findings" — work through each item
@@ -231,7 +232,7 @@ Direct is a state you re-earn at every checkpoint, never tenure.
      the workflow's value: there is one loop command now (`/auto`), and `--plan` is a flag
      on it rather than a separate workflow name. Any approved plan phase continues into
      implementation on the same thread.
-     - **Archive the approval message first** (`"$COMMS_SH" archive --as claude "<file>"`) — this prevents a re-triggered `/read-from-codex` from re-reading the stale approval and double-firing the implement phase
+     - **Archive the approval message first** (`"$COMMS_SH" archive --as "$SELF" "<file>"`) — this prevents a re-triggered `/read-from-codex` from re-reading the stale approval and double-firing the implement phase
      - Notify user, status line first: "Implementing. Plan approved after N rounds."
      - `"$COMMS_SH" lessons --surface "<implementation area>"` (bounded) — the plan was
        lesson-checked at draft time, but implementation surfaces new specifics
@@ -274,7 +275,7 @@ Direct is a state you re-earn at every checkpoint, never tenure.
          moment the change grows a diff. (codex + grok, panel r1.)
    - Otherwise → **Stop. Notify user** with status line first: "Done. Approved after N
      rounds." Then any advisory worth keeping. Record the reviewer performance note
-     (see above), archive: `"$COMMS_SH" archive --as claude "<file>"`, then close the
+     (see above), archive: `"$COMMS_SH" archive --as "$SELF" "<file>"`, then close the
      thread's state: `"$COMMS_SH" state complete "<thread>"`
 
 2. **If `round >= max-rounds`:**
@@ -343,7 +344,7 @@ installed location(s) — an installed-only edit is lost on the next install.
   thread was rebuilt from the REVIEW FILE's random suffix (`...-policy-48271`) instead of the
   original (`...-policy-32664`), because both look like "the loop's id". The outbound still
   delivered, so nothing failed loudly — but the thread-scoped inbox lookup
-  (`list --as claude --thread <thread>`) then reported NO pending message for the real thread and
+  (`list --as "$SELF" --thread <thread>`) then reported NO pending message for the real thread and
   emitted a workspace-mismatch warning, while the reply sat there unread. Thread is an identity
   copied forward, not a value computed per round; only `message_id` changes each round.
   RECURRED 2026-08-18 despite this note (thread typed from a remembered suffix while

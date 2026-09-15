@@ -15,7 +15,9 @@ helpers/
 docs/loopspec/                 the portable review-loop kernel (spec, schemas, fixtures,
                                check.sh, prompt fragments) — vendored by other consumers
 templates/
-  claude-commands/*.md         Claude Code slash commands (thin prompt wrappers)
+  claude-commands/*.md         driver commands (thin prompt wrappers). install.sh copies
+                               them to Claude and Grok command dirs and wraps them as
+                               Codex SKILL.md files; identity is comms.sh whoami.
 tests/run.sh                   hermetic harness (mailbox default) — run before every commit
 docs/                          this documentation + ROADMAP/advisories
 ```
