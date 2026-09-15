@@ -556,6 +556,11 @@ build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> <agent> [mounted] �
   GROK_RSET="$(frontmatter_field "$msg" review_set)"
   GROK_DISPATCH="$(frontmatter_field "$msg" dispatch)"
   GROK_INID="$(frontmatter_field "$msg" message_id)"
+  # Review identity: the reply is the same artifact the request pinned. Omitting
+  # these let cmd_send treat the reply as a fresh workflow dispatch and mint a
+  # NEW artifact (round 2 reviewed a newer SHA than the request).
+  GROK_AID="$(frontmatter_field "$msg" artifact_id)"
+  GROK_HEAD="$(frontmatter_field "$msg" head_sha)"
   # The two prompt shapes are fully split on the reply type — a consult never
   # sees reviewer framing or the verdict bar, and a review never hears "this is
   # not a review" (first-live-consult finding, codex-triaged).
@@ -1040,6 +1045,8 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
     [ -n "$GROK_LOOPR" ] && printf 'loop-rounds: %s\n' "$GROK_LOOPR"
     [ -n "$GROK_RSET" ] && printf 'review_set: %s\n' "$GROK_RSET"
     [ -n "${GROK_DISPATCH:-}" ] && printf 'dispatch: %s\n' "$GROK_DISPATCH"
+    [ -n "${GROK_AID:-}" ] && printf 'artifact_id: %s\n' "$GROK_AID"
+    [ -n "${GROK_HEAD:-}" ] && printf 'head_sha: %s\n' "$GROK_HEAD"
     [ -n "$verdict" ] && printf 'verdict: %s\n' "$verdict"
     printf -- '---\n\n'
     if [ -n "${vline:-}" ] && [ "${vcount:-0}" -eq 1 ]; then

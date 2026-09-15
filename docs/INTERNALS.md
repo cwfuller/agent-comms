@@ -214,12 +214,13 @@ documented, the operator applies it, and the runner honors the selection.
 
 The parent stamps the ENTIRE
 reply envelope itself (type/from/workspace/message_id/thread/in-reply-to/workflow/
-phase/round/max-rounds/verdict) from captured inbound values — the child's output is
+phase/round/max-rounds/artifact_id/head_sha/verdict) from captured inbound values — the child's output is
 body only — reviews additionally lead with a `VERDICT:` line, which is parsed ONLY
 for review-feedback turns (on a consult, a stray verdict line is preserved as body
 text, never a verdict field) — so no model-authored frontmatter is ever persisted
-and a prompt-injected reply cannot re-thread, impersonate, or archive another turn's
-inbound. Bypass modes (`always-approve`/`--yolo`/`bypassPermissions`) and writable
+and a prompt-injected reply cannot re-thread, impersonate, retarget the artifact, or archive another turn's
+inbound. `send` is the coordinator door: a review-feedback whose `artifact_id`/`head_sha`
+disagree with the request is refused, and a reply is never snapshotted into a new artifact. Bypass modes (`always-approve`/`--yolo`/`bypassPermissions`) and writable
 sandboxes (`off`/`devbox`/`workspace`) are refused outright in loop turns, in both
 token forms, after shell-splitting the extra args. **Known carve-out:** the
 `read-only` profile keeps OS temp directories writable (`/tmp`, `/var/tmp`, macOS

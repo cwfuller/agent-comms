@@ -358,7 +358,7 @@ verb wired to the memory tracker.** That entrypoint — not a second orchestrato
 "one skill-wrappable command that runs a loop" real. Step 5's hard gate (trackerless local mode)
 is closer than the July note implies.
 
-### Open: `ask` reports a FALSE FAILURE after a successful consult (2026-09-02)
+### Closed: `ask` reports a FALSE FAILURE after a successful consult (2026-09-02)
 
 **Observed live.** `comms.sh ask --from claude --to codex --wait --file q.txt` completed the
 consult — `completed: codex finished; the reply is in the inbox`, and `reply.md` is present in the
@@ -371,25 +371,17 @@ empty inbox); fix and retry 'comms.sh send --to codex <file>'
 ```
 
 **Mechanism.** The ACP consult path ARCHIVES the outbound (confirmed: the message is in
-`.comms/archive/`, absent from `.comms/to-codex/`). `cmd_ask` then delegates to `cmd_send`, which
-later reads the outbound AT ITS ORIGINAL PATH to classify the message —
-`frontmatter_field "$file" workflow`. The path no longer exists, `awk` fails, the field comes back
-empty, and the outcome falls through to `manual` / "NOT spawned … fix and retry".
+`.comms/archive/`, absent from `.comms/to-codex/`). `cmd_send` classified `--wait` success from
+deliver stdout that did not match `spawned`/`delivered`/…, so outcome stayed `manual`. It then
+read the outbound AT ITS ORIGINAL PATH (`state_update_from` / `frontmatter_field`) — `awk` failed,
+and the RESULT line told the caller to retry a turn that had already finished.
 
-**Why it matters more than a cosmetic wart.** The consult SUCCEEDED. An operator — or an agent
-driving `ask` — is told the peer was never spawned and to retry, which would pay for a second
-turn that is not needed. It is the same success/failure-signal mismatch class as the S4-2 blocker
-(`broker_stamp` copies the reply before `send`, so a dead send still looked answered) and the
-S4-4 `RESULT: manual … fix and retry` after a refused transport.
-
-**Shape of the fix (not done here).** Classify BEFORE delivery/archiving, or re-resolve the
-message the way `leg_reply_candidates` already does ("archive stays first so ordering semantics
-are identical"). Either way the rule is: never read a path whose owner may have moved it.
-
-**Why it is its own increment.** This is the `send`/report path, which produced three subtle
-defects in one day (a `die` swallowed through nested command substitution on bash 3.2; pickup
-resolved after transport; a fix-and-retry lie on a refused transport). It gets its own branch and
-its own review round rather than riding along on unrelated work.
+**Fix.** Classify `completed:` (and a foreground-turn failure) from deliver stdout; emit
+`RESULT: completed` (never "NOT spawned") on a successful `--wait`. Re-resolve the outbound
+through archive before any post-delivery read (`resolve_message_path`; archive first, same
+order as `leg_reply_candidates`). Capture `cmd_verdict` before deliver so a moved reply file
+cannot blank the acceptance status. Shipped with reply-identity inheritance: a review
+reply copies/inherits the request's `artifact_id`/`head_sha` and `send` refuses a mismatch.
 
 ### Open after S4-2: an UNSTAMPED review still reads the live tree (2026-09-01)
 

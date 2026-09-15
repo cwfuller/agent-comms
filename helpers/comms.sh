@@ -38,7 +38,9 @@
 #   send --to <agent> <file> [--wait] [--archive-inbound <file>]
 #                               --wait runs the peer turn in the FOREGROUND instead of
 #                               detaching — required inside sandboxes that reap the
-#                               children of a finished shell command.
+#                               children of a finished shell command. Success is
+#                               RESULT: completed (never "NOT spawned"). A review
+#                               reply inherits the request's artifact_id/head_sha.
 #                               validate, deliver, update thread state, then archive inbound
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
@@ -474,6 +476,46 @@ frontmatter_field() {
     NR==1 && $0=="---" {inFM=1; next}
     inFM && $0=="---" {exit}
     inFM && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print; exit}' "$1"
+}
+
+# resolve_message_path <path>
+# The file at <path>, or its archive copy when a successful turn has already
+# moved it. `send --wait` archives the outbound before cmd_send returns from
+# deliver; later readers must not open a path whose owner may have moved it
+# (ROADMAP 2026-09-02: awk "can't open file" then RESULT: NOT spawned after a
+# successful consult). Archive first matches leg_reply_candidates.
+resolve_message_path() {
+  local p="${1:-}" root base
+  [ -n "$p" ] || return 1
+  [ -f "$p" ] && { printf '%s' "$p"; return 0; }
+  base="$(basename "$p")"
+  root="$(cmd_root)"
+  [ -f "$root/archive/$base" ] && { printf '%s' "$root/archive/$base"; return 0; }
+  return 1
+}
+
+# find_message_by_id <message_id>
+# Locate a message by its frontmatter message_id (or `<id>.md` basename).
+# Archive first, then every inbox — same order as leg_reply_candidates, so a
+# just-archived request is what a reply bind sees.
+find_message_by_id() {
+  local mid="${1:-}" root d f
+  [ -n "$mid" ] || return 1
+  root="$(cmd_root)"
+  for d in "$root/archive" "$root"/to-*; do
+    [ -d "$d" ] || continue
+    if [ -f "$d/${mid}.md" ]; then
+      printf '%s' "$d/${mid}.md"
+      return 0
+    fi
+    for f in "$d"/*.md; do
+      [ -f "$f" ] || continue
+      [ "$(frontmatter_field "$f" message_id)" = "$mid" ] || continue
+      printf '%s' "$f"
+      return 0
+    done
+  done
+  return 1
 }
 
 file_mtime() {
@@ -4949,7 +4991,48 @@ cmd_send() {
       printf '%s' "$a"
     fi
   }
-  if [ -n "$(frontmatter_field "$file" workflow)" ]; then
+  # bind_reply_identity <reply> <inbound-or-empty>
+  # A review reply is the SAME artifact as the request it answers. broker_stamp
+  # copies the pair onto the envelope; this is the coordinator door that cannot
+  # be bypassed: inherit when the reply omitted them, refuse when they disagree.
+  # Never snapshot a reply — minting a new artifact here is how round 2 silently
+  # reviewed a newer SHA than the request. (field report, 2026-09-15.)
+  bind_reply_identity() {
+    local rf="$1" inbound="${2:-}" req="" irt req_aid req_sha rep_aid rep_sha
+    if [ -n "$inbound" ] && [ -f "$inbound" ]; then
+      req="$inbound"
+    else
+      irt="$(frontmatter_field "$rf" in-reply-to)"
+      [ -n "$irt" ] || return 0
+      req="$(find_message_by_id "$irt" || true)"
+    fi
+    [ -n "$req" ] && [ -f "$req" ] || return 0
+    req_aid="$(frontmatter_field "$req" artifact_id)"
+    req_sha="$(frontmatter_field "$req" head_sha)"
+    IFS= read -r rep_aid < <(fm_field_lines "$rf" artifact_id) || rep_aid=""
+    IFS= read -r rep_sha < <(fm_field_lines "$rf" head_sha) || rep_sha=""
+    if [ -n "$req_aid" ] && [ -n "$rep_aid" ] && [ "$req_aid" != "$rep_aid" ]; then
+      die "send: reply artifact_id '$(clip "$rep_aid")' does not match request '$(clip "$req_aid")' — a review reply cannot retarget the artifact"
+    fi
+    if [ -n "$req_sha" ] && [ -n "$rep_sha" ] && [ "$req_sha" != "$rep_sha" ]; then
+      die "send: reply head_sha '$(clip "$rep_sha")' does not match request '$(clip "$req_sha")' — a review reply cannot retarget the artifact base"
+    fi
+    if [ -n "$req_aid" ]; then
+      stamp_head_sha "$rf" "$req_aid" "${req_sha:-}"
+    elif [ -n "$req_sha" ] && [ -z "$rep_sha" ]; then
+      stamp_head_sha "$rf" "" "$req_sha"
+    fi
+  }
+  local send_type
+  send_type="$(frontmatter_field "$file" type)"
+  if [ "$send_type" = "review-feedback" ]; then
+    bind_reply_identity "$file" "$archive_inbound"
+    # A reply's identity is the request's, including mount-style pairs where
+    # artifact_id is the reviewed commit and head_sha is its base — that is NOT
+    # the snapshot invariant (artifact_base == head_sha) that the resend path
+    # enforces on review-requests. Re-validating here refused every warm-mounted
+    # grok turn after persistence.
+  elif [ -n "$(frontmatter_field "$file" workflow)" ]; then
     local send_aid send_base existing_aid existing_sha aid_ct
     # Fresh-vs-resend is decided by PHYSICAL artifact_id lines: a blank first
     # value made frontmatter_field return empty, sending a pinned message down
@@ -4960,6 +5043,10 @@ cmd_send() {
     # file already avoids that shape in cmd_list); read the first line directly.
     IFS= read -r existing_aid < <(fm_field_lines "$file" artifact_id) || existing_aid=""
     if [ "${aid_ct:-0}" -eq 0 ]; then
+      # A reply must inherit, never mint. The fresh-snapshot path is for the
+      # request that OPENS a loop; running it on review-feedback was the identity
+      # bug (a newer SHA than the request, after the author committed).
+      if [ "$send_type" = "review-request" ]; then
       # Fresh dispatch: retain the tree and stamp the WHOLE git identity from the
       # one snapshot operation — artifact_id names the content, head_sha the base
       # it applies to; same object, so they cannot desync, and any hand-typed
@@ -4970,8 +5057,8 @@ cmd_send() {
       send_pair="$(cmd_snapshot create --with-base 2>/dev/null || true)"
   # Same synthetic-snapshot warning as panel dispatch: a fresh unpinned workflow send snapshots
   # too, so reviewers read uncommitted work here as well. Deliberately STDERR ONLY — the
-  # `RESULT:` line is a parsed contract (`tail -1`) and the open `ask` false-failure already
-  # mis-derives outcomes from captured stdout on this path. Scoped as grok put it: "do not touch
+  # `RESULT:` line is a parsed contract (`tail -1`) and the closed `ask` false-failure used to
+  # mis-derive outcomes from captured stdout on this path. Scoped as grok put it: "do not touch
   # RESULT:", not "do not warn". (grok, staging-safety r3.)
   if [ -n "$send_pair" ]; then
     _sp_aid="${send_pair%%	*}"; _sp_base="${send_pair#*	}"
@@ -4989,6 +5076,7 @@ cmd_send() {
         # implies a pinned one — the precise failure the snapshot exists to
         # remove, and invisible afterwards. (codex, transport-flip round 4.)
         die "send: could not retain the artifact under review — refusing to dispatch a loop against an unpinned tree (is this a git repo with a commit?)"
+      fi
       fi
     else
       # RESEND of an already-pinned message: the artifact is preserved, but its
@@ -5046,9 +5134,13 @@ cmd_send() {
     # SEND time — including OVERWRITING a driver-typed or stale-template value;
     # "when absent" was a hole for leftover hand-typed consults. (codex + grok,
     # stamped-authorities round 1.)
-    local live_sha
-    live_sha="$(git -C "$(git rev-parse --show-toplevel 2>/dev/null || main_repo_root)" rev-parse -q --verify HEAD 2>/dev/null || true)"
-    [ -n "$live_sha" ] && stamp_head_sha "$file" "" "$live_sha"
+    # A review-feedback without `workflow:` is still a reply: do not overwrite
+    # inherited identity with live HEAD.
+    if [ "$send_type" != "review-feedback" ]; then
+      local live_sha
+      live_sha="$(git -C "$(git rev-parse --show-toplevel 2>/dev/null || main_repo_root)" rev-parse -q --verify HEAD 2>/dev/null || true)"
+      [ -n "$live_sha" ] && stamp_head_sha "$file" "" "$live_sha"
+    fi
   fi
 
   # Atomicity guard: never deliver or archive on a malformed outbound message.
@@ -5062,7 +5154,7 @@ cmd_send() {
   # r1.) `request_id` is what binds a reply to the attempt it answers — a panel retry
   # reuses set+thread+round, so without it a stale acceptance reads as the new leg
   # answering. (codex + grok, plan r1.)
-  local ev_type ev_thread ev_round ev_set ev_dispatch ev_aid ev_mid ev_agent ev_reqid
+  local ev_type ev_thread ev_round ev_set ev_dispatch ev_aid ev_mid ev_agent ev_reqid ev_verdict=""
   ev_type="$(frontmatter_field "$file" type)"
   ev_thread="$(frontmatter_field "$file" thread)"
   ev_round="$(frontmatter_field "$file" round)"
@@ -5071,7 +5163,8 @@ cmd_send() {
   ev_aid="$(frontmatter_field "$file" artifact_id)"
   ev_mid="$(frontmatter_field "$file" message_id)"
   case "$ev_type" in
-    review-feedback) ev_agent="$(frontmatter_field "$file" from)"; ev_reqid="$(frontmatter_field "$file" in-reply-to)" ;;
+    review-feedback) ev_agent="$(frontmatter_field "$file" from)"; ev_reqid="$(frontmatter_field "$file" in-reply-to)"
+                     ev_verdict="$(cmd_verdict "$file" 2>/dev/null || true)" ;;
     *)               ev_agent="$to"; ev_reqid="$ev_mid" ;;
   esac
   # FAIL-CLOSED, and only here. This is the one point where refusing changes nothing that
@@ -5152,7 +5245,12 @@ cmd_send() {
     # `blocked` is UNREACHABLE since S4-4: it meant "this session cannot reach the cmux
     # socket", and there is no socket. The enum keeps the value so ARCHIVED state written
     # before the removal still validates and still reads back; nothing produces it now.
+    *"foreground turn failed"*) outcome=failed ;;
     *FAILED*)             outcome=failed ;;
+    # --wait runs the turn in the foreground, so success is `completed:` not a spawn.
+    # Missing this token left outcome=manual and printed "NOT spawned … fix and retry"
+    # after a successful consult (ROADMAP 2026-09-02).
+    *"completed:"*)       outcome=completed ;;
     *"spawned runphase"*) outcome=spawned ;;
     *"already running"*)  outcome=spawned ;;   # headless re-send: turn already in flight
     *"HELD:"*)            outcome=held ;;      # thread paused by a hold marker
@@ -5161,7 +5259,15 @@ cmd_send() {
   # Record thread ground truth (workflow messages with a thread only). The
   # ||-context also suppresses errexit inside the function, so NO state failure
   # mode — mkdir, redirect, parse — can abort send before the inbound archive.
-  state_update_from "$file" "$outcome" "$rundir" "$to" || echo "warning: thread state not recorded" >&2
+  # --wait archives the outbound during deliver; re-resolve so we never awk a
+  # path whose owner has moved it.
+  local file_live=""
+  file_live="$(resolve_message_path "$file" || true)"
+  if [ -n "$file_live" ]; then
+    state_update_from "$file_live" "$outcome" "$rundir" "$to" || echo "warning: thread state not recorded" >&2
+  else
+    echo "warning: outbound '$(clip "$file")' is gone after delivery and could not be re-resolved in archive — thread state not recorded" >&2
+  fi
   # The OUTCOME half of the pair. TWO events, not one: a `request-persisted` with no
   # `request-dispatched` after it names the turn that never got out the door — a wedged
   # acpx is a real failure mode — which a single post-delivery event could only report as
@@ -5175,7 +5281,7 @@ cmd_send() {
   local ev_kind ev_status
   case "$ev_type" in
     review-request)  ev_kind=request-dispatched; ev_status="$outcome" ;;
-    review-feedback) ev_kind=reply-accepted;     ev_status="$(cmd_verdict "$file" 2>/dev/null || true)" ;;
+    review-feedback) ev_kind=reply-accepted;     ev_status="$ev_verdict" ;;
     *)               ev_kind=message-dispatched; ev_status="$outcome" ;;
   esac
   if ! cmd_events append --kind "$ev_kind" --set "$ev_set" --dispatch "$ev_dispatch" --thread "$ev_thread" \
@@ -5217,6 +5323,7 @@ cmd_send() {
     # "already running" also lands here but carries no via= — an unknown route prints no
     # parenthetical at all. Naming a route we did not observe is the same defect in a new spot.
     spawned)   echo "RESULT: spawned${route:+ ($route)} — a peer turn is running detached; the reply lands in the inbox when it exits. Await it with the runphase.sh command printed above, then read the reply." ;;
+    completed) echo "RESULT: completed — $to finished; the reply is in the inbox" ;;
     held)      echo "RESULT: held — the thread is paused by a hold marker; nothing was spawned. Release with 'runphase.sh release <thread>', then RE-SEND ('comms.sh send --to $to <file>') — a bare deliver would spawn the turn but leave this thread's state stuck on 'held', blinding status and the stalled watchdog." ;;
     pickup)
       # Text deliberately starts "manual —" for the peers' expectations: the

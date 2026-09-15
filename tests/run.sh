@@ -2181,6 +2181,25 @@ RFM="$WORK/ma-legfm"; mkdir -p "$RFM"
 grep -q '^in-reply-to: '"${MA_WS}"'_2026-08-20T09-00-00_review-req-1$' "$REPLY1" \
   && grep -q '^workflow: auto-full$' "$REPLY1" && grep -q '^round: 1$' "$REPLY1" \
   && ok "stamped envelope binds the reply to the inbound turn" || fail "envelope-binding assertion"
+# Identity copy is a live broker_stamp path, on a request send already pinned. Do not
+# stamp MA_MSG itself: that mounts every grok-stub leg and drops the unmounted
+# inspection-contract prompt.
+MA_PIN="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-58-00_pin-id-1.md"
+sed -e 's/^thread: ma-arc-1$/thread: ma-arc-pin/' \
+    -e "s|^message_id: .*|message_id: ${MA_WS}_2026-08-20T09-58-00_pin-id-1|" \
+  "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_PIN"
+run_ma send --to grok "$MA_PIN" >/dev/null 2>&1 || true
+MA_PIN_AID="$(sed -n '2,/^---$/p' "$MA_PIN" | grep -m1 '^artifact_id:' | sed 's/^artifact_id: //')"
+MA_PIN_SHA="$(sed -n '2,/^---$/p' "$MA_PIN" | grep -m1 '^head_sha:' | sed 's/^head_sha: //')"
+RPIN="$WORK/ma-leg-pin"; mkdir -p "$RPIN"
+GROK_STUB_VERDICT=APPROVE run_grok_leg "$MA_PIN" "$RPIN" >/dev/null 2>&1
+REPLY_PIN="$(find "$MA_FIX/.comms/to-claude" -type f -name '*grok-reply*' -newer "$RPIN/prompt.md" | head -1)"
+[ -n "$MA_PIN_AID" ] && [ -n "$REPLY_PIN" ] && grep -q "^artifact_id: $MA_PIN_AID$" "$REPLY_PIN" \
+  && ok "broker_stamp copies the request's artifact_id onto the reply" \
+  || fail "broker_stamp artifact_id (aid=$MA_PIN_AID reply=$(grep '^artifact_id:' "$REPLY_PIN" 2>/dev/null))"
+[ -n "$MA_PIN_SHA" ] && [ -n "$REPLY_PIN" ] && grep -q "^head_sha: $MA_PIN_SHA$" "$REPLY_PIN" \
+  && ok "broker_stamp copies the request's head_sha onto the reply" \
+  || fail "broker_stamp head_sha (sha=$MA_PIN_SHA reply=$(grep '^head_sha:' "$REPLY_PIN" 2>/dev/null))"
 
 section "runphase: the parent-brokered prompt is provider-neutral"
 # The broker gate is `provider = grok OR via = acp` (runphase.sh), so this prompt is built for
@@ -2799,6 +2818,92 @@ SAEOF
 run_sa send --to codex "$SA_Q" >/dev/null 2>&1
 grep -q "^head_sha: $SA_HEAD$" "$SA_Q" \
   && ok "consult head_sha is helper-stamped at send time" || fail "consult head_sha stamp"
+
+# A review reply inherits the request's artifact; it must never mint a new one.
+SA_REP="$SA_FIX/.comms/to-claude/${SA_WS}_2026-08-26T14-20-00_reply-inherit.md"
+cat > "$SA_REP" <<SAEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-26T19:20:00Z
+workspace: $SA_WS
+message_id: ${SA_WS}_2026-08-26T14-20-00_reply-inherit
+thread: sa-arc-1
+in-reply-to: ${SA_WS}_2026-08-26T14-00-00_auto-1
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 5
+verdict: APPROVE
+---
+
+## Findings
+
+### Blocking
+- None.
+SAEOF
+run_sa send --to claude "$SA_REP" >/dev/null 2>&1
+SA_REP_AID="$(sed -n '2,/^---$/p' "$SA_REP" | grep -m1 '^artifact_id:' | sed 's/^artifact_id: //')"
+SA_REP_SHA="$(sed -n '2,/^---$/p' "$SA_REP" | grep -m1 '^head_sha:' | sed 's/^head_sha: //')"
+[ "$SA_REP_AID" = "$SA_MSG_AID" ] && [ "$SA_REP_SHA" = "$SA_MSG_SHA" ] \
+  && ok "an unpinned review reply inherits the request's artifact_id/head_sha" \
+  || fail "reply inherit (aid=$SA_REP_AID want=$SA_MSG_AID sha=$SA_REP_SHA want=$SA_MSG_SHA)"
+SA_MIS="$SA_FIX/.comms/to-claude/${SA_WS}_2026-08-26T14-21-00_reply-mismatch.md"
+cat > "$SA_MIS" <<SAEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-26T19:21:00Z
+workspace: $SA_WS
+message_id: ${SA_WS}_2026-08-26T14-21-00_reply-mismatch
+thread: sa-arc-1
+in-reply-to: ${SA_WS}_2026-08-26T14-00-00_auto-1
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 5
+artifact_id: ffffffffffffffffffffffffffffffffffffffff
+head_sha: $SA_MSG_SHA
+verdict: APPROVE
+---
+
+## Findings
+
+### Blocking
+- None.
+SAEOF
+SA_MIS_OUT="$(run_sa send --to claude "$SA_MIS" 2>&1)" && sa_mis_rc=0 || sa_mis_rc=$?
+[ "$sa_mis_rc" -ne 0 ] && printf '%s\n' "$SA_MIS_OUT" | grep -q 'cannot retarget the artifact' \
+  && ok "a review reply whose artifact_id disagrees with the request is refused" \
+  || fail "mismatch reply (rc=$sa_mis_rc got: $(printf '%.120s' "$SA_MIS_OUT"))"
+SA_ORPH="$SA_FIX/.comms/to-claude/${SA_WS}_2026-08-26T14-22-00_reply-orphan.md"
+cat > "$SA_ORPH" <<SAEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-26T19:22:00Z
+workspace: $SA_WS
+message_id: ${SA_WS}_2026-08-26T14-22-00_reply-orphan
+thread: sa-orphan
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 5
+verdict: APPROVE
+---
+
+## Findings
+
+### Blocking
+- None.
+SAEOF
+run_sa send --to claude "$SA_ORPH" >/dev/null 2>&1 || true
+grep -q '^artifact_id:' "$SA_ORPH" \
+  && fail "an orphan review reply was snapshotted into a new artifact" \
+  || ok "an orphan review reply is not snapshotted — replies never mint an artifact"
+# These replies live in to-claude under THIS workspace; leave them and list --as claude
+# succeeds instead of diagnosing the fwh-platform fixture below.
+rm -f "$SA_REP" "$SA_MIS" "$SA_ORPH"
 
 # workspace pin: an explicit set beats every inferred identity and repairs listing
 SA_OTHER="$SA_FIX/.comms/to-claude/fwh-platform_2026-08-26T14-10-00_reply-1.md"
@@ -6522,6 +6627,69 @@ AKF2="$(find "$AK/.comms/to-codex" -name '*ask-grok-to-codex*' -type f | head -1
 # command that spawned it ends, which is normal inside an agent sandbox.
 grep -q -- '--wait) COMMS_WAIT=1' "$COMMS" && ok "send accepts --wait" || fail "send --wait flag"
 grep -q 'in the foreground (no detach)' "$COMMS" && ok "--wait runs the turn in the foreground" || fail "--wait foreground path"
+# Behavioral: a successful --wait must not report NOT spawned after the outbound is
+# archived (the 2026-09-02 false-failure). Stub runphase next to a copied helper so
+# the wait path is the real cmd_send/deliver_headless, not a grep of the source.
+WAIT_H="$WORK/wait-helpers"; mkdir -p "$WAIT_H"
+cp "$COMMS" "$WAIT_H/comms.sh"; chmod +x "$WAIT_H/comms.sh"
+cat > "$WAIT_H/runphase.sh" <<'WAITSTUB'
+#!/bin/bash
+set -euo pipefail
+msg=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --message) shift; msg="${1:-}" ;;
+  esac
+  shift || true
+done
+if [ -n "$msg" ] && [ -f "$msg" ] && [ "${WAIT_STUB_RC:-0}" = "0" ]; then
+  dest="$(cd "$(dirname "$msg")/.." && pwd)/archive"
+  mkdir -p "$dest"
+  mv "$msg" "$dest/"
+fi
+exit "${WAIT_STUB_RC:-0}"
+WAITSTUB
+chmod +x "$WAIT_H/runphase.sh"
+WAIT_R="$WORK/wait-repo"; mkdir -p "$WAIT_R"; WAIT_R="$(cd "$WAIT_R" && pwd -P)"
+git -C "$WAIT_R" init -q -b main
+git -C "$WAIT_R" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$WAIT_R/.comms/to-grok" "$WAIT_R/.comms/archive"
+printf 'agents = claude codex grok\ndefault-target = grok\n' > "$WAIT_R/.comms/config"
+WAIT_WS="$(cd "$WAIT_R" && "$WAIT_H/comms.sh" workspace)"
+WAIT_MSG="$WAIT_R/.comms/to-grok/${WAIT_WS}_2026-09-02T12-00-00_wait-ask.md"
+cat > "$WAIT_MSG" <<WAITEOF
+---
+type: question
+from: claude
+timestamp: 2026-09-02T12:00:00Z
+workspace: $WAIT_WS
+message_id: ${WAIT_WS}_2026-09-02T12-00-00_wait-ask
+---
+
+## Question
+is wait status truthful
+WAITEOF
+WAIT_OUT="$(cd "$WAIT_R" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE COMMS_DELIVERY=headless "$WAIT_H/comms.sh" send --wait --to grok "$WAIT_MSG" 2>&1)" || true
+WAIT_TAIL="$(printf '%s\n' "$WAIT_OUT" | tail -1)"
+case "$WAIT_TAIL" in
+  "RESULT: completed"*) ok "send --wait success is RESULT: completed, not a spawn" ;;
+  *) fail "send --wait success RESULT (got: $WAIT_TAIL)" ;;
+esac
+printf '%s\n' "$WAIT_OUT" | grep -qi 'NOT spawned' \
+  && fail "send --wait success still says NOT spawned" || ok "send --wait success does not claim the peer failed to spawn"
+printf '%s\n' "$WAIT_OUT" | grep -qi "can't open file" \
+  && fail "send --wait still awks the archived outbound path" || ok "send --wait re-resolves a moved outbound (no awk on a gone path)"
+WAIT_MSG2="$WAIT_R/.comms/to-grok/${WAIT_WS}_2026-09-02T12-01-00_wait-fail.md"
+sed -e 's/wait-ask/wait-fail/g' -e 's/is wait status truthful/fail please/' "$WAIT_R/.comms/archive/$(basename "$WAIT_MSG")" > "$WAIT_MSG2" \
+  || sed -e 's/wait-ask/wait-fail/g' "$WAIT_MSG" > "$WAIT_MSG2"
+WAIT_FAIL="$(cd "$WAIT_R" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE COMMS_DELIVERY=headless WAIT_STUB_RC=1 "$WAIT_H/comms.sh" send --wait --to grok "$WAIT_MSG2" 2>&1)" || true
+WAIT_FAIL_TAIL="$(printf '%s\n' "$WAIT_FAIL" | tail -1)"
+case "$WAIT_FAIL_TAIL" in
+  "RESULT: failed"*) ok "send --wait failure is RESULT: failed, not NOT spawned" ;;
+  *) fail "send --wait failure RESULT (got: $WAIT_FAIL_TAIL)" ;;
+esac
+printf '%s\n' "$WAIT_FAIL" | grep -qi 'NOT spawned' \
+  && fail "send --wait failure still says NOT spawned" || ok "send --wait failure does not claim the peer was never spawned"
 # acpx launch is asked for, never guessed twice
 grep -q 'acpx_launcher' "$REPO/helpers/acp.sh" && ok "acp.sh owns how acpx is launched" || fail "acpx launcher"
 grep -q 'ACPX_BIN' "$REPO/helpers/acp.sh" && ok "an installed acpx binary can replace npx entirely" || fail "ACPX_BIN support"

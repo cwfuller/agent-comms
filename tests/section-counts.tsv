@@ -23,7 +23,7 @@ compose: cross-severity corroboration	13
 loopspec: conformance fixtures	1
 multi-agent: registry contract	15
 multi-agent: sender enforcement + grok inbox round-trip	2
-multi-agent: grok stub + full-arc runphase legs	100
+multi-agent: grok stub + full-arc runphase legs	102
 runphase: the parent-brokered prompt is provider-neutral	20
 multi-agent: grok arg refusals	13
 multi-agent: archive-owner authority (comms.sh send)	5
@@ -31,7 +31,7 @@ multi-agent: template source contracts	21
 broker: a missing VERDICT line is DERIVED, not discarded	3
 one placeholder rule: broker derivation and findings/compose cannot disagree	39
 findings are LIST ITEMS in any markdown form (field bug, 2026-08-26)	16
-stamped authorities: workspace pin (#3) + send-time git metadata (#6)	37
+stamped authorities: workspace pin (#3) + send-time git metadata (#6)	40
 friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	45
@@ -55,7 +55,7 @@ grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims)	4
 comms.sh: transport selection (no pane must not strand a consult)	49
 panel: N parallel 2-party legs over ONE artifact	72
 templates: the loop closes its thread state on the terminal approval	2
-ask: the driver-neutral consult verb	23
+ask: the driver-neutral consult verb	28
 review turns may read history, never publish or rewrite it	44
 runphase: warm ACP mounts live at a stable per-(thread,agent) path	47
 presence & worktrees: advisory coordination (plan presence-worktrees-15135)	117
