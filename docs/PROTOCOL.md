@@ -169,8 +169,10 @@ instead of silently reviewing unrelated contents.
 A `review-feedback` reply is the same artifact as the request it answers. The parent
 copies `artifact_id`/`head_sha` onto the stamped envelope; `send` inherits them from
 `--archive-inbound` or `in-reply-to` when the reply omitted them, and refuses a
-mismatch. A reply is never snapshotted into a new artifact — that would make round 2
-review a newer SHA than the request the moment the author committed.
+mismatch. `--archive-inbound` and `in-reply-to` must name the same request; an
+identity-bearing reply whose request cannot be resolved is refused rather than
+skipping validation. A reply is never snapshotted into a new artifact — that would
+make round 2 review a newer SHA than the request the moment the author committed.
 
 **Push safety — create worktrees on their own branch, never on `main`.** The common
 footgun: an agent working in a worktree runs `git push` and it lands on `main` instead of

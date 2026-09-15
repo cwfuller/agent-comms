@@ -2901,9 +2901,83 @@ run_sa send --to claude "$SA_ORPH" >/dev/null 2>&1 || true
 grep -q '^artifact_id:' "$SA_ORPH" \
   && fail "an orphan review reply was snapshotted into a new artifact" \
   || ok "an orphan review reply is not snapshotted — replies never mint an artifact"
+SA_ORPH_HEAD="$SA_FIX/.comms/to-claude/${SA_WS}_2026-08-26T14-23-00_reply-orphan-head.md"
+cat > "$SA_ORPH_HEAD" <<SAEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-26T19:23:00Z
+workspace: $SA_WS
+message_id: ${SA_WS}_2026-08-26T14-23-00_reply-orphan-head
+thread: sa-orphan
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 5
+artifact_id: HEAD
+verdict: APPROVE
+---
+
+## Findings
+
+### Blocking
+- None.
+SAEOF
+SA_OH_OUT="$(run_sa send --to claude "$SA_ORPH_HEAD" 2>&1)" && sa_oh_rc=0 || sa_oh_rc=$?
+[ "$sa_oh_rc" -ne 0 ] && printf '%s\n' "$SA_OH_OUT" | grep -q 'unverifiable pin' \
+  && ok "an orphan review reply carrying artifact identity is refused" \
+  || fail "orphan-with-identity (rc=$sa_oh_rc got: $(printf '%.120s' "$SA_OH_OUT"))"
+# --archive-inbound B + in-reply-to A must not bind B's artifact onto A's reply.
+SA_B="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T14-24-00_req-b.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T14-24-00_req-b/' \
+    -e 's/^thread: sa-arc-1$/thread: sa-arc-b/' "$SA_MSG" > "$SA_B"
+run_sa send --to codex "$SA_B" >/dev/null 2>&1 || true
+SA_XIN="$SA_FIX/.comms/to-claude/${SA_WS}_2026-08-26T14-25-00_reply-cross.md"
+cat > "$SA_XIN" <<SAEOF
+---
+type: review-feedback
+from: codex
+timestamp: 2026-08-26T19:25:00Z
+workspace: $SA_WS
+message_id: ${SA_WS}_2026-08-26T14-25-00_reply-cross
+thread: sa-arc-1
+in-reply-to: ${SA_WS}_2026-08-26T14-00-00_auto-1
+workflow: auto
+phase: implement
+round: 1
+max-rounds: 5
+verdict: APPROVE
+---
+
+## Findings
+
+### Blocking
+- None.
+SAEOF
+SA_XIN_OUT="$(run_sa send --to claude --archive-inbound "$SA_B" "$SA_XIN" 2>&1)" && sa_xin_rc=0 || sa_xin_rc=$?
+[ "$sa_xin_rc" -ne 0 ] && printf '%s\n' "$SA_XIN_OUT" | grep -q 'different request' \
+  && ok "archive-inbound of B cannot bind a reply whose in-reply-to is A" \
+  || fail "cross-bind (rc=$sa_xin_rc got: $(printf '%.120s' "$SA_XIN_OUT"))"
+# Already-archived inbound still binds (resolve_message_path).
+SA_C="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T14-26-00_req-c.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T14-26-00_req-c/' \
+    -e 's/^thread: sa-arc-1$/thread: sa-arc-c/' "$SA_MSG" > "$SA_C"
+run_sa send --to codex "$SA_C" >/dev/null 2>&1 || true
+SA_C_AID="$(sed -n '2,/^---$/p' "$SA_C" | grep -m1 '^artifact_id:' | sed 's/^artifact_id: //')"
+mkdir -p "$SA_FIX/.comms/archive"
+mv "$SA_C" "$SA_FIX/.comms/archive/"
+SA_ARCH="$SA_FIX/.comms/to-claude/${SA_WS}_2026-08-26T14-27-00_reply-arch.md"
+sed -e 's/^message_id: .*/message_id: '"${SA_WS}"'_2026-08-26T14-27-00_reply-arch/' \
+    -e 's/^in-reply-to: .*/in-reply-to: '"${SA_WS}"'_2026-08-26T14-26-00_req-c/' \
+    -e 's/^thread: sa-arc-1$/thread: sa-arc-c/' "$SA_XIN" > "$SA_ARCH"
+run_sa send --to claude --archive-inbound "$SA_C" "$SA_ARCH" >/dev/null 2>&1
+SA_ARCH_AID="$(sed -n '2,/^---$/p' "$SA_ARCH" | grep -m1 '^artifact_id:' | sed 's/^artifact_id: //')"
+[ -n "$SA_C_AID" ] && [ "$SA_ARCH_AID" = "$SA_C_AID" ] \
+  && ok "an already-archived --archive-inbound still binds the reply identity" \
+  || fail "archived inbound bind (got=$SA_ARCH_AID want=$SA_C_AID)"
 # These replies live in to-claude under THIS workspace; leave them and list --as claude
 # succeeds instead of diagnosing the fwh-platform fixture below.
-rm -f "$SA_REP" "$SA_MIS" "$SA_ORPH"
+rm -f "$SA_REP" "$SA_MIS" "$SA_ORPH" "$SA_ORPH_HEAD" "$SA_XIN" "$SA_ARCH" "$SA_B" "$SA_FIX/.comms/archive/$(basename "$SA_C")"
 
 # workspace pin: an explicit set beats every inferred identity and repairs listing
 SA_OTHER="$SA_FIX/.comms/to-claude/fwh-platform_2026-08-26T14-10-00_reply-1.md"

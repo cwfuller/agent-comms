@@ -4998,15 +4998,35 @@ cmd_send() {
   # Never snapshot a reply — minting a new artifact here is how round 2 silently
   # reviewed a newer SHA than the request. (field report, 2026-09-15.)
   bind_reply_identity() {
-    local rf="$1" inbound="${2:-}" req="" irt req_aid req_sha rep_aid rep_sha
-    if [ -n "$inbound" ] && [ -f "$inbound" ]; then
-      req="$inbound"
-    else
-      irt="$(frontmatter_field "$rf" in-reply-to)"
-      [ -n "$irt" ] || return 0
+    local rf="$1" inbound="${2:-}" req="" irt inbound_id req_aid req_sha rep_aid rep_sha
+    local aid_ct sha_ct
+    irt="$(frontmatter_field "$rf" in-reply-to)"
+    if [ -n "$inbound" ]; then
+      # --archive-inbound may already have been moved; never silently fall through
+      # to a different in-reply-to. (codex, identity r1, blocking.)
+      req="$(resolve_message_path "$inbound" || true)"
+      [ -n "$req" ] && [ -f "$req" ] \
+        || die "send: --archive-inbound '$(clip "$inbound")' is gone and could not be re-resolved in archive — refusing to bind a reply against a missing request"
+      inbound_id="$(frontmatter_field "$req" message_id)"
+      [ -n "$inbound_id" ] || inbound_id="$(basename "$req" .md)"
+      if [ -n "$irt" ] && [ "$irt" != "$inbound_id" ]; then
+        die "send: --archive-inbound is '$(clip "$inbound_id")' but in-reply-to is '$(clip "$irt")' — refusing to bind a reply to a different request"
+      fi
+    elif [ -n "$irt" ]; then
       req="$(find_message_by_id "$irt" || true)"
     fi
-    [ -n "$req" ] && [ -f "$req" ] || return 0
+    if [ -z "$req" ] || [ ! -f "$req" ]; then
+      # No request to inherit from. An identity-FREE orphan must not mint (the
+      # snapshot skip below). An identity-BEARING one is unverifiable: previously
+      # the pinned-workflow path refused HEAD/phantoms; skipping resend on every
+      # review-feedback reopened that. (codex, identity r1, blocking.)
+      aid_ct="$(fm_field_lines "$rf" artifact_id | wc -l | tr -d ' ')"
+      sha_ct="$(fm_field_lines "$rf" head_sha | wc -l | tr -d ' ')"
+      if [ "${aid_ct:-0}" -gt 0 ] || [ "${sha_ct:-0}" -gt 0 ]; then
+        die "send: review reply carries artifact identity but the request it answers was not found — refusing an unverifiable pin"
+      fi
+      return 0
+    fi
     req_aid="$(frontmatter_field "$req" artifact_id)"
     req_sha="$(frontmatter_field "$req" head_sha)"
     IFS= read -r rep_aid < <(fm_field_lines "$rf" artifact_id) || rep_aid=""
