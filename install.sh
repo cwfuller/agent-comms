@@ -459,7 +459,7 @@ install_local_assets() {
   install_driver_commands \
     "$PROJECT_ROOT/.claude/commands" \
     "$PROJECT_ROOT/.grok/commands" \
-    "$PROJECT_ROOT/.codex/skills"
+    "$PROJECT_ROOT/.agents/skills"
   for f in $RETIRED_COMMANDS; do
     [ -f "$PROJECT_ROOT/.claude/commands/$f" ] && { rm -f "$PROJECT_ROOT/.claude/commands/$f"; echo "  removed retired command /${f%.md}"; }
     [ -f "$PROJECT_ROOT/.grok/commands/$f" ] && { rm -f "$PROJECT_ROOT/.grok/commands/$f"; echo "  removed retired Grok command /${f%.md}"; }
@@ -525,7 +525,7 @@ warn_local_shadowing() {
   for f in $CLAUDE_COMMANDS; do
     [ -f "$PROJECT_ROOT/.claude/commands/$f" ] && shadowed="$shadowed .claude/commands/$f"
     [ -f "$PROJECT_ROOT/.grok/commands/$f" ] && shadowed="$shadowed .grok/commands/$f"
-    [ -f "$PROJECT_ROOT/.codex/skills/${f%.md}/SKILL.md" ] && shadowed="$shadowed .codex/skills/${f%.md}"
+    [ -f "$PROJECT_ROOT/.agents/skills/${f%.md}/SKILL.md" ] && shadowed="$shadowed .agents/skills/${f%.md}"
   done
   for h in $HELPERS; do
     [ -f "$PROJECT_ROOT/.agent-comms/$h" ] && shadowed="$shadowed .agent-comms/$h"
@@ -855,7 +855,7 @@ note_local_pin() {
   echo ""
   echo "  note: project-local copies are pinned — they shadow any global install and"
   echo "  do NOT pick up global updates. Re-run with --scope=local to refresh them, or"
-  echo "  delete the .claude/commands/, .grok/commands/, .codex/skills/,"
+  echo "  delete the .claude/commands/, .grok/commands/, .agents/skills/,"
   echo "  .agents/loopspec-fragments/, and .agent-comms/ copies to fall back to global."
 }
 
@@ -884,11 +884,11 @@ echo ""
 echo "  done! installed:"
 case "$SCOPE" in
   local)
-    echo "    Project Claude/Grok/Codex: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
+    echo "    Project Claude: /auto  Grok: /local:auto  Codex: \$auto  (plus send-to-codex / read-from-codex)"
     ;;
   global)
     echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
-    echo "    Global Grok:   /auto, /ask, /clean-comms in $GROK_COMMANDS_DIR"
+    echo "    Global Grok:   /user:auto (bare /auto is Grok's permission-mode built-in) in $GROK_COMMANDS_DIR"
     echo "    Global Codex:  \$auto, \$ask, \$clean-comms in $CODEX_SKILLS_DIR"
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
     ;;
@@ -897,7 +897,7 @@ case "$SCOPE" in
     ;;
   both)
     echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
-    echo "    Global Grok:   /auto, /ask, /clean-comms in $GROK_COMMANDS_DIR"
+    echo "    Global Grok:   /user:auto (bare /auto is Grok's permission-mode built-in) in $GROK_COMMANDS_DIR"
     echo "    Global Codex:  \$auto, \$ask, \$clean-comms in $CODEX_SKILLS_DIR"
     echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
     echo "    Project state: .comms/, .gitignore"
@@ -905,7 +905,7 @@ case "$SCOPE" in
 esac
 echo ""
 echo "  usage:"
-echo "    Claude / Grok / Codex: '/auto build feature X'  (add --plan for a capped approach round)"
+echo "    Claude: '/auto build feature X'     Grok: '/user:auto …' or '/local:auto …'     Codex: '\$auto …'"
 echo "    Review turns you RECEIVE stay parent-brokered over ACP — nothing to invoke by hand"
 echo ""
 echo "  transport: ACP (no pane multiplexer required)"

@@ -1843,7 +1843,7 @@ Most of the plumbing is already agent-neutral: the registry, `inbox_for`, `trans
 
 - [x] **The LOOP surface is Claude-only.** `/auto` now installs for Claude
   (`~/.claude/commands/`), Grok (`~/.grok/commands/`), and Codex
-  (`~/.codex/skills/auto/SKILL.md`). Same five command bodies; Codex gets a SKILL.md
+  (`~/.codex/skills/auto/SKILL.md`; local pin `.agents/skills/`). Same five command bodies; Codex gets a SKILL.md
   wrapper at install time, not a second origin. *(Consult half shipped 2026-08-26 as
   `comms.sh ask --from X --to Y [--wait]`, d80c213; loop verb shipped with `whoami`.)*
 - [x] **`from:` is written by the template, not derived.** `comms.sh whoami` is the

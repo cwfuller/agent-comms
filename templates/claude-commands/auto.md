@@ -4,6 +4,12 @@ Autonomous implement + review cycle: implement, send to one or more reviewers, a
 This is THE loop command. Most work: `/auto <task>` — let the implementation speak for
 itself. A wrong approach surfaces fast in the implement review and you fix it there.
 
+Invocation is per runtime, because the short name is not free everywhere:
+- Claude: `/auto`
+- Grok: `/user:auto` (global install) or `/local:auto` (project pin). Bare `/auto` is
+  Grok's permission-mode built-in and keeps that name; the workflow is the qualified one.
+- Codex: `$auto` (a skill, not a slash command). Continuation is `$read-from-codex`.
+
 Reach for `--plan` ONLY when a wrong *approach* would be expensive to discover after
 implementing: novel architecture, high blast radius, safety-critical, or ambiguous scope.
 It is judged on DIRECTION, never on the prose of the plan — that bar, not a tight round

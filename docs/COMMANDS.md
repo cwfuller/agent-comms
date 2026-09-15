@@ -4,10 +4,16 @@ Every driver command, Codex skill, and helper subcommand. Commands are thin
 prompt-wrappers; the shell logic lives in the installed helpers (see
 [INTERNALS.md](INTERNALS.md) for why).
 
-The same five commands install for Claude (`~/.claude/commands/`), Grok
-(`~/.grok/commands/`), and Codex (`~/.codex/skills/<name>/SKILL.md`). `/auto` is
-the loop verb in all three. Identity is `comms.sh whoami`, never a hardcoded
-`from: claude`.
+The same five command bodies install for Claude (`~/.claude/commands/`), Grok
+(`~/.grok/commands/`), and Codex (`~/.codex/skills/<name>/SKILL.md` globally;
+`.agents/skills/<name>/SKILL.md` for a local pin). Identity is `comms.sh whoami`,
+never a hardcoded `from: claude`.
+
+Invocation is not the same short name on every runtime:
+- Claude: `/auto`
+- Grok: `/user:auto` (global) or `/local:auto` (project pin). Bare `/auto` is Grok's
+  permission-mode built-in and keeps that name.
+- Codex: `$auto` (a skill). Continuation is `$read-from-codex`.
 
 ## Driver commands
 
@@ -82,8 +88,8 @@ is the only mode that deletes the other agent's unread mail.
 ## Codex skills
 
 Driver skills `$auto`, `$ask`, `$send-to-codex`, `$read-from-codex`, and `$clean-comms`
-install into `~/.codex/skills/` (and `.codex/skills/` for a local pin). They are the
-same loop surface Claude and Grok get. A Codex session driving `/auto` uses
+install into `~/.codex/skills/` globally and `.agents/skills/` for a local pin. They are the
+same loop surface Claude and Grok get. A Codex session driving `$auto` uses
 `comms.sh whoami` (or `COMMS_SELF=codex`) so `from:` is `codex`, not a copied Claude name.
 
 The reviewer-side skills `$read-from-claude` and `$send-to-claude` were **DELETED** in step 4
@@ -111,7 +117,7 @@ agnostic.
 | `root` | print the main repo's `.comms` path (worktree-safe) |
 | `workspace` | print the resolved workspace name (explicit pin → branch → repo dir) |
 | `agents [default\|--supported]` | registered agents from `.comms/config` (zero-config: `claude codex grok`), the default target, or the supported-backend table |
-| `whoami` | print the driving agent: `COMMS_SELF` → session env (`GROK_AGENT=1`, `CLAUDECODE`, `CODEX_SANDBOX`, …) → ancestor executable. Fails closed; never defaults to `claude` |
+| `whoami` | print the driving agent: `COMMS_SELF` → session env (`GROK_AGENT=1`, `CLAUDECODE`, `CODEX_SANDBOX`, …) → ancestor executable. Fails closed on no signal and on conflicting signals; never defaults to `claude` |
 | `list --as <agent> [--thread <t>]` | pending inbox messages, newest first; non-zero + "latest archived" hint when empty |
 | `status` | one-screen loop summary: workspace, latest archived message + its loop fields, pending counts per inbox |
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |

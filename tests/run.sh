@@ -10417,6 +10417,14 @@ wh_env() { (cd "$WH" && env -u COMMS_SELF -u GROK_AGENT -u CLAUDECODE -u CLAUDE_
   && ok "CODEX_SANDBOX detects codex" || fail "CODEX_SANDBOX detect"
 [ "$(wh_env GROK_AGENT=1 COMMS_SELF=codex PATH="$WHPS/empty:$PATH" "$COMMS" whoami 2>/dev/null)" = codex ] \
   && ok "COMMS_SELF wins over GROK_AGENT" || fail "COMMS_SELF override"
+wh_env GROK_AGENT=1 CLAUDECODE=1 PATH="$WHPS/empty:$PATH" "$COMMS" whoami >/dev/null 2>&1 \
+  && fail "whoami picked a winner between GROK_AGENT and CLAUDECODE" || ok "whoami refuses GROK_AGENT+CLAUDECODE conflict"
+wh_env GROK_AGENT=1 CODEX_THREAD_ID=probe PATH="$WHPS/empty:$PATH" "$COMMS" whoami >/dev/null 2>&1 \
+  && fail "whoami picked a winner between GROK_AGENT and CODEX_THREAD_ID" || ok "whoami refuses GROK_AGENT+CODEX_THREAD_ID conflict"
+wh_env CLAUDECODE=1 CODEX_THREAD_ID=probe PATH="$WHPS/empty:$PATH" "$COMMS" whoami >/dev/null 2>&1 \
+  && fail "whoami picked a winner between CLAUDECODE and CODEX_THREAD_ID" || ok "whoami refuses CLAUDECODE+CODEX_THREAD_ID conflict"
+[ "$(wh_env GROK_AGENT=1 CLAUDECODE=1 COMMS_SELF=codex PATH="$WHPS/empty:$PATH" "$COMMS" whoami 2>/dev/null)" = codex ] \
+  && ok "COMMS_SELF wins over conflicting session signals" || fail "COMMS_SELF vs conflicting env"
 wh_env GROK_AGENT=codex PATH="$WHPS/empty:$PATH" "$COMMS" whoami >/dev/null 2>&1 \
   && fail "GROK_AGENT=<agent-name> was treated as the TUI flag" || ok "GROK_AGENT=<agent-name> is not the TUI flag"
 wh_env PATH="$WHPS/empty:$PATH" "$COMMS" whoami >/dev/null 2>&1 \
@@ -10462,7 +10470,8 @@ grep -A30 'done! installed:' "$REPO/install.sh" | grep -q 'Global Grok' \
   && ok "installer banner names Grok" || fail "installer banner names Grok"
 (cd "$AA" && aa_env bash "$REPO/install.sh" --scope=local >/dev/null 2>&1)
 [ -f "$AA/.grok/commands/auto.md" ] && ok "local pin installs grok /auto" || fail "local pin installs grok /auto"
-[ -f "$AA/.codex/skills/auto/SKILL.md" ] && ok "local pin installs Codex auto" || fail "local pin installs Codex auto"
+[ -f "$AA/.agents/skills/auto/SKILL.md" ] && ok "local pin installs Codex auto under .agents/skills" || fail "local pin installs Codex auto under .agents/skills"
+[ ! -e "$AA/.codex/skills/auto" ] && ok "local pin does not put Codex auto under .codex/skills" || fail "local pin still used .codex/skills"
 
 section "comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture"
 PRE_COUNT="$(find "$REPO_FIX/.comms/to-claude" "$REPO_FIX/.comms/to-codex" "$REPO_FIX/.comms/archive" -type f | wc -l | tr -d ' ')"

@@ -15,7 +15,8 @@
 #                                  (zero-config
 #                                  default: claude codex / target codex)
 #   whoami                      print the driving agent (COMMS_SELF → session env →
-#                               ancestor executable). Fails closed; never defaults to claude.
+#                               ancestor executable). Fails closed on no signal AND on
+#                               conflicting signals; never defaults to claude.
 #   list --as <agent> [--thread <t>]   pending inbox messages, newest first
 #   status                      one-screen loop state: latest archive, verdict, pending counts
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
@@ -342,12 +343,23 @@ whoami_from_ancestors() {
 cmd_whoami() {
   local me="${COMMS_SELF:-}"
   if [ -z "$me" ]; then
-    if [ "${GROK_AGENT:-}" = "1" ]; then
-      me=grok
-    elif [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${CLAUDE_PID:-}" ]; then
-      me=claude
-    elif [ -n "${CODEX_SANDBOX:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; then
-      me=codex
+    # Collect EVERY matching session signal. Silent precedence (GROK_AGENT beating
+    # CLAUDECODE beating CODEX_*) is how a nested launch impersonates the parent.
+    # Two distinct hits fail closed; a single hit wins; none falls through to ancestors.
+    local hits="" hit seen="" n=0
+    [ "${GROK_AGENT:-}" = "1" ] && hits="$hits grok"
+    { [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${CLAUDE_PID:-}" ]; } && hits="$hits claude"
+    { [ -n "${CODEX_SANDBOX:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; } && hits="$hits codex"
+    for hit in $hits; do
+      case " $seen " in *" $hit "*) continue ;; esac
+      seen="$seen $hit"
+      n=$((n + 1))
+    done
+    seen="${seen# }"
+    if [ "$n" -gt 1 ]; then
+      die "whoami: conflicting identity signals ($seen) — set COMMS_SELF to a registered name"
+    elif [ "$n" -eq 1 ]; then
+      me="$seen"
     else
       me="$(whoami_from_ancestors || true)"
     fi

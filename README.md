@@ -33,11 +33,14 @@ less ~/src/agent-comms/install.sh     # with --scope=both it writes ~/.claude/co
 cd /path/to/your/project && bash ~/src/agent-comms/install.sh --scope=both
 ```
 
-Then, in Claude Code, Grok, or Codex:
+Then, in Claude Code:
 
 ```
 /auto add rate limiting to the API
 ```
+
+Grok: `/user:auto add rate limiting to the API` (or `/local:auto` for a project pin —
+bare `/auto` is Grok's permission-mode built-in). Codex: `$auto add rate limiting to the API`.
 
 That's it. The driving agent implements, snapshots the tree, and every other registered agent
 reviews **that same pinned artifact**. Shared blockers gate the next round; unique
