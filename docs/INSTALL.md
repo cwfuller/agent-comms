@@ -56,11 +56,16 @@ Global installs are shared: update once (`install.sh --scope=global` from a chec
 re-run the curl line) and every project picks the new version up immediately.
 
 A **local pinned** install copies everything into the repo instead. Pinned copies
-**shadow the global install and never auto-update** — the installer prints exactly this
-warning. Resolution order everywhere is *local pin first, then global* (commands via the
-CLI's own project-command precedence; helpers via the templates' resolver:
-`<repo>/.agent-comms/comms.sh` then `~/.agent-comms/comms.sh`). To un-pin, delete the
-repo's `.claude/commands/`, `.grok/commands/`, `.agents/skills/`, `.agents/loopspec-fragments/`, and `.agent-comms/` copies.
+**never auto-update** — the installer prints exactly this warning. For Claude commands,
+Grok commands, and helpers, they also **shadow the global install**: resolution is
+*local pin first, then global* (commands via the CLI's own project-command precedence;
+helpers via `<repo>/.agent-comms/comms.sh` then `~/.agent-comms/comms.sh`).
+
+**Codex does not shadow.** Same-name skills are not merged. A local pin at
+`.agents/skills/auto` and a global copy at `~/.codex/skills/auto` can both appear in
+the `$` selector, unlabeled. Pick the copy you mean, or disable the other with
+`/skills`. To un-pin, delete the repo's `.claude/commands/`, `.grok/commands/`,
+`.agents/skills/`, `.agents/loopspec-fragments/`, and `.agent-comms/` copies.
 
 Stale pins are the classic failure mode: a repo pinned months ago silently runs old
 behavior while every other repo runs current. `install.sh --scope=global` warns when it

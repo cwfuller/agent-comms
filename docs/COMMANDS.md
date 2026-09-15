@@ -89,7 +89,9 @@ is the only mode that deletes the other agent's unread mail.
 
 Driver skills `$auto`, `$ask`, `$send-to-codex`, `$read-from-codex`, and `$clean-comms`
 install into `~/.codex/skills/` globally and `.agents/skills/` for a local pin. They are the
-same loop surface Claude and Grok get. A Codex session driving `$auto` uses
+same loop surface Claude and Grok get, except Codex will list both copies in the `$`
+selector when a pin and a global install share a name — pick one, or disable the other
+with `/skills`. A Codex session driving `$auto` uses
 `comms.sh whoami` (or `COMMS_SELF=codex`) so `from:` is `codex`, not a copied Claude name.
 
 The reviewer-side skills `$read-from-claude` and `$send-to-claude` were **DELETED** in step 4

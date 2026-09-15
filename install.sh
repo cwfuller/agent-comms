@@ -537,10 +537,12 @@ warn_local_shadowing() {
   done
 
   if [ -n "$shadowed" ]; then
-    echo "  warning: project-local agent-comms files exist and will shadow the global install:"
+    echo "  warning: project-local agent-comms files exist:"
     for path in $shadowed; do
       echo "    $path"
     done
+    echo "  Claude/Grok commands and helpers shadow the global install. Codex skills do"
+    echo "  not — same-name local and global copies can both appear in the $ selector."
     # NAME THE REFRESH FIRST. This used to offer deletion as the only way forward, which reads
     # as "there is no supported way to update a pin" — and sends people to hand-copy the files,
     # bypassing every protection install_file provides (symlink resolution, mode and owner
@@ -853,10 +855,13 @@ fi
 
 note_local_pin() {
   echo ""
-  echo "  note: project-local copies are pinned — they shadow any global install and"
-  echo "  do NOT pick up global updates. Re-run with --scope=local to refresh them, or"
-  echo "  delete the .claude/commands/, .grok/commands/, .agents/skills/,"
-  echo "  .agents/loopspec-fragments/, and .agent-comms/ copies to fall back to global."
+  echo "  note: project-local copies are pinned and do NOT pick up global updates."
+  echo "  Claude/Grok commands and helpers shadow the global install. Codex skills do"
+  echo "  not: a local .agents/skills copy and ~/.codex/skills of the same name can both"
+  echo "  appear in the $ selector — pick the one you mean, or disable the other via /skills."
+  echo "  Re-run with --scope=local to refresh pins, or delete the .claude/commands/,"
+  echo "  .grok/commands/, .agents/skills/, .agents/loopspec-fragments/, and"
+  echo "  .agent-comms/ copies to fall back to global."
 }
 
 case "$SCOPE" in
