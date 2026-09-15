@@ -494,6 +494,25 @@ resolve_message_path() {
   return 1
 }
 
+# resolve_inbound_path <path-or-basename>
+# --archive-inbound accepts a full path OR a bare filename (cmd_archive looks
+# the basename up in the sender's inbox). bind_reply_identity must use the same
+# surface or a still-pending `request.md` dies as "gone". Archive first, then
+# every inbox — never the outbound itself (caller excludes).
+resolve_inbound_path() {
+  local p="${1:-}" root base d
+  [ -n "$p" ] || return 1
+  [ -f "$p" ] && { printf '%s' "$p"; return 0; }
+  root="$(cmd_root)"
+  base="$(basename "$p")"
+  [ -f "$root/archive/$base" ] && { printf '%s' "$root/archive/$base"; return 0; }
+  for d in "$root"/to-*; do
+    [ -d "$d" ] || continue
+    [ -f "$d/$base" ] && { printf '%s' "$d/$base"; return 0; }
+  done
+  return 1
+}
+
 # find_message_by_id <message_id>
 # Locate a message by its frontmatter message_id (or `<id>.md` basename).
 # Archive first, then every inbox — same order as leg_reply_candidates, so a
@@ -5002,11 +5021,11 @@ cmd_send() {
     local aid_ct sha_ct
     irt="$(frontmatter_field "$rf" in-reply-to)"
     if [ -n "$inbound" ]; then
-      # --archive-inbound may already have been moved; never silently fall through
-      # to a different in-reply-to. (codex, identity r1, blocking.)
-      req="$(resolve_message_path "$inbound" || true)"
+      # --archive-inbound may already have been moved, or be a bare filename the
+      # archive preflight would still find in an inbox. (codex, identity r2.)
+      req="$(resolve_inbound_path "$inbound" || true)"
       [ -n "$req" ] && [ -f "$req" ] \
-        || die "send: --archive-inbound '$(clip "$inbound")' is gone and could not be re-resolved in archive — refusing to bind a reply against a missing request"
+        || die "send: --archive-inbound '$(clip "$inbound")' is gone and could not be re-resolved in archive or an inbox — refusing to bind a reply against a missing request"
       inbound_id="$(frontmatter_field "$req" message_id)"
       [ -n "$inbound_id" ] || inbound_id="$(basename "$req" .md)"
       if [ -n "$irt" ] && [ "$irt" != "$inbound_id" ]; then
@@ -5014,6 +5033,15 @@ cmd_send() {
       fi
     elif [ -n "$irt" ]; then
       req="$(find_message_by_id "$irt" || true)"
+    fi
+    # The outbound must not count as the request it answers: a self-referential
+    # in-reply-to plus artifact_id: HEAD used to validate against itself.
+    # Only a review-request is an eligible bind source. (codex, identity r2.)
+    if [ -n "$req" ] && [ -f "$rf" ] && [ "$req" -ef "$rf" ]; then
+      req=""
+    fi
+    if [ -n "$req" ] && [ -f "$req" ] && [ "$(frontmatter_field "$req" type)" != "review-request" ]; then
+      req=""
     fi
     if [ -z "$req" ] || [ ! -f "$req" ]; then
       # No request to inherit from. An identity-FREE orphan must not mint (the
