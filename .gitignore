@@ -18,4 +18,5 @@
 # Ignoring them also keeps them OUT of review artifacts: snapshot-on-send captures untracked
 # files, so every un-ignored install copy is duplicated into every snapshot a reviewer reads.
 .claude/commands/
+.grok/
 .agents/
