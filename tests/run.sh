@@ -9578,6 +9578,33 @@ printf '%s\n' "$DO_OUT7" | grep -q 'docs-only candidate — skipping the suite' 
 [ "$(git -C "$DO" rev-parse main)" = "$(git -C "$DO" rev-parse worktree-docskip)" ] \
   && ok "the LICENSE-only candidate landed" || fail "LICENSE-only did not land"
 
+# Submodule-suppression config must not hide a changed gitlink behind prose.
+do_reset
+(
+  cd "$DO/.claude/worktrees/docskip"
+  mkdir -p /tmp/docskip-sub-$$ && git -C /tmp/docskip-sub-$$ init -q
+  (cd /tmp/docskip-sub-$$ && echo s > f && git add f && git -c user.email=t@t -c user.name=t commit -qm s)
+  git -c protocol.file.allow=always submodule add --quiet /tmp/docskip-sub-$$ submod >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "add submod" >/dev/null 2>&1
+  # bump submodule + README under ignoreSubmodules=all for the integrate parent
+  (cd submod && echo t >> f && git add f && git -c user.email=t@t -c user.name=t commit -qm t)
+  git add submod
+  echo x >> README.md && git add README.md
+  git -c user.email=t@t -c user.name=t commit -qm "readme+sub" >/dev/null 2>&1
+) >/dev/null 2>&1
+DO_MAIN="$(git -C "$DO" rev-parse main)"
+# Force the classify path to see ignoreSubmodules=all if inherited; the classifier
+# itself must override. Also set it on the candidate repo for realism.
+git -C "$DO" config diff.ignoreSubmodules all
+git -C "$DO/.claude/worktrees/docskip" config diff.ignoreSubmodules all
+DO_OUT8="$(run_do integrate worktree-docskip 2>&1 || true)"
+git -C "$DO" config --unset diff.ignoreSubmodules >/dev/null 2>&1 || true
+printf '%s\n' "$DO_OUT8" | grep -q 'docs-only candidate' \
+  && fail "a README+gitlink change under ignoreSubmodules=all took the docs-only skip" \
+  || ok "a README+gitlink change under ignoreSubmodules=all does not take the docs-only skip"
+[ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
+  && ok "a README+gitlink change with a red suite does not land" || fail "README+gitlink landed"
+
 section "the coordinator's event log: a durable record that is not the mailbox"
 # Contraction step 3, criteria 1 and 4. The log's value is that it SURVIVES things — a
 # driver that dies mid-panel, a broker that refuses, N runners appending at once — so it is

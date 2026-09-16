@@ -3654,10 +3654,24 @@ integrate_is_docs_only() {  # <root> <base-oid> <cand-oid> — 0 iff every chang
   # not a skip: identical trees fall through to attest/suite. The skip does
   # not mint an attestation. --no-renames so a rename cannot hide its source
   # path (e.g. helpers/comms.sh -> docs/comms.md would otherwise look like
-  # prose-only).
-  local root="$1" base="$2" cand="$3" paths p
-  paths="$(git -C "$root" diff --name-only --no-renames "$base" "$cand")" || return 1
+  # prose-only). --ignore-submodules=none so a config like diff.ignoreSubmodules=all
+  # cannot hide a changed gitlink behind a README bump. Symlink/gitlink modes at
+  # otherwise-allowed paths also refuse the skip (name alone is not enough).
+  local root="$1" base="$2" cand="$3" paths p raw line mode_a mode_b
+  paths="$(git -C "$root" diff --name-only --no-renames --ignore-submodules=none "$base" "$cand")" || return 1
   [ -n "$paths" ] || return 1
+  raw="$(git -C "$root" diff --raw --no-renames --ignore-submodules=none "$base" "$cand")" || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    # :oldmode newmode ... — modes are octal; 120000 symlink, 160000 gitlink
+    mode_a="${line#*:}"; mode_a="${mode_a%% *}"
+    mode_b="${line#* }"; mode_b="${mode_b%% *}"
+    case "$mode_a$mode_b" in
+      *120000*|*160000*) return 1 ;;
+    esac
+  done <<EOF
+$raw
+EOF
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     case "$p" in
