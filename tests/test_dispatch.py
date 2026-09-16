@@ -304,15 +304,28 @@ def wait_file(path):
 def assert_stopped(test, pid):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        state = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
-                               capture_output=True, text=True).stdout.strip()
-        if not state or state.startswith('Z'):
+        probe = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
+                               capture_output=True, text=True)
+        state = probe.stdout.strip()
+        if probe.returncode == 1 and not state and not probe.stderr.strip():
+            return  # ps reports no matching process, without an inspection error.
+        if probe.returncode != 0 or probe.stderr.strip() or not state:
+            test.fail(f'cannot inspect worker {pid}: exit {probe.returncode}, {probe.stderr!r}')
+        if state.startswith('Z'):
             return
         time.sleep(0.02)
     test.fail(f'worker process {pid} survived cancellation ({state})')
 
 
 class WorkerLifecycle(unittest.TestCase):
+    def test_inspection_failure_is_not_proof_of_process_exit(self):
+        for rc, error in ((1, 'ps: Operation not permitted'), (0, '')):
+            with self.subTest(status=rc):
+                failed = subprocess.CompletedProcess(['ps'], rc, '', error)
+                with patch.object(subprocess, 'run', return_value=failed):
+                    with self.assertRaises(AssertionError):
+                        assert_stopped(self, 12345)
+
     def test_signal_between_spawn_and_registration_leaves_no_worker(self):
         real_popen = subprocess.Popen
         for sig in (signal.SIGINT, signal.SIGTERM):

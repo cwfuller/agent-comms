@@ -2612,7 +2612,7 @@ Back-to-back measurements at **51e0211**, **1619 assertions**, both fully green:
 
 This pair saved **624.80s (10m25s), 68.2%**, or **3.14x**. Both runs recorded the same-OID
 attestation. They did not overlap another full suite. Machine load varied: the parallel run
-started near 8 and ended near 15; samples during the serial run ranged roughly 15–56.
+started near 8 and ended near 15; samples during the serial run ranged roughly 11–56.
 Grok reviewed while the serial benchmark ran, without running another full suite. This is one
 same-commit pair with similar total CPU work, not an isolated-machine scaling guarantee.
 These measurements precede the follow-up cancellation/source-guard regression fixes.
