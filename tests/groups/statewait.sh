@@ -180,5 +180,5 @@ grep -q 'RP_EXPECT_STATE:-' "$REPO/helpers/runphase.sh" \
   && ok "the waiter reads the captured copy set-u safely" || fail "waiter does not read the captured copy safely"
 grep -q 'unset COMMS_RUNPHASE_EXPECT_STATE' "$REPO/helpers/runphase.sh" \
   && ok "the runner clears the declaration before launching the provider" || fail "runner does not clear the declaration for the child"
-grep -A1 '^unset COMMS_DELIVERY' "$REPO/tests/run.sh" | grep -q 'COMMS_RUNPHASE_EXPECT_STATE' \
+grep -A1 '^unset COMMS_DELIVERY' "$REPO/tests/lib/harness.sh" | grep -q 'COMMS_RUNPHASE_EXPECT_STATE' \
   && ok "the harness scrubs an inherited declaration" || fail "harness no longer scrubs the inherited declaration"

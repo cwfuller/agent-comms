@@ -3,8 +3,10 @@ section "harness: a partial run is never a verdict"
 # The corpus gates integrate. These assertions guard the gate itself.
 TEST_SOURCES=()
 while IFS= read -r source_path; do TEST_SOURCES+=("$REPO/$source_path"); done < <(git -C "$REPO" ls-files -- 'tests/*.sh' 'tests/lib/*.sh' 'tests/groups/*.sh')
-[ "$(grep -lE '^ *\(cd .*"\$COMMS" attest-green ' "${TEST_SOURCES[@]}" | wc -l | tr -d ' ')" = 1 ] \
-  && ok "exactly one file in tests/ can mint an attestation" || fail "more than one attestation mint site under tests/"
+# Fixture attestations exercise temporary repositories. Only the complete runner may
+# mint for REPO itself; moving those fixture tests into files must not confuse this guard.
+[ "$(grep -lE '^ *\(cd "\$REPO" && "\$COMMS" attest-green ' "${TEST_SOURCES[@]}")" = "$REPO/tests/run.sh" ] \
+  && ok "only the complete runner can mint for the repository under test" || fail "the suite attestation owner changed"
 grep -q '\[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \]' "$REPO/tests/run.sh" \
   && ok "the exit status requires coverage, not just an absence of failures" || fail "exit status has no coverage conjunct"
 grep -q 'if \[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \] && \[ -n "${TESTED_OID:-}" \]' "$REPO/tests/run.sh" \

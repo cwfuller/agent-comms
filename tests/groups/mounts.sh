@@ -623,8 +623,10 @@ if [ -n "$WM_KT" ] && [ -d "$WM_KT" ]; then
   fi
 fi
 
-check_not "transport rejects an unregistered agent" run_tr transport gemini
-check_not "transport rejects an unknown option" run_tr transport codex --bogus
+# These refusal checks use this group's registry, not transport.sh's private fixture.
+wm_transport() { (cd "$MA_FIX" && env -u COMMS_DELIVERY "$COMMS" "$@"); }
+check_not "transport rejects an unregistered agent" wm_transport transport gemini
+check_not "transport rejects an unknown option" wm_transport transport codex --bogus
 
 section "reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)"
 # Self-contained: a fresh fixture so clean-mounts' repo-key scope never collides with the
