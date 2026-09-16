@@ -3652,16 +3652,18 @@ integrate_is_docs_only() {  # <root> <base-oid> <cand-oid> — 0 iff every chang
   # (docs/loopspec — the installed review bar) and AGENTS.md (the onboarding
   # contract) are load-bearing and must still pay the suite. Empty diffs are
   # not a skip: identical trees fall through to attest/suite. The skip does
-  # not mint an attestation.
+  # not mint an attestation. --no-renames so a rename cannot hide its source
+  # path (e.g. helpers/comms.sh -> docs/comms.md would otherwise look like
+  # prose-only).
   local root="$1" base="$2" cand="$3" paths p
-  paths="$(git -C "$root" diff --name-only "$base" "$cand")" || return 1
+  paths="$(git -C "$root" diff --name-only --no-renames "$base" "$cand")" || return 1
   [ -n "$paths" ] || return 1
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     case "$p" in
       README.md|LICENSE) continue ;;
       docs/*/*) return 1 ;;
-      docs/*) continue ;;
+      docs/*.md) continue ;;
       *) return 1 ;;
     esac
   done <<EOF

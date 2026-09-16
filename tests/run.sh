@@ -9538,6 +9538,46 @@ run_do integrate worktree-docskip >/dev/null 2>&1 || true
 [ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
   && ok "a nested docs/ path is not treated as prose" || fail "nested docs path landed"
 
+# Rename detection must not hide a non-prose source path behind a docs/*.md dest.
+do_reset
+(cd "$DO/.claude/worktrees/docskip" && git mv helpers/x.sh docs/x.md \
+  && git -c user.email=t@t -c user.name=t commit -qm "rename: helper to docs") >/dev/null 2>&1
+DO_MAIN="$(git -C "$DO" rev-parse main)"
+DO_OUT4="$(run_do integrate worktree-docskip 2>&1 || true)"
+printf '%s\n' "$DO_OUT4" | grep -q 'docs-only candidate' \
+  && fail "a helper→docs rename took the docs-only skip" || ok "a helper→docs rename does not take the docs-only skip"
+[ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
+  && ok "a helper→docs rename with a red suite does not land" || fail "helper→docs rename landed"
+
+# Same for nested docs → top-level docs: source is still load-bearing.
+do_reset
+(cd "$DO/.claude/worktrees/docskip" && git mv docs/loopspec/SPEC.md docs/SPEC.md \
+  && git -c user.email=t@t -c user.name=t commit -qm "rename: nested to top") >/dev/null 2>&1
+DO_MAIN="$(git -C "$DO" rev-parse main)"
+DO_OUT5="$(run_do integrate worktree-docskip 2>&1 || true)"
+printf '%s\n' "$DO_OUT5" | grep -q 'docs-only candidate' \
+  && fail "a nested→top-level docs rename took the docs-only skip" || ok "a nested→top-level docs rename does not take the docs-only skip"
+[ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
+  && ok "a nested→top-level docs rename with a red suite does not land" || fail "nested→top rename landed"
+
+# Non-md top-level docs files are not prose (allowlist is docs/*.md only).
+do_reset
+(cd "$DO/.claude/worktrees/docskip" && printf '#!/bin/bash\necho x\n' > docs/foo.sh \
+  && git add docs/foo.sh && git -c user.email=t@t -c user.name=t commit -qm "docs: script") >/dev/null 2>&1
+DO_MAIN="$(git -C "$DO" rev-parse main)"
+DO_OUT6="$(run_do integrate worktree-docskip 2>&1 || true)"
+printf '%s\n' "$DO_OUT6" | grep -q 'docs-only candidate' \
+  && fail "a docs/*.sh change took the docs-only skip" || ok "a docs/*.sh change does not take the docs-only skip"
+[ "$(git -C "$DO" rev-parse main)" = "$DO_MAIN" ] \
+  && ok "a docs/*.sh change with a red suite does not land" || fail "docs/*.sh change landed"
+
+do_commit "docs: license" LICENSE
+DO_OUT7="$(run_do integrate worktree-docskip 2>&1 || true)"
+printf '%s\n' "$DO_OUT7" | grep -q 'docs-only candidate — skipping the suite' \
+  && ok "a LICENSE-only candidate skips the suite" || fail "LICENSE-only did not skip (got: $(printf '%s' "$DO_OUT7" | tail -2))"
+[ "$(git -C "$DO" rev-parse main)" = "$(git -C "$DO" rev-parse worktree-docskip)" ] \
+  && ok "the LICENSE-only candidate landed" || fail "LICENSE-only did not land"
+
 section "the coordinator's event log: a durable record that is not the mailbox"
 # Contraction step 3, criteria 1 and 4. The log's value is that it SURVIVES things — a
 # driver that dies mid-panel, a broker that refuses, N runners appending at once — so it is
