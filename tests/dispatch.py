@@ -92,23 +92,49 @@ def kill_worker_session(proc):
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                # Darwin rejects killpg when only zombies remain. Do not equate
+                # every EPERM with that case: prove there is no running member.
+                members = subprocess.check_output(['ps', '-axo', 'pgid=,stat='], text=True)
+                if any(group == str(pgid) and not state.startswith('Z')
+                       for group, state in (line.split() for line in members.splitlines())):
+                    raise
 
 
 def stop_workers(active, sig, grace=15):
-    # The existing supervisor owns descendant teardown and preserves signal identity.
-    for proc, *_ in active.values():
-        if proc.poll() is None:
-            proc.send_signal(sig)
-    deadline = time.monotonic() + grace
-    for proc, *_ in active.values():
+    # Do not poll/wait/send_signal until session cleanup: each can reap the
+    # supervisor and release the PID that proves ownership of nested job groups.
+    pending = [proc for proc, *_ in active.values() if proc.returncode is None]
+    for proc in pending:
         try:
-            proc.wait(timeout=max(0.1, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
+            os.kill(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            print(f'SUITE: worker signal failed for {proc.pid}: {exc}', file=sys.stderr)
+    deadline = time.monotonic() + grace
+    while pending:
+        expired = time.monotonic() >= deadline
+        try:
+            states = dict(line.split() for line in subprocess.check_output(
+                ['ps', '-axo', 'pid=,stat='], text=True).splitlines()) if not expired else {}
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            expired, states = True, {}
+        for proc in list(pending):
+            state = states.get(str(proc.pid), '')
+            if not expired and state and not state.startswith('Z'):
+                continue
+            # Even a cooperative supervisor can leave a nested job-control group:
+            # its normal cleanup owns the worker group, not groups the worker made.
+            # It remains unreaped here, so sweep its session before waiting.
             try:
                 kill_worker_session(proc)
                 proc.wait(timeout=5)
             except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
                 print(f'SUITE: worker cleanup failed for {proc.pid}: {exc}', file=sys.stderr)
+            pending.remove(proc)
+        if pending:
+            time.sleep(0.05)
 
 
 def run_workers(repo, oid, directory, rows, jobs):

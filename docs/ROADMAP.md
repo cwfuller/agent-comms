@@ -2625,6 +2625,10 @@ had started its child; the STOP probe also accepted any non-zombie state. Both n
 handshake with the child. The zero-exit case requires a stopped supervisor and an exited
 child before INT; missing handshakes fail. The retained late-cancel assertion still fails
 against a temporary helper with cancellation status coercion removed.
+An additional real-supervisor probe found that cancellation could leave a nested
+job-control group after the supervisor exited. The coordinator now retains the unreaped
+supervisor PID through session cleanup, even when the supervisor exits cooperatively;
+the regression requires the nested child to stop too.
 An existing direct-provider mount fixture also omitted the Grok stub from PATH. It now uses
 the stub and requires a completed turn before counting successful cleanup.
 

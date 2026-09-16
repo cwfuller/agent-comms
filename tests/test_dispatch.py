@@ -219,6 +219,12 @@ exit 0
         self.assertIn('passed: 2  failed: 0  skipped: 0', run.stdout)
 
     def test_real_supervisor_cancellation_cannot_accept_prepared_report(self):
+        self.check_real_supervisor_cancellation(nested_group=False)
+
+    def test_real_supervisor_cancellation_reaches_nested_process_group(self):
+        self.check_real_supervisor_cancellation(nested_group=True)
+
+    def check_real_supervisor_cancellation(self, nested_group):
         # Use the production supervisor, including its separate child process group.
         shutil.copyfile(Path(__file__).parents[1] / 'helpers/comms.sh',
                         self.root / 'helpers/comms.sh')
@@ -227,13 +233,14 @@ name="$1"; results="$3"
 printf '%s\\t1\\n' "$name" > "$results/$name.sections"
 : > "$results/$name.skips"
 printf '1\\t0\\t0\\n%s\\ncomplete\\n' "$name" > "$results/$name.done"
+JOB_CONTROL
 sleep 60 &
 echo $! > .descendant-pid
 echo $$ > .worker-pid
 # The worker's parent is with-beat, whose parent is the dispatcher.
 ps -p "$PPID" -o ppid= > .dispatcher-pid
 wait
-''')
+'''.replace('JOB_CONTROL', 'set -m' if nested_group else ':'))
         proc = subprocess.Popen(['bash', 'tests/run.sh'], cwd=self.root,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                 start_new_session=True)
@@ -242,6 +249,7 @@ wait
             os.kill(int((self.root / '.dispatcher-pid').read_text()), signal.SIGINT)
             out, err = proc.communicate(timeout=20)
             self.assertEqual(proc.returncode, 130, out + err)
+            self.assertNotIn('worker cleanup failed', err)
             self.assertNotIn('passed:', out)
             self.assertNotIn('ATTESTATION: recorded', out)
             for name in ('.worker-pid', '.descendant-pid'):
