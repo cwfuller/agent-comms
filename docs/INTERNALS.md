@@ -18,7 +18,11 @@ templates/
   claude-commands/*.md         driver commands (thin prompt wrappers). install.sh copies
                                them to Claude and Grok command dirs and wraps them as
                                Codex SKILL.md files; identity is comms.sh whoami.
-tests/run.sh                   hermetic harness (mailbox default) — run before every commit
+tests/run.sh                   complete-suite gate — run on the committed candidate
+tests/dispatch.py              bounded scheduling and complete worker-report aggregation
+tests/worker.sh                one fixture-owning group under process supervision
+tests/lib/                     counters, committed coverage contracts, fixture builders
+tests/groups/                  independent regression groups (mailbox default)
 docs/                          this documentation + ROADMAP/advisories
 ```
 
@@ -380,7 +384,12 @@ Delivery no longer touches any socket, so there is nothing left to be sandbox-bl
 bash tests/run.sh
 ```
 
-~90 assertions covering both helpers and the installer. Design points:
+The assertion count and section vector are pinned in committed contracts under `tests/`.
+Independent groups own their fixtures; presence/signals run exclusively, then up to four
+workers execute the remaining groups. The complete coordinator alone can attest after
+validating every worker report and both contracts. `--group <name>` is a focused,
+non-attesting development run; `--jobs 1` runs the same complete corpus serially. See
+[tests/README.md](../tests/README.md) for details. Design points:
 
 - **Hermetic, or it pokes real agents.** The suite default is `COMMS_DELIVERY=mailbox`:
   write the file, nudge nobody, no spawned child, no network. The first version of the
@@ -448,8 +457,8 @@ upgrade stops rather than continuing past a warning.
 
 ## Contributing checklist
 
-1. `bash tests/run.sh` — green, from a clean shell
-2. `bash -n install.sh helpers/*.sh tests/run.sh`
+1. Commit the candidate, then `bash tests/run.sh` — green, with an explicit attestation result
+2. Check syntax for the shell files you changed, including files under `tests/lib/` and `tests/groups/`
 3. No bare dollar-digit/dollar-star tokens anywhere under `templates/`
 4. New behavior → new assertion; reviewer-caught bug → regression test
 5. Docs: README stays glanceable; depth goes in `docs/`; protocol changes update

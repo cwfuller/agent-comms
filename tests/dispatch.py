@@ -64,20 +64,51 @@ def reset_signals():
     # can pass SIG_IGN through Python; normalize before starting the supervisor.
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT):
         signal.signal(sig, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
 
 
-def stop_workers(active, sig):
+def kill_worker_session(proc):
+    """The supervisor and its job-control children have different process groups."""
+    if proc.returncode is not None:
+        return
+    groups = {proc.pid}
+    try:
+        # Keep the supervisor from starting another worker while taking this snapshot.
+        # Do not use Popen.send_signal here: its poll can reap this PID before enumeration.
+        os.kill(proc.pid, signal.SIGSTOP)
+        pids = subprocess.check_output(['ps', '-axo', 'pid='], text=True).split()
+        for value in pids:
+            try:
+                pid = int(value)
+                if os.getsid(pid) == proc.pid:
+                    groups.add(os.getpgid(pid))
+            except (ProcessLookupError, PermissionError):
+                continue
+    finally:
+        # Reap the supervisor last. Its unreaped PID pins the session identity while
+        # enumerating; never infer ownership from a worker-written PID file.
+        for pgid in sorted(groups, key=lambda group: group == proc.pid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def stop_workers(active, sig, grace=15):
     # The existing supervisor owns descendant teardown and preserves signal identity.
     for proc, *_ in active.values():
         if proc.poll() is None:
             proc.send_signal(sig)
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + grace
     for proc, *_ in active.values():
         try:
             proc.wait(timeout=max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+            try:
+                kill_worker_session(proc)
+                proc.wait(timeout=5)
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                print(f'SUITE: worker cleanup failed for {proc.pid}: {exc}', file=sys.stderr)
 
 
 def run_workers(repo, oid, directory, rows, jobs):
@@ -100,10 +131,20 @@ def run_workers(repo, oid, directory, rows, jobs):
                                '--no-heartbeat', '--name', 'suite-' + name,
                                '--instance', '00000000000000000000000000000001', '--',
                                'bash', str(repo / 'tests/worker.sh'), name, oid, str(directory)]
-                    proc = subprocess.Popen(command, cwd=repo, env=env, stdin=subprocess.DEVNULL,
-                                            stdout=log, stderr=subprocess.STDOUT,
-                                            start_new_session=True, preexec_fn=reset_signals)
-                    active[name] = (proc, log, time.monotonic())
+                    # A signal after Popen spawns but before registration must not leave
+                    # an untracked worker. The child unmasks in reset_signals before exec.
+                    previous_mask = signal.pthread_sigmask(
+                        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+                    try:
+                        proc = subprocess.Popen(command, cwd=repo, env=env, stdin=subprocess.DEVNULL,
+                                                stdout=log, stderr=subprocess.STDOUT,
+                                                start_new_session=True, preexec_fn=reset_signals)
+                        active[name] = (proc, log, time.monotonic())
+                    except BaseException:
+                        log.close()
+                        raise
+                    finally:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
                     print('START ' + name, flush=True)
                 for name, (proc, log, started) in list(active.items()):
                     elapsed = time.monotonic() - started
@@ -121,7 +162,14 @@ def run_workers(repo, oid, directory, rows, jobs):
                 if active:
                     time.sleep(0.1)
     except BaseException:
-        stop_workers(active, signal.SIGTERM)
+        # A second cancellation must not interrupt cleanup of the remaining workers.
+        handlers = {sig: signal.signal(sig, signal.SIG_IGN)
+                    for sig in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            stop_workers(active, signal.SIGTERM)
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
         raise
     finally:
         for _, log, _ in active.values():

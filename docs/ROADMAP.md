@@ -616,9 +616,10 @@ landed: `acp-warm-mount` (step 1) is on main, and `suite-lanes` carried the per-
 assertion vector and the watchdog-poll fix, which are on main too — `worktree-suite-lanes`
 now has zero commits ahead. Read a branch's real distance from main before treating this
 block as a reservation; it was stale for a day before anyone checked. `suite-perf` /
-`worktree-suite-shard` also has no commits vs main. Do not start a new suite effort:
-sharding was measured at 1.07x and rejected (ranked item 4), and the vector — the thing
-that detects assertions MOVING between sections — is already landed and earning its place.
+`worktree-suite-shard` also had no commits vs main at that checkpoint. The old dependency-
+closed sharding experiment measured 1.07x and was rejected (ranked item 4). **The owner
+reopened this work on 2026-09-16:** independent fixture-owning groups now feed one complete
+coverage gate; see the new measurement below. The per-section vector remains authoritative.
 
 ### Freeze
 
@@ -645,16 +646,17 @@ exactly; that is not a license to weaken the presence model (see step 7).
    59 sections were 87% of the original runtime; the largest section after the
    fix is ~50s.
 
-   **Superseded — sharding was built, measured at 1.07x and REJECTED; see ranked
-   item 4.** What actually moved the number was profiling: a `sleep 1` in the
-   provider watchdog cost 58s a run (13%), and polling it finely took 430s -> 364s
+   **Historical result — the dependency-closed sharding attempt measured 1.07x and was
+   rejected; see ranked item 4. The 2026-09-16 independent-group runner supersedes this
+   restriction while retaining complete committed coverage.** Profiling found a `sleep 1`
+   in the provider watchdog that cost 58s a run (13%); polling it finely took 430s -> 364s
    ON IDENTICAL TREES (the absolute figures are stale — the corpus has grown since;
    pair every runtime with its assertion count).
    `suite-lanes` still earns its place for the per-section vector, which detects
-   assertions moving between sections — but nothing here should be read as an
-   instruction to shard.
-   - **a sharded or partial run must never mint an attestation** (the
-     coverage contract is the gate, not a courtesy)
+   assertions moving between sections.
+   - **An individual worker or focused run must never mint an attestation.** Only the
+     complete aggregate may attest, after checking every worker and both committed coverage
+     contracts.
    - do not "tier" the suite as a speed hack — a subset that attests is how
      `integrate` lands untested code
    - `attest-green` already skips integrate's *second* run; it does not
@@ -2590,7 +2592,45 @@ populated fixture also expands to non-decimal names and trips the fallback regar
 would have passed against the very bug it existed to catch. **If you add a guard beside a
 change, review the guard harder than the change.**
 
+### Complete independent groups (2026-09-16, owner-directed restructuring)
+
+The sequential corpus is now 18 independently scheduled groups, with setup-only fixture
+builders instead of dependency-group reruns. Presence/signals run exclusively first; the
+other groups run with up to four workers. Every original section retains its assertion count.
+The corpus delta is **+1**: one coordinator assertion executes the report, gate, scheduling
+and lifecycle regression tests. The complete runner validates every worker report, unique
+sections and skip IDs, then applies both coverage contracts from the captured commit. A
+focused group can never attest. `ATTESTATION` now says explicitly whether integration can
+reuse the exact-commit result; the old silent refusal hid redundant full runs.
+
+Back-to-back measurements at **51e0211**, **1619 assertions**, both fully green:
+
+| Mode | Wall | User CPU | System CPU | Passed / failed / skipped |
+| --- | ---: | ---: | ---: | --- |
+| Default four workers | 291.94s | 260.67s | 429.46s | 1619 / 0 / 0 |
+| `--jobs 1` | 916.74s | 269.21s | 456.66s | 1619 / 0 / 0 |
+
+This pair saved **624.80s (10m25s), 68.2%**, or **3.14x**. Both runs recorded the same-OID
+attestation. They did not overlap another full suite. Machine load varied: the parallel run
+started near 8 and ended near 15; samples during the serial run ranged roughly 15–56.
+Grok reviewed while the serial benchmark ran, without running another full suite. This is one
+same-commit pair with similar total CPU work, not an isolated-machine scaling guarantee.
+These measurements precede the follow-up cancellation/source-guard regression fixes.
+
+The original three signal failures came from SIGINT being ignored when Bash started;
+normalizing signal dispositions before the worker supervisor starts makes that path testable.
+An existing direct-provider mount fixture also omitted the Grok stub from PATH. It now uses
+the stub and requires a completed turn before counting successful cleanup.
+
+The rejected 2026-08-30 experiment below duplicated prerequisite sections and could not
+produce a complete reusable verdict. This runner constructs prerequisites without rerunning
+their assertions and preserves the full aggregate gate; its result is not a partial-lane pass.
+
 ### The sharding rejection, adversarially re-audited (2026-08-30)
+
+**Historical audit.** The owner reopened suite restructuring on 2026-09-16. Its new complete
+coordinator can attest after aggregating every independent worker; the partial-lane limitation
+below describes the rejected implementation. The coverage invariants still apply.
 
 Item 4's verdict was re-attacked by four independent lenses (critical path, edge breaking,
 partition quality, alternative levers), each trying to OVERTURN it. Three claimed sharding was

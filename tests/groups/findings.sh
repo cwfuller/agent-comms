@@ -302,7 +302,7 @@ narration above, numbered findings below
 ### Process
 - no friction
 LFEOF
-# self-contained: run_tr is defined much later in this file
+# Self-contained transport wrapper for this fixture.
 run_lf() { (cd "$REPO" && env -u COMMS_DELIVERY "$COMMS" "$@"); }
 LF_ROWS="$(run_lf findings "$LF/numbered.md" 2>/dev/null | tail -n +2)"
 [ "$(printf '%s\n' "$LF_ROWS" | grep -c .)" = "2" ] \

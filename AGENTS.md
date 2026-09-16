@@ -197,12 +197,20 @@ the interleaving I think is safe — find one where it isn't" earns its tokens.
 bash tests/run.sh
 ```
 
-One umbrella suite. It is still slow — measured 2026-08-30 at **~563s for 1395 assertions**
-on a machine at load ~10, down from **672s on the identical corpus** immediately before the
-hot-wait fixes landed. Reducing it further is active work; see the "Suite runtime" subsection
-of `docs/ROADMAP.md`, which carries the full profile. The cost is concentrated, not spread:
-ten sections account for ~87% of runtime, and spawn overhead is ~5%, not the dominant term it
-was once estimated to be.
+One complete umbrella suite, scheduled as independent fixture-owning groups. The presence
+and signal group runs alone; the remaining groups run with up to four workers. Use
+`bash tests/run.sh --jobs 1` for the same complete corpus serially, and
+`bash tests/run.sh --group <name>` for a focused development run that cannot attest.
+`bash tests/run.sh --list` lists the groups. See [tests/README.md](tests/README.md) for the
+worker/report contract and `docs/ROADMAP.md` for measured timings.
+
+Commit the candidate before its final complete run. The runner prints whether it recorded
+an exact-commit attestation; a green run on tracked edits cannot validate the commit made
+afterward. Integration can reuse only a fresh attestation for its exact candidate.
+
+Historical baseline: on 2026-08-30 the sequential corpus measured **~563s for 1395
+assertions**, down from **672s on the identical corpus** before the hot-wait fixes. Those
+figures and the old profile describe that corpus, not the current independent groups.
 
 **Read every runtime figure here as paired with its corpus size, and never compare across
 them.** Three separate optimizations have each cut 20–35% *on identical trees* — the state
@@ -316,7 +324,9 @@ runtime, quote the assertion count with it or measure both sides yourself.
 | `helpers/comms.sh` | the command router: messaging, presence, worktrees, panels, integrate |
 | `helpers/runphase.sh` | spawning and awaiting peer review turns over ACP |
 | `templates/` | the slash commands and skills that `install.sh` deploys into user projects |
-| `tests/run.sh` | the whole regression corpus |
+| `tests/run.sh` | complete-suite entrypoint and final coverage/attestation gate |
+| `tests/groups/`, `tests/lib/` | regression groups and explicit fixture/counter helpers |
+| `tests/dispatch.py` | bounded worker scheduling and complete-report aggregation |
 | `.comms/` | live mailboxes, thread state, presence records, archive — runtime, not source |
 | `docs/PROTOCOL.md` | message format, loop semantics, presence & worktree rules |
 | `docs/COMMANDS.md` | the command reference (not exhaustive — `panel`, `compose`, `friction`, `round-note` currently live only in `helpers/comms.sh`'s header banner, which is the real catalog) |

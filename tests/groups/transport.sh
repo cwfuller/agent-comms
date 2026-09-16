@@ -40,12 +40,14 @@ printf '%s\n' "$TR_MBXS" | grep -qi 'NOT spawned' \
 # THE CMUX WINDOWS ARE PROCESS-GLOBAL EXPORTS, not section-scoped: a section inserted between a
 # `COMMS_DELIVERY=mailbox` and its restore would silently inherit the pane transport — the exact way
 # these five sections once inherited the suite default. Pin WHICH banners may appear inside a cmux
-# window, so the next tests/run.sh edit fails here instead of running under the wrong transport.
+# window, so the next harness or group edit fails here instead of using the wrong transport.
 # (grok, S4-1 r1, advisory.)
 # NOTE the ^export anchor: this line itself starts with TR_WINDOW=, so the pattern cannot
 # match its own source. (It briefly did match the harness default after a global cmux->mailbox
 # rewrite edited this pattern too — the assertion caught that immediately, which is the point.)
-TR_WINDOW="$(grep -c '^export COMMS_DELIVERY=cmux$' "$REPO/tests/run.sh" || true)"
+TR_SOURCES=()
+while IFS= read -r source_path; do TR_SOURCES+=("$REPO/$source_path"); done < <(git -C "$REPO" ls-files -- 'tests/*.sh' 'tests/lib/*.sh' 'tests/groups/*.sh')
+TR_WINDOW="$(grep -h '^export COMMS_DELIVERY=cmux$' "${TR_SOURCES[@]}" | wc -l | tr -d ' ' )"
 [ "$TR_WINDOW" = "0" ] \
   && ok "no cmux transport window survives anywhere in the corpus" || fail "$TR_WINDOW cmux window(s) remain after S4-4"
 
