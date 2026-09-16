@@ -3666,6 +3666,7 @@ integrate_is_docs_only() {  # <root> <base-oid> <cand-oid> — 0 iff every chang
     # :oldmode newmode ... — modes are octal; 120000 symlink, 160000 gitlink
     mode_a="${line#*:}"; mode_a="${mode_a%% *}"
     mode_b="${line#* }"; mode_b="${mode_b%% *}"
+    # Concat is safe: git modes never end in 1/6, so 120000/160000 cannot span the join.
     case "$mode_a$mode_b" in
       *120000*|*160000*) return 1 ;;
     esac
