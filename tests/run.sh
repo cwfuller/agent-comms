@@ -9579,18 +9579,28 @@ printf '%s\n' "$DO_OUT7" | grep -q 'docs-only candidate — skipping the suite' 
   && ok "the LICENSE-only candidate landed" || fail "LICENSE-only did not land"
 
 # Submodule-suppression config must not hide a changed gitlink behind prose.
-# The gitlink and .gitmodules must already be on main — adding them in the
-# candidate would let .gitmodules (a regular file ignoreSubmodules does not
-# suppress) trip the skip independently of the gitlink.
+# $DO's checkout is session-primary (never occupy main). Put the submodule on
+# fixture main via update-ref after committing it on the worktree, then reset
+# so the candidate delta is only README + gitlink (no .gitmodules).
 DO_SUB="$WORK/docskip-sub"; mkdir -p "$DO_SUB"
 git -C "$DO_SUB" init -q
 (cd "$DO_SUB" && echo s > f && git add f && git -c user.email=t@t -c user.name=t commit -qm s) >/dev/null 2>&1
-(cd "$DO" && git -c protocol.file.allow=always submodule add --quiet "$DO_SUB" submod >/dev/null 2>&1 \
-  && git -c user.email=t@t -c user.name=t commit -qm "add submod") >/dev/null 2>&1
 do_reset
+(cd "$DO/.claude/worktrees/docskip" && git -c protocol.file.allow=always submodule add --quiet "$DO_SUB" submod >/dev/null 2>&1 \
+  && git -c user.email=t@t -c user.name=t commit -qm "add submod") >/dev/null 2>&1
+git -C "$DO" update-ref refs/heads/main "$(git -C "$DO/.claude/worktrees/docskip" rev-parse HEAD)"
+do_reset
+git -C "$DO/.claude/worktrees/docskip" submodule update --init --quiet >/dev/null 2>&1 \
+  || fail "gitlink fixture: submodule did not initialize on main"
+[ -f "$DO/.claude/worktrees/docskip/submod/f" ] \
+  || fail "gitlink fixture: submod/f missing after reset onto main"
 (cd "$DO/.claude/worktrees/docskip" && (cd submod && echo t >> f && git add f && git -c user.email=t@t -c user.name=t commit -qm t) \
   && git add submod && echo x >> README.md && git add README.md \
-  && git -c user.email=t@t -c user.name=t commit -qm "readme+sub") >/dev/null 2>&1
+  && git -c user.email=t@t -c user.name=t commit -qm "readme+sub") >/dev/null 2>&1 \
+  || fail "gitlink fixture: could not commit README+gitlink bump"
+DO_DELTA="$(git -C "$DO/.claude/worktrees/docskip" diff --name-only --no-renames --ignore-submodules=none "$(git -C "$DO" rev-parse main)" HEAD | sort | tr '\n' ' ')"
+[ "$DO_DELTA" = "README.md submod " ] \
+  || fail "gitlink fixture: candidate delta was '$DO_DELTA' (want README.md + submod)"
 DO_MAIN="$(git -C "$DO" rev-parse main)"
 git -C "$DO" config diff.ignoreSubmodules all
 git -C "$DO/.claude/worktrees/docskip" config diff.ignoreSubmodules all
