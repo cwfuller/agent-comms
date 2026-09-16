@@ -538,56 +538,91 @@ set +m
 sleep 2; kill -INT "$PW_IW" 2>/dev/null
 PW_IRC=0; wait "$PW_IW" 2>/dev/null || PW_IRC=$?
 [ "$PW_IRC" = 130 ] && ok "INT to the wrapper yields the child's INT status (130)" || fail "INT identity lost (rc=$PW_IRC)"
-# CANCELLATION NEVER SUCCEEDS (codex, impl r5: a fast child exiting 0 before the
-# re-signal produced 225/2000 false successes — integrate would land them). Twenty
-# INT-at-spawn iterations with an instant child: no run may return 0.
-# The 20-iteration loop runs in a FRESH bash child: the suite shell carries
-# hundreds of prior background-job table entries, and the loop consistently
-# produced exactly one spurious rc-0 there while 100-iteration standalone runs
-# (and direct instrumentation) are always clean — a harness-shell interaction,
-# not a wrapper defect. The child shell isolates the job table; forensics print
-# on any zero.
+# CANCELLATION NEVER SUCCEEDS: exercise a running child and an already-exited
+# zero-status child. Handshake before signaling: an immediate post-fork INT can
+# hit the pre-exec launch shell, and kill also succeeds against a zombie.
+cat > "$PW/cancel-fast-child.sh" <<'PWCANCEL'
+printf '%s\n' "$$" > "$1.ready"
+[ "${2:-}" != live ] || exec sleep 30
+deadline=$((SECONDS + 10))
+while [ ! -f "$1.release" ]; do
+  [ "$SECONDS" -lt "$deadline" ] || exit 124
+  sleep 0.01
+done
+: > "$1.zero"
+exit 0
+PWCANCEL
 PW_CANCEL_OUT="$(bash -c '
   C="$1"; PW="$2"; I="$3"
   false0=0; delivered=0
   for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    mark="$PW/cancel-live-$i"
     set -m
-    ( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- sleep 0.3 ) 2>/tmp/pwcancel.$$.err & p=$!
+    ( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- bash "$PW/cancel-fast-child.sh" "$mark" live ) 2>/tmp/pwcancel.$$.err & p=$!
     set +m
-    if kill -INT "$p" 2>/dev/null; then
+    deadline=$((SECONDS + 10))
+    while [ ! -s "$mark.ready" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.01; done
+    if [ -s "$mark.ready" ] && kill -INT "$p" 2>/dev/null; then
       delivered=$((delivered + 1))
       rc=0; wait "$p" 2>/dev/null || rc=$?
-      if [ "$rc" -eq 0 ]; then false0=$((false0 + 1)); echo "ZERO at iter $i:"; cat /tmp/pwcancel.$$.err; fi
+      if [ "$rc" -ne 130 ]; then false0=$((false0 + 1)); echo "live-iter $i returned $rc, expected INT status 130:"; cat /tmp/pwcancel.$$.err; fi
     else
+      false0=$((false0 + 1)); echo "live-iter $i did not reach the cancellation point"
+      kill -TERM "$p" 2>/dev/null || true
       wait "$p" 2>/dev/null || true
     fi
     rm -f /tmp/pwcancel.$$.err
   done
-  # Instant-exit child: the child can finish with rc 0 BEFORE the INT lands, so
-  # only the status coercion keeps a latched cancellation nonzero — the sleeping
-  # child above never samples that path (grok, impl r8 advisory). A bare
-  # kill-then-wait is FLAKY here: kill succeeds on a zombie too, and a wrapper
-  # that finished uncancelled legitimately returns 0 (the r5 lesson). So each
-  # iteration is STOP-gated: freeze the wrapper, confirm it is stopped and not a
-  # zombie, queue the INT, thaw — a counted INT is provably delivered alive.
+  # Zero-exit child: wait until with-beat has started its child (and armed its
+  # traps), STOP the supervisor and require an actual T state, then release the
+  # child and require its exit before queuing INT. Merely checking non-Z immediately
+  # after launch neither proves STOP took effect nor that exec reset SIGINT.
+  # Missing handshakes or failed process inspection fail this assertion.
   fastn=0
   for i in 1 2 3 4 5 6 7 8 9 10; do
+    mark="$PW/cancel-fast-$i"
     set -m
-    ( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- true ) 2>/tmp/pwcancel.$$.err & p=$!
+    ( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- bash "$PW/cancel-fast-child.sh" "$mark" ) 2>/tmp/pwcancel.$$.err & p=$!
     set +m
-    kill -STOP "$p" 2>/dev/null || true
-    st="$(ps -p "$p" -o stat= 2>/dev/null || true)"
-    case "$st" in
-      *Z*|"") kill -CONT "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true ;;
-      *) kill -INT "$p" 2>/dev/null || true
-         kill -CONT "$p" 2>/dev/null || true
+    deadline=$((SECONDS + 10))
+    while [ ! -s "$mark.ready" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.01; done
+    child="$(cat "$mark.ready" 2>/dev/null)"
+    stopped=0; exited=0
+    if [ -n "$child" ] && kill -STOP "$p" 2>/dev/null; then
+      while [ "$SECONDS" -lt "$deadline" ]; do
+        st="$(ps -p "$p" -o stat= 2>/dev/null)" || break
+        case "$st" in *T*) stopped=1; break ;; esac
+        sleep 0.01
+      done
+    fi
+    : > "$mark.release"
+    if [ "$stopped" = 1 ]; then
+      while [ "$SECONDS" -lt "$deadline" ]; do
+        st="$(ps -p "$child" -o stat= 2>"$mark.ps-error")"; ps_rc=$?
+        [ ! -s "$mark.ps-error" ] || break
+        # waitpid can collect the exit in the kernel while the supervisor is
+        # stopped; ps then reports absence instead of a zombie on Darwin.
+        if [ "$ps_rc" = 1 ] && [ -z "$st" ]; then exited=1; break; fi
+        [ "$ps_rc" = 0 ] && [ -n "$st" ] || break
+        case "$st" in *Z*) exited=1; break ;; esac
+        sleep 0.01
+      done
+    fi
+    if [ "$exited" = 1 ] && [ -f "$mark.zero" ] && kill -INT "$p" 2>/dev/null; then
+         kill -CONT "$p" 2>/dev/null
          fastn=$((fastn + 1)); delivered=$((delivered + 1))
          rc=0; wait "$p" 2>/dev/null || rc=$?
-         if [ "$rc" -eq 0 ]; then false0=$((false0 + 1)); echo "ZERO at fast-iter $i:"; cat /tmp/pwcancel.$$.err; fi ;;
-    esac
+         if [ "$rc" -eq 0 ]; then false0=$((false0 + 1)); echo "ZERO at fast-iter $i:"; cat /tmp/pwcancel.$$.err; fi
+    else
+      false0=$((false0 + 1))
+      echo "fast-iter $i handshake failed: stopped=$stopped exited=$exited"
+      kill -TERM "$p" 2>/dev/null || true
+      kill -CONT "$p" 2>/dev/null || true
+      wait "$p" 2>/dev/null || true
+    fi
     rm -f /tmp/pwcancel.$$.err
   done
-  [ "$fastn" -ge 5 ] || echo "WARN: only $fastn/10 fast-exit iterations were live at INT"
+  [ "$fastn" -eq 10 ] || echo "ERROR: only $fastn/10 zero-exit iterations reached the cancellation point"
   echo "delivered=$delivered false0=$false0"
 ' cancel-probe "$COMMS" "$PW" "$PW_I1")"
 PW_DELIVERED="$(printf '%s\n' "$PW_CANCEL_OUT" | sed -n 's/.*delivered=\([0-9]*\).*/\1/p')"

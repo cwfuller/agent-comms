@@ -2619,6 +2619,12 @@ These measurements precede the follow-up cancellation/source-guard regression fi
 
 The original three signal failures came from SIGINT being ignored when Bash started;
 normalizing signal dispositions before the worker supervisor starts makes that path testable.
+One later complete run still hit the fast-cancellation assertion, and an isolated probe
+also reproduced zero returns in the immediate-signal loop. Neither proved the supervisor
+had started its child; the STOP probe also accepted any non-zombie state. Both now
+handshake with the child. The zero-exit case requires a stopped supervisor and an exited
+child before INT; missing handshakes fail. The retained late-cancel assertion still fails
+against a temporary helper with cancellation status coercion removed.
 An existing direct-provider mount fixture also omitted the Grok stub from PATH. It now uses
 the stub and requires a completed turn before counting successful cleanup.
 
