@@ -84,10 +84,12 @@ to discover after implementing — novel architecture, high blast radius,
 safety-critical. Most work should let the implementation speak for itself.
 Without an explicit `--plan` / `--no-plan`, `comms.sh route` may request the
 approach-review phase and recommend an abstract `fast|balanced|strong` tier plus
-effort. The decision backend is opt-in (`COMMS_ROUTE_BACKEND=typesafe` or
+effort (a live classification is raised one step; fail-open stays medium /
+balanced). The decision backend is opt-in (`COMMS_ROUTE_BACKEND=typesafe` or
 `COMMS_ROUTE=1` plus `TYPESAFE_API_KEY`); a key in the environment is not enough
 by itself. Prompt phrases (`use strong`, `skip plan`) override it with no backend.
-It never chooses a reviewer or a vendor model id — map the tier in the runtime.
+It never chooses a reviewer or a vendor model id — map the tier in the runtime
+to whatever that session currently offers for cheap / default / best.
 
 **A panel is the default.** Every registered agent except the driver reviews the
 same pinned artifact. They find different things. A blocking finding two of them

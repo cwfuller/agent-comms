@@ -132,8 +132,8 @@ keys="$(printf '%s\n' "$OUT" | awk -F': ' '{print $1}' | paste -sd, -)"
 rt_stub 0.91 0 0.92 high 0.81 "$ST/mech.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "no" ] && [ "$(rt_kv "$OUT" complexity)" = "mechanical" ] \
-  && [ "$(rt_kv "$OUT" tier)" = "fast" ] \
-  && ok "high noul + mechanical => plan no, tier fast" || fail "mech plan (rc=$rc out=$OUT)"
+  && [ "$(rt_kv "$OUT" tier)" = "balanced" ] \
+  && ok "high noul + mechanical => plan no, tier balanced (one-step up)" || fail "mech plan (rc=$rc out=$OUT)"
 
 rt_stub 0.20 3 0.92 high 0.81 "$ST/lownoul.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/lownoul.json" -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
@@ -149,8 +149,8 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/hard.json" -- "debug a race" 2>/dev/null)" && rc
 rt_stub 0.91 1 0.92 high 0.81 "$ST/std.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/std.json" -- "add a well-specified endpoint" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "no" ] && [ "$(rt_kv "$OUT" complexity)" = "standard" ] \
-  && [ "$(rt_kv "$OUT" tier)" = "balanced" ] \
-  && ok "high noul + standard => plan no, tier balanced" || fail "std plan (rc=$rc out=$OUT)"
+  && [ "$(rt_kv "$OUT" tier)" = "strong" ] \
+  && ok "high noul + standard => plan no, tier strong (one-step up)" || fail "std plan (rc=$rc out=$OUT)"
 
 rt_stub 0.50 2 0.92 xhigh 0.90 "$ST/xhi.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/xhi.json" -- "debug a race" 2>/dev/null)" && rc=0 || rc=$?
@@ -159,13 +159,13 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/xhi.json" -- "debug a race" 2>/dev/null)" && rc=
 
 rt_stub 0.50 2 0.92 xhigh 0.20 "$ST/xhi-low.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/xhi-low.json" -- "debug a race" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "medium" ] && [ "$(rt_kv "$OUT" effort_p)" = "-" ] \
-  && ok "low-confidence effort clamps to medium" || fail "effort clamp (rc=$rc out=$OUT)"
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "high" ] && [ "$(rt_kv "$OUT" effort_p)" = "-" ] \
+  && ok "low-confidence effort clamps to medium then rises to high" || fail "effort clamp (rc=$rc out=$OUT)"
 
 rt_stub 0.50 2 0.92 high 0.70 "$ST/high.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/high.json" -- "debug a race" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "high" ] \
-  && ok "confident high effort is kept" || fail "high effort (rc=$rc out=$OUT)"
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "xhigh" ] \
+  && ok "confident high effort is raised to xhigh" || fail "high effort (rc=$rc out=$OUT)"
 
 rt_stub 0.91 3 0.20 high 0.81 "$ST/lowc.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/lowc.json" -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
@@ -260,9 +260,9 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/infprob.json" -- "redesign the auth stack" 2>/de
 # cache-sticky no-downgrade; optional JSONL log.
 rt_stub 0.20 0 0.20 low 0.90 "$ST/mech-lowc.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech-lowc.json" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "balanced" ] \
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] \
   && [ "$(rt_kv "$OUT" gate)" = "low-confidence-middle" ] \
-  && ok "low complexity confidence lands on balanced, not fast" || fail "lowc middle (rc=$rc out=$OUT)"
+  && ok "low complexity confidence lands on strong (middle, then one-step up)" || fail "lowc middle (rc=$rc out=$OUT)"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "use strong to rename a typo" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" = "override" ] \
@@ -283,15 +283,15 @@ OUT="$(rt -- "use fast to rename this" 2>/dev/null)" && rc=0 || rc=$?
 
 LOG="$ST/route.jsonl"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" COMMS_ROUTE_LOG="$LOG" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ -s "$LOG" ] && grep -q '"tier": "fast"' "$LOG" \
+[ "$rc" -eq 0 ] && [ -s "$LOG" ] && grep -q '"tier": "balanced"' "$LOG" \
   && ok "COMMS_ROUTE_LOG records the decision" || fail "route log (rc=$rc log=$(cat "$LOG" 2>/dev/null))"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "format the table on fast disk" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "fast" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "balanced" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
   && ok "ordinary prose 'on fast disk' is not a tier override" || fail "false override tier (rc=$rc out=$OUT)"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech-lowc.json" -- "rename with high confidence" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "low" ] && [ "$(rt_kv "$OUT" gate)" = "low-confidence-middle" ] \
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "medium" ] && [ "$(rt_kv "$OUT" gate)" = "low-confidence-middle" ] \
   && ok "ordinary prose 'with high confidence' is not an effort override" || fail "false override effort (rc=$rc out=$OUT)"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" --current-tier fast --context-tokens 50000 \
@@ -304,7 +304,7 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" -- "Redesign the cryptographic subsys
   && ok "ordinary prose 'use fast algorithms' is not a tier override" || fail "false override fast algorithms (rc=$rc out=$OUT)"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" -- "Redesign the payment system to use low latency networking" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "high" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "xhigh" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
   && ok "ordinary prose 'use low latency' is not an effort override" || fail "false override low latency (rc=$rc out=$OUT)"
 
 OUT="$(rt COMMS_ROUTE_BACKEND=typesafe -- "use plan first and use strong" 2>/dev/null)" && rc=0 || rc=$?
@@ -318,7 +318,7 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" COMMS_ROUTE_CURRENT_TIER=strong COMMS
   && ok "env-only current-tier + context-tokens is cache-sticky" || fail "env cache sticky (rc=$rc out=$OUT)"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" COMMS_ROUTE_CURRENT_TIER=high -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "fast" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "balanced" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
   && ok "invalid ambient COMMS_ROUTE_CURRENT_TIER is ignored, not usage-error" || fail "invalid env tier (rc=$rc out=$OUT)"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" -- "refactor to use fast, in-memory caching" 2>/dev/null)" && rc=0 || rc=$?

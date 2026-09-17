@@ -17,7 +17,9 @@
 # Never selects a reviewer, a vendor model id, or a panel roster. Human
 # --plan / --no-plan in /auto skip this helper entirely. Prompt phrases
 # ("use strong", "skip plan") are in-helper overrides, copied from jev-router.
-# They still win when an enabled backend errors.
+# They still win when an enabled backend errors. A live classification raises
+# effort and tier one step (low→medium→high→xhigh, fast→balanced→strong);
+# fail-open stays medium/balanced.
 #
 # Env:
 #   COMMS_ROUTE_BACKEND       typesafe|jev|stub — opt-in decision backend
@@ -360,6 +362,21 @@ gate = "classify"
 if cconf < COMPLEXITY_CONFIDENCE_MIN:
     tier = "balanced"
     gate = "low-confidence-middle"
+
+def _step_up(seq, value):
+    try:
+        i = seq.index(value)
+    except ValueError:
+        return value
+    return seq[min(i + 1, len(seq) - 1)]
+
+# Prefer slightly more reasoning / a stronger model than the raw classification.
+# Fail-open and prompt overrides skip this. Cache-sticky still refuses a
+# downgrade after the bump.
+effort = _step_up(EFFORTS, effort)
+if effort != choice:
+    effort_p = None
+tier = _step_up(TIERS, tier)
 
 current = os.environ.get("COMMS_ROUTE_CURRENT_TIER") or ""
 try:

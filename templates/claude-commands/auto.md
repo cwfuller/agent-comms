@@ -134,8 +134,9 @@ asked. Do not narrate every dispatch.
    `ROUTE_EFFORT`; if it can pick a cheaper/faster model for `tier: fast` (or keep
    a stronger one for `tier: strong`), do so. Never fail the loop because effort
    or model cannot be set. Never emit a vendor model id from this helper — map
-   `fast|balanced|strong` in the runtime, the way jev-router maps abstract tiers
-   in code. A fail-open result (`source: fail-open` or `source: disabled`) means
+   `fast|balanced|strong` to whatever this session currently offers for cheap /
+   default / best (a newly released model is used when it is that band's current
+   best, not because a table in this repo named it). A fail-open result (`source: fail-open` or `source: disabled`) means
    `plan: no` — continue to implement. The classifier never chooses a reviewer
    or a panel roster.
 
