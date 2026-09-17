@@ -273,53 +273,43 @@ choice_ans = answers.get("effort")
 if not isinstance(noul_ans, dict) or not isinstance(score_ans, dict) or not isinstance(choice_ans, dict):
     fail_open("response is missing needs_plan, complexity, or effort")
 
-try:
-    plan_p = float(noul_ans["noul"])
-except (KeyError, TypeError, ValueError):
-    fail_open("needs_plan.noul is missing or not a number")
-if plan_p != plan_p or plan_p < 0 or plan_p > 1:  # NaN or out of range
-    fail_open("needs_plan.noul is out of range")
+def unit_float(value, what):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        fail_open(f"{what} is missing or not a number")
+    if v != v or v < 0.0 or v > 1.0:
+        fail_open(f"{what} is out of range")
+    return v
 
+plan_p = unit_float(noul_ans.get("noul"), "needs_plan.noul")
 probs = score_ans.get("probabilities")
 if not isinstance(probs, dict) or not probs:
     fail_open("complexity.probabilities is missing")
-try:
-    cconf = float(score_ans.get("confidence"))
-except (TypeError, ValueError):
-    fail_open("complexity.confidence is missing or not a number")
-if cconf != cconf or cconf < 0 or cconf > 1:
-    fail_open("complexity.confidence is out of range")
+cconf = unit_float(score_ans.get("confidence"), "complexity.confidence")
 
 # Argmax over declared levels. On a tie keep the cheaper (lower) level.
 # Do not interpolate the weighted score — jev-1.13 is weak at that.
+# A non-unit probability must fail-open: treating 2 or Inf as a winner would
+# enable plan: yes from a malformed body.
 best_p = -1.0
-best_level = "1"
+best_level = "0"
 for idx in ("0", "1", "2", "3"):
-    try:
-        p = float(probs.get(idx, 0))
-    except (TypeError, ValueError):
-        p = 0.0
+    raw = 0 if idx not in probs else probs[idx]
+    p = unit_float(raw, f"complexity.probabilities[{idx}]")
     if p > best_p:
         best_p = p
         best_level = idx
 complexity = LEVELS[int(best_level)]
 
 choice = choice_ans.get("choice")
-try:
-    econf = float(choice_ans.get("confidence"))
-except (TypeError, ValueError):
-    fail_open("effort.confidence is missing or not a number")
-if econf != econf or econf < 0 or econf > 1:
-    fail_open("effort.confidence is out of range")
+econf = unit_float(choice_ans.get("confidence"), "effort.confidence")
 if choice not in EFFORTS:
     fail_open("effort.choice is not a known effort")
 effort_p = None
 eprobs = choice_ans.get("probabilities")
 if isinstance(eprobs, dict) and choice in eprobs:
-    try:
-        effort_p = float(eprobs[choice])
-    except (TypeError, ValueError):
-        effort_p = None
+    effort_p = unit_float(eprobs[choice], f"effort.probabilities[{choice}]")
 
 # Policy lives in code, not in the model.
 plan = "no"
@@ -333,6 +323,7 @@ if (
 effort = choice
 if econf < EFFORT_CONFIDENCE_MIN:
     effort = "medium"
+    effort_p = None
 
 plan_p_s = f"{plan_p:.3f}"
 effort_p_s = f"{effort_p:.3f}" if effort_p is not None else "-"
@@ -342,5 +333,6 @@ reason = (
     f"(level {best_level}, conf {cconf_s}) effort={choice} "
     f"(conf {econf:.3f})"
 )
-emit(plan, effort, complexity, plan_p_s, effort_p_s, cconf_s, "jev", reason)
+src = "stub" if os.environ.get("COMMS_ROUTE_STUB") else "jev"
+emit(plan, effort, complexity, plan_p_s, effort_p_s, cconf_s, src, reason)
 PY

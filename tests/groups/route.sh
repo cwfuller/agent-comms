@@ -69,8 +69,17 @@ rt -- >/dev/null 2>&1 </dev/null && rc=0 || rc=$?
 [ "$rc" -eq 2 ] && ok "empty task is a usage error" || fail "empty task rc=$rc (want 2)"
 
 NPY="$WORK/nopython"; mkdir -p "$NPY"
-OUT="$(rt PATH="$NPY" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+# Keep the shell utilities cmd_route / fail_open need, and provide a stub so we
+# pass the key check — otherwise PATH=empty fail-opens as missing-sibling or
+# missing-key and never exercises command -v python3.
+for _t in dirname tr cat bash awk sed; do
+  _src="$(command -v "$_t" 2>/dev/null)" || continue
+  ln -s "$_src" "$NPY/$_t"
+done
+rt_stub 0.91 3 0.92 high 0.81 "$ST/py-mask.json"
+OUT="$(rt PATH="$NPY" COMMS_ROUTE_STUB="$ST/py-mask.json" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "fail-open" ] \
+  && printf '%s\n' "$OUT" | grep -q 'python3' \
   && ok "missing python3 fail-opens" || fail "missing python3 (rc=$rc out=$OUT)"
 
 BARE="$WORK/bare-comms"; mkdir -p "$BARE"
@@ -92,8 +101,11 @@ section "comms.sh: route policy"
 rt_stub 0.91 3 0.92 high 0.81 "$ST/arch.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" COMMS_ROUTE_URL="http://127.0.0.1:1" -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "yes" ] && [ "$(rt_kv "$OUT" complexity)" = "architectural" ] \
-  && [ "$(rt_kv "$OUT" source)" = "jev" ] \
-  && ok "high noul + architectural => plan yes" || fail "arch plan (rc=$rc out=$OUT)"
+  && [ "$(rt_kv "$OUT" source)" = "stub" ] \
+  && ok "high noul + architectural => plan yes (source=stub)" || fail "arch plan (rc=$rc out=$OUT)"
+keys="$(printf '%s\n' "$OUT" | awk -F': ' '{print $1}' | paste -sd, -)"
+[ "$keys" = "plan,effort,complexity,plan_p,effort_p,complexity_confidence,source,reason" ] \
+  && ok "stub success emits the stable key set" || fail "success key set ($keys)"
 
 rt_stub 0.91 0 0.92 high 0.81 "$ST/mech.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
@@ -122,7 +134,7 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/xhi.json" -- "debug a race" 2>/dev/null)" && rc=
 
 rt_stub 0.50 2 0.92 xhigh 0.20 "$ST/xhi-low.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/xhi-low.json" -- "debug a race" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "medium" ] \
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "medium" ] && [ "$(rt_kv "$OUT" effort_p)" = "-" ] \
   && ok "low-confidence effort clamps to medium" || fail "effort clamp (rc=$rc out=$OUT)"
 
 rt_stub 0.50 2 0.92 high 0.70 "$ST/high.json"
@@ -161,5 +173,60 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/std.json" --task "add a well-specified endpoint"
 # A stub must win over a URL that would fail if contacted.
 OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" COMMS_ROUTE_URL="http://127.0.0.1:1" \
   TYPESAFE_API_KEY="not-a-real-key" -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "yes" ] \
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "yes" ] && [ "$(rt_kv "$OUT" source)" = "stub" ] \
   && ok "stub is used even when a key and a dead URL are set" || fail "stub vs URL (rc=$rc out=$OUT)"
+
+# Malformed probabilities must fail-open, not win argmax and enable plan.
+python3 - "$ST/badprob.json" <<'PY'
+import json, sys
+body = {
+    "model": "jev-latest",
+    "answers": {
+        "needs_plan": {"type": "noul", "noul": 0.9},
+        "complexity": {
+            "type": "score",
+            "score": 2.0,
+            "legend": {"0": "m", "1": "s", "2": "h", "3": "a"},
+            "probabilities": {"0": 0.9, "1": 0.1, "2": 2, "3": 0},
+            "confidence": 0.9,
+        },
+        "effort": {
+            "type": "choice",
+            "choice": "high",
+            "probabilities": {"low": 0, "medium": 0, "high": 1, "xhigh": 0},
+            "confidence": 0.9,
+        },
+    },
+}
+json.dump(body, open(sys.argv[1], "w"))
+PY
+OUT="$(rt COMMS_ROUTE_STUB="$ST/badprob.json" -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "fail-open" ] && [ "$(rt_kv "$OUT" plan)" = "no" ] \
+  && ok "out-of-range complexity probability fail-opens" || fail "badprob (rc=$rc out=$OUT)"
+
+python3 - "$ST/infprob.json" <<'PY'
+import json, sys
+body = {
+    "model": "jev-latest",
+    "answers": {
+        "needs_plan": {"type": "noul", "noul": 0.9},
+        "complexity": {
+            "type": "score",
+            "score": 2.0,
+            "legend": {"0": "m", "1": "s", "2": "h", "3": "a"},
+            "probabilities": {"0": 0.9, "1": 0.1, "2": "Infinity", "3": 0},
+            "confidence": 0.9,
+        },
+        "effort": {
+            "type": "choice",
+            "choice": "high",
+            "probabilities": {"low": 0, "medium": 0, "high": 1, "xhigh": 0},
+            "confidence": 0.9,
+        },
+    },
+}
+json.dump(body, open(sys.argv[1], "w"))
+PY
+OUT="$(rt COMMS_ROUTE_STUB="$ST/infprob.json" -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "fail-open" ] && [ "$(rt_kv "$OUT" plan)" = "no" ] \
+  && ok "non-finite complexity probability fail-opens" || fail "infprob (rc=$rc out=$OUT)"
