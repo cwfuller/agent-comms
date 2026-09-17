@@ -357,8 +357,9 @@ if econf < EFFORT_CONFIDENCE_MIN:
 # helper never names a vendor model id (claude/codex/grok each map it).
 tier = TIER_OF[complexity]
 gate = "classify"
-# jev-codex-router calibration: low confidence → middle tier, not frontier and
-# not a silent downgrade to fast.
+# Low confidence refuses fast (and plan). The later one-step bump then
+# raises this middle pick to strong. Gate name records the refuse-fast
+# choice, not the post-bump tier.
 if cconf < COMPLEXITY_CONFIDENCE_MIN:
     tier = "balanced"
     gate = "low-confidence-middle"
@@ -402,8 +403,8 @@ effort_p_s = f"{effort_p:.3f}" if effort_p is not None else "-"
 cconf_s = f"{cconf:.3f}"
 reason = (
     f"needs_plan={plan_p_s} complexity={complexity} "
-    f"(level {best_level}, conf {cconf_s}) effort={choice} "
-    f"(conf {econf:.3f}) tier={tier} gate={gate}"
+    f"(level {best_level}, conf {cconf_s}) effort={effort} "
+    f"(classified {choice}, conf {econf:.3f}) tier={tier} gate={gate}"
 )
 emit(
     plan=plan, effort=effort, complexity=complexity, tier=tier, gate=gate,
