@@ -62,6 +62,8 @@ file=""
 explicit_task=0
 current_tier=""
 context_tokens=""
+tier_from_cli=0
+tokens_from_cli=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --task)
@@ -72,10 +74,10 @@ while [ $# -gt 0 ]; do
       file="$2"; shift 2 ;;
     --current-tier)
       [ $# -ge 2 ] || usage_err "--current-tier needs fast|balanced|strong"
-      current_tier="$2"; shift 2 ;;
+      current_tier="$2"; tier_from_cli=1; shift 2 ;;
     --context-tokens)
       [ $# -ge 2 ] || usage_err "--context-tokens needs a non-negative integer"
-      context_tokens="$2"; shift 2 ;;
+      context_tokens="$2"; tokens_from_cli=1; shift 2 ;;
     --)
       shift
       task="$*"
@@ -93,24 +95,29 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# CLI flags win; empty flag defaults must not clobber caller env. /auto never
-# passes --current-tier / --context-tokens, so cache-sticky is env-only there.
-if [ -z "$current_tier" ]; then
-  current_tier="${COMMS_ROUTE_CURRENT_TIER:-}"
-fi
-if [ -z "$context_tokens" ]; then
-  context_tokens="${COMMS_ROUTE_CONTEXT_TOKENS:-}"
-fi
-
-if [ -n "$current_tier" ]; then
+# CLI flags win and usage-error. Ambient env is fallback; invalid ambient is
+# ignored (not exit 2) so a stale COMMS_ROUTE_CURRENT_TIER=high cannot abort
+# /auto. /auto never passes the flags, so cache-sticky is env-only there.
+if [ "$tier_from_cli" -eq 1 ]; then
   case "$current_tier" in
     fast|balanced|strong) ;;
-    *) usage_err "current tier must be fast, balanced, or strong" ;;
+    *) usage_err "--current-tier must be fast, balanced, or strong" ;;
+  esac
+else
+  current_tier="${COMMS_ROUTE_CURRENT_TIER:-}"
+  case "$current_tier" in
+    ""|fast|balanced|strong) ;;
+    *) current_tier="" ;;
   esac
 fi
-if [ -n "$context_tokens" ]; then
+if [ "$tokens_from_cli" -eq 1 ]; then
   case "$context_tokens" in
-    ''|*[!0-9]*) usage_err "context tokens must be a non-negative integer" ;;
+    ''|*[!0-9]*) usage_err "--context-tokens must be a non-negative integer" ;;
+  esac
+else
+  context_tokens="${COMMS_ROUTE_CONTEXT_TOKENS:-}"
+  case "$context_tokens" in
+    ""|*[!0-9]*) context_tokens="" ;;
   esac
 fi
 
@@ -171,16 +178,34 @@ def _write(fields):
             pass
     sys.exit(0)
 
+overrides = {}
+
+def emit(**fields):
+    _write(fields)
+
+def emit_overrides(reason):
+    emit(
+        plan=overrides.get("plan", "no"),
+        effort=overrides.get("effort", "medium"),
+        complexity="standard",
+        tier=overrides.get("tier", "balanced"),
+        gate="override",
+        plan_p="-", effort_p="-", complexity_confidence="-",
+        source="override",
+        reason=reason,
+    )
+
 def fail_open(reason, source="fail-open"):
+    # Human prompt overrides still win when an enabled backend errors or
+    # returns an unusable answers object. Empty until detect_overrides runs.
+    if overrides:
+        emit_overrides(f"prompt override; {reason}")
     _write({
         "plan": "no", "effort": "medium", "complexity": "standard",
         "tier": "balanced", "gate": source,
         "plan_p": "-", "effort_p": "-", "complexity_confidence": "-",
         "source": source, "reason": reason,
     })
-
-def emit(**fields):
-    _write(fields)
 
 _home = os.environ.get("COMMS_ROUTE_HOME") or ""
 if _home:
@@ -213,10 +238,10 @@ _OV_PLAN_NO = re.compile(
 _OV_PLAN_YES = re.compile(
     r"\b(?:use|switch to)\s+plan\b|\bplan first\b", re.I)
 # Routing command, not adjective+noun: "use fast to rename" / "use fast." match;
-# "use fast algorithms" / "use low latency" do not. Intentionally not `with`/`on`
-# as prefixes ("on fast disk", "with high confidence") and not a bare word
-# boundary after the token (that still fires on "use fast algorithms").
-_OV_TAIL = r"(?=\s*$|[.,;:!]|\s+(?:to|and|then|for)\b)"
+# "use fast algorithms" / "use low latency" / "use fast, in-memory caching"
+# do not. Comma is not a tail: it is how English lists adjectives. Intentionally
+# not `with`/`on` as prefixes and not a bare word boundary after the token.
+_OV_TAIL = r"(?=\s*$|[.;:!]|\s+(?:to|and|then|for)\b)"
 _OV_TIER = (
     (re.compile(r"\b(?:use|switch to)\s+(?:fast|haiku|luna)(?:\s+tier)?" + _OV_TAIL, re.I), "fast"),
     (re.compile(r"\b(?:use|switch to)\s+(?:balanced|sonnet|terra)(?:\s+tier)?" + _OV_TAIL, re.I), "balanced"),
@@ -254,18 +279,6 @@ if len(task) > 8000:
     task = task[:8000]
 overrides = detect_overrides(task)
 
-def emit_overrides(reason):
-    emit(
-        plan=overrides.get("plan", "no"),
-        effort=overrides.get("effort", "medium"),
-        complexity="standard",
-        tier=overrides.get("tier", "balanced"),
-        gate="override",
-        plan_p="-", effort_p="-", complexity_confidence="-",
-        source="override",
-        reason=reason,
-    )
-
 timeout_raw = os.environ.get("COMMS_ROUTE_TIMEOUT_SECS", "8")
 try:
     timeout = int(timeout_raw)
@@ -285,13 +298,9 @@ state = {
 try:
     backend_name, answers = route_backend.classify(state, timeout)
 except route_backend.BackendError as e:
-    if overrides:
-        emit_overrides(f"prompt override; backend error: {e.reason}")
     fail_open(e.reason, e.source)
 
 if answers is None:
-    if overrides:
-        emit_overrides("prompt override; no decision backend")
     fail_open(
         "no decision backend enabled "
         "(set COMMS_ROUTE_BACKEND=typesafe or COMMS_ROUTE=1)"

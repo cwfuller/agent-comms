@@ -69,6 +69,9 @@ OUT="$(rt COMMS_ROUTE=0 COMMS_ROUTE_STUB="$ST/would-plan.json" -- "redesign the 
 rt -- >/dev/null 2>&1 </dev/null && rc=0 || rc=$?
 [ "$rc" -eq 2 ] && ok "empty task is a usage error" || fail "empty task rc=$rc (want 2)"
 
+rt --current-tier high -- "rename a typo" >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -eq 2 ] && ok "invalid --current-tier is a usage error" || fail "invalid CLI tier rc=$rc (want 2)"
+
 NPY="$WORK/nopython"; mkdir -p "$NPY"
 # Keep the shell utilities cmd_route / fail_open need, and provide a stub so we
 # pass the key check — otherwise PATH=empty fail-opens as missing-sibling or
@@ -313,3 +316,16 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" COMMS_ROUTE_CURRENT_TIER=strong COMMS
   -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" = "cache-sticky" ] \
   && ok "env-only current-tier + context-tokens is cache-sticky" || fail "env cache sticky (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" COMMS_ROUTE_CURRENT_TIER=high -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "fast" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
+  && ok "invalid ambient COMMS_ROUTE_CURRENT_TIER is ignored, not usage-error" || fail "invalid env tier (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" -- "refactor to use fast, in-memory caching" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
+  && ok "ordinary prose 'use fast, in-memory' is not a tier override" || fail "false override comma (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/partial.json" -- "use plan first and use strong" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "yes" ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] \
+  && [ "$(rt_kv "$OUT" source)" = "override" ] \
+  && ok "prompt override survives malformed backend answers" || fail "override on malformed answers (rc=$rc out=$OUT)"
