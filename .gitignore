@@ -1,3 +1,8 @@
+# Bytecode from helpers/route_backend.py (and any future python helpers).
+# Snapshot-on-send captures untracked files; a __pycache__ in the artifact is noise.
+__pycache__/
+*.pyc
+
 # Local agent communication
 .comms/
 .codex/AGENTS.md
