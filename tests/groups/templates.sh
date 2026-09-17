@@ -368,8 +368,8 @@ grep -q 'ROUTE_PLAN' "$AIF" && grep -q 'plan: yes' "$AIF" && grep -q 'ROUTE_SOUR
   || fail "auto.md plan: yes handoff"
 grep -q 'never chooses a reviewer' "$AIF" && grep -q 'panel roster' "$AIF" \
   && ok "auto.md forbids routing reviewers or models" || fail "auto.md reviewer/model routing leak"
-grep -q 'Effort is advisory' "$AIF" \
-  && ok "auto.md treats effort as advisory" || fail "auto.md effort is not advisory"
+grep -q 'Effort and tier are advisory' "$AIF" && grep -q 'ROUTE_TIER' "$AIF" \
+  && ok "auto.md treats effort and tier as advisory" || fail "auto.md effort/tier is not advisory"
 grep -q -- '--no-route' "$AIF" && grep -q 'COMMS_ROUTE=0' "$AIF" \
   && ok "auto.md can disable the classifier" || fail "auto.md missing disable"
 grep -q 'fail-open is a decision, never a stop' "$AIF" \

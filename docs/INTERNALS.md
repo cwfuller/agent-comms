@@ -11,8 +11,8 @@ helpers/
   comms.sh                     message engine: workspace/list/validate/archive/deliver/send/state/clean
                                + bounded reads: lessons/archive-search
                                + route (delegates to route.sh)
-  route.sh                     /auto query classifier: plan yes/no + implementer effort
-                               (TypeSafe Jev; fail-open without a key)
+  route.sh                     /auto query classifier: plan yes/no + effort + abstract
+                               tier (TypeSafe Jev; policy composed in code; fail-open)
   runphase.sh                  peer-turn runner — ACP for every provider, direct headless for grok
                                only (COMMS_DELIVERY=headless): spawn → observe → record
 docs/loopspec/                 the portable review-loop kernel (spec, schemas, fixtures,

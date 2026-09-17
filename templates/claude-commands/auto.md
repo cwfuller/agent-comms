@@ -121,16 +121,20 @@ asked. Do not narrate every dispatch.
    printf '%s\n' "$ROUTE_OUT"
    ROUTE_PLAN="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^plan: //p' | head -1)"
    ROUTE_EFFORT="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^effort: //p' | head -1)"
+   ROUTE_TIER="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^tier: //p' | head -1)"
    ROUTE_SOURCE="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^source: //p' | head -1)"
    ```
-   If `ROUTE_PLAN` is `yes` and `ROUTE_SOURCE` is `jev`, run the plan phase (step 3)
-   as if `--plan` was passed. A `source: stub` result is the test seam — treat it
-   as fail-open (`plan: no`), never as a live classification.
-   Effort is advisory: if this runtime can set reasoning effort, apply `ROUTE_EFFORT`
-   before implementing. Never fail the loop because effort cannot be set. A
-   fail-open result (`source: fail-open` or `source: disabled`) means `plan: no` —
-   continue to implement. The classifier never chooses a reviewer, a model, or a
-   panel roster.
+   If `ROUTE_PLAN` is `yes` and `ROUTE_SOURCE` is `jev` or `override`, run the plan
+   phase (step 3) as if `--plan` was passed. A `source: stub` result is the test
+   seam — treat it as fail-open (`plan: no`), never as a live classification.
+   Effort and tier are advisory: if this runtime can set reasoning effort, apply
+   `ROUTE_EFFORT`; if it can pick a cheaper/faster model for `tier: fast` (or keep
+   a stronger one for `tier: strong`), do so. Never fail the loop because effort
+   or model cannot be set. Never emit a vendor model id from this helper — map
+   `fast|balanced|strong` in the runtime, the way jev-router maps abstract tiers
+   in code. A fail-open result (`source: fail-open` or `source: disabled`) means
+   `plan: no` — continue to implement. The classifier never chooses a reviewer
+   or a panel roster.
 
 3. **Plan phase — `--plan`, or the classifier said `plan: yes`.** Skip entirely
    when `--no-plan` was set, when the classifier said `plan: no` / fail-open, or

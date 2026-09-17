@@ -83,8 +83,10 @@ Invocation differs by driver (see the table above). The flags are the same:
 to discover after implementing — novel architecture, high blast radius,
 safety-critical. Most work should let the implementation speak for itself.
 Without an explicit `--plan` / `--no-plan`, `comms.sh route` (TypeSafe Jev, when
-`TYPESAFE_API_KEY` is set) may request the approach-review phase; it fails open
-to "no plan" without a key. It never chooses a reviewer or a model.
+`TYPESAFE_API_KEY` is set) may request the approach-review phase and recommend
+an abstract `fast|balanced|strong` tier plus effort. Prompt phrases (`use strong`,
+`skip plan`) override it. It fails open to "no plan" / `balanced` without a key.
+It never chooses a reviewer or a vendor model id — map the tier in the runtime.
 
 **A panel is the default.** Every registered agent except the driver reviews the
 same pinned artifact. They find different things. A blocking finding two of them

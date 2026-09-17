@@ -57,7 +57,7 @@ ST="$WORK/route-stubs"; mkdir -p "$ST"
 section "comms.sh: route fail-open"
 OUT="$(rt -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "fail-open" ] && [ "$(rt_kv "$OUT" plan)" = "no" ] \
-  && [ "$(rt_kv "$OUT" effort)" = "medium" ] \
+  && [ "$(rt_kv "$OUT" effort)" = "medium" ] && [ "$(rt_kv "$OUT" tier)" = "balanced" ] \
   && ok "no key fail-opens to plan=no effort=medium" || fail "no key fail-open (rc=$rc out=$OUT)"
 
 rt_stub 0.99 3 0.99 xhigh 0.99 "$ST/would-plan.json"
@@ -94,23 +94,24 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/missing.json" -- "rename a typo" 2>/dev/null)" &
 
 OUT="$(rt -- "rename a typo" 2>/dev/null)"
 keys="$(printf '%s\n' "$OUT" | awk -F': ' '{print $1}' | paste -sd, -)"
-[ "$keys" = "plan,effort,complexity,plan_p,effort_p,complexity_confidence,source,reason" ] \
+[ "$keys" = "plan,effort,complexity,tier,gate,plan_p,effort_p,complexity_confidence,source,reason" ] \
   && ok "fail-open emits the stable key set" || fail "key set ($keys)"
 
 section "comms.sh: route policy"
 rt_stub 0.91 3 0.92 high 0.81 "$ST/arch.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" COMMS_ROUTE_URL="http://127.0.0.1:1" -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "yes" ] && [ "$(rt_kv "$OUT" complexity)" = "architectural" ] \
-  && [ "$(rt_kv "$OUT" source)" = "stub" ] \
+  && [ "$(rt_kv "$OUT" source)" = "stub" ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] \
   && ok "high noul + architectural => plan yes (source=stub)" || fail "arch plan (rc=$rc out=$OUT)"
 keys="$(printf '%s\n' "$OUT" | awk -F': ' '{print $1}' | paste -sd, -)"
-[ "$keys" = "plan,effort,complexity,plan_p,effort_p,complexity_confidence,source,reason" ] \
+[ "$keys" = "plan,effort,complexity,tier,gate,plan_p,effort_p,complexity_confidence,source,reason" ] \
   && ok "stub success emits the stable key set" || fail "success key set ($keys)"
 
 rt_stub 0.91 0 0.92 high 0.81 "$ST/mech.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "no" ] && [ "$(rt_kv "$OUT" complexity)" = "mechanical" ] \
-  && ok "high noul + mechanical => plan no" || fail "mech plan (rc=$rc out=$OUT)"
+  && [ "$(rt_kv "$OUT" tier)" = "fast" ] \
+  && ok "high noul + mechanical => plan no, tier fast" || fail "mech plan (rc=$rc out=$OUT)"
 
 rt_stub 0.20 3 0.92 high 0.81 "$ST/lownoul.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/lownoul.json" -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
@@ -120,12 +121,14 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/lownoul.json" -- "redesign the auth stack" 2>/de
 rt_stub 0.91 2 0.92 high 0.81 "$ST/hard.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/hard.json" -- "debug a race" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "yes" ] && [ "$(rt_kv "$OUT" complexity)" = "hard" ] \
-  && ok "high noul + hard => plan yes" || fail "hard plan (rc=$rc out=$OUT)"
+  && [ "$(rt_kv "$OUT" tier)" = "strong" ] \
+  && ok "high noul + hard => plan yes, tier strong" || fail "hard plan (rc=$rc out=$OUT)"
 
 rt_stub 0.91 1 0.92 high 0.81 "$ST/std.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/std.json" -- "add a well-specified endpoint" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "no" ] && [ "$(rt_kv "$OUT" complexity)" = "standard" ] \
-  && ok "high noul + standard => plan no" || fail "std plan (rc=$rc out=$OUT)"
+  && [ "$(rt_kv "$OUT" tier)" = "balanced" ] \
+  && ok "high noul + standard => plan no, tier balanced" || fail "std plan (rc=$rc out=$OUT)"
 
 rt_stub 0.50 2 0.92 xhigh 0.90 "$ST/xhi.json"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/xhi.json" -- "debug a race" 2>/dev/null)" && rc=0 || rc=$?
@@ -230,3 +233,33 @@ PY
 OUT="$(rt COMMS_ROUTE_STUB="$ST/infprob.json" -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "fail-open" ] && [ "$(rt_kv "$OUT" plan)" = "no" ] \
   && ok "non-finite complexity probability fail-opens" || fail "infprob (rc=$rc out=$OUT)"
+
+# OSS-router policy: compose tier in code; low confidence → middle; prompt override;
+# cache-sticky no-downgrade; optional JSONL log.
+rt_stub 0.20 0 0.20 low 0.90 "$ST/mech-lowc.json"
+OUT="$(rt COMMS_ROUTE_STUB="$ST/mech-lowc.json" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "balanced" ] \
+  && [ "$(rt_kv "$OUT" gate)" = "low-confidence-middle" ] \
+  && ok "low complexity confidence lands on balanced, not fast" || fail "lowc middle (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "use strong to rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" = "override" ] \
+  && ok "prompt 'use strong' overrides a mechanical stub" || fail "override strong (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" -- "skip plan and redesign auth" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "no" ] && [ "$(rt_kv "$OUT" gate)" = "override" ] \
+  && ok "prompt 'skip plan' overrides an architectural stub" || fail "override no-plan (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" --current-tier strong --context-tokens 50000 \
+  -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" = "cache-sticky" ] \
+  && ok "large-context downgrade is refused (cache-sticky)" || fail "cache sticky (rc=$rc out=$OUT)"
+
+OUT="$(rt -- "use fast on this rename" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "override" ] && [ "$(rt_kv "$OUT" tier)" = "fast" ] \
+  && ok "prompt override works with no TypeSafe key" || fail "override no-key (rc=$rc out=$OUT)"
+
+LOG="$ST/route.jsonl"
+OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" COMMS_ROUTE_LOG="$LOG" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ -s "$LOG" ] && grep -q '"tier": "fast"' "$LOG" \
+  && ok "COMMS_ROUTE_LOG records the decision" || fail "route log (rc=$rc log=$(cat "$LOG" 2>/dev/null))"
