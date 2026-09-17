@@ -19,15 +19,20 @@
 # ("use strong", "skip plan") are in-helper overrides, copied from jev-router.
 #
 # Env:
-#   TYPESAFE_API_KEY          live TypeSafe key (not required with stub or override)
+#   COMMS_ROUTE_BACKEND       typesafe|jev|stub — opt-in decision backend
+#   COMMS_ROUTE=1             enable the typesafe backend (same as BACKEND=typesafe)
 #   COMMS_ROUTE=0             disable; fail-open with source=disabled
+#   TYPESAFE_API_KEY          live TypeSafe key (typesafe backend only)
 #   COMMS_ROUTE_URL           default https://api.typesafe.ai/v1/systemone
 #   COMMS_ROUTE_MODEL         default jev-latest
 #   COMMS_ROUTE_TIMEOUT_SECS  default 8
-#   COMMS_ROUTE_STUB          canned System One JSON body (tests)
+#   COMMS_ROUTE_STUB          canned System One JSON (selects the stub backend)
 #   COMMS_ROUTE_LOG           optional JSONL decision log (tests / calibration)
 #   COMMS_ROUTE_CURRENT_TIER  fast|balanced|strong — session's current tier
 #   COMMS_ROUTE_CONTEXT_TOKENS  approx conversation size; blocks downgrades past 20k
+#
+# A TypeSafe key alone does NOT enable classification. Set COMMS_ROUTE_BACKEND
+# or COMMS_ROUTE=1. Prompt overrides still work with no backend.
 set -euo pipefail
 
 usage_err() { echo "route.sh: $*" >&2; exit 2; }
@@ -116,24 +121,17 @@ case "${COMMS_ROUTE:-}" in
   0|false|no|off|FALSE|NO|OFF) fail_open "COMMS_ROUTE disables the classifier" disabled ;;
 esac
 
-stub="${COMMS_ROUTE_STUB:-}"
-key="${TYPESAFE_API_KEY:-}"
-
 if ! command -v python3 >/dev/null 2>&1; then
   fail_open "python3 is unavailable"
 fi
 
+export COMMS_ROUTE_HOME="$(cd "$(dirname "$0")" && pwd)"
 export COMMS_ROUTE_TASK="$task"
-export COMMS_ROUTE_STUB="$stub"
-export COMMS_ROUTE_URL="${COMMS_ROUTE_URL:-https://api.typesafe.ai/v1/systemone}"
-export COMMS_ROUTE_MODEL="${COMMS_ROUTE_MODEL:-jev-latest}"
-export COMMS_ROUTE_TIMEOUT_SECS="${COMMS_ROUTE_TIMEOUT_SECS:-8}"
 export COMMS_ROUTE_CURRENT_TIER="$current_tier"
 export COMMS_ROUTE_CONTEXT_TOKENS="${context_tokens:-0}"
-export TYPESAFE_API_KEY="$key"
 
 python3 - <<'PY' || fail_open "classifier python exited non-zero"
-import json, os, re, sys, time, urllib.request
+import json, os, re, sys, time
 
 KEYS = (
     "plan", "effort", "complexity", "tier", "gate",
@@ -171,6 +169,14 @@ def fail_open(reason, source="fail-open"):
 
 def emit(**fields):
     _write(fields)
+
+_home = os.environ.get("COMMS_ROUTE_HOME") or ""
+if _home:
+    sys.path.insert(0, _home)
+try:
+    import route_backend
+except ImportError:
+    fail_open("route_backend.py is not installed next to route.sh")
 
 LEVELS = ("mechanical", "standard", "hard", "architectural")
 EFFORTS = ("low", "medium", "high", "xhigh")
@@ -242,14 +248,25 @@ try:
 except ValueError:
     fail_open("COMMS_ROUTE_TIMEOUT_SECS is not a positive integer")
 
-stub = os.environ.get("COMMS_ROUTE_STUB") or ""
-key = os.environ.get("TYPESAFE_API_KEY") or ""
+state = {
+    "task": task,
+    "kind": (
+        "agent-comms /auto query. Decide whether an approach-review "
+        "phase is warranted, and how much reasoning effort the "
+        "implementer needs. Do not pick a reviewer or a vendor model."
+    ),
+}
+try:
+    backend_name, answers = route_backend.classify(state, timeout)
+except route_backend.BackendError as e:
+    fail_open(e.reason, e.source)
 
-# Override-only path: a prompt like "use strong" must work without a TypeSafe key
-# (jev-router: explicit request wins; the classifier is not required).
-if not stub and not key:
+if answers is None:
     if not overrides:
-        fail_open("TYPESAFE_API_KEY is unset")
+        fail_open(
+            "no decision backend enabled "
+            "(set COMMS_ROUTE_BACKEND=typesafe or COMMS_ROUTE=1)"
+        )
     emit(
         plan=overrides.get("plan", "no"),
         effort=overrides.get("effort", "medium"),
@@ -258,149 +275,8 @@ if not stub and not key:
         gate="override",
         plan_p="-", effort_p="-", complexity_confidence="-",
         source="override",
-        reason="prompt override; no TypeSafe call",
+        reason="prompt override; no decision backend",
     )
-
-body_text = ""
-if stub:
-    try:
-        with open(stub, "r", encoding="utf-8") as fh:
-            body_text = fh.read()
-    except OSError as e:
-        fail_open(f"COMMS_ROUTE_STUB unreadable ({type(e).__name__})")
-else:
-    payload = {
-        "model": os.environ.get("COMMS_ROUTE_MODEL") or "jev-latest",
-        "state": {
-            "task": task,
-            "kind": (
-                "agent-comms /auto query. Decide whether an approach-review "
-                "phase is warranted, and how much reasoning effort the "
-                "implementer needs. Do not pick a reviewer or a vendor model."
-            ),
-        },
-        "questions": {
-            "needs_plan": {
-                "type": "noul",
-                "instructions": (
-                    "Does this task have genuine ambiguity about the "
-                    "implementation approach, such that writing code before "
-                    "agreeing on direction would be expensive to undo?"
-                ),
-                "criteria": {
-                    "true": (
-                        "Novel architecture, high blast radius, safety-critical "
-                        "work, or multiple reasonable approaches that would be "
-                        "costly to reverse after implementing."
-                    ),
-                    "false": (
-                        "The implementation path is clear: a localized fix, a "
-                        "well-specified feature, a typo, tests, docs, or work "
-                        "where a wrong first pass is cheap to correct in review."
-                    ),
-                },
-            },
-            "complexity": {
-                "type": "score",
-                "instructions": (
-                    "How hard is this coding task for a competent implementer "
-                    "who can read the repository? Judge the reasoning the "
-                    "request demands, not the length of the reply."
-                ),
-                "criteria": [
-                    {
-                        "what": "Mechanical: trivial, purely factual, or one-file busywork.",
-                        "signals": [
-                            "Rename a symbol, fix a typo, reformat, add a comment",
-                            "Answer a short factual question about a known file",
-                            "Run one obvious command and report the output",
-                        ],
-                        "not_for": "Anything requiring design judgement or multi-file reasoning.",
-                    },
-                    {
-                        "what": "Standard: ordinary bounded engineering with a clear shape.",
-                        "signals": [
-                            "Implement a well-specified function, endpoint, or component",
-                            "Write or fix tests for existing behaviour",
-                            "Localised bug fix where the cause is already understood",
-                        ],
-                        "not_for": "Open-ended architecture, subtle concurrency, or unknown-cause debugging.",
-                    },
-                    {
-                        "what": "Hard: unknown-cause debugging, concurrency, security, or multi-module work.",
-                        "signals": [
-                            "Debug a failure whose cause is unknown",
-                            "Refactor across several modules",
-                            "Security, auth, concurrency, or data-migration logic",
-                        ],
-                        "not_for": "Work a competent mid-level engineer would finish without thinking hard.",
-                    },
-                    {
-                        "what": "Architectural: the wrong approach would be expensive to undo.",
-                        "signals": [
-                            "Whole-system design or a new abstraction other code must follow",
-                            "High blast radius, safety-critical, or ambiguous direction",
-                        ],
-                        "not_for": "A localised change whose first pass is cheap to correct in review.",
-                    },
-                ],
-            },
-            "effort": {
-                "type": "choice",
-                "instructions": (
-                    "Pick the cheapest reasoning effort that can complete this "
-                    "task in one pass. Judge the reasoning the task demands, "
-                    "not the length of the reply."
-                ),
-                "criteria": {
-                    "low": {
-                        "what": "Mechanical or purely factual work.",
-                        "not_for": "Design judgement or debugging an unknown cause.",
-                    },
-                    "medium": {
-                        "what": "Ordinary bounded engineering with a clear shape.",
-                        "not_for": "Open-ended architecture or subtle concurrency.",
-                    },
-                    "high": {
-                        "what": "Hard reasoning, ambiguity, or high blast radius.",
-                        "not_for": "Work a competent mid-level engineer would finish without thinking hard.",
-                    },
-                    "xhigh": {
-                        "what": "Very hard work: long chains of constraints, novel architecture, or safety-critical design.",
-                        "not_for": "Anything a single focused high-effort pass would finish.",
-                    },
-                },
-            },
-        },
-    }
-    url = os.environ.get("COMMS_ROUTE_URL") or "https://api.typesafe.ai/v1/systemone"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body_text = resp.read().decode("utf-8")
-    except Exception as e:
-        fail_open(f"request failed ({type(e).__name__})")
-
-try:
-    parsed = json.loads(body_text)
-except json.JSONDecodeError:
-    fail_open("response is not JSON")
-
-if not isinstance(parsed, dict):
-    fail_open("response JSON is not an object")
-answers = parsed.get("answers")
-if not isinstance(answers, dict):
-    fail_open("response has no answers object")
 
 noul_ans = answers.get("needs_plan")
 score_ans = answers.get("complexity")
@@ -450,7 +326,7 @@ if econf < EFFORT_CONFIDENCE_MIN:
 # mapping a Choice onto concrete models, but we emit the abstract name so this
 # helper never names a vendor model id (claude/codex/grok each map it).
 tier = TIER_OF[complexity]
-gate = "jev"
+gate = "classify"
 # jev-codex-router calibration: low confidence → middle tier, not frontier and
 # not a silent downgrade to fast.
 if cconf < COMPLEXITY_CONFIDENCE_MIN:
@@ -484,12 +360,9 @@ reason = (
     f"(level {best_level}, conf {cconf_s}) effort={choice} "
     f"(conf {econf:.3f}) tier={tier} gate={gate}"
 )
-src = "stub" if stub else "jev"
-if overrides and src != "stub":
-    src = "jev"
 emit(
     plan=plan, effort=effort, complexity=complexity, tier=tier, gate=gate,
     plan_p=plan_p_s, effort_p=effort_p_s, complexity_confidence=cconf_s,
-    source=src, reason=reason,
+    source=backend_name, reason=reason,
 )
 PY

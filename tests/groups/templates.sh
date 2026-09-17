@@ -363,8 +363,8 @@ grep -q -- '--no-plan' "$AIF" \
 grep -q 'do not call' "$AIF" && grep -q -- '--plan' "$AIF" \
   && ok "auto.md skips the classifier when --plan or --no-plan is set" || fail "auto.md override skip"
 grep -q 'ROUTE_PLAN' "$AIF" && grep -q 'plan: yes' "$AIF" && grep -q 'ROUTE_SOURCE' "$AIF" \
-  && grep -q 'source: stub' "$AIF" \
-  && ok "auto.md runs the plan phase when the classifier says plan: yes from jev, not stub" \
+  && grep -q 'source: stub' "$AIF" && grep -q 'typesafe' "$AIF" \
+  && ok "auto.md runs the plan phase for a live backend, not stub" \
   || fail "auto.md plan: yes handoff"
 grep -q 'never chooses a reviewer' "$AIF" && grep -q 'panel roster' "$AIF" \
   && ok "auto.md forbids routing reviewers or models" || fail "auto.md reviewer/model routing leak"

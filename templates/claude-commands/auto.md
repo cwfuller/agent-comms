@@ -4,8 +4,10 @@ Autonomous implement + review cycle: implement, send to one or more reviewers, a
 This is THE loop command. Most work: `/auto <task>` — let the implementation speak for
 itself. A wrong approach surfaces fast in the implement review and you fix it there.
 A query classifier (`comms.sh route`) may enable the approach-review phase when the
-task looks architectural; `--plan` / `--no-plan` override it. The classifier never
-chooses a reviewer, a model, or the panel roster.
+task looks architectural; `--plan` / `--no-plan` override it. The classifier is
+opt-in (`COMMS_ROUTE_BACKEND=typesafe` or `COMMS_ROUTE=1`); a TypeSafe key alone
+does not turn it on. The classifier never chooses a reviewer, a model, or the
+panel roster.
 
 Invocation is per runtime, because the short name is not free everywhere:
 - Claude: `/auto`
@@ -124,9 +126,10 @@ asked. Do not narrate every dispatch.
    ROUTE_TIER="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^tier: //p' | head -1)"
    ROUTE_SOURCE="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^source: //p' | head -1)"
    ```
-   If `ROUTE_PLAN` is `yes` and `ROUTE_SOURCE` is `jev` or `override`, run the plan
-   phase (step 3) as if `--plan` was passed. A `source: stub` result is the test
-   seam — treat it as fail-open (`plan: no`), never as a live classification.
+   If `ROUTE_PLAN` is `yes` and `ROUTE_SOURCE` is not `stub`, `fail-open`, or
+   `disabled`, run the plan phase (step 3) as if `--plan` was passed. That
+   includes `typesafe` / `jev` and `override`. A `source: stub` result is the
+   test seam — treat it as fail-open (`plan: no`), never as a live classification.
    Effort and tier are advisory: if this runtime can set reasoning effort, apply
    `ROUTE_EFFORT`; if it can pick a cheaper/faster model for `tier: fast` (or keep
    a stronger one for `tier: strong`), do so. Never fail the loop because effort

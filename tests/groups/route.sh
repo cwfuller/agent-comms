@@ -13,6 +13,7 @@ rt() {
   done
   (cd "$REPO_FIX" && env -u TYPESAFE_API_KEY -u COMMS_ROUTE -u COMMS_ROUTE_STUB \
     -u COMMS_ROUTE_URL -u COMMS_ROUTE_MODEL -u COMMS_ROUTE_TIMEOUT_SECS \
+    -u COMMS_ROUTE_BACKEND \
     "${envvars[@]}" "$COMMS" route "$@")
 }
 
@@ -96,6 +97,22 @@ OUT="$(rt -- "rename a typo" 2>/dev/null)"
 keys="$(printf '%s\n' "$OUT" | awk -F': ' '{print $1}' | paste -sd, -)"
 [ "$keys" = "plan,effort,complexity,tier,gate,plan_p,effort_p,complexity_confidence,source,reason" ] \
   && ok "fail-open emits the stable key set" || fail "key set ($keys)"
+
+OUT="$(rt TYPESAFE_API_KEY=fake COMMS_ROUTE_URL="http://127.0.0.1:1" \
+  COMMS_ROUTE_TIMEOUT_SECS=1 -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "fail-open" ] \
+  && printf '%s\n' "$OUT" | grep -q 'no decision backend enabled' \
+  && ok "a TypeSafe key does not enable the backend by itself" || fail "key-not-enable (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_BACKEND=nope COMMS_ROUTE_STUB="$ST/would-plan.json" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "fail-open" ] \
+  && printf '%s\n' "$OUT" | grep -q 'unknown decision backend' \
+  && ok "unknown COMMS_ROUTE_BACKEND fail-opens" || fail "unknown backend (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_BACKEND=typesafe -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "fail-open" ] \
+  && printf '%s\n' "$OUT" | grep -q 'TYPESAFE_API_KEY' \
+  && ok "typesafe backend without a key fail-opens" || fail "typesafe no-key (rc=$rc out=$OUT)"
 
 section "comms.sh: route policy"
 rt_stub 0.91 3 0.92 high 0.81 "$ST/arch.json"
@@ -265,7 +282,7 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" COMMS_ROUTE_LOG="$LOG" -- "rename a t
   && ok "COMMS_ROUTE_LOG records the decision" || fail "route log (rc=$rc log=$(cat "$LOG" 2>/dev/null))"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "format the table on fast disk" 2>/dev/null)" && rc=0 || rc=$?
-[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "fast" ] && [ "$(rt_kv "$OUT" gate)" = "jev" ] \
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "fast" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
   && ok "ordinary prose 'on fast disk' is not a tier override" || fail "false override tier (rc=$rc out=$OUT)"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech-lowc.json" -- "rename with high confidence" 2>/dev/null)" && rc=0 || rc=$?

@@ -93,11 +93,11 @@
 #   route [--task T|--file F|--current-tier T|--context-tokens N|--] <task>
 #                               classify an /auto query: plan yes/no, implementer
 #                               effort, and abstract tier (fast|balanced|strong).
-#                               Fail-open (plan=no, effort=medium, tier=balanced)
-#                               with no key, on timeout, or on a malformed answer.
-#                               Prompt overrides ("use strong", "skip plan") win.
-#                               Never selects a reviewer or a vendor model id.
-#                               COMMS_ROUTE=0 disables.
+#                               Decision backends are opt-in (COMMS_ROUTE_BACKEND
+#                               or COMMS_ROUTE=1); TypeSafe/Jev is one backend.
+#                               Fail-open with no backend, on timeout, or on a
+#                               malformed answer. Prompt overrides win. Never
+#                               selects a reviewer or a vendor model id.
 #   panel dispatch --to a,b <review-request> [--set ID]
 #                               fan ONE artifact out to N reviewers as N parallel 2-party
 #                               legs sharing a review_set. One snapshot for the whole set.

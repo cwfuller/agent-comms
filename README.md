@@ -82,10 +82,11 @@ Invocation differs by driver (see the table above). The flags are the same:
 **When to reach for `--plan`:** only when a wrong *approach* would be expensive
 to discover after implementing — novel architecture, high blast radius,
 safety-critical. Most work should let the implementation speak for itself.
-Without an explicit `--plan` / `--no-plan`, `comms.sh route` (TypeSafe Jev, when
-`TYPESAFE_API_KEY` is set) may request the approach-review phase and recommend
-an abstract `fast|balanced|strong` tier plus effort. Prompt phrases (`use strong`,
-`skip plan`) override it. It fails open to "no plan" / `balanced` without a key.
+Without an explicit `--plan` / `--no-plan`, `comms.sh route` may request the
+approach-review phase and recommend an abstract `fast|balanced|strong` tier plus
+effort. The decision backend is opt-in (`COMMS_ROUTE_BACKEND=typesafe` or
+`COMMS_ROUTE=1` plus `TYPESAFE_API_KEY`); a key in the environment is not enough
+by itself. Prompt phrases (`use strong`, `skip plan`) override it with no backend.
 It never chooses a reviewer or a vendor model id — map the tier in the runtime.
 
 **A panel is the default.** Every registered agent except the driver reviews the
