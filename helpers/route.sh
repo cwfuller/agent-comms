@@ -10,13 +10,14 @@
 #
 # Fail-open (plan=no, effort=medium, tier=balanced, source=fail-open|disabled):
 #   - COMMS_ROUTE=0/false/no/off
-#   - no key, no stub, and no prompt override
+#   - no backend, and no prompt override
 #   - python3 missing
-#   - HTTP timeout / 4xx/5xx / body we cannot parse
+#   - HTTP timeout / 4xx/5xx / body we cannot parse, unless a prompt override applies
 #
 # Never selects a reviewer, a vendor model id, or a panel roster. Human
 # --plan / --no-plan in /auto skip this helper entirely. Prompt phrases
 # ("use strong", "skip plan") are in-helper overrides, copied from jev-router.
+# They still win when an enabled backend errors.
 #
 # Env:
 #   COMMS_ROUTE_BACKEND       typesafe|jev|stub — opt-in decision backend
@@ -29,7 +30,9 @@
 #   COMMS_ROUTE_STUB          canned System One JSON (selects the stub backend)
 #   COMMS_ROUTE_LOG           optional JSONL decision log (tests / calibration)
 #   COMMS_ROUTE_CURRENT_TIER  fast|balanced|strong — session's current tier
+#                             (honoured when --current-tier is omitted)
 #   COMMS_ROUTE_CONTEXT_TOKENS  approx conversation size; blocks downgrades past 20k
+#                             (honoured when --context-tokens is omitted)
 #
 # A TypeSafe key alone does NOT enable classification. Set COMMS_ROUTE_BACKEND
 # or COMMS_ROUTE=1. Prompt overrides still work with no backend.
@@ -90,15 +93,24 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# CLI flags win; empty flag defaults must not clobber caller env. /auto never
+# passes --current-tier / --context-tokens, so cache-sticky is env-only there.
+if [ -z "$current_tier" ]; then
+  current_tier="${COMMS_ROUTE_CURRENT_TIER:-}"
+fi
+if [ -z "$context_tokens" ]; then
+  context_tokens="${COMMS_ROUTE_CONTEXT_TOKENS:-}"
+fi
+
 if [ -n "$current_tier" ]; then
   case "$current_tier" in
     fast|balanced|strong) ;;
-    *) usage_err "--current-tier must be fast, balanced, or strong" ;;
+    *) usage_err "current tier must be fast, balanced, or strong" ;;
   esac
 fi
 if [ -n "$context_tokens" ]; then
   case "$context_tokens" in
-    ''|*[!0-9]*) usage_err "--context-tokens must be a non-negative integer" ;;
+    ''|*[!0-9]*) usage_err "context tokens must be a non-negative integer" ;;
   esac
 fi
 
@@ -200,16 +212,18 @@ _OV_PLAN_NO = re.compile(
     r"\b(?:skip plan|no plan|without plan|don't plan|do not plan)\b", re.I)
 _OV_PLAN_YES = re.compile(
     r"\b(?:use|switch to)\s+plan\b|\bplan first\b", re.I)
-# Intentionally not `with`/`on`: those fire on ordinary prose ("on fast disk",
-# "with high confidence"). jev-router can be looser because its tokens are
-# vendor names; ours are English adjectives.
+# Routing command, not adjective+noun: "use fast to rename" / "use fast." match;
+# "use fast algorithms" / "use low latency" do not. Intentionally not `with`/`on`
+# as prefixes ("on fast disk", "with high confidence") and not a bare word
+# boundary after the token (that still fires on "use fast algorithms").
+_OV_TAIL = r"(?=\s*$|[.,;:!]|\s+(?:to|and|then|for)\b)"
 _OV_TIER = (
-    (re.compile(r"\b(?:use|switch to)\s+(?:fast|haiku|luna)\b", re.I), "fast"),
-    (re.compile(r"\b(?:use|switch to)\s+(?:balanced|sonnet|terra)\b", re.I), "balanced"),
-    (re.compile(r"\b(?:use|switch to)\s+(?:strong|opus|sol)\b", re.I), "strong"),
+    (re.compile(r"\b(?:use|switch to)\s+(?:fast|haiku|luna)(?:\s+tier)?" + _OV_TAIL, re.I), "fast"),
+    (re.compile(r"\b(?:use|switch to)\s+(?:balanced|sonnet|terra)(?:\s+tier)?" + _OV_TAIL, re.I), "balanced"),
+    (re.compile(r"\b(?:use|switch to)\s+(?:strong|opus|sol)(?:\s+tier)?" + _OV_TAIL, re.I), "strong"),
 )
 _OV_EFFORT = re.compile(
-    r"\b(?:use|switch to)\s+(low|medium|high|xhigh)(?:\s+effort)?\b", re.I)
+    r"\b(?:use|switch to)\s+(low|medium|high|xhigh)(?:\s+effort)?" + _OV_TAIL, re.I)
 
 def detect_overrides(text):
     ov = {}
@@ -240,6 +254,18 @@ if len(task) > 8000:
     task = task[:8000]
 overrides = detect_overrides(task)
 
+def emit_overrides(reason):
+    emit(
+        plan=overrides.get("plan", "no"),
+        effort=overrides.get("effort", "medium"),
+        complexity="standard",
+        tier=overrides.get("tier", "balanced"),
+        gate="override",
+        plan_p="-", effort_p="-", complexity_confidence="-",
+        source="override",
+        reason=reason,
+    )
+
 timeout_raw = os.environ.get("COMMS_ROUTE_TIMEOUT_SECS", "8")
 try:
     timeout = int(timeout_raw)
@@ -259,23 +285,16 @@ state = {
 try:
     backend_name, answers = route_backend.classify(state, timeout)
 except route_backend.BackendError as e:
+    if overrides:
+        emit_overrides(f"prompt override; backend error: {e.reason}")
     fail_open(e.reason, e.source)
 
 if answers is None:
-    if not overrides:
-        fail_open(
-            "no decision backend enabled "
-            "(set COMMS_ROUTE_BACKEND=typesafe or COMMS_ROUTE=1)"
-        )
-    emit(
-        plan=overrides.get("plan", "no"),
-        effort=overrides.get("effort", "medium"),
-        complexity="standard",
-        tier=overrides.get("tier", "balanced"),
-        gate="override",
-        plan_p="-", effort_p="-", complexity_confidence="-",
-        source="override",
-        reason="prompt override; no decision backend",
+    if overrides:
+        emit_overrides("prompt override; no decision backend")
+    fail_open(
+        "no decision backend enabled "
+        "(set COMMS_ROUTE_BACKEND=typesafe or COMMS_ROUTE=1)"
     )
 
 noul_ans = answers.get("needs_plan")

@@ -1481,7 +1481,8 @@ cmd_route() {
   sh="$(cd "$(dirname "$0")" && pwd)/route.sh"
   if [ ! -f "$sh" ]; then
     echo "comms.sh: route: helper missing at $sh — fail-open" >&2
-    printf 'plan: no\neffort: medium\ncomplexity: standard\nplan_p: -\neffort_p: -\ncomplexity_confidence: -\nsource: fail-open\nreason: route.sh is not installed next to comms.sh\n'
+    # Must match route.sh KEYS_FAIL_OPEN (stable 10-key set including tier/gate).
+    printf 'plan: no\neffort: medium\ncomplexity: standard\ntier: balanced\ngate: fail-open\nplan_p: -\neffort_p: -\ncomplexity_confidence: -\nsource: fail-open\nreason: route.sh is not installed next to comms.sh\n'
     return 0
   fi
   if [ -x "$sh" ]; then

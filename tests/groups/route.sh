@@ -13,7 +13,7 @@ rt() {
   done
   (cd "$REPO_FIX" && env -u TYPESAFE_API_KEY -u COMMS_ROUTE -u COMMS_ROUTE_STUB \
     -u COMMS_ROUTE_URL -u COMMS_ROUTE_MODEL -u COMMS_ROUTE_TIMEOUT_SECS \
-    -u COMMS_ROUTE_BACKEND \
+    -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_CURRENT_TIER -u COMMS_ROUTE_CONTEXT_TOKENS \
     "${envvars[@]}" "$COMMS" route "$@")
 }
 
@@ -86,7 +86,9 @@ OUT="$(rt PATH="$NPY" COMMS_ROUTE_STUB="$ST/py-mask.json" -- "rename a typo" 2>/
 BARE="$WORK/bare-comms"; mkdir -p "$BARE"
 cp "$COMMS" "$BARE/comms.sh"; chmod +x "$BARE/comms.sh"
 OUT="$(env -u TYPESAFE_API_KEY COMMS_DELIVERY=mailbox "$BARE/comms.sh" route -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+keys="$(printf '%s\n' "$OUT" | awk -F': ' '{print $1}' | paste -sd, -)"
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "fail-open" ] \
+  && [ "$keys" = "plan,effort,complexity,tier,gate,plan_p,effort_p,complexity_confidence,source,reason" ] \
   && ok "comms.sh without sibling route.sh fail-opens" || fail "missing sibling (rc=$rc out=$OUT)"
 
 OUT="$(rt COMMS_ROUTE_STUB="$ST/missing.json" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
@@ -272,7 +274,7 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" --current-tier strong --context-token
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" = "cache-sticky" ] \
   && ok "large-context downgrade is refused (cache-sticky)" || fail "cache sticky (rc=$rc out=$OUT)"
 
-OUT="$(rt -- "use fast on this rename" 2>/dev/null)" && rc=0 || rc=$?
+OUT="$(rt -- "use fast to rename this" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" source)" = "override" ] && [ "$(rt_kv "$OUT" tier)" = "fast" ] \
   && ok "prompt override works with no TypeSafe key" || fail "override no-key (rc=$rc out=$OUT)"
 
@@ -293,3 +295,21 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" --current-tier fast --context-tokens 
   -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" != "cache-sticky" ] \
   && ok "large context does not block an upgrade" || fail "cache sticky upgrade (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" -- "Redesign the cryptographic subsystem to use fast algorithms" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
+  && ok "ordinary prose 'use fast algorithms' is not a tier override" || fail "false override fast algorithms (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" -- "Redesign the payment system to use low latency networking" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "high" ] && [ "$(rt_kv "$OUT" gate)" = "classify" ] \
+  && ok "ordinary prose 'use low latency' is not an effort override" || fail "false override low latency (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_BACKEND=typesafe -- "use plan first and use strong" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "yes" ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] \
+  && [ "$(rt_kv "$OUT" source)" = "override" ] && [ "$(rt_kv "$OUT" gate)" = "override" ] \
+  && ok "prompt override survives an enabled backend error" || fail "override on backend error (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" COMMS_ROUTE_CURRENT_TIER=strong COMMS_ROUTE_CONTEXT_TOKENS=50000 \
+  -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" = "cache-sticky" ] \
+  && ok "env-only current-tier + context-tokens is cache-sticky" || fail "env cache sticky (rc=$rc out=$OUT)"
