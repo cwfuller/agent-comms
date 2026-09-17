@@ -17,12 +17,18 @@ Invocation is not the same short name on every runtime:
 
 ## Driver commands
 
-### `/auto [--plan] [--reviewers a,b] [--rounds N] [--via headless] <task>`
+### `/auto [--plan|--no-plan] [--no-route] [--reviewers a,b] [--rounds N] [--via headless] <task>`
 
 Implement → send to the other registered agents → fix blocking findings → repeat until `APPROVE` or `N`
 rounds (default 10). The task text can describe work or reference an existing plan file.
 Round messages keep stable context (latest findings bundle + `git diff --stat` +
 validation results), never per-finding fix narration.
+
+Without `--plan` / `--no-plan`, `comms.sh route` classifies the stripped task and may
+enable the approach-review phase (`plan: yes`) and recommend implementer effort.
+`--plan` forces the phase; `--no-plan` skips it; `--no-route` (or `COMMS_ROUTE=0`)
+skips the classifier. Fail-open is `plan: no`, never a stop. The classifier does
+not pick a reviewer, a model, or the panel roster.
 
 ### `/ask [agent] [question] [--with-diff] [--with-files a,b]`
 
@@ -139,6 +145,7 @@ agnostic.
 | `clean mounts [--yes] [--orphans]` | GC this repo's EXTERNAL mount store (`${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts`, or `COMMS_MOUNT_BASE`); dry-run without `--yes`; scoped to this repo's `<repo-key>` and refuses the whole key if any owner is live or unprovable; `--orphans` REPORTS moved-checkout keys without deleting. Needs no `--as` |
 | `lessons [--bytes N] [--surface P] [--file F]` | bounded newest-first tail of the current worktree's `docs/advisories.md` |
 | `archive-search <pattern> [--bytes N] [--limit K]` | bounded newest-first search of `archive/` across workspaces |
+| `route [--task T\|--file F\|--] <task>` | classify an `/auto` query: `plan: yes\|no` and implementer `effort`. Fail-open (`plan: no`, `effort: medium`) with no `TYPESAFE_API_KEY`, on timeout, or on a malformed answer. Never selects a reviewer or a model. `COMMS_ROUTE=0` disables |
 | `findings [--out F] [--role gating\|shadow] [--review-set ID] [--artifact ID] [--reviewer-version V] [--prompt-version V] [--header] [<message>...]` | extract review findings to TSV (default: the whole archive, oldest first); `--out` appends and is idempotent by `finding_id` |
 | `shadow --to <agent> <review-request> [--review-set ID] [--out F] [--timeout-secs N]` | run a SECOND reviewer on the same artifact; the reply is stored but never delivered and never written to thread state |
 | `events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R] [--limit N]` | read the coordinator's append-only log (`.comms/events.tsv`): roster planned → request persisted → dispatched → turn started → provider result → reply validated/refused → reply accepted → turn finished → composition completed. Filters apply before `--limit`; a malformed row is named on stderr, never parsed. See PROTOCOL "Coordinator event log" for the recovery walk |

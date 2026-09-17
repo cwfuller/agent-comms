@@ -66,8 +66,10 @@ Invocation differs by driver (see the table above). The flags are the same:
 ```text
 <auto> <task>                 # implement → review → fix, until approved
                               #   reviewed by a PANEL of every other agent by default
+                              #   a query classifier may enable an approach review
 <auto> --reviewers codex      # narrow it to one reviewer
-<auto> --plan <task>          # add an approach review first (high-stakes work)
+<auto> --plan <task>          # force an approach review first (high-stakes work)
+<auto> --no-plan <task>       # skip approach review even if the classifier would request one
 <auto> --rounds 3 <task>      # a tighter cap than the default 10
 
 <ask> codex <question>        # one-off consult, no loop, no verdict
@@ -80,6 +82,9 @@ Invocation differs by driver (see the table above). The flags are the same:
 **When to reach for `--plan`:** only when a wrong *approach* would be expensive
 to discover after implementing — novel architecture, high blast radius,
 safety-critical. Most work should let the implementation speak for itself.
+Without an explicit `--plan` / `--no-plan`, `comms.sh route` (TypeSafe Jev, when
+`TYPESAFE_API_KEY` is set) may request the approach-review phase; it fails open
+to "no plan" without a key. It never chooses a reviewer or a model.
 
 **A panel is the default.** Every registered agent except the driver reviews the
 same pinned artifact. They find different things. A blocking finding two of them

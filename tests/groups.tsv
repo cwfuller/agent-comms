@@ -16,3 +16,4 @@ harness	parallel
 events	parallel
 isolation	parallel
 identity	parallel
+route	parallel

@@ -221,6 +221,7 @@ SUM1="$(cat "$INST_FIX/.gitignore")"
 [ "$SUM1" = "$(cat "$INST_FIX/.gitignore")" ] && ok "project scope is idempotent" || fail "project scope is idempotent"
 LOCAL_OUT="$(cd "$INST_FIX" && bash "$REPO/install.sh" --scope=local 2>&1)"
 [ -x "$INST_FIX/.agent-comms/comms.sh" ] && ok "local scope installs executable helpers" || fail "local scope installs executable helpers"
+[ -x "$INST_FIX/.agent-comms/route.sh" ] && ok "local scope installs route.sh" || fail "local scope installs route.sh"
 [ -f "$INST_FIX/.claude/commands/auto.md" ] && ok "local scope installs commands" || fail "local scope installs commands"
 [ -f "$INST_FIX/.claude/commands/ask.md" ] && ok "local scope installs /ask" || fail "local scope installs ask.md"
 # THE BLOCKING DEFECT r1 FOUND, pinned two ways. A local-only install — also the noninteractive

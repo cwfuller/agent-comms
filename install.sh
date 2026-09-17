@@ -45,7 +45,7 @@ RETIRED_HELPERS="fleet.sh"
 RETIRED_CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
-HELPERS="comms.sh runphase.sh acp.sh"
+HELPERS="comms.sh runphase.sh acp.sh route.sh"
 # The reviewer's REVIEW BAR, installed as data. It used to be read out of the codex self-send
 # skills at runtime, which made "delete the self-send templates" silently equal to "delete the
 # reviewer's standard". Installed from docs/loopspec/fragments/ — their canonical home, and what

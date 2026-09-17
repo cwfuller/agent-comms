@@ -1,8 +1,11 @@
-Autonomous implement + review cycle: implement, send to one or more reviewers, and fix on their findings until approved or max rounds. `--plan` adds a short, capped approach-review first.
+Autonomous implement + review cycle: implement, send to one or more reviewers, and fix on their findings until approved or max rounds. `--plan` forces an approach-review first; without it a query classifier may still request one.
 
 ## When to use this
 This is THE loop command. Most work: `/auto <task>` — let the implementation speak for
 itself. A wrong approach surfaces fast in the implement review and you fix it there.
+A query classifier (`comms.sh route`) may enable the approach-review phase when the
+task looks architectural; `--plan` / `--no-plan` override it. The classifier never
+chooses a reviewer, a model, or the panel roster.
 
 Invocation is per runtime, because the short name is not free everywhere:
 - Claude: `/auto`
@@ -12,6 +15,7 @@ Invocation is per runtime, because the short name is not free everywhere:
 
 Reach for `--plan` ONLY when a wrong *approach* would be expensive to discover after
 implementing: novel architecture, high blast radius, safety-critical, or ambiguous scope.
+`--no-plan` skips the approach review even if the classifier would have requested one.
 It is judged on DIRECTION, never on the prose of the plan — that bar, not a tight round
 cap, is what keeps a plan phase from becoming a document-nit loop.
 
@@ -70,8 +74,11 @@ asked. Do not narrate every dispatch.
      real blocking finding in every one of its first five rounds and was still finding them
      when the cap stopped it. Cheap rounds are not the cost worth optimising; handing
      unfinished work back to a human is.
-   - `--plan` runs an approach review first (step 3). Off by default. It gets its OWN
-     budget of `--rounds`; the phases do not share one.
+   - `--plan` runs an approach review first (step 3). It gets its OWN budget of
+     `--rounds`; the phases do not share one. `--no-plan` skips that phase even if
+     the classifier would have requested it. `--no-route` (or `COMMS_ROUTE=0`) skips
+     the classifier. `--plan` and `--no-plan` are human overrides: do not call
+     `route` when either is set. If both appear, `--plan` wins.
    - `--reviewers a,b` selects the reviewing agents. **The default is a PANEL: every
      registered agent except the one driving.** Narrow it explicitly when you want one
      (`--reviewers codex`). Derive the default from the registry — never hardcode a
@@ -107,8 +114,25 @@ asked. Do not narrate every dispatch.
    COMMS_ROOT="$("$COMMS_SH" root)"
    WORKSPACE="$("$COMMS_SH" workspace)"
    ```
+   Then, if neither `--plan` nor `--no-plan` nor `--no-route` was set, classify the
+   stripped task (`TASK` is the argument text with flags removed; fail-open is a
+   decision, never a stop):
+   ```bash
+   ROUTE_OUT="$("$COMMS_SH" route -- "$TASK")"
+   printf '%s\n' "$ROUTE_OUT"
+   ROUTE_PLAN="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^plan: //p' | head -1)"
+   ROUTE_EFFORT="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^effort: //p' | head -1)"
+   ```
+   If `ROUTE_PLAN` is `yes`, run the plan phase (step 3) as if `--plan` was passed.
+   Effort is advisory: if this runtime can set reasoning effort, apply `ROUTE_EFFORT`
+   before implementing. Never fail the loop because effort cannot be set. A
+   fail-open result (`source: fail-open` or `source: disabled`) means `plan: no` —
+   continue to implement. The classifier never chooses a reviewer, a model, or a
+   panel roster.
 
-3. **`--plan` only — the approach round.** Skip entirely without the flag.
+3. **Plan phase — `--plan`, or the classifier said `plan: yes`.** Skip entirely
+   when `--no-plan` was set, when the classifier said `plan: no` / fail-open, or
+   when `--no-route` skipped classification and `--plan` was not passed.
    - Write the approach: the goal, the mechanism, the invariants it must not break, and
      what you deliberately are NOT doing. A real approach doc, not a 2-line intent.
    - Frontmatter: `workflow: auto`, `phase: plan`, `round: 1`, `max-rounds: <N>`, and

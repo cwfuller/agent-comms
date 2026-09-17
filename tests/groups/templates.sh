@@ -351,3 +351,24 @@ section "comms.sh: help prints its whole header"
 HELP_OUT="$(cd "$REPO_FIX" && env "$COMMS" help)"
 echo "$HELP_OUT" | grep -q 'archive-search' \
   && ok "help lists the last subcommand (no fixed-range truncation)" || fail "help truncates its own header"
+echo "$HELP_OUT" | grep -q 'route' \
+  && ok "help lists the route classifier" || fail "help omits route"
+
+section "templates: /auto query route"
+AIF="$REPO/templates/claude-commands/auto.md"
+grep -qF '"$COMMS_SH" route --' "$AIF" \
+  && ok "auto.md calls comms.sh route on the stripped task" || fail "auto.md does not call route"
+grep -q -- '--no-plan' "$AIF" \
+  && ok "auto.md documents --no-plan as a human override" || fail "auto.md missing --no-plan"
+grep -q 'do not call' "$AIF" && grep -q -- '--plan' "$AIF" \
+  && ok "auto.md skips the classifier when --plan or --no-plan is set" || fail "auto.md override skip"
+grep -q 'ROUTE_PLAN' "$AIF" && grep -q 'plan: yes' "$AIF" \
+  && ok "auto.md runs the plan phase when the classifier says plan: yes" || fail "auto.md plan: yes handoff"
+grep -q 'never chooses a reviewer' "$AIF" && grep -q 'panel roster' "$AIF" \
+  && ok "auto.md forbids routing reviewers or models" || fail "auto.md reviewer/model routing leak"
+grep -q 'Effort is advisory' "$AIF" \
+  && ok "auto.md treats effort as advisory" || fail "auto.md effort is not advisory"
+grep -q -- '--no-route' "$AIF" && grep -q 'COMMS_ROUTE=0' "$AIF" \
+  && ok "auto.md can disable the classifier" || fail "auto.md missing disable"
+grep -q 'fail-open is a decision, never a stop' "$AIF" \
+  && ok "auto.md continues to implement on fail-open" || fail "auto.md fail-open is a stop"

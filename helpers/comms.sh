@@ -90,6 +90,11 @@
 #   ask --from <agent> --to <agent> [--wait] (--file F | words...)
 #                               one-off consult, driver-neutral: composes the question,
 #                               validates it, sends it. Any agent can ask any other.
+#   route [--task T|--file F|--] <task>
+#                               classify an /auto query: plan yes/no and implementer
+#                               effort. Fail-open (plan=no, effort=medium) with no key,
+#                               on timeout, or on a malformed answer. Never selects a
+#                               reviewer or a model. COMMS_ROUTE=0 disables.
 #   panel dispatch --to a,b <review-request> [--set ID]
 #                               fan ONE artifact out to N reviewers as N parallel 2-party
 #                               legs sharing a review_set. One snapshot for the whole set.
@@ -1465,6 +1470,21 @@ findings_set_lookup() {  # <root> <thread> <round> <phase> -> set\tartifact\tpro
     return 0
   fi
   awk -F'\t' -v t="$2" -v r="$3" -v ph="${4:-}" 'NR>1 && $3==t && $4==r && $5==ph {print $1 "\t" $6 "\t" $7; exit}' "$idx"
+}
+
+cmd_route() {
+  # A missing sibling must not abort /auto: fail-open, same as a missing key.
+  local sh
+  sh="$(cd "$(dirname "$0")" && pwd)/route.sh"
+  if [ ! -f "$sh" ]; then
+    echo "comms.sh: route: helper missing at $sh — fail-open" >&2
+    printf 'plan: no\neffort: medium\ncomplexity: standard\nplan_p: -\neffort_p: -\ncomplexity_confidence: -\nsource: fail-open\nreason: route.sh is not installed next to comms.sh\n'
+    return 0
+  fi
+  if [ -x "$sh" ]; then
+    exec "$sh" "$@"
+  fi
+  exec /bin/bash "$sh" "$@"
 }
 
 cmd_ask() {
@@ -5496,6 +5516,7 @@ case "${1:-}" in
   archive-search) shift; cmd_archive_search "$@" ;;
   findings)       shift; cmd_findings "$@" ;;
   ask)            shift; cmd_ask "$@" ;;
+  route)          shift; cmd_route "$@" ;;
   panel)          shift; cmd_panel "$@" ;;
   compose)        shift; cmd_compose "$@" ;;
   round-note)     shift; cmd_round_note "$@" ;;
