@@ -8,6 +8,16 @@ emits whole `## ` sections up to a byte budget, ordered by the date in each head
 physical order here may be mixed and writers may append or prepend freely. A section
 whose heading carries no `YYYY-MM-DD` sorts last (but is never dropped).
 
+## 2026-09-17 — thread `jev-router-guide-10251` (auto panel claude+codex, implement r3, double APPROVE)
+
+Opt-in swappable `/auto` decision backends (TypeSafe/Jev is one). Carry-over:
+
+- **Stub + prompt override emits `source: stub`.** The success path applies the
+  override but labels `source` with the backend name; `/auto` then ignores
+  `plan: yes` because `stub` is the test seam. Failure-path overrides emit
+  `source: override` and are honoured. Pre-existing, test-only, not live
+  (`source: typesafe` + override is honoured). Left as-is.
+
 ## 2026-09-15 — thread `any-agent-auto-driver-19880` (auto, Codex-only r2, APPROVE)
 
 `/auto` as a driver for Grok and Codex. Codex approved aea5f72. Carry-over:
