@@ -46,7 +46,7 @@ comms.sh: bounded reads (archive-search)	10
 comms.sh: help prints its whole header	2
 templates: /auto query route	8
 comms.sh: route fail-open	7
-comms.sh: route policy	24
+comms.sh: route policy	27
 install.sh: .codex/AGENTS.md managed block	47
 grading pilot: findings extraction (the single-reviewer baseline)	15
 grading pilot: --out ledger is append-only and idempotent	4

@@ -193,14 +193,17 @@ DOWNGRADE_MAX_CONTEXT = 20000
 _OV_PLAN_NO = re.compile(
     r"\b(?:skip plan|no plan|without plan|don't plan|do not plan)\b", re.I)
 _OV_PLAN_YES = re.compile(
-    r"\b(?:use|switch to|with|on)\s+plan\b|\bplan first\b", re.I)
+    r"\b(?:use|switch to)\s+plan\b|\bplan first\b", re.I)
+# Intentionally not `with`/`on`: those fire on ordinary prose ("on fast disk",
+# "with high confidence"). jev-router can be looser because its tokens are
+# vendor names; ours are English adjectives.
 _OV_TIER = (
-    (re.compile(r"\b(?:use|switch to|with|on)\s+(?:fast|haiku|luna)\b", re.I), "fast"),
-    (re.compile(r"\b(?:use|switch to|with|on)\s+(?:balanced|sonnet|terra)\b", re.I), "balanced"),
-    (re.compile(r"\b(?:use|switch to|with|on)\s+(?:strong|opus|sol)\b", re.I), "strong"),
+    (re.compile(r"\b(?:use|switch to)\s+(?:fast|haiku|luna)\b", re.I), "fast"),
+    (re.compile(r"\b(?:use|switch to)\s+(?:balanced|sonnet|terra)\b", re.I), "balanced"),
+    (re.compile(r"\b(?:use|switch to)\s+(?:strong|opus|sol)\b", re.I), "strong"),
 )
 _OV_EFFORT = re.compile(
-    r"\b(?:use|switch to|with)\s+(low|medium|high|xhigh)\b", re.I)
+    r"\b(?:use|switch to)\s+(low|medium|high|xhigh)(?:\s+effort)?\b", re.I)
 
 def detect_overrides(text):
     ov = {}

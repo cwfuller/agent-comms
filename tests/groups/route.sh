@@ -263,3 +263,16 @@ LOG="$ST/route.jsonl"
 OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" COMMS_ROUTE_LOG="$LOG" -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && [ -s "$LOG" ] && grep -q '"tier": "fast"' "$LOG" \
   && ok "COMMS_ROUTE_LOG records the decision" || fail "route log (rc=$rc log=$(cat "$LOG" 2>/dev/null))"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "format the table on fast disk" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "fast" ] && [ "$(rt_kv "$OUT" gate)" = "jev" ] \
+  && ok "ordinary prose 'on fast disk' is not a tier override" || fail "false override tier (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/mech-lowc.json" -- "rename with high confidence" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" effort)" = "low" ] && [ "$(rt_kv "$OUT" gate)" = "low-confidence-middle" ] \
+  && ok "ordinary prose 'with high confidence' is not an effort override" || fail "false override effort (rc=$rc out=$OUT)"
+
+OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" --current-tier fast --context-tokens 50000 \
+  -- "redesign the auth stack" 2>/dev/null)" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] && [ "$(rt_kv "$OUT" gate)" != "cache-sticky" ] \
+  && ok "large context does not block an upgrade" || fail "cache sticky upgrade (rc=$rc out=$OUT)"
