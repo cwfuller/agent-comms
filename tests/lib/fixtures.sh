@@ -204,6 +204,21 @@ case " $* " in
     fi
     printf '%s\t(%s)\n' "$ax_id" "${AX_ENSURE_STATE:-created}"; exit 0 ;;
   *" sessions show "*)
+    # --format json is a GLOBAL flag and precedes the profile, so it is matched on the whole
+    # argv. The policy preflight reads this shape; the text shape below stays for the cwd
+    # binding assert. AX_MODEL/AX_EFFORT drive the reported config_options, AX_SHOW_NO_OPTS
+    # omits the list (the JetBrains-client shape), AX_SHOW_JSON_GARBAGE emits unparseable
+    # bytes -- both must land as UNDECIDABLE, never as a pass.
+    case " $* " in
+      *" --format json "*)
+        if [ -n "${AX_SHOW_JSON_GARBAGE:-}" ]; then printf 'not json at all\n'; exit 0; fi
+        if [ -n "${AX_SHOW_NO_OPTS:-}" ]; then
+          printf '{"acpx":{"acpx_record_id":"stub"},"cwd":"%s"}\n' "${AX_LIE_CWD:-$(pwd -P)}"; exit 0
+        fi
+        printf '{"cwd":"%s","acpx":{"acpx_record_id":"stub","config_options":[{"id":"model","currentValue":"%s"},{"id":"reasoning_effort","currentValue":"%s"}]}}\n' \
+          "${AX_LIE_CWD:-$(pwd -P)}" "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}"
+        exit 0 ;;
+    esac
     printf 'name: stub\n'
     printf 'cwd: %s\n' "${AX_LIE_CWD:-$(pwd -P)}"
     exit 0 ;;
@@ -240,6 +255,31 @@ case " $* " in
 esac
 if [ -n "${ACP_PARITY_PROBE:-}" ]; then
   { printf 'git=%s\n' "$(command -v git)"; printf 'PATH=%s\n' "$PATH"; } > "$ACP_PARITY_PROBE"
+fi
+# THE PROVIDER'S OWN ROLLOUT. Real codex appends a turn_context per prompt under
+# $CODEX_HOME/sessions/<Y>/<M>/<D>/rollout-*.jsonl carrying the model and effort it actually
+# ran; the post-turn attestation reads the bytes appended during THIS prompt. The stub models
+# that so the gate is exercised against the real shape rather than a convenient one.
+#   AX_ROLLOUT_EFFORT / AX_ROLLOUT_MODEL — what the turn "really" ran (default: the preflight
+#     values, i.e. the honest case). Setting only these two reproduces B1: preflight passes
+#     from the record while the billable turn runs something else.
+#   AX_ROLLOUT_NEW_FILE — append to a NEW jsonl, as a replacement session does.
+#   AX_ROLLOUT_NONE     — write nothing (evidence missing -> undecidable).
+#   AX_ROLLOUT_DOUBLE   — two root contexts (ambiguous -> undecidable).
+if [ -n "${CODEX_HOME:-}" ] && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
+  ax_rd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_rd" 2>/dev/null
+  ax_rf="$ax_rd/rollout-stub.jsonl"
+  [ -n "${AX_ROLLOUT_NEW_FILE:-}" ] && ax_rf="$ax_rd/rollout-stub-replacement.jsonl"
+  ax_re="${AX_ROLLOUT_EFFORT:-${AX_EFFORT:-xhigh}}"
+  ax_rm="${AX_ROLLOUT_MODEL:-${AX_MODEL:-gpt-6-astra}}"
+  # A non-root context (turn_id != root_turn_id) must be IGNORED by the reader, so emit one
+  # every time: a gate that counted it would see ambiguity on every honest turn.
+  printf '{"type":"turn_context","payload":{"turn_id":"t-child","root_turn_id":"t-root","model":"%s","effort":"%s"}}\n' \
+    "$ax_rm" "$ax_re" >> "$ax_rf" 2>/dev/null || true
+  printf '{"type":"turn_context","payload":{"turn_id":"t-root","root_turn_id":"t-root","model":"%s","effort":"%s"}}\n' \
+    "$ax_rm" "$ax_re" >> "$ax_rf" 2>/dev/null || true
+  [ -n "${AX_ROLLOUT_DOUBLE:-}" ] && printf '{"type":"turn_context","payload":{"turn_id":"t-root2","root_turn_id":"t-root2","model":"%s","effort":"%s"}}\n' \
+    "$ax_rm" "$ax_re" >> "$ax_rf" 2>/dev/null
 fi
 # A mounted --approve-all child can write. AX_CHILD_WRITE plants residue at an untracked
 # AND an ignored path, so a restage can be shown to clear both.

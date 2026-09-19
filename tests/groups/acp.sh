@@ -688,3 +688,73 @@ python3 -c 'import json,sys; sys.exit(0 if json.loads("\"%s\"" % sys.argv[1]) ==
   && ok "json_escape round-trips tab, CR, LF, quote and backslash through a JSON decoder" || fail "json_escape output does not decode (got: $(printf '%q' "$JE_OUT"))"
 [ -n "$JE_RP" ] && [ "$JE_RP" = "$JE_CS" ] \
   && ok "runphase.sh and comms.sh carry byte-identical json_escape definitions" || fail "json_escape drifted between helpers"
+
+section "acp.sh: the reviewer model+effort policy"
+# THE POLICY IS DECLARED ONCE, VALIDATED AT THE ACCESSOR, AND ASSERTED ON BYTES.
+# The predecessor of these assertions grepped templates/claude-commands/auto.md for the
+# sentence "Effort and tier are advisory" -- which is how a router whose decision nothing
+# consumed passed three double-APPROVE arcs. Assert what is WRITTEN and what is REFUSED.
+AP="$REPO/helpers/acp.sh"
+
+POL="$("$AP" policy codex)"
+[ "$POL" = "$(printf 'gpt-6-astra\txhigh')" ] \
+  && ok "policy codex prints the declared model and effort, tab-separated" || fail "policy codex (got: $(printf '%q' "$POL"))"
+
+PCFG="$("$AP" provider-config codex)"
+printf '%s\n' "$PCFG" | grep -qx 'model_reasoning_effort = "xhigh"' \
+  && ok "provider-config writes the effort key the codex binary reads" || fail "provider-config effort key"
+printf '%s\n' "$PCFG" | grep -qx 'model = "gpt-6-astra"' \
+  && ok "provider-config writes the model key" || fail "provider-config model key"
+[ "$(printf '%s\n' "$PCFG" | wc -l | tr -d ' ')" = 4 ] \
+  && ok "provider-config emits exactly four keys — no stray or duplicated line" || fail "provider-config line count"
+printf '%s\n' "$PCFG" | grep -qx 'sandbox_mode = "read-only"' \
+  && ok "provider-config keeps approval/sandbox as literals beside the policy" || fail "provider-config literals"
+
+COMMS_ACP_CODEX_EFFORT=high "$AP" provider-config codex | grep -qx 'model_reasoning_effort = "high"' \
+  && ok "COMMS_ACP_CODEX_EFFORT overrides the written effort" || fail "effort env override"
+
+# TOML INJECTION. The values are interpolated into the file that governs the reviewer's
+# sandbox, so a quote or newline must be refused at the accessor -- by ALLOWLIST, never by
+# enumerating bad characters (docs/advisories.md:363).
+INJ='xhigh"
+sandbox_mode = "danger-full-access'
+COMMS_ACP_CODEX_EFFORT="$INJ" "$AP" provider-config codex >/dev/null 2>&1 \
+  && fail "an injected effort was accepted" \
+  || ok "an effort carrying a quote and a newline is refused before any config is emitted"
+COMMS_ACP_CODEX_MODEL='a b' "$AP" policy codex >/dev/null 2>&1 \
+  && fail "a model with a space was accepted" || ok "a model that is not a bare identifier is refused"
+
+"$AP" provider-config claude >/dev/null 2>&1 \
+  && fail "claude was given a provider config" \
+  || ok "provider-config is empty and nonzero where no isolated home exists (claude)"
+
+# policy-check: the PREFLIGHT record read. 0 match / 20 mismatch / 21 undecidable, and
+# undecidable is never "model matched, effort optional".
+pc() { printf '%s' "$1" | "$AP" policy-check codex - >/dev/null 2>&1; printf '%s' "$?"; }
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-astra"},{"id":"reasoning_effort","currentValue":"xhigh"}]}}')" = 0 ] \
+  && ok "policy-check accepts a record matching the policy" || fail "policy-check match"
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-astra"},{"id":"reasoning_effort","currentValue":"medium"}]}}')" = 20 ] \
+  && ok "policy-check rejects the effort this bug actually produced (medium)" || fail "policy-check effort mismatch"
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-5.6-sol"},{"id":"reasoning_effort","currentValue":"xhigh"}]}}')" = 20 ] \
+  && ok "policy-check rejects a model float against the id we wrote" || fail "policy-check model mismatch"
+[ "$(pc '{"acpx":{"acpx_record_id":"x"}}')" = 21 ] \
+  && ok "an absent config_options list is UNDECIDABLE, not a pass (the JetBrains-client shape)" || fail "policy-check absent options"
+[ "$(pc 'not json')" = 21 ] \
+  && ok "an unparseable session record is UNDECIDABLE, not a pass" || fail "policy-check unparseable"
+
+# policy-attest shares ONE verdict function with policy-check, so the pre- and post-turn
+# gates cannot drift into disagreeing about what the policy is.
+"$AP" policy-attest codex xhigh gpt-6-astra >/dev/null 2>&1 \
+  && ok "policy-attest accepts an observed turn that ran the policy" || fail "policy-attest match"
+"$AP" policy-attest codex medium gpt-6-astra >/dev/null 2>&1; [ "$?" = 20 ] \
+  && ok "policy-attest rejects an observed turn that ran shallower than declared" || fail "policy-attest mismatch"
+"$AP" policy-attest codex "" >/dev/null 2>&1; [ "$?" = 21 ] \
+  && ok "policy-attest treats missing evidence as undecidable" || fail "policy-attest undecidable"
+grep -q 'policy_verdict' "$AP" && [ "$(grep -c 'policy_verdict "\$' "$AP")" -ge 2 ] \
+  && ok "both gates route through the same policy_verdict accessor" || fail "the two gates do not share one verdict function"
+
+# runphase must hold NO policy literal: the config comes from the accessor, so a second copy
+# cannot drift out of sync with the one that is validated.
+grep -qE 'gpt-6-astra|model_reasoning_effort' "$REPO/helpers/runphase.sh" \
+  && fail "runphase.sh carries a literal model or effort value" \
+  || ok "runphase.sh holds no model or effort literal — it asks acp.sh"

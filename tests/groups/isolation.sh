@@ -228,3 +228,72 @@ grep -q 'deny writes and non-git execs while still allowing' "$REPO/docs/ROADMAP
 grep -q 'open security item' "$REPO/docs/ROADMAP.md" \
   && ok "the open security item stays open while a dispatched provider is uncontained" \
   || fail "the security item was closed while grok remains uncontained"
+
+# --- the reviewer model+effort policy gates -------------------------------------------
+# THE ATTESTATION IS EXTRACTED AND RUN, not grepped. A source-shape assert cannot tell a
+# working evidence reader from a broken one, and the bug this closes was invisible for three
+# weeks precisely because every check was a string match.
+ISO_RO="$(sed -n '/^acp_rollout_observed() {/,/^}/p' "$ISO_RP")"
+ISO_RD="$WORK/rollout-probe"; rm -rf "$ISO_RD"; mkdir -p "$ISO_RD/sessions/2026/09/19"
+ISO_RJ="$ISO_RD/sessions/2026/09/19/rollout-a.jsonl"
+iso_ctx() { printf '{"type":"turn_context","payload":{"turn_id":"%s","root_turn_id":"%s","model":"%s","effort":"%s"}}\n' "$1" "$2" "$3" "$4"; }
+iso_observed() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_RD" "$1" ) 2>/dev/null; }
+
+: > "$WORK/rollout-snap-empty.txt"
+iso_ctx t-root t-root gpt-6-astra xhigh >> "$ISO_RJ"
+[ "$(iso_observed "$WORK/rollout-snap-empty.txt")" = "$(printf 'xhigh\tgpt-6-astra')" ] \
+  && ok "the attestation reads the effort and model the provider recorded for the turn" || fail "rollout read"
+
+# B1: the record passed preflight, then the BILLABLE turn ran something else. The evidence
+# must report what actually ran, not what was requested.
+printf '%s %s\n' "$ISO_RJ" "$(wc -c < "$ISO_RJ" | tr -d ' ')" > "$WORK/rollout-snap-b1.txt"
+iso_ctx t-root2 t-root2 gpt-6-astra medium >> "$ISO_RJ"
+[ "$(iso_observed "$WORK/rollout-snap-b1.txt")" = "$(printf 'medium\tgpt-6-astra')" ] \
+  && ok "a replacement turn running a DIFFERENT effort is reported from the appended bytes (B1)" || fail "B1 transition not observed"
+
+# Only the snapshot delta counts: an earlier matching context must never satisfy the gate.
+printf '%s %s\n' "$ISO_RJ" "$(wc -c < "$ISO_RJ" | tr -d ' ')" > "$WORK/rollout-snap-none.txt"
+iso_observed "$WORK/rollout-snap-none.txt" >/dev/null 2>&1 \
+  && fail "a pre-snapshot context satisfied the gate" \
+  || ok "a matching context written BEFORE the prompt never counts as evidence"
+
+# A replacement session starts a NEW jsonl; files that appeared after the snapshot count too.
+ISO_RJ2="$ISO_RD/sessions/2026/09/19/rollout-b.jsonl"
+iso_ctx t-new t-new gpt-6-astra low >> "$ISO_RJ2"
+[ "$(iso_observed "$WORK/rollout-snap-none.txt")" = "$(printf 'low\tgpt-6-astra')" ] \
+  && ok "a rollout file created after the snapshot is read (replacement session)" || fail "new-file evidence missed"
+
+# Ambiguity and absence are UNDECIDABLE, never a pass.
+iso_ctx t-new2 t-new2 gpt-6-astra xhigh >> "$ISO_RJ2"
+iso_observed "$WORK/rollout-snap-none.txt" >/dev/null 2>&1 \
+  && fail "two root contexts were accepted" || ok "two root turn_contexts in the window are undecidable, not a pass"
+rm -f "$ISO_RJ2"
+: > "$WORK/rollout-snap-all.txt"; printf '%s %s\n' "$ISO_RJ" "$(wc -c < "$ISO_RJ" | tr -d ' ')" > "$WORK/rollout-snap-all.txt"
+iso_observed "$WORK/rollout-snap-all.txt" >/dev/null 2>&1 \
+  && fail "absent evidence was accepted" || ok "no turn_context in the window is undecidable, not a pass"
+
+# A non-root context must be ignored, or every honest turn would look ambiguous.
+ISO_RJ3="$ISO_RD/sessions/2026/09/19/rollout-c.jsonl"
+iso_ctx t-child t-parent gpt-6-astra xhigh >> "$ISO_RJ3"
+iso_ctx t-solo  t-solo   gpt-6-astra xhigh >> "$ISO_RJ3"
+[ "$(iso_observed "$WORK/rollout-snap-all.txt")" = "$(printf 'xhigh\tgpt-6-astra')" ] \
+  && ok "a non-root turn_context is ignored rather than counted as a second root" || fail "non-root context miscounted"
+
+# Missing identifiers must not compare equal to each other.
+ISO_RJ4="$ISO_RD/sessions/2026/09/19/rollout-d.jsonl"
+rm -f "$ISO_RJ3"
+printf '{"type":"turn_context","payload":{"model":"gpt-6-astra","effort":"xhigh"}}\n' >> "$ISO_RJ4"
+iso_observed "$WORK/rollout-snap-all.txt" >/dev/null 2>&1 \
+  && fail "a context with no turn ids was accepted" || ok "two absent turn ids do not compare equal — the context is not treated as root"
+
+# PLACEMENT. The attestation gates publication, so it must precede the stamp; and the
+# identity write must stay where a kill -9 can still be identified.
+ISO_ATT_LN="$(grep -n 'acp_rollout_observed "\$acp_iso_home"' "$ISO_RP" | head -1 | cut -d: -f1)"
+ISO_STAMP_LN="$(grep -n 'broker_stamp_and_deliver "\$msg"' "$ISO_RP" | tail -1 | cut -d: -f1)"
+[ -n "$ISO_ATT_LN" ] && [ -n "$ISO_STAMP_LN" ] && [ "$ISO_ATT_LN" -lt "$ISO_STAMP_LN" ] \
+  && ok "the policy attestation runs BEFORE the review is published" || fail "attestation does not precede broker_stamp_and_deliver"
+ISO_ID_LN="$(grep -n "printf 'provider\\\\t%s\\\\n'" "$ISO_RP" | head -1 | cut -d: -f1)"
+[ -n "$ISO_ID_LN" ] && [ "$ISO_ID_LN" -lt "$ISO_ATT_LN" ] \
+  && ok "the turn.tsv identity write still precedes the policy gate, so a dead runner keeps its identity" || fail "identity write moved"
+awk '/turn_observe "\$run_dir"/{a=NR} /acp_refuse policy-unapplied "the review turn/{b=NR} END{exit !(a && b && a<b)}' "$ISO_RP" \
+  && ok "observed columns are appended before the refusal unmounts the turn" || fail "divergence recorded after unwinding"

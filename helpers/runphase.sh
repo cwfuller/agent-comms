@@ -2089,6 +2089,80 @@ acp_confirm_mode() {
   [ "$rc" -eq 0 ] && [ "$out" = "mode set: $mode" ]
 }
 
+# acp_rollout_observed <iso-home> <snapshot-file> — print "<effort>\t<model>" for the ONE root
+# turn_context this turn appended, or exit non-zero.
+#
+# THE EVIDENCE THE PROVIDER WROTE ITSELF. codex appends a turn_context per prompt carrying the
+# model and effort it actually ran; that is the only record of the BILLABLE turn, and the only
+# thing a mid-flight replacement session cannot forge past. Bound to the SNAPSHOT DELTA: grown
+# bytes of pre-existing files plus whole files that appeared since. Exactly one root context is
+# expected in that window — zero, two, or a missing effort is undecidable, never a pass. Root is
+# turn_id == root_turn_id with BOTH present and non-empty, so two missing ids cannot compare
+# equal. (codex + grok, plan r2/r3.)
+acp_rollout_observed() {
+  command -v python3 >/dev/null 2>&1 || return 21
+  python3 - "$1" "$2" <<'PY'
+import json,os,sys,glob
+home,snap=sys.argv[1],sys.argv[2]
+prev={}
+try:
+    for line in open(snap):
+        line=line.rstrip("\n")
+        if not line: continue
+        p,_,s=line.rpartition(" ")
+        if p:
+            try: prev[p]=int(s)
+            except ValueError: pass
+except OSError:
+    pass
+roots=[]
+for f in sorted(glob.glob(os.path.join(home,"sessions","**","rollout-*.jsonl"),recursive=True)):
+    start=prev.get(f,0)
+    try:
+        size=os.path.getsize(f)
+    except OSError:
+        continue
+    # A file that SHRANK was replaced under us: its identity is no longer the snapshot's, so
+    # read it whole rather than trusting a stale offset.
+    if size<start: start=0
+    if size==start: continue
+    try:
+        with open(f,"rb") as fh:
+            fh.seek(start)
+            blob=fh.read().decode("utf-8","replace")
+    except OSError:
+        continue
+    for line in blob.splitlines():
+        line=line.strip()
+        if not line: continue
+        try: r=json.loads(line)
+        except Exception: continue
+        if r.get("type")!="turn_context": continue
+        p=r.get("payload") or {}
+        tid,rid=p.get("turn_id"),p.get("root_turn_id")
+        if not tid or not rid or tid!=rid: continue
+        roots.append((p.get("effort"),p.get("model")))
+if len(roots)!=1:
+    sys.stderr.write("expected exactly one root turn_context in the post-prompt window, found %d\n"%len(roots))
+    sys.exit(21)
+eff,mod=roots[0]
+print("%s\t%s"%("" if eff is None else eff,"" if mod is None else mod))
+PY
+}
+
+# turn_observe <run-dir> <effort> <model> <record> — APPEND observed columns to turn.tsv.
+# The identity block stays exactly where it is written; load_turn_identity ignores unknown
+# keys, so appending is safe, and a dead runner keeps its identity. These carry OBSERVED
+# values only — writing the policy literals here would report the expected depth even when
+# the attestation found divergence. Called on the failure path too, BEFORE acp_refuse
+# unmounts, so a refusal stays diagnosable. (codex + grok, plan r2/r3.)
+turn_observe() {
+  { printf 'observed_effort\t%s\n' "${2:-unknown}"
+    printf 'observed_model\t%s\n'  "${3:-unknown}"
+    printf 'acp_record\t%s\n'      "${4:-unknown}"
+  } >> "$1/turn.tsv" 2>/dev/null || true
+}
+
 # acp_canary <workdir> <profile> <session> <run-dir> <secs> — prove the session's runtime serves its
 # configured model BEFORE the real prompt, by prompting the SAME session through the SAME argv shape
 # (the caller passes the identical option vector). It sets, never echoes, two globals:
@@ -2891,9 +2965,17 @@ cmd_run() {
             fi
           fi
           ABORT_NOTE="refused: could not write the isolated read-only codex config for '$provider'"
-          _iso_place "" "$acp_iso_home/config.toml" 600 'approval_policy = "on-request"
-sandbox_mode = "read-only"
-' || die "run: cannot write the isolated codex config"
+          # THE POLICY IS NOT SPELLED HERE. acp.sh owns it and validates it; runphase holds no
+          # model or effort literal, so the two cannot drift and a second caller cannot reach
+          # the TOML interpolation with an unvalidated value. Until 2026-09-19 this wrote only
+          # approval_policy and sandbox_mode, so a mounted reviewer ran the model's DEFAULT
+          # effort and every gated review was shallower than the operator had configured.
+          local acp_iso_cfg=""
+          acp_iso_cfg="$("$acp_sh" provider-config codex)" \
+            || die "run: the codex reviewer policy is invalid — refusing to write an isolated config"
+          [ -n "$acp_iso_cfg" ] || die "run: acp.sh returned an empty isolated codex config"
+          _iso_place "" "$acp_iso_home/config.toml" 600 "$acp_iso_cfg" \
+            || die "run: cannot write the isolated codex config"
           ABORT_NOTE="runner aborted unexpectedly — see runner.log"
           acp_iso=(env "CODEX_HOME=$acp_iso_home" "INITIAL_AGENT_MODE=read-only")
           acp_iso_backend="codex-home+read-only"
@@ -3095,6 +3177,32 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       fi
     fi
 
+    # PREFLIGHT POLICY READ — free, necessary, and explicitly NOT sufficient.
+    #
+    # `sessions show` is a purely LOCAL record read (no connection, no spawn, no tokens), so
+    # this costs nothing and catches the common case before any spend. It CANNOT be the gate:
+    # acpx replays `desired_config_options` when it creates a REPLACEMENT session
+    # (replayFreshSessionPreferences early-returns only when !createdFreshSession), so a stale
+    # preference can be reinstated AFTER this passes and the billable prompt still runs wrong.
+    # The post-turn attestation below is the control that actually gates. (codex, plan r1 B1.)
+    #
+    # We REFUSE a conflicting saved preference rather than rewriting the record: acpx owns that
+    # file, `connectAndLoadSession` captures the options BEFORE connecting, and a retained queue
+    # owner can overwrite an external edit — so our exclusivity over it is unproven. Retiring the
+    # session is the honest remedy. (codex + grok, plan r3.)
+    if [ -n "$acp_iso_home" ]; then
+      local pol_out="" pol_rc=0
+      pol_out="$( acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" 2>>"$run_dir/runner.log" \
+                  | "$acp_sh" policy-check codex - 2>>"$run_dir/runner.log" )" || pol_rc=$?
+      case "$pol_rc" in
+        0)  printf 'policy preflight: %s\n' "$pol_out" >>"$run_dir/runner.log" ;;
+        20) acp_refuse policy-unapplied "the reviewer session will not run the declared model/effort policy ($pol_out) — retire it with 'acpx $acp_profile sessions close' and re-send"
+            return 1 ;;
+        *)  acp_refuse policy-unapplied "could not verify the reviewer model/effort policy before the canary (status $pol_rc) — refusing rather than paying for a review of unknown depth"
+            return 1 ;;
+      esac
+    fi
+
     # COMPATIBILITY CANARY: prove the session runtime serves its configured model BEFORE the real
     # prompt is spent on it. Same session, same argv shape; the reply is classified by the shared
     # comms.sh reply-check so all three transports agree. Per-turn, no cache: mounted owners are new
@@ -3132,6 +3240,18 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # (the measured claude boundary). So pinning once, before the canary, contains both prompts.
     # THE REAL-TURN TIMER STARTS HERE, after the canary, so a slow-but-successful canary cannot make
     # a completed review look truncated. (codex, plan r3 advisory.)
+    # ROLLOUT SNAPSHOT — taken immediately before the billable prompt so the attestation below
+    # reads only bytes THIS turn produced. A matching canary context, or a prior round's, must
+    # never satisfy the gate; and a replacement session starts a NEW jsonl, so the snapshot
+    # records paths AND sizes and the check also considers files that appeared after it.
+    # (grok, plan r2/r3.)
+    if [ -n "$acp_iso_home" ]; then
+      find "$acp_iso_home/sessions" -name 'rollout-*.jsonl' -type f -exec stat -f '%N %z' {} \; \
+        > "$run_dir/rollout-snapshot.txt" 2>/dev/null \
+      || find "$acp_iso_home/sessions" -name 'rollout-*.jsonl' -type f -printf '%p %s\n' \
+        > "$run_dir/rollout-snapshot.txt" 2>/dev/null \
+      || : > "$run_dir/rollout-snapshot.txt"
+    fi
     acp_t0="$(date +%s)"
     ( acp_exec "$workdir" \
         ${acp_prompt_opts[@]+"${acp_prompt_opts[@]}"} \
@@ -3180,6 +3300,32 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       unmount_artifact
       trap - EXIT
       exit 1
+    fi
+    # POST-TURN POLICY ATTESTATION — the control that actually gates, and the last thing before
+    # publication. `compose` answers a leg from the published review-feedback, not result.json,
+    # and write_result is one-shot, so a divergence noticed AFTER the stamp would land anyway.
+    # It therefore runs here: after the prompt, before broker_stamp_and_deliver, before unmount
+    # (a throwaway mount deletes home/). A wrong-depth review is REFUSED UNPUBLISHED rather than
+    # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
+    # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
+    if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
+      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg=""
+      att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
+      if [ "$att_rc" -eq 0 ]; then
+        att_eff="${att_out%%$'\t'*}"; att_mod="${att_out#*$'\t'}"
+        att_msg="$("$acp_sh" policy-attest codex "$att_eff" "$att_mod" 2>>"$run_dir/runner.log")" || att_rc=$?
+      fi
+      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}"
+      if [ "$att_rc" -ne 0 ]; then
+        printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
+        if [ "$att_rc" -eq 20 ]; then
+          acp_refuse policy-unapplied "the review turn did not run the declared model/effort policy ($att_msg) — refusing to publish a review of the wrong depth; retire the session with 'acpx $acp_profile sessions close' and re-send"
+        else
+          acp_refuse policy-unapplied "could not attest the model/effort the review turn actually ran (status $att_rc) — refusing to publish a review of unknown depth"
+        fi
+        return 1
+      fi
+      printf 'policy attested: %s\n' "$att_msg" >>"$run_dir/runner.log"
     fi
     if [ "$acp_rc" -eq 0 ] && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then
       acp_status=completed

@@ -26,6 +26,17 @@
 #   profile <agent> | version
 #       the acpx launch profile for an agent, and the pinned acpx version. Other
 #       helpers ask for these instead of keeping a second copy of the map.
+#   policy <agent>
+#       the reviewer model+effort policy for an agent, tab-separated
+#       (<model>\t<effort>); empty + exit 1 where no policy applies.
+#   provider-config <agent>
+#       the COMPLETE isolated provider config file text for a mounted review
+#       turn. runphase asks for this rather than holding a literal, so the
+#       policy is spelled exactly once.
+#   policy-check <agent> - | policy-attest <agent> <effort> [model]
+#       compare an `acpx sessions show --format json` record on stdin, or an
+#       observed effort/model pair, against the policy. Exit 0 match,
+#       20 mismatch, 21 undecidable. Undecidable is never "it matched".
 #
 # Pinned: acpx is pre-1.0 with an evolving CLI — every invocation goes through
 # npx -y acpx@$ACPX_VERSION (cached by npm after first use; no global install).
@@ -38,6 +49,24 @@ ACPX_VERSION="0.13.1"
 ACP_SESSION_NAME="agent-comms-ask"
 NODE_MIN_MAJOR=22
 NODE_MIN_MINOR=13
+
+# THE REVIEWER MODEL+EFFORT POLICY. Declared HERE, never inherited: the isolated CODEX_HOME
+# exists precisely so the operator's ~/.codex/config.toml does NOT reach a review turn, and a
+# reviewer whose depth silently tracks the provider's default is not a reviewable gate. Measured
+# 2026-09-19: mounted turns ran the model DEFAULT effort (sol->low, astra->medium) from isolation
+# commit 21cb780 (2026-08-29) onward, while unmounted /ask turns kept the operator's xhigh — 280
+# acpx session records, boundary exact to the day.
+#
+# EFFORT is the contract. The MODEL is an env-overridable default: a retired id must surface as a
+# refused turn, not a silent float to whatever the account now serves. (grok, plan r1/r3.)
+ACP_POLICY_CODEX_MODEL="${COMMS_ACP_CODEX_MODEL:-gpt-6-astra}"
+ACP_POLICY_CODEX_EFFORT="${COMMS_ACP_CODEX_EFFORT:-xhigh}"
+
+# Values reach a TOML file that governs the reviewer's sandbox, so they are ALLOWLISTED, never
+# scrubbed of known-bad characters: docs/advisories.md:363 records that neutralising by
+# enumeration "is the shape that has failed" in this codebase. A value carrying a quote or a
+# newline could otherwise append `sandbox_mode = "danger-full-access"` to a reviewer's config.
+ACP_POLICY_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 
 die() { echo "acp.sh: $*" >&2; exit 1; }
 # The comms.sh installed beside this script — the home of the reply-body predicates this
@@ -103,6 +132,50 @@ profile_for() {  # acpx built-in launch profile per agent; empty = unsupported
     grok)   echo grok-build ;;
     *)      echo "" ;;
   esac
+}
+
+policy_for() {  # <agent> -> "<model>\t<effort>"; empty + 1 where no policy applies
+  local m e
+  case "$1" in
+    codex) m="$ACP_POLICY_CODEX_MODEL"; e="$ACP_POLICY_CODEX_EFFORT" ;;
+    # claude/grok have no isolated provider config, so nothing carries a policy for them.
+    # The policy exists exactly where the isolated home exists. (plan r1.)
+    *)     return 1 ;;
+  esac
+  # VALIDATE AT THE ACCESSOR. Every consumer goes through here, so a second caller cannot
+  # reach the interpolation with an unvalidated value.
+  [[ "$m" =~ $ACP_POLICY_RE ]] || die "policy: model '$m' is not a bare identifier — refusing to interpolate it into the reviewer's isolated config"
+  [[ "$e" =~ $ACP_POLICY_RE ]] || die "policy: effort '$e' is not a bare identifier — refusing to interpolate it into the reviewer's isolated config"
+  printf '%s\t%s\n' "$m" "$e"
+}
+
+provider_config_for() {  # <agent> -> the COMPLETE isolated config text
+  local pol m e
+  pol="$(policy_for "$1")" || return 1
+  m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"
+  # approval_policy and sandbox_mode are LITERALS, never concatenated from the environment —
+  # only the two policy values are interpolated, and both are allowlisted above. (grok, plan r2.)
+  printf 'approval_policy = "on-request"\nsandbox_mode = "read-only"\nmodel = "%s"\nmodel_reasoning_effort = "%s"\n' "$m" "$e"
+}
+
+# policy_verdict <agent> <observed-effort> <observed-model> — the ONE comparison, used by both
+# the pre-canary preference check and the post-turn attestation so they cannot drift.
+#   0 match | 20 mismatch | 21 undecidable
+# Undecidable is NEVER "it matched": an absent reading is exactly the case that hid this bug.
+policy_verdict() {
+  local agent="$1" oe="$2" om="${3:-}" pol m e
+  pol="$(policy_for "$agent")" || return 21
+  m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"
+  [ -n "$oe" ] && [ "$oe" != null ] || { printf 'undecidable: no observed effort\n'; return 21; }
+  if [ "$oe" != "$e" ]; then
+    printf 'want effort=%s model=%s; got effort=%s model=%s\n' "$e" "$m" "$oe" "${om:-unknown}"; return 20
+  fi
+  # The model is attested too, because provider-config writes the model key into the isolated
+  # toml — a float against the id we wrote is a refused turn, consistent with a retired id.
+  if [ -n "$om" ] && [ "$om" != null ] && [ "$om" != "$m" ]; then
+    printf 'want effort=%s model=%s; got effort=%s model=%s\n' "$e" "$m" "$oe" "$om"; return 20
+  fi
+  printf 'effort=%s model=%s\n' "$oe" "${om:-unknown}"; return 0
 }
 
 cmd_doctor() {
@@ -262,6 +335,56 @@ case "${1:-}" in
     printf '%s\n' "$(profile_for "$1")"
     ;;
   version) printf '%s\n' "$ACPX_VERSION" ;;
+  policy)
+    shift
+    [ -n "${1:-}" ] || die "policy: an agent name is required"
+    policy_for "$1" || exit 1
+    ;;
+  provider-config)
+    shift
+    [ -n "${1:-}" ] || die "provider-config: an agent name is required"
+    provider_config_for "$1" || exit 1
+    ;;
+  policy-check)
+    # policy-check <agent> -   (record JSON on stdin)
+    # Reads an `acpx sessions show --format json` record and compares its CURRENT
+    # config_options against the policy. This is the PREFLIGHT reading: necessary, and
+    # explicitly NOT sufficient — a replacement session can replay a stale preference after
+    # it passes (codex, plan r1 B1). The post-turn attestation is the control that gates.
+    shift
+    [ -n "${1:-}" ] || die "policy-check: an agent name is required"
+    _pc_agent="$1"; shift
+    [ "${1:-}" = "-" ] || die "policy-check: the record is read from stdin — pass '-'"
+    command -v python3 >/dev/null 2>&1 || { echo "undecidable: python3 is unavailable" >&2; exit 21; }
+    _pc_out="$(python3 -c '
+import json,sys
+try: r=json.load(sys.stdin)
+except Exception: print("\t"); sys.exit(0)
+opts=(r.get("acpx") or {}).get("config_options")
+if not isinstance(opts,list): print("\t"); sys.exit(0)
+d={}
+for o in opts:
+    if isinstance(o,dict) and o.get("id") is not None:
+        d[str(o["id"])]=o.get("currentValue")
+def g(k):
+    v=d.get(k)
+    return "" if v is None else str(v)
+print("%s\t%s" % (g("reasoning_effort"), g("model")))
+' 2>/dev/null)" || { echo "undecidable: could not parse the session record" >&2; exit 21; }
+    _pc_eff="${_pc_out%%$'\t'*}"; _pc_mod="${_pc_out#*$'\t'}"
+    # A missing list, a missing key, or unparseable JSON all land here as an empty effort and
+    # are UNDECIDABLE — never "model matched, effort optional". (grok, plan r2.)
+    policy_verdict "$_pc_agent" "$_pc_eff" "$_pc_mod"; exit $?
+    ;;
+  policy-attest)
+    # policy-attest <agent> <observed-effort> [observed-model] — the post-turn comparison,
+    # fed from the provider's OWN rollout record. Same verdict function as policy-check so
+    # the two gates cannot drift apart.
+    shift
+    [ -n "${1:-}" ] || die "policy-attest: an agent name is required"
+    [ -n "${2:-}" ] || { echo "undecidable: no observed effort was supplied" >&2; exit 21; }
+    policy_verdict "$1" "$2" "${3:-}"; exit $?
+    ;;
   launcher) acpx_prepare_cache; acpx_launcher; printf '\n' ;;
   supports)
     # supports <agent> — exit 0 iff a consult can actually run here for that
