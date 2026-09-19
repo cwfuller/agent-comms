@@ -187,6 +187,33 @@ Still required before this is believed in production: the live ACP validation be
 establish parent-side enforcement, not rollout timing and shape across real cold, resumed and
 replacement sessions.
 
+### READY, DELIBERATELY NOT DONE: reinstall the fixed helpers into every scope (step 4, 2026-09-19)
+
+**Held at the operator's decision while three peer sessions were live.** Not an oversight and not
+a blocker — a sequencing choice, recorded so the preconditions travel with it.
+
+Why it was held: the repo-local `.agent-comms/` is what every session in this checkout executes
+(local pin beats global), the branch is 12 commits ahead of `main` and unlanded, and installing
+would have pushed unlanded code into the shared install while changing three running sessions'
+behaviour mid-flight. The disruption is not hypothetical: 8 of 8 real pre-fix records from
+`~/.acpx/sessions/` refuse with `policy-unapplied`, so every peer whose mounted codex session
+predates the fix would start refusing its in-flight review turns.
+
+**Do it in this order:**
+1. Wait for the live peers to finish (`helpers/comms.sh presence others …`, or `stalled`).
+2. `helpers/comms.sh integrate worktree-jev-router-findings`. The tree diff is code plus nested
+   docs, so it pays the suite; the attestation for `26ebbc4` will not cover the current tip.
+3. `install.sh` into BOTH scopes. `install.sh:48` already lists all five helpers. Installing
+   globally alone leaves this checkout on the old code, because the local pin wins.
+4. Retire warm codex sessions that predate the fix (`acpx <profile> sessions close`), or accept
+   one `policy-unapplied` refusal per stale session as it is discovered. This is the expected
+   behaviour, not a defect — do not weaken the gate to avoid it.
+
+**Until this lands, nothing in normal operation runs the fix.** Every review in this arc ran under
+the BRANCH helpers, reached only because `comms.sh` resolves `runphase.sh` as a sibling
+(`comms.sh:2825`, `:4425`) and the panels were dispatched from the worktree. A session driving
+from the shared checkout still gets 2026-09-15 helpers with no policy at all.
+
 ### APPROVED ON BRANCH 2026-09-19: a policy observation carries its attribution (step 3)
 
 `26ebbc4`, both legs APPROVE at implement r2. `acp_rollout_observed` now returns effort, model,
