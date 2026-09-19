@@ -159,6 +159,117 @@ monorepo is a shared cache OUTSIDE the worktree, plus `suite-attest-secs` for in
 tracked work differs from HEAD would claim evidence for code other than the recorded commit;
 ignored installed dependencies do not violate it. (Both reviewers, plan r1.)
 
+### OPEN: the reviewer effort pin never reaches a mounted codex turn (2026-09-19, sev 2, claude+codex consult)
+
+**Reviews have been running at `medium`, not the operator's configured `xhigh`.** Verified against
+the live mount store: all **25** turn-context records across the three 2026-09-17 Jev arcs
+(`jev-auto-router-21214`, `jev-router-guide-10251`, `route-bias-up-58191`) record
+`"model":"gpt-6-astra","reasoning_effort":"medium"`, unanimously. The operator's
+`~/.codex/config.toml` pins `model_reasoning_effort = "xhigh"`.
+
+Mechanism: `helpers/runphase.sh:2894-2896` synthesizes an isolated `$CODEX_HOME/config.toml`
+containing only `approval_policy` and `sandbox_mode`, then replaces `CODEX_HOME` wholesale at
+`:2898`. The synthesized config cannot carry any user model or effort setting. **The model still
+arrives** (astra is correct) because acpx applies it through ACP model controls; **effort is a
+separate adapter control** and nothing sets it. Selecting a model does not select an effort.
+
+Codex confirmed the transport binding from installed source: acpx `0.13.1` validates advertised
+model support and calls `session/set_config_option` / legacy `session/set_model`; codex adapter
+`1.12.0` passes model and effort into the turn request. So a fix has a real consumer — this is
+wiring, not a protocol limit. Do not assume legacy `model[effort]` syntax works through every
+adapter version.
+
+Fix shape: a narrow per-provider model+effort policy resolved into the ACP session, **not** a copy
+of the user's config (that would reintroduce exactly the settings isolation deliberately excludes).
+A review that requires a specific model/effort should FAIL when the setting did not apply —
+`PONG` proves responsiveness, it does not prove model identity. Record requested policy separately
+from observed execution, and preserve `unknown` when execution evidence is absent; writing
+requested values into `write_result` and calling them actual would perpetuate the problem.
+
+Version skew worth recording when this is fixed: cached adapter dependency is codex `0.154.0`
+while `codex` on PATH is `0.155.1`.
+
+*Superseded observation, kept so it is not rediscovered:* seven rollouts under `.comms/mounts/`
+show `gpt-5.6-sol` / `low`. Those are 2026-08-30 legacy mounts on CLI `0.148.0`. The live mount
+store is `~/.local/state/agent-comms/mounts/` (`helpers/runphase.sh:1367`). Sample the live store,
+not `.comms/mounts/`.
+
+### OPEN: the /auto model router computes a decision nothing consumes (2026-09-19, sev 3, claude+codex consult)
+
+The Jev classifier (`helpers/route.sh`, `helpers/route_backend.py`, landed 2026-09-17,
+`d42ea88` → `9a17491`) works and is well-tested, but **its effort/tier outputs have no consumer
+and could not be honored if they did.**
+
+- `ROUTE_EFFORT` / `ROUTE_TIER` are assigned at `templates/claude-commands/auto.md:125-126` and
+  never read. Repo-wide the identifiers appear four times: those two assignments, prose at
+  `auto.md:134`, and `tests/groups/templates.sh:371` — which asserts *that the sentence "Effort and
+  tier are advisory" exists in the markdown*. That is the only test of the path. The tests and the
+  implementation agree with each other while both miss the intended outcome.
+- `grep -rn -e '--model' -e 'reasoning_effort' -e '--effort' helpers templates` → **0 hits**. The
+  spawn argvs (`runphase.sh:2680` grok, `:2687` codex, `:2701` claude) and the ACP option vector
+  (`:3074`, spent `:3136`) carry no model or effort. `runphase.sh` has zero `COMMS_ROUTE` refs.
+- `ROUTE_PLAN` **does** have a real consumer (`auto.md:129`) and does real work. Scope this entry to
+  effort/tier; "the router is consumerless" overstates it.
+
+**Cost-down is unreachable on the ordinary path.** A 128-cell stub grid over the full input space
+(4 complexity x 2 confidences x 4 effort choices x 2 confidences x 2 noul) yields
+`tier {balanced:16, strong:112}`, `effort {medium:16, high:80, xhigh:32}`, `fast` and `low`
+unreachable. The unconditional `_step_up` (`route.sh:377-380`, landed `ce66d45`) runs after
+`TIER_OF`, and the low-confidence floor is applied *before* it, so a vague trivial task lands on
+`strong`. The cheapest classified output equals `KEYS_FAIL_OPEN` (`route.sh:47-58`) byte for byte —
+so fail-open is currently the cheapest outcome the system produces, and a dead API key is
+indistinguishable from "Jev said this was easy" except by reading `source:`.
+
+Caveat on that grid, from codex: it is **unweighted**. It proves `fast`/`low` are unreachable; it
+does not prove 87.5% of real tasks would select `strong`, nor that savings against an
+always-astra/xhigh baseline are impossible. Overrides bypass the bump. Real savings require a
+concrete tier→model mapping and a measured workload.
+
+**Structural note:** `route.sh:295-298` aims effort at "the implementer", which for `/auto` is the
+driving session — it cannot relaunch itself with a different model. Reviewer turns are the right
+controllable boundary (separately launched, configurable), but a reviewer classifier would need the
+artifact, phase, risk and prior findings, not the initiating task sentence, which is all the
+classifier receives today. A one-line concurrency change can demand a deep review.
+
+**Not deployed.** Both `~/.agent-comms/` and this repo's `.agent-comms/` hold 2026-09-15 copies with
+no `route.sh` and no `cmd_route`; the **local copy wins**, so reinstalling globally alone leaves the
+checkout stale. `install.sh:48` already lists both helpers.
+
+**Auditability is incomplete, not zero.** The runtime mount records recover what a turn used.
+Missing is durable correlated reporting: `COMMS_ROUTE_LOG` (`route.sh:168-180`) is a working writer
+nothing ever sets; its `at` is local-time `strftime` with no offset while `events.tsv` /
+`rounds.tsv` are UTC-Z; it carries no `thread` / `workspace`, so rows could not be joined even if
+enabled. `EVENT_KINDS` (`comms.sh:2374`) is a closed 13-kind list with no route kind.
+`write_result` (`runphase.sh:291`) emits 10 fixed fields with no model/effort. Shell-level
+fail-opens bypass the Python writer entirely, and that writer swallows write failures.
+
+**Agreed order (claude proposed, codex revised):**
+
+1. Restore the reviewer contract — the sev 2 entry above. Real cost and real review quality, today.
+2. Prove it through the production ACP path: fresh sessions, resumed sessions, owner replacement,
+   unsupported selections. Validate before the canary; inspect actual turn metadata.
+3. Record requested policy separately from observed execution (model, effort, policy source,
+   backend version, session/turn ids, thread, phase, round; UTC).
+4. Reinstall to **every** scope, global and repo-local.
+5. Only then evaluate routing — fixed per-provider/per-phase policy first, with manual overrides.
+   If Jev survives that, run it in **shadow mode** and compare total cost, latency, extra rounds and
+   missed defects.
+
+**No eval yet, and that is a considered decision.** There is no ground truth for "this task needed
+xhigh" — it is a counterfactual. The answerable questions are "does routing beat a flat default"
+(an outcome A/B on rounds-to-green, no labels needed) and "did the `plan` call match the
+operator's" (free retrospective labels; `plan` is the only binding output). Before either,
+~20-30 logged live decisions answer the cheap question — *is it a constant function?* — with no
+labels and no confidence interval. Fix the log shape first or those rows are unjoinable forever.
+
+**Open question the operator should settle:** what is `_step_up` FOR? If it is a safety margin for
+an untrusted classifier, make it confidence-conditional so `fast`/`low` return. If it is permanent
+policy, say so in `README.md` and stop calling this a cost router — it is an escalation device.
+There is a credible case for deleting the effort/tier half outright and keeping `plan` only:
+dynamic routing should survive because it demonstrably improves cost at acceptable quality, not
+because three approved arcs already exist.
+
+
 ### OPEN: the mixed-severity class has no suite guard (2026-09-03, sev 3, corroboration r4)
 
 **Left open deliberately at `max-rounds`, so it is recorded here rather than lost in friction.**
