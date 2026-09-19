@@ -471,3 +471,21 @@ mkdir -p "$ISO_RQ-na"
 ( acp_sh=/nonexistent/acp.sh; eval "$ISO_TO2"; turn_observe "$ISO_RQ-na" xhigh gpt-6-astra r t f 0 ) 2>/dev/null
 grep -qx "requested_effort	unknown" "$ISO_RQ-na/turn.tsv" 2>/dev/null \
   && ok "an unreachable policy accessor records requested=unknown, never an assumed default" || fail "unreachable accessor did not record unknown"
+
+# A refusal must be RECOVERABLE. `acpx <profile> sessions close` alone does not retire a MOUNTED
+# session: the record is keyed by (agent, cwd, name), so a hint that omits the session name and
+# the workdir sends the operator to close the wrong thing, every resend refuses again, and the
+# panel stays pending — a wedged loop rather than a retryable refusal. (codex, installed-path
+# deployment probe.)
+for _h in 'the reviewer session will not run the declared' 'the review turn did not run the declared'; do
+  _line="$(grep -n "$_h" "$ISO_RP" | head -1 | cut -d: -f1)"
+  _txt="$(sed -n "${_line}p" "$ISO_RP")"
+  case "$_txt" in
+    *'sessions close $acp_session'*) : ;;
+    *) fail "a policy refusal hint omits the session name: ${_h}"; continue ;;
+  esac
+  case "$_txt" in
+    *'in $workdir'*) ok "the policy refusal names the session AND the cwd needed to retire it (${_h})" ;;
+    *) fail "a policy refusal hint omits the workdir: ${_h}" ;;
+  esac
+done
