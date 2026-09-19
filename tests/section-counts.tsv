@@ -1,0 +1,77 @@
+comms.sh: root/workspace	3
+comms.sh: validate	5
+comms.sh: error-envelope (a provider API error is not an answer)	9
+comms.sh: reply-check (completion-evidence contract: 10 answer / 11 error / 12 undecidable)	6
+comms.sh: archive (idempotent, own inbox only)	4
+comms.sh: list	3
+comms.sh: latest archive is direction/thread/time aware	4
+comms.sh: send (atomicity guard)	4
+install.sh: scopes	20
+comms.sh: status smoke	3
+install.sh: local pin gitignored + global scope (overridden HOME dirs)	45
+comms.sh v2: thread filter + verdict normalization + error lane	4
+comms.sh v2: state lifecycle	13
+comms.sh v2: state hardening (slash thread, garbage epoch, quotes)	5
+comms.sh v2: state dir blocked as a FILE must not break send/archive	3
+comms.sh v2.1.1: status shouts when a loop stalled undelivered	2
+comms.sh v2.1: send emits a loud RESULT line — and it is the FINAL line	3
+runphase step 2: hold, release, and the stalled watchdog	12
+headless delivery: self-pickup suppression and a missing runner	7
+comms.sh: workspace identity (no cmux)	3
+panel dispatch: synthetic-snapshot warning	4
+compose: cross-severity corroboration	13
+loopspec: conformance fixtures	1
+multi-agent: registry contract	15
+multi-agent: sender enforcement + grok inbox round-trip	2
+multi-agent: grok stub + full-arc runphase legs	102
+runphase: the parent-brokered prompt is provider-neutral	20
+multi-agent: grok arg refusals	13
+multi-agent: archive-owner authority (comms.sh send)	5
+multi-agent: template source contracts	21
+broker: a missing VERDICT line is DERIVED, not discarded	3
+one placeholder rule: broker derivation and findings/compose cannot disagree	39
+findings are LIST ITEMS in any markdown form (field bug, 2026-08-26)	16
+stamped authorities: workspace pin (#3) + send-time git metadata (#6)	46
+friction: a one-line seam for reporting harness problems	32
+transports emit the child\'s bytes, verbatim and identically	13
+acp.sh: consult transport (stubbed npx)	45
+acp.sh: the reviewer model+effort policy	25
+reviewer policy: a wrong-depth review is never published	14
+runphase: the compatibility canary gates every ACP turn	24
+runphase: parent-brokered claude and codex legs over ACP	41
+scope-dial template source contract	15
+templates: bare dollar-digit/dollar-star hygiene	1
+/ask canonical template source contract	10
+loopspec: prompt fragments do not drift from docs/loopspec/fragments/	10
+comms.sh: bounded reads (lessons)	20
+comms.sh: bounded reads (archive-search)	10
+comms.sh: help prints its whole header	2
+templates: /auto query route	8
+comms.sh: route fail-open	11
+comms.sh: route policy	34
+install.sh: .codex/AGENTS.md managed block	47
+grading pilot: findings extraction (the single-reviewer baseline)	15
+grading pilot: --out ledger is append-only and idempotent	4
+grading pilot: shadow role + run identity are stamped, not inferred	3
+grading pilot: snapshot RETAINS the reviewed tree (a hash alone cannot)	8
+grading pilot: prompt-version partitions grades across an instruction edit	8
+grading pilot: shadow reviewer is a MEASUREMENT, structurally unable to gate	53
+grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims)	44
+comms.sh: transport selection (no pane must not strand a consult)	49
+panel: N parallel 2-party legs over ONE artifact	72
+templates: the loop closes its thread state on the terminal approval	2
+ask: the driver-neutral consult verb	28
+review turns may read history, never publish or rewrite it	44
+runphase: warm ACP mounts live at a stable per-(thread,agent) path	47
+presence & worktrees: advisory coordination (plan presence-worktrees-15135)	117
+runphase: the state-file wait is DECLARED by the spawner, never guessed	22
+harness: a partial run is never a verdict	55
+integrate: an exit status is not proof the suite ran	30
+integrate: the verification tree is a FRESH checkout	11
+integrate: docs-only skip	19
+the coordinator's event log: a durable record that is not the mailbox	169
+reviewer isolation: a mounted turn is contained or it does not run	80
+reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)	21
+any-agent driver surface	40
+comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5
+harness: complete parallel worker reports	1
