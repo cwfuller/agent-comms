@@ -270,6 +270,52 @@ dynamic routing should survive because it demonstrably improves cost at acceptab
 because three approved arcs already exist.
 
 
+### OPEN: the reviewer containment measurement is stale — re-probe on codex-acp 1.12.0 (2026-09-19, sev 2, acpx surface probe)
+
+**Do not fold this into the effort-pin work. It needs its own round and one live write-probe.**
+
+`helpers/runphase.sh:2780-2786` records the containment measurement: *"Measured on Darwin with
+acpx 0.13.1 / codex-acp **1.6.2**: an isolated CODEX_HOME plus INITIAL_AGENT_MODE=read-only
+refuses workspace writes AND /tmp writes at the OS."* The installed adapter is now **1.12.0**
+(`~/.npm/_npx/bb64e4387f65cc68/node_modules/@agentclientprotocol/codex-acp/package.json`), and on
+1.12.0 the mode named "read-only" is a **workspace-write** policy:
+
+```js
+// codex-acp 1.12.0 dist/index.js:27706-27721
+static ReadOnly = new _AgentMode("read-only", …,
+  { type: "workspaceWrite", writableRoots: [], networkAccess: false,
+    excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+  "workspace-write");
+```
+
+A live mounted review turn confirms this reaches codex — `turn_context.payload.sandbox_policy` in
+`~/.local/state/agent-comms/mounts/*/*/home/sessions/2026/09/1[789]/rollout-*.jsonl` reads
+`{'type': 'workspace-write', 'network_access': False, 'exclude_tmpdir_env_var': False,
+'exclude_slash_tmp': False}`. Note there is **no** `writable_roots` key in the emitted payload.
+
+The open question is narrow and empirical: **under codex's `workspace-write` with an empty
+`writableRoots`, is the mount cwd writable?** Workspace-write normally makes the cwd writable by
+design — that is what distinguishes it from read-only. If it is writable on 1.12.0, then the
+measured OS-level write denial no longer holds and reviewer containment now rests on whatever
+post-hoc check exists, not on the sandbox.
+
+**What this entry does NOT claim.** The code comment is *not* wrong about the mechanism:
+`runphase.sh:2789-2790` already states "The adapter reads INITIAL_AGENT_MODE (not sandbox_mode)",
+which is correct. The staleness is in the **measurement**, not the attribution. (An earlier probe
+report framed this as a mis-attributed comment; that framing was checked and rejected.)
+
+Also note `sandbox_mode = "read-only"` in the synthesized config (`runphase.sh:2894-2896`) is
+inert for the sandbox on this adapter, because `AgentMode` supplies an explicit `sandboxPolicy`
+on every turn (`dist/index.js:28857`, `sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(
+agentMode.sandboxPolicy, …)`). Keep the key — it is harmless and correct for any path that does
+read it — but do not treat its presence as evidence of containment.
+
+**To settle it:** one mounted review turn instructed to attempt a write inside the mount cwd, a
+write to `/tmp`, and a network call, with the results recorded. That is the same experiment the
+1.6.2 measurement ran; re-run it and update the comment with the adapter version it was measured
+against, so the next version bump makes the staleness visible.
+
+
 ### OPEN: the mixed-severity class has no suite guard (2026-09-03, sev 3, corroboration r4)
 
 **Left open deliberately at `max-rounds`, so it is recorded here rather than lost in friction.**
