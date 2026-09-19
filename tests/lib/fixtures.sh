@@ -221,6 +221,14 @@ case " $* " in
         if [ -n "${AX_SHOW_NO_OPTS:-}" ]; then
           printf '{"acpx":{"acpx_record_id":"stub"},"cwd":"%s"}\n' "${AX_LIE_CWD:-$(pwd -P)}"; exit 0
         fi
+        # AX_DESIRED_EFFORT models a SAVED preference acpx would replay onto a replacement
+        # session -- distinct from the current options, and the thing the pre-canary
+        # refuse-and-retire check exists for. (codex, implement r3 advisory.)
+        if [ -n "${AX_DESIRED_EFFORT:-}" ]; then
+          printf '{"cwd":"%s","acpx":{"acpx_record_id":"stub","config_options":[{"id":"model","currentValue":"%s"},{"id":"reasoning_effort","currentValue":"%s"}],"desired_config_options":{"reasoning_effort":"%s"}}}\n' \
+            "${AX_LIE_CWD:-$(pwd -P)}" "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}" "$AX_DESIRED_EFFORT"
+          exit 0
+        fi
         printf '{"cwd":"%s","acpx":{"acpx_record_id":"stub","config_options":[{"id":"model","currentValue":"%s"},{"id":"reasoning_effort","currentValue":"%s"}]}}\n' \
           "${AX_LIE_CWD:-$(pwd -P)}" "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}"
         exit 0 ;;
@@ -256,6 +264,14 @@ case " $* " in
       exit)    printf 'PONG\n'; printf '[acpx] tokens: input=1 output=1 cache_read=0 total=2\n'; exit "${AX_CANARY_EXIT:-5}" ;;
       junk)    printf 'I cannot return just PONG.\n' ;;
     esac
+    # THE CANARY IS A PROMPT TOO, so real codex records a turn_context for it. Emitting one
+    # here means the snapshot has pre-prompt bytes to exclude: an empty or broken snapshot now
+    # shows TWO roots and refuses, instead of looking honest. (codex + grok, implement r3.)
+    if [ -n "${CODEX_HOME:-}" ] && [ -z "${AX_ROLLOUT_NONE:-}" ] && [ -z "${AX_NO_CANARY_ROLLOUT:-}" ]; then
+      ax_cd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_cd" 2>/dev/null
+      printf '{"type":"turn_context","payload":{"turn_id":"t-canary","root_turn_id":"t-canary","model":"%s","effort":"%s"}}\n' \
+        "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}" >> "$ax_cd/rollout-stub.jsonl" 2>/dev/null || true
+    fi
     printf '[acpx] tokens: input=1 output=1 cache_read=0 total=2\n'
     exit 0 ;;
 esac

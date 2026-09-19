@@ -790,7 +790,15 @@ pol_msg() {  # <thread> -> writes a mounted review-request and echoes its path
       | sed -e "s/^thread: ma-arc-1\$/thread: $thr/" -e "s/^from: claude\$/from: grok/"
   } > "$m"; printf '%s' "$m"
 }
-pol_inbox_n() { find "$MA_FIX/.comms/to-grok" -name "*$1*" -type f 2>/dev/null | wc -l | tr -d ' '; }
+# COUNT PUBLISHED FEEDBACK BY ENVELOPE, NOT BY FILENAME. Replies are named
+# ${workspace}_${ts}_${agent}-reply-$$ (runphase.sh:542, :1078) -- the thread token appears
+# INSIDE the message, never in the path. A filename glob therefore returned 0 whether or not
+# the review was published, so the "nothing was published" assertions could not fail. The
+# honest control below must find EXACTLY ONE, which is what gives the negative controls teeth.
+# (codex + grok, implement r3, blocking.)
+pol_inbox_n() {
+  grep -l "^thread: $1\$" "$MA_FIX/.comms/to-grok"/*.md 2>/dev/null | wc -l | tr -d ' '
+}
 pol_run() {  # <thread> <dir> [extra env assignments...]
   local thr="$1" dir="$2"; shift 2
   mkdir -p "$dir"
@@ -805,6 +813,10 @@ POL_OK="$WORK/pol-ok"; POL_CFG="$WORK/pol-ok.cfg"
 pol_run pol-ok "$POL_OK" AX_CFG_LOG="$POL_CFG"
 [ "$(cn_status "$POL_OK")" = "completed" ] \
   && ok "a mounted turn that runs the declared policy completes" || fail "honest turn: status=$(cn_status "$POL_OK")"
+# THE POSITIVE CONTROL. Without this, every "published nothing" assertion below could be
+# passing because the lookup is blind rather than because nothing was published.
+[ "$(pol_inbox_n pol-ok)" = 1 ] \
+  && ok "the honest turn publishes exactly one review-feedback the lookup can see" || fail "the publication lookup is blind (honest control found $(pol_inbox_n pol-ok))"
 # Read from the CHILD's view: the mount is torn down when the turn ends, so asserting on the
 # parent's own write would prove less and be impossible here anyway.
 grep -q 'model_reasoning_effort = "xhigh"' "$POL_CFG" 2>/dev/null \
@@ -836,3 +848,18 @@ awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$POL_PRE_LOG" 2>/dev/
   || ok "no prompt — canary or review — is sent after a preflight policy refusal"
 [ "$(pol_inbox_n pol-preflight)" = 0 ] \
   && ok "the preflight refusal publishes nothing" || fail "preflight refusal published feedback"
+# A SAVED preference acpx would replay is refused pre-canary — distinct from the current
+# options the previous case exercised. (codex, implement r3 advisory.)
+POL_DES="$WORK/pol-desired"; POL_DES_LOG="$WORK/pol-desired.argv"
+pol_run pol-desired "$POL_DES" AX_DESIRED_EFFORT=low AX_CWD_LOG="$POL_DES_LOG"
+[ "$(cn_status "$POL_DES")" = "failed" ] && [ "$(pol_inbox_n pol-desired)" = 0 ] \
+  && ok "a saved effort preference that would be replayed refuses the turn, unpublished" || fail "saved-preference refusal: status=$(cn_status "$POL_DES") inbox=$(pol_inbox_n pol-desired)"
+awk -F'\t' '$2 ~ / --file /' "$POL_DES_LOG" 2>/dev/null | grep -q . \
+  && fail "the review prompt was sent despite a conflicting saved preference" \
+  || ok "no review prompt is sent when a saved preference would be replayed"
+# THE CANARY NOW WRITES ROLLOUT EVIDENCE, so the snapshot has pre-prompt bytes to exclude.
+# The honest control passing proves the window genuinely excludes them: if the snapshot were
+# empty or unbounded, the canary root plus the review root would read as two and refuse.
+POL_CAN="$WORK/pol-canary"; pol_run pol-canary "$POL_CAN"
+[ "$(cn_status "$POL_CAN")" = "completed" ] && [ "$(pol_inbox_n pol-canary)" = 1 ] \
+  && ok "pre-prompt canary rollout bytes are excluded from the window, not counted as ambiguity" || fail "canary evidence broke the honest path: status=$(cn_status "$POL_CAN")"
