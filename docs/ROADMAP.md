@@ -159,6 +159,34 @@ monorepo is a shared cache OUTSIDE the worktree, plus `suite-attest-secs` for in
 tracked work differs from HEAD would claim evidence for code other than the recorded commit;
 ignored installed dependencies do not violate it. (Both reviewers, plan r1.)
 
+### LANDED ON BRANCH 2026-09-19: the reviewer effort pin now binds and is attested (sev 2)
+
+Fixed on `worktree-jev-router-findings` (`26d74ab`), APPROVED by both legs at implement r4 after
+three plan rounds and four implement rounds. `helpers/acp.sh` owns the policy
+(`COMMS_ACP_CODEX_MODEL` / `COMMS_ACP_CODEX_EFFORT`, default `gpt-6-astra`/`xhigh`) behind
+`policy` / `provider-config` / `policy-check` / `policy-attest`, all routed through one
+`policy_verdict`; `runphase.sh` writes the isolated config from the accessor and holds no literal,
+refuses a conflicting saved preference pre-canary, and **refuses to publish** a turn whose rollout
+evidence does not attest the policy. +63 assertions; suite 1757 green.
+
+Blockers the panel found that a green suite had not: the saved-preference check was commented but
+never implemented; `glob` suppresses directory-scan errors so an unreadable subtree produced an
+empty snapshot; renamed and unattributable evidence passed; and the publication assertion searched
+filenames for a thread token that only ever appears in the envelope, so it could not fail.
+
+**Carried advisories, not done:**
+- The saved-preference runner test asserts no `--file` prompt but not the absence of the canary
+  prompt; the current-options test does both. Ordering guard against regression. (codex r4.)
+- `POL_CAN` infers canary-byte exclusion from a completed publish rather than asserting the
+  snapshot recorded those bytes; a silent `>>` failure would make it a second honest control
+  instead of a window proof. Pin the snapshot size or the canary line. (grok r4.)
+- Backend session/turn identifiers are still discarded by the reader and absent from
+  `turn_observe`. Belongs with the requested-vs-observed logging step.
+
+Still required before this is believed in production: the live ACP validation below — fixtures
+establish parent-side enforcement, not rollout timing and shape across real cold, resumed and
+replacement sessions.
+
 ### OPEN: the reviewer effort pin never reaches a mounted codex turn (2026-09-19, sev 2, claude+codex consult)
 
 **Reviews have been running at `medium`, not the operator's configured `xhigh`.** Verified against
