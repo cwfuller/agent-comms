@@ -2233,6 +2233,19 @@ PY
 # the attestation found divergence. Called on the failure path too, BEFORE acp_refuse
 # unmounts, so a refusal stays diagnosable. (codex + grok, plan r2/r3.)
 turn_observe() {
+  # REQUESTED AND OBSERVED ARE RECORDED SEPARATELY, and never conflated. The whole point of the
+  # arc is that a declared depth and an executed depth were silently assumed equal for three
+  # weeks; a ledger that cannot express "we asked for X and got Y" reproduces that blindness.
+  # The requested pair comes from the policy accessor, the observed pair from the provider's own
+  # rollout, and a refusal records BOTH so the divergence is legible without the mount.
+  # (codex, live-proof r1: "identify whether its model/effort fields are requested or verified".)
+  local _req_m="unknown" _req_e="unknown" _pol
+  if _pol="$("$acp_sh" policy codex 2>/dev/null)"; then
+    _req_m="${_pol%%$'\t'*}"; _req_e="${_pol#*$'\t'}"
+  fi
+  { printf 'requested_model\t%s\n'  "$_req_m"
+    printf 'requested_effort\t%s\n' "$_req_e"
+  } >> "$1/turn.tsv" 2>/dev/null || true
   # An EXPLICIT empty observation is still "no evidence" and must read as unknown, not as a
   # blank column a human has to interpret. (grok, implement r1.)
   { printf 'observed_effort\t%s\n' "${2:-}"

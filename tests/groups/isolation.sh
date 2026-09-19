@@ -446,3 +446,28 @@ AP_S="$REPO/helpers/acp.sh"
 "$AP_S" policy-attest codex "$(iso_split "$(printf '\tgpt-6-astra\tt-1\t/r/a.jsonl\t42')" | cut -d'|' -f1)" \
         "$(iso_split "$(printf '\tgpt-6-astra\tt-1\t/r/a.jsonl\t42')" | cut -d'|' -f2)" >/dev/null 2>&1
 [ "$?" = 21 ] && ok "a missing effort reaches the verdict as undecidable, not as a mismatch" || fail "missing effort misclassified"
+
+# STEP 3 PROPER — REQUESTED vs OBSERVED must be separable in the ledger. Recording only what a
+# turn was observed to run reproduces the blindness this whole arc exists to fix: for three weeks
+# a declared depth and an executed depth were assumed equal because nothing wrote both down.
+ISO_TO2="$(sed -n '/^turn_observe() {/,/^}/p' "$ISO_RP")"
+ISO_RQ="$WORK/turnobs-req"; rm -rf "$ISO_RQ"; mkdir -p "$ISO_RQ"
+( acp_sh="$REPO/helpers/acp.sh"; eval "$ISO_TO2"; turn_observe "$ISO_RQ" medium gpt-6-astra rec-9 t-9 /r/y.jsonl 7 )
+grep -qx "requested_effort	xhigh" "$ISO_RQ/turn.tsv" \
+  && ok "turn.tsv records the REQUESTED effort from the policy accessor" || fail "requested effort missing"
+grep -qx "requested_model	gpt-6-astra" "$ISO_RQ/turn.tsv" \
+  && ok "turn.tsv records the REQUESTED model" || fail "requested model missing"
+# The divergence must be legible from the file alone, with no mount and no rollout.
+grep -qx "observed_effort	medium" "$ISO_RQ/turn.tsv" && grep -qx "requested_effort	xhigh" "$ISO_RQ/turn.tsv" \
+  && ok "a requested/observed divergence is readable from turn.tsv without the mount" || fail "divergence not legible"
+# The requested pair must come from the ACCESSOR, not be a second literal that can drift.
+mkdir -p "$ISO_RQ-ov"
+( acp_sh="$REPO/helpers/acp.sh"; eval "$ISO_TO2"
+  COMMS_ACP_CODEX_EFFORT=high turn_observe "$ISO_RQ-ov" xhigh gpt-6-astra r t f 0 ) 2>/dev/null
+grep -qx "requested_effort	high" "$ISO_RQ-ov/turn.tsv" 2>/dev/null \
+  && ok "the requested pair tracks the policy accessor, not a second hardcoded copy" || fail "requested pair does not follow the accessor"
+# An unreachable accessor records unknown rather than silently claiming the default.
+mkdir -p "$ISO_RQ-na"
+( acp_sh=/nonexistent/acp.sh; eval "$ISO_TO2"; turn_observe "$ISO_RQ-na" xhigh gpt-6-astra r t f 0 ) 2>/dev/null
+grep -qx "requested_effort	unknown" "$ISO_RQ-na/turn.tsv" 2>/dev/null \
+  && ok "an unreachable policy accessor records requested=unknown, never an assumed default" || fail "unreachable accessor did not record unknown"
