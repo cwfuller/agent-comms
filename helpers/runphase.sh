@@ -2089,7 +2089,8 @@ acp_confirm_mode() {
   [ "$rc" -eq 0 ] && [ "$out" = "mode set: $mode" ]
 }
 
-# acp_rollout_observed <iso-home> <snapshot-file> — print "<effort>\t<model>" for the ONE root
+# acp_rollout_observed <iso-home> <snapshot-file> — print
+# "<effort>\t<model>\t<turn-id>\t<evidence-file>\t<window-origin>" for the ONE root
 # turn_context this turn appended, or exit non-zero.
 #
 # THE EVIDENCE THE PROVIDER WROTE ITSELF. codex appends a turn_context per prompt carrying the
@@ -3396,7 +3397,16 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off=""
       att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
       if [ "$att_rc" -eq 0 ]; then
-        IFS=$'\t' read -r att_eff att_mod att_turn att_src att_off <<<"$att_out"
+        # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
+        # field after an empty one shifts left — a context missing its effort was reported as a
+        # policy mismatch (20) with the model in the effort column instead of missing evidence
+        # (21), which is wrong exactly when the diagnostics matter. cut preserves empty fields.
+        # (codex, attribution r1 B1; grok probed the same shift.)
+        att_eff="$(printf '%s' "$att_out" | cut -f1)"
+        att_mod="$(printf '%s' "$att_out" | cut -f2)"
+        att_turn="$(printf '%s' "$att_out" | cut -f3)"
+        att_src="$(printf '%s' "$att_out" | cut -f4)"
+        att_off="$(printf '%s' "$att_out" | cut -f5)"
         att_msg="$("$acp_sh" policy-attest codex "$att_eff" "$att_mod" 2>>"$run_dir/runner.log")" || att_rc=$?
       fi
       turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}"

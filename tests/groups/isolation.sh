@@ -423,3 +423,26 @@ grep -qx "observed_turn	t-attr" "$ISO_TD/turn.tsv" && grep -qx "evidence_offset	
 ( eval "$ISO_TO"; turn_observe "$ISO_TD" "" "" "" "" "" "" )
 grep -qx "observed_turn	unknown" "$ISO_TD/turn.tsv" \
   && ok "absent attribution records unknown, never a blank column" || fail "blank attribution column"
+
+# B1 (codex, attribution r1): the CALLER's field split, which the reader-level probes above
+# bypass entirely. `IFS=$'\t' read` treats tab as IFS whitespace, so an empty column collapses
+# and every later field shifts left — a context missing its effort was reported as a policy
+# MISMATCH carrying the model in the effort slot, instead of missing evidence. Extract the real
+# split from the source and run it, so this cannot regress to `read`.
+ISO_SPLIT="$(sed -n '/att_eff="\$(printf/,/att_off="\$(printf/p' "$ISO_RP")"
+iso_split() { ( att_out="$1"; eval "$ISO_SPLIT"; printf '%s|%s|%s|%s|%s' "$att_eff" "$att_mod" "$att_turn" "$att_src" "$att_off" ); }
+[ "$(iso_split "$(printf 'xhigh\tgpt-6-astra\tt-1\t/r/a.jsonl\t42')")" = "xhigh|gpt-6-astra|t-1|/r/a.jsonl|42" ] \
+  && ok "a complete observation splits into its five fields" || fail "complete split (got $(iso_split "$(printf 'xhigh\tgpt-6-astra\tt-1\t/r/a.jsonl\t42')"))"
+[ "$(iso_split "$(printf 'xhigh\t\tt-1\t/r/a.jsonl\t42')")" = "xhigh||t-1|/r/a.jsonl|42" ] \
+  && ok "an EMPTY model does not shift the remaining fields left" || fail "empty model shifted the split (got $(iso_split "$(printf 'xhigh\t\tt-1\t/r/a.jsonl\t42')"))"
+[ "$(iso_split "$(printf '\tgpt-6-astra\tt-1\t/r/a.jsonl\t42')")" = "|gpt-6-astra|t-1|/r/a.jsonl|42" ] \
+  && ok "an EMPTY effort does not shift the remaining fields left" || fail "empty effort shifted the split"
+grep -q "IFS=\$'\\\\t' read -r att_eff" "$ISO_RP" \
+  && fail "the caller split regressed to a field-collapsing read" \
+  || ok "the caller does not split the observation with a whitespace-IFS read"
+# ...and the shift had a SEMANTIC cost: an empty effort must stay undecidable (21), never a
+# mismatch (21 vs 20 is the difference between "no evidence" and "ran the wrong depth").
+AP_S="$REPO/helpers/acp.sh"
+"$AP_S" policy-attest codex "$(iso_split "$(printf '\tgpt-6-astra\tt-1\t/r/a.jsonl\t42')" | cut -d'|' -f1)" \
+        "$(iso_split "$(printf '\tgpt-6-astra\tt-1\t/r/a.jsonl\t42')" | cut -d'|' -f2)" >/dev/null 2>&1
+[ "$?" = 21 ] && ok "a missing effort reaches the verdict as undecidable, not as a mismatch" || fail "missing effort misclassified"
