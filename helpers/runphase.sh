@@ -2102,15 +2102,28 @@ acp_confirm_mode() {
 acp_rollout_snapshot() {  # <iso-home> <out> — path, inode and size of every rollout file
   command -v python3 >/dev/null 2>&1 || return 1
   python3 - "$1" "$2" <<'PY'
-import os,sys,glob
+import os,sys
 home,out=sys.argv[1],sys.argv[2]
+# NOT glob: it suppresses directory-scanning errors internally, so an unreadable subtree
+# returned [] and the surrounding except never fired -- an empty snapshot under which old
+# bytes read as newly appended. os.walk with onerror RAISES. (codex, implement r2 B1.)
+def _boom(e): raise e
 rows=[]
 try:
-    for f in sorted(glob.glob(os.path.join(home,"sessions","**","rollout-*.jsonl"),recursive=True)):
-        st=os.stat(f)                      # an unreadable file FAILS the snapshot
-        rows.append("%s\t%d\t%d"%(f,st.st_ino,st.st_size))
+    root=os.path.join(home,"sessions")
+    if not os.path.isdir(root):
+        # A proven-absent sessions dir is an empty snapshot; an unreadable one is a failure.
+        os.listdir(home)
+    else:
+        for dirpath,_,names in os.walk(root,onerror=_boom):
+            for n in sorted(names):
+                if n.startswith("rollout-") and n.endswith(".jsonl"):
+                    f=os.path.join(dirpath,n)
+                    st=os.stat(f)          # an unreadable file FAILS the snapshot
+                    rows.append("%s\t%d\t%d"%(f,st.st_ino,st.st_size))
 except OSError as e:
     sys.stderr.write("rollout snapshot failed: %s\n"%e); sys.exit(1)
+rows.sort()
 try:
     with open(out,"w") as fh:
         fh.write("\n".join(rows)+("\n" if rows else ""))
@@ -2122,7 +2135,7 @@ PY
 acp_rollout_observed() {
   command -v python3 >/dev/null 2>&1 || return 21
   python3 - "$1" "$2" <<'PY'
-import json,os,sys,glob
+import json,os,sys
 home,snap=sys.argv[1],sys.argv[2]
 def undecidable(msg):
     sys.stderr.write(msg+"\n"); sys.exit(21)
@@ -2140,10 +2153,26 @@ try:
 except OSError:
     undecidable("the rollout snapshot could not be read")
 roots=[]
+def _boom(e): raise e
+files=[]
 try:
-    files=sorted(glob.glob(os.path.join(home,"sessions","**","rollout-*.jsonl"),recursive=True))
+    root=os.path.join(home,"sessions")
+    if os.path.isdir(root):
+        for dirpath,_,names in os.walk(root,onerror=_boom):
+            for n in names:
+                if n.startswith("rollout-") and n.endswith(".jsonl"):
+                    files.append(os.path.join(dirpath,n))
+    else:
+        os.listdir(home)
 except OSError:
     undecidable("the provider's rollout directory could not be enumerated")
+files.sort()
+# A snapshotted file that has VANISHED was renamed or deleted: its bytes may reappear under a
+# new pathname with offset zero, letting an old context pass as new. (codex, implement r2 B2.)
+seen=set(files)
+for f in prev:
+    if f not in seen:
+        undecidable("a rollout file present at snapshot time is gone — renamed or deleted during the turn")
 for f in files:
     try: st=os.stat(f)
     except OSError: undecidable("a rollout file became unreadable during the turn")
@@ -2180,7 +2209,11 @@ for f in files:
         p=r.get("payload")
         if not isinstance(p,dict): undecidable("a turn_context with no payload")
         tid,rid=p.get("turn_id"),p.get("root_turn_id")
-        if not tid or not rid: continue      # unattributable: never treated as root
+        # UNATTRIBUTABLE IS REFUSED, NOT SKIPPED: skipping let a divergent context with no ids
+        # hide behind an earlier matching one. A child turn (ids present, differing) is a
+        # legitimate skip. (codex, implement r2 B2.)
+        if not tid or not rid:
+            undecidable("a turn_context in the window carries no turn identifiers")
         if tid!=rid: continue                # a child turn, not the billable root
         roots.append((p.get("effort"),p.get("model")))
 if len(roots)!=1:

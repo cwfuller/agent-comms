@@ -359,3 +359,42 @@ grep -q 'find .*-exec stat' "$ISO_RP" \
   || ok "the rollout snapshot is enumerated by the same reader, not by find -exec stat"
 awk '/acp_rollout_snapshot "\$acp_iso_home"/{a=NR} /acp_refuse policy-unapplied "could not enumerate/{b=NR} END{exit !(a && b && b>a && b-a<6)}' "$ISO_RP" \
   && ok "a snapshot failure refuses BEFORE the prompt is sent" || fail "snapshot failure does not refuse pre-prompt"
+
+# B1 (codex, implement r2): python's glob SUPPRESSES directory-scanning errors internally, so
+# `except OSError` around it never fired — an unreadable subtree produced an EMPTY snapshot,
+# under which pre-existing bytes read as newly appended. Verified: glob returns [] on a 0o000
+# directory rather than raising. The walk must propagate instead.
+ISO_PD="$WORK/perm-probe"; rm -rf "$ISO_PD"; mkdir -p "$ISO_PD/sessions/2026/09/19"
+iso_ctx t-p t-p gpt-6-astra xhigh > "$ISO_PD/sessions/2026/09/19/rollout-p.jsonl"
+chmod 000 "$ISO_PD/sessions/2026/09/19" 2>/dev/null
+if [ "$(id -u)" = 0 ]; then
+  chmod 755 "$ISO_PD/sessions/2026/09/19" 2>/dev/null
+  ok "an unreadable rollout subtree fails the snapshot (skipped detail: running as root)"
+else
+  iso_snapshot "$ISO_PD" "$WORK/snap-perm.txt" \
+    && { chmod 755 "$ISO_PD/sessions/2026/09/19" 2>/dev/null; fail "an unreadable rollout subtree produced a successful snapshot"; } \
+    || { chmod 755 "$ISO_PD/sessions/2026/09/19" 2>/dev/null; ok "an unreadable rollout subtree fails the snapshot instead of yielding an empty one"; }
+fi
+grep -q 'onerror=_boom' "$ISO_RP" \
+  && ok "rollout enumeration propagates directory-scan errors rather than suppressing them" || fail "enumeration still suppresses scan errors"
+
+# B2 (codex, implement r2): a snapshotted file RENAMED after the snapshot reappears under a new
+# pathname at offset zero, so its old context reads as newly appended.
+ISO_RN="$WORK/rollout-rename"; rm -rf "$ISO_RN"; mkdir -p "$ISO_RN/sessions/2026/09/19"
+iso_observed3() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_RN" "$1" ) 2>/dev/null; }
+iso_ctx t-r t-r gpt-6-astra xhigh > "$ISO_RN/sessions/2026/09/19/rollout-orig.jsonl"
+iso_snapshot "$ISO_RN" "$WORK/snap-rn.txt"
+mv "$ISO_RN/sessions/2026/09/19/rollout-orig.jsonl" "$ISO_RN/sessions/2026/09/19/rollout-moved.jsonl"
+iso_observed3 "$WORK/snap-rn.txt" >/dev/null 2>&1 \
+  && fail "a renamed old rollout passed as new evidence" || ok "a snapshotted rollout that vanished (renamed) is undecidable"
+
+# An unattributable context must be REFUSED, not skipped: skipping let a divergent context with
+# no ids hide behind an earlier matching one.
+ISO_UA="$WORK/rollout-unattr"; rm -rf "$ISO_UA"; mkdir -p "$ISO_UA/sessions/2026/09/19"
+iso_observed4() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_UA" "$1" ) 2>/dev/null; }
+: > "$WORK/snap-ua.txt"
+{ iso_ctx t-m t-m gpt-6-astra xhigh
+  printf '{"type":"turn_context","payload":{"model":"gpt-6-astra","effort":"medium"}}\n'
+} > "$ISO_UA/sessions/2026/09/19/rollout-u.jsonl"
+iso_observed4 "$WORK/snap-ua.txt" >/dev/null 2>&1 \
+  && fail "a divergent context with no ids hid behind a matching one" || ok "a turn_context carrying no identifiers is refused, not skipped"

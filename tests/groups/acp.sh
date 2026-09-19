@@ -775,3 +775,64 @@ grep -qE 'gpt-6-astra|model_reasoning_effort' "$REPO/helpers/runphase.sh" \
   && ok "a conflicting saved preference in LIST shape is refused too" || fail "list-shaped desired preference missed"
 [ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-astra"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":"weird"}}')" = 21 ] \
   && ok "a saved-preference shape we do not understand is undecidable, not ignored" || fail "unknown desired shape ignored"
+
+section "reviewer policy: a wrong-depth review is never published"
+# RUNNER-LEVEL, through the real mounted codex path — not an extracted function and not a
+# line-order grep. The guarantee under test is that a turn which did not run the declared
+# model+effort produces NO published review-feedback, so compose can never gate on it.
+# Reuses the mounted-codex setup above (artifact metadata, isolated HOME, external mount base),
+# because only a mounted turn has an isolated home and therefore a policy. (codex, implement r2 B3.)
+pol_msg() {  # <thread> -> writes a mounted review-request and echoes its path
+  local thr="$1" m="$MA_FIX/.comms/to-codex/${MA_WS}_2026-08-20T13-00-00_$thr.md"
+  { head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+    printf 'artifact_id: %s\nhead_sha: %s\n' "$CN_MHEAD" "$CN_MHEAD"
+    tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" \
+      | sed -e "s/^thread: ma-arc-1\$/thread: $thr/" -e "s/^from: claude\$/from: grok/"
+  } > "$m"; printf '%s' "$m"
+}
+pol_inbox_n() { find "$MA_FIX/.comms/to-grok" -name "*$1*" -type f 2>/dev/null | wc -l | tr -d ' '; }
+pol_run() {  # <thread> <dir> [extra env assignments...]
+  local thr="$1" dir="$2"; shift 2
+  mkdir -p "$dir"
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$CN_MHOME" COMMS_MOUNT_BASE="$CN_MBASE" \
+      ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=pong COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+      "$@" "$RP" run --message "$(pol_msg "$thr")" --dir "$dir" \
+      --provider codex --via acp --timeout-secs 20 ) >/dev/null 2>&1
+}
+
+# CONTROL: honest turn. The policy holds end to end, so the review publishes.
+POL_OK="$WORK/pol-ok"; POL_CFG="$WORK/pol-ok.cfg"
+pol_run pol-ok "$POL_OK" AX_CFG_LOG="$POL_CFG"
+[ "$(cn_status "$POL_OK")" = "completed" ] \
+  && ok "a mounted turn that runs the declared policy completes" || fail "honest turn: status=$(cn_status "$POL_OK")"
+# Read from the CHILD's view: the mount is torn down when the turn ends, so asserting on the
+# parent's own write would prove less and be impossible here anyway.
+grep -q 'model_reasoning_effort = "xhigh"' "$POL_CFG" 2>/dev/null \
+  && ok "the config the provider actually read carries the declared effort" || fail "provider-visible config lacks the effort key"
+grep -q 'model = "gpt-6-astra"' "$POL_CFG" 2>/dev/null \
+  && ok "the config the provider actually read carries the declared model" || fail "provider-visible config lacks the model key"
+
+# THE BUG ITSELF: preflight is clean, but the turn RAN at medium. Must refuse, unpublished.
+POL_DIV="$WORK/pol-divergent"; pol_run pol-divergent "$POL_DIV" AX_ROLLOUT_EFFORT=medium
+[ "$(cn_status "$POL_DIV")" = "failed" ] \
+  && ok "a turn that ran shallower than the policy fails" || fail "divergent turn: status=$(cn_status "$POL_DIV")"
+grep -q 'policy-unapplied' "$POL_DIV/result.json" 2>/dev/null \
+  && ok "the divergent turn is refused with reason policy-unapplied" || fail "reason is not policy-unapplied"
+[ "$(pol_inbox_n pol-divergent)" = 0 ] \
+  && ok "NO review-feedback is published for a wrong-depth turn — compose can never gate on it" || fail "a wrong-depth review reached the inbox"
+
+# MISSING EVIDENCE is undecidable, and equally unpublished.
+POL_NONE="$WORK/pol-noevidence"; pol_run pol-noevidence "$POL_NONE" AX_ROLLOUT_NONE=1
+[ "$(cn_status "$POL_NONE")" = "failed" ] && [ "$(pol_inbox_n pol-noevidence)" = 0 ] \
+  && ok "a turn whose depth cannot be attested is refused and unpublished" || fail "unattestable turn published or passed"
+
+# PRE-CANARY refusal: a conflicting saved preference stops the turn before any prompt is spent.
+POL_PRE="$WORK/pol-preflight"; POL_PRE_LOG="$WORK/pol-preflight.argv"
+pol_run pol-preflight "$POL_PRE" AX_EFFORT=medium AX_CWD_LOG="$POL_PRE_LOG"
+[ "$(cn_status "$POL_PRE")" = "failed" ] \
+  && ok "a session that will not serve the policy is refused before the canary" || fail "preflight refusal: status=$(cn_status "$POL_PRE")"
+awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$POL_PRE_LOG" 2>/dev/null | grep -q . \
+  && fail "a prompt was sent after the preflight refusal" \
+  || ok "no prompt — canary or review — is sent after a preflight policy refusal"
+[ "$(pol_inbox_n pol-preflight)" = 0 ] \
+  && ok "the preflight refusal publishes nothing" || fail "preflight refusal published feedback"

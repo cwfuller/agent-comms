@@ -178,6 +178,12 @@ cat > "$AXB/npx" <<'AXSTUB'
 if [ -n "${AX_CWD_LOG:-}" ]; then
   printf '%s\t%s\n' "$(pwd -P)" "$*" >> "$AX_CWD_LOG"
 fi
+# AX_CFG_LOG captures the isolated config THE PROVIDER ACTUALLY SAW. The mount is unmounted
+# when the turn ends, so a test cannot read config.toml afterwards; recording it from inside
+# the child is both possible and stronger evidence than the parent re-reading its own write.
+if [ -n "${AX_CFG_LOG:-}" ] && [ -n "${CODEX_HOME:-}" ] && [ -f "$CODEX_HOME/config.toml" ]; then
+  cat "$CODEX_HOME/config.toml" >> "$AX_CFG_LOG" 2>/dev/null || true
+fi
 case " $* " in
   *" sessions ensure "*)
     # The session NAME drives the record id below, so it must be parsed before it is used.
