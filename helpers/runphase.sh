@@ -3295,7 +3295,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
                   | "$acp_sh" policy-check codex - 2>>"$run_dir/runner.log" )" || pol_rc=$?
       case "$pol_rc" in
         0)  printf 'policy preflight: %s\n' "$pol_out" >>"$run_dir/runner.log" ;;
-        20) acp_refuse policy-unapplied "the reviewer session will not run the declared model/effort policy ($pol_out) — retire it with \`acpx $acp_profile sessions close $acp_session\` in $workdir, then re-send"
+        20) acp_refuse policy-unapplied "the reviewer session will not run the declared model/effort policy ($pol_out) — retire it with \`acpx --cwd $workdir $acp_profile sessions close $acp_session\`, then re-send"
             return 1 ;;
         *)  acp_refuse policy-unapplied "could not verify the reviewer model/effort policy before the canary (status $pol_rc) — refusing rather than paying for a review of unknown depth"
             return 1 ;;
@@ -3431,7 +3431,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       if [ "$att_rc" -ne 0 ]; then
         printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
         if [ "$att_rc" -eq 20 ]; then
-          acp_refuse policy-unapplied "the review turn did not run the declared model/effort policy ($att_msg) — refusing to publish a review of the wrong depth; retire it with \`acpx $acp_profile sessions close $acp_session\` in $workdir, then re-send"
+          acp_refuse policy-unapplied "the review turn did not run the declared model/effort policy ($att_msg) — refusing to publish a review of the wrong depth; retire it with \`acpx --cwd $workdir $acp_profile sessions close $acp_session\`, then re-send"
         else
           acp_refuse policy-unapplied "could not attest the model/effort the review turn actually ran (status $att_rc) — refusing to publish a review of unknown depth"
         fi

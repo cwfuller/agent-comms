@@ -205,7 +205,9 @@ predates the fix would start refusing its in-flight review turns.
    docs, so it pays the suite; the attestation for `26ebbc4` will not cover the current tip.
 3. `install.sh` into BOTH scopes. `install.sh:48` already lists all five helpers. Installing
    globally alone leaves this checkout on the old code, because the local pin wins.
-4. Retire warm codex sessions that predate the fix (`acpx <profile> sessions close`), or accept
+4. Retire warm codex sessions that predate the fix (`acpx --cwd <mount-workdir> <profile> sessions
+   close <session>` — records key on (agent, cwd, name), so a bare `sessions close` from the main
+   checkout closes the WRONG record and every resend refuses again), or accept
    one `policy-unapplied` refusal per stale session as it is discovered. This is the expected
    behaviour, not a defect — do not weaken the gate to avoid it.
 

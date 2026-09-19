@@ -484,8 +484,13 @@ for _h in 'the reviewer session will not run the declared' 'the review turn did 
     *'sessions close $acp_session'*) : ;;
     *) fail "a policy refusal hint omits the session name: ${_h}"; continue ;;
   esac
+  # The pasted command must stand alone: an operator who copies only what is between the
+  # backticks, from the main checkout, must still resolve the right (agent, cwd, name) tuple.
+  # Naming the directory in surrounding prose is not enough. acpx takes --cwd as a GLOBAL
+  # option, so it must precede the profile. (grok, recoverable r1.)
   case "$_txt" in
-    *'in $workdir'*) ok "the policy refusal names the session AND the cwd needed to retire it (${_h})" ;;
-    *) fail "a policy refusal hint omits the workdir: ${_h}" ;;
+    *'acpx --cwd $workdir $acp_profile sessions close $acp_session'*)
+      ok "the copyable retirement command carries --cwd before the profile (${_h})" ;;
+    *) fail "a policy refusal hint does not carry --cwd inside the command: ${_h}" ;;
   esac
 done
