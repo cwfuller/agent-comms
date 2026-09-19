@@ -187,6 +187,53 @@ Still required before this is believed in production: the live ACP validation be
 establish parent-side enforcement, not rollout timing and shape across real cold, resumed and
 replacement sessions.
 
+### PROVEN LIVE 2026-09-19: the reviewer policy binds on a real mounted codex turn (step 2)
+
+The fixtures proved parent-side enforcement with a stubbed acpx. This is the production-path
+evidence both reviewers required. Dispatched deliberately through the BRANCH worktree's
+`helpers/comms.sh`, which resolves `runphase.sh` as a sibling (`comms.sh:2825`, `:4425`), so a real
+codex review turn ran under the policy code — step 1 dogfooding itself.
+
+**Cold mounted session** (thread `live-acp-proof-15474`, acp record
+`01a0baf9-6dfe-7cb0-bfa9-6eb4e6921f51`):
+```
+runner.log:  policy preflight: effort=xhigh model=gpt-6-astra
+             policy attested:  effort=xhigh model=gpt-6-astra
+turn.tsv:    observed_effort xhigh   observed_model gpt-6-astra
+```
+Independently confirmed from the provider's OWN rollout, read directly rather than trusting the
+runner's log — `.../live-acp-proof-15474-c50487723fdc-codex/home/sessions/2026/09/19/rollout-*.jsonl`
+carries `model=gpt-6-astra effort=xhigh`. **This is the first reviewer turn in this repo measured
+at xhigh.**
+
+**The snapshot window is validated against the real lifecycle, not inferred.** That rollout
+contains **two** root `turn_context` records — the canary and the review, exactly as codex writes
+them — and the attestation still passed, because the snapshot delta excluded the pre-prompt canary
+bytes. grok's r4 advisory said the fixture only *inferred* this from a completed publish; the live
+run shows it mechanically.
+
+**Discrimination proven on real, unmodified session records.** Feeding genuine pre-fix records from
+`~/.acpx/sessions/` to the live preflight: **8 of 8 refuse** with
+`want effort=xhigh model=gpt-6-astra; got effort=medium model=gpt-6-astra`, while the post-fix
+record from the live turn is accepted. Same code, real metadata, opposite outcomes — so warm
+sessions predating the fix do refuse until retired, as predicted, and the gate is not vacuously
+passing everything.
+
+**Method note, recorded because it nearly cost a bad conclusion.** The request asked codex to
+self-report its model and effort, but the prompt itself named the expected values. Codex correctly
+refused to treat that as confirmation and answered *unknown*: "Supplying the expected values in the
+prompt means an echoed answer would not independently validate the rollout." Self-report is not an
+instrument here; the rollout is. Do not design the resumed/replacement probes that way.
+
+**Open, carried into the logging step:** `acp_rollout_observed` returns only effort and model,
+discarding the backend session id, turn/root ids, rollout path and snapshot byte boundary. After
+`unmount_artifact` removes a throwaway home those are unrecoverable, so a refusal cannot be
+reconstructed later. codex asked for capture in this step and presentation in the logging step.
+
+**Not yet probed:** resumed and replacement sessions under the fix. A mounted session keys on mount
+identity (`runphase.sh:2752`, `:2901`), not thread, so exercising a true resume needs a second turn
+against a surviving durable mount rather than a re-send.
+
 ### OPEN: the reviewer effort pin never reaches a mounted codex turn (2026-09-19, sev 2, claude+codex consult)
 
 **Reviews have been running at `medium`, not the operator's configured `xhigh`.** Verified against
