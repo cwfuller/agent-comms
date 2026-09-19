@@ -70,7 +70,7 @@ integrate: an exit status is not proof the suite ran	30
 integrate: the verification tree is a FRESH checkout	11
 integrate: docs-only skip	19
 the coordinator's event log: a durable record that is not the mailbox	169
-reviewer isolation: a mounted turn is contained or it does not run	87
+reviewer isolation: a mounted turn is contained or it does not run	90
 reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)	21
 any-agent driver surface	40
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5

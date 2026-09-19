@@ -489,8 +489,28 @@ for _h in 'the reviewer session will not run the declared' 'the review turn did 
   # Naming the directory in surrounding prose is not enough. acpx takes --cwd as a GLOBAL
   # option, so it must precede the profile. (grok, recoverable r1.)
   case "$_txt" in
-    *'acpx --cwd $workdir $acp_profile sessions close $acp_session'*)
-      ok "the copyable retirement command carries --cwd before the profile (${_h})" ;;
-    *) fail "a policy refusal hint does not carry --cwd inside the command: ${_h}" ;;
+    *'acpx --cwd $_q_wd $acp_profile sessions close $acp_session'*)
+      ok "the copyable retirement command carries an ESCAPED --cwd before the profile (${_h})" ;;
+    *) fail "a policy refusal hint does not carry an escaped --cwd inside the command: ${_h}" ;;
   esac
 done
+
+# A directory only NAMED in prose tolerates a space; one INTERPOLATED into a command the operator
+# pastes does not. The previous round moved the path into executable text and so introduced this:
+# a mount base like `/private/tmp/review mounts` rendered `--cwd /private/tmp/review` plus a stray
+# argument, retirement failed, and the stale session survived — the exact wedge the hint exists to
+# prevent. Assert the RENDERED command, not the source line. (codex, recoverable r2 B1.)
+iso_render() { local workdir="$1" acp_profile=codex acp_session=S _q_wd
+  printf -v _q_wd '%q' "$workdir"
+  printf 'acpx --cwd %s %s sessions close %s' "$_q_wd" "$acp_profile" "$acp_session"; }
+ISO_SP="$(iso_render '/private/tmp/review mounts/x')"
+printf '%s' "$ISO_SP" | grep -q 'review\\ mounts' \
+  && ok "a workdir containing a space renders as ONE shell argument" || fail "space in workdir splits the pasted command (got: $ISO_SP)"
+# The rendered command must parse back to the exact directory, spaces and all.
+ISO_BACK="$(eval "set -- $(printf '%s' "$ISO_SP" | sed 's/^acpx //')"; printf '%s' "$2")"
+[ "$ISO_BACK" = '/private/tmp/review mounts/x' ] \
+  && ok "the rendered --cwd argument parses back to the exact directory" || fail "cwd did not round-trip (got: $ISO_BACK)"
+ISO_QT="$(iso_render "/tmp/it's a mount")"
+printf '%s' "$ISO_QT" | grep -q "it" \
+  && [ "$(eval "set -- $(printf '%s' "$ISO_QT" | sed 's/^acpx //')"; printf '%s' "$2")" = "/tmp/it's a mount" ] \
+  && ok "a workdir containing a quote survives rendering intact" || fail "quote in workdir broke the rendered command"
