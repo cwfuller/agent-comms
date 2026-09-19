@@ -35,7 +35,7 @@ stamped authorities: workspace pin (#3) + send-time git metadata (#6)	46
 friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	45
-acp.sh: the reviewer model+effort policy	19
+acp.sh: the reviewer model+effort policy	25
 runphase: the compatibility canary gates every ACP turn	24
 runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15
@@ -69,7 +69,7 @@ integrate: an exit status is not proof the suite ran	30
 integrate: the verification tree is a FRESH checkout	11
 integrate: docs-only skip	19
 the coordinator's event log: a durable record that is not the mailbox	169
-reviewer isolation: a mounted turn is contained or it does not run	57
+reviewer isolation: a mounted turn is contained or it does not run	66
 reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)	21
 any-agent driver surface	40
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5

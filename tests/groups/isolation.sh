@@ -238,6 +238,8 @@ ISO_RD="$WORK/rollout-probe"; rm -rf "$ISO_RD"; mkdir -p "$ISO_RD/sessions/2026/
 ISO_RJ="$ISO_RD/sessions/2026/09/19/rollout-a.jsonl"
 iso_ctx() { printf '{"type":"turn_context","payload":{"turn_id":"%s","root_turn_id":"%s","model":"%s","effort":"%s"}}\n' "$1" "$2" "$3" "$4"; }
 iso_observed() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_RD" "$1" ) 2>/dev/null; }
+ISO_SNAP="$(sed -n '/^acp_rollout_snapshot() {/,/^}/p' "$ISO_RP")"
+iso_snapshot() { ( eval "$ISO_SNAP"; acp_rollout_snapshot "$1" "$2" ) 2>/dev/null; }
 
 : > "$WORK/rollout-snap-empty.txt"
 iso_ctx t-root t-root gpt-6-astra xhigh >> "$ISO_RJ"
@@ -246,13 +248,13 @@ iso_ctx t-root t-root gpt-6-astra xhigh >> "$ISO_RJ"
 
 # B1: the record passed preflight, then the BILLABLE turn ran something else. The evidence
 # must report what actually ran, not what was requested.
-printf '%s %s\n' "$ISO_RJ" "$(wc -c < "$ISO_RJ" | tr -d ' ')" > "$WORK/rollout-snap-b1.txt"
+iso_snapshot "$ISO_RD" "$WORK/rollout-snap-b1.txt"
 iso_ctx t-root2 t-root2 gpt-6-astra medium >> "$ISO_RJ"
 [ "$(iso_observed "$WORK/rollout-snap-b1.txt")" = "$(printf 'medium\tgpt-6-astra')" ] \
   && ok "a replacement turn running a DIFFERENT effort is reported from the appended bytes (B1)" || fail "B1 transition not observed"
 
 # Only the snapshot delta counts: an earlier matching context must never satisfy the gate.
-printf '%s %s\n' "$ISO_RJ" "$(wc -c < "$ISO_RJ" | tr -d ' ')" > "$WORK/rollout-snap-none.txt"
+iso_snapshot "$ISO_RD" "$WORK/rollout-snap-none.txt"
 iso_observed "$WORK/rollout-snap-none.txt" >/dev/null 2>&1 \
   && fail "a pre-snapshot context satisfied the gate" \
   || ok "a matching context written BEFORE the prompt never counts as evidence"
@@ -268,7 +270,7 @@ iso_ctx t-new2 t-new2 gpt-6-astra xhigh >> "$ISO_RJ2"
 iso_observed "$WORK/rollout-snap-none.txt" >/dev/null 2>&1 \
   && fail "two root contexts were accepted" || ok "two root turn_contexts in the window are undecidable, not a pass"
 rm -f "$ISO_RJ2"
-: > "$WORK/rollout-snap-all.txt"; printf '%s %s\n' "$ISO_RJ" "$(wc -c < "$ISO_RJ" | tr -d ' ')" > "$WORK/rollout-snap-all.txt"
+iso_snapshot "$ISO_RD" "$WORK/rollout-snap-all.txt"
 iso_observed "$WORK/rollout-snap-all.txt" >/dev/null 2>&1 \
   && fail "absent evidence was accepted" || ok "no turn_context in the window is undecidable, not a pass"
 
@@ -297,3 +299,63 @@ ISO_ID_LN="$(grep -n "printf 'provider\\\\t%s\\\\n'" "$ISO_RP" | head -1 | cut -
   && ok "the turn.tsv identity write still precedes the policy gate, so a dead runner keeps its identity" || fail "identity write moved"
 awk '/turn_observe "\$run_dir"/{a=NR} /acp_refuse policy-unapplied "the review turn/{b=NR} END{exit !(a && b && a<b)}' "$ISO_RP" \
   && ok "observed columns are appended before the refusal unmounts the turn" || fail "divergence recorded after unwinding"
+
+# B1/B2 (codex, implement r1). The snapshot was built with `find -exec stat`, whose exit
+# status does NOT reflect a failing -exec (verified: `find . -exec false \;` exits 0), so the
+# GNU fallback could never fire and the last resort wrote an EMPTY snapshot — under which old
+# bytes read as newly appended. And the reader SKIPPED unreadable or malformed evidence rather
+# than refusing it. Both are now fail-closed, and both are asserted by running the code.
+ISO_SD="$WORK/snap-probe"; rm -rf "$ISO_SD"; mkdir -p "$ISO_SD/sessions/2026/09/19"
+ISO_SF="$ISO_SD/sessions/2026/09/19/rollout-x.jsonl"
+iso_ctx t-a t-a gpt-6-astra xhigh > "$ISO_SF"
+iso_snapshot "$ISO_SD" "$WORK/snap-out.txt" \
+  && [ "$(awk -F'\t' 'NF==3' "$WORK/snap-out.txt" | wc -l | tr -d ' ')" = 1 ] \
+  && ok "the snapshot records path, inode and size for each rollout file" || fail "snapshot shape"
+iso_snapshot "$ISO_SD" "/nonexistent-dir/snap.txt" \
+  && fail "an unwritable snapshot reported success" || ok "a snapshot that cannot be written fails closed"
+
+# A file REPLACED under us (same path, new inode) is not the continuation of what we
+# snapshotted: reading it whole would let an old matching context satisfy the gate.
+ISO_RD2="$WORK/rollout-identity"; rm -rf "$ISO_RD2"; mkdir -p "$ISO_RD2/sessions/2026/09/19"
+ISO_RF2="$ISO_RD2/sessions/2026/09/19/rollout-y.jsonl"
+iso_observed2() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_RD2" "$1" ) 2>/dev/null; }
+iso_ctx t-old t-old gpt-6-astra xhigh > "$ISO_RF2"
+iso_snapshot "$ISO_RD2" "$WORK/snap-id.txt"
+rm -f "$ISO_RF2"; iso_ctx t-old t-old gpt-6-astra xhigh > "$ISO_RF2"   # new inode, same bytes
+iso_observed2 "$WORK/snap-id.txt" >/dev/null 2>&1 \
+  && fail "a replaced rollout file was accepted" || ok "a rollout file replaced during the turn is undecidable, not re-read whole"
+
+# TRUNCATION likewise: the old offset no longer bounds anything.
+iso_ctx t-1 t-1 gpt-6-astra xhigh > "$ISO_RF2"; iso_ctx t-2 t-2 gpt-6-astra xhigh >> "$ISO_RF2"
+iso_snapshot "$ISO_RD2" "$WORK/snap-tr.txt"
+iso_ctx t-3 t-3 gpt-6-astra xhigh > "$ISO_RF2"                          # shrank
+iso_observed2 "$WORK/snap-tr.txt" >/dev/null 2>&1 \
+  && fail "a truncated rollout file was accepted" || ok "a rollout file truncated during the turn is undecidable"
+
+# MALFORMED evidence is refused, not skipped: skipping let a garbled record hide a divergent
+# context behind an earlier matching one.
+iso_ctx t-ok t-ok gpt-6-astra xhigh > "$ISO_RF2"
+iso_snapshot "$ISO_RD2" "$WORK/snap-mal.txt"
+iso_ctx t-good t-good gpt-6-astra xhigh >> "$ISO_RF2"; printf '{"type":"turn_context" BROKEN\n' >> "$ISO_RF2"
+iso_observed2 "$WORK/snap-mal.txt" >/dev/null 2>&1 \
+  && fail "malformed evidence was skipped" || ok "a malformed record in the window is undecidable, not skipped"
+
+# A record still being written is a write in flight, not evidence.
+iso_ctx t-ok2 t-ok2 gpt-6-astra xhigh > "$ISO_RF2"
+iso_snapshot "$ISO_RD2" "$WORK/snap-part.txt"
+printf '{"type":"turn_context","payload":{"turn_id":"t-p","root_turn_id":"t-p","effort":"xhigh"' >> "$ISO_RF2"
+iso_observed2 "$WORK/snap-part.txt" >/dev/null 2>&1 \
+  && fail "a partial trailing record was accepted" || ok "a rollout ending mid-record is undecidable"
+
+# An unparseable SNAPSHOT means the window is unbounded — refuse rather than treat as empty.
+printf 'garbage-with-no-tabs\n' > "$WORK/snap-bad.txt"
+iso_observed2 "$WORK/snap-bad.txt" >/dev/null 2>&1 \
+  && fail "an unreadable snapshot was treated as empty" || ok "an unreadable snapshot entry is undecidable, not an empty window"
+
+# The snapshot is taken by the same python that reads it -- no find/stat whose -exec failure
+# the shell cannot see.
+grep -q 'find .*-exec stat' "$ISO_RP" \
+  && fail "the rollout snapshot still uses find -exec stat" \
+  || ok "the rollout snapshot is enumerated by the same reader, not by find -exec stat"
+awk '/acp_rollout_snapshot "\$acp_iso_home"/{a=NR} /acp_refuse policy-unapplied "could not enumerate/{b=NR} END{exit !(a && b && b>a && b-a<6)}' "$ISO_RP" \
+  && ok "a snapshot failure refuses BEFORE the prompt is sent" || fail "snapshot failure does not refuse pre-prompt"

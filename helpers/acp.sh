@@ -167,15 +167,14 @@ policy_verdict() {
   pol="$(policy_for "$agent")" || return 21
   m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"
   [ -n "$oe" ] && [ "$oe" != null ] || { printf 'undecidable: no observed effort\n'; return 21; }
-  if [ "$oe" != "$e" ]; then
-    printf 'want effort=%s model=%s; got effort=%s model=%s\n' "$e" "$m" "$oe" "${om:-unknown}"; return 20
-  fi
-  # The model is attested too, because provider-config writes the model key into the isolated
-  # toml — a float against the id we wrote is a refused turn, consistent with a retired id.
-  if [ -n "$om" ] && [ "$om" != null ] && [ "$om" != "$m" ]; then
+  # BOTH keys are policy, so BOTH must be evidenced. provider-config writes the model into the
+  # isolated toml, so an observation that cannot show the model is missing evidence for half the
+  # contract — and "absent" must never read as "fine". (codex, implement r1 B3.)
+  [ -n "$om" ] && [ "$om" != null ] || { printf 'undecidable: no observed model\n'; return 21; }
+  if [ "$oe" != "$e" ] || [ "$om" != "$m" ]; then
     printf 'want effort=%s model=%s; got effort=%s model=%s\n' "$e" "$m" "$oe" "$om"; return 20
   fi
-  printf 'effort=%s model=%s\n' "$oe" "${om:-unknown}"; return 0
+  printf 'effort=%s model=%s\n' "$oe" "$om"; return 0
 }
 
 cmd_doctor() {
@@ -356,12 +355,18 @@ case "${1:-}" in
     _pc_agent="$1"; shift
     [ "${1:-}" = "-" ] || die "policy-check: the record is read from stdin — pass '-'"
     command -v python3 >/dev/null 2>&1 || { echo "undecidable: python3 is unavailable" >&2; exit 21; }
+    # THE SAVED PREFERENCE IS READ TOO, and this is the point of the check. acpx replays
+    # `desired_config_options` when it creates a REPLACEMENT session, so a leftover
+    # `reasoning_effort` that conflicts with the policy can be reinstated after the current
+    # options look clean. Reading only `config_options` would leave the approved
+    # refuse-and-retire control unimplemented. (codex, implement r1 B4.)
     _pc_out="$(python3 -c '
 import json,sys
 try: r=json.load(sys.stdin)
-except Exception: print("\t"); sys.exit(0)
-opts=(r.get("acpx") or {}).get("config_options")
-if not isinstance(opts,list): print("\t"); sys.exit(0)
+except Exception: print("\t\tBAD"); sys.exit(0)
+ax=r.get("acpx") or {}
+opts=ax.get("config_options")
+if not isinstance(opts,list): print("\t\t"); sys.exit(0)
 d={}
 for o in opts:
     if isinstance(o,dict) and o.get("id") is not None:
@@ -369,9 +374,34 @@ for o in opts:
 def g(k):
     v=d.get(k)
     return "" if v is None else str(v)
-print("%s\t%s" % (g("reasoning_effort"), g("model")))
+des=ax.get("desired_config_options")
+dv=""
+if des is None:
+    dv=""                      # absent is fine: nothing will be replayed
+elif isinstance(des,dict):
+    v=des.get("reasoning_effort")
+    dv="" if v is None else str(v)
+elif isinstance(des,list):
+    for o in des:
+        if isinstance(o,dict) and str(o.get("id"))=="reasoning_effort":
+            v=o.get("currentValue", o.get("value"))
+            dv="" if v is None else str(v)
+else:
+    dv="BAD"                   # a shape we do not understand is not a shape we may ignore
+print("%s\t%s\t%s" % (g("reasoning_effort"), g("model"), dv))
 ' 2>/dev/null)" || { echo "undecidable: could not parse the session record" >&2; exit 21; }
-    _pc_eff="${_pc_out%%$'\t'*}"; _pc_mod="${_pc_out#*$'\t'}"
+    _pc_eff="${_pc_out%%$'\t'*}"; _pc_rest="${_pc_out#*$'\t'}"
+    _pc_mod="${_pc_rest%%$'\t'*}"; _pc_des="${_pc_rest#*$'\t'}"
+    if [ "$_pc_des" = BAD ]; then
+      echo "undecidable: the session record's saved preferences are unreadable" >&2; exit 21
+    fi
+    if [ -n "$_pc_des" ]; then
+      _pc_pol="$(policy_for "$_pc_agent")" || exit 21
+      if [ "$_pc_des" != "${_pc_pol#*$'\t'}" ]; then
+        printf 'a saved effort preference (%s) conflicts with the policy and would be replayed onto a replacement session\n' "$_pc_des"
+        exit 20
+      fi
+    fi
     # A missing list, a missing key, or unparseable JSON all land here as an empty effort and
     # are UNDECIDABLE — never "model matched, effort optional". (grok, plan r2.)
     policy_verdict "$_pc_agent" "$_pc_eff" "$_pc_mod"; exit $?

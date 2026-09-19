@@ -758,3 +758,20 @@ grep -q 'policy_verdict' "$AP" && [ "$(grep -c 'policy_verdict "\$' "$AP")" -ge 
 grep -qE 'gpt-6-astra|model_reasoning_effort' "$REPO/helpers/runphase.sh" \
   && fail "runphase.sh carries a literal model or effort value" \
   || ok "runphase.sh holds no model or effort literal — it asks acp.sh"
+# B3 (codex, implement r1): BOTH keys are policy, so missing model evidence is undecidable.
+# It previously returned 0 and printed model=unknown — half the contract unverified.
+"$AP" policy-attest codex xhigh "" >/dev/null 2>&1; [ "$?" = 21 ] \
+  && ok "an observation with no model is undecidable, not a pass" || fail "missing observed model passed"
+[ "$(pc '{"acpx":{"config_options":[{"id":"reasoning_effort","currentValue":"xhigh"}]}}')" = 21 ] \
+  && ok "a preflight record missing the model is undecidable, not a pass" || fail "preflight missing model passed"
+# B4 (codex, implement r1): the refuse-and-retire control was commented but NOT implemented —
+# the parser read only config_options, so a saved preference that acpx would replay onto a
+# replacement session was never seen.
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-astra"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":{"reasoning_effort":"low"}}}')" = 20 ] \
+  && ok "a saved effort preference conflicting with the policy is refused before the canary" || fail "conflicting desired preference accepted"
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-astra"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":{"reasoning_effort":"xhigh"}}}')" = 0 ] \
+  && ok "a saved preference matching the policy is accepted" || fail "matching desired preference refused"
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-astra"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":[{"id":"reasoning_effort","currentValue":"low"}]}}')" = 20 ] \
+  && ok "a conflicting saved preference in LIST shape is refused too" || fail "list-shaped desired preference missed"
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-astra"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":"weird"}}')" = 21 ] \
+  && ok "a saved-preference shape we do not understand is undecidable, not ignored" || fail "unknown desired shape ignored"

@@ -2099,52 +2099,92 @@ acp_confirm_mode() {
 # expected in that window — zero, two, or a missing effort is undecidable, never a pass. Root is
 # turn_id == root_turn_id with BOTH present and non-empty, so two missing ids cannot compare
 # equal. (codex + grok, plan r2/r3.)
+acp_rollout_snapshot() {  # <iso-home> <out> — path, inode and size of every rollout file
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$1" "$2" <<'PY'
+import os,sys,glob
+home,out=sys.argv[1],sys.argv[2]
+rows=[]
+try:
+    for f in sorted(glob.glob(os.path.join(home,"sessions","**","rollout-*.jsonl"),recursive=True)):
+        st=os.stat(f)                      # an unreadable file FAILS the snapshot
+        rows.append("%s\t%d\t%d"%(f,st.st_ino,st.st_size))
+except OSError as e:
+    sys.stderr.write("rollout snapshot failed: %s\n"%e); sys.exit(1)
+try:
+    with open(out,"w") as fh:
+        fh.write("\n".join(rows)+("\n" if rows else ""))
+except OSError as e:
+    sys.stderr.write("rollout snapshot unwritable: %s\n"%e); sys.exit(1)
+PY
+}
+
 acp_rollout_observed() {
   command -v python3 >/dev/null 2>&1 || return 21
   python3 - "$1" "$2" <<'PY'
 import json,os,sys,glob
 home,snap=sys.argv[1],sys.argv[2]
+def undecidable(msg):
+    sys.stderr.write(msg+"\n"); sys.exit(21)
 prev={}
 try:
-    for line in open(snap):
-        line=line.rstrip("\n")
-        if not line: continue
-        p,_,s=line.rpartition(" ")
-        if p:
-            try: prev[p]=int(s)
-            except ValueError: pass
+    with open(snap) as fh:
+        for line in fh:
+            line=line.rstrip("\n")
+            if not line: continue
+            parts=line.split("\t")
+            # A snapshot line we cannot parse means we cannot bound the window. Refuse.
+            if len(parts)!=3: undecidable("unreadable rollout snapshot entry")
+            try: prev[parts[0]]=(int(parts[1]),int(parts[2]))
+            except ValueError: undecidable("unreadable rollout snapshot entry")
 except OSError:
-    pass
+    undecidable("the rollout snapshot could not be read")
 roots=[]
-for f in sorted(glob.glob(os.path.join(home,"sessions","**","rollout-*.jsonl"),recursive=True)):
-    start=prev.get(f,0)
-    try:
-        size=os.path.getsize(f)
-    except OSError:
-        continue
-    # A file that SHRANK was replaced under us: its identity is no longer the snapshot's, so
-    # read it whole rather than trusting a stale offset.
-    if size<start: start=0
-    if size==start: continue
+try:
+    files=sorted(glob.glob(os.path.join(home,"sessions","**","rollout-*.jsonl"),recursive=True))
+except OSError:
+    undecidable("the provider's rollout directory could not be enumerated")
+for f in files:
+    try: st=os.stat(f)
+    except OSError: undecidable("a rollout file became unreadable during the turn")
+    if f in prev:
+        ino,size=prev[f]
+        # REPLACED OR TRUNCATED. Either way the bytes we would read are not the continuation
+        # of what we snapshotted, so the window is not bounded and the evidence is not ours.
+        # Reading such a file whole would let an OLD matching context satisfy the gate.
+        if st.st_ino!=ino: undecidable("a rollout file was replaced during the turn")
+        if st.st_size<size: undecidable("a rollout file was truncated during the turn")
+        start=size
+    else:
+        start=0                              # created after the snapshot: read whole
+    if st.st_size==start: continue
     try:
         with open(f,"rb") as fh:
             fh.seek(start)
-            blob=fh.read().decode("utf-8","replace")
-    except OSError:
-        continue
-    for line in blob.splitlines():
+            raw=fh.read()
+    except OSError: undecidable("a rollout file could not be read")
+    if len(raw)!=st.st_size-start: undecidable("an incomplete read of the provider's rollout")
+    try: blob=raw.decode("utf-8")
+    except UnicodeDecodeError: undecidable("the provider's rollout is not valid UTF-8")
+    lines=blob.splitlines()
+    # A trailing partial line is a write in flight, not evidence.
+    if blob and not blob.endswith("\n"): undecidable("the provider's rollout ends mid-record")
+    for line in lines:
         line=line.strip()
         if not line: continue
+        # MALFORMED EVIDENCE IS REFUSED, NOT SKIPPED. Skipping let a garbled record hide a
+        # divergent context behind an earlier matching one. (codex, implement r1 B2.)
         try: r=json.loads(line)
-        except Exception: continue
+        except Exception: undecidable("a malformed record in the provider's rollout")
         if r.get("type")!="turn_context": continue
-        p=r.get("payload") or {}
+        p=r.get("payload")
+        if not isinstance(p,dict): undecidable("a turn_context with no payload")
         tid,rid=p.get("turn_id"),p.get("root_turn_id")
-        if not tid or not rid or tid!=rid: continue
+        if not tid or not rid: continue      # unattributable: never treated as root
+        if tid!=rid: continue                # a child turn, not the billable root
         roots.append((p.get("effort"),p.get("model")))
 if len(roots)!=1:
-    sys.stderr.write("expected exactly one root turn_context in the post-prompt window, found %d\n"%len(roots))
-    sys.exit(21)
+    undecidable("expected exactly one root turn_context in the post-prompt window, found %d"%len(roots))
 eff,mod=roots[0]
 print("%s\t%s"%("" if eff is None else eff,"" if mod is None else mod))
 PY
@@ -2157,10 +2197,12 @@ PY
 # the attestation found divergence. Called on the failure path too, BEFORE acp_refuse
 # unmounts, so a refusal stays diagnosable. (codex + grok, plan r2/r3.)
 turn_observe() {
-  { printf 'observed_effort\t%s\n' "${2:-unknown}"
-    printf 'observed_model\t%s\n'  "${3:-unknown}"
-    printf 'acp_record\t%s\n'      "${4:-unknown}"
-  } >> "$1/turn.tsv" 2>/dev/null || true
+  # An EXPLICIT empty observation is still "no evidence" and must read as unknown, not as a
+  # blank column a human has to interpret. (grok, implement r1.)
+  { printf 'observed_effort\t%s\n' "${2:-}"
+    printf 'observed_model\t%s\n'  "${3:-}"
+    printf 'acp_record\t%s\n'      "${4:-}"
+  } | sed 's/\t$/\tunknown/' >> "$1/turn.tsv" 2>/dev/null || true
 }
 
 # acp_canary <workdir> <profile> <session> <run-dir> <secs> — prove the session's runtime serves its
@@ -3245,12 +3287,16 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # never satisfy the gate; and a replacement session starts a NEW jsonl, so the snapshot
     # records paths AND sizes and the check also considers files that appeared after it.
     # (grok, plan r2/r3.)
+    # Enumerated by the SAME python that reads it back, never by find/stat: `find -exec` does
+    # not propagate the failure of an individual -exec, so a BSD `stat -f` that exits 0 having
+    # written nothing would silently skip the GNU arm and leave an EMPTY snapshot — under which
+    # old bytes read as newly appended. Enumeration failure REFUSES before the prompt rather
+    # than proceeding with evidence we cannot bound. (codex, implement r1 B1; grok r1.)
     if [ -n "$acp_iso_home" ]; then
-      find "$acp_iso_home/sessions" -name 'rollout-*.jsonl' -type f -exec stat -f '%N %z' {} \; \
-        > "$run_dir/rollout-snapshot.txt" 2>/dev/null \
-      || find "$acp_iso_home/sessions" -name 'rollout-*.jsonl' -type f -printf '%p %s\n' \
-        > "$run_dir/rollout-snapshot.txt" 2>/dev/null \
-      || : > "$run_dir/rollout-snapshot.txt"
+      if ! acp_rollout_snapshot "$acp_iso_home" "$run_dir/rollout-snapshot.txt"; then
+        acp_refuse policy-unapplied "could not enumerate the provider's rollout files before the prompt — refusing rather than paying for a turn whose depth could not then be attested"
+        return 1
+      fi
     fi
     acp_t0="$(date +%s)"
     ( acp_exec "$workdir" \
