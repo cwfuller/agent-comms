@@ -2246,8 +2246,13 @@ turn_observe() {
   { printf 'requested_model\t%s\n'  "$_req_m"
     printf 'requested_effort\t%s\n' "$_req_e"
   } >> "$1/turn.tsv" 2>/dev/null || true
-  # An EXPLICIT empty observation is still "no evidence" and must read as unknown, not as a
-  # blank column a human has to interpret. (grok, implement r1.)
+  # The OBSERVED pair below carries what the provider's own rollout reported, and only that.
+  # Do not copy the policy into these columns: that would report the expected depth even when
+  # the attestation found divergence, which is the failure this ledger exists to expose. The
+  # requested values live in their own keys above — they are not a violation of that rule, they
+  # are the other half of the comparison. An EXPLICIT empty observation is still "no evidence"
+  # and must read as unknown, not as a blank column a human has to interpret.
+  # (grok, implement r1; comment corrected requested-vs-observed r1.)
   { printf 'observed_effort\t%s\n' "${2:-}"
     printf 'observed_model\t%s\n'  "${3:-}"
     printf 'acp_record\t%s\n'      "${4:-}"

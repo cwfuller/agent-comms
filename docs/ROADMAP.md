@@ -214,6 +214,35 @@ the BRANCH helpers, reached only because `comms.sh` resolves `runphase.sh` as a 
 (`comms.sh:2825`, `:4425`) and the panels were dispatched from the worktree. A session driving
 from the shared checkout still gets 2026-09-15 helpers with no policy at all.
 
+### APPROVED ON BRANCH 2026-09-19: requested policy is recorded beside observed (step 3, completing)
+
+`f8e4848`, both legs APPROVE. `turn_observe` writes `requested_model` / `requested_effort` from
+the `acp.sh policy` accessor beside `observed_*`, so a divergence is readable from `turn.tsv`
+alone once the mount is gone. The requested pair is never a second literal, and an unreachable
+accessor records `unknown` rather than asserting the default.
+
+**Why this needed a second commit:** the attribution capture above was landed and described as
+"requested-vs-observed logging" when it recorded only the observed side. A ledger that records
+what ran, but not what was asked for, cannot express "asked xhigh, got medium" — which is exactly
+the blindness that hid the original bug. Declaring a step done is not the same as doing it; this
+is the second time in this arc that a claim outran the work (the first was a publication
+assertion that could not fail).
+
+**Still owed by the broader step, explicitly NOT delivered here** (codex): policy SOURCE and
+backend VERSION are named in the step description and are not durable fields yet. Do not treat
+the roadmap step as closed on the strength of this increment.
+
+**Ruled out deliberately** (grok, and codex concurring as non-blocking): the requested pair is
+NOT written on pre-canary, containment, canary or provider-failure refusals. Those turns never
+produced an observed depth, so a requested-only row would blur "never started" with "ran the
+wrong depth"; a preflight `policy-check` 20 already carries the comparison in its refusal note.
+Treat any change there as a criteria amendment, not as an incomplete step.
+
+**Known ordering limitation** (codex, non-blocking): the accessor is queried after the provider
+finishes, so if `acp.sh` were edited or reinstalled mid-turn, `requested_*` would describe the new
+policy rather than the one that generated that turn's config. Resolve and retain the pair at
+config-generation time when this logging is next extended.
+
 ### APPROVED ON BRANCH 2026-09-19: a policy observation carries its attribution (step 3)
 
 `26ebbc4`, both legs APPROVE at implement r2. `acp_rollout_observed` now returns effort, model,
