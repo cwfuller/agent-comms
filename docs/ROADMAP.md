@@ -187,6 +187,40 @@ Still required before this is believed in production: the live ACP validation be
 establish parent-side enforcement, not rollout timing and shape across real cold, resumed and
 replacement sessions.
 
+### APPROVED ON BRANCH 2026-09-19: a policy observation carries its attribution (step 3)
+
+`26ebbc4`, both legs APPROVE at implement r2. `acp_rollout_observed` now returns effort, model,
+backend turn id, evidence file and window origin, captured AT READ TIME because
+`unmount_artifact` destroys a throwaway home and with it any chance of reconstructing a refusal.
+`turn_observe` persists them as `observed_turn` / `evidence_file` / `evidence_offset`, on the
+refusal path too, still writing `unknown` rather than a blank.
+
+**The blocker worth remembering:** the caller split the reader's output with
+`IFS=$'\t' read`. Tab is IFS *whitespace*, so an empty column collapses and every later field
+shifts left — a context missing its effort was reported as a policy MISMATCH (20) with the model
+in the effort slot instead of MISSING EVIDENCE (21), wrong exactly when the diagnostic matters.
+Now a `cut`-per-field split, with a tripwire that fails if it regresses to `read`.
+
+**Self-inflicted, recorded so the pattern is not repeated:** updating the counts with
+`open(p,'w').write(open(p).read()...)` truncated `tests/section-counts.tsv` to zero bytes and
+`4f0c016` committed the loss of all 77 lines. The write-mode open truncates before the read
+evaluates. The per-section gate caught it on the next run — which is precisely why that gate
+exists — and `git ls-tree` confined the damage to one commit. Read first, then open for writing.
+
+**Carried, by both reviewers' own assessment (non-blocking):**
+- Criterion 20 is asserted compositionally, not end to end: the split is fed a crafted
+  empty-effort line rather than one produced by `acp_rollout_observed` itself. grok: "a one-line
+  glue of reader stdout into the split into policy-attest would make 20 a property of the path
+  rather than of the pieces."
+- `cut -fN` on a delimiter-free line returns the whole line, so a malformed single-field return
+  would populate all five fields and read as a mismatch rather than undecidable. `cut -s` would
+  fix it; not a shape the reader can currently emit.
+- TSV's supported-character assumptions rest on a parent-owned `acp_iso_home` and codex's
+  generated `rollout-*.jsonl` basenames. The configurable mount-base prefix is not so
+  constrained; document the assumption rather than treating it as closed.
+- Still open from step 1: the saved-preference runner test asserts no `--file` but not the canary
+  prompt; `POL_CAN` infers canary-byte exclusion from a completed publish.
+
 ### PROVEN LIVE 2026-09-19: the reviewer policy binds on a real mounted codex turn (step 2)
 
 The fixtures proved parent-side enforcement with a stubbed acpx. This is the production-path
