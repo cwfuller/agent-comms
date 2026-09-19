@@ -2100,6 +2100,16 @@ acp_confirm_mode() {
 # expected in that window — zero, two, or a missing effort is undecidable, never a pass. Root is
 # turn_id == root_turn_id with BOTH present and non-empty, so two missing ids cannot compare
 # equal. (codex + grok, plan r2/r3.)
+# policy_retire_cmd <profile> <session> <workdir> — the copyable command that retires a MOUNTED
+# session. Records key on (agent, cwd, name), so the directory must be IN the command, not merely
+# named beside it; and because the operator pastes this, the directory must survive as ONE shell
+# argument. printf %q does that. Rendered in one place so the two refusal sites cannot drift and
+# so a test can exercise the real renderer rather than a copy of it.
+policy_retire_cmd() {
+  local _q; printf -v _q '%q' "$3"
+  printf 'acpx --cwd %s %s sessions close %s' "$_q" "$1" "$2"
+}
+
 acp_rollout_snapshot() {  # <iso-home> <out> — path, inode and size of every rollout file
   command -v python3 >/dev/null 2>&1 || return 1
   python3 - "$1" "$2" <<'PY'
@@ -3295,8 +3305,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
                   | "$acp_sh" policy-check codex - 2>>"$run_dir/runner.log" )" || pol_rc=$?
       case "$pol_rc" in
         0)  printf 'policy preflight: %s\n' "$pol_out" >>"$run_dir/runner.log" ;;
-        20) local _q_wd; printf -v _q_wd '%q' "$workdir"
-            acp_refuse policy-unapplied "the reviewer session will not run the declared model/effort policy ($pol_out) — retire it with \`acpx --cwd $_q_wd $acp_profile sessions close $acp_session\`, then re-send"
+        20) acp_refuse policy-unapplied "the reviewer session will not run the declared model/effort policy ($pol_out) — retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
             return 1 ;;
         *)  acp_refuse policy-unapplied "could not verify the reviewer model/effort policy before the canary (status $pol_rc) — refusing rather than paying for a review of unknown depth"
             return 1 ;;
@@ -3413,7 +3422,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
-      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" _q_wd=""
+      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off=""
       att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
       if [ "$att_rc" -eq 0 ]; then
         # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
@@ -3432,8 +3441,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       if [ "$att_rc" -ne 0 ]; then
         printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
         if [ "$att_rc" -eq 20 ]; then
-          printf -v _q_wd '%q' "$workdir"
-          acp_refuse policy-unapplied "the review turn did not run the declared model/effort policy ($att_msg) — refusing to publish a review of the wrong depth; retire it with \`acpx --cwd $_q_wd $acp_profile sessions close $acp_session\`, then re-send"
+          acp_refuse policy-unapplied "the review turn did not run the declared model/effort policy ($att_msg) — refusing to publish a review of the wrong depth; retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
         else
           acp_refuse policy-unapplied "could not attest the model/effort the review turn actually ran (status $att_rc) — refusing to publish a review of unknown depth"
         fi

@@ -477,40 +477,40 @@ grep -qx "requested_effort	unknown" "$ISO_RQ-na/turn.tsv" 2>/dev/null \
 # the workdir sends the operator to close the wrong thing, every resend refuses again, and the
 # panel stays pending — a wedged loop rather than a retryable refusal. (codex, installed-path
 # deployment probe.)
+# Both refusal sites must go through the ONE renderer. A second hand-rolled command string is
+# how the escaping regressed last round, so guard the DRY property at the source and the
+# behaviour in the renderer tests below.
 for _h in 'the reviewer session will not run the declared' 'the review turn did not run the declared'; do
   _line="$(grep -n "$_h" "$ISO_RP" | head -1 | cut -d: -f1)"
   _txt="$(sed -n "${_line}p" "$ISO_RP")"
   case "$_txt" in
-    *'sessions close $acp_session'*) : ;;
-    *) fail "a policy refusal hint omits the session name: ${_h}"; continue ;;
-  esac
-  # The pasted command must stand alone: an operator who copies only what is between the
-  # backticks, from the main checkout, must still resolve the right (agent, cwd, name) tuple.
-  # Naming the directory in surrounding prose is not enough. acpx takes --cwd as a GLOBAL
-  # option, so it must precede the profile. (grok, recoverable r1.)
-  case "$_txt" in
-    *'acpx --cwd $_q_wd $acp_profile sessions close $acp_session'*)
-      ok "the copyable retirement command carries an ESCAPED --cwd before the profile (${_h})" ;;
-    *) fail "a policy refusal hint does not carry an escaped --cwd inside the command: ${_h}" ;;
+    *'$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")'*)
+      ok "the policy refusal renders its retirement command through the shared accessor (${_h})" ;;
+    *) fail "a policy refusal hand-rolls its retirement command: ${_h}" ;;
   esac
 done
 
-# A directory only NAMED in prose tolerates a space; one INTERPOLATED into a command the operator
-# pastes does not. The previous round moved the path into executable text and so introduced this:
-# a mount base like `/private/tmp/review mounts` rendered `--cwd /private/tmp/review` plus a stray
-# argument, retirement failed, and the stale session survived — the exact wedge the hint exists to
-# prevent. Assert the RENDERED command, not the source line. (codex, recoverable r2 B1.)
-iso_render() { local workdir="$1" acp_profile=codex acp_session=S _q_wd
-  printf -v _q_wd '%q' "$workdir"
-  printf 'acpx --cwd %s %s sessions close %s' "$_q_wd" "$acp_profile" "$acp_session"; }
+# THE PRODUCTION RENDERER IS EXTRACTED AND RUN. The previous version of these assertions
+# reimplemented the rendering, so codex replaced %q with %s in the real code and the suite stayed
+# green — a test that proves only that a copy of the logic works. Now one renderer exists and the
+# test executes it, so removing the escaping from production fails here. (codex, recoverable r3 B1.)
+ISO_RC="$(sed -n '/^policy_retire_cmd() {/,/^}/p' "$ISO_RP")"
+iso_render() { ( eval "$ISO_RC"; policy_retire_cmd codex S "$1" ); }
+[ -n "$ISO_RC" ] && ok "the retirement command has ONE production renderer the tests can run" || fail "policy_retire_cmd not found in runphase.sh"
 ISO_SP="$(iso_render '/private/tmp/review mounts/x')"
-printf '%s' "$ISO_SP" | grep -q 'review\\ mounts' \
-  && ok "a workdir containing a space renders as ONE shell argument" || fail "space in workdir splits the pasted command (got: $ISO_SP)"
-# The rendered command must parse back to the exact directory, spaces and all.
-ISO_BACK="$(eval "set -- $(printf '%s' "$ISO_SP" | sed 's/^acpx //')"; printf '%s' "$2")"
+ISO_BACK="$(eval "set -- ${ISO_SP#acpx }"; printf '%s' "$2")"
 [ "$ISO_BACK" = '/private/tmp/review mounts/x' ] \
-  && ok "the rendered --cwd argument parses back to the exact directory" || fail "cwd did not round-trip (got: $ISO_BACK)"
+  && ok "a workdir containing a space round-trips through the rendered command as one argument" || fail "space in workdir splits the pasted command (got: $ISO_SP)"
 ISO_QT="$(iso_render "/tmp/it's a mount")"
-printf '%s' "$ISO_QT" | grep -q "it" \
-  && [ "$(eval "set -- $(printf '%s' "$ISO_QT" | sed 's/^acpx //')"; printf '%s' "$2")" = "/tmp/it's a mount" ] \
-  && ok "a workdir containing a quote survives rendering intact" || fail "quote in workdir broke the rendered command"
+[ "$(eval "set -- ${ISO_QT#acpx }"; printf '%s' "$2")" = "/tmp/it's a mount" ] \
+  && ok "a workdir containing a quote round-trips through the rendered command" || fail "quote in workdir broke the rendered command"
+case "$(iso_render '/tmp/plain')" in
+  'acpx --cwd /tmp/plain codex sessions close S') ok "the rendered command puts --cwd before the profile, as acpx requires" ;;
+  *) fail "rendered command shape wrong: $(iso_render '/tmp/plain')" ;;
+esac
+# CONTROL: the assertions must FAIL if the escaping is removed from production. Without this,
+# criterion 29 is a claim rather than a fact — which is exactly how the previous version passed.
+ISO_NOQ="$(printf '%s' "$ISO_RC" | sed "s/printf -v _q '%q'/printf -v _q '%s'/")"
+ISO_BROKE="$( ( eval "$ISO_NOQ"; policy_retire_cmd codex S '/private/tmp/review mounts/x' ) )"
+[ "$(eval "set -- ${ISO_BROKE#acpx }"; printf '%s' "$2")" != '/private/tmp/review mounts/x' ] \
+  && ok "removing %q from the renderer breaks the round-trip — the escaping test can fail" || fail "the escaping control passes unescaped; the test is vacuous"
