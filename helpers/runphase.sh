@@ -2215,11 +2215,13 @@ for f in files:
         if not tid or not rid:
             undecidable("a turn_context in the window carries no turn identifiers")
         if tid!=rid: continue                # a child turn, not the billable root
-        roots.append((p.get("effort"),p.get("model")))
+        roots.append((p.get("effort"),p.get("model"),tid,f,start))
 if len(roots)!=1:
     undecidable("expected exactly one root turn_context in the post-prompt window, found %d"%len(roots))
-eff,mod=roots[0]
-print("%s\t%s"%("" if eff is None else eff,"" if mod is None else mod))
+eff,mod,tid,src,off=roots[0]
+# effort, model, backend turn id, rollout path, snapshot byte boundary -- the evidence a
+# refusal needs to be reconstructable once the isolated home is gone. (codex, live-proof r1.)
+print("%s\t%s\t%s\t%s\t%s"%("" if eff is None else eff,"" if mod is None else mod,tid,src,off))
 PY
 }
 
@@ -2235,6 +2237,9 @@ turn_observe() {
   { printf 'observed_effort\t%s\n' "${2:-}"
     printf 'observed_model\t%s\n'  "${3:-}"
     printf 'acp_record\t%s\n'      "${4:-}"
+    printf 'observed_turn\t%s\n'   "${5:-}"
+    printf 'evidence_file\t%s\n'   "${6:-}"
+    printf 'evidence_offset\t%s\n' "${7:-}"
   } | sed 's/\t$/\tunknown/' >> "$1/turn.tsv" 2>/dev/null || true
 }
 
@@ -3388,13 +3393,13 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
-      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg=""
+      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off=""
       att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
       if [ "$att_rc" -eq 0 ]; then
-        att_eff="${att_out%%$'\t'*}"; att_mod="${att_out#*$'\t'}"
+        IFS=$'\t' read -r att_eff att_mod att_turn att_src att_off <<<"$att_out"
         att_msg="$("$acp_sh" policy-attest codex "$att_eff" "$att_mod" 2>>"$run_dir/runner.log")" || att_rc=$?
       fi
-      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}"
+      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}"
       if [ "$att_rc" -ne 0 ]; then
         printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
         if [ "$att_rc" -eq 20 ]; then

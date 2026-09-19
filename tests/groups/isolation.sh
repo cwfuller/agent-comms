@@ -237,7 +237,7 @@ ISO_RO="$(sed -n '/^acp_rollout_observed() {/,/^}/p' "$ISO_RP")"
 ISO_RD="$WORK/rollout-probe"; rm -rf "$ISO_RD"; mkdir -p "$ISO_RD/sessions/2026/09/19"
 ISO_RJ="$ISO_RD/sessions/2026/09/19/rollout-a.jsonl"
 iso_ctx() { printf '{"type":"turn_context","payload":{"turn_id":"%s","root_turn_id":"%s","model":"%s","effort":"%s"}}\n' "$1" "$2" "$3" "$4"; }
-iso_observed() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_RD" "$1" ) 2>/dev/null; }
+iso_observed() { local _o _r; _o="$( ( eval "$ISO_RO"; acp_rollout_observed "$ISO_RD" "$1" ) 2>/dev/null )"; _r=$?; [ "$_r" -eq 0 ] || return "$_r"; printf '%s' "$_o" | cut -f1,2; }
 ISO_SNAP="$(sed -n '/^acp_rollout_snapshot() {/,/^}/p' "$ISO_RP")"
 iso_snapshot() { ( eval "$ISO_SNAP"; acp_rollout_snapshot "$1" "$2" ) 2>/dev/null; }
 
@@ -318,7 +318,7 @@ iso_snapshot "$ISO_SD" "/nonexistent-dir/snap.txt" \
 # snapshotted: reading it whole would let an old matching context satisfy the gate.
 ISO_RD2="$WORK/rollout-identity"; rm -rf "$ISO_RD2"; mkdir -p "$ISO_RD2/sessions/2026/09/19"
 ISO_RF2="$ISO_RD2/sessions/2026/09/19/rollout-y.jsonl"
-iso_observed2() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_RD2" "$1" ) 2>/dev/null; }
+iso_observed2() { local _o _r; _o="$( ( eval "$ISO_RO"; acp_rollout_observed "$ISO_RD2" "$1" ) 2>/dev/null )"; _r=$?; [ "$_r" -eq 0 ] || return "$_r"; printf '%s' "$_o" | cut -f1,2; }
 iso_ctx t-old t-old gpt-6-astra xhigh > "$ISO_RF2"
 iso_snapshot "$ISO_RD2" "$WORK/snap-id.txt"
 rm -f "$ISO_RF2"; iso_ctx t-old t-old gpt-6-astra xhigh > "$ISO_RF2"   # new inode, same bytes
@@ -398,3 +398,28 @@ iso_observed4() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_UA" "$1" ) 2>/dev
 } > "$ISO_UA/sessions/2026/09/19/rollout-u.jsonl"
 iso_observed4 "$WORK/snap-ua.txt" >/dev/null 2>&1 \
   && fail "a divergent context with no ids hid behind a matching one" || ok "a turn_context carrying no identifiers is refused, not skipped"
+
+# STEP 3 — the attestation must capture ATTRIBUTION at read time. Once unmount_artifact removes
+# a throwaway home the rollout is gone, so a refusal that recorded only effort/model cannot be
+# reconstructed afterwards. (codex, live-proof r1.)
+ISO_AT="$WORK/rollout-attrib"; rm -rf "$ISO_AT"; mkdir -p "$ISO_AT/sessions/2026/09/19"
+ISO_AF="$ISO_AT/sessions/2026/09/19/rollout-attr.jsonl"
+iso_observed5() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_AT" "$1" ) 2>/dev/null; }
+: > "$WORK/snap-attr.txt"
+iso_ctx t-attr t-attr gpt-6-astra xhigh > "$ISO_AF"
+ISO_AT_OUT="$(iso_observed5 "$WORK/snap-attr.txt")"
+[ "$(printf '%s' "$ISO_AT_OUT" | awk -F'\t' '{print NF}')" = 5 ] \
+  && ok "the attestation returns effort, model, turn id, evidence file and byte offset" || fail "attribution fields missing (got: $ISO_AT_OUT)"
+[ "$(printf '%s' "$ISO_AT_OUT" | cut -f3)" = "t-attr" ] \
+  && ok "the backend turn id of the attested context is captured" || fail "turn id not captured"
+[ "$(printf '%s' "$ISO_AT_OUT" | cut -f4)" = "$ISO_AF" ] \
+  && ok "the rollout file the evidence came from is captured" || fail "evidence path not captured"
+# turn_observe writes them, and still records unknown rather than a blank for absent evidence.
+ISO_TO="$(sed -n '/^turn_observe() {/,/^}/p' "$ISO_RP")"
+ISO_TD="$WORK/turnobs"; rm -rf "$ISO_TD"; mkdir -p "$ISO_TD"
+( eval "$ISO_TO"; turn_observe "$ISO_TD" xhigh gpt-6-astra rec-1 t-attr /r/x.jsonl 42 )
+grep -qx "observed_turn	t-attr" "$ISO_TD/turn.tsv" && grep -qx "evidence_offset	42" "$ISO_TD/turn.tsv" \
+  && ok "turn.tsv records the backend turn id and the snapshot byte boundary" || fail "turn.tsv attribution columns missing"
+( eval "$ISO_TO"; turn_observe "$ISO_TD" "" "" "" "" "" "" )
+grep -qx "observed_turn	unknown" "$ISO_TD/turn.tsv" \
+  && ok "absent attribution records unknown, never a blank column" || fail "blank attribution column"
