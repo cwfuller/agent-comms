@@ -11,8 +11,12 @@ rt() {
       *) break ;;
     esac
   done
+  # COMMS_ROUTE_LOG is stripped too: an inherited log path let the real classifier APPEND a
+  # live record during the suite, even on a fail-open. A fixture that wants a log supplies its
+  # own path as an explicit assignment above. (codex, implement r6.)
   (cd "$REPO_FIX" && env -u TYPESAFE_API_KEY -u COMMS_ROUTE -u COMMS_ROUTE_STUB \
-    -u COMMS_ROUTE_URL -u COMMS_ROUTE_MODEL -u COMMS_ROUTE_TIMEOUT_SECS \
+    -u COMMS_ROUTE_URL -u COMMS_ROUTE_MODEL -u COMMS_ROUTE_TIMEOUT_SECS -u COMMS_ROUTE_LOG \
+    -u COMMS_ROUTE_SHADOW_ALLOW -u COMMS_ROUTE_SHADOW_KEY \
     -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_CURRENT_TIER -u COMMS_ROUTE_CONTEXT_TOKENS \
     "${envvars[@]}" "$COMMS" route "$@")
 }
@@ -351,7 +355,7 @@ RS_KEY="$( cd "$RS_REPO" && eval "$RS_KEYFN"; shadow_repo_key )"
 # of them would silently arm the live classify path while every other assertion stayed green.
 # NO LIVE ROUTING SETTINGS may reach these calls: the suite must never contact TypeSafe, and
 # the harness does not clear the developer's environment. (codex P1, implement r1/r2.)
-RS_CLEAN="env -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE -u COMMS_ROUTE_STUB -u TYPESAFE_API_KEY -u COMMS_ROUTE_URL -u COMMS_ROUTE_MODEL"
+RS_CLEAN="env -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE -u COMMS_ROUTE_STUB -u TYPESAFE_API_KEY -u COMMS_ROUTE_URL -u COMMS_ROUTE_MODEL -u COMMS_ROUTE_LOG -u COMMS_ROUTE_SHADOW_ALLOW -u COMMS_ROUTE_SHADOW_KEY"
 RS_BASE="$(cd "$REPO" && $RS_CLEAN "$RS_SH" -- 'add a null check' 2>/dev/null)"
 RS_WITH="$(cd "$REPO" && $RS_CLEAN COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_ID=x \
              COMMS_ROUTE_SHADOW_DIR="$WORK" COMMS_ROUTE_SHADOW_KEY=k COMMS_ROUTE_SHADOW_BACKEND=stub \
@@ -519,11 +523,21 @@ sys.exit(0 if r.returncode!=0 else 1)' \
   && ok "a GIT_DIR pointing at a permitted repo cannot authorise another tree" || fail "GIT_DIR selected another project"
 # RUN the shell derivation under redirected git settings and require the SAME key as a clean
 # environment. A grep for the variable name passes if either scrub site is deleted.
-RS_CLEANKEY="$( cd "$RS_REPO" && eval "$RS_KEYFN"; shadow_repo_key )"
-RS_HIJACK="$( cd "$RS_REPO" && GIT_DIR="$REPO/.git" GIT_WORK_TREE="$REPO" eval "$RS_KEYFN"; \
-              cd "$RS_REPO" && GIT_DIR="$REPO/.git" GIT_WORK_TREE="$REPO" shadow_repo_key )"
-[ -n "$RS_CLEANKEY" ] && [ "$RS_CLEANKEY" = "$RS_HIJACK" ] \
-  && ok "the shell derivation ignores a redirected GIT_DIR/GIT_WORK_TREE and yields the same key" || fail "redirected git settings changed the shell-derived identity (clean=$RS_CLEANKEY hijacked=$RS_HIJACK)"
+RS_ROOTFN="$(sed -n '/^shadow_main_root() {/,/^}/p' "$RS_SH")"
+# BOTH derivations, each under redirected git settings, each compared to its clean result.
+# Executing only one left the other scrub removable without failing anything. (codex r6.)
+rs_derive() { # <fn> [hijack]
+  if [ "${2:-}" = hijack ]; then
+    ( cd "$RS_REPO" && export GIT_DIR="$REPO/.git" GIT_WORK_TREE="$REPO"; eval "$RS_KEYFN"; eval "$RS_ROOTFN"; "$1" )
+  else
+    ( cd "$RS_REPO" && eval "$RS_KEYFN"; eval "$RS_ROOTFN"; "$1" )
+  fi
+}
+for _fn in shadow_repo_key shadow_main_root; do
+  _c="$(rs_derive "$_fn")"; _h="$(rs_derive "$_fn" hijack)"
+  [ -n "$_c" ] && [ "$_c" = "$_h" ] \
+    && ok "$_fn ignores a redirected GIT_DIR/GIT_WORK_TREE" || fail "$_fn changed under redirected git settings (clean=$_c hijacked=$_h)"
+done
 
 # A DECISION ID NAMES A FILE, so anything but a bare token can traverse out of the record root.
 python3 -c '
@@ -565,3 +579,25 @@ rb._reset_raw(); rb._observe(b"{}\xff", 200); a=rb.LAST_RAW["body_b64"]
 rb._reset_raw(); rb._observe(b"{}\xfe", 200); b=rb.LAST_RAW["body_b64"]
 sys.exit(0 if a and b and a!=b else 1)' "$REPO/helpers" \
   && ok "distinct invalid bytes are retained distinctly, not collapsed by a lossy decode" || fail "raw retention is lossy"
+
+# A PAID DECISION LOST AT PUBLISH TIME. The earlier probe fails during directory preparation,
+# which is before the backend is called — so it does not actually cover "we paid for a decision
+# and could not record it". Make the destination directory exist but be unwritable, so the
+# backend answers and the WRITE is what fails. (codex advisory, implement r6.)
+python3 -c '
+import os,subprocess,sys,stat,shutil
+helpers,stub,repo,allow=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
+dest=os.path.join(repo,".comms","route-shadow")
+if os.path.isfile(dest): os.unlink(dest)
+os.makedirs(dest, exist_ok=True)
+os.chmod(dest, 0o500)                      # exists, not writable
+env=dict(os.environ, COMMS_ROUTE_SHADOW_ID="postresp", COMMS_ROUTE_TASK="x",
+         COMMS_ROUTE_BACKEND="stub", COMMS_ROUTE_STUB=stub, COMMS_ROUTE_SHADOW_ALLOW=allow)
+env.pop("COMMS_ROUTE_SHADOW_KEY", None)
+r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], cwd=repo, env=env,
+                 capture_output=True, text=True)
+os.chmod(dest, 0o700)
+wrote=os.path.exists(os.path.join(dest,"postresp.json"))
+sys.exit(0 if r.returncode!=0 and not wrote and "could not write" in r.stderr else 1)' \
+  "$REPO/helpers" "$RS_STUB" "$RS_REPO" "$RS_ALLOW" \
+  && ok "a decision that answers but cannot be published fails loudly at the write" || fail "a post-response write failure was not reported"
