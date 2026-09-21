@@ -175,6 +175,15 @@ cat > "$AXB/npx" <<'AXSTUB'
 # mktemp path -- a $PWD stub would refuse every legitimate turn on macOS.
 # AX_CWD_LOG records every invocation's cwd so a test can observe the CHILD's directory
 # rather than grepping runphase.sh for a path expression.
+ax_test_root="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd -P)"
+ax_rollout_ok() {  # the DESTINATION must be inside the suite work root
+  [ -n "${CODEX_HOME:-}" ] || return 1
+  [ -n "$ax_test_root" ] || return 1
+  case "$(cd "$CODEX_HOME" 2>/dev/null && pwd -P)" in
+    "$ax_test_root"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 if [ -n "${AX_CWD_LOG:-}" ]; then
   printf '%s\t%s\n' "$(pwd -P)" "$*" >> "$AX_CWD_LOG"
 fi
@@ -267,8 +276,7 @@ case " $* " in
     # THE CANARY IS A PROMPT TOO, so real codex records a turn_context for it. Emitting one
     # here means the snapshot has pre-prompt bytes to exclude: an empty or broken snapshot now
     # shows TWO roots and refuses, instead of looking honest. (codex + grok, implement r3.)
-    if [ -n "${CODEX_HOME:-}" ] && [ -z "${AX_ROLLOUT_NONE:-}" ] && [ -z "${AX_NO_CANARY_ROLLOUT:-}" ] \
-       && [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx-test-store" ]; then
+    if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ] && [ -z "${AX_NO_CANARY_ROLLOUT:-}" ]; then
       ax_cd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_cd" 2>/dev/null
       printf '{"type":"turn_context","payload":{"turn_id":"t-canary","root_turn_id":"t-canary","model":"%s","effort":"%s"}}\n' \
         "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}" >> "$ax_cd/rollout-stub.jsonl" 2>/dev/null || true
@@ -289,7 +297,7 @@ fi
 #   AX_ROLLOUT_NEW_FILE — append to a NEW jsonl, as a replacement session does.
 #   AX_ROLLOUT_NONE     — write nothing (evidence missing -> undecidable).
 #   AX_ROLLOUT_DOUBLE   — two root contexts (ambiguous -> undecidable).
-if [ -n "${CODEX_HOME:-}" ] && [ -z "${AX_ROLLOUT_NONE:-}" ] && [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx-test-store" ]; then
+if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
   ax_rd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_rd" 2>/dev/null
   ax_rf="$ax_rd/rollout-stub.jsonl"
   [ -n "${AX_ROLLOUT_NEW_FILE:-}" ] && ax_rf="$ax_rd/rollout-stub-replacement.jsonl"

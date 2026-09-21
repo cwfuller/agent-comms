@@ -866,3 +866,25 @@ awk -F'\t' '$2 ~ / --file /' "$POL_DES_LOG" 2>/dev/null | grep -q . \
 POL_CAN="$WORK/pol-canary"; pol_run pol-canary "$POL_CAN"
 [ "$(cn_status "$POL_CAN")" = "completed" ] && [ "$(pol_inbox_n pol-canary)" = 1 ] \
   && ok "pre-prompt canary rollout bytes are excluded from the window, not counted as ambiguity" || fail "canary evidence broke the honest path: status=$(cn_status "$POL_CAN")"
+
+# THE STUB AUTHORIZES ITS DESTINATION, not some other directory. A marked fixture HOME with a
+# FOREIGN CODEX_HOME previously still wrote synthetic rollout records into that foreign home —
+# the guard read $HOME while the write targeted $CODEX_HOME. Runs here because this is where
+# fixture_acp builds the stub; the same control in the route group silently exercised nothing.
+# (codex, shadow-collector implement r8.)
+# GENUINELY OUTSIDE the suite work root — a path under $WORK is legitimately authorised, so
+# using one would have tested nothing. This stands in for the developer's real ~/.codex.
+AXD_FOREIGN="$(mktemp -d "${TMPDIR:-/tmp}/acp-foreign-home.XXXXXX")"
+AXD_MARKED="$WORK/marked-home"; mkdir -p "$AXD_MARKED/.acpx/sessions"; : > "$AXD_MARKED/.acpx-test-store"
+AXD_PAY="$WORK/foreign-payload.md"; printf 'x\n' > "$AXD_PAY"
+( cd "$WORK" && env PATH="$AXB:$PATH" HOME="$AXD_MARKED" CODEX_HOME="$AXD_FOREIGN" \
+    ACP_PARITY_PAYLOAD="$AXD_PAY" "$AXB/npx" -y acpx@0.13.1 codex -s sess --file "$AXD_PAY" ) >/dev/null 2>&1 || true
+[ -z "$(find "$AXD_FOREIGN" -name 'rollout-*.jsonl' 2>/dev/null)" ] \
+  && ok "a marked HOME does not authorise rollout evidence into a CODEX_HOME outside the suite root" || fail "the stub wrote into a CODEX_HOME outside the suite root"
+rm -rf "$AXD_FOREIGN"
+# ...and the legitimate case still writes, so the guard is not simply off.
+AXD_OK="$WORK/acp-parity/legit-home"; rm -rf "$AXD_OK"; mkdir -p "$AXD_OK"
+( cd "$WORK" && env PATH="$AXB:$PATH" HOME="$AXD_MARKED" CODEX_HOME="$AXD_OK" \
+    ACP_PARITY_PAYLOAD="$AXD_PAY" "$AXB/npx" -y acpx@0.13.1 codex -s sess --file "$AXD_PAY" ) >/dev/null 2>&1 || true
+[ -n "$(find "$AXD_OK" -name 'rollout-*.jsonl' 2>/dev/null)" ] \
+  && ok "a CODEX_HOME inside the suite work root still receives its rollout evidence" || fail "the guard blocked a legitimate fixture home"

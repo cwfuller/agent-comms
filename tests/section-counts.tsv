@@ -36,7 +36,7 @@ friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	45
 acp.sh: the reviewer model+effort policy	25
-reviewer policy: a wrong-depth review is never published	14
+reviewer policy: a wrong-depth review is never published	17
 runphase: the compatibility canary gates every ACP turn	24
 runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15

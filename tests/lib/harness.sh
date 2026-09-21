@@ -8,7 +8,8 @@ set -uo pipefail
 # Unset at suite entry, ahead of every git operation; tests that need them set them locally.
 # (codex, shadow-collector implement r7.)
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_PREFIX 2>/dev/null || true
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_PREFIX \
+      GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_NAMESPACE 2>/dev/null || true
 
 # HERMETIC: scrub inherited headless-delivery env — a harness run from INSIDE a
 # headless peer turn (e.g. Codex reviewing this repo) inherits these and would

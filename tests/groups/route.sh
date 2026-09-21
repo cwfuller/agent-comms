@@ -602,15 +602,24 @@ sys.exit(0 if r.returncode!=0 and not wrote and "could not write" in r.stderr el
   "$REPO/helpers" "$RS_STUB" "$RS_REPO" "$RS_ALLOW" \
   && ok "a decision that answers but cannot be published fails loudly at the write" || fail "a post-response write failure was not reported"
 
-# THE HARNESS MUST SCRUB REPOSITORY-SELECTION GIT VARIABLES BEFORE ANY FIXTURE RUNS. Without
-# that, `git -C <fixture> init && commit` resolves to the CALLER'S repository and the suite
-# writes live git state. Assert the scrub by BEHAVIOUR: inside a non-repo directory, git must
-# fail to resolve a toplevel — which it cannot do if a selector survived. (codex r7.)
+# THE HARNESS SCRUB, EXERCISED UNDER A HOSTILE ENVIRONMENT. Inspecting the clean suite proves
+# nothing: removing the whole scrub still passes if nothing hostile was seeded, and checking
+# four names misses the rest. Seed every selector in a CHILD that sources the harness prefix,
+# and require each to be gone. (codex, implement r8.)
+RS_GITVARS="GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_PREFIX GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_NAMESPACE"
+RS_SEED=""; for _v in $RS_GITVARS; do RS_SEED="$RS_SEED $_v=/hostile"; done
+RS_SURV="$(env $RS_SEED bash -c '
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_PREFIX \
+        GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_NAMESPACE 2>/dev/null || true
+  for v in '"$RS_GITVARS"'; do eval "val=\${$v:-}"; [ -n "$val" ] && printf "%s " "$v"; done')"
+[ -z "$RS_SURV" ] && ok "every repository-selection git variable is removed by the harness scrub" || fail "survived the scrub: $RS_SURV"
+# ...and the scrub the HARNESS actually ships must list them all, or the child above diverges.
+RS_MISSING=""
+for _v in $RS_GITVARS; do grep -q "$_v" "$REPO/tests/lib/harness.sh" || RS_MISSING="$RS_MISSING $_v"; done
+[ -z "$RS_MISSING" ] && ok "the shipped harness scrub covers every selector the control seeds" || fail "harness scrub omits:$RS_MISSING"
+# Behavioural backstop: in this suite, a non-repo directory must not resolve a toplevel.
 RS_NOREPO="$WORK/not-a-repo"; mkdir -p "$RS_NOREPO"
 ( cd "$RS_NOREPO" && git rev-parse --show-toplevel ) >/dev/null 2>&1 \
   && fail "a git selector survived into the suite: a non-repo directory resolved a toplevel" \
-  || ok "the harness scrubs repository-selection git variables before fixtures run"
-for _v in GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY; do
-  [ -z "${!_v:-}" ] || fail "$_v survived into the suite environment"
-done
-ok "no repository-selection git variable is set in the suite environment"
+  || ok "a non-repo directory resolves no toplevel inside the suite"
