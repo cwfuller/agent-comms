@@ -36,7 +36,7 @@ friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	45
 acp.sh: the reviewer model+effort policy	25
-reviewer policy: a wrong-depth review is never published	17
+reviewer policy: a wrong-depth review is never published	16
 runphase: the compatibility canary gates every ACP turn	24
 runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15
@@ -49,7 +49,7 @@ comms.sh: help prints its whole header	2
 templates: /auto query route	8
 comms.sh: route fail-open	11
 comms.sh: route policy	34
-route.sh: the shadow collector cannot reach /auto	30
+route.sh: the shadow collector cannot reach /auto	31
 install.sh: .codex/AGENTS.md managed block	47
 grading pilot: findings extraction (the single-reviewer baseline)	15
 grading pilot: --out ledger is append-only and idempotent	4
