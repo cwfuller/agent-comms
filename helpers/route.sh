@@ -109,11 +109,12 @@ shadow_run() {
   # before `git add -A`. A file anywhere else in the worktree would be snapshotted into the
   # review artifact, so a reviewer would read the task text and the mapped decision — a path
   # into a live loop that sits outside the stdout contract. (grok, plan r1.)
-  # The record root. Defaults to the MAIN repo's gitignored .comms/ — which cmd_snapshot
-  # strips, so a record can never ride into a review artifact. Overridable ONLY so the suite
-  # can write into its own work dir: without that, every suite run dropped real task text
-  # into the live mailbox. (grok, implement r1.)
-  dir="${COMMS_ROUTE_SHADOW_RECORD_DIR:-$root/.comms/route-shadow}"
+  # The record root is ALWAYS the main repo's gitignored .comms/, which cmd_snapshot strips
+  # before `git add -A`. NOT overridable: an env-settable destination could be pointed at a
+  # tracked directory and would sweep task text into a live review artifact, which is exactly
+  # the path out of the stdout contract this design closes. The suite isolates itself by
+  # running against its own temporary repository instead. (codex P2, implement r3.)
+  dir="$root/.comms/route-shadow"
   mkdir -p "$dir" || shadow_die "cannot create $dir"
   id="$(shadow_decision_id)" || shadow_die "cannot mint a decision id"
   COMMS_ROUTE_SHADOW_ID="$id" \

@@ -1488,14 +1488,22 @@ cmd_route() {
     # loses argument boundaries and the terminator, so `route -- "document the --shadow flag"`
     # was refused instead of failing open — ordinary task text is not an option.
     # (codex P2 + grok, implement r1.) `--shadow-map` is not matched: it has no implementation.
-    local _a
-    for _a in "$@"; do
-      [ "$_a" = "--" ] && break
-      if [ "$_a" = "--shadow" ]; then
-        echo "comms.sh: route: helper missing at $sh — cannot run the shadow collector" >&2
-        return 1
-      fi
+    local _want_shadow=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --) break ;;
+        --shadow) _want_shadow=1; shift ;;
+        # VALUE-TAKING options consume their argument, so `route --task --shadow` classifies
+        # the literal task "--shadow" rather than selecting the collector.
+        --task|--file|--current-tier|--context-tokens|--thread) shift 2 || shift ;;
+        -*) shift ;;
+        *) break ;;   # positional: the task starts here, options are over
+      esac
     done
+    if [ "$_want_shadow" -eq 1 ]; then
+      echo "comms.sh: route: helper missing at $sh — cannot run the shadow collector" >&2
+      return 1
+    fi
     echo "comms.sh: route: helper missing at $sh — fail-open" >&2
     # Must match route.sh KEYS_FAIL_OPEN (stable 10-key set including tier/gate).
     printf 'plan: no\neffort: medium\ncomplexity: standard\ntier: balanced\ngate: fail-open\nplan_p: -\neffort_p: -\ncomplexity_confidence: -\nsource: fail-open\nreason: route.sh is not installed next to comms.sh\n'

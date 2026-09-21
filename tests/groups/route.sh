@@ -340,8 +340,11 @@ RS_ALLOW="$WORK/shadow-allow"; : > "$RS_ALLOW"
 # EXTRACT the production key function rather than recomputing it. A hand-rolled version of
 # this produced a different hash and left the permit never matching — the same reimplementation
 # mistake that sent `questions` as a list.
+RS_REPO="$WORK/shadow-repo"; mkdir -p "$RS_REPO"; RS_REPO="$(cd "$RS_REPO" && pwd -P)"
+git -C "$RS_REPO" init -q 2>/dev/null
+git -C "$RS_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
 RS_KEYFN="$(sed -n '/^shadow_repo_key() {/,/^}/p' "$RS_SH")"
-RS_KEY="$( cd "$REPO" && eval "$RS_KEYFN"; shadow_repo_key )"
+RS_KEY="$( cd "$RS_REPO" && eval "$RS_KEYFN"; shadow_repo_key )"
 
 # 1. THE COUPLING THIS SLICE EXISTS TO AVOID. resolve() treats COMMS_ROUTE_BACKEND /
 # COMMS_ROUTE / COMMS_ROUTE_STUB as the on-switch, so a collector implemented by exporting one
@@ -388,15 +391,14 @@ printf '%s\n' "$RS_KEY" > "$RS_ALLOW"
 RS_DIR="$WORK/shadow-out"; mkdir -p "$RS_DIR"
 # RECORD INTO THE WORK DIR. Without this every suite run wrote real task text into the live
 # .comms/ mailbox of whatever checkout ran it. (grok, implement r1.)
-RS_SOUT="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub \
-           COMMS_ROUTE_SHADOW_RECORD_DIR="$RS_DIR" \
+RS_SOUT="$(cd "$RS_REPO" && $RS_CLEAN COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub \
            COMMS_ROUTE_STUB="$RS_STUB" "$RS_SH" --shadow --thread t-1 --current-tier strong --context-tokens 900 \
            -- 'refactor the scheduler' 2>/dev/null)"
 RS_ID="$(printf '%s' "$RS_SOUT" | sed -n 's/^shadow-decision //p')"
 [ "$(printf '%s' "$RS_SOUT" | grep -cE '^(plan|effort|complexity|tier|gate|source|reason):')" = 0 ] \
   && ok "the SUCCESS path emits no classify key either, not just the refusal path" || fail "success path leaked a classify key"
 [ -n "$RS_ID" ] && ok "a permitted shadow run prints a decision id and nothing else" || fail "no decision id on stdout"
-RS_REC="$RS_DIR/$RS_ID.json"
+RS_REC="$RS_REPO/.comms/route-shadow/$RS_ID.json"
 [ -f "$RS_REC" ] && ok "the decision is recorded under the main repo's gitignored .comms/" || fail "no record at $RS_REC"
 python3 -c '
 import json,sys
@@ -460,7 +462,7 @@ env=dict(os.environ, COMMS_ROUTE_SHADOW_ID="probe", COMMS_ROUTE_SHADOW_DIR=sys.a
 env.pop("COMMS_ROUTE_SHADOW_KEY", None)
 r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], env=env,
                  capture_output=True, text=True)
-sys.exit(0 if r.returncode!=0 and not os.path.exists(os.path.join(sys.argv[3],"probe.json")) else 1)'   "$REPO/helpers" "$RS_STUB" "$RS_DIR" \
+sys.exit(0 if r.returncode!=0 and not os.path.exists(os.path.join(sys.argv[3],"probe.json")) else 1)'   "$REPO/helpers" "$RS_STUB" "$RS_REPO" \
   && ok "invoking the collector directly without permission refuses and writes nothing" || fail "direct invocation bypassed the permission gate"
 
 # 8. The live smoke path stays OUT of the corpus: this suite must never call TypeSafe.
@@ -474,3 +476,19 @@ RS_NOHTTP="$(cd "$REPO" && env COMMS_ROUTE_BACKEND=typesafe TYPESAFE_API_KEY=dum
    COMMS_ROUTE_URL=http://127.0.0.1:1/never $RS_CLEAN "$RS_SH" -- 'add a null check' 2>&1)"
 printf '%s' "$RS_NOHTTP" | grep -qx 'source: fail-open' \
   && ok "inherited live routing settings are stripped, so the suite cannot reach TypeSafe" || fail "suite reached a backend with inherited settings"
+
+# A BORROWED PERMIT MUST NOT WORK. Supplying another project's allowlisted key from a different
+# tree transmits that tree's task text under the wrong identity. (codex P1, implement r3.)
+RS_OTHER="$WORK/shadow-other"; mkdir -p "$RS_OTHER"; RS_OTHER="$(cd "$RS_OTHER" && pwd -P)"
+git -C "$RS_OTHER" init -q 2>/dev/null
+git -C "$RS_OTHER" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+python3 -c '
+import os,subprocess,sys
+helpers,stub,other,key=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
+env=dict(os.environ, COMMS_ROUTE_SHADOW_ID="borrow", COMMS_ROUTE_SHADOW_DIR=other,
+         COMMS_ROUTE_SHADOW_KEY=key, COMMS_ROUTE_TASK="client text", COMMS_ROUTE_BACKEND="stub",
+         COMMS_ROUTE_STUB=stub, COMMS_ROUTE_SHADOW_ALLOW=sys.argv[5])
+r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], cwd=other,
+                 env=env, capture_output=True, text=True)
+sys.exit(0 if r.returncode!=0 else 1)' "$REPO/helpers" "$RS_STUB" "$RS_OTHER" "$RS_KEY" "$RS_ALLOW" \
+  && ok "another project's permitted key cannot authorise this tree's task text" || fail "a borrowed permit was accepted"

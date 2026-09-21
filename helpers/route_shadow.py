@@ -35,6 +35,30 @@ TASK_LIMIT = 8000
 QUESTIONS = route_backend.QUESTIONS
 
 
+def _canonical_project_key():
+    """sha256 of the canonical MAIN repo root of the CURRENT working tree.
+
+    Derived here, never taken from the environment: permission that trusts a caller-supplied
+    identity is not permission. Mirrors route.sh's shadow_repo_key and runphase's
+    mount_repo_key so one clone is one project across worktrees and mounts.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode != 0:
+            return ""
+        first = out.stdout.splitlines()[0] if out.stdout.splitlines() else ""
+        if not first.startswith("worktree "):
+            return ""
+        root = os.path.realpath(first[len("worktree "):].strip())
+    except Exception:
+        return ""
+    if not root:
+        return ""
+    return hashlib.sha256(root.encode("utf-8")).hexdigest()
+
+
 def _permitted(key):
     """The allowlist check, enforced HERE as well as in route.sh.
 
@@ -96,9 +120,18 @@ def main():
     # written only because the project was explicitly permitted before the call was made.
     rec["sent"] = sent
 
-    # BEFORE the backend is resolved and long before any socket.
-    if not _permitted(rec["project_key"]):
-        _die("project %r is not permitted to transmit task text" % (rec["project_key"] or "",))
+    # BEFORE the backend is resolved and long before any socket. The key is DERIVED from the
+    # current tree; a supplied one that disagrees is a caller trying to borrow another
+    # project's permit, and is refused rather than honoured.
+    derived = _canonical_project_key()
+    supplied = rec["project_key"]
+    if not derived:
+        _die("cannot derive the project identity (not a git worktree?) — refusing")
+    if supplied and supplied != derived:
+        _die("supplied project key does not identify this repository — refusing")
+    rec["project_key"] = derived
+    if not _permitted(derived):
+        _die("project %s is not permitted to transmit task text" % derived)
 
     state = route_backend.build_state(sent)
     rec["questions_sha256"] = hashlib.sha256(
