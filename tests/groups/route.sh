@@ -439,16 +439,26 @@ sys.exit(0 if set(st)=={"task","kind"} and st["kind"]==rb.STATE_KIND and rs.rout
 grep -q 'route_backend.build_state(task)' "$RS_SH" \
   && ok "the live classify path uses the shared state builder too" || fail "classify path hand-builds state"
 
-# 7. A DECISION THAT CANNOT BE RECORDED IS A FAILURE, never a silent success.
+# 7. A DECISION THAT CANNOT BE RECORDED IS A FAILURE, never a silent success. Induced at the
+# DERIVED destination inside the temp repo: a supplied directory is ignored now, so the old
+# probe published into the live mailbox instead of failing. (codex, implement r5.)
 python3 -c '
-import os,subprocess,sys
-helpers=sys.argv[1]
-env=dict(os.environ, COMMS_ROUTE_SHADOW_ID="probe", COMMS_ROUTE_SHADOW_DIR="/proc/nonexistent-dir",
-         COMMS_ROUTE_TASK="x", COMMS_ROUTE_BACKEND="stub", COMMS_ROUTE_STUB=sys.argv[2])
-r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], env=env,
+import os,subprocess,sys,stat
+helpers,stub,repo,allow=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
+dest=os.path.join(repo,".comms","route-shadow")
+os.makedirs(os.path.dirname(dest), exist_ok=True)
+# Make the derived destination unusable: a FILE where the directory must be.
+if os.path.isdir(dest):
+    import shutil; shutil.rmtree(dest)
+open(dest,"w").close()
+env=dict(os.environ, COMMS_ROUTE_SHADOW_ID="writefail", COMMS_ROUTE_TASK="x",
+         COMMS_ROUTE_BACKEND="stub", COMMS_ROUTE_STUB=stub, COMMS_ROUTE_SHADOW_ALLOW=allow)
+env.pop("COMMS_ROUTE_SHADOW_KEY", None)
+r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], cwd=repo, env=env,
                  capture_output=True, text=True)
-sys.exit(0 if r.returncode!=0 else 1)' "$REPO/helpers" "$RS_STUB" \
-  && ok "an unwritable record directory fails loudly instead of losing a paid decision" || fail "write failure was swallowed"
+os.unlink(dest)
+sys.exit(0 if r.returncode!=0 else 1)' "$REPO/helpers" "$RS_STUB" "$RS_REPO" "$RS_ALLOW" \
+  && ok "an unusable derived record destination fails loudly instead of losing a paid decision" || fail "write failure was swallowed"
 
 # 7b. PERMISSION IS ENFORCED AT THE COLLECTOR BOUNDARY, not only in the shell. route_shadow.py
 # is installed executable with its own __main__, so a direct invocation bypassed the gate and
@@ -507,8 +517,13 @@ r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], cwd=
 sys.exit(0 if r.returncode!=0 else 1)' \
   "$REPO/helpers" "$RS_STUB" "$RS_OTHER" "$RS_ALLOW" "$RS_REPO/.git" \
   && ok "a GIT_DIR pointing at a permitted repo cannot authorise another tree" || fail "GIT_DIR selected another project"
-grep -q 'GIT_DIR' "$RS_SH" \
-  && ok "route.sh also strips repo-selection git variables when deriving identity" || fail "route.sh does not strip git selectors"
+# RUN the shell derivation under redirected git settings and require the SAME key as a clean
+# environment. A grep for the variable name passes if either scrub site is deleted.
+RS_CLEANKEY="$( cd "$RS_REPO" && eval "$RS_KEYFN"; shadow_repo_key )"
+RS_HIJACK="$( cd "$RS_REPO" && GIT_DIR="$REPO/.git" GIT_WORK_TREE="$REPO" eval "$RS_KEYFN"; \
+              cd "$RS_REPO" && GIT_DIR="$REPO/.git" GIT_WORK_TREE="$REPO" shadow_repo_key )"
+[ -n "$RS_CLEANKEY" ] && [ "$RS_CLEANKEY" = "$RS_HIJACK" ] \
+  && ok "the shell derivation ignores a redirected GIT_DIR/GIT_WORK_TREE and yields the same key" || fail "redirected git settings changed the shell-derived identity (clean=$RS_CLEANKEY hijacked=$RS_HIJACK)"
 
 # A DECISION ID NAMES A FILE, so anything but a bare token can traverse out of the record root.
 python3 -c '
