@@ -346,8 +346,11 @@ RS_KEY="$( cd "$REPO" && eval "$RS_KEYFN"; shadow_repo_key )"
 # 1. THE COUPLING THIS SLICE EXISTS TO AVOID. resolve() treats COMMS_ROUTE_BACKEND /
 # COMMS_ROUTE / COMMS_ROUTE_STUB as the on-switch, so a collector implemented by exporting one
 # of them would silently arm the live classify path while every other assertion stayed green.
-RS_BASE="$(cd "$REPO" && "$RS_SH" -- 'add a null check' 2>/dev/null)"
-RS_WITH="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_ID=x \
+# NO LIVE ROUTING SETTINGS may reach these calls: the suite must never contact TypeSafe, and
+# the harness does not clear the developer's environment. (codex P1, implement r1/r2.)
+RS_CLEAN="env -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE -u COMMS_ROUTE_STUB -u TYPESAFE_API_KEY -u COMMS_ROUTE_URL -u COMMS_ROUTE_MODEL"
+RS_BASE="$(cd "$REPO" && $RS_CLEAN "$RS_SH" -- 'add a null check' 2>/dev/null)"
+RS_WITH="$(cd "$REPO" && $RS_CLEAN COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_ID=x \
              COMMS_ROUTE_SHADOW_DIR="$WORK" COMMS_ROUTE_SHADOW_KEY=k COMMS_ROUTE_SHADOW_BACKEND=stub \
              "$RS_SH" -- 'add a null check' 2>/dev/null)"
 [ -n "$RS_BASE" ] && [ "$RS_BASE" = "$RS_WITH" ] \
@@ -357,7 +360,7 @@ printf '%s\n' "$RS_BASE" | grep -qx 'source: fail-open' \
 
 # 2. STDOUT ISOLATION, observed rather than asserted about. /auto seds plan/effort/tier/source
 # out of `route` output; the shadow path must emit none of them, ever.
-RS_OUT="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW=/nonexistent-allow "$RS_SH" --shadow -- 'x' 2>/dev/null)"; RS_RC=$?
+RS_OUT="$(cd "$REPO" && $RS_CLEAN COMMS_ROUTE_SHADOW_ALLOW=/nonexistent-allow "$RS_SH" --shadow -- 'x' 2>/dev/null)"; RS_RC=$?
 [ "$(printf '%s' "$RS_OUT" | grep -cE '^(plan|effort|complexity|tier|gate|source|reason|plan_p|effort_p|complexity_confidence):')" = 0 ] \
   && ok "the shadow path emits no classify key on stdout, so /auto has nothing to read" || fail "shadow stdout carried a classify key"
 
@@ -365,7 +368,7 @@ RS_OUT="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW=/nonexistent-allow "$RS_SH"
 # project the operator has not permitted; client work is in scope.
 [ "$RS_RC" -ne 0 ] \
   && ok "an unpermitted project refuses the shadow run" || fail "unpermitted project was allowed to run"
-RS_ERR="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW=/nonexistent-allow COMMS_ROUTE_URL=http://127.0.0.1:1 \
+RS_ERR="$(cd "$REPO" && $RS_CLEAN COMMS_ROUTE_SHADOW_ALLOW=/nonexistent-allow COMMS_ROUTE_URL=http://127.0.0.1:1 \
             "$RS_SH" --shadow -- 'x' 2>&1 >/dev/null)"
 printf '%s' "$RS_ERR" | grep -q 'not permitted' \
   && ok "the refusal names permission, and happens before any request is attempted" || fail "refusal did not cite permission"
@@ -463,3 +466,11 @@ sys.exit(0 if r.returncode!=0 and not os.path.exists(os.path.join(sys.argv[3],"p
 # 8. The live smoke path stays OUT of the corpus: this suite must never call TypeSafe.
 grep -q 'COMMS_ROUTE_SHADOW_BACKEND' "$RS_SH" \
   && ok "the collector's backend is overridable so the suite never needs TypeSafe" || fail "collector backend is not overridable"
+
+# THE CRITERION ITSELF, executed: with live routing settings inherited and a dummy credential,
+# the classify path must still make no request. Point the URL at a closed port so a real
+# attempt would be visible as a connection error rather than silently succeeding.
+RS_NOHTTP="$(cd "$REPO" && env COMMS_ROUTE_BACKEND=typesafe TYPESAFE_API_KEY=dummy \
+   COMMS_ROUTE_URL=http://127.0.0.1:1/never $RS_CLEAN "$RS_SH" -- 'add a null check' 2>&1)"
+printf '%s' "$RS_NOHTTP" | grep -qx 'source: fail-open' \
+  && ok "inherited live routing settings are stripped, so the suite cannot reach TypeSafe" || fail "suite reached a backend with inherited settings"

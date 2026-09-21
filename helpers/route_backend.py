@@ -187,20 +187,35 @@ def backend_stub(state, questions, timeout):
 # module-level rather than returned, because route.sh unpacks classify() as a 2-tuple and a
 # third element would become a non-zero python exit — a fail-open on the LIVE path.
 # Distinguishes "no response received" from "response received but unusable".
-LAST_RAW = {"body": None, "http_status": None, "received": False}
+LAST_RAW = {"body": None, "http_status": None, "received": False, "decodable": None}
 
 
 def _reset_raw():
     LAST_RAW["body"] = None
     LAST_RAW["http_status"] = None
     LAST_RAW["received"] = False
+    LAST_RAW["decodable"] = None
 
 
-def _observe(body, http_status=None):
-    LAST_RAW["body"] = body
+def _observe(raw, http_status=None):
+    """Record a received body losslessly. Returns bytes; callers decode as THEY require.
+
+    The record wants every byte that arrived; classification wants strict UTF-8. Conflating
+    those let a lossy decode change a live routing decision. (codex P2, implement r2.)
+    """
+    if isinstance(raw, bytes):
+        try:
+            raw.decode("utf-8")
+            LAST_RAW["decodable"] = True
+        except UnicodeDecodeError:
+            LAST_RAW["decodable"] = False
+        LAST_RAW["body"] = raw.decode("utf-8", "replace")
+    else:
+        LAST_RAW["decodable"] = True
+        LAST_RAW["body"] = raw
     LAST_RAW["http_status"] = http_status
     LAST_RAW["received"] = True
-    return body
+    return raw
 
 
 @register("typesafe", "jev")
@@ -228,12 +243,14 @@ def backend_typesafe(state, questions, timeout):
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = _observe(resp.read().decode("utf-8", "replace"), getattr(resp, "status", None))
+            # Observe the BYTES, then decode STRICTLY for classification — unchanged from
+            # pre-collector behaviour, so an undecodable body still fails closed.
+            body = _observe(resp.read(), getattr(resp, "status", None)).decode("utf-8")
     except urllib.error.HTTPError as e:
         # An error body is evidence too: a 4xx explaining a bad model id is exactly what the
         # smoke test exists to surface, and discarding it leaves "request failed (HTTPError)".
         try:
-            _observe(e.read().decode("utf-8", "replace"), getattr(e, "code", None))
+            _observe(e.read(), getattr(e, "code", None))
         except Exception:
             pass
         raise BackendError(f"request failed (HTTPError {getattr(e, 'code', '?')})") from e

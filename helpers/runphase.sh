@@ -2227,8 +2227,16 @@ for f in files:
             undecidable("a turn_context in the window carries no turn identifiers")
         if tid!=rid: continue                # a child turn, not the billable root
         roots.append((p.get("effort"),p.get("model"),tid,f,start))
-if len(roots)!=1:
-    undecidable("expected exactly one root turn_context in the post-prompt window, found %d"%len(roots))
+# ALL ROOTS MUST AGREE — not "exactly one". A real round-2 warm resumed session emitted FOUR
+# root turn_contexts, all gpt-6-astra/xhigh, and exactly-one-root refused that honest turn in a
+# live project. grok predicted this in the effort-pin arc ("widen the selector rather than
+# taking any matching root in the window") and prescribed this shape: agreement still catches a
+# wrong-depth turn, because a turn that ran at two different depths is itself not attestable.
+if not roots:
+    undecidable("no root turn_context in the post-prompt window")
+_pairs={(e, m) for e, m, _t, _s, _o in roots}
+if len(_pairs)!=1:
+    undecidable("root turn_contexts disagree on model/effort: %s" % sorted(_pairs))
 eff,mod,tid,src,off=roots[0]
 # effort, model, backend turn id, rollout path, snapshot byte boundary -- the evidence a
 # refusal needs to be reconstructable once the isolated home is gone. (codex, live-proof r1.)

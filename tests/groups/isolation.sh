@@ -514,3 +514,24 @@ ISO_NOQ="$(printf '%s' "$ISO_RC" | sed "s/printf -v _q '%q'/printf -v _q '%s'/")
 ISO_BROKE="$( ( eval "$ISO_NOQ"; policy_retire_cmd codex S '/private/tmp/review mounts/x' ) )"
 [ "$(eval "set -- ${ISO_BROKE#acpx }"; printf '%s' "$2")" != '/private/tmp/review mounts/x' ] \
   && ok "removing %q from the renderer breaks the round-trip — the escaping test can fail" || fail "the escaping control passes unescaped; the test is vacuous"
+
+# ALL ROOTS MUST AGREE, not exactly one. A live round-2 warm resumed session in another project
+# emitted FOUR root turn_contexts, all gpt-6-astra/xhigh, and the exactly-one rule refused that
+# honest turn with status 21 — blocking a real review. grok predicted this shape in the
+# effort-pin arc and prescribed widening the selector rather than accepting any matching root.
+ISO_MR="$WORK/rollout-multiroot"; rm -rf "$ISO_MR"; mkdir -p "$ISO_MR/sessions/2026/09/20"
+ISO_MF="$ISO_MR/sessions/2026/09/20/rollout-m.jsonl"
+iso_observed6() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_MR" "$1" ) 2>/dev/null; }
+: > "$WORK/snap-mr.txt"
+for i in 1 2 3 4; do iso_ctx "t-$i" "t-$i" gpt-6-astra xhigh >> "$ISO_MF"; done
+[ "$(iso_observed6 "$WORK/snap-mr.txt" | cut -f1,2)" = "$(printf 'xhigh\tgpt-6-astra')" ] \
+  && ok "four AGREEING root turn_contexts attest instead of refusing an honest turn" || fail "agreeing roots still refused"
+# ...but a turn that ran at two different depths is not attestable and must still refuse.
+iso_ctx t-5 t-5 gpt-6-astra medium >> "$ISO_MF"
+iso_observed6 "$WORK/snap-mr.txt" >/dev/null 2>&1 \
+  && fail "disagreeing roots were accepted" || ok "roots that DISAGREE on depth still refuse — widening did not weaken the gate"
+# Zero roots remains undecidable.
+ISO_ZR="$WORK/rollout-zeroroot"; rm -rf "$ISO_ZR"; mkdir -p "$ISO_ZR/sessions/2026/09/20"
+iso_ctx t-c t-parent gpt-6-astra xhigh > "$ISO_ZR/sessions/2026/09/20/rollout-z.jsonl"
+( eval "$ISO_RO"; acp_rollout_observed "$ISO_ZR" "$WORK/snap-mr.txt" ) >/dev/null 2>&1 \
+  && fail "a window with no root was accepted" || ok "no root in the window is still undecidable"
