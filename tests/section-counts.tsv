@@ -49,7 +49,7 @@ comms.sh: help prints its whole header	2
 templates: /auto query route	8
 comms.sh: route fail-open	11
 comms.sh: route policy	34
-route.sh: the shadow collector cannot reach /auto	28
+route.sh: the shadow collector cannot reach /auto	30
 install.sh: .codex/AGENTS.md managed block	47
 grading pilot: findings extraction (the single-reviewer baseline)	15
 grading pilot: --out ledger is append-only and idempotent	4

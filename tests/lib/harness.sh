@@ -1,6 +1,15 @@
 # Shared counters, coverage verdicts and exit sentinel.
 set -uo pipefail
 
+# HERMETIC, FIRST: repository-selection git variables. With GIT_DIR/GIT_WORK_TREE inherited,
+# `git -C <fixture>` resolves to the CALLER'S repository, so fixture `init` and
+# `commit --allow-empty` would write into live git state before any test-level scrub runs —
+# verified: `GIT_DIR=<repo>/.git git -C /tmp/empty rev-parse --show-toplevel` prints the repo.
+# Unset at suite entry, ahead of every git operation; tests that need them set them locally.
+# (codex, shadow-collector implement r7.)
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_PREFIX 2>/dev/null || true
+
 # HERMETIC: scrub inherited headless-delivery env — a harness run from INSIDE a
 # headless peer turn (e.g. Codex reviewing this repo) inherits these and would
 # route baseline tests through headless delivery (observed live: 40

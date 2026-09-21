@@ -601,3 +601,16 @@ wrote=os.path.exists(os.path.join(dest,"postresp.json"))
 sys.exit(0 if r.returncode!=0 and not wrote and "could not write" in r.stderr else 1)' \
   "$REPO/helpers" "$RS_STUB" "$RS_REPO" "$RS_ALLOW" \
   && ok "a decision that answers but cannot be published fails loudly at the write" || fail "a post-response write failure was not reported"
+
+# THE HARNESS MUST SCRUB REPOSITORY-SELECTION GIT VARIABLES BEFORE ANY FIXTURE RUNS. Without
+# that, `git -C <fixture> init && commit` resolves to the CALLER'S repository and the suite
+# writes live git state. Assert the scrub by BEHAVIOUR: inside a non-repo directory, git must
+# fail to resolve a toplevel — which it cannot do if a selector survived. (codex r7.)
+RS_NOREPO="$WORK/not-a-repo"; mkdir -p "$RS_NOREPO"
+( cd "$RS_NOREPO" && git rev-parse --show-toplevel ) >/dev/null 2>&1 \
+  && fail "a git selector survived into the suite: a non-repo directory resolved a toplevel" \
+  || ok "the harness scrubs repository-selection git variables before fixtures run"
+for _v in GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY; do
+  [ -z "${!_v:-}" ] || fail "$_v survived into the suite environment"
+done
+ok "no repository-selection git variable is set in the suite environment"

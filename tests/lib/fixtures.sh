@@ -267,7 +267,8 @@ case " $* " in
     # THE CANARY IS A PROMPT TOO, so real codex records a turn_context for it. Emitting one
     # here means the snapshot has pre-prompt bytes to exclude: an empty or broken snapshot now
     # shows TWO roots and refuses, instead of looking honest. (codex + grok, implement r3.)
-    if [ -n "${CODEX_HOME:-}" ] && [ -z "${AX_ROLLOUT_NONE:-}" ] && [ -z "${AX_NO_CANARY_ROLLOUT:-}" ]; then
+    if [ -n "${CODEX_HOME:-}" ] && [ -z "${AX_ROLLOUT_NONE:-}" ] && [ -z "${AX_NO_CANARY_ROLLOUT:-}" ] \
+       && [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx-test-store" ]; then
       ax_cd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_cd" 2>/dev/null
       printf '{"type":"turn_context","payload":{"turn_id":"t-canary","root_turn_id":"t-canary","model":"%s","effort":"%s"}}\n' \
         "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}" >> "$ax_cd/rollout-stub.jsonl" 2>/dev/null || true
@@ -288,7 +289,7 @@ fi
 #   AX_ROLLOUT_NEW_FILE — append to a NEW jsonl, as a replacement session does.
 #   AX_ROLLOUT_NONE     — write nothing (evidence missing -> undecidable).
 #   AX_ROLLOUT_DOUBLE   — two root contexts (ambiguous -> undecidable).
-if [ -n "${CODEX_HOME:-}" ] && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
+if [ -n "${CODEX_HOME:-}" ] && [ -z "${AX_ROLLOUT_NONE:-}" ] && [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx-test-store" ]; then
   ax_rd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_rd" 2>/dev/null
   ax_rf="$ax_rd/rollout-stub.jsonl"
   [ -n "${AX_ROLLOUT_NEW_FILE:-}" ] && ax_rf="$ax_rd/rollout-stub-replacement.jsonl"
