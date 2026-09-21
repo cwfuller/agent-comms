@@ -35,6 +35,26 @@ TASK_LIMIT = 8000
 QUESTIONS = route_backend.QUESTIONS
 
 
+def _permitted(key):
+    """The allowlist check, enforced HERE as well as in route.sh.
+
+    This module is installed executable and has its own __main__, so a caller that runs it
+    directly — including the suite — bypassed the shell-side gate entirely and could reach
+    HTTP with an empty project key. Permission is a property of the backend-call boundary,
+    not of one entry path. (codex P1, implement r1.)
+    """
+    if not key:
+        return False
+    allow = os.environ.get("COMMS_ROUTE_SHADOW_ALLOW") or os.path.join(
+        os.environ.get("AGENT_COMMS_HOME") or os.path.expanduser("~/.agent-comms"),
+        "route-shadow-allow")
+    try:
+        with open(allow, "r", encoding="utf-8") as fh:
+            return any(line.strip() == key for line in fh)
+    except OSError:
+        return False
+
+
 def _die(msg):
     sys.stderr.write("route_shadow: %s\n" % msg)
     raise SystemExit(1)
@@ -76,9 +96,16 @@ def main():
     # written only because the project was explicitly permitted before the call was made.
     rec["sent"] = sent
 
-    state = {"task": sent}
+    # BEFORE the backend is resolved and long before any socket.
+    if not _permitted(rec["project_key"]):
+        _die("project %r is not permitted to transmit task text" % (rec["project_key"] or "",))
+
+    state = route_backend.build_state(sent)
     rec["questions_sha256"] = hashlib.sha256(
         json.dumps(QUESTIONS, sort_keys=True).encode("utf-8")).hexdigest()
+    # The COMPLETE outbound payload, so a replay can prove it matched production.
+    rec["state_sha256"] = hashlib.sha256(
+        json.dumps(state, sort_keys=True).encode("utf-8")).hexdigest()
     name, fn = route_backend.resolve()
     if not fn:
         _die("no backend resolved (the collector sets COMMS_ROUTE_BACKEND for its own call only)")

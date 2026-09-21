@@ -112,6 +112,23 @@ QUESTIONS = {
     },
 }
 
+# THE OUTBOUND STATE, built in ONE place. Both the live classify path and the shadow collector
+# call this: a collector that sent `{"task": ...}` without `kind` recorded decisions made under
+# a DIFFERENT prompt from the one production sends, which makes the observation worthless for
+# the comparison it exists to support. Same class of bug as hand-writing QUESTIONS.
+# (codex P2 + grok, shadow-collector implement r1 — corroborated.)
+STATE_KIND = (
+    "agent-comms /auto query. Decide whether an approach-review "
+    "phase is warranted, and how much reasoning effort the "
+    "implementer needs. Do not pick a reviewer or a vendor model."
+)
+
+
+def build_state(task):
+    """The exact outbound state both callers send."""
+    return {"task": task, "kind": STATE_KIND}
+
+
 BACKENDS = {}
 ALIASES = {}
 
@@ -151,6 +168,7 @@ def _parse_answers(body_text):
 
 @register("stub")
 def backend_stub(state, questions, timeout):
+    _reset_raw()
     path = os.environ.get("COMMS_ROUTE_STUB") or ""
     if not path:
         raise BackendError("COMMS_ROUTE_STUB is unset")
@@ -172,6 +190,12 @@ def backend_stub(state, questions, timeout):
 LAST_RAW = {"body": None, "http_status": None, "received": False}
 
 
+def _reset_raw():
+    LAST_RAW["body"] = None
+    LAST_RAW["http_status"] = None
+    LAST_RAW["received"] = False
+
+
 def _observe(body, http_status=None):
     LAST_RAW["body"] = body
     LAST_RAW["http_status"] = http_status
@@ -181,6 +205,7 @@ def _observe(body, http_status=None):
 
 @register("typesafe", "jev")
 def backend_typesafe(state, questions, timeout):
+    _reset_raw()
     key = os.environ.get("TYPESAFE_API_KEY") or ""
     if not key:
         raise BackendError("TYPESAFE_API_KEY is unset")
@@ -203,7 +228,7 @@ def backend_typesafe(state, questions, timeout):
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = _observe(resp.read().decode("utf-8"), getattr(resp, "status", None))
+            body = _observe(resp.read().decode("utf-8", "replace"), getattr(resp, "status", None))
     except urllib.error.HTTPError as e:
         # An error body is evidence too: a 4xx explaining a bad model id is exactly what the
         # smoke test exists to surface, and discarding it leaves "request failed (HTTPError)".

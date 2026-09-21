@@ -1484,11 +1484,18 @@ cmd_route() {
     # answering `--shadow` with those ten keys would hand a caller a decision the collector
     # never made, and would defeat the stdout isolation the shadow path is built on. Refuse
     # any non-classify argv loudly instead. (grok, shadow-collector plan r1.)
-    case " $* " in
-      *" --shadow "*|*" --shadow-map "*)
+    # Scan OPTIONS ONLY, stopping at `--`, exactly as route.sh does. A flattened `$*` match
+    # loses argument boundaries and the terminator, so `route -- "document the --shadow flag"`
+    # was refused instead of failing open — ordinary task text is not an option.
+    # (codex P2 + grok, implement r1.) `--shadow-map` is not matched: it has no implementation.
+    local _a
+    for _a in "$@"; do
+      [ "$_a" = "--" ] && break
+      if [ "$_a" = "--shadow" ]; then
         echo "comms.sh: route: helper missing at $sh — cannot run the shadow collector" >&2
-        return 1 ;;
-    esac
+        return 1
+      fi
+    done
     echo "comms.sh: route: helper missing at $sh — fail-open" >&2
     # Must match route.sh KEYS_FAIL_OPEN (stable 10-key set including tier/gate).
     printf 'plan: no\neffort: medium\ncomplexity: standard\ntier: balanced\ngate: fail-open\nplan_p: -\neffort_p: -\ncomplexity_confidence: -\nsource: fail-open\nreason: route.sh is not installed next to comms.sh\n'

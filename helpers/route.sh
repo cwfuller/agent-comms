@@ -109,7 +109,11 @@ shadow_run() {
   # before `git add -A`. A file anywhere else in the worktree would be snapshotted into the
   # review artifact, so a reviewer would read the task text and the mapped decision — a path
   # into a live loop that sits outside the stdout contract. (grok, plan r1.)
-  dir="$root/.comms/route-shadow"
+  # The record root. Defaults to the MAIN repo's gitignored .comms/ — which cmd_snapshot
+  # strips, so a record can never ride into a review artifact. Overridable ONLY so the suite
+  # can write into its own work dir: without that, every suite run dropped real task text
+  # into the live mailbox. (grok, implement r1.)
+  dir="${COMMS_ROUTE_SHADOW_RECORD_DIR:-$root/.comms/route-shadow}"
   mkdir -p "$dir" || shadow_die "cannot create $dir"
   id="$(shadow_decision_id)" || shadow_die "cannot mint a decision id"
   COMMS_ROUTE_SHADOW_ID="$id" \
@@ -150,6 +154,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --shadow) shadow_mode=1; shift ;;
     --thread)
+      [ "$shadow_mode" -eq 1 ] || usage_err "--thread is only valid with --shadow"
       [ $# -ge 2 ] || usage_err "--thread needs a value"
       shadow_thread="$2"; shift 2 ;;
     --task)
@@ -377,14 +382,9 @@ try:
 except ValueError:
     fail_open("COMMS_ROUTE_TIMEOUT_SECS is not a positive integer")
 
-state = {
-    "task": task,
-    "kind": (
-        "agent-comms /auto query. Decide whether an approach-review "
-        "phase is warranted, and how much reasoning effort the "
-        "implementer needs. Do not pick a reviewer or a vendor model."
-    ),
-}
+# ONE state builder, shared with the shadow collector so an observation can never be made
+# under a different prompt than production sends. (codex P2 + grok, implement r1.)
+state = route_backend.build_state(task)
 try:
     backend_name, answers = route_backend.classify(state, timeout)
 except route_backend.BackendError as e:

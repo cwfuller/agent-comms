@@ -383,11 +383,17 @@ RS_STUB="$WORK/shadow-stub.json"
 printf '%s' '{"answers":{"needs_plan":{"noul":0.9},"complexity":{"probabilities":{"0":0,"1":0,"2":1,"3":0},"confidence":0.8},"effort":{"choice":"high","confidence":0.9}}}' > "$RS_STUB"
 printf '%s\n' "$RS_KEY" > "$RS_ALLOW"
 RS_DIR="$WORK/shadow-out"; mkdir -p "$RS_DIR"
-RS_ID="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub \
+# RECORD INTO THE WORK DIR. Without this every suite run wrote real task text into the live
+# .comms/ mailbox of whatever checkout ran it. (grok, implement r1.)
+RS_SOUT="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub \
+           COMMS_ROUTE_SHADOW_RECORD_DIR="$RS_DIR" \
            COMMS_ROUTE_STUB="$RS_STUB" "$RS_SH" --shadow --thread t-1 --current-tier strong --context-tokens 900 \
-           -- 'refactor the scheduler' 2>/dev/null | sed -n 's/^shadow-decision //p')"
+           -- 'refactor the scheduler' 2>/dev/null)"
+RS_ID="$(printf '%s' "$RS_SOUT" | sed -n 's/^shadow-decision //p')"
+[ "$(printf '%s' "$RS_SOUT" | grep -cE '^(plan|effort|complexity|tier|gate|source|reason):')" = 0 ] \
+  && ok "the SUCCESS path emits no classify key either, not just the refusal path" || fail "success path leaked a classify key"
 [ -n "$RS_ID" ] && ok "a permitted shadow run prints a decision id and nothing else" || fail "no decision id on stdout"
-RS_REC="$(cd "$REPO" && git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')/.comms/route-shadow/$RS_ID.json"
+RS_REC="$RS_DIR/$RS_ID.json"
 [ -f "$RS_REC" ] && ok "the decision is recorded under the main repo's gitignored .comms/" || fail "no record at $RS_REC"
 python3 -c '
 import json,sys
@@ -416,9 +422,19 @@ import route_backend, route_shadow
 sys.exit(0 if route_shadow.QUESTIONS is route_backend.QUESTIONS else 1)' "$REPO/helpers" \
   && ok "the collector sends the production question set, not a reimplementation" || fail "collector reimplements QUESTIONS"
 
+# 6b. THE OUTBOUND STATE MUST BE PRODUCTION'S. A collector that sent {"task":...} without
+# `kind` recorded decisions made under a different prompt — both reviewers caught it.
+python3 -c '
+import sys
+sys.path.insert(0,sys.argv[1])
+import route_backend as rb, route_shadow as rs
+st=rb.build_state("t")
+sys.exit(0 if set(st)=={"task","kind"} and st["kind"]==rb.STATE_KIND and rs.route_backend.build_state is rb.build_state else 1)' "$REPO/helpers" \
+  && ok "both callers build the outbound state from one shared builder including kind" || fail "state builder diverged"
+grep -q 'route_backend.build_state(task)' "$RS_SH" \
+  && ok "the live classify path uses the shared state builder too" || fail "classify path hand-builds state"
+
 # 7. A DECISION THAT CANNOT BE RECORDED IS A FAILURE, never a silent success.
-(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub \
-   COMMS_ROUTE_STUB="$RS_STUB" COMMS_ROUTE_SHADOW_DIR_OVERRIDE=1 "$RS_SH" --shadow -- 'x' ) >/dev/null 2>&1
 python3 -c '
 import os,subprocess,sys
 helpers=sys.argv[1]
@@ -428,6 +444,21 @@ r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], env=
                  capture_output=True, text=True)
 sys.exit(0 if r.returncode!=0 else 1)' "$REPO/helpers" "$RS_STUB" \
   && ok "an unwritable record directory fails loudly instead of losing a paid decision" || fail "write failure was swallowed"
+
+# 7b. PERMISSION IS ENFORCED AT THE COLLECTOR BOUNDARY, not only in the shell. route_shadow.py
+# is installed executable with its own __main__, so a direct invocation bypassed the gate and
+# could reach HTTP with an empty project key. (codex P1, implement r1.)
+python3 -c '
+import os,subprocess,sys
+helpers=sys.argv[1]
+env=dict(os.environ, COMMS_ROUTE_SHADOW_ID="probe", COMMS_ROUTE_SHADOW_DIR=sys.argv[3],
+         COMMS_ROUTE_TASK="x", COMMS_ROUTE_BACKEND="stub", COMMS_ROUTE_STUB=sys.argv[2],
+         COMMS_ROUTE_SHADOW_ALLOW="/nonexistent-allow")
+env.pop("COMMS_ROUTE_SHADOW_KEY", None)
+r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], env=env,
+                 capture_output=True, text=True)
+sys.exit(0 if r.returncode!=0 and not os.path.exists(os.path.join(sys.argv[3],"probe.json")) else 1)'   "$REPO/helpers" "$RS_STUB" "$RS_DIR" \
+  && ok "invoking the collector directly without permission refuses and writes nothing" || fail "direct invocation bypassed the permission gate"
 
 # 8. The live smoke path stays OUT of the corpus: this suite must never call TypeSafe.
 grep -q 'COMMS_ROUTE_SHADOW_BACKEND' "$RS_SH" \
