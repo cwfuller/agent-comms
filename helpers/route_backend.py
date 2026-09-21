@@ -13,6 +13,7 @@
 """Swappable decision backends for comms.sh route."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 import urllib.error
@@ -187,7 +188,8 @@ def backend_stub(state, questions, timeout):
 # module-level rather than returned, because route.sh unpacks classify() as a 2-tuple and a
 # third element would become a non-zero python exit — a fail-open on the LIVE path.
 # Distinguishes "no response received" from "response received but unusable".
-LAST_RAW = {"body": None, "http_status": None, "received": False, "decodable": None}
+LAST_RAW = {"body": None, "body_b64": None, "http_status": None, "received": False,
+            "decodable": None}
 
 
 def _reset_raw():
@@ -195,6 +197,7 @@ def _reset_raw():
     LAST_RAW["http_status"] = None
     LAST_RAW["received"] = False
     LAST_RAW["decodable"] = None
+    LAST_RAW["body_b64"] = None
 
 
 def _observe(raw, http_status=None):
@@ -210,9 +213,11 @@ def _observe(raw, http_status=None):
         except UnicodeDecodeError:
             LAST_RAW["decodable"] = False
         LAST_RAW["body"] = raw.decode("utf-8", "replace")
+        LAST_RAW["body_b64"] = base64.b64encode(raw).decode("ascii")
     else:
         LAST_RAW["decodable"] = True
         LAST_RAW["body"] = raw
+        LAST_RAW["body_b64"] = base64.b64encode(raw.encode("utf-8")).decode("ascii")
     LAST_RAW["http_status"] = http_status
     LAST_RAW["received"] = True
     return raw

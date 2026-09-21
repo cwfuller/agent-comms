@@ -492,3 +492,61 @@ r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], cwd=
                  env=env, capture_output=True, text=True)
 sys.exit(0 if r.returncode!=0 else 1)' "$REPO/helpers" "$RS_STUB" "$RS_OTHER" "$RS_KEY" "$RS_ALLOW" \
   && ok "another project's permitted key cannot authorise this tree's task text" || fail "a borrowed permit was accepted"
+# GIT_DIR AND FRIENDS CAN SELECT ANOTHER REPOSITORY. From an unpermitted tree, pointing GIT_DIR
+# at a permitted repo made the collector authorise and record THAT repo's identity for this
+# tree's task text. Identity derivation must ignore repo-selection variables. (codex P1, r4.)
+python3 -c '
+import os,subprocess,sys
+helpers,stub,other,allow,realgit=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5]
+env=dict(os.environ, GIT_DIR=realgit, COMMS_ROUTE_SHADOW_ID="gitdir",
+         COMMS_ROUTE_TASK="client text", COMMS_ROUTE_BACKEND="stub", COMMS_ROUTE_STUB=stub,
+         COMMS_ROUTE_SHADOW_ALLOW=allow)
+env.pop("COMMS_ROUTE_SHADOW_KEY", None)
+r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], cwd=other,
+                 env=env, capture_output=True, text=True)
+sys.exit(0 if r.returncode!=0 else 1)' \
+  "$REPO/helpers" "$RS_STUB" "$RS_OTHER" "$RS_ALLOW" "$RS_REPO/.git" \
+  && ok "a GIT_DIR pointing at a permitted repo cannot authorise another tree" || fail "GIT_DIR selected another project"
+grep -q 'GIT_DIR' "$RS_SH" \
+  && ok "route.sh also strips repo-selection git variables when deriving identity" || fail "route.sh does not strip git selectors"
+
+# A DECISION ID NAMES A FILE, so anything but a bare token can traverse out of the record root.
+python3 -c '
+import os,subprocess,sys
+helpers,stub,repo,allow=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
+env=dict(os.environ, COMMS_ROUTE_SHADOW_ID="../../escaped", COMMS_ROUTE_TASK="x",
+         COMMS_ROUTE_BACKEND="stub", COMMS_ROUTE_STUB=stub, COMMS_ROUTE_SHADOW_ALLOW=allow)
+env.pop("COMMS_ROUTE_SHADOW_KEY", None)
+r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], cwd=repo,
+                 env=env, capture_output=True, text=True)
+escaped=os.path.exists(os.path.join(os.path.dirname(repo),"escaped.json"))
+sys.exit(0 if r.returncode!=0 and not escaped else 1)' \
+  "$REPO/helpers" "$RS_STUB" "$RS_REPO" "$RS_ALLOW" \
+  && ok "a traversing decision id is refused and writes nothing outside the record root" || fail "decision id escaped the record root"
+
+# THE DESTINATION IS DERIVED, not supplied: removing the shell override was not enough while
+# the collector still honoured COMMS_ROUTE_SHADOW_DIR on its own entry path.
+python3 -c '
+import os,subprocess,sys,glob
+helpers,stub,repo,allow,bad=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5]
+env=dict(os.environ, COMMS_ROUTE_SHADOW_ID="dirprobe", COMMS_ROUTE_TASK="x",
+         COMMS_ROUTE_BACKEND="stub", COMMS_ROUTE_STUB=stub, COMMS_ROUTE_SHADOW_ALLOW=allow,
+         COMMS_ROUTE_SHADOW_DIR=bad)
+env.pop("COMMS_ROUTE_SHADOW_KEY", None)
+subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], cwd=repo, env=env,
+               capture_output=True, text=True)
+here=os.path.exists(os.path.join(repo,".comms","route-shadow","dirprobe.json"))
+there=glob.glob(os.path.join(bad,"dirprobe*"))
+sys.exit(0 if here and not there else 1)' \
+  "$REPO/helpers" "$RS_STUB" "$RS_REPO" "$RS_ALLOW" "$WORK/not-the-record-root" \
+  && ok "the record lands in the derived .comms/, never where COMMS_ROUTE_SHADOW_DIR points" || fail "a supplied directory redirected the record"
+
+# Lossless raw retention: distinct invalid bytes must not collapse to the same stored text.
+python3 -c '
+import sys
+sys.path.insert(0,sys.argv[1])
+import route_backend as rb
+rb._reset_raw(); rb._observe(b"{}\xff", 200); a=rb.LAST_RAW["body_b64"]
+rb._reset_raw(); rb._observe(b"{}\xfe", 200); b=rb.LAST_RAW["body_b64"]
+sys.exit(0 if a and b and a!=b else 1)' "$REPO/helpers" \
+  && ok "distinct invalid bytes are retained distinctly, not collapsed by a lossy decode" || fail "raw retention is lossy"
