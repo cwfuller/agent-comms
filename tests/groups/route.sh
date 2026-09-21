@@ -329,3 +329,106 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/partial.json" -- "use plan first and use strong"
 [ "$rc" -eq 0 ] && [ "$(rt_kv "$OUT" plan)" = "yes" ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] \
   && [ "$(rt_kv "$OUT" source)" = "override" ] \
   && ok "prompt override survives malformed backend answers" || fail "override on malformed answers (rc=$rc out=$OUT)"
+
+section "route.sh: the shadow collector cannot reach /auto"
+# THE COLLECTOR EXISTS TO OBSERVE, NEVER TO DECIDE. Every assertion here RUNS the real code:
+# this arc shipped five reimplementation bugs, the last of which sent `questions` as a list and
+# drew HTTP 422 from the live API on the first real call. Asserting source shape would have
+# caught none of them.
+RS_SH="$REPO/helpers/route.sh"
+RS_ALLOW="$WORK/shadow-allow"; : > "$RS_ALLOW"
+# EXTRACT the production key function rather than recomputing it. A hand-rolled version of
+# this produced a different hash and left the permit never matching — the same reimplementation
+# mistake that sent `questions` as a list.
+RS_KEYFN="$(sed -n '/^shadow_repo_key() {/,/^}/p' "$RS_SH")"
+RS_KEY="$( cd "$REPO" && eval "$RS_KEYFN"; shadow_repo_key )"
+
+# 1. THE COUPLING THIS SLICE EXISTS TO AVOID. resolve() treats COMMS_ROUTE_BACKEND /
+# COMMS_ROUTE / COMMS_ROUTE_STUB as the on-switch, so a collector implemented by exporting one
+# of them would silently arm the live classify path while every other assertion stayed green.
+RS_BASE="$(cd "$REPO" && "$RS_SH" -- 'add a null check' 2>/dev/null)"
+RS_WITH="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_ID=x \
+             COMMS_ROUTE_SHADOW_DIR="$WORK" COMMS_ROUTE_SHADOW_KEY=k COMMS_ROUTE_SHADOW_BACKEND=stub \
+             "$RS_SH" -- 'add a null check' 2>/dev/null)"
+[ -n "$RS_BASE" ] && [ "$RS_BASE" = "$RS_WITH" ] \
+  && ok "every collector variable exported leaves the classify path byte-identical" || fail "collector env changed the classify path"
+printf '%s\n' "$RS_BASE" | grep -qx 'source: fail-open' \
+  && ok "the classify path is still fail-open with no backend enabled" || fail "classify path is not fail-open"
+
+# 2. STDOUT ISOLATION, observed rather than asserted about. /auto seds plan/effort/tier/source
+# out of `route` output; the shadow path must emit none of them, ever.
+RS_OUT="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW=/nonexistent-allow "$RS_SH" --shadow -- 'x' 2>/dev/null)"; RS_RC=$?
+[ "$(printf '%s' "$RS_OUT" | grep -cE '^(plan|effort|complexity|tier|gate|source|reason|plan_p|effort_p|complexity_confidence):')" = 0 ] \
+  && ok "the shadow path emits no classify key on stdout, so /auto has nothing to read" || fail "shadow stdout carried a classify key"
+
+# 3. PERMISSION FAILS CLOSED, BEFORE ANY SOCKET. Task text must not leave the machine from a
+# project the operator has not permitted; client work is in scope.
+[ "$RS_RC" -ne 0 ] \
+  && ok "an unpermitted project refuses the shadow run" || fail "unpermitted project was allowed to run"
+RS_ERR="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW=/nonexistent-allow COMMS_ROUTE_URL=http://127.0.0.1:1 \
+            "$RS_SH" --shadow -- 'x' 2>&1 >/dev/null)"
+printf '%s' "$RS_ERR" | grep -q 'not permitted' \
+  && ok "the refusal names permission, and happens before any request is attempted" || fail "refusal did not cite permission"
+
+# 4. A MISSING HELPER MUST NOT ANSWER A SHADOW ARGV WITH THE CLASSIFY KEYS.
+RS_TMP="$WORK/route-missing"; mkdir -p "$RS_TMP"; cp "$REPO/helpers/comms.sh" "$RS_TMP/comms.sh"; chmod +x "$RS_TMP/comms.sh"
+RS_MISS="$("$RS_TMP/comms.sh" route --shadow -- 'x' 2>/dev/null)"; RS_MRC=$?
+[ "$RS_MRC" -ne 0 ] && [ "$(printf '%s' "$RS_MISS" | grep -cE '^(plan|source):')" = 0 ] \
+  && ok "a missing route.sh refuses --shadow instead of inventing a decision" || fail "missing helper answered --shadow with classify keys"
+"$RS_TMP/comms.sh" route -- 'x' 2>/dev/null | grep -qx 'source: fail-open' \
+  && ok "...while a plain classify argv still fails open unchanged" || fail "missing-helper fail-open regressed"
+
+# 5. THE RECORD. Run the collector for real against a stub and read what it wrote.
+RS_STUB="$WORK/shadow-stub.json"
+printf '%s' '{"answers":{"needs_plan":{"noul":0.9},"complexity":{"probabilities":{"0":0,"1":0,"2":1,"3":0},"confidence":0.8},"effort":{"choice":"high","confidence":0.9}}}' > "$RS_STUB"
+printf '%s\n' "$RS_KEY" > "$RS_ALLOW"
+RS_DIR="$WORK/shadow-out"; mkdir -p "$RS_DIR"
+RS_ID="$(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub \
+           COMMS_ROUTE_STUB="$RS_STUB" "$RS_SH" --shadow --thread t-1 --current-tier strong --context-tokens 900 \
+           -- 'refactor the scheduler' 2>/dev/null | sed -n 's/^shadow-decision //p')"
+[ -n "$RS_ID" ] && ok "a permitted shadow run prints a decision id and nothing else" || fail "no decision id on stdout"
+RS_REC="$(cd "$REPO" && git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')/.comms/route-shadow/$RS_ID.json"
+[ -f "$RS_REC" ] && ok "the decision is recorded under the main repo's gitignored .comms/" || fail "no record at $RS_REC"
+python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+need=["record_version","at","decision_id","project_key","thread","sent","sent_sha256","policy_inputs","raw_response","status","backend","questions_sha256"]
+missing=[k for k in need if k not in d]
+sys.exit(1 if missing else 0)' "$RS_REC" \
+  && ok "the record carries every field a replay needs" || fail "record is missing required fields"
+python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+sys.exit(0 if d["at"].endswith("Z") and d["policy_inputs"]["current_tier"]=="strong" and d["policy_inputs"]["context_tokens"]=="900" else 1)' "$RS_REC" \
+  && ok "the timestamp is UTC-Z and the cache-sticky inputs a replay needs are retained" || fail "UTC-Z or policy inputs wrong"
+python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+sys.exit(0 if d["raw_response"] and "Bearer" not in json.dumps(d) and "Authorization" not in json.dumps(d) else 1)' "$RS_REC" \
+  && ok "the raw response is retained verbatim and no credential is written" || fail "raw response missing or credential leaked"
+
+# 6. THE DRY GUARD that would have caught the HTTP 422: the collector must send the PRODUCTION
+# question set, not a copy of it.
+python3 -c '
+import sys,json,hashlib
+sys.path.insert(0,sys.argv[1])
+import route_backend, route_shadow
+sys.exit(0 if route_shadow.QUESTIONS is route_backend.QUESTIONS else 1)' "$REPO/helpers" \
+  && ok "the collector sends the production question set, not a reimplementation" || fail "collector reimplements QUESTIONS"
+
+# 7. A DECISION THAT CANNOT BE RECORDED IS A FAILURE, never a silent success.
+(cd "$REPO" && env COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub \
+   COMMS_ROUTE_STUB="$RS_STUB" COMMS_ROUTE_SHADOW_DIR_OVERRIDE=1 "$RS_SH" --shadow -- 'x' ) >/dev/null 2>&1
+python3 -c '
+import os,subprocess,sys
+helpers=sys.argv[1]
+env=dict(os.environ, COMMS_ROUTE_SHADOW_ID="probe", COMMS_ROUTE_SHADOW_DIR="/proc/nonexistent-dir",
+         COMMS_ROUTE_TASK="x", COMMS_ROUTE_BACKEND="stub", COMMS_ROUTE_STUB=sys.argv[2])
+r=subprocess.run([sys.executable, os.path.join(helpers,"route_shadow.py")], env=env,
+                 capture_output=True, text=True)
+sys.exit(0 if r.returncode!=0 else 1)' "$REPO/helpers" "$RS_STUB" \
+  && ok "an unwritable record directory fails loudly instead of losing a paid decision" || fail "write failure was swallowed"
+
+# 8. The live smoke path stays OUT of the corpus: this suite must never call TypeSafe.
+grep -q 'COMMS_ROUTE_SHADOW_BACKEND' "$RS_SH" \
+  && ok "the collector's backend is overridable so the suite never needs TypeSafe" || fail "collector backend is not overridable"

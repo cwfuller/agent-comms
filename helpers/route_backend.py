@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 
 QUESTIONS = {
@@ -158,7 +159,24 @@ def backend_stub(state, questions, timeout):
             body = fh.read()
     except OSError as e:
         raise BackendError(f"COMMS_ROUTE_STUB unreadable ({type(e).__name__})") from e
+    _observe(body)
     return _parse_answers(body)
+
+
+# LAST RAW OBSERVATION, captured before any parsing can raise. `_parse_answers` throws on a
+# malformed body and its BackendError carries only reason/source, so returning (raw, answers)
+# on the success path alone would still discard exactly the responses worth studying. Kept
+# module-level rather than returned, because route.sh unpacks classify() as a 2-tuple and a
+# third element would become a non-zero python exit — a fail-open on the LIVE path.
+# Distinguishes "no response received" from "response received but unusable".
+LAST_RAW = {"body": None, "http_status": None, "received": False}
+
+
+def _observe(body, http_status=None):
+    LAST_RAW["body"] = body
+    LAST_RAW["http_status"] = http_status
+    LAST_RAW["received"] = True
+    return body
 
 
 @register("typesafe", "jev")
@@ -185,7 +203,15 @@ def backend_typesafe(state, questions, timeout):
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8")
+            body = _observe(resp.read().decode("utf-8"), getattr(resp, "status", None))
+    except urllib.error.HTTPError as e:
+        # An error body is evidence too: a 4xx explaining a bad model id is exactly what the
+        # smoke test exists to surface, and discarding it leaves "request failed (HTTPError)".
+        try:
+            _observe(e.read().decode("utf-8", "replace"), getattr(e, "code", None))
+        except Exception:
+            pass
+        raise BackendError(f"request failed (HTTPError {getattr(e, 'code', '?')})") from e
     except Exception as e:
         raise BackendError(f"request failed ({type(e).__name__})") from e
     return _parse_answers(body)

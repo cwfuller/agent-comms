@@ -1480,6 +1480,15 @@ cmd_route() {
   local sh
   sh="$(cd "$(dirname "$0")" && pwd)/route.sh"
   if [ ! -f "$sh" ]; then
+    # The fail-open KEYS block is the CLASSIFY contract and nothing else. A missing helper
+    # answering `--shadow` with those ten keys would hand a caller a decision the collector
+    # never made, and would defeat the stdout isolation the shadow path is built on. Refuse
+    # any non-classify argv loudly instead. (grok, shadow-collector plan r1.)
+    case " $* " in
+      *" --shadow "*|*" --shadow-map "*)
+        echo "comms.sh: route: helper missing at $sh — cannot run the shadow collector" >&2
+        return 1 ;;
+    esac
     echo "comms.sh: route: helper missing at $sh — fail-open" >&2
     # Must match route.sh KEYS_FAIL_OPEN (stable 10-key set including tier/gate).
     printf 'plan: no\neffort: medium\ncomplexity: standard\ntier: balanced\ngate: fail-open\nplan_p: -\neffort_p: -\ncomplexity_confidence: -\nsource: fail-open\nreason: route.sh is not installed next to comms.sh\n'

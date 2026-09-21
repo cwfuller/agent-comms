@@ -59,8 +59,88 @@ KEYS_FAIL_OPEN() { # <reason> [source]
 }
 fail_open() { KEYS_FAIL_OPEN "$@"; }
 
+# ---------------------------------------------------------------------------
+# SHADOW COLLECTOR — observes what Jev would decide, and CANNOT tell /auto anything.
+#
+# Isolation is a property of the OUTPUT CONTRACT, not of caller discipline: this path never
+# prints the ten-key block that /auto seds for `plan:` / `effort:` / `tier:` / `source:`, so a
+# real loop has nothing to read even by accident. It also never reaches `fail_open`/`_write`,
+# because route.sh:154 turns any python failure into a SUCCESSFUL keys block and `_write`
+# swallows OSError — reusing either would defeat both the isolation and the loud failures.
+# (codex + grok, plan r1.)
+#
+# The collector must also never be implemented by exporting COMMS_ROUTE_BACKEND / COMMS_ROUTE /
+# COMMS_ROUTE_STUB into the environment /auto inherits: resolve() treats those as the on-switch,
+# so that would silently arm the live classify path. They are set for THIS python call only.
+shadow_repo_key() {  # -> 64-hex sha256 of the canonical MAIN repo root
+  # The main checkout, not `pwd` and not --show-toplevel: a session worktree and each review
+  # mount have different toplevels, so hashing those turns one clone into several projects and
+  # a permit granted where the operator works would not match where the loop runs. Same input
+  # as runphase's mount_repo_key. (codex + grok, plan r1.)
+  local root
+  root="$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')" || return 1
+  [ -n "$root" ] || return 1
+  root="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
+  printf '%s' "$root" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256
+      elif command -v sha256sum >/dev/null 2>&1; then sha256sum; else printf ''; fi; } | cut -c1-64
+}
+shadow_main_root() {
+  local root
+  root="$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')" || return 1
+  [ -n "$root" ] || return 1
+  (cd "$root" 2>/dev/null && pwd -P)
+}
+# The operator allowlist lives OUTSIDE the tree, keyed by repo hash, and is ABSENT by default.
+# A tracked permit would be present in every worktree and carried into the mounted review
+# artifact; and sending task text to a third-party API is a different act from reading local
+# files, so client projects must not be transmittable by accident. (grok, plan r1.)
+SHADOW_ALLOW="${COMMS_ROUTE_SHADOW_ALLOW:-${AGENT_COMMS_HOME:-$HOME/.agent-comms}/route-shadow-allow}"
+SHADOW_PY="$(cd "$(dirname "$0")" && pwd)/route_shadow.py"
+shadow_die() { echo "route.sh: shadow: $*" >&2; exit 1; }
+shadow_run() {
+  local key root dir id
+  key="$(shadow_repo_key)" || shadow_die "cannot compute the project key (not a git repo, or no sha256 utility)"
+  # PERMISSION BEFORE ANY SOCKET. Default is refusal, and the refusal happens before the task
+  # text could leave the machine.
+  shadow_permitted "$key" \
+    || shadow_die "project $key is not permitted to transmit task text (add the key to $SHADOW_ALLOW)"
+  root="$(shadow_main_root)" || shadow_die "cannot resolve the main repo root"
+  # Records live under the MAIN repo's .comms/, which is gitignored AND stripped by cmd_snapshot
+  # before `git add -A`. A file anywhere else in the worktree would be snapshotted into the
+  # review artifact, so a reviewer would read the task text and the mapped decision — a path
+  # into a live loop that sits outside the stdout contract. (grok, plan r1.)
+  dir="$root/.comms/route-shadow"
+  mkdir -p "$dir" || shadow_die "cannot create $dir"
+  id="$(shadow_decision_id)" || shadow_die "cannot mint a decision id"
+  COMMS_ROUTE_SHADOW_ID="$id" \
+  COMMS_ROUTE_SHADOW_DIR="$dir" \
+  COMMS_ROUTE_SHADOW_KEY="$key" \
+  COMMS_ROUTE_SHADOW_THREAD="$shadow_thread" \
+  COMMS_ROUTE_SHADOW_CURRENT_TIER="$current_tier" \
+  COMMS_ROUTE_SHADOW_CONTEXT_TOKENS="$context_tokens" \
+  COMMS_ROUTE_SHADOW_WORKSPACE="${COMMS_WORKSPACE:-}" \
+  COMMS_ROUTE_TASK="$task" \
+  COMMS_ROUTE_BACKEND="${COMMS_ROUTE_SHADOW_BACKEND:-typesafe}" \
+    python3 "$SHADOW_PY" || shadow_die "the collector failed (see stderr above)"
+  # The ONLY stdout this path produces. Deliberately not parseable as plan/effort/tier/source.
+  printf 'shadow-decision %s\n' "$id"
+  exit 0
+}
+shadow_decision_id() {
+  if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr 'A-Z' 'a-z'; return; fi
+  python3 -c 'import uuid;print(uuid.uuid4())' 2>/dev/null
+}
+shadow_permitted() {
+  local key="$1"
+  [ -n "$key" ] || return 1
+  [ -f "$SHADOW_ALLOW" ] || return 1
+  grep -qxF "$key" "$SHADOW_ALLOW" 2>/dev/null
+}
+
 task=""
 file=""
+shadow_mode=0
+shadow_thread=""
 explicit_task=0
 current_tier=""
 context_tokens=""
@@ -68,6 +148,10 @@ tier_from_cli=0
 tokens_from_cli=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --shadow) shadow_mode=1; shift ;;
+    --thread)
+      [ $# -ge 2 ] || usage_err "--thread needs a value"
+      shadow_thread="$2"; shift 2 ;;
     --task)
       [ $# -ge 2 ] || usage_err "--task needs a value"
       task="$2"; explicit_task=1; shift 2 ;;
@@ -137,6 +221,10 @@ fi
 case "$(printf '%s' "$task" | tr -d ' \t\n\r')" in
   "") usage_err "task is empty" ;;
 esac
+
+if [ "$shadow_mode" -eq 1 ]; then
+  shadow_run   # never returns; never prints the classify keys
+fi
 
 case "${COMMS_ROUTE:-}" in
   0|false|no|off|FALSE|NO|OFF) fail_open "COMMS_ROUTE disables the classifier" disabled ;;
