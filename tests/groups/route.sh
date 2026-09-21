@@ -608,16 +608,16 @@ sys.exit(0 if r.returncode!=0 and not wrote and "could not write" in r.stderr el
 # and require each to be gone. (codex, implement r8.)
 RS_GITVARS="GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_PREFIX GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_NAMESPACE"
 RS_SEED=""; for _v in $RS_GITVARS; do RS_SEED="$RS_SEED $_v=/hostile"; done
+# EXTRACT THE SHIPPED SCRUB and run THAT in the seeded child. A copied `unset` block tests a
+# copy: codex replaced the harness's unset with `:` and both checks stayed green while all ten
+# selectors survived. Extraction makes that mutation fail here. (codex, implement r9.)
+RS_SCRUB="$(awk '/^unset GIT_DIR/{f=1} f{print} f&&!/\\$/{exit}' "$REPO/tests/lib/harness.sh")"
+[ -n "$RS_SCRUB" ] && ok "the harness git scrub can be extracted for execution" || fail "no git scrub block found in harness.sh"
 RS_SURV="$(env $RS_SEED bash -c '
-  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-        GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_PREFIX \
-        GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_NAMESPACE 2>/dev/null || true
-  for v in '"$RS_GITVARS"'; do eval "val=\${$v:-}"; [ -n "$val" ] && printf "%s " "$v"; done')"
-[ -z "$RS_SURV" ] && ok "every repository-selection git variable is removed by the harness scrub" || fail "survived the scrub: $RS_SURV"
-# ...and the scrub the HARNESS actually ships must list them all, or the child above diverges.
-RS_MISSING=""
-for _v in $RS_GITVARS; do grep -q "$_v" "$REPO/tests/lib/harness.sh" || RS_MISSING="$RS_MISSING $_v"; done
-[ -z "$RS_MISSING" ] && ok "the shipped harness scrub covers every selector the control seeds" || fail "harness scrub omits:$RS_MISSING"
+  '"$RS_SCRUB"'
+  for v in '"$RS_GITVARS"'; do eval "val=\${$v:-}"; [ -n "$val" ] && printf "%s " "$v"; done' 2>/dev/null)"
+[ -z "$RS_SURV" ] && ok "running the SHIPPED scrub against a hostile environment removes every selector" || fail "survived the shipped scrub: $RS_SURV"
+
 # Behavioural backstop: in this suite, a non-repo directory must not resolve a toplevel.
 RS_NOREPO="$WORK/not-a-repo"; mkdir -p "$RS_NOREPO"
 ( cd "$RS_NOREPO" && git rev-parse --show-toplevel ) >/dev/null 2>&1 \
