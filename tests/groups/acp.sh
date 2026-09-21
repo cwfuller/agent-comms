@@ -755,9 +755,12 @@ grep -q 'policy_verdict' "$AP" && [ "$(grep -c 'policy_verdict "\$' "$AP")" -ge 
 
 # runphase must hold NO policy literal: the config comes from the accessor, so a second copy
 # cannot drift out of sync with the one that is validated.
-grep -qE 'gpt-6-astra|model_reasoning_effort' "$REPO/helpers/runphase.sh" \
-  && fail "runphase.sh carries a literal model or effort value" \
-  || ok "runphase.sh holds no model or effort literal — it asks acp.sh"
+# CODE only: a model id inside a COMMENT is documentation, not a second source of truth that
+# can drift. Stripping comments keeps the check on the thing that matters. (Tripped by a
+# comment describing a live rollout, 2026-09-21.)
+sed 's/[[:space:]]*#.*$//' "$REPO/helpers/runphase.sh" | grep -qE 'gpt-6-astra|model_reasoning_effort' \
+  && fail "runphase.sh carries a literal model or effort value in CODE" \
+  || ok "runphase.sh holds no model or effort literal in code — it asks acp.sh"
 # B3 (codex, implement r1): BOTH keys are policy, so missing model evidence is undecidable.
 # It previously returned 0 and printed model=unknown — half the contract unverified.
 "$AP" policy-attest codex xhigh "" >/dev/null 2>&1; [ "$?" = 21 ] \
