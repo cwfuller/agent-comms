@@ -32,7 +32,7 @@ out of the box). Clone-first install, scopes and reviewer containment:
 <auto> <task>               implement → panel review → fix, until approved (10 rounds max)
 <auto> --reviewers codex    one reviewer instead of the whole panel
 <auto> --plan <task>        approach review first, for high-stakes work
-<auto> --max <task>         deepest review: strongest model, highest effort
+<auto> --max <task>         deepest Codex review: strongest model, highest effort
 <ask> codex <question>      one-off consult, no loop
 ```
 
@@ -41,8 +41,9 @@ Every flag and the helper CLI: [docs/COMMANDS.md](docs/COMMANDS.md).
 ## Why you can trust the verdict
 
 - **Pinned artifact.** Every reviewer reads the same snapshot, not your live tree.
-- **Corroboration gates.** A blocker two reviewers raise blocks; a lone one is
-  flagged for you, so one noisy reviewer cannot stall the loop.
+- **Corroboration gates.** A blocker two reviewers raise blocks, as do the gating
+  (first) reviewer's; any other lone blocker is flagged for you to cross-check,
+  so one noisy reviewer cannot stall the loop.
 - **Nothing silently dropped.** Malformed messages are refused, an unanswered
   reviewer blocks the gate, and leftover advisories feed later rounds.
 - **Proven review depth.** Each Codex review is checked against the model and
@@ -55,13 +56,18 @@ How: [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/INTERNALS.md](docs/INTERNALS.md
 A classifier (Jev, via TypeSafe) sizes the work so easy things run cheap:
 
 - **The loop:** decides whether a task needs an approach review first.
-  Enable with `COMMS_ROUTE_BACKEND=typesafe`.
 - **Reviewers:** picks each Codex reviewer's model tier and effort per thread
-  from a versioned table (GPT-6 Luna / Sol / Astra when your installed codex is
-  new enough, else GPT-5.6). Low confidence keeps the default depth. Enable with
-  `COMMS_REVIEW_ROUTE=1`.
+  from a versioned table (fast / balanced = GPT-6 Luna / Sol when your installed
+  codex is new enough, else GPT-5.6 Luna / Terra; strong = GPT-6 Astra). Low
+  confidence keeps the default depth.
+
+Setup: `TYPESAFE_API_KEY`, `COMMS_ROUTE_BACKEND=typesafe` (turns on the
+classifier), `COMMS_REVIEW_ROUTE=1` (applies it to reviewers), and the project
+listed in `~/.agent-comms/route-shadow-allow` before any reviewer request text is
+sent. Without the backend, reviewer routing keeps the default depth.
 
 Both are off by default; `--no-route` turns them off for one loop. Details:
+[`route` / `review-route`](docs/COMMANDS.md),
 [reviewer routing](docs/INTERNALS.md#reviewer-modeleffort-routing),
 `acp.sh doctor`, `acp.sh capabilities`.
 
