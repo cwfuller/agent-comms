@@ -52,7 +52,7 @@ templates: /auto query route	11
 comms.sh: route fail-open	11
 comms.sh: route policy	34
 route.sh: the shadow collector cannot reach /auto	31
-comms.sh: reviewer routing decisions	31
+comms.sh: reviewer routing decisions	32
 install.sh: .codex/AGENTS.md managed block	47
 grading pilot: findings extraction (the single-reviewer baseline)	15
 grading pilot: --out ledger is append-only and idempotent	4

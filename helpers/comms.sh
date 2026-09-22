@@ -1573,8 +1573,15 @@ cmd_review_route() {
       [ -n "$_vt" ] && [ -n "$_vp" ] || usage_err "review-route verify: --thread and --phase are required"
       command -v python3 >/dev/null 2>&1 || die "review-route: python3 is required"
       [ -f "$py" ] || die "review-route: route_review.py is not installed next to comms.sh — re-run install.sh"
+      # A request that names a dispatch is a PANEL LEG and is judged ONLY by its panel's record:
+      # no match refuses. Falling back to the standalone exact-thread rule let a decision that
+      # merely belongs to a thread named `<base>-<agent>` replace the one the panel stamped.
+      # (codex, implement r3.)
       if [ -n "$_vd" ]; then
-        _vleg="$(panel_leg_agent "$_vt" "$_vd" "$_vid" "$_va")" || _vleg=""
+        _vleg="$(panel_leg_agent "$_vt" "$_vd" "$_vid" "$_va")" || {
+          echo "comms.sh: review-route verify: $(clip "$_vid") is not the decision dispatch $(clip "$_vd") recorded for leg thread $(clip "$_vt")" >&2
+          return 1
+        }
       fi
       python3 "$py" verify --root "$(cmd_root)" --thread "$_vt" --phase "$_vp" ${_vleg:+--leg-agents "$_vleg"} -- "$_vid"
       return ;;

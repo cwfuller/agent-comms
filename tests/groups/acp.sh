@@ -1221,9 +1221,13 @@ agent	grok
 RR_D9="$WORK/rr-9"; RR_LEG=d-rr-test rr_run rr-panel-codex "$RRP" "$RR_D9" COMMS_REVIEW_ROUTE=1
 RR_D10="$WORK/rr-10"; rr_run rr-panel-codex "$RRP" "$RR_D10" COMMS_REVIEW_ROUTE=1
 RR_D10b="$WORK/rr-10b"; RR_LEG=d-typed-by-author rr_run rr-panel-codex "$RRP" "$RR_D10b" COMMS_REVIEW_ROUTE=1
+# ...and a real leg carrying a DIFFERENT current decision (one that belongs to a thread literally
+# named rr-panel-codex) is refused rather than judged by the standalone rule. (codex, implement r3.)
+RRPC="$(rr_decide rr-panel-codex fast low)"
+RR_D10c="$WORK/rr-10c"; RR_LEG=d-rr-test rr_run rr-panel-codex "$RRPC" "$RR_D10c" COMMS_REVIEW_ROUTE=1
 [ "$(cn_status "$RR_D9")" = completed ] && [ "$(tv "$RR_D9" observed_model)" = gpt-5.6-luna ] \
-  && [ "$(cn_status "$RR_D10")" = failed ] && [ "$(cn_status "$RR_D10b")" = failed ] \
-  && ok "a corroborated panel leg carries its base decision; a lookalike thread, bare or with a typed dispatch, does not" || fail "panel leg: leg=$(cn_status "$RR_D9") lookalike=$(cn_status "$RR_D10") fabricated=$(cn_status "$RR_D10b")"
+  && [ "$(cn_status "$RR_D10")" = failed ] && [ "$(cn_status "$RR_D10b")" = failed ] && [ "$(cn_status "$RR_D10c")" = failed ] \
+  && ok "a recorded panel leg carries its base decision; a lookalike (bare or typed dispatch) or a substituted decision does not" || fail "panel leg: leg=$(cn_status "$RR_D9") lookalike=$(cn_status "$RR_D10") fabricated=$(cn_status "$RR_D10b") substituted=$(cn_status "$RR_D10c")"
 # THE RUNTIME REACHES THE CHILD: the resolved binary is the adapter's CODEX_PATH, and `bundled`
 # removes an inherited one, so the ledger always names what launched.
 RRN="$(rr_decide rr-rt fast low)"

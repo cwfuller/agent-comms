@@ -736,6 +736,18 @@ rrc "$COMMS" review-route verify "$RL_ID" --thread "$RR_LONG-codex" --phase impl
 rrc "$COMMS" review-route verify "$RS_ID" --thread "$RR_SHORT-codex" --phase implement --leg-dispatch d-rr-long >/dev/null 2>&1; B=$?
 [ -n "$RR_SHORT" ] && [ "$RR_SHORT" != "$RR_LONG" ] && [ "$A" = 0 ] && [ "$B" != 0 ] \
   && ok "a thread named after a long thread's shortened identity cannot pass as a leg of that thread's panel" || fail "identity alias ($A$B short=$RR_SHORT)"
+# A LEG IS JUDGED ONLY BY ITS PANEL'S RECORD (codex, implement r3): a thread literally named
+# `<base>-codex` with its own current cheaper decision cannot substitute it into the panel's leg.
+rrc "$COMMS" review-route decide --thread t-top --phase implement --tier strong --effort xhigh >/dev/null 2>&1
+rrc "$COMMS" review-route decide --thread t-top-codex --phase implement --tier fast --effort low >/dev/null 2>&1
+RT_ID="$(rrv "$(rrc "$COMMS" review-route lookup --thread t-top --phase implement 2>/dev/null)" decision)"
+RTC_ID="$(rrv "$(rrc "$COMMS" review-route lookup --thread t-top-codex --phase implement 2>/dev/null)" decision)"
+rr_panel_record d-top "$RT_ID" t-top codex
+rrc "$COMMS" review-route verify "$RTC_ID" --thread t-top-codex --phase implement --leg-dispatch d-top >/dev/null 2>&1; A=$?
+rrc "$COMMS" review-route verify "$RT_ID" --thread t-top-codex --phase implement --leg-dispatch d-top >/dev/null 2>&1; B=$?
+rrc "$COMMS" review-route verify "$RTC_ID" --thread t-top-codex --phase implement >/dev/null 2>&1; C=$?
+[ "$A" != 0 ] && [ "$B" = 0 ] && [ "$C" = 0 ] \
+  && ok "a leg carrying anything but its panel's stamped decision is refused, with no fallback to the standalone rule" || fail "leg substitution ($A$B$C)"
 
 # THE reviewer-v1 MAPPING, run directly: cheap outputs are reachable, and nothing malformed,
 # tied or split can land on the cheapest reviewer. No bump anywhere.
