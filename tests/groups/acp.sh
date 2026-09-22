@@ -891,6 +891,17 @@ R="$(cd "$WORK" && env -u COMMS_ACP_CODEX_PATH -u COMMS_ACP_CODEX_MODEL -u COMMS
 D_B="$(rv "$(res "$AP" resolve codex)" policy_digest)"; D_N="$(rv "$(res COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" resolve codex)" policy_digest)"
 [ -n "$D_B" ] && [ -n "$D_N" ] && [ "$D_B" != "$D_N" ] \
   && ok "the same pair on a different runtime is a different policy (a runtime change is a fresh session)" || fail "runtime not in digest"
+# A RUNTIME THAT HANGS on --version is killed at the probe deadline: auto-detection stays on the
+# bundled runtime (recorded), an explicit path is refused — neither stalls the turn.
+mkdir -p "$RTD/hang"; printf '#!/bin/sh
+sleep 30
+' > "$RTD/hang/codex"; chmod +x "$RTD/hang/codex"
+RT_T0="$(date +%s)"
+R="$(cd "$WORK" && env -u COMMS_ACP_CODEX_PATH -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT COMMS_ACP_RUNTIME_PROBE_SECS=1 PATH="$RTD/hang:$PATH" "$AP" resolve codex)"
+res COMMS_ACP_RUNTIME_PROBE_SECS=1 COMMS_ACP_CODEX_PATH="$RTD/hang/codex" "$AP" resolve codex >/dev/null 2>&1; A=$?
+RT_EL=$(( $(date +%s) - RT_T0 ))
+[ "$(rv "$R" runtime)" = bundled ] && [ "$(rv "$R" fallback)" = runtime-probe-failed ] && [ "$A" = 1 ] && [ "$RT_EL" -lt 15 ] \
+  && ok "a runtime hanging on --version is cut off at the deadline: auto stays bundled (recorded), explicit is refused" || fail "hanging runtime (el=${RT_EL}s rc=$A $R)"
 res COMMS_ACP_CODEX_PATH="$RTD/new" "$AP" resolve codex >/dev/null 2>&1; A=$?
 res COMMS_ACP_CODEX_MODEL=gpt-6-sol "$AP" resolve codex >/dev/null 2>&1; B=$?
 [ "$A" = 1 ] && [ "$B" = 1 ] \
@@ -1124,7 +1135,7 @@ rr_msg() {  # <thread> <decision-id-or-empty> -> an implement-phase mounted requ
   m="$(pol_msg "$thr")"
   sed -i.bak -e 's/^phase: plan$/phase: implement/' "$m" && rm -f "$m.bak"
   if [ -n "$rid" ]; then
-    awk -v rid="$rid" -v leg="${RR_LEG:-}" 'NR==1{print; next} !done && $0=="---"{print "route_decision: " rid; if (leg != "") print "dispatch: d-rr-test"; done=1} {print}' "$m" > "$m.tmp" && mv "$m.tmp" "$m"
+    awk -v rid="$rid" -v leg="${RR_LEG:-}" 'NR==1{print; next} !done && $0=="---"{print "route_decision: " rid; if (leg != "") print "dispatch: " leg; done=1} {print}' "$m" > "$m.tmp" && mv "$m.tmp" "$m"
   fi
   printf '%s' "$m"
 }
@@ -1195,14 +1206,18 @@ rr_run rr-stale "$RRZ" "$RR_D8" COMMS_REVIEW_ROUTE=1 AX_MODEL=gpt-6-astra AX_EFF
 [ "$(cn_status "$RR_D8")" = failed ] && [ "$(tv "$RR_D8" adapter_check)" = mismatch ] \
   && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L8" 2>/dev/null | grep -q . \
   && ok "a session reporting the baseline for a routed turn is refused before any prompt" || fail "stale session: status=$(cn_status "$RR_D8") adapter=$(tv "$RR_D8" adapter_check)"
-# A PANEL LEG (`<base>-codex`, `dispatch:` present) routes on its base thread's decision; a thread
-# merely NAMED like a leg, with no dispatch, never borrows another thread's decision.
+# A PANEL LEG (`<base>-codex`) routes on its base thread's decision ONLY when the coordinator log
+# corroborates it (a panel-planned row for its dispatch, agent and base thread). A lookalike thread
+# — with no dispatch, or with a dispatch the author typed — never borrows another thread's decision.
 RRP="$(rr_decide rr-panel fast low)"
-RR_D9="$WORK/rr-9"; RR_LEG=1 rr_run rr-panel-codex "$RRP" "$RR_D9" COMMS_REVIEW_ROUTE=1
+( cd "$MA_FIX" && "$COMMS" events append --kind panel-planned --set rr-panel-set --dispatch d-rr-test \
+    --agent codex --thread rr-panel --status planned ) >/dev/null 2>&1
+RR_D9="$WORK/rr-9"; RR_LEG=d-rr-test rr_run rr-panel-codex "$RRP" "$RR_D9" COMMS_REVIEW_ROUTE=1
 RR_D10="$WORK/rr-10"; rr_run rr-panel-codex "$RRP" "$RR_D10" COMMS_REVIEW_ROUTE=1
+RR_D10b="$WORK/rr-10b"; RR_LEG=d-typed-by-author rr_run rr-panel-codex "$RRP" "$RR_D10b" COMMS_REVIEW_ROUTE=1
 [ "$(cn_status "$RR_D9")" = completed ] && [ "$(tv "$RR_D9" observed_model)" = gpt-5.6-luna ] \
-  && [ "$(cn_status "$RR_D10")" = failed ] \
-  && ok "a panel leg resolves to its base thread's decision; a lookalike thread without dispatch does not" || fail "panel leg: leg=$(cn_status "$RR_D9") lookalike=$(cn_status "$RR_D10")"
+  && [ "$(cn_status "$RR_D10")" = failed ] && [ "$(cn_status "$RR_D10b")" = failed ] \
+  && ok "a corroborated panel leg carries its base decision; a lookalike thread, bare or with a typed dispatch, does not" || fail "panel leg: leg=$(cn_status "$RR_D9") lookalike=$(cn_status "$RR_D10") fabricated=$(cn_status "$RR_D10b")"
 # THE RUNTIME REACHES THE CHILD: the resolved binary is the adapter's CODEX_PATH, and `bundled`
 # removes an inherited one, so the ledger always names what launched.
 RRN="$(rr_decide rr-rt fast low)"

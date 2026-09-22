@@ -73,7 +73,10 @@ def main():
         _k, _root = route_backend.canonical_project()
         state, input_meta, unsendable = route_backend.prepare_review_input(task, _root)
         questions = route_backend.REVIEW_QUESTIONS
-        sent = json.dumps(state["request"], sort_keys=True, ensure_ascii=False)
+        # The WHOLE outbound state (artifact identity, measured signals, phase, round, workflow),
+        # not only the request sections: the observation must stay reproducible after the request
+        # changes or disappears. (codex, implement r1, advisory.)
+        sent = json.dumps(state, sort_keys=True, ensure_ascii=False)
     else:
         sent = task[:TASK_LIMIT]
         state, input_meta = route_backend.build_state(sent), None

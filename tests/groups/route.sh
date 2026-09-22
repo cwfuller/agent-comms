@@ -701,12 +701,14 @@ rrc "$COMMS" review-route show '../../etc/x' >/dev/null 2>&1; C=$?
 rrc "$COMMS" review-route lookup --thread t-none --phase implement >/dev/null 2>&1; D=$?
 [ "$A" != 0 ] && [ "$B" != 0 ] && [ "$C" != 0 ] && [ "$D" != 0 ] \
   && ok "show refuses a foreign thread, a wrong phase and a path-shaped id; lookup refuses an absent decision" || fail "show/lookup refusals ($A$B$C$D)"
-rrc "$COMMS" review-route verify "$RX2" --thread t-exp-codex --phase implement --leg >/dev/null 2>&1; A=$?
+rrc "$COMMS" events append --kind panel-planned --set rr-v --dispatch d-rr-v --agent codex --thread t-exp --status planned >/dev/null 2>&1
+rrc "$COMMS" review-route verify "$RX2" --thread t-exp-codex --phase implement --leg-dispatch d-rr-v >/dev/null 2>&1; A=$?
 rrc "$COMMS" review-route verify "$RX2" --thread t-exp-codex --phase implement >/dev/null 2>&1; B=$?
+rrc "$COMMS" review-route verify "$RX2" --thread t-exp-codex --phase implement --leg-dispatch d-typed >/dev/null 2>&1; E=$?
 rrc "$COMMS" review-route verify "$RX" --thread t-exp --phase implement >/dev/null 2>&1; C=$?
 rrc "$COMMS" review-route verify "-h" --thread t-exp --phase implement >/dev/null 2>&1; D=$?
-[ "$A" = 0 ] && [ "$B" != 0 ] && [ "$C" != 0 ] && [ "$D" != 0 ] \
-  && ok "verify: a leg (--leg) may carry its base decision, a lookalike thread may not, a replaced id is stale, and an option-shaped id is refused" || fail "verify ($A$B$C$D)"
+[ "$A" = 0 ] && [ "$B" != 0 ] && [ "$E" != 0 ] && [ "$C" != 0 ] && [ "$D" != 0 ] \
+  && ok "verify: a log-corroborated leg may carry its base decision; a bare or typed-dispatch lookalike may not; a replaced id is stale; an option-shaped id is refused" || fail "verify ($A$B$E$C$D)"
 
 # THE reviewer-v1 MAPPING, run directly: cheap outputs are reachable, and nothing malformed,
 # tied or split can land on the cheapest reviewer. No bump anywhere.
@@ -724,7 +726,9 @@ except ValueError: print("malformed")' "$REPO/helpers" "$1"; }
   && [ "$(rrmap '{"review_depth":{"probabilities":{"0":0.9,"1":0.9,"2":0,"3":0},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.9}}')" = malformed ] \
   && ok "a partial or non-normalized distribution is malformed (baseline), not read as mechanical" || fail "partial distribution"
 [ "$(rrmap '{"review_depth":{"probabilities":{"0":1,"1":0,"2":0,"3":0},"confidence":0.2},"review_effort":{"choice":"low","confidence":0.2}}')" = "none none low-depth-confidence+low-effort-confidence" ] \
-  && ok "low confidence selects the baseline once per dimension (none), recorded as a gate" || fail "low confidence mapping"
+  && [ "$(rrmap '{"review_depth":{"probabilities":{"0":1,"1":0,"2":0,"3":0},"confidence":0.2},"review_effort":{"choice":"low","confidence":0.9}}')" = "none none low-depth-confidence" ] \
+  && [ "$(rrmap '{"review_depth":{"probabilities":{"0":1,"1":0,"2":0,"3":0},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.2}}')" = "none none low-effort-confidence" ] \
+  && ok "low confidence on EITHER dimension keeps the whole baseline (none/none), recorded as a gate" || fail "low confidence mapping"
 [ "$(rrmap '{"review_depth":{"probabilities":{"0":1,"1":0,"2":0,"3":0},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.9,"probabilities":{"low":0.5,"medium":0.5,"high":0,"xhigh":0}}}' | cut -d' ' -f2)" = medium ] \
   && ok "a supplied effort distribution can only deepen the chosen effort" || fail "effort distribution"
 
@@ -846,9 +850,14 @@ RS4="$(sed -n 's/^route_decision: //p' "$RS4F" 2>/dev/null | head -1)"
 rr_req "$WORK/rr-sh2.md" t-shadow2 implement
 RSH2="$(rrc COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub COMMS_ROUTE_STUB="$RR_STUB" \
         "$REPO/helpers/route.sh" --shadow --reviewer --file "$WORK/rr-sh2.md" 2>/dev/null | sed -n 's/^shadow-decision //p')"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["status"]=="unsendable" and not d.get("answers") else 1)' \
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); st=json.loads(d["sent"]); sys.exit(0 if d["status"]=="unsendable" and not d.get("answers") and "risk_signals" in st and "artifact" in st and "phase" in st else 1)' \
     "$RR_REPO/.comms/route-shadow/$RSH2.json" 2>/dev/null \
-  && ok "a reviewer shadow of an unmeasurable request is recorded as unsendable, with no call made" || fail "shadow unsendable ($RSH2)"
+  && ok "a reviewer shadow of an unmeasurable request is recorded as unsendable, with no call made, and keeps the whole state" || fail "shadow unsendable ($RSH2)"
+# A TYPED dispatch does not make a lookalike thread a panel leg at send time either.
+rr_req "$RR_REPO/.comms/rr-s5.md" t-iso-codex implement "dispatch: d-typed
+route_decision: $RISO"
+rrc COMMS_REVIEW_ROUTE=1 "$COMMS" send --to codex "$RR_REPO/.comms/rr-s5.md" >/dev/null 2>&1; A=$?
+[ "$A" != 0 ] && ok "send refuses a lookalike leg whose dispatch the coordinator log does not corroborate" || fail "typed dispatch accepted at send"
 # "use max" is the implementer override too.
 OUT="$(rt -- "use max to fix the parser" 2>/dev/null)"
 [ "$(rt_kv "$OUT" tier)" = strong ] && [ "$(rt_kv "$OUT" effort)" = xhigh ] && [ "$(rt_kv "$OUT" source)" = override ] \

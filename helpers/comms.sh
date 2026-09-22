@@ -100,7 +100,7 @@
 #                               selects a reviewer or a vendor model id.
 #   review-route decide (--request <review-request> | --thread T --phase P) [--tier T] [--effort E] [--replace]
 #   review-route lookup --thread T --phase P
-#   review-route verify <decision-id> --thread <message thread> --phase P [--leg]
+#   review-route verify <decision-id> --thread <message thread> --phase P [--leg-dispatch D [--leg-agent A]]
 #   review-route show <decision-id> [--thread T] [--phase P]
 #   review-route enabled
 #                               the REVIEWER routing decision for a (thread, phase): an
@@ -1552,17 +1552,20 @@ cmd_review_route() {
   case "$verb" in
     enabled) review_routing_enabled; return ;;
     verify)
-      # verify <id> --thread <message thread> --phase <p> [--leg] — the id a request CARRIES,
-      # checked against the decision IN FORCE (the record names its own workspace, so the caller's
-      # cwd or branch cannot change the answer). --leg: the thread may be the decision's thread plus
-      # `-<registered agent>` (a panel leg, or a shadow of one); without it the thread must match
-      # exactly — a thread merely NAMED `x-grok` never borrows `x`'s decision.
-      local _vid="${1:-}" _vt="" _vp="" _vleg=""; [ "$#" -gt 0 ] && shift
+      # verify <id> --thread <message thread> --phase <p> [--leg-dispatch <d> [--leg-agent <a>]]
+      # — the id a request CARRIES, checked against the decision IN FORCE (the record names its
+      # own workspace, so the caller's cwd or branch cannot change the answer). The thread must
+      # equal the decision's thread, EXCEPT for a panel leg that the coordinator log corroborates:
+      # a `panel-planned` row for that dispatch naming agent <a> and base thread <thread minus
+      # -a>. A `dispatch:` value the author typed, with no such row, earns no exception — so a
+      # thread merely NAMED `x-codex` never borrows `x`'s decision. (codex, implement r1.)
+      local _vid="${1:-}" _vt="" _vp="" _vd="" _va="" _vbase="" _vleg=""; [ "$#" -gt 0 ] && shift
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --thread) _vt="${2:-}"; shift 2 || shift ;;
-          --phase)  _vp="${2:-}"; shift 2 || shift ;;
-          --leg)    _vleg="$(registry_agents | tr ' ' ',')"; shift ;;
+          --thread)       _vt="${2:-}"; shift 2 || shift ;;
+          --phase)        _vp="${2:-}"; shift 2 || shift ;;
+          --leg-dispatch) _vd="${2:-}"; shift 2 || shift ;;
+          --leg-agent)    _va="${2:-}"; shift 2 || shift ;;
           *) usage_err "review-route verify: unknown option '$(clip "$1")'" ;;
         esac
       done
@@ -1570,6 +1573,9 @@ cmd_review_route() {
       [ -n "$_vt" ] && [ -n "$_vp" ] || usage_err "review-route verify: --thread and --phase are required"
       command -v python3 >/dev/null 2>&1 || die "review-route: python3 is required"
       [ -f "$py" ] || die "review-route: route_review.py is not installed next to comms.sh — re-run install.sh"
+      if [ -n "$_vd" ]; then
+        _vleg="$(panel_leg_agent "$_vt" "$_vd" "$_va")" || _vleg=""
+      fi
       python3 "$py" verify --root "$(cmd_root)" --thread "$_vt" --phase "$_vp" ${_vleg:+--leg-agents "$_vleg"} -- "$_vid"
       return ;;
     decide|show|lookup) ;;
@@ -1605,6 +1611,28 @@ stamp_route_decision() {
     fm && index(probe, "route_decision:") == 1 { next }
     { print }
   ' "$sf" > "$stamped" && mv -f "$stamped" "$sf" || { rm -f "$stamped" 2>/dev/null; return 1; }
+}
+
+# panel_leg_agent <thread> <dispatch> [<agent>] — the agent whose PANEL LEG this thread is, per the
+# coordinator log: a `panel-planned` row for <dispatch> naming agent A and base thread T such that
+# <thread> == T-A (optionally only for the given agent). Prints A and returns 0, else returns 1.
+# The comparison goes through event_identity, the transform the writer applied, so a long base
+# thread clipped on the way into the log still matches itself.
+panel_leg_agent() {
+  local thr="$1" disp="$2" only="${3:-}" rows ag rthr base
+  [ -n "$thr" ] && [ -n "$disp" ] || return 1
+  rows="$(cmd_events --dispatch "$disp" --kind panel-planned 2>/dev/null | awk -F'\t' 'NR>1 {print $8 "\t" $6}')" || return 1
+  while IFS="$(printf '\t')" read -r ag rthr; do
+    [ -n "$ag" ] || continue
+    [ -z "$only" ] || [ "$ag" = "$only" ] || continue
+    case "$thr" in *"-$ag") base="${thr%-"$ag"}" ;; *) continue ;; esac
+    if [ -n "$base" ] && [ "$(event_identity "$base" "$EVENT_W_THREAD")" = "$rthr" ]; then
+      printf '%s\n' "$ag"; return 0
+    fi
+  done <<EOF
+$rows
+EOF
+  return 1
 }
 
 # route_decision_for <request> <base-thread> <phase> <artifact> <base> — decide (or reuse) the
@@ -5439,9 +5467,8 @@ cmd_send() {
       # `--replace` between two legs cannot split one review set across two decisions. Its
       # thread is `<base>-<to>`, and only THIS recipient's suffix is accepted.
       if [ -n "$route_have" ]; then
-        printf '%s' "$route_have" | grep -qE '^rd-[0-9a-f]{32}$' \
-          && python3 "$(cd "$(dirname "$SELF")" && pwd)/route_review.py" verify --root "$(cmd_root)" \
-               --thread "$route_thr" --phase "$route_phase" --leg-agents "$to" -- "$route_have" >/dev/null \
+        cmd_review_route verify "$route_have" --thread "$route_thr" --phase "$route_phase" \
+            --leg-dispatch "$(frontmatter_field "$file" dispatch)" --leg-agent "$to" >/dev/null \
           || die "send: the panel's routing decision '$(clip "$route_have")' does not belong to leg thread '$route_thr' phase '$route_phase'"
         route_id="$route_have"
       fi

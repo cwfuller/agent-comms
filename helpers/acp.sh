@@ -258,7 +258,7 @@ ver_ge() {
 ACP_RUNTIME_PATH_RE='^/[A-Za-z0-9._/+@-]+$'
 policy_runtime_codex() {
   local want="${COMMS_ACP_CODEX_PATH:-}" d cand="" v
-  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""
   if [ "$want" = bundled ]; then return 0; fi
   if [ -n "$want" ]; then
     if ! [[ "$want" =~ $ACP_RUNTIME_PATH_RE ]] || [ ! -x "$want" ] || [ -d "$want" ]; then
@@ -273,9 +273,48 @@ policy_runtime_codex() {
     done
     [ -n "$cand" ] || return 0
   fi
-  v="$("$cand" --version 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+(\.[0-9]+)*$/) { print $i; exit } }')" || v=""
-  if [ -z "$v" ] && [ -z "$want" ]; then return 0; fi   # an auto-found binary that will not say what it is: stay bundled
-  RT_PATH="$cand"; RT_VERSION="${v:-unknown}"
+  # BOUNDED. This runs on EVERY codex resolution — baseline turns included — before the canary and
+  # before the turn budget starts, while the runner holds its mount claim, so a CLI or wrapper that
+  # hangs on --version would stall reviews with nothing to stop it. The probe runs in its own
+  # process group and the whole group is killed at the deadline. (codex, implement r1.)
+  v="$(runtime_version_probe "$cand")" || v=""
+  if [ -z "$v" ]; then
+    if [ -n "$want" ]; then RT_ERR="COMMS_ACP_CODEX_PATH '$want' did not report a version within ${ACP_RUNTIME_PROBE_SECS}s"; return 0; fi
+    RT_NOTE="runtime-probe-failed"   # an auto-found binary that will not say what it is: stay bundled
+    return 0
+  fi
+  RT_PATH="$cand"; RT_VERSION="$v"
+}
+
+# runtime_version_probe <binary> — its dotted version from `--version`, within
+# COMMS_ACP_RUNTIME_PROBE_SECS (default 5), or nothing. python3 owns the deadline because it can
+# kill the probe's whole process group; without python3 the probe is not attempted (auto-detection
+# then stays bundled, and an explicit path is refused as unverifiable).
+ACP_RUNTIME_PROBE_SECS="${COMMS_ACP_RUNTIME_PROBE_SECS:-5}"
+case "$ACP_RUNTIME_PROBE_SECS" in ''|*[!0-9]*|0) ACP_RUNTIME_PROBE_SECS=5 ;; esac
+[ "${#ACP_RUNTIME_PROBE_SECS}" -le 3 ] || ACP_RUNTIME_PROBE_SECS=5
+runtime_version_probe() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$1" "$ACP_RUNTIME_PROBE_SECS" <<'RTPY' 2>/dev/null
+import os,re,signal,subprocess,sys
+exe,secs=sys.argv[1],int(sys.argv[2])
+try:
+    p=subprocess.Popen([exe,"--version"],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                       stdin=subprocess.DEVNULL,start_new_session=True)
+except OSError:
+    sys.exit(1)
+try:
+    out,_=p.communicate(timeout=secs)
+except subprocess.TimeoutExpired:
+    try: os.killpg(p.pid,signal.SIGKILL)
+    except OSError: pass
+    try: p.communicate(timeout=2)
+    except Exception: pass
+    sys.exit(1)
+m=re.search(rb"(?<![0-9.])([0-9]+\.[0-9]+(?:\.[0-9]+)*)", out or b"")
+if p.returncode!=0 or not m: sys.exit(1)
+print(m.group(1).decode())
+RTPY
 }
 
 # policy_model_available <agent> <transport> <model> — 0 iff the model's declared minimum runtime
@@ -328,9 +367,10 @@ resolve_policy() {
     return 0
   fi
   # THE RUNTIME, resolved before any model is chosen: which models exist depends on it.
-  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""
   if [ "$agent" = codex ]; then policy_runtime_codex; fi
   [ -z "$RT_ERR" ] || { echo "acp.sh: resolve: $RT_ERR — refusing rather than running another runtime" >&2; return 1; }
+  [ -z "$RT_NOTE" ] || fb="${fb:+$fb;}$RT_NOTE"
   R_RUNTIME="$RT_PATH"; R_RUNTIME_VERSION="$RT_VERSION"
   base="$(policy_map_get baseline "$agent" "$transport")"
   [ -n "$base" ] || { echo "acp.sh: resolve: the map has no baseline for $agent/$transport — refusing" >&2; return 1; }
@@ -614,7 +654,7 @@ cmd_resolve() {
 cmd_capabilities() {
   local ver; ver="$(policy_map_check)" || exit 1
   printf 'map_version: %s (%s)\n' "$ver" "$ACP_POLICY_MAP"
-  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; policy_runtime_codex
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
   printf 'reviewer codex runtime: %s (version %s)%s\n' "$RT_PATH" "$RT_VERSION" "${RT_ERR:+ — REFUSED: $RT_ERR}"
   # Two passes, so a routing-eligible combination's rows print whatever order the map lists them in.
   awk -F'\t' '
@@ -641,7 +681,7 @@ cmd_doctor() {
   echo "acpx: pinned @$ACPX_VERSION via npx (cached after first use)"
   echo "agents: codex claude grok enabled ($(for a in codex claude grok; do printf '%s=%s ' "$a" "$(profile_for "$a")"; done))"
   # Which codex a MOUNTED reviewer will run, and so which mapped models it can serve.
-  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; policy_runtime_codex
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
   if [ -n "$RT_ERR" ]; then echo "reviewer codex runtime: REFUSED — $RT_ERR"
   else echo "reviewer codex runtime: $RT_PATH (version $RT_VERSION)$( [ "$RT_PATH" = bundled ] && printf ' — the ACP adapter'"'"'s own copy; models that need a newer codex fall back per policy-map.tsv')"; fi
   # Reply verification needs python3 (comms.sh reply-check). Without it every reply is UNDECIDABLE

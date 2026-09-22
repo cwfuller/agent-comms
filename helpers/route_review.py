@@ -177,11 +177,15 @@ def map_answers(answers):
         effort = EFFORTS[max(EFFORTS.index(choice), cheapest_covering(evals))]
     gates = []
     if dconf < DEPTH_CONFIDENCE_MIN:
-        tier = "none"
         gates.append("low-depth-confidence")
     if econf < EFFORT_CONFIDENCE_MIN:
-        effort = "none"
         gates.append("low-effort-confidence")
+    if gates:
+        # EITHER gate keeps the WHOLE baseline. Clearing only the doubtful dimension let the other
+        # route cheaper — a confident `low` effort on the baseline model, or a `fast` model at the
+        # baseline effort — which is below the baseline the low-confidence guarantee promises.
+        # (codex, implement r1.)
+        tier, effort = "none", "none"
     gate = "+".join(gates) if gates else "classify"
     reason = ("policy=%s depth=%s conf=%.3f covering-level=%d effort-choice=%s conf=%.3f -> tier=%s effort=%s"
               % (POLICY, ",".join("%.3f" % v for v in dvals), dconf, level, choice, econf, tier, effort))

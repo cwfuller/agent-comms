@@ -3030,15 +3030,15 @@ cmd_run() {
     local acp_transport=acp acp_route_err="" acp_route_cur="" acp_route_cur_id="" acp_phase=""
     [ -n "$mount_dir" ] && acp_transport=acp-mounted
     acp_phase="$(frontmatter_field "$msg" phase || true)"
-    local acp_is_leg=""
-    [ -n "$(frontmatter_field "$msg" dispatch || true)" ] && acp_is_leg=1
+    local acp_leg_dispatch=""
+    acp_leg_dispatch="$(frontmatter_field "$msg" dispatch || true)"
     [[ "$acp_phase" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || acp_phase=-
     "$COMMS" review-route enabled 2>/dev/null && acp_routing=on
     # The stamped id is read ONLY when routing is on — with routing off a leftover id is ignored
     # (fallback routing-disabled), never a reason to refuse a baseline turn — and it must be the
     # decision CURRENTLY in force for its own thread and phase (`review-route verify`, keyed on
     # the record, not on this runner's cwd): an old or planted id never routes a turn, and only a
-    # panel leg (`dispatch:` present) may carry its base thread's decision.
+    # panel leg the coordinator log corroborates may carry its base thread's decision.
     if [ "$acp_routing" = off ]; then
       # Recorded, never loaded: the ledger says a routed request ran unrouted and why. A value
       # that is not even a well-formed id is dropped rather than handed to the resolver.
@@ -3048,7 +3048,7 @@ cmd_run() {
       acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
       if [ -n "$acp_route_id" ]; then
         if acp_route_cur="$("$COMMS" review-route verify "$acp_route_id" --thread "$msg_thread" --phase "$acp_phase" \
-                              ${acp_is_leg:+--leg} 2>>"$run_dir/runner.log")"; then
+                              ${acp_leg_dispatch:+--leg-dispatch "$acp_leg_dispatch"} 2>>"$run_dir/runner.log")"; then
           acp_route_cur_id="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="decision"{print $2; exit}')"
           if [ "$acp_route_cur_id" = "$acp_route_id" ]; then
             acp_route_tier="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="tier"{print $2; exit}')"
