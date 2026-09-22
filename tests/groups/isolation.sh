@@ -535,3 +535,35 @@ ISO_ZR="$WORK/rollout-zeroroot"; rm -rf "$ISO_ZR"; mkdir -p "$ISO_ZR/sessions/20
 iso_ctx t-c t-parent gpt-6-astra xhigh > "$ISO_ZR/sessions/2026/09/20/rollout-z.jsonl"
 ( eval "$ISO_RO"; acp_rollout_observed "$ISO_ZR" "$WORK/snap-mr.txt" ) >/dev/null 2>&1 \
   && fail "a window with no root was accepted" || ok "no root in the window is still undecidable"
+
+# A LARGE SESSION RECORD MUST NOT KILL THE RUNNER. The mount-corroboration read slurped the whole
+# acpx session record and piped it to `sed | head -1`. Records grow every round; once one crossed
+# the pipe buffer with an early match, `head` exited while the producer was still writing, the
+# producer took SIGPIPE, the pipeline returned 141, and `set -euo pipefail` killed the runner ON
+# THAT ASSIGNMENT — before anything was logged. Operators saw "runner aborted unexpectedly — see
+# runner.log" with a ZERO-BYTE runner.log. Hit live at 2.2 MB in two projects, on two machines,
+# and diagnosed independently by two sessions. Deterministic, not flaky: early rounds pass, then
+# every later round on that thread fails instantly.
+ISO_BIGREC="$WORK/big-session.json"
+python3 -c "
+import json,sys
+d={'cwd':'/some/mount/view/tree','name':'n',
+   'blob':[{'cwd':'/some/mount/view/tree','pad':'y'*200} for _ in range(6000)]}
+open(sys.argv[1],'w').write(json.dumps(d,indent=1))" "$ISO_BIGREC"
+[ "$(wc -c < "$ISO_BIGREC")" -gt 1000000 ] \
+  && ok "the oversized-record fixture is past the pipe buffer" || fail "fixture too small to exercise SIGPIPE"
+# Run the SHIPPED reader expression, under the same shell options the runner uses.
+ISO_READ="$(grep -n 'corr_cwd="\$(sed -n' "$ISO_RP" | head -1 | cut -d: -f2- | sed 's/^[[:space:]]*//')"
+[ -n "$ISO_READ" ] && ok "the session-record read is a direct file read, not a slurped pipeline" || fail "no direct-read corr_cwd found"
+ISO_OUT="$(bash -c 'set -euo pipefail; corr_json="'"$ISO_BIGREC"'"; '"$ISO_READ"'; printf "%s" "$corr_cwd"' 2>/dev/null)"; ISO_RC=$?
+[ "$ISO_RC" -eq 0 ] \
+  && ok "reading a multi-megabyte session record does not kill the runner (no SIGPIPE)" || fail "the shipped read died rc=$ISO_RC on a large record"
+[ "$ISO_OUT" = "/some/mount/view/tree" ] \
+  && ok "...and it still returns the first cwd" || fail "wrong cwd from the large record: $ISO_OUT"
+# CONTROL: the OLD pipeline shape must actually fail, or the test above proves nothing.
+bash -c 'set -euo pipefail; body="$(cat "'"$ISO_BIGREC"'")"; v="$(printf "%s\n" "$body" | sed -n "s/^[[:space:]]*\"cwd\":[[:space:]]*\"\(.*\)\",*$/\1/p" | head -1)"; printf "%s" "$v"' >/dev/null 2>&1 \
+  && fail "the old slurp|head pipeline survived the large record — the control proves nothing" \
+  || ok "the old slurp|head shape does die on this fixture, so the fix is what makes it pass"
+# And no slurp|head pipeline remains anywhere in the runner.
+[ "$(grep -cE "printf .*\| *sed .*\| *head -1" "$ISO_RP")" = 0 ] \
+  && ok "no slurp-into-sed-into-head pipeline remains in runphase.sh" || fail "a slurp|head pipeline remains"

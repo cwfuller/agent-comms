@@ -1619,9 +1619,13 @@ mount_claim_take() {  # <kdir> <run dir> -> 0 held | 1 refused
       MOUNT_CLAIM_NOTE="the claim at $held could not be read, so its holder cannot be adjudicated; refusing rather than assuming it is free"
       return 1
     fi
-    hp="$(printf '%s\n' "$hbody" | sed -n 's/^pid=//p' | head -1)"
-    hs="$(printf '%s\n' "$hbody" | sed -n 's/^start=//p' | head -1)"
-    hfmt="$(printf '%s\n' "$hbody" | sed -n 's/^fmt=//p' | head -1)"
+    # Same shape as the session-record read below: `slurp | sed | head -1` takes SIGPIPE
+    # once the producer outruns the consumer, and `set -euo pipefail` turns that into a
+    # silent runner death. A claim file is small today, so this is latent rather than live —
+    # fixed anyway, because the defect is the PATTERN, not the file that happened to grow.
+    hp="$(sed -n '/^pid=/{s/^pid=//p;q;}' "$held" 2>/dev/null)" || hp=""
+    hs="$(sed -n '/^start=/{s/^start=//p;q;}' "$held" 2>/dev/null)" || hs=""
+    hfmt="$(sed -n '/^fmt=/{s/^fmt=//p;q;}' "$held" 2>/dev/null)" || hfmt=""
     # A tombstone is an EXPLICIT, successfully-read marker -- never merely an absent pid.
     if printf '%s\n' "$hbody" | grep -qx 'released=1'; then
       if ln "$stage" "$kdir/.claim.$(( n + 1 ))" 2>/dev/null; then
@@ -2622,11 +2626,20 @@ cmd_run() {
         # written as `pwd -P` of exactly this path when it was a real tree.
         corr_phys="$mount_dir"
         if [ -f "$corr_json" ] && [ ! -L "$corr_json" ]; then
-          local corr_body="" corr_rc=0
-          corr_body="$(cat "$corr_json" 2>/dev/null)" || corr_rc=$?
-          if [ "$corr_rc" = 0 ]; then
-            corr_cwd="$(printf '%s\n' "$corr_body" | sed -n 's/^[[:space:]]*"cwd":[[:space:]]*"\(.*\)",*$/\1/p' | head -1)"
-          fi
+          # READ THE FILE, STOP AT THE FIRST MATCH, NO DOWNSTREAM PIPE.
+          #
+          # This slurped the whole record and piped it to `sed | head -1`. A session record
+          # grows every round; once it exceeds the pipe buffer with an early match, `head`
+          # exits while the producer is still writing, the producer takes SIGPIPE, the
+          # pipeline returns 141, and `set -euo pipefail` kills the runner ON THIS ASSIGNMENT
+          # — before anything is logged. The operator sees only "runner aborted unexpectedly
+          # — see runner.log" with a ZERO-BYTE runner.log. Observed live at 2.2 MB on two
+          # machines and two projects; deterministic once the record crosses the threshold,
+          # which is why rounds 1-5 of a loop pass and every later round fails instantly.
+          #
+          # `q` inside the match block is POSIX. GNU `T;q` is not: BSD/macOS sed exits 1 on
+          # it, which under `set -e` would kill the runner a different way.
+          corr_cwd="$(sed -n '/^[[:space:]]*"cwd":/{s/^[[:space:]]*"cwd":[[:space:]]*"\(.*\)",*$/\1/p;q;}' "$corr_json" 2>/dev/null)" || corr_cwd=""
         fi
         if [ -z "$corr_cwd" ] || [ -z "$corr_phys" ] || [ "$corr_cwd" != "$corr_phys" ]; then
           mount_degrade "the recorded (record, home) pair does not name an acpx record for this mount; degrading rather than probing a store it may not own — the durable mount is left as-is deliberately; restaging it without corroboration is the bug this check prevents (record=$st_record home=$st_home json=$corr_json record_cwd=${corr_cwd:-<none>} mount=$corr_phys)"
