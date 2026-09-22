@@ -1234,6 +1234,10 @@ printf 'agents =\tclaude\t codex\ndefault-target = codex\nsuite-cmd = bash t.sh\
 st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
 grep -qx 'agents = claude codex' "$ST_PROJ/.comms/config" && grep -qx 'default-target = codex' "$ST_PROJ/.comms/config" \
   && ok "a whitespace-irregular roster is normalised before it is written back" || fail "roster not normalised: $(tr '\n\t' '|^' < "$ST_PROJ/.comms/config")"
+printf 'agents = claude codex\ndefault-target = claude codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
+st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
+grep -qx 'default-target = codex' "$ST_PROJ/.comms/config" \
+  && ok "a malformed multi-name default-target is replaced, not offered back as the fallback" || fail "multi-name default kept"
 printf 'agents = claude codex\ndefault-target = codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
 # An explicit COMMS_ROUTE=0 beside a named backend is OFF; accepting defaults must keep it off.
 printf 'COMMS_ROUTE_BACKEND=typesafe\nCOMMS_ROUTE=0\n' > "$ST_HOME/settings"; st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1

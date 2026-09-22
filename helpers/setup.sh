@@ -194,6 +194,9 @@ if [ -n "$CFG" ]; then
   AGENTS="$(printf '%s' "$AGENTS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
   first="${AGENTS%% *}"; dflt_default="$CUR_DEFAULT"
   # Plain statements, never a `case` inside $( ): bash 3.2 mis-parses that and assigns shell text.
+  # The current value is a candidate only if it is ONE name in the roster ("claude codex" would
+  # pass the substring match and be offered back as the fallback).
+  case "$dflt_default" in *[[:space:]]*) dflt_default="" ;; esac
   case " $AGENTS " in *" $dflt_default "*) ;; *) dflt_default="" ;; esac
   if [ -z "$dflt_default" ]; then case " $AGENTS " in *" codex "*) dflt_default=codex ;; *) dflt_default="$first" ;; esac; fi
   DEFAULT="$(ask "  default reviewer (for /ask and single-reviewer loops)" "$dflt_default")"
