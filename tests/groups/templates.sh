@@ -381,4 +381,7 @@ grep -q 'COMMS_REVIEW_ROUTE=1' "$AIF" && grep -q 'Never write `route_decision:` 
   && ok "auto.md leaves reviewer routing to the helpers and never teaches the author to pick its reviewer's depth" \
   || fail "auto.md reviewer-routing contract"
 grep -q 'ALSO turns reviewer routing off' "$AIF" && grep -q 'do NOT affect reviewer routing' "$AIF" \
-  && ok "auto.md defines how --no-route and --plan/--no-plan interact with reviewer routing" || fail "auto.md routing flag interaction"
+  && grep -q 'INLINE on every `send` / `panel dispatch`' "$AIF" && grep -q 'COMMS_ROUTE=0 "$COMMS_SH" send' "$AIF" \
+  && ok "auto.md defines how --no-route and --plan/--no-plan interact with reviewer routing, inline so it persists" || fail "auto.md routing flag interaction"
+grep -q -- '--max' "$AIF" && grep -q 'use max' "$AIF" && grep -q 'COMMS_REVIEW_MAX=1' "$AIF" && grep -q 'only ever raises depth' "$AIF" \
+  && ok "auto.md maps --max / 'use max' to the reviewer ceiling override" || fail "auto.md use-max override"

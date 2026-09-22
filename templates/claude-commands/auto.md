@@ -88,10 +88,19 @@ asked. Do not narrate every dispatch.
      the classifier would have requested it. `--no-route` (or `COMMS_ROUTE=0`) skips
      the classifier. `--plan` and `--no-plan` are human overrides: do not call
      `route` when either is set. If both appear, `--plan` wins.
-     `--no-route` ALSO turns reviewer routing off for this loop — export
-     `COMMS_ROUTE=0` (the master switch the helpers read) before any `send`.
+     `--no-route` ALSO turns reviewer routing off for this loop: put `COMMS_ROUTE=0`
+     (the master switch the helpers read) INLINE on every `send` / `panel dispatch`
+     command of the loop — `COMMS_ROUTE=0 "$COMMS_SH" send ...`. An `export` in one
+     tool call does not survive into the next, so it would silently stop applying.
      `--plan` / `--no-plan` do NOT affect reviewer routing: they choose whether an
      approach review happens, not how deeply a reviewer thinks.
+   - `--max`, or the phrase `use max` in the task, is the operator asking for the
+     deepest review: put `COMMS_REVIEW_MAX=1` INLINE on every `send` / `panel dispatch`
+     of the loop (same reason as above — an export does not persist between tool calls).
+     Every reviewer turn then runs the policy map's ceiling (the strongest model at its
+     highest effort), whatever routing decided; only explicit `COMMS_ACP_CODEX_*` pins
+     outrank it. It only ever raises depth. Ceiling turns run long — add
+     `COMMS_RUNPHASE_TIMEOUT_SECS=3600` inline too if a reviewer times out.
    - `--reviewers a,b` selects the reviewing agents. **The default is a PANEL: every
      registered agent except the one driving.** Narrow it explicitly when you want one
      (`--reviewers codex`). Derive the default from the registry — never hardcode a

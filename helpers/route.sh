@@ -367,6 +367,9 @@ _OV_TIER = (
 )
 _OV_EFFORT = re.compile(
     r"\b(?:use|switch to)\s+(low|medium|high|xhigh)(?:\s+effort)?" + _OV_TAIL, re.I)
+# "use max": the strongest tier at the highest implementer effort. The same phrase makes /auto
+# export COMMS_REVIEW_MAX=1, which raises every reviewer to the map's ceiling.
+_OV_MAX = re.compile(r"\b(?:use|switch to)\s+max(?:imum)?(?:\s+(?:tier|effort))?" + _OV_TAIL, re.I)
 
 def detect_overrides(text):
     ov = {}
@@ -381,6 +384,9 @@ def detect_overrides(text):
     m = _OV_EFFORT.search(text)
     if m:
         ov["effort"] = m.group(1).lower()
+    if _OV_MAX.search(text):
+        ov["tier"] = "strong"
+        ov["effort"] = "xhigh"
     return ov
 
 def unit_float(value, what):

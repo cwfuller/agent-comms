@@ -2260,22 +2260,32 @@ eff,mod,tid,src,off=roots[0]
 # and an unreadable or absent one is simply unknown). The adapter floats under a caret range and
 # bundles its own codex, so a map validated on one runtime can otherwise be applied to another
 # with no trace. (design critique r1.)
-rt=""
+# codex writes session_meta ONCE, when the session is created, never on resume — so it is the
+# runtime that CREATED the session. It is reported as this turn's runtime only when it falls inside
+# the attested window (the session was created during this turn); otherwise the created value is
+# kept under its own honest name and the turn's runtime is unknown. (code review r1.)
+rt_win=""; rt_created=""
 try:
     with open(src,"rb") as fh:
+        pos=0
         for raw in fh:
+            here=pos; pos+=len(raw)
             try: r=json.loads(raw.decode("utf-8"))
             except Exception: continue
             if r.get("type")=="session_meta":
                 p=r.get("payload") or {}
                 v=p.get("cli_version") if isinstance(p,dict) else None
-                if isinstance(v,str) and v: rt=v
+                if isinstance(v,str) and v:
+                    rt_created=v
+                    if here>=off: rt_win=v
 except OSError:
-    rt=""
-if not all(c.isalnum() or c in "._-+" for c in rt): rt=""
-# effort, model, backend turn id, rollout path, snapshot byte boundary, runtime -- the evidence a
-# refusal needs to be reconstructable once the isolated home is gone. (codex, live-proof r1.)
-print("%s\t%s\t%s\t%s\t%s\t%s"%("" if eff is None else eff,"" if mod is None else mod,tid,src,off,rt))
+    rt_win=""; rt_created=""
+def _tok(v): return v if all(c.isalnum() or c in "._-+" for c in v) else ""
+rt_win=_tok(rt_win); rt_created=_tok(rt_created)
+# effort, model, backend turn id, rollout path, snapshot byte boundary, runtime of THIS turn (only
+# when evidenced in the window), runtime that created the session -- the evidence a refusal needs
+# to be reconstructable once the isolated home is gone. (codex, live-proof r1.)
+print("%s\t%s\t%s\t%s\t%s\t%s\t%s"%("" if eff is None else eff,"" if mod is None else mod,tid,src,off,rt_win,rt_created))
 PY
 }
 
@@ -2346,6 +2356,7 @@ turn_observe() {
     printf 'evidence_offset\t%s\n' "${7:-}"
     printf 'evidence_source\t%s\n' "${6:+provider-rollout}"
     printf 'observed_runtime\t%s\n' "${8:-}"
+    printf 'session_created_runtime\t%s\n' "${9:-}"
   } | sed 's/\t$/\tunknown/' >> "$1/turn.tsv" 2>/dev/null || true
 }
 
@@ -3019,12 +3030,15 @@ cmd_run() {
     local acp_transport=acp acp_route_err="" acp_route_cur="" acp_route_cur_id="" acp_phase=""
     [ -n "$mount_dir" ] && acp_transport=acp-mounted
     acp_phase="$(frontmatter_field "$msg" phase || true)"
+    local acp_is_leg=""
+    [ -n "$(frontmatter_field "$msg" dispatch || true)" ] && acp_is_leg=1
     [[ "$acp_phase" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || acp_phase=-
     "$COMMS" review-route enabled 2>/dev/null && acp_routing=on
     # The stamped id is read ONLY when routing is on — with routing off a leftover id is ignored
     # (fallback routing-disabled), never a reason to refuse a baseline turn — and it must be the
-    # decision CURRENTLY in force for this thread's base and phase: an old or planted id with a
-    # plausible thread never routes a turn.
+    # decision CURRENTLY in force for its own thread and phase (`review-route verify`, keyed on
+    # the record, not on this runner's cwd): an old or planted id never routes a turn, and only a
+    # panel leg (`dispatch:` present) may carry its base thread's decision.
     if [ "$acp_routing" = off ]; then
       # Recorded, never loaded: the ledger says a routed request ran unrouted and why. A value
       # that is not even a well-formed id is dropped rather than handed to the resolver.
@@ -3033,7 +3047,8 @@ cmd_run() {
     else
       acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
       if [ -n "$acp_route_id" ]; then
-        if acp_route_cur="$("$COMMS" review-route current --thread "$msg_thread" --phase "$acp_phase" 2>>"$run_dir/runner.log")"; then
+        if acp_route_cur="$("$COMMS" review-route verify "$acp_route_id" --thread "$msg_thread" --phase "$acp_phase" \
+                              ${acp_is_leg:+--leg} 2>>"$run_dir/runner.log")"; then
           acp_route_cur_id="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="decision"{print $2; exit}')"
           if [ "$acp_route_cur_id" = "$acp_route_id" ]; then
             acp_route_tier="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="tier"{print $2; exit}')"
@@ -3093,10 +3108,6 @@ cmd_run() {
     else
       acp_session="agent-comms-oneoff-$(safe_name "$(frontmatter_field "$msg" message_id)")"
     fi
-    { printf 'policy_digest\t%s\n' "${acp_policy_digest:-none}"
-      printf 'acp_session\t%s\n' "$acp_session"
-      printf 'acpx_version\t%s\n' "$("$acp_sh" version 2>/dev/null || echo unknown)"
-    } >> "$run_dir/turn.tsv" 2>/dev/null || true
     # acpx GLOBAL options must precede the profile; only subcommand flags follow it.
     # (`--cwd` after the profile is rejected outright — caught live.) The turn runs
     # IN $workdir because acpx keys session identity on (agent, cwd, name) and compares
@@ -3111,6 +3122,13 @@ cmd_run() {
     # shellcheck disable=SC2206
     acp_launch=($("$acp_sh" launcher 2>/dev/null))
     [ "${#acp_launch[@]}" -gt 0 ] || acp_launch=(npx -y "acpx@$("$acp_sh" version)")
+    { printf 'policy_digest\t%s\n' "${acp_policy_digest:-none}"
+      printf 'acp_session\t%s\n' "$acp_session"
+      # The PINNED acpx version and the launcher that actually ran: ACPX_BIN can replace the pin,
+      # and a constant filed as observed would hide exactly that drift. (code review r1.)
+      printf 'acpx_pinned_version\t%s\n' "$("$acp_sh" version 2>/dev/null || echo unknown)"
+      printf 'acpx_launcher\t%s\n' "${acp_launch[*]:-unknown}"
+    } >> "$run_dir/turn.tsv" 2>/dev/null || true
     # --format text is PINNED: `format` is a config scalar, so the ambient default is
     # branch-controllable. Field 1 of the first line is the record id in both the created
     # and the already-existing case.
@@ -3251,7 +3269,17 @@ cmd_run() {
           _iso_place "" "$acp_iso_home/config.toml" 600 "$acp_iso_cfg" \
             || die "run: cannot write the isolated codex config"
           ABORT_NOTE="runner aborted unexpectedly — see runner.log"
-          acp_iso=(env "CODEX_HOME=$acp_iso_home" "INITIAL_AGENT_MODE=read-only")
+          # THE RUNTIME the policy was resolved against — its models were checked against THIS
+          # binary — handed to the adapter as CODEX_PATH. `bundled` UNSETS an inherited CODEX_PATH,
+          # so an operator variable cannot silently run a different codex than the ledger names.
+          local acp_rt=""
+          acp_rt="$("$acp_sh" runtime codex --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" \
+            || { ABORT_NOTE="refused: the resolved codex runtime is unusable"; die "run: the resolved codex runtime is unusable"; }
+          if [ "$acp_rt" = bundled ]; then
+            acp_iso=(env -u CODEX_PATH "CODEX_HOME=$acp_iso_home" "INITIAL_AGENT_MODE=read-only")
+          else
+            acp_iso=(env "CODEX_PATH=$acp_rt" "CODEX_HOME=$acp_iso_home" "INITIAL_AGENT_MODE=read-only")
+          fi
           acp_iso_backend="codex-home+read-only"
           acp_iso_mode="read-only"
           ;;
@@ -3599,13 +3627,8 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
-      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt=""
+      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
       att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
-      # The expectation must be the one resolved before launch. The reviewer ran in between, and a
-      # record it could rewrite to match its own rollout would turn a mismatch into a pass.
-      if [ "$att_rc" -eq 0 ] && ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
-        att_rc=22; att_msg="the resolved policy record changed during the turn"
-      fi
       if [ "$att_rc" -eq 0 ]; then
         # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
         # field after an empty one shifts left — a context missing its effort was reported as a
@@ -3618,9 +3641,17 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
         att_src="$(printf '%s' "$att_out" | cut -f4)"
         att_off="$(printf '%s' "$att_out" | cut -f5)"
         att_rt="$(printf '%s' "$att_out" | cut -f6)"
-        att_msg="$("$acp_sh" policy-attest codex "$att_eff" "$att_mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || att_rc=$?
+        att_rtc="$(printf '%s' "$att_out" | cut -f7)"
+        # The expectation must be the one resolved before launch. The reviewer ran in between, and
+        # a record it could rewrite to match its own rollout would turn a mismatch into a pass.
+        # Checked AFTER the evidence is parsed, so a refusal still records what actually ran.
+        if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
+          att_rc=22; att_msg="the resolved policy record changed during the turn"
+        else
+          att_msg="$("$acp_sh" policy-attest codex "$att_eff" "$att_mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || att_rc=$?
+        fi
       fi
-      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}"
+      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}" "${att_rtc:-}"
       if [ "$att_rc" -ne 0 ]; then
         printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
         if [ "$att_rc" -eq 20 ]; then

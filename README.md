@@ -98,8 +98,11 @@ bumped mapping is the named `implementer-bump-v1` hint for the implementer only.
 versioned `helpers/policy-map.tsv` — the one place vendor model ids live —
 then attests from the provider's own rollout that it actually ran that
 model and effort, or refuses to publish. Claude and Grok stay on their fixed
-behaviour until their controls are proven. See `acp.sh capabilities` and
-`docs/INTERNALS.md` "Reviewer model/effort routing".
+behaviour until their controls are proven. Reviewers use your installed `codex`
+when it is new enough (GPT-6 Sol/Luna need >= 0.155), else fall back to the
+gpt-5.6 models. `/auto --max` (or "use max") runs every reviewer at the
+strongest model and highest effort. See `acp.sh doctor` / `acp.sh capabilities`
+and `docs/INTERNALS.md` "Reviewer model/effort routing".
 
 **A panel is the default.** Every registered agent except the driver reviews the
 same pinned artifact. They find different things. A blocking finding two of them

@@ -277,24 +277,69 @@ def _sections(body):
     return out
 
 
-def artifact_numstat(repo, base, artifact):
-    """`git diff --numstat <base> <artifact>` in the MAIN repo, or None when it cannot be measured.
+# The branches a change under review is measured against, in order. The artifact's own base
+# (head_sha) is only a last resort: send stamps artifact == base for a committed (clean) tree, and
+# a dirty tree's base is HEAD, so diffing against it measures nothing, or only the uncommitted tail.
+INTEGRATION_REFS = ("refs/heads/main", "refs/heads/master", "refs/remotes/origin/HEAD")
 
-    The helper measures the change itself. The request's own `## Files changed` section is written
-    by the author whose work is under review, so it is recorded only as `author_claimed` and never
-    drives the decision. Both ids must be full 40-hex object ids (send stamps them before deciding).
-    """
-    import re
+
+def _git(repo, *args):
     import subprocess
-    if not (repo and re.fullmatch(r"[0-9a-f]{40}", base or "") and re.fullmatch(r"[0-9a-f]{40}", artifact or "")):
-        return None
     env = {k: v for k, v in os.environ.items() if k not in GIT_SELECTORS}
     try:
-        out = subprocess.run(["git", "-C", repo, "diff", "--numstat", base, artifact],
-                             capture_output=True, text=True, timeout=20, env=env)
+        out = subprocess.run(["git", "-C", repo] + list(args), capture_output=True, text=True,
+                             timeout=20, env=env)
     except Exception:
         return None
     return out.stdout if out.returncode == 0 else None
+
+
+def measure_change(repo, artifact, base=None):
+    """(numstat, measured_from, ref) for the change under review, or (None, None, why).
+
+    The helper measures the change itself. The request's own `## Files changed` section is written
+    by the author whose work is under review, so it is sent only as request text and never drives
+    the signals. The change is `merge-base(artifact, integration branch)..artifact`; an artifact that
+    IS the integration tip, an unresolvable id, or an EMPTY diff is UNMEASURED — never a measured
+    zero, which would read as "trivially small" and steer toward the cheapest reviewer.
+    """
+    import re
+    if not (repo and re.fullmatch(r"[0-9a-f]{40}", artifact or "")):
+        return None, None, "no full artifact id"
+    frm, ref = None, None
+    for r in INTEGRATION_REFS:
+        mb = (_git(repo, "merge-base", artifact, r) or "").strip()
+        if re.fullmatch(r"[0-9a-f]{40}", mb) and mb != artifact:
+            frm, ref = mb, r
+            break
+    if frm is None and re.fullmatch(r"[0-9a-f]{40}", base or "") and base != artifact:
+        frm, ref = base, "head_sha"
+    if frm is None:
+        return None, None, "no integration base distinct from the artifact"
+    ns = _git(repo, "diff", "--numstat", frm, artifact)
+    if ns is None:
+        return None, None, "git diff failed"
+    if not ns.strip():
+        return None, None, "the measured diff is empty"
+    return ns, frm, ref
+
+
+def prepare_review_input(text, repo, artifact=None, base=None):
+    """(state, meta, unsendable_reason) — the ONE path from a request to the outbound reviewer
+    state, used by the live decider AND the shadow collector, so an observation is never made
+    under an input production would not send. unsendable_reason is None when it may be sent."""
+    fm, _ = _split_request(text)
+    artifact = artifact or fm.get("artifact_id", "")
+    base = base or fm.get("head_sha", "")
+    numstat, frm, ref_or_why = measure_change(repo, artifact, base)
+    state, meta = build_review_state(text, numstat=numstat, artifact=artifact)
+    meta["measured_from"] = frm
+    meta["measured_ref"] = ref_or_why if numstat is not None else None
+    if numstat is None:
+        return state, meta, "the change under review could not be measured (%s)" % ref_or_why
+    if meta["sent_chars"] == 0:
+        return state, meta, "the request has none of the reviewable sections"
+    return state, meta, None
 
 
 def risk_signals(numstat):

@@ -17,7 +17,7 @@ Invocation is not the same short name on every runtime:
 
 ## Driver commands
 
-### `/auto [--plan|--no-plan] [--no-route] [--reviewers a,b] [--rounds N] [--via headless] <task>`
+### `/auto [--plan|--no-plan] [--no-route] [--max] [--reviewers a,b] [--rounds N] [--via headless] <task>`
 
 Implement → send to the other registered agents → fix blocking findings → repeat until `APPROVE` or `N`
 rounds (default 10). The task text can describe work or reference an existing plan file.
@@ -33,7 +33,9 @@ the implementer only (the named `implementer-bump-v1` policy).
 
 Reviewer model/effort routing is separate and helper-applied (see `review-route` and
 `acp.sh resolve`): opt-in with `COMMS_REVIEW_ROUTE=1`, implement phase only.
-`--no-route` exports `COMMS_ROUTE=0`, which turns reviewer routing off too;
+`--no-route` puts `COMMS_ROUTE=0` inline on the loop's sends, which turns reviewer routing off too;
+`--max` (or `use max` in the task) puts `COMMS_REVIEW_MAX=1` inline, which runs every reviewer at
+the policy map's ceiling (strongest model, highest effort) whatever routing decided;
 `--plan` / `--no-plan` do not affect it.
 
 ### `/ask [agent] [question] [--with-diff] [--with-files a,b]`
@@ -155,7 +157,7 @@ agnostic.
 | `route --shadow [--thread T] [--current-tier T] [--context-tokens N] -- <task>` | OBSERVE what the classifier would decide, without deciding anything. Emits no classify key — only `shadow-decision <id>` — so `/auto` cannot read it. Refuses unless the project key is in `route-shadow-allow`; records the raw response, the shared outbound state and the effective policy inputs under the main repo's `.comms/route-shadow/`. Records carry `role`, `policy_variant` and `rubric_version` (record v2). |
 | `route --shadow --reviewer --file <review-request> [--thread T]` | the same observation for the REVIEWER rubric, through the same bounded state builder and questions as `review-route decide`. Writes nothing under `route-decisions/`, so a collection can never activate a routed turn. |
 | `review-route decide (--request <file> \| --thread T --phase P) [--tier T] [--effort E] [--replace]` | record the reviewer routing decision for (workspace, base thread, phase): an abstract candidate `tier` (`fast\|balanced\|strong\|none`) and `effort` (`low..xhigh\|none`; `none` = keep the baseline). Made ONCE and reused every round (sticky pointer); an existing decision is returned unchanged, explicit flags against one are refused without `--replace`, and `--replace` mints a NEW id. `--tier/--effort` = an explicit OPERATOR decision (strict: the resolver refuses it rather than substituting). Otherwise it classifies the request with the reviewer rubric (`reviewer-v1`, no bump, split/tied answers go deeper, low confidence or a malformed answer = `none`), but only for a project in `route-shadow-allow` (else `not-permitted`, nothing sent), only with a measurable artifact diff (risk signals come from `git diff --numstat`, never the author's stat), and a `stub` answer is recorded but never applied. Records live in `.comms/route-decisions/<id>.json` with the bounded input, omissions, raw answer and who decided. |
-| `review-route lookup --thread T --phase P` / `current --thread <msg thread> --phase P` / `show <id> [--thread T] [--phase P]` / `enabled` | the decision in force (`current` strips a panel leg's `-<agent>` suffix first); `show` refuses a foreign thread or phase; `enabled` exits 0 iff `COMMS_REVIEW_ROUTE=1` and `COMMS_ROUTE` is not `0`. `send` and `panel dispatch` call `decide` after the snapshot and stamp `route_decision:` (helper-only: every other send strips it). |
+| `review-route lookup --thread T --phase P` / `verify <id> --thread <msg thread> --phase P [--leg]` / `show <id> [--thread T] [--phase P]` / `enabled` | `lookup`: the decision in force for this workspace's thread+phase. `verify`: the id a request CARRIES must be the decision in force for the record's own thread+phase (keyed on the record, so the caller's cwd or branch cannot change the answer); only with `--leg` may the thread be that thread plus `-<registered agent>` — a thread merely named `x-grok` never borrows `x`'s decision. `show` refuses a foreign thread or phase. `enabled` exits 0 iff `COMMS_REVIEW_ROUTE=1` and `COMMS_ROUTE` is not `0`. `send` and `panel dispatch` call `decide` after the snapshot and stamp `route_decision:` (helper-only: every other send strips it). |
 | `findings [--out F] [--role gating\|shadow] [--review-set ID] [--artifact ID] [--reviewer-version V] [--prompt-version V] [--header] [<message>...]` | extract review findings to TSV (default: the whole archive, oldest first); `--out` appends and is idempotent by `finding_id` |
 | `shadow --to <agent> <review-request> [--review-set ID] [--out F] [--timeout-secs N]` | run a SECOND reviewer on the same artifact; the reply is stored but never delivered and never written to thread state |
 | `events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R] [--limit N]` | read the coordinator's append-only log (`.comms/events.tsv`): roster planned → request persisted → dispatched → turn started → provider result → reply validated/refused → reply accepted → turn finished → composition completed. Filters apply before `--limit`; a malformed row is named on stderr, never parsed. See PROTOCOL "Coordinator event log" for the recovery walk |
@@ -328,9 +330,25 @@ with the fallback rather than returned as an answer.
 `helpers/policy-map.tsv` — the ONE versioned table naming vendor models (baseline, tier→model,
 effort→value, the efforts each model accepts, and a capability row per provider/transport with its
 mechanism, evidence source and versions tested). Precedence per dimension: operator pin
-(`COMMS_ACP_CODEX_MODEL` / `COMMS_ACP_CODEX_EFFORT`) > an eligible, enabled, implement-phase route >
-baseline. The pair is validated; an invalid routed dimension falls back to the baseline once
-(recorded), an invalid pin or explicit decision is refused. Capability `eligible` may route,
+(`COMMS_ACP_CODEX_MODEL` / `COMMS_ACP_CODEX_EFFORT`) > the operator's "use max" ceiling
+(`COMMS_REVIEW_MAX=1`, the map's `ceiling` row) > an eligible, enabled, implement-phase route >
+baseline. A tier is an ORDERED list (`fast` = gpt-6-luna then gpt-5.6-luna; `balanced` = gpt-6-sol
+then gpt-5.6-terra): the first model the reviewer's codex runtime can serve, by the minimum runtime
+on its `pair` row; a skipped preference is recorded (`runtime-lacks:<model>`). The pair is
+validated; an invalid routed dimension falls back to the baseline once (recorded), an invalid pin,
+max pair or explicit decision is refused, and so is a pinned/baseline/ceiling model the runtime
+cannot serve.
+
+**The reviewer's codex runtime.** The ACP adapter bundles its own codex and runs it unless
+`CODEX_PATH` names another; the bundled copy can lag your installed CLI, and new models are served
+only to new enough clients (2026-09-22: bundled 0.154.0 is refused gpt-6-luna on a ChatGPT login;
+installed 0.155.1 serves gpt-6-luna and gpt-6-sol). `acp.sh` resolves the runtime per turn:
+`COMMS_ACP_CODEX_PATH=<path>` uses that binary, `=bundled` uses the adapter's copy, and unset it
+auto-detects the installed `codex` on PATH (skipping cmux/asdf shims), falling back to bundled.
+Nothing needs setting on a new machine with a current codex installed; `acp.sh doctor` and
+`acp.sh capabilities` print which runtime reviewers will use. The record carries `runtime` /
+`runtime_version`, runphase passes it as the child's `CODEX_PATH` (and unsets an inherited one for
+`bundled`), and the runtime is part of `policy_digest`, so an upgrade is a fresh session. Capability `eligible` may route,
 `fixed` applies and attests the baseline only, `unsupported` claims nothing (`verify none`) — today
 only codex/acp-mounted is eligible. The printed record (`policy_digest`, sources, `fallback`,
 `map_version`, …) is what runphase persists; `policy`, `provider-config`, `policy-check` and
@@ -373,9 +391,10 @@ lives here), `result.json` (provider, status, exit code, session id), `pid`,
 `runner.log`, `policy.tsv` (the per-turn policy record resolved BEFORE the session is
 launched; hash-checked before every consumer) and `turn.tsv` (identity, then
 `route_decision`, `policy_*`, `requested_model/effort` at resolution time,
-`policy_digest`, `acp_session`, `acpx_version`, `adapter_check/report/source` from the
-preflight, and `observed_model/effort`, `evidence_*`, `observed_runtime` from the
-provider's own rollout — requested, adapter-reported and observed are never conflated). A
+`policy_digest`, `acp_session`, `acpx_pinned_version`, `acpx_launcher`,
+`adapter_check/report/source` from the preflight, and `observed_model/effort`, `evidence_*`,
+`observed_runtime` (only when the session was created in this turn's window) and
+`session_created_runtime` from the provider's own rollout — requested, adapter-reported and observed are never conflated). A
 mounted codex session is named `agent-comms+mount+<ident>+p<policy_digest>`, so a
 changed concrete policy is a fresh session and an unchanged one stays warm. Thread state mirrors the outcome (`spawned` →
 `completed`/`failed`/`timeout`), records `last_run_dir` (the `stalled` watchdog's pid

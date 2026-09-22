@@ -701,8 +701,12 @@ rrc "$COMMS" review-route show '../../etc/x' >/dev/null 2>&1; C=$?
 rrc "$COMMS" review-route lookup --thread t-none --phase implement >/dev/null 2>&1; D=$?
 [ "$A" != 0 ] && [ "$B" != 0 ] && [ "$C" != 0 ] && [ "$D" != 0 ] \
   && ok "show refuses a foreign thread, a wrong phase and a path-shaped id; lookup refuses an absent decision" || fail "show/lookup refusals ($A$B$C$D)"
-[ "$(rrc "$COMMS" review-route current --thread t-exp-codex --phase implement 2>/dev/null | awk -F'\t' '$1=="decision"{print $2}')" = "$RX2" ] \
-  && ok "a panel leg's thread (<base>-<agent>) resolves to its base thread's current decision" || fail "current for a leg thread"
+rrc "$COMMS" review-route verify "$RX2" --thread t-exp-codex --phase implement --leg >/dev/null 2>&1; A=$?
+rrc "$COMMS" review-route verify "$RX2" --thread t-exp-codex --phase implement >/dev/null 2>&1; B=$?
+rrc "$COMMS" review-route verify "$RX" --thread t-exp --phase implement >/dev/null 2>&1; C=$?
+rrc "$COMMS" review-route verify "-h" --thread t-exp --phase implement >/dev/null 2>&1; D=$?
+[ "$A" = 0 ] && [ "$B" != 0 ] && [ "$C" != 0 ] && [ "$D" != 0 ] \
+  && ok "verify: a leg (--leg) may carry its base decision, a lookalike thread may not, a replaced id is stale, and an option-shaped id is refused" || fail "verify ($A$B$C$D)"
 
 # THE reviewer-v1 MAPPING, run directly: cheap outputs are reachable, and nothing malformed,
 # tied or split can land on the cheapest reviewer. No bump anywhere.
@@ -808,3 +812,44 @@ RR_IMP="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "rename a typo" 2>/dev/null)"
 python3 -c 'import sys; sys.path.insert(0,sys.argv[1]); import route_backend as b; sys.exit(0 if ("policy="+b.IMPLEMENTER_POLICY_VARIANT) in sys.argv[2] else 1)' \
   "$REPO/helpers" "$(rt_kv "$RR_IMP" reason)" \
   && ok "the implementer classifier names its bumped policy variant in reason:" || fail "implementer variant not named ($RR_IMP)"
+# THE CHANGE UNDER REVIEW is measured against the integration branch, never as artifact..artifact:
+# a committed (clean) tree stamps artifact == head_sha, and diffing that measures "0 files" — a
+# false "trivially small" that would steer toward the cheapest reviewer.
+git -C "$RR_REPO" branch -f main "$RR_BASE" >/dev/null 2>&1
+rr_req "$WORK/rr-q7.md" t-clean implement
+OUT="$(rrc COMMS_ROUTE_STUB="$RR_STUB" COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" "$COMMS" review-route decide --request "$WORK/rr-q7.md" --artifact "$RR_AID" --base "$RR_AID" 2>/dev/null)"
+RC7="$(rrv "$OUT" decision)"
+rr_req "$WORK/rr-q8.md" t-onmain implement
+OUT8="$(rrc COMMS_ROUTE_STUB="$RR_STUB" COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" "$COMMS" review-route decide --request "$WORK/rr-q8.md" --artifact "$RR_BASE" --base "$RR_BASE" 2>/dev/null)"
+RC8="$(rrv "$OUT8" decision)"
+[ "$(rrj "$RC7" 'd["sent"]["risk_signals"]["files_changed"]')" = 2 ] && [ "$(rrj "$RC7" 'd["input"]["measured_ref"]')" = refs/heads/main ] \
+  && [ "$(rrv "$OUT8" source)" = fail-open ] && [ "$(rrj "$RC8" '"sent" in d')" = False ] \
+  && ok "a clean committed artifact is measured from its merge-base with main; an unmeasurable one is never a measured zero" || fail "measurement ($OUT / $OUT8)"
+# A BASE THREAD ENDING IN -<agent> is keyed as written: the panel completes and every leg verifies.
+rr_req "$RR_REPO/.comms/rr-p2.md" t-acp-grok implement
+rrc COMMS_REVIEW_ROUTE=1 "$COMMS" panel dispatch --to codex,grok "$RR_REPO/.comms/rr-p2.md" >/dev/null 2>&1; A=$?
+RP2_C="$(grep -h '^route_decision:' $(grep -l '^thread: t-acp-grok-codex$' "$RR_REPO/.comms/to-codex"/*.md 2>/dev/null) 2>/dev/null)"
+RP2_G="$(grep -h '^route_decision:' $(grep -l '^thread: t-acp-grok-grok$' "$RR_REPO/.comms/to-grok"/*.md 2>/dev/null) 2>/dev/null)"
+[ "$A" = 0 ] && [ -n "$RP2_C" ] && [ "$RP2_C" = "$RP2_G" ] \
+  && [ "$(rrj "${RP2_C#route_decision: }" 'd["thread"]')" = t-acp-grok ] \
+  && ok "a panel whose base thread ends in -grok keys its decision on the thread as written and fans out whole" || fail "panel on -grok thread (rc=$A $RP2_C / $RP2_G)"
+# A THREAD MERELY NAMED like a leg never borrows the other thread's decision.
+rrc "$COMMS" review-route decide --thread t-iso --phase implement --tier fast --effort low >/dev/null 2>&1
+RISO="$(rrv "$(rrc "$COMMS" review-route lookup --thread t-iso --phase implement 2>/dev/null)" decision)"
+rr_req "$RR_REPO/.comms/rr-s4.md" t-iso-grok implement
+rrc COMMS_REVIEW_ROUTE=1 "$COMMS" send --to codex "$RR_REPO/.comms/rr-s4.md" >/dev/null 2>&1
+RS4F="$(grep -l '^thread: t-iso-grok$' "$RR_REPO/.comms/to-codex"/*.md "$RR_REPO/.comms/rr-s4.md" 2>/dev/null | head -1)"
+RS4="$(sed -n 's/^route_decision: //p' "$RS4F" 2>/dev/null | head -1)"
+[ -n "$RISO" ] && [ -n "$RS4" ] && [ "$RS4" != "$RISO" ] && [ "$(rrj "$RS4" 'd["thread"]')" = t-iso-grok ] \
+  && ok "thread x-grok gets its own decision, never thread x's" || fail "lookalike thread borrowed a decision ($RS4 vs $RISO)"
+# THE SHADOW never observes an input production would not send.
+rr_req "$WORK/rr-sh2.md" t-shadow2 implement
+RSH2="$(rrc COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub COMMS_ROUTE_STUB="$RR_STUB" \
+        "$REPO/helpers/route.sh" --shadow --reviewer --file "$WORK/rr-sh2.md" 2>/dev/null | sed -n 's/^shadow-decision //p')"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["status"]=="unsendable" and not d.get("answers") else 1)' \
+    "$RR_REPO/.comms/route-shadow/$RSH2.json" 2>/dev/null \
+  && ok "a reviewer shadow of an unmeasurable request is recorded as unsendable, with no call made" || fail "shadow unsendable ($RSH2)"
+# "use max" is the implementer override too.
+OUT="$(rt -- "use max to fix the parser" 2>/dev/null)"
+[ "$(rt_kv "$OUT" tier)" = strong ] && [ "$(rt_kv "$OUT" effort)" = xhigh ] && [ "$(rt_kv "$OUT" source)" = override ] \
+  && ok "'use max' overrides the implementer hint to strong / xhigh" || fail "use max override ($OUT)"

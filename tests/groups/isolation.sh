@@ -408,15 +408,26 @@ iso_observed5() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_AT" "$1" ) 2>/dev
 : > "$WORK/snap-attr.txt"
 iso_ctx t-attr t-attr gpt-6-astra xhigh > "$ISO_AF"
 ISO_AT_OUT="$(iso_observed5 "$WORK/snap-attr.txt")"
-[ "$(printf '%s' "$ISO_AT_OUT" | awk -F'\t' '{print NF}')" = 6 ] \
-  && ok "the attestation returns effort, model, turn id, evidence file, byte offset and runtime" || fail "attribution fields missing (got: $ISO_AT_OUT)"
-# THE RUNTIME that produced the evidence rides with it (session_meta.cli_version, usually written
-# BEFORE the window — provenance, not turn evidence); absent reads as empty, never as a guess.
-[ -z "$(printf '%s' "$ISO_AT_OUT" | cut -f6)" ] \
-  && { printf '{"type":"session_meta","payload":{"cli_version":"0.154.0","originator":"acpx"}}\n'; cat "$ISO_AF"; } > "$ISO_AF.tmp" \
-  && mv "$ISO_AF.tmp" "$ISO_AF" \
-  && [ "$(iso_observed5 "$WORK/snap-attr.txt" | cut -f6)" = "0.154.0" ] \
-  && ok "the provider runtime version is captured from the evidence file, and absent reads as empty" || fail "runtime version not captured"
+[ "$(printf '%s' "$ISO_AT_OUT" | awk -F'\t' '{print NF}')" = 7 ] \
+  && ok "the attestation returns effort, model, turn id, evidence file, byte offset and both runtimes" || fail "attribution fields missing (got: $ISO_AT_OUT)"
+# THE RUNTIME. codex writes session_meta ONCE, at session creation, never on resume: it is this
+# turn's runtime only when it falls INSIDE the window; before the window it is the runtime that
+# CREATED the session and is reported under that name only. Absent reads as empty, never a guess.
+ISO_RT_OK=1
+[ -z "$(printf '%s' "$ISO_AT_OUT" | cut -f6)" ] && [ -z "$(printf '%s' "$ISO_AT_OUT" | cut -f7)" ] || ISO_RT_OK=0
+{ printf '{"type":"session_meta","payload":{"cli_version":"0.154.0","originator":"acpx"}}\n'; cat "$ISO_AF"; } > "$ISO_AF.tmp" && mv "$ISO_AF.tmp" "$ISO_AF"
+ISO_RT_IN="$(iso_observed5 "$WORK/snap-attr.txt")"
+[ "$(printf '%s' "$ISO_RT_IN" | cut -f6)" = 0.154.0 ] && [ "$(printf '%s' "$ISO_RT_IN" | cut -f7)" = 0.154.0 ] || ISO_RT_OK=0
+# A RESUMED session: the meta precedes the window, so it is creation provenance, not this turn.
+printf '%s\t1\t%s\n' "$ISO_AF" "$(( $(wc -c < "$ISO_AF") ))" > "$WORK/snap-attr-resume.txt"
+iso_ctx t-res t-res gpt-6-astra xhigh >> "$ISO_AF"
+ISO_INO="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_ino)' "$ISO_AF")"
+awk -F'\t' -v ino="$ISO_INO" 'BEGIN{OFS="\t"}{$2=ino; print}' "$WORK/snap-attr-resume.txt" > "$WORK/snap-attr-resume.t" && mv "$WORK/snap-attr-resume.t" "$WORK/snap-attr-resume.txt"
+ISO_RT_RES="$(iso_observed5 "$WORK/snap-attr-resume.txt")"
+[ "$(printf '%s' "$ISO_RT_RES" | cut -f3)" = t-res ] && [ -z "$(printf '%s' "$ISO_RT_RES" | cut -f6)" ] \
+  && [ "$(printf '%s' "$ISO_RT_RES" | cut -f7)" = 0.154.0 ] || ISO_RT_OK=0
+[ "$ISO_RT_OK" = 1 ] \
+  && ok "the runtime is this turn's only when its session_meta is inside the window; otherwise it is the session's creator" || fail "runtime provenance (in=$ISO_RT_IN resume=$ISO_RT_RES)"
 [ "$(printf '%s' "$ISO_AT_OUT" | cut -f3)" = "t-attr" ] \
   && ok "the backend turn id of the attested context is captured" || fail "turn id not captured"
 [ "$(printf '%s' "$ISO_AT_OUT" | cut -f4)" = "$ISO_AF" ] \
@@ -496,7 +507,7 @@ env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$REPO/helpers/acp.sh" re
   --decision rd-0123 --routing on --phase implement > "$ISO_RQ-rt/policy.tsv" 2>/dev/null
 ( eval "$ISO_TP"; turn_policy "$ISO_RQ-rt" "$ISO_RQ-rt/policy.tsv" rd-0123 ) 2>/dev/null
 grep -qx "route_decision	rd-0123" "$ISO_RQ-rt/turn.tsv" && grep -qx "policy_model_source	route" "$ISO_RQ-rt/turn.tsv" \
-  && grep -qx "policy_fallback	none" "$ISO_RQ-rt/turn.tsv" \
+  && grep -qx "policy_fallback	runtime-lacks:gpt-6-luna" "$ISO_RQ-rt/turn.tsv" \
   && grep -q "^policy_map_version	[0-9]" "$ISO_RQ-rt/turn.tsv" \
   && ok "a routed turn records its decision id, map version and per-dimension source" || fail "routed provenance missing"
 

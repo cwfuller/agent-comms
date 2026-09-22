@@ -8,6 +8,7 @@
                            [--replace]
     route_review.py lookup --root <.comms> --workspace <ws> --thread <t> --phase <p>
     route_review.py show   --root <.comms> <decision-id> [--thread <t>] [--phase <p>]
+    route_review.py verify --root <.comms> <decision-id> --thread <t> --phase <p> [--leg-agents a,b]
 
 A decision is made ONCE per (workspace, base thread, phase) and reused by every later round of that
 phase: a sticky pointer names it, so round N resolves to the same concrete policy as round 1 and
@@ -227,23 +228,18 @@ def classify_into(rec, text, args):
         rec["source"], rec["gate"] = "not-permitted", "not-permitted"
         rec["reason"] = "project %s is not permitted to transmit request text (see route-shadow-allow)" % key
         return
-    numstat = route_backend.artifact_numstat(root, args.base, args.artifact)
-    state, meta = route_backend.build_review_state(text, numstat=numstat, artifact=args.artifact)
+    state, meta, unsendable = route_backend.prepare_review_input(text, root, args.artifact, args.base)
     rec["input"] = meta
+    if unsendable:
+        # An artifact id alone conveys identity, not content; an unmeasurable change or an empty
+        # request has nothing to price a review on. Nothing is sent, and the state is not kept.
+        rec["source"], rec["gate"] = "fail-open", "fail-open"
+        rec["reason"] = unsendable + "; nothing was sent"
+        return
     rec["sent"] = state
     rec["state_sha256"] = hashlib.sha256(json.dumps(state, sort_keys=True).encode("utf-8")).hexdigest()
     rec["classifier"] = {"model": os.environ.get("COMMS_ROUTE_MODEL") or "jev-latest",
                          "url": os.environ.get("COMMS_ROUTE_URL") or "https://api.typesafe.ai/v1/systemone"}
-    if numstat is None:
-        # An artifact id alone conveys identity, not content; without a measured change there is
-        # nothing to price a review on.
-        rec["source"], rec["gate"] = "fail-open", "fail-open"
-        rec["reason"] = "the artifact diff could not be measured; nothing was sent"
-        return
-    if meta["sent_chars"] == 0:
-        rec["source"], rec["gate"] = "fail-open", "fail-open"
-        rec["reason"] = "the request has none of the reviewable sections; nothing was sent"
-        return
     try:
         timeout = float(os.environ.get("COMMS_ROUTE_TIMEOUT_SECS") or "8")
         if timeout <= 0:
@@ -379,6 +375,34 @@ def cmd_lookup(a):
     emit(rec)
 
 
+def cmd_verify(a):
+    """The id a request CARRIES, checked against the decision IN FORCE — independent of the caller's
+    cwd, branch or inferred workspace (the record names its own workspace). The request's thread
+    must be the decision's thread, or — for a panel leg only — that thread plus `-<agent>` for one
+    of the agents passed in --leg-agents. Nothing is guessed from a suffix: a thread merely named
+    `x-grok` never borrows thread `x`'s decision."""
+    ddir = decisions_dir(a.root)
+    rec = load_record(ddir, a.decision)
+    if rec["phase"] != a.phase:
+        die("decision %s was made for phase %r, not %r" % (a.decision, rec["phase"], a.phase))
+    legs = [x for x in (a.leg_agents or "").split(",") if x]
+    if a.thread != rec["thread"] and a.thread not in ["%s-%s" % (rec["thread"], x) for x in legs]:
+        die("decision %s was made for thread %r, not %r" % (a.decision, rec["thread"], a.thread))
+    cur = read_pointer(pointer_path(ddir, rec.get("workspace", ""), rec["thread"], rec["phase"]))
+    if cur != a.decision:
+        die("decision %s is not the decision in force for thread %r phase %r (%s)"
+            % (a.decision, rec["thread"], rec["phase"], cur or "none"))
+    show_tsv(rec)
+
+
+def show_tsv(rec):
+    for k, v in (("decision", rec["decision_id"]), ("thread", rec["thread"]), ("phase", rec["phase"]),
+                 ("tier", rec["candidate"]["tier"]), ("effort", rec["candidate"]["effort"]),
+                 ("source", rec.get("source", "")), ("decided_by", rec.get("decided_by", "")),
+                 ("rubric", rec.get("rubric_version", ""))):
+        sys.stdout.write("%s\t%s\n" % (k, " ".join(str(v).split()) or "-"))
+
+
 def cmd_show(a):
     ddir = decisions_dir(a.root)
     rec = load_record(ddir, a.decision)
@@ -388,11 +412,7 @@ def cmd_show(a):
     if a.phase is not None and rec["phase"] != a.phase:
         die("decision %s was made for phase %r, not %r — refusing to route on it"
             % (a.decision, rec["phase"], a.phase))
-    for k, v in (("decision", rec["decision_id"]), ("thread", rec["thread"]), ("phase", rec["phase"]),
-                 ("tier", rec["candidate"]["tier"]), ("effort", rec["candidate"]["effort"]),
-                 ("source", rec.get("source", "")), ("decided_by", rec.get("decided_by", "")),
-                 ("rubric", rec.get("rubric_version", ""))):
-        sys.stdout.write("%s\t%s\n" % (k, " ".join(str(v).split()) or "-"))
+    show_tsv(rec)
 
 
 def main(argv):
@@ -416,13 +436,19 @@ def main(argv):
     lk.add_argument("--workspace", required=True)
     lk.add_argument("--thread", required=True)
     lk.add_argument("--phase", required=True)
+    v = sub.add_parser("verify")
+    v.add_argument("--root", required=True)
+    v.add_argument("decision")
+    v.add_argument("--thread", required=True)
+    v.add_argument("--phase", required=True)
+    v.add_argument("--leg-agents", dest="leg_agents")
     s = sub.add_parser("show")
     s.add_argument("--root", required=True)
     s.add_argument("decision")
     s.add_argument("--thread")
     s.add_argument("--phase")
     a = p.parse_args(argv)
-    {"decide": cmd_decide, "lookup": cmd_lookup, "show": cmd_show}[a.cmd](a)
+    {"decide": cmd_decide, "lookup": cmd_lookup, "show": cmd_show, "verify": cmd_verify}[a.cmd](a)
 
 
 if __name__ == "__main__":

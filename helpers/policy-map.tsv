@@ -15,9 +15,13 @@
 #   capability  <provider> <transport> <eligible|fixed|unsupported> <application mechanism>
 #               <evidence source> <versions tested> <notes>
 #   baseline    <provider> <transport> <model> <effort>
-#   tier        <provider> <transport> <fast|balanced|strong> <model>
+#   tier        <provider> <transport> <fast|balanced|strong> <model>[,<fallback model>...]
+#               an ORDERED preference: the first model the reviewer runtime can serve
 #   effort      <provider> <transport> <low|medium|high|xhigh> <provider-effort>
 #   pair        <provider> <transport> <model> <comma-separated efforts the model accepts>
+#               [<minimum codex runtime version that can serve it>]
+#   ceiling     <provider> <transport> <model> <effort>   the operator's "use max" pair
+#               (COMMS_REVIEW_MAX=1): the strongest model at its highest accepted effort
 #
 # Transports: acp-mounted = a mounted review turn with an isolated provider home (the only
 # place a policy is both APPLIED and ATTESTED); acp = an unmounted ACP turn (the operator's own
@@ -34,12 +38,24 @@
 # @agentclientprotocol/claude-agent-acp 0.60.0 dist, grok 1.0.40 --help + models_cache.json.
 # Tier labels follow the provider's own model descriptions: luna "fast and affordable", terra
 # "balanced", astra "most capable".
-version	2026-09-22.1
+#
+# LIVE PROBES, 2026-09-22 (acpx 0.13.1, codex-acp 1.12.0 bundling codex 0.154.0, ChatGPT auth):
+# - gpt-6-sol / gpt-6-luna (released 2026-09-22): the adapter's BUNDLED codex 0.154.0 is refused
+#   gpt-6-luna for a ChatGPT-auth account (400; no model metadata, so no effort option) and does
+#   not advertise gpt-6-sol. With CODEX_PATH at the installed codex 0.155.1 both answered and were
+#   attested (gpt-6-luna/low, gpt-6-sol/medium). Hence the 0.155.0 minimum on their pair rows and
+#   the gpt-5.6 fallbacks in each tier.
+# - The rollout records the requested model/effort even when the API call then fails, so a
+#   turn_context alone does not prove the turn succeeded; the canary and reply-check gates stay.
+# - A resumed codex session adopted a changed config.toml (one observation); `acpx set` of
+#   model/reasoning_effort is honoured BEFORE the first prompt and fails ("Internal error") after
+#   one. Sessions are still keyed by policy digest, so no correctness rests on either.
+version	2026-09-22.4
 
-capability	codex	acp-mounted	eligible	isolated CODEX_HOME config.toml (model, model_reasoning_effort), read at thread start/resume; a changed policy is a new session	preflight: acpx config_options + saved preferences; gate: the provider's own rollout turn_context (model, effort) per turn	codex-acp 1.12.0; codex 0.154.0 (bundled); acpx 0.13.1	the adapter floats under ^1.1.5; observed_runtime in turn.tsv records what actually ran
+capability	codex	acp-mounted	eligible	isolated CODEX_HOME config.toml (model, model_reasoning_effort), read at thread start/resume, with CODEX_PATH naming the runtime; a changed policy or runtime is a new session	preflight: acpx config_options + saved preferences; gate: the provider's own rollout turn_context (model, effort) per turn, behind the canary and reply-check	codex-acp 1.12.0; codex 0.154.0 (bundled) and 0.155.1 (installed, via CODEX_PATH); acpx 0.13.1	the adapter floats under ^1.1.5; policy.tsv records the runtime resolved, turn.tsv the runtime that created the session
 capability	codex	acp	unsupported	none: an unmounted turn runs the operator's own ~/.codex config	none	-	nothing applies or attests a policy
 capability	codex	headless	unsupported	none: codex review turns are ACP-only	none	-	-
-capability	claude	acp-mounted	unsupported	none applied; the adapter exposes ACP config options `model` (aliases) and `effort` (default,low..max)	transcripts in the shared ~/.claude (message.model, effort); not isolated per turn	claude-agent-acp 0.60.0 (read from dist, not exercised)	needs a live proof of `acpx claude set` before it may be eligible
+capability	claude	acp-mounted	unsupported	none applied; the adapter exposes ACP config options `model` (aliases) and `effort` (default,low..max)	transcripts in the shared ~/.claude (message.model, effort); not isolated per turn	claude-agent-acp 0.60.0; live-probed 2026-09-22 outside agent-comms	`acpx claude set model|effort` BEFORE the first prompt was honoured (transcript: claude-sonnet-5, effort low); after a prompt, or effort on a model without it (haiku), fails "Internal error"; eligibility needs per-turn transcript attestation wired in
 capability	claude	acp	unsupported	none applied (operator settings)	as acp-mounted	-	-
 capability	claude	headless	unsupported	none: claude review turns are ACP-only	none	-	-
 capability	grok	acp-mounted	unsupported	none applied; newer builds expose ACP `model` + `reasoning_effort` (older builds: none)	~/.grok/sessions summary.json: effort per SESSION only	grok 1.0.40 (read from --help/docs, not exercised)	effort is dropped silently on models without supportsReasoningEffort; refused on Darwin without an uncontained override
@@ -47,9 +63,15 @@ capability	grok	acp	unsupported	none applied	as acp-mounted	-	-
 capability	grok	headless	unsupported	none: -m / --reasoning-effort exist but are not passed	as acp-mounted	grok 1.0.40	-
 
 baseline	codex	acp-mounted	gpt-6-astra	xhigh
+# `ultra` is the highest effort gpt-6-astra accepts. It can run well past an xhigh review, so a
+# `use max` loop may need a larger COMMS_RUNPHASE_TIMEOUT_SECS; set `max` here for a lower ceiling.
+ceiling	codex	acp-mounted	gpt-6-astra	ultra
 
-tier	codex	acp-mounted	fast	gpt-5.6-luna
-tier	codex	acp-mounted	balanced	gpt-5.6-terra
+# GPT-6 first where the runtime can serve it (codex >= 0.155.0), else the gpt-5.6 model the bundled
+# runtime is proven to serve. Positioning per OpenAI: astra most capable, sol everyday value, luna
+# narrow/easily checked work.
+tier	codex	acp-mounted	fast	gpt-6-luna,gpt-5.6-luna
+tier	codex	acp-mounted	balanced	gpt-6-sol,gpt-5.6-terra
 tier	codex	acp-mounted	strong	gpt-6-astra
 
 effort	codex	acp-mounted	low	low
@@ -58,6 +80,8 @@ effort	codex	acp-mounted	high	high
 effort	codex	acp-mounted	xhigh	xhigh
 
 pair	codex	acp-mounted	gpt-6-astra	low,medium,high,xhigh,max,ultra
+pair	codex	acp-mounted	gpt-6-sol	low,medium,high,xhigh,max,ultra	0.155.0
+pair	codex	acp-mounted	gpt-6-luna	low,medium,high,xhigh,max	0.155.0
 pair	codex	acp-mounted	gpt-5.6-sol	low,medium,high,xhigh,max,ultra
 pair	codex	acp-mounted	gpt-5.6-terra	low,medium,high,xhigh,max,ultra
 pair	codex	acp-mounted	gpt-5.6-luna	low,medium,high,xhigh,max

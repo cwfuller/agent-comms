@@ -797,8 +797,9 @@ R="$(res "$AP" resolve codex)"
 R="$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
 [ "$(rv "$R" model)" = gpt-5.6-luna ] && [ "$(rv "$R" effort)" = low ] \
   && [ "$(rv "$R" model_source)" = route ] && [ "$(rv "$R" effort_source)" = route ] \
-  && [ "$(rv "$R" effective_tier)" = fast ] && [ "$(rv "$R" fallback)" = none ] \
-  && ok "a confident fast/low candidate reaches a configured cheap pair — cost-down is reachable" || fail "fast/low not reachable ($R)"
+  && [ "$(rv "$R" effective_tier)" = fast ] && [ "$(rv "$R" fallback)" = runtime-lacks:gpt-6-luna ] \
+  && [ "$(rv "$R" runtime)" = bundled ] \
+  && ok "a fast/low candidate reaches a cheap pair; on the bundled runtime the tier falls back to its servable model, recorded" || fail "fast/low not reachable ($R)"
 R="$(res "$AP" resolve codex --tier balanced --effort medium --decision rd-a --routing on --phase implement)"
 [ "$(rv "$R" model)" = gpt-5.6-terra ] && [ "$(rv "$R" effort)" = medium ] \
   && ok "tier and effort are SEPARATE dimensions (balanced -> terra, medium -> medium)" || fail "balanced/medium ($R)"
@@ -823,7 +824,7 @@ OUT="$(res COMMS_ACP_CODEX_MODEL=gpt-5.6-luna COMMS_ACP_CODEX_EFFORT=ultra "$AP"
 [ "$RC" = 1 ] && [ -z "$OUT" ] \
   && ok "an explicitly pinned pair the model rejects is REFUSED, never substituted" || fail "invalid pinned pair (rc=$RC out=$OUT)"
 R="$(res COMMS_ACP_CODEX_EFFORT=ultra "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
-[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = ultra ] && [ "$(rv "$R" fallback)" = unsupported-pair ] \
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = ultra ] && [ "$(rv "$R" fallback)" = "runtime-lacks:gpt-6-luna;unsupported-pair" ] \
   && ok "a routed dimension that makes an invalid pair falls back to the baseline once, recorded" || fail "routed invalid pair ($R)"
 R="$(res COMMS_ACP_CODEX_MODEL=gpt-9-preview "$AP" resolve codex)"
 [ "$(rv "$R" model)" = gpt-9-preview ] && [ "$(rv "$R" pair)" = unverified-pin ] \
@@ -870,6 +871,56 @@ PCO="$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt
 [ "$RC" = 21 ] && printf '%s\n' "$PCO" | grep -q 'no reasoning_effort option for model gpt-reserve' \
   && ok "a session exposing no effort option for its model is undecidable with the specific cause" || fail "missing effort option message (rc=$RC $PCO)"
 
+# THE REVIEWER RUNTIME decides which mapped models exist. Stub binaries stand in for installed
+# codex builds; the harness pins the corpus to `bundled`, so every case names its runtime.
+RTD="$WORK/rt-stubs"; mkdir -p "$RTD/new" "$RTD/cmux-cli-shims/x" "$RTD/old"
+printf '#!/bin/sh\necho "codex-cli 0.155.1"\n' > "$RTD/new/codex"
+printf '#!/bin/sh\necho "codex-cli 9.9.9"\n' > "$RTD/cmux-cli-shims/x/codex"
+printf '#!/bin/sh\necho "codex-cli 0.150.0"\n' > "$RTD/old/codex"
+chmod +x "$RTD/new/codex" "$RTD/cmux-cli-shims/x/codex" "$RTD/old/codex"
+R="$(res COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-6-luna ] && [ "$(rv "$R" fallback)" = none ] && [ "$(rv "$R" runtime)" = "$RTD/new/codex" ] \
+  && [ "$(rv "$R" runtime_version)" = 0.155.1 ] \
+  && ok "a runtime new enough for the tier's first preference serves it (fast -> gpt-6-luna), recorded with its version" || fail "new runtime ($R)"
+R="$(res COMMS_ACP_CODEX_PATH="$RTD/old/codex" "$AP" resolve codex --tier balanced --effort medium --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-5.6-terra ] && [ "$(rv "$R" fallback)" = runtime-lacks:gpt-6-sol ] \
+  && ok "a runtime too old for gpt-6-sol falls back to the tier's next model, gracefully and recorded" || fail "old runtime ($R)"
+R="$(cd "$WORK" && env -u COMMS_ACP_CODEX_PATH -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT PATH="$RTD/cmux-cli-shims/x:$RTD/new:$PATH" "$AP" resolve codex)"
+[ "$(rv "$R" runtime)" = "$RTD/new/codex" ] && [ "$(rv "$R" runtime_version)" = 0.155.1 ] \
+  && ok "unset, the installed codex is auto-detected on PATH, skipping per-session wrapper shims" || fail "auto-detect ($R)"
+D_B="$(rv "$(res "$AP" resolve codex)" policy_digest)"; D_N="$(rv "$(res COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" resolve codex)" policy_digest)"
+[ -n "$D_B" ] && [ -n "$D_N" ] && [ "$D_B" != "$D_N" ] \
+  && ok "the same pair on a different runtime is a different policy (a runtime change is a fresh session)" || fail "runtime not in digest"
+res COMMS_ACP_CODEX_PATH="$RTD/new" "$AP" resolve codex >/dev/null 2>&1; A=$?
+res COMMS_ACP_CODEX_MODEL=gpt-6-sol "$AP" resolve codex >/dev/null 2>&1; B=$?
+[ "$A" = 1 ] && [ "$B" = 1 ] \
+  && ok "an unusable explicit runtime, or a pinned model the runtime cannot serve, is refused — never swapped" || fail "runtime refusals ($A/$B)"
+res COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" resolve codex > "$WORK/rt-rec.tsv"
+sed "s|^runtime	.*|runtime	relative/codex|" "$WORK/rt-rec.tsv" > "$WORK/rt-bad.tsv"
+[ "$(res "$AP" runtime codex --policy-file "$WORK/rt-rec.tsv")" = "$RTD/new/codex" ] \
+  && ! res "$AP" runtime codex --policy-file "$WORK/rt-bad.tsv" >/dev/null 2>&1 \
+  && ok "the runtime accessor returns the record's validated binary and refuses a tampered one" || fail "runtime accessor"
+# "USE MAX": the operator's ceiling outranks routing, the baseline and the phase exclusion;
+# explicit pins outrank it; it is strict; it claims nothing where nothing applies.
+R="$(res COMMS_REVIEW_MAX=1 "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+R2="$(res COMMS_REVIEW_MAX=1 "$AP" resolve codex --phase plan)"
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = ultra ] && [ "$(rv "$R" model_source)" = max ] \
+  && [ "$(rv "$R" fallback)" = max-override ] && [ "$(rv "$R2" effort)" = ultra ] \
+  && ok "COMMS_REVIEW_MAX runs the map's ceiling over any route, baseline or phase" || fail "use max ($R)"
+R="$(res COMMS_REVIEW_MAX=1 COMMS_ACP_CODEX_EFFORT=high "$AP" resolve codex)"
+res COMMS_REVIEW_MAX=1 COMMS_ACP_CODEX_MODEL=gpt-5.6-luna "$AP" resolve codex >/dev/null 2>&1; A=$?
+R3="$(res COMMS_REVIEW_MAX=1 "$AP" resolve claude)"
+[ "$(rv "$R" effort)" = high ] && [ "$(rv "$R" effort_source)" = pin ] && [ "$(rv "$R" model_source)" = max ] && [ "$A" = 1 ] \
+  && [ "$(rv "$R3" fallback)" = "max-unsupported;capability-unsupported" ] \
+  && ok "a pin outranks max per dimension, an invalid max pair is refused, and max claims nothing where nothing applies" || fail "use max precedence ($R / $A / $R3)"
+PM="$WORK/policy-map-probe"; rm -rf "$PM"; mkdir -p "$PM"; cp "$AP" "$PM/acp.sh"; chmod +x "$PM/acp.sh"
+# A MAP ROW cannot make a combination with no apply-and-attest code claim a policy.
+{ grep -v '^capability	claude	acp-mounted	' "$REPO/helpers/policy-map.tsv"
+  printf 'capability\tclaude\tacp-mounted\tfixed\tm\te\tv\tn\nbaseline\tclaude\tacp-mounted\topus\thigh\npair\tclaude\tacp-mounted\topus\thigh\n'; } > "$PM/policy-map.tsv"
+R="$(res "$PM/acp.sh" resolve claude)"
+[ "$(rv "$R" capability)" = unsupported ] && [ "$(rv "$R" verify)" = none ] && [ "$(rv "$R" fallback)" = "capability-unimplemented;capability-unsupported" ] \
+  && ok "a map row marking a combination with no apply/attest path fixed or eligible is downgraded, not believed" || fail "capability-unimplemented ($R)"
+
 # THE MAP IS THE ONLY TABLE and it is validated whole. A bare copy of acp.sh with a crafted
 # sibling map stands in for a broken install.
 PM="$WORK/policy-map-probe"; rm -rf "$PM"; mkdir -p "$PM"; cp "$AP" "$PM/acp.sh"; chmod +x "$PM/acp.sh"
@@ -885,7 +936,7 @@ res "$PM/acp.sh" resolve codex >/dev/null 2>&1 && fail "a map with two versions 
   || ok "a map with a duplicated version row is refused"
 grep -v '^pair	codex	acp-mounted	gpt-5.6-luna	' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
 R="$(res "$PM/acp.sh" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
-[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" fallback)" = unsupported-pair ] \
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" fallback)" = "runtime-lacks:gpt-6-luna;unsupported-pair" ] \
   && ok "a routed model the map lists no accepted efforts for is never run unvalidated" || fail "unpaired routed model ($R)"
 
 # FIXED: the baseline (plus pins) is applied and attested, routing is ignored.
@@ -1073,7 +1124,7 @@ rr_msg() {  # <thread> <decision-id-or-empty> -> an implement-phase mounted requ
   m="$(pol_msg "$thr")"
   sed -i.bak -e 's/^phase: plan$/phase: implement/' "$m" && rm -f "$m.bak"
   if [ -n "$rid" ]; then
-    awk -v rid="$rid" 'NR==1{print; next} !done && $0=="---"{print "route_decision: " rid; done=1} {print}' "$m" > "$m.tmp" && mv "$m.tmp" "$m"
+    awk -v rid="$rid" -v leg="${RR_LEG:-}" 'NR==1{print; next} !done && $0=="---"{print "route_decision: " rid; if (leg != "") print "dispatch: d-rr-test"; done=1} {print}' "$m" > "$m.tmp" && mv "$m.tmp" "$m"
   fi
   printf '%s' "$m"
 }
@@ -1115,7 +1166,7 @@ RR_D3="$WORK/rr-3"; rr_run rr-arc "$RR2" "$RR_D3" COMMS_REVIEW_ROUTE=1
 [ -n "$RR2" ] && [ "$RR2" != "$RR1" ] && [ "$(cn_status "$RR_D3")" = completed ] \
   && [ "$(tv "$RR_D3" acp_session)" != "$RR_S1" ] && [ "$(tv "$RR_D3" observed_model)" = gpt-5.6-terra ] \
   && [ "$(tv "$RR_D3" observed_effort)" = medium ] \
-  && ok "a replaced decision runs in a fresh session under the new pair, never the warm old one" || fail "deliberate change: status=$(cn_status "$RR_D3") session=$(tv "$RR_D3" acp_session) obs=$(tv "$RR_D3" observed_model)"
+  && ok "a replaced decision runs in a fresh session under the new pair, never the warm old one" || fail "deliberate change: status=$(cn_status "$RR_D3") reason=$(cn_reason "$RR_D3") session=$(tv "$RR_D3" acp_session) obs=$(tv "$RR_D3" observed_model) log=$(grep -E 'policy|canary|refus|timed' "$RR_D3/runner.log" 2>/dev/null | tr '\n' ' ' | cut -c1-500)"
 # THE OLD ID after a replace is not the decision in force: refused before any prompt, unpublished.
 RR_D4="$WORK/rr-4"; RR_L4="$WORK/rr-4.argv"; rr_run rr-arc "$RR1" "$RR_D4" COMMS_REVIEW_ROUTE=1 AX_CWD_LOG="$RR_L4"
 [ "$(cn_status "$RR_D4")" = failed ] \
@@ -1144,8 +1195,28 @@ rr_run rr-stale "$RRZ" "$RR_D8" COMMS_REVIEW_ROUTE=1 AX_MODEL=gpt-6-astra AX_EFF
 [ "$(cn_status "$RR_D8")" = failed ] && [ "$(tv "$RR_D8" adapter_check)" = mismatch ] \
   && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L8" 2>/dev/null | grep -q . \
   && ok "a session reporting the baseline for a routed turn is refused before any prompt" || fail "stale session: status=$(cn_status "$RR_D8") adapter=$(tv "$RR_D8" adapter_check)"
-# A PANEL LEG (`<base>-codex`) routes on its base thread's decision.
+# A PANEL LEG (`<base>-codex`, `dispatch:` present) routes on its base thread's decision; a thread
+# merely NAMED like a leg, with no dispatch, never borrows another thread's decision.
 RRP="$(rr_decide rr-panel fast low)"
-RR_D9="$WORK/rr-9"; rr_run rr-panel-codex "$RRP" "$RR_D9" COMMS_REVIEW_ROUTE=1
+RR_D9="$WORK/rr-9"; RR_LEG=1 rr_run rr-panel-codex "$RRP" "$RR_D9" COMMS_REVIEW_ROUTE=1
+RR_D10="$WORK/rr-10"; rr_run rr-panel-codex "$RRP" "$RR_D10" COMMS_REVIEW_ROUTE=1
 [ "$(cn_status "$RR_D9")" = completed ] && [ "$(tv "$RR_D9" observed_model)" = gpt-5.6-luna ] \
-  && ok "a panel leg's thread resolves to its base thread's decision" || fail "panel leg: status=$(cn_status "$RR_D9")"
+  && [ "$(cn_status "$RR_D10")" = failed ] \
+  && ok "a panel leg resolves to its base thread's decision; a lookalike thread without dispatch does not" || fail "panel leg: leg=$(cn_status "$RR_D9") lookalike=$(cn_status "$RR_D10")"
+# THE RUNTIME REACHES THE CHILD: the resolved binary is the adapter's CODEX_PATH, and `bundled`
+# removes an inherited one, so the ledger always names what launched.
+RRN="$(rr_decide rr-rt fast low)"
+RR_D11="$WORK/rr-11"; RR_CFG11="$WORK/rr-11.cfg"; RR_ENV11="$WORK/rr-11.env"
+rr_run rr-rt "$RRN" "$RR_D11" COMMS_REVIEW_ROUTE=1 COMMS_ACP_CODEX_PATH="$RTD/new/codex" AX_CFG_LOG="$RR_CFG11" AX_ENV_LOG="$RR_ENV11"
+RR_D12="$WORK/rr-12"; RR_ENV12="$WORK/rr-12.env"
+rr_run rr-rt2 "" "$RR_D12" CODEX_PATH=/bogus/codex AX_ENV_LOG="$RR_ENV12"
+[ "$(cn_status "$RR_D11")" = completed ] && grep -q 'model = "gpt-6-luna"' "$RR_CFG11" \
+  && grep -qx "CODEX_PATH=$RTD/new/codex" "$RR_ENV11" && ! grep -qv "CODEX_PATH=$RTD/new/codex" "$RR_ENV11" \
+  && [ "$(cn_status "$RR_D12")" = completed ] && grep -qx 'CODEX_PATH=<unset>' "$RR_ENV12" && ! grep -q 'bogus' "$RR_ENV12" \
+  && [ -n "$(tv "$RR_D11" acpx_launcher)" ] \
+  && ok "the resolved runtime is the child's CODEX_PATH, and a bundled turn unsets an inherited one" || fail "runtime to child: s11=$(cn_status "$RR_D11") s12=$(cn_status "$RR_D12")"
+RR_D13="$WORK/rr-13"; RR_CFG13="$WORK/rr-13.cfg"
+rr_run rr-max "" "$RR_D13" COMMS_REVIEW_MAX=1 AX_CFG_LOG="$RR_CFG13"
+[ "$(cn_status "$RR_D13")" = completed ] && grep -q 'model_reasoning_effort = "ultra"' "$RR_CFG13" \
+  && [ "$(tv "$RR_D13" policy_model_source)" = max ] && [ "$(tv "$RR_D13" observed_effort)" = ultra ] \
+  && ok "a use-max turn runs and attests the ceiling pair" || fail "use-max turn: status=$(cn_status "$RR_D13")"

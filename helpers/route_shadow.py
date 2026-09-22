@@ -66,8 +66,12 @@ def main():
         _die("unknown shadow role %r" % role)
     # The REVIEWER observation goes through the SAME bounded builder and questions as the live
     # reviewer decider (route_review.py); the task text is then the review request itself.
+    unsendable = None
     if role == "reviewer":
-        state, input_meta = route_backend.build_review_state(task)
+        # The SAME preparation as the live decider (measured change, bounded sections), so the
+        # observation is of an input production would actually send — or of nothing at all.
+        _k, _root = route_backend.canonical_project()
+        state, input_meta, unsendable = route_backend.prepare_review_input(task, _root)
         questions = route_backend.REVIEW_QUESTIONS
         sent = json.dumps(state["request"], sort_keys=True, ensure_ascii=False)
     else:
@@ -145,13 +149,19 @@ def main():
         timeout = 8.0
 
     try:
+        if unsendable:
+            # Recorded, not sent: production would not have classified this request either.
+            raise route_backend.BackendError(unsendable, "unsendable")
         answers = fn(state, questions, timeout)
         rec["status"] = "success"
         rec["answers"] = answers
     except route_backend.BackendError as e:
         # "no response received" and "a response arrived but was unusable" are different
-        # observations and must not collapse into one status.
-        rec["status"] = "error" if not route_backend.LAST_RAW["received"] else "unusable"
+        # observations and must not collapse into one status; nor is "never sent".
+        if e.source == "unsendable":
+            rec["status"] = "unsendable"
+        else:
+            rec["status"] = "error" if not route_backend.LAST_RAW["received"] else "unusable"
         rec["error"] = str(e)
     except Exception as e:  # noqa: BLE001 - an unexpected failure is still an observation
         rec["status"] = "error"

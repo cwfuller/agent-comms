@@ -37,7 +37,11 @@ unset CLAUDE_PID COMMS_PRESENCE_PID COMMS_SELF GROK_AGENT CLAUDECODE CLAUDE_CODE
 # them set them per invocation.
 # The classifier's own switches go too: with reviewer routing on, every send and panel fixture in
 # the corpus would classify, and an inherited backend would reach TypeSafe from the suite.
-unset COMMS_REVIEW_ROUTE COMMS_ACP_CODEX_MODEL COMMS_ACP_CODEX_EFFORT \
+# THE REVIEWER RUNTIME is pinned to the adapter's bundled codex for the whole corpus: auto-detection
+# would otherwise find whatever codex the developer has installed, and the routed-model assertions
+# would describe that machine. The runtime cases set their own stub binaries per invocation.
+export COMMS_ACP_CODEX_PATH=bundled
+unset COMMS_REVIEW_ROUTE COMMS_REVIEW_MAX COMMS_ACP_CODEX_MODEL COMMS_ACP_CODEX_EFFORT \
       COMMS_ROUTE COMMS_ROUTE_BACKEND COMMS_ROUTE_STUB TYPESAFE_API_KEY COMMS_ROUTE_URL \
       COMMS_ROUTE_LOG COMMS_ROUTE_SHADOW_ALLOW 2>/dev/null || true
 

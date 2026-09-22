@@ -408,7 +408,15 @@ runphase: current decision == stamped id? ─▶ acp.sh resolve ─▶ run_dir/p
   resolution time; `adapter_*` is what acpx reports; `observed_*` is the provider's own rollout
   (with its `cli_version`). The record is hash-checked before the config, the preflight and the
   attestation, because the reviewer runs in between.
-- **Capabilities.** Only codex/acp-mounted is `eligible`. Claude and Grok expose model/effort
+- **Runtime-aware tiers.** A tier is an ordered model list; the resolver picks the first model the
+  reviewer's codex runtime can serve (minimum runtime per `pair` row), so gpt-6-luna/sol are used
+  where an installed codex >= 0.155 runs the review and gpt-5.6 otherwise, recorded either way. The
+  runtime is auto-detected (or `COMMS_ACP_CODEX_PATH`), handed to the adapter as `CODEX_PATH`, and
+  is part of the policy digest.
+- **"use max".** `COMMS_REVIEW_MAX=1` (`/auto --max`) runs the map's `ceiling` pair on every turn
+  that applies a policy; only an explicit pin outranks it, and it only ever raises depth.
+- **Capabilities.** Only codex/acp-mounted is `eligible`, and a combination with no apply-and-attest
+  path in code cannot be promoted by a map edit alone (`capability-unimplemented`). Claude and Grok expose model/effort
   controls in their adapters, but agent-comms neither applies them nor has isolated per-turn
   evidence, so their rows are `unsupported` and their turns record that rather than a policy.
 - **Collection is not activation.** `route --shadow --reviewer` uses the same builder and rubric

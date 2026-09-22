@@ -193,6 +193,10 @@ fi
 if [ -n "${AX_CFG_LOG:-}" ] && [ -n "${CODEX_HOME:-}" ] && [ -f "$CODEX_HOME/config.toml" ]; then
   cat "$CODEX_HOME/config.toml" >> "$AX_CFG_LOG" 2>/dev/null || true
 fi
+# AX_ENV_LOG records the CODEX_PATH the CHILD inherited (the runtime the adapter would launch).
+if [ -n "${AX_ENV_LOG:-}" ]; then
+  printf 'CODEX_PATH=%s\n' "${CODEX_PATH-<unset>}" >> "$AX_ENV_LOG" 2>/dev/null || true
+fi
 # THE PROVIDER FIXES ITS POLICY WHEN A SESSION IS CREATED. Real codex reads model/effort from the
 # isolated config.toml at thread start and then sends its OWN in-memory values on every prompt; a
 # resumed session is NOT known to adopt a changed config. The stub models exactly that: `sessions

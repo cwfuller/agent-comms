@@ -100,7 +100,7 @@
 #                               selects a reviewer or a vendor model id.
 #   review-route decide (--request <review-request> | --thread T --phase P) [--tier T] [--effort E] [--replace]
 #   review-route lookup --thread T --phase P
-#   review-route current --thread <message thread> --phase P
+#   review-route verify <decision-id> --thread <message thread> --phase P [--leg]
 #   review-route show <decision-id> [--thread T] [--phase P]
 #   review-route enabled
 #                               the REVIEWER routing decision for a (thread, phase): an
@@ -1551,27 +1551,29 @@ cmd_review_route() {
   py="$(cd "$(dirname "$SELF")" && pwd)/route_review.py"
   case "$verb" in
     enabled) review_routing_enabled; return ;;
-    current)
-      # current --thread <message thread> --phase <p> — the decision CURRENTLY in force for the
-      # message's base thread and phase, in show's TSV form. runphase compares it with the id the
-      # request carries: an old or planted id that is not the current pointer never routes a turn.
-      local _ct="" _cp="" _co _cid _cb
+    verify)
+      # verify <id> --thread <message thread> --phase <p> [--leg] — the id a request CARRIES,
+      # checked against the decision IN FORCE (the record names its own workspace, so the caller's
+      # cwd or branch cannot change the answer). --leg: the thread may be the decision's thread plus
+      # `-<registered agent>` (a panel leg, or a shadow of one); without it the thread must match
+      # exactly — a thread merely NAMED `x-grok` never borrows `x`'s decision.
+      local _vid="${1:-}" _vt="" _vp="" _vleg=""; [ "$#" -gt 0 ] && shift
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --thread) _ct="${2:-}"; shift 2 || shift ;;
-          --phase)  _cp="${2:-}"; shift 2 || shift ;;
-          *) usage_err "review-route current: unknown option '$(clip "$1")'" ;;
+          --thread) _vt="${2:-}"; shift 2 || shift ;;
+          --phase)  _vp="${2:-}"; shift 2 || shift ;;
+          --leg)    _vleg="$(registry_agents | tr ' ' ',')"; shift ;;
+          *) usage_err "review-route verify: unknown option '$(clip "$1")'" ;;
         esac
       done
-      [ -n "$_ct" ] && [ -n "$_cp" ] || usage_err "review-route current: --thread and --phase are required"
-      _cb="$(route_base_thread "$_ct")"
-      _co="$(cmd_review_route lookup --thread "$_cb" --phase "$_cp")" || return 1
-      _cid="$(printf '%s\n' "$_co" | sed -n 's/^decision: //p' | head -1)"
-      [ -n "$_cid" ] || return 1
-      cmd_review_route show "$_cid" --thread "$_cb" --phase "$_cp"
+      printf '%s' "$_vid" | grep -qE '^rd-[0-9a-f]{32}$' || { echo "comms.sh: review-route verify: '$(clip "$_vid")' is not a decision id" >&2; return 1; }
+      [ -n "$_vt" ] && [ -n "$_vp" ] || usage_err "review-route verify: --thread and --phase are required"
+      command -v python3 >/dev/null 2>&1 || die "review-route: python3 is required"
+      [ -f "$py" ] || die "review-route: route_review.py is not installed next to comms.sh — re-run install.sh"
+      python3 "$py" verify --root "$(cmd_root)" --thread "$_vt" --phase "$_vp" ${_vleg:+--leg-agents "$_vleg"} -- "$_vid"
       return ;;
     decide|show|lookup) ;;
-    *) usage_err "review-route: expected decide|lookup|show|current|enabled" ;;
+    *) usage_err "review-route: expected decide|lookup|show|verify|enabled" ;;
   esac
   command -v python3 >/dev/null 2>&1 || die "review-route: python3 is required"
   [ -f "$py" ] || die "review-route: route_review.py is not installed next to comms.sh — re-run install.sh"
@@ -1581,7 +1583,10 @@ cmd_review_route() {
   elif [ "$verb" = lookup ]; then
     python3 "$py" lookup --root "$(cmd_root)" --workspace "$(cmd_workspace)" "$@"
   else
-    python3 "$py" show --root "$(cmd_root)" "$@"
+    # `--` before the id: an option-shaped value can never be parsed as a flag (e.g. `-h`).
+    local _sid="${1:-}"; [ "$#" -gt 0 ] && shift
+    printf '%s' "$_sid" | grep -qE '^rd-[0-9a-f]{32}$' || { echo "comms.sh: review-route show: '$(clip "$_sid")' is not a decision id" >&2; return 1; }
+    python3 "$py" show --root "$(cmd_root)" "$@" -- "$_sid"
   fi
 }
 
@@ -1600,17 +1605,6 @@ stamp_route_decision() {
     fm && index(probe, "route_decision:") == 1 { next }
     { print }
   ' "$sf" > "$stamped" && mv -f "$stamped" "$sf" || { rm -f "$stamped" 2>/dev/null; return 1; }
-}
-
-# route_base_thread <thread> — the thread a reviewer decision is keyed on: a panel leg's
-# `<base>-<agent>` (and a `comms.sh shadow` of any leg) strips its trailing registered-agent
-# suffix. ONE accessor for send, panel dispatch and runphase, so they cannot key differently.
-route_base_thread() {
-  local t="$1" a
-  for a in $(registry_agents); do
-    case "$t" in *"-$a") printf '%s\n' "${t%-"$a"}"; return 0 ;; esac
-  done
-  printf '%s\n' "$t"
 }
 
 # route_decision_for <request> <base-thread> <phase> <artifact> <base> — decide (or reuse) the
@@ -1876,7 +1870,7 @@ cmd_panel() {
   # the whole panel rather than half of it). Every leg carries the same id and each leg's send
   # validates it without re-deciding; resolution per PROVIDER happens in runphase.
   local panel_route_id=""
-  panel_route_id="$(route_decision_for "$req" "$(route_base_thread "$base_thread")" "$phase" "$aid" "$dispatch_base")" \
+  panel_route_id="$(route_decision_for "$req" "$base_thread" "$phase" "$aid" "$dispatch_base")" \
     || die "panel dispatch: reviewer routing failed — refusing to fan out"
   # A SYNTHETIC snapshot means the tree was DIRTY at dispatch: the artifact reviewers read is
   # not any commit you made, and every uncommitted file — including work belonging to another
@@ -5437,15 +5431,18 @@ cmd_send() {
   local route_id="" route_thr route_phase route_have
   if [ "$send_type" = "review-request" ] && [ -n "$(frontmatter_field "$file" workflow)" ] \
      && review_routing_enabled; then
-    route_thr="$(route_base_thread "$(frontmatter_field "$file" thread)")"
+    route_thr="$(frontmatter_field "$file" thread)"
     route_phase="$(frontmatter_field "$file" phase)"
     IFS= read -r route_have < <(fm_field_lines "$file" route_decision) || route_have=""
     if [ -n "$(frontmatter_field "$file" dispatch)" ]; then
-      # A PANEL LEG keeps the id its dispatch stamped — validated, never re-decided, so a
-      # `--replace` between two legs cannot split one review set across two decisions.
+      # A PANEL LEG keeps the id its dispatch stamped — verified, never re-decided, so a
+      # `--replace` between two legs cannot split one review set across two decisions. Its
+      # thread is `<base>-<to>`, and only THIS recipient's suffix is accepted.
       if [ -n "$route_have" ]; then
-        cmd_review_route show "$route_have" --thread "$route_thr" --phase "$route_phase" >/dev/null \
-          || die "send: the panel's routing decision '$(clip "$route_have")' does not belong to thread '$route_thr' phase '$route_phase'"
+        printf '%s' "$route_have" | grep -qE '^rd-[0-9a-f]{32}$' \
+          && python3 "$(cd "$(dirname "$SELF")" && pwd)/route_review.py" verify --root "$(cmd_root)" \
+               --thread "$route_thr" --phase "$route_phase" --leg-agents "$to" -- "$route_have" >/dev/null \
+          || die "send: the panel's routing decision '$(clip "$route_have")' does not belong to leg thread '$route_thr' phase '$route_phase'"
         route_id="$route_have"
       fi
     else

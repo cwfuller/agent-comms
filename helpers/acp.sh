@@ -32,13 +32,17 @@
 #       for one turn, through the versioned policy-map.tsv beside this file.
 #       Prints the policy record (key<TAB>value lines) the caller persists and
 #       hands back via --policy-file. Precedence per dimension: operator pin
-#       (COMMS_ACP_CODEX_MODEL / COMMS_ACP_CODEX_EFFORT) > an eligible, enabled
-#       routed candidate > the map's baseline. Exit 0 resolved (including an
+#       (COMMS_ACP_CODEX_MODEL / COMMS_ACP_CODEX_EFFORT) > the operator's "use max"
+#       ceiling (COMMS_REVIEW_MAX=1) > an eligible, enabled routed candidate > the
+#       map's baseline. Exit 0 resolved (including an
 #       `unsupported` provider/transport), 1 refused (invalid pair, bad map),
 #       2 usage.
 #   capabilities
 #       the map version and every provider/transport capability row, with the
 #       concrete controls of each routing-eligible combination.
+#   runtime <agent> --policy-file <record>
+#       the codex binary the record resolved (`bundled`, or an absolute path) —
+#       see policy_runtime_codex for COMMS_ACP_CODEX_PATH and auto-detection.
 #   policy <agent> [--policy-file <record>]
 #       the reviewer model+effort policy for an agent, tab-separated
 #       (<model>\t<effort>); empty + exit 1 where no policy applies.
@@ -177,17 +181,19 @@ policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic o
     $1 == "capability" {
       if (NF != 8 || !tok($2) || !tok($3) || $4 !~ /^(eligible|fixed|unsupported)$/) bad("malformed capability")
       once("c" SUBSEP $2 SUBSEP $3); next }
-    $1 == "baseline" {
-      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 !~ re) bad("malformed baseline")
-      once("b" SUBSEP $2 SUBSEP $3); next }
+    $1 == "baseline" || $1 == "ceiling" {
+      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 !~ re) bad("malformed " $1)
+      once($1 SUBSEP $2 SUBSEP $3); next }
     $1 == "tier" {
-      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ /^(fast|balanced|strong)$/ || $5 !~ re) bad("malformed tier")
+      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ /^(fast|balanced|strong)$/ || $5 == "") bad("malformed tier")
+      n = split($5, a, ","); for (i = 1; i <= n; i++) if (a[i] !~ re) bad("malformed tier model")
       once("t" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
     $1 == "effort" {
       if (NF != 5 || !tok($2) || !tok($3) || $4 !~ /^(low|medium|high|xhigh)$/ || $5 !~ re) bad("malformed effort")
       once("e" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
     $1 == "pair" {
-      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 == "") bad("malformed pair")
+      if ((NF != 5 && NF != 6) || !tok($2) || !tok($3) || $4 !~ re || $5 == "") bad("malformed pair")
+      if (NF == 6 && $6 !~ /^[0-9]+(\.[0-9]+)*$/) bad("malformed pair minimum runtime")
       n = split($5, a, ","); for (i = 1; i <= n; i++) if (a[i] !~ re) bad("malformed pair effort")
       once("p" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
     { bad("unknown row kind \"" $1 "\"") }
@@ -200,14 +206,16 @@ policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic o
 # policy_map_get <kind> <provider> <transport> [key] — the value column(s) of ONE row, or nothing.
 #   capability -> <eligible|fixed|unsupported>   baseline -> <model>\t<effort>
 #   tier <t> -> <model>   effort <e> -> <provider-effort>   pair <model> -> <comma list>
+#   ceiling -> <model>\t<effort>
 # Only ever called after policy_map_check has passed for this invocation.
 policy_map_get() {
   awk -F'\t' -v k="$1" -v p="$2" -v t="$3" -v key="${4:-}" '
     { sub(/\r$/, "") }
     /^[[:space:]]*(#|$)/ { next }
-    $1 != k || $2 != p || $3 != t { next }
+    ($1 != k && !(k == "pairmin" && $1 == "pair")) || $2 != p || $3 != t { next }
     k == "capability" { print $4; exit }
-    k == "baseline"   { print $4 "\t" $5; exit }
+    k == "baseline" || k == "ceiling" { print $4 "\t" $5; exit }
+    k == "pairmin" && $4 == key { print (NF == 6 ? $6 : ""); exit }
     $4 == key         { print $5; exit }' "$ACP_POLICY_MAP"
 }
 # policy_map_reverse <kind> <provider> <transport> <value> — the abstract label whose row maps to
@@ -216,14 +224,76 @@ policy_map_reverse() {
   local r
   r="$(awk -F'\t' -v k="$1" -v p="$2" -v t="$3" -v v="$4" '
     { sub(/\r$/, "") }
-    $1 == k && $2 == p && $3 == t && $5 == v { print $4; exit }' "$ACP_POLICY_MAP")"
+    $1 == k && $2 == p && $3 == t { n = split($5, a, ","); for (i = 1; i <= n; i++) if (a[i] == v) { print $4; exit } }' "$ACP_POLICY_MAP")"
   printf '%s\n' "${r:-unmapped}"
+}
+
+# THE COMBINATIONS WITH AN APPLY-AND-ATTEST PATH IN CODE. The map may only mark these `eligible` or
+# `fixed`; any other row claiming either is downgraded to `unsupported` (fallback
+# capability-unimplemented), so a map edit alone can never make the ledger claim a policy that no
+# code applies or checks. Adding a provider here requires its runphase arm to write the config,
+# preflight it and attest it. (code review r1.)
+policy_applied_combo() { case "$1/$2" in codex/acp-mounted) return 0 ;; esac; return 1; }
+
+# ver_ge <a> <b> — dotted numeric version a >= b. A non-numeric side is "not known to be >=".
+ver_ge() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    if (a !~ /^[0-9]+(\.[0-9]+)*$/ || b !~ /^[0-9]+(\.[0-9]+)*$/) exit 1
+    na = split(a, x, "."); nb = split(b, y, "."); n = (na > nb ? na : nb)
+    for (i = 1; i <= n; i++) { xi = (i <= na ? x[i] + 0 : 0); yi = (i <= nb ? y[i] + 0 : 0)
+      if (xi > yi) exit 0; if (xi < yi) exit 1 }
+    exit 0 }'
+}
+
+# THE CODEX RUNTIME a mounted reviewer will run. The ACP adapter ships its OWN codex and uses it
+# unless CODEX_PATH names another; that bundled copy can lag the operator's installed CLI by
+# releases, and new models are served only to new enough clients (measured 2026-09-22: bundled
+# 0.154.0 is refused gpt-6-luna for a ChatGPT-auth account; the installed 0.155.1 serves it).
+#   COMMS_ACP_CODEX_PATH=bundled   use the adapter's bundled codex (version unknown to us)
+#   COMMS_ACP_CODEX_PATH=<path>    use that binary
+#   unset                          the operator's installed codex, found on PATH (skipping
+#                                  per-session wrapper shims), else the bundled one
+# Sets RT_PATH (absolute path, or `bundled`) and RT_VERSION (x.y.z, or `unknown`). Never fails:
+# an unusable explicit path is REFUSED by resolve, not silently swapped for another runtime.
+ACP_RUNTIME_PATH_RE='^/[A-Za-z0-9._/+@-]+$'
+policy_runtime_codex() {
+  local want="${COMMS_ACP_CODEX_PATH:-}" d cand="" v
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""
+  if [ "$want" = bundled ]; then return 0; fi
+  if [ -n "$want" ]; then
+    if ! [[ "$want" =~ $ACP_RUNTIME_PATH_RE ]] || [ ! -x "$want" ] || [ -d "$want" ]; then
+      RT_ERR="COMMS_ACP_CODEX_PATH '$want' is not an executable absolute path"; return 0
+    fi
+    cand="$want"
+  else
+    local IFS=:
+    for d in ${PATH:-}; do
+      case "$d" in ""|*cmux-cli-shims*|*/.asdf/shims|*/node_modules/.bin) continue ;; esac
+      if [ -x "$d/codex" ] && [ ! -d "$d/codex" ] && [[ "$d/codex" =~ $ACP_RUNTIME_PATH_RE ]]; then cand="$d/codex"; break; fi
+    done
+    [ -n "$cand" ] || return 0
+  fi
+  v="$("$cand" --version 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+(\.[0-9]+)*$/) { print $i; exit } }')" || v=""
+  if [ -z "$v" ] && [ -z "$want" ]; then return 0; fi   # an auto-found binary that will not say what it is: stay bundled
+  RT_PATH="$cand"; RT_VERSION="${v:-unknown}"
+}
+
+# policy_model_available <agent> <transport> <model> — 0 iff the model's declared minimum runtime
+# (optional 6th column of its `pair` row) is met by RT_VERSION. No minimum = available everywhere.
+policy_model_available() {
+  local min; min="$(policy_map_get pairmin "$1" "$2" "$3")"
+  [ -z "$min" ] && return 0
+  ver_ge "$RT_VERSION" "$min"
 }
 
 # The operator's pins, per provider. Only codex has an applied policy, so only codex has pins; a
 # provider added here must also gain an `eligible` capability row with its own evidence.
 policy_pin_model()  { case "$1" in codex) printf '%s' "${COMMS_ACP_CODEX_MODEL:-}" ;; esac; }
 policy_pin_effort() { case "$1" in codex) printf '%s' "${COMMS_ACP_CODEX_EFFORT:-}" ;; esac; }
+# THE OPERATOR'S "use max": every reviewer turn that applies a policy runs the map's `ceiling` pair.
+# Provider-neutral on purpose — it names no model, the map does. It only ever RAISES depth, so it is
+# not an author-steering channel the way a cheaper route would be.
+policy_max_on() { case "${COMMS_REVIEW_MAX:-}" in 1|true|yes|on|TRUE|YES|ON) return 0 ;; esac; return 1; }
 
 # resolve_policy <agent> <transport> <tier> <effort> <decision> <routing> <phase> <candidate-source>
 # Sets the R_* globals describing the resolved policy. Returns 0 resolved, 1 refused (a message is
@@ -242,6 +312,10 @@ resolve_policy() {
   R_DECISION="$decision"; R_ROUTING="$routing"; R_PHASE="$phase"; R_CSRC="$csrc"; R_DIGEST=none
   R_MAPV="$(policy_map_check)" || return 1
   R_CAP="$(policy_map_get capability "$agent" "$transport")"; R_CAP="${R_CAP:-unsupported}"
+  if [ "$R_CAP" != unsupported ] && ! policy_applied_combo "$agent" "$transport"; then
+    R_CAP=unsupported; fb="${fb:+$fb;}capability-unimplemented"
+  fi
+  R_RUNTIME=n/a; R_RUNTIME_VERSION=n/a
   if [ "$routing" = on ] && [ "$decision" = none ]; then fb="${fb:+$fb;}no-decision"; fi
   if [ "$routing" = off ] && [ "$decision" != none ]; then fb="${fb:+$fb;}routing-disabled"; fi
   if [ "$R_CAP" = unsupported ]; then
@@ -249,9 +323,15 @@ resolve_policy() {
     # otherwise look like a policy: no model, no effort, no verification requirement.
     R_MODEL=n/a; R_EFFORT=n/a; R_MSRC=unsupported; R_ESRC=unsupported
     R_ETIER=n/a; R_EEFF=n/a; R_PAIR=n/a; R_VERIFY=none
+    policy_max_on && fb="${fb:+$fb;}max-unsupported"
     R_FALLBACK="${fb:+$fb;}capability-unsupported"
     return 0
   fi
+  # THE RUNTIME, resolved before any model is chosen: which models exist depends on it.
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""
+  if [ "$agent" = codex ]; then policy_runtime_codex; fi
+  [ -z "$RT_ERR" ] || { echo "acp.sh: resolve: $RT_ERR — refusing rather than running another runtime" >&2; return 1; }
+  R_RUNTIME="$RT_PATH"; R_RUNTIME_VERSION="$RT_VERSION"
   base="$(policy_map_get baseline "$agent" "$transport")"
   [ -n "$base" ] || { echo "acp.sh: resolve: the map has no baseline for $agent/$transport — refusing" >&2; return 1; }
   bm="${base%%$'\t'*}"; be="${base#*$'\t'}"
@@ -269,6 +349,16 @@ resolve_policy() {
     elif [ "$phase" != implement ]; then fb="${fb:+$fb;}phase-excluded"
     else route_ok=1; fi
   fi
+  # "use max" outranks routing, the baseline and the phase exclusion; only an explicit per-
+  # dimension pin outranks it. It is strict like an explicit decision: an invalid pair refuses.
+  local cm="" ce="" max_on=0
+  if policy_max_on; then
+    local ceil; ceil="$(policy_map_get ceiling "$agent" "$transport")"
+    [ -n "$ceil" ] || { echo "acp.sh: resolve: COMMS_REVIEW_MAX is set but the map has no ceiling for $agent/$transport — refusing" >&2; return 1; }
+    cm="${ceil%%$'\t'*}"; ce="${ceil#*$'\t'}"; max_on=1
+    if [ "$route_ok" = 1 ]; then fb="${fb:+$fb;}max-override"; fi
+    route_ok=0; csrc=explicit
+  fi
   # EXPLICIT IS STRICT. An operator who named a tier or effort asked for THAT; a candidate the map
   # cannot honour is refused and named, never quietly replaced by the baseline. (handoff item 7.)
   explicit_refuse() {
@@ -276,10 +366,21 @@ resolve_policy() {
   }
   # PRECEDENCE, PER DIMENSION: pin > eligible+enabled route > baseline. A missing or `none`
   # candidate keeps the concrete baseline; it is never passed on as an abstract default.
-  local rm="" re=""
+  local re=""
   if [ -n "$pm" ]; then R_MODEL="$pm"; R_MSRC=pin
+  elif [ "$max_on" = 1 ]; then R_MODEL="$cm"; R_MSRC=max
   elif [ "$route_ok" = 1 ] && [ "$tier" != none ]; then
-    rm="$(policy_map_get tier "$agent" "$transport" "$tier")"
+    # A tier is an ORDERED preference list: the first model this runtime can serve. A skipped
+    # preference is recorded, so "fast ran gpt-5.6-luna because the runtime lacks gpt-6-luna" is
+    # legible from the ledger. An empty result falls back like an unmapped tier.
+    local tl m1 _om rm=""
+    tl="$(policy_map_get tier "$agent" "$transport" "$tier")"
+    local IFS_SAVE="$IFS"; IFS=,
+    for m1 in $tl; do
+      if policy_model_available "$agent" "$transport" "$m1"; then rm="$m1"; break; fi
+      fb="${fb:+$fb;}runtime-lacks:$m1"
+    done
+    IFS="$IFS_SAVE"
     if [ -n "$rm" ]; then R_MODEL="$rm"; R_MSRC=route
     elif [ "$csrc" = explicit ]; then explicit_refuse "tier '$tier', which the map does not define for $agent/$transport"; return 1
     else R_MODEL="$bm"; R_MSRC=baseline; fb="${fb:+$fb;}unmapped-tier"; fi
@@ -288,6 +389,7 @@ resolve_policy() {
     if [ "$route_ok" = 1 ]; then fb="${fb:+$fb;}no-candidate-tier"; fi
   fi
   if [ -n "$pe" ]; then R_EFFORT="$pe"; R_ESRC=pin
+  elif [ "$max_on" = 1 ]; then R_EFFORT="$ce"; R_ESRC=max
   elif [ "$route_ok" = 1 ] && [ "$effort" != none ]; then
     re="$(policy_map_get effort "$agent" "$transport" "$effort")"
     if [ -n "$re" ]; then R_EFFORT="$re"; R_ESRC=route
@@ -307,6 +409,9 @@ resolve_policy() {
     accepted="$(policy_map_get pair "$agent" "$transport" "$R_MODEL")"
     bad=""
     if [ -z "$accepted" ]; then
+      if [ "$R_MSRC" = pin ] && [ "$R_ESRC" = max ]; then
+        echo "acp.sh: resolve: COMMS_REVIEW_MAX cannot validate effort '$R_EFFORT' for the pinned, unmapped model '$R_MODEL' — refusing" >&2; return 1
+      fi
       if [ "$R_MSRC" = pin ]; then
         # A pinned model the map does not know: honoured, labelled unverified. A ROUTED effort on
         # top of it would be an unvalidated combination the map never approved, so it is dropped.
@@ -329,6 +434,13 @@ resolve_policy() {
     echo "acp.sh: resolve: model '$R_MODEL' does not accept effort '$R_EFFORT' (model from $R_MSRC, effort from $R_ESRC; map $R_MAPV) — refusing rather than substituting" >&2
     return 1
   done
+  # The chosen model must exist on the runtime that will run it. A pinned, baseline or ceiling
+  # model that needs a newer runtime is REFUSED here with the remedy, never swapped: the canary
+  # would only discover it after a session was spent on it.
+  if ! policy_model_available "$agent" "$transport" "$R_MODEL"; then
+    echo "acp.sh: resolve: model '$R_MODEL' ($R_MSRC) needs codex >= $(policy_map_get pairmin "$agent" "$transport" "$R_MODEL"), but the reviewer runtime is $R_RUNTIME ($R_RUNTIME_VERSION) — install a newer codex or set COMMS_ACP_CODEX_PATH" >&2
+    return 1
+  fi
   R_ETIER="$(policy_map_reverse tier "$agent" "$transport" "$R_MODEL")"
   R_EEFF="$(policy_map_reverse effort "$agent" "$transport" "$R_EFFORT")"
   R_VERIFY="model,effort"
@@ -337,14 +449,16 @@ resolve_policy() {
   # the pair — a new decision, a pin, a map bump, routing switched off — is a FRESH session under
   # the new config instead of a warm one holding the old preference, and an unchanged pair keeps
   # its warm session.
-  R_DIGEST="$(policy_digest "$R_MODEL" "$R_EFFORT")" || { echo "acp.sh: resolve: no sha256 utility to identify the policy" >&2; return 1; }
+  R_DIGEST="$(policy_digest "$R_MODEL" "$R_EFFORT" "$R_RUNTIME" "$R_RUNTIME_VERSION")" || { echo "acp.sh: resolve: no sha256 utility to identify the policy" >&2; return 1; }
   return 0
 }
 
-policy_digest() {  # <model> <effort> -> 12 hex
+policy_digest() {  # <model> <effort> <runtime> <runtime-version> -> 12 hex
+  # The RUNTIME is part of the identity: codex fixes a session's runtime when it is created, so a
+  # runtime upgrade must be a fresh session too, never a resume under a different binary.
   local d
-  if command -v shasum >/dev/null 2>&1; then d="$(printf '%s\0%s' "$1" "$2" | shasum -a 256)"
-  elif command -v sha256sum >/dev/null 2>&1; then d="$(printf '%s\0%s' "$1" "$2" | sha256sum)"
+  if command -v shasum >/dev/null 2>&1; then d="$(printf '%s\0%s\0%s\0%s' "$1" "$2" "$3" "$4" | shasum -a 256)"
+  elif command -v sha256sum >/dev/null 2>&1; then d="$(printf '%s\0%s\0%s\0%s' "$1" "$2" "$3" "$4" | sha256sum)"
   else return 1; fi
   d="${d%% *}"; d="${d:0:12}"
   [[ "$d" =~ ^[0-9a-f]{12}$ ]] || return 1
@@ -370,6 +484,8 @@ emit_policy_record() {  # the persisted per-turn expectation; key<TAB>value, fix
   printf 'effective_tier\t%s\n'   "$R_ETIER"
   printf 'effective_effort\t%s\n' "$R_EEFF"
   printf 'pair\t%s\n'             "$R_PAIR"
+  printf 'runtime\t%s\n'          "$R_RUNTIME"
+  printf 'runtime_version\t%s\n'  "$R_RUNTIME_VERSION"
   printf 'fallback\t%s\n'         "${R_FALLBACK:-none}"
   printf 'verify\t%s\n'           "$R_VERIFY"
   printf 'policy_digest\t%s\n'    "$R_DIGEST"
@@ -498,6 +614,8 @@ cmd_resolve() {
 cmd_capabilities() {
   local ver; ver="$(policy_map_check)" || exit 1
   printf 'map_version: %s (%s)\n' "$ver" "$ACP_POLICY_MAP"
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; policy_runtime_codex
+  printf 'reviewer codex runtime: %s (version %s)%s\n' "$RT_PATH" "$RT_VERSION" "${RT_ERR:+ — REFUSED: $RT_ERR}"
   # Two passes, so a routing-eligible combination's rows print whatever order the map lists them in.
   awk -F'\t' '
     { sub(/\r$/, "") }
@@ -506,9 +624,10 @@ cmd_capabilities() {
     # the concrete rows print for every combination that APPLIES a policy (eligible or fixed)
     $1 == "capability" { printf "%s/%s: %s\n  mechanism: %s\n  evidence: %s\n  versions tested: %s\n  notes: %s\n", $2, $3, $4, $5, $6, $7, $8; next }
     $1 == "baseline" && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s baseline: model=%s effort=%s\n", $2, $3, $4, $5; next }
-    $1 == "tier"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s tier %s -> model %s\n", $2, $3, $4, $5; next }
+    $1 == "ceiling"  && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s ceiling (use max): model=%s effort=%s\n", $2, $3, $4, $5; next }
+    $1 == "tier"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s tier %s -> first servable of %s\n", $2, $3, $4, $5; next }
     $1 == "effort"   && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s effort %s -> %s\n", $2, $3, $4, $5; next }
-    $1 == "pair"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s accepts: %s\n", $2, $3, $4, $5; next }' "$ACP_POLICY_MAP" "$ACP_POLICY_MAP"
+    $1 == "pair"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s accepts: %s%s\n", $2, $3, $4, $5, (NF == 6 ? " (needs codex >= " $6 ")" : ""); next }' "$ACP_POLICY_MAP" "$ACP_POLICY_MAP"
 }
 
 cmd_doctor() {
@@ -521,6 +640,10 @@ cmd_doctor() {
   fi
   echo "acpx: pinned @$ACPX_VERSION via npx (cached after first use)"
   echo "agents: codex claude grok enabled ($(for a in codex claude grok; do printf '%s=%s ' "$a" "$(profile_for "$a")"; done))"
+  # Which codex a MOUNTED reviewer will run, and so which mapped models it can serve.
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; policy_runtime_codex
+  if [ -n "$RT_ERR" ]; then echo "reviewer codex runtime: REFUSED — $RT_ERR"
+  else echo "reviewer codex runtime: $RT_PATH (version $RT_VERSION)$( [ "$RT_PATH" = bundled ] && printf ' — the ACP adapter'"'"'s own copy; models that need a newer codex fall back per policy-map.tsv')"; fi
   # Reply verification needs python3 (comms.sh reply-check). Without it every reply is UNDECIDABLE
   # and refused rather than trusted, so name it here rather than leaving the operator to discover it
   # mid-consult. (codex, acp-compat-gate plan r2.)
@@ -669,6 +792,20 @@ case "${1:-}" in
     ;;
   version) printf '%s\n' "$ACPX_VERSION" ;;
   resolve) shift; cmd_resolve "$@" ;;
+  runtime)
+    # runtime <agent> --policy-file <record> — the codex binary the persisted record resolved
+    # (`bundled`, or a validated absolute path). runphase hands it to the adapter as CODEX_PATH, so
+    # the runtime that runs is the one the policy was resolved (and its models checked) against.
+    shift; policy_args "$@"
+    [ -n "${PA_POS[0]:-}" ] && [ -n "$PA_FILE" ] || die "runtime: usage: runtime <agent> --policy-file <record>"
+    [ -f "$PA_FILE" ] || die "runtime: no such record"
+    _rt="$(awk -F'\t' '$1=="runtime"{n++; v=$2} END{if(n==1) print v}' "$PA_FILE")"
+    _rp="$(awk -F'\t' '$1=="provider"{n++; v=$2} END{if(n==1) print v}' "$PA_FILE")"
+    [ "$_rp" = "${PA_POS[0]}" ] || die "runtime: the record is for '${_rp:-?}', not '${PA_POS[0]}'"
+    if [ "$_rt" = bundled ] || [ "$_rt" = n/a ]; then printf '%s\n' "$_rt"; exit 0; fi
+    [[ "$_rt" =~ $ACP_RUNTIME_PATH_RE ]] && [ -x "$_rt" ] && [ ! -d "$_rt" ] || die "runtime: the record's runtime '${_rt:-}' is not an executable absolute path"
+    printf '%s\n' "$_rt"
+    ;;
   capabilities) shift; cmd_capabilities ;;
   policy)
     shift; policy_args "$@"

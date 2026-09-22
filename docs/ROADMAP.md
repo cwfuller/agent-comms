@@ -387,6 +387,30 @@ Implements the "reviewer turns are the right controllable boundary" note below, 
   observed / runtime separately.
 - The implementer classifier's bump is now the NAMED variant `implementer-bump-v1`, advisory only.
 
+**Live probes, 2026-09-22** (outside agent-comms; acpx 0.13.1, codex-acp 1.12.0 / bundled codex
+0.154.0, claude-agent-acp 0.60.0; evidence is the provider's own rollout / transcript):
+- `acpx codex set reasoning_effort|model` BEFORE the first prompt is honoured (config said
+  luna/low; the rollout shows `gpt-5.6-terra/medium` ran). After a prompt it fails with "Internal
+  error" and nothing changes — same shape as the `set-mode` finding. `set` also persists
+  `desired_config_options` / `session_options.model`, which acpx replays; policy-check reads both.
+- A resumed codex session ADOPTED a changed `config.toml` (gpt-6-astra/high on the same thread).
+  One observation; the policy-digest session names make correctness independent of it.
+- `acpx claude set model sonnet` + `set effort low` before the first prompt is honoured (transcript:
+  `claude-sonnet-5`, effort `low`); effort on haiku fails. Claude is controllable over ACP; making
+  it eligible still needs per-turn transcript attestation in runphase.
+- gpt-6-sol / gpt-6-luna (released 2026-09-22): the adapter's BUNDLED codex 0.154.0 rejects
+  gpt-6-luna for a ChatGPT-auth account (400) and does not advertise gpt-6-sol; with `CODEX_PATH` at
+  the installed codex 0.155.1 both answered and attested. Hence runtime auto-detection, a 0.155.0
+  minimum on their pair rows, and ordered tiers that fall back to gpt-5.6 (map 2026-09-22.4).
+- A routed live proof through the real mounted path (worktree helpers, `--no-deliver`): fresh
+  luna/low attested; warm resume passed preflight + canary then was refused for tree contamination
+  (the reviewer ran `py_compile` — the open containment item above, not routing); a replaced
+  decision switched to a new policy-named session verified by preflight; its warm resume attested
+  terra/medium.
+- Operator ceiling: `COMMS_REVIEW_MAX=1` / `/auto --max` → the map's `ceiling` (gpt-6-astra/ultra).
+- The rollout writes `turn_context` with the requested model even when the API call then fails, so
+  a rollout alone does not prove a successful turn; the canary + reply-check gates remain required.
+
 **Still open:** a bounded live proof on real mounted codex turns (fresh routed, warm resume,
 deliberate change); claude/grok controls proven live before any row may become `eligible`; and the
 outcome experiment — frozen mapping, same artifacts and prompts under baseline vs routed,
