@@ -20,9 +20,8 @@ Needs git, Node >= 22.13 and at least two agent CLIs (`claude` and `codex` work
 out of the box). Clone-first install, scopes and reviewer containment:
 [docs/INSTALL.md](docs/INSTALL.md).
 
-Then run `~/.agent-comms/comms.sh setup` (offered at the end of install; re-run any
-time). It detects your agents and saves settings to `~/.agent-comms/settings`, so
-nothing depends on shell exports.
+Then run `~/.agent-comms/comms.sh setup` (re-runnable): it detects your agents and
+saves [settings](docs/INSTALL.md#settings-commssh-setup), so nothing depends on shell exports.
 
 ## Use
 
@@ -65,12 +64,8 @@ A classifier (Jev, via TypeSafe) sizes the work so easy things run cheap:
   codex is new enough, else GPT-5.6 Luna / Terra; strong = GPT-6 Astra). Low
   confidence keeps the default depth.
 
-Setup (`comms.sh setup` asks for all of it): `TYPESAFE_API_KEY`, `COMMS_ROUTE_BACKEND=typesafe` (turns on the
-classifier), `COMMS_REVIEW_ROUTE=1` (applies it to reviewers), and the project
-listed in `~/.agent-comms/route-shadow-allow` before any reviewer request text is
-sent. Without the backend, reviewer routing keeps the default depth.
-
-Both are off by default; `--no-route` turns them off for one loop. Details:
+Off by default. `comms.sh setup` turns it on (TypeSafe key, then per-project
+permission before any review text is sent); `--no-route` turns it off for one loop. Details:
 [`route` / `review-route`](docs/COMMANDS.md),
 [reviewer routing](docs/INTERNALS.md#reviewer-modeleffort-routing),
 `acp.sh doctor`, `acp.sh capabilities`.
