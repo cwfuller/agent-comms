@@ -499,6 +499,14 @@ because three approved arcs already exist.
 
 ### OPEN: the reviewer containment measurement is stale — re-probe on codex-acp 1.12.0 (2026-09-19, sev 2, acpx surface probe)
 
+**Widened 2026-09-22 (codex, reviewer-routing implement r4, advisory):** the routing binding makes
+mounted codex reviews run the operator's INSTALLED codex by default (auto-detected; handed to the
+adapter as `CODEX_PATH`), not only the adapter's bundled copy. The live probes established model /
+effort compatibility for installed 0.155.1, not sandbox equivalence. Run the write, `/tmp` and
+network probes against BOTH runtimes (`COMMS_ACP_CODEX_PATH=bundled` and the installed one). A
+mounted routed proof turn also showed the reviewer writing `__pycache__` into the tree on the
+bundled runtime (refused by the tree-identity check, so unpublished) — evidence for this item.
+
 **Do not fold this into the effort-pin work. It needs its own round and one live write-probe.**
 
 `helpers/runphase.sh:2780-2786` records the containment measurement: *"Measured on Darwin with
