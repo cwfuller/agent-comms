@@ -6,8 +6,15 @@ itself. A wrong approach surfaces fast in the implement review and you fix it th
 A query classifier (`comms.sh route`) may enable the approach-review phase when the
 task looks architectural; `--plan` / `--no-plan` override it. The classifier is
 opt-in (`COMMS_ROUTE_BACKEND=typesafe` or `COMMS_ROUTE=1`); a TypeSafe key alone
-does not turn it on. The classifier never chooses a reviewer, a model, or the
-panel roster.
+does not turn it on. The classifier never chooses a reviewer or the panel roster,
+and its effort/tier are an advisory hint for YOU, the implementer.
+
+Reviewer model/effort routing is a SEPARATE opt-in (`COMMS_REVIEW_ROUTE=1`) that the
+helpers apply, not you: when it is on, `send` / `panel dispatch` record one reviewer
+decision per thread and phase and stamp `route_decision:` on the request, and each
+reviewer turn resolves it against a versioned policy map (`acp.sh capabilities`). Off,
+every reviewer runs its fixed baseline. Never write `route_decision:` yourself — the
+helper strips it.
 
 Invocation is per runtime, because the short name is not free everywhere:
 - Claude: `/auto`
@@ -81,6 +88,10 @@ asked. Do not narrate every dispatch.
      the classifier would have requested it. `--no-route` (or `COMMS_ROUTE=0`) skips
      the classifier. `--plan` and `--no-plan` are human overrides: do not call
      `route` when either is set. If both appear, `--plan` wins.
+     `--no-route` ALSO turns reviewer routing off for this loop — export
+     `COMMS_ROUTE=0` (the master switch the helpers read) before any `send`.
+     `--plan` / `--no-plan` do NOT affect reviewer routing: they choose whether an
+     approach review happens, not how deeply a reviewer thinks.
    - `--reviewers a,b` selects the reviewing agents. **The default is a PANEL: every
      registered agent except the one driving.** Narrow it explicitly when you want one
      (`--reviewers codex`). Derive the default from the registry — never hardcode a
@@ -130,13 +141,15 @@ asked. Do not narrate every dispatch.
    `disabled`, run the plan phase (step 3) as if `--plan` was passed. That
    includes `typesafe` / `jev` and `override`. A `source: stub` result is the
    test seam — treat it as fail-open (`plan: no`), never as a live classification.
-   Effort and tier are advisory: if this runtime can set reasoning effort, apply
-   `ROUTE_EFFORT`; if it can pick a cheaper/faster model for `tier: fast` (or keep
-   a stronger one for `tier: strong`), do so. Never fail the loop because effort
-   or model cannot be set. Never emit a vendor model id from this helper — map
-   `fast|balanced|strong` to whatever this session currently offers for cheap /
-   default / best (a newly released model is used when it is that band's current
-   best, not because a table in this repo named it). A fail-open result (`source: fail-open` or `source: disabled`) means
+   Effort and tier are advisory, and they are about YOUR implementer session only
+   (the `implementer-bump-v1` policy, named in `reason:`): if this runtime can set
+   reasoning effort, apply `ROUTE_EFFORT`; if it can pick a cheaper/faster model for
+   `tier: fast` (or keep a stronger one for `tier: strong`), do so. Never fail the
+   loop because effort or model cannot be set. Never emit a vendor model id from this
+   helper — map `fast|balanced|strong` to whatever this session currently offers for
+   cheap / default / best (a newly released model is used when it is that band's
+   current best). Reviewer turns are different: they are bound by the helpers'
+   versioned policy map, never by this output. A fail-open result (`source: fail-open` or `source: disabled`) means
    `plan: no` — continue to implement. The classifier never chooses a reviewer
    or a panel roster.
 
@@ -248,6 +261,12 @@ verdict format. The cycle continues until APPROVE or max rounds.
    `review_set` and **one snapshot**, and validates the whole roster before sending any
    leg — a half-fanned panel silently drops a voice from the composed gate. It prints the
    `review_set` id; keep it, you need it to compose.
+
+   Reviewer routing (only with `COMMS_REVIEW_ROUTE=1`, implement phase only) happens inside
+   these two commands: the first implement request on a thread records the decision, later
+   rounds reuse it, so the reviewer keeps its warm session. You are the author under review:
+   never choose, replace or hand-write your own reviewer's depth. Explicit decisions are an
+   operator action (docs/COMMANDS.md, `review-route`).
 
    Either way the message is stamped with `artifact_id:` and the tree is pinned, so every
    reviewer reads the SAME artifact rather than whatever the working tree happens to hold

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import urllib.error
@@ -128,6 +129,302 @@ STATE_KIND = (
 def build_state(task):
     """The exact outbound state both callers send."""
     return {"task": task, "kind": STATE_KIND}
+
+
+# ---------------------------------------------------------------------------------------------
+# THE REVIEWER RUBRIC — a DIFFERENT question from the one above. `QUESTIONS` asks how hard a task
+# is for the IMPLEMENTER, from the initiating sentence alone; using that answer to price a REVIEW
+# would reuse a judgement about the wrong actor made from the wrong input. A reviewer's cost is
+# set by the change it must attack: what was done, the acceptance criteria, the files touched, and
+# what earlier rounds already found. (handoff 2026-09-22, "reviewer-specific classification
+# contract"; docs/ROADMAP.md "a reviewer classifier would need the artifact, phase, risk and prior
+# findings".)
+#
+# Versioned: every decision record carries REVIEW_RUBRIC_VERSION and a hash of these questions,
+# and the live decider and the shadow collector both import them from HERE, so an observation can
+# never be made under a different prompt from the one production sends.
+REVIEW_RUBRIC_VERSION = "reviewer-v1"
+# The NAMED policy variants that map raw answers to a candidate. route.sh applies the implementer
+# one (with its one-step bump) and names it in `reason:`; route_review.py applies the reviewer one
+# (no bump). Recorded on every decision and shadow row so rows made under different mappings are
+# never pooled by accident.
+IMPLEMENTER_POLICY_VARIANT = "implementer-bump-v1"
+REVIEWER_POLICY_VARIANT = "reviewer-v1"
+REVIEW_QUESTIONS = {
+    "review_depth": {
+        "type": "score",
+        "instructions": (
+            "How much reasoning does an adequate adversarial review of THIS change need, to "
+            "find the defects that would block it from landing? Judge the change described "
+            "(what was done, the files, the acceptance criteria, earlier findings), not the "
+            "length of the request."
+        ),
+        "criteria": [
+            {
+                "what": "Mechanical: the change is trivially checkable.",
+                "signals": [
+                    "Docs, comments, a rename, or formatting only",
+                    "A one-line fix whose correctness is visible in the diff",
+                ],
+                "not_for": "Any change to control flow, state, concurrency, security, or data.",
+            },
+            {
+                "what": "Standard: an ordinary bounded change with a clear shape.",
+                "signals": [
+                    "A well-specified function or test change in one module",
+                    "A localized fix whose cause is stated and whose blast radius is small",
+                ],
+                "not_for": "Multi-module interactions, lifecycle/race reasoning, or trust boundaries.",
+            },
+            {
+                "what": "Hard: defects hide in interactions the diff does not show directly.",
+                "signals": [
+                    "Concurrency, lifecycle, retries, caching, or state across rounds",
+                    "Security, sandboxing, permissions, or input validation",
+                    "Several modules or a protocol other code depends on",
+                ],
+                "not_for": "Changes a careful reviewer can verify line by line.",
+            },
+            {
+                "what": "Architectural: a wrong direction would be expensive to undo after landing.",
+                "signals": [
+                    "A new abstraction or contract other code must follow",
+                    "Safety-critical gates, or a change to what the review process itself trusts",
+                ],
+                "not_for": "A localized change whose first pass is cheap to correct.",
+            },
+        ],
+    },
+    "review_effort": {
+        "type": "choice",
+        "instructions": (
+            "Pick the cheapest reasoning effort at which a reviewer would reliably find the "
+            "blocking defects in this change in one pass. Missing a real defect is far more "
+            "expensive than extra reasoning."
+        ),
+        "criteria": {
+            "low": {
+                "what": "The change is mechanical and its correctness is visible directly.",
+                "not_for": "Anything with behaviour a reviewer must reason about.",
+            },
+            "medium": {
+                "what": "An ordinary bounded change with a clear shape and small blast radius.",
+                "not_for": "Interactions across modules, rounds, processes, or trust boundaries.",
+            },
+            "high": {
+                "what": "Interactions, lifecycle, or security reasoning the diff does not show directly.",
+                "not_for": "Changes a careful reviewer can verify line by line.",
+            },
+            "xhigh": {
+                "what": "Long chains of constraints, safety-critical gates, or a new contract.",
+                "not_for": "Anything a single focused high-effort pass would finish.",
+            },
+        },
+    },
+}
+
+REVIEW_STATE_KIND = (
+    "agent-comms reviewer routing. Decide how much reasoning an adversarial code REVIEW of "
+    "the described change needs. Do not pick a reviewer, a vendor model, or whether to plan."
+)
+
+# The bounded input, section by section. Headings are the ones the /auto review-request
+# template and AGENTS.md prescribe; a request that lacks one records it as OMITTED rather than
+# silently sending less. Limits are characters of each section's body after the heading.
+REVIEW_SECTIONS = (
+    ("intent", ("intent / approach", "intent"), 1500),
+    ("done", ("what was done", "what was done this round"), 2500),
+    ("criteria", ("acceptance criteria",), 1500),
+    ("files", ("files changed",), 2000),
+    ("decisions", ("key decisions",), 1200),
+    ("focus", ("review focus", "review ask"), 1000),
+    ("prior", ("prior review context", "prior findings"), 2000),
+)
+REVIEW_TOTAL_LIMIT = 10000
+
+
+def _split_request(text):
+    """(frontmatter dict, body) of a review-request file. Only the leading --- block counts."""
+    fm, body = {}, text
+    lines = text.splitlines()
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                for ln in lines[1:i]:
+                    if ":" in ln:
+                        k, v = ln.split(":", 1)
+                        k = k.strip()
+                        if k and k not in fm:  # first match, as every shell reader does
+                            fm[k] = v.strip()
+                body = "\n".join(lines[i + 1:])
+                break
+    return fm, body
+
+
+def _sections(body):
+    """{normalized heading: text} for every `## ` heading (first occurrence wins)."""
+    out, cur, buf = {}, None, []
+    for ln in body.splitlines():
+        if ln.startswith("## "):
+            if cur is not None and cur not in out:
+                out[cur] = "\n".join(buf).strip()
+            cur = ln[3:].strip().lower()
+            buf = []
+        elif cur is not None:
+            buf.append(ln)
+    if cur is not None and cur not in out:
+        out[cur] = "\n".join(buf).strip()
+    return out
+
+
+def artifact_numstat(repo, base, artifact):
+    """`git diff --numstat <base> <artifact>` in the MAIN repo, or None when it cannot be measured.
+
+    The helper measures the change itself. The request's own `## Files changed` section is written
+    by the author whose work is under review, so it is recorded only as `author_claimed` and never
+    drives the decision. Both ids must be full 40-hex object ids (send stamps them before deciding).
+    """
+    import re
+    import subprocess
+    if not (repo and re.fullmatch(r"[0-9a-f]{40}", base or "") and re.fullmatch(r"[0-9a-f]{40}", artifact or "")):
+        return None
+    env = {k: v for k, v in os.environ.items() if k not in GIT_SELECTORS}
+    try:
+        out = subprocess.run(["git", "-C", repo, "diff", "--numstat", base, artifact],
+                             capture_output=True, text=True, timeout=20, env=env)
+    except Exception:
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def risk_signals(numstat):
+    """Deterministic counts from a numstat block: files, insertions, deletions, binary files, and
+    changed files per top-level path. Counts only — no judgement is encoded here."""
+    sig = {"files_changed": 0, "insertions": 0, "deletions": 0, "binary_files": 0, "top_level": {}}
+    for line in (numstat or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        add, rem, path = parts[0], parts[1], parts[-1]
+        sig["files_changed"] += 1
+        if add == "-" or rem == "-":
+            sig["binary_files"] += 1
+        else:
+            try:
+                sig["insertions"] += int(add)
+                sig["deletions"] += int(rem)
+            except ValueError:
+                continue
+        top = path.split("/", 1)[0] if "/" in path else "(root)"
+        sig["top_level"][top] = sig["top_level"].get(top, 0) + 1
+    return sig
+
+
+def build_review_state(request_text, numstat=None, artifact=None):
+    """(state, input_meta) for a reviewer-routing decision — the ONE builder live and shadow share.
+
+    The state carries role/workflow/phase/round, the artifact id (IDENTITY ONLY — it conveys which
+    snapshot, not its content), each bounded section of the request, and count-only risk signals
+    MEASURED from `numstat` (the helper's own `git diff --numstat` of the artifact; None when it
+    could not be measured). The author's `## Files changed` text is sent as a request section like
+    any other and never feeds the signals. input_meta records exactly what was sent, what was
+    truncated, what was absent, and whether the signals were measured.
+    """
+    fm, body = _split_request(request_text)
+    secs = _sections(body)
+    sent, meta_secs, omitted = {}, {}, []
+    total = 0
+    for name, headings, limit in REVIEW_SECTIONS:
+        text = None
+        for h in headings:
+            if h in secs:
+                text = secs[h]
+                break
+        if text is None or not text.strip():
+            omitted.append(name)
+            continue
+        room = max(0, min(limit, REVIEW_TOTAL_LIMIT - total))
+        piece = text[:room]
+        sent[name] = piece
+        total += len(piece)
+        meta_secs[name] = {"chars": len(text), "sent_chars": len(piece),
+                           "truncated": len(piece) < len(text)}
+    state = {
+        "kind": REVIEW_STATE_KIND,
+        "role": "reviewer",
+        "workflow": fm.get("workflow", ""),
+        "phase": fm.get("phase", ""),
+        "round": fm.get("round", ""),
+        "artifact": {"id": artifact or fm.get("artifact_id", ""),
+                     "note": "identity only; no code content is sent"},
+        "request": sent,
+        "risk_signals": risk_signals(numstat) if numstat is not None else None,
+    }
+    meta = {
+        "sections": meta_secs,
+        "omitted": omitted,
+        "sent_chars": total,
+        "request_chars": len(request_text),
+        "total_limit": REVIEW_TOTAL_LIMIT,
+        "signals_measured": numstat is not None,
+    }
+    return state, meta
+
+
+# Git variables that can point a command at a DIFFERENT repository than the cwd.
+GIT_SELECTORS = {
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX",
+}
+
+def canonical_project():
+    """sha256 of the canonical MAIN repo root of the CURRENT working tree.
+
+    Derived here, never taken from the environment: permission that trusts a caller-supplied
+    identity is not permission. Mirrors route.sh's shadow_repo_key and runphase's
+    mount_repo_key so one clone is one project across worktrees and mounts. Shared by the shadow
+    collector and the live reviewer decider.
+    """
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if k not in GIT_SELECTORS}
+    try:
+        out = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                             capture_output=True, text=True, timeout=10, env=env)
+        if out.returncode != 0:
+            return "", ""
+        first = out.stdout.splitlines()[0] if out.stdout.splitlines() else ""
+        if not first.startswith("worktree "):
+            return "", ""
+        root = os.path.realpath(first[len("worktree "):].strip())
+    except Exception:
+        return "", ""
+    if not root:
+        return "", ""
+    return hashlib.sha256(root.encode("utf-8")).hexdigest(), root
+
+
+def transmission_permitted(key):
+    """The per-project allowlist for sending project text to a third-party classifier.
+
+    Enforced at every path that transmits: the shadow collector (here AND in route.sh) and the
+    live reviewer decider. Absent by default, outside the tree, keyed by project hash.
+
+    route_shadow.py is installed executable with its own __main__, so a caller that ran it
+    directly — including the suite — bypassed the shell-side gate entirely and could reach
+    HTTP with an empty project key. Permission is a property of the backend-call boundary,
+    not of one entry path. (codex P1, implement r1.)
+    """
+    if not key:
+        return False
+    allow = os.environ.get("COMMS_ROUTE_SHADOW_ALLOW") or os.path.join(
+        os.environ.get("AGENT_COMMS_HOME") or os.path.expanduser("~/.agent-comms"),
+        "route-shadow-allow")
+    try:
+        with open(allow, "r", encoding="utf-8") as fh:
+            return any(line.strip() == key for line in fh)
+    except OSError:
+        return False
 
 
 BACKENDS = {}
@@ -285,9 +582,12 @@ def resolve():
     return None, None
 
 
-def classify(state, timeout):
-    """Run the enabled backend. Returns (name, answers) or (None, None)."""
+def classify(state, timeout, questions=None):
+    """Run the enabled backend. Returns (name, answers) or (None, None).
+
+    `questions` defaults to the implementer rubric; the reviewer decider passes REVIEW_QUESTIONS.
+    """
     name, fn = resolve()
     if fn is None:
         return None, None
-    return name, fn(state, QUESTIONS, timeout)
+    return name, fn(state, QUESTIONS if questions is None else questions, timeout)

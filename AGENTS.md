@@ -323,6 +323,8 @@ runtime, quote the assertion count with it or measure both sides yourself.
 |---|---|
 | `helpers/comms.sh` | the command router: messaging, presence, worktrees, panels, integrate |
 | `helpers/runphase.sh` | spawning and awaiting peer review turns over ACP |
+| `helpers/acp.sh`, `helpers/policy-map.tsv` | ACP consults; the reviewer model/effort resolver and its versioned map — the only place vendor model ids live |
+| `helpers/route.sh`, `route_backend.py`, `route_review.py`, `route_shadow.py` | the /auto classifier, the reviewer routing decisions, and the shadow collector |
 | `templates/` | the slash commands and skills that `install.sh` deploys into user projects |
 | `tests/run.sh` | complete-suite entrypoint and final coverage/attestation gate |
 | `tests/groups/`, `tests/lib/` | regression groups and explicit fixture/counter helpers |

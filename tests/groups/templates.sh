@@ -374,3 +374,11 @@ grep -q -- '--no-route' "$AIF" && grep -q 'COMMS_ROUTE=0' "$AIF" \
   && ok "auto.md can disable the classifier" || fail "auto.md missing disable"
 grep -q 'fail-open is a decision, never a stop' "$AIF" \
   && ok "auto.md continues to implement on fail-open" || fail "auto.md fail-open is a stop"
+# REVIEWER routing is a helper-level opt-in the author under review never drives by hand.
+grep -q 'COMMS_REVIEW_ROUTE=1' "$AIF" && grep -q 'Never write `route_decision:` yourself' "$AIF" \
+  && grep -q 'never choose, replace or hand-write your own reviewer' "$AIF" \
+  && ! grep -q 'review-route decide' "$AIF" \
+  && ok "auto.md leaves reviewer routing to the helpers and never teaches the author to pick its reviewer's depth" \
+  || fail "auto.md reviewer-routing contract"
+grep -q 'ALSO turns reviewer routing off' "$AIF" && grep -q 'do NOT affect reviewer routing' "$AIF" \
+  && ok "auto.md defines how --no-route and --plan/--no-plan interact with reviewer routing" || fail "auto.md routing flag interaction"

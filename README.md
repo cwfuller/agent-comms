@@ -89,7 +89,17 @@ balanced). The decision backend is opt-in (`COMMS_ROUTE_BACKEND=typesafe` or
 `COMMS_ROUTE=1` plus `TYPESAFE_API_KEY`); a key in the environment is not enough
 by itself. Prompt phrases (`use strong`, `skip plan`) override it with no backend.
 It never chooses a reviewer or a vendor model id — map the tier in the runtime
-to whatever that session currently offers for cheap / default / best.
+to whatever that session currently offers for cheap / default / best. That
+bumped mapping is the named `implementer-bump-v1` hint for the implementer only.
+
+**Reviewer routing (opt-in, off by default).** With `COMMS_REVIEW_ROUTE=1`,
+`send` / `panel dispatch` record one reviewer decision per thread and phase
+(implement only) and each mounted Codex review turn resolves it through the
+versioned `helpers/policy-map.tsv` — the one place vendor model ids live —
+then attests from the provider's own rollout that it actually ran that
+model and effort, or refuses to publish. Claude and Grok stay on their fixed
+behaviour until their controls are proven. See `acp.sh capabilities` and
+`docs/INTERNALS.md` "Reviewer model/effort routing".
 
 **A panel is the default.** Every registered agent except the driver reviews the
 same pinned artifact. They find different things. A blocking finding two of them

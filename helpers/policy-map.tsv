@@ -1,0 +1,63 @@
+# agent-comms reviewer model/effort policy map — THE one place a vendor model id is named.
+#
+# Read only by helpers/acp.sh (`resolve`, and every policy accessor), from the file installed
+# beside it. There is deliberately no environment override for the map itself: operator
+# intent enters as the COMMS_ACP_CODEX_MODEL / COMMS_ACP_CODEX_EFFORT pins, never as a
+# second table. Every value here reaches a TOML file that governs a reviewer's sandbox, so
+# acp.sh allowlists each one on read and refuses the whole map if any row is malformed.
+#
+# A model update is ONE edit here plus `version`, never a change to the classifier rubric.
+# Bump `version` on every change: it is recorded with every resolved turn (policy.tsv,
+# turn.tsv), so a row can always be joined to the table that produced it.
+#
+# Rows (TAB-separated; `#` starts a comment line):
+#   version     <id>
+#   capability  <provider> <transport> <eligible|fixed|unsupported> <application mechanism>
+#               <evidence source> <versions tested> <notes>
+#   baseline    <provider> <transport> <model> <effort>
+#   tier        <provider> <transport> <fast|balanced|strong> <model>
+#   effort      <provider> <transport> <low|medium|high|xhigh> <provider-effort>
+#   pair        <provider> <transport> <model> <comma-separated efforts the model accepts>
+#
+# Transports: acp-mounted = a mounted review turn with an isolated provider home (the only
+# place a policy is both APPLIED and ATTESTED); acp = an unmounted ACP turn (the operator's own
+# provider config runs); headless = the detached CLI runner (grok only).
+#
+# Capability `eligible` means a routed decision may change the concrete pair. `fixed` means the
+# baseline (plus pins) is applied and attested but routing is ignored. `unsupported` means nothing
+# is applied, so nothing may be claimed. Only a provider/transport whose controls AND per-turn
+# evidence were established is eligible; a control that merely exists in an adapter is recorded
+# in the mechanism text, not enabled.
+#
+# Evidence (2026-09-22, local and read-only): codex models_cache.json (codex-cli 0.155.1 and the
+# isolated home's 0.154.0), @agentclientprotocol/codex-acp 1.12.0 dist, acpx 0.13.1 dist,
+# @agentclientprotocol/claude-agent-acp 0.60.0 dist, grok 1.0.40 --help + models_cache.json.
+# Tier labels follow the provider's own model descriptions: luna "fast and affordable", terra
+# "balanced", astra "most capable".
+version	2026-09-22.1
+
+capability	codex	acp-mounted	eligible	isolated CODEX_HOME config.toml (model, model_reasoning_effort), read at thread start/resume; a changed policy is a new session	preflight: acpx config_options + saved preferences; gate: the provider's own rollout turn_context (model, effort) per turn	codex-acp 1.12.0; codex 0.154.0 (bundled); acpx 0.13.1	the adapter floats under ^1.1.5; observed_runtime in turn.tsv records what actually ran
+capability	codex	acp	unsupported	none: an unmounted turn runs the operator's own ~/.codex config	none	-	nothing applies or attests a policy
+capability	codex	headless	unsupported	none: codex review turns are ACP-only	none	-	-
+capability	claude	acp-mounted	unsupported	none applied; the adapter exposes ACP config options `model` (aliases) and `effort` (default,low..max)	transcripts in the shared ~/.claude (message.model, effort); not isolated per turn	claude-agent-acp 0.60.0 (read from dist, not exercised)	needs a live proof of `acpx claude set` before it may be eligible
+capability	claude	acp	unsupported	none applied (operator settings)	as acp-mounted	-	-
+capability	claude	headless	unsupported	none: claude review turns are ACP-only	none	-	-
+capability	grok	acp-mounted	unsupported	none applied; newer builds expose ACP `model` + `reasoning_effort` (older builds: none)	~/.grok/sessions summary.json: effort per SESSION only	grok 1.0.40 (read from --help/docs, not exercised)	effort is dropped silently on models without supportsReasoningEffort; refused on Darwin without an uncontained override
+capability	grok	acp	unsupported	none applied	as acp-mounted	-	-
+capability	grok	headless	unsupported	none: -m / --reasoning-effort exist but are not passed	as acp-mounted	grok 1.0.40	-
+
+baseline	codex	acp-mounted	gpt-6-astra	xhigh
+
+tier	codex	acp-mounted	fast	gpt-5.6-luna
+tier	codex	acp-mounted	balanced	gpt-5.6-terra
+tier	codex	acp-mounted	strong	gpt-6-astra
+
+effort	codex	acp-mounted	low	low
+effort	codex	acp-mounted	medium	medium
+effort	codex	acp-mounted	high	high
+effort	codex	acp-mounted	xhigh	xhigh
+
+pair	codex	acp-mounted	gpt-6-astra	low,medium,high,xhigh,max,ultra
+pair	codex	acp-mounted	gpt-5.6-sol	low,medium,high,xhigh,max,ultra
+pair	codex	acp-mounted	gpt-5.6-terra	low,medium,high,xhigh,max,ultra
+pair	codex	acp-mounted	gpt-5.6-luna	low,medium,high,xhigh,max

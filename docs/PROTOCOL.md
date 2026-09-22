@@ -223,6 +223,8 @@ phase: plan | implement
 round: 2
 max-rounds: 4
 verdict: APPROVE | REQUEST_CHANGES   # reviewer replies only; read normalized
+route_decision: <stamped by send>    # reviewer routing only (COMMS_REVIEW_ROUTE=1); helper-stamped,
+                                     # stripped everywhere else, never shown to the reviewer
 ---
 ```
 
@@ -546,7 +548,8 @@ because of filename order.
 provider's CLI in the background — since step 4 that is `grok` alone; the Codex
 (`codex exec --json`) and Claude (`claude -p`) direct arms were DELETED — records the run under
 `.comms/logs/<message_id>.<epoch>.<pid>/` (`prompt.md`, `events.ndjson` JSONL event
-log, `result.json`, `pid`, `runner.log`), and mirrors the outcome into thread state
+log, `result.json`, `pid`, `runner.log`, and for ACP turns `policy.tsv` + `turn.tsv` — the
+per-turn policy record and the requested/adapter/observed ledger), and mirrors the outcome into thread state
 on exit. Identity is a process handle, not a pane guess.
 A loop is unattended work and should not require an open pane. **Since step 4 (2026-09-01), claude
 and codex review turns are ACP-ONLY**: the self-send path they used on the headless transport was

@@ -19,7 +19,16 @@
 # ("use strong", "skip plan") are in-helper overrides, copied from jev-router.
 # They still win when an enabled backend errors. A live classification raises
 # effort and tier one step (low→medium→high→xhigh, fast→balanced→strong);
-# fail-open stays medium/balanced.
+# fail-open stays medium/balanced. That bumped mapping is the NAMED policy
+# variant `implementer-bump-v1` (recorded in `reason:`, the decision log and
+# shadow records): it is an ADVISORY implementer hint, and it is never the
+# candidate that routes a reviewer. Reviewer routing uses its own rubric and
+# its own un-bumped policy (`reviewer-v1`, helpers/route_review.py).
+#
+# --shadow --reviewer --file <review-request> [--thread T] records what the
+# REVIEWER rubric would decide for a request, through the same state builder
+# and questions as the live reviewer decider. Like every shadow call it prints
+# only `shadow-decision <id>` and writes nothing a loop reads.
 #
 # Env:
 #   COMMS_ROUTE_BACKEND       typesafe|jev|stub — opt-in decision backend
@@ -128,6 +137,7 @@ shadow_run() {
   COMMS_ROUTE_SHADOW_CURRENT_TIER="$current_tier" \
   COMMS_ROUTE_SHADOW_CONTEXT_TOKENS="$context_tokens" \
   COMMS_ROUTE_SHADOW_WORKSPACE="${COMMS_WORKSPACE:-}" \
+  COMMS_ROUTE_SHADOW_ROLE="$shadow_role" \
   COMMS_ROUTE_TASK="$task" \
   COMMS_ROUTE_BACKEND="${COMMS_ROUTE_SHADOW_BACKEND:-typesafe}" \
     python3 "$SHADOW_PY" || shadow_die "the collector failed (see stderr above)"
@@ -149,6 +159,7 @@ shadow_permitted() {
 task=""
 file=""
 shadow_mode=0
+shadow_role=implementer
 shadow_thread=""
 explicit_task=0
 current_tier=""
@@ -158,6 +169,9 @@ tokens_from_cli=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --shadow) shadow_mode=1; shift ;;
+    --reviewer)
+      [ "$shadow_mode" -eq 1 ] || usage_err "--reviewer is only valid with --shadow (live reviewer decisions are made by comms.sh review-route)"
+      shadow_role=reviewer; shift ;;
     --thread)
       [ "$shadow_mode" -eq 1 ] || usage_err "--thread is only valid with --shadow"
       [ $# -ge 2 ] || usage_err "--thread needs a value"
@@ -256,6 +270,9 @@ KEYS = (
     "plan", "effort", "complexity", "tier", "gate",
     "plan_p", "effort_p", "complexity_confidence", "source", "reason",
 )
+# THE NAMED POLICY VARIANT this helper applies. The one-step bump below is part of it; a
+# different mapping must get a different name so logged rows stay comparable.
+POLICY_VARIANT = "implementer-bump-v1"
 
 def _write(fields):
     reason = " ".join(str(fields["reason"]).split())
@@ -271,6 +288,7 @@ def _write(fields):
         }
         rec.update({k: fields[k] for k in KEYS if k != "reason"})
         rec["reason"] = reason
+        rec["policy_variant"] = POLICY_VARIANT
         try:
             with open(log_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -495,7 +513,7 @@ plan_p_s = f"{plan_p:.3f}"
 effort_p_s = f"{effort_p:.3f}" if effort_p is not None else "-"
 cconf_s = f"{cconf:.3f}"
 reason = (
-    f"needs_plan={plan_p_s} complexity={complexity} "
+    f"policy={POLICY_VARIANT} needs_plan={plan_p_s} complexity={complexity} "
     f"(level {best_level}, conf {cconf_s}) effort={effort} "
     f"(classified {choice}, conf {econf:.3f}) tier={tier} gate={gate}"
 )

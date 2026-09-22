@@ -6,7 +6,7 @@ comms.sh: archive (idempotent, own inbox only)	4
 comms.sh: list	3
 comms.sh: latest archive is direction/thread/time aware	4
 comms.sh: send (atomicity guard)	4
-install.sh: scopes	20
+install.sh: scopes	22
 comms.sh: status smoke	3
 install.sh: local pin gitignored + global scope (overridden HOME dirs)	45
 comms.sh v2: thread filter + verdict normalization + error lane	4
@@ -36,7 +36,9 @@ friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	45
 acp.sh: the reviewer model+effort policy	25
+acp.sh: the reviewer policy resolver	33
 reviewer policy: a wrong-depth review is never published	16
+reviewer routing: a routed decision reaches the mounted codex turn	13
 runphase: the compatibility canary gates every ACP turn	24
 runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15
@@ -46,10 +48,11 @@ loopspec: prompt fragments do not drift from docs/loopspec/fragments/	10
 comms.sh: bounded reads (lessons)	20
 comms.sh: bounded reads (archive-search)	10
 comms.sh: help prints its whole header	2
-templates: /auto query route	8
+templates: /auto query route	10
 comms.sh: route fail-open	11
 comms.sh: route policy	34
 route.sh: the shadow collector cannot reach /auto	31
+comms.sh: reviewer routing decisions	24
 install.sh: .codex/AGENTS.md managed block	47
 grading pilot: findings extraction (the single-reviewer baseline)	15
 grading pilot: --out ledger is append-only and idempotent	4
@@ -71,7 +74,7 @@ integrate: an exit status is not proof the suite ran	30
 integrate: the verification tree is a FRESH checkout	11
 integrate: docs-only skip	19
 the coordinator's event log: a durable record that is not the mailbox	169
-reviewer isolation: a mounted turn is contained or it does not run	103
+reviewer isolation: a mounted turn is contained or it does not run	107
 reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)	21
 any-agent driver surface	40
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5

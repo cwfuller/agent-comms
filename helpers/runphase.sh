@@ -512,6 +512,19 @@ cap_word() {
   printf '%s%s' "$(printf '%s' "$1" | cut -c1 | tr '[:lower:]' '[:upper:]')" "$(printf '%s' "$1" | cut -c2-)"
 }
 
+# msg_for_prompt <msg> — the message as the reviewer sees it: verbatim, except that the helper's
+# routing id (`route_decision:`) is dropped from the frontmatter. The reviewer has no use for it,
+# and a routed and a baseline turn over the same request must receive the SAME prompt, or an
+# outcome comparison between them measures the prompt difference too.
+msg_for_prompt() {
+  LC_ALL=C awk '
+    { probe = $0; sub(/\r$/, "", probe) }
+    NR == 1 && probe == "---" { fm = 1; print; next }
+    fm && probe == "---" { fm = 0; print; next }
+    fm && index(probe, "route_decision:") == 1 { next }
+    { print }' "$1"
+}
+
 build_grok_prompt() {  # <msg> <run-dir> <peer> <main-root> <agent> [mounted] — sets the GROK_* globals
   # Parent-brokered prompt. Named for grok because grok was the first such turn, but
   # ANY provider running under --via acp is parent-brokered too: the parent stamps and
@@ -578,7 +591,7 @@ Your working directory IS the tree to reference; ground your answer in what you
 actually inspect there (read files, grep, read-only git commands) rather than recall.
 
 ----- BEGIN MESSAGE -----
-$(cat "$msg")
+$(msg_for_prompt "$msg")
 ----- END MESSAGE -----
 
 OUTPUT ONLY your reply body as your final message — no frontmatter, no code fences
@@ -672,7 +685,7 @@ trusted parent — do not go looking for the mailbox, and do not run comms helpe
 if the quoted material mentions them. Your working directory IS the tree to review.
 
 ----- BEGIN MESSAGE -----
-$(cat "$msg")
+$(msg_for_prompt "$msg")
 ----- END MESSAGE -----
 $prior_block
 $sha_note
@@ -2242,45 +2255,97 @@ _pairs={(e, m) for e, m, _t, _s, _o in roots}
 if len(_pairs)!=1:
     undecidable("root turn_contexts disagree on model/effort: %s" % sorted(_pairs))
 eff,mod,tid,src,off=roots[0]
-# effort, model, backend turn id, rollout path, snapshot byte boundary -- the evidence a
+# THE RUNTIME THAT PRODUCED THE EVIDENCE: the newest session_meta.cli_version in the evidence file
+# (written at session start, so usually BEFORE the window — it is provenance, not turn evidence,
+# and an unreadable or absent one is simply unknown). The adapter floats under a caret range and
+# bundles its own codex, so a map validated on one runtime can otherwise be applied to another
+# with no trace. (design critique r1.)
+rt=""
+try:
+    with open(src,"rb") as fh:
+        for raw in fh:
+            try: r=json.loads(raw.decode("utf-8"))
+            except Exception: continue
+            if r.get("type")=="session_meta":
+                p=r.get("payload") or {}
+                v=p.get("cli_version") if isinstance(p,dict) else None
+                if isinstance(v,str) and v: rt=v
+except OSError:
+    rt=""
+if not all(c.isalnum() or c in "._-+" for c in rt): rt=""
+# effort, model, backend turn id, rollout path, snapshot byte boundary, runtime -- the evidence a
 # refusal needs to be reconstructable once the isolated home is gone. (codex, live-proof r1.)
-print("%s\t%s\t%s\t%s\t%s"%("" if eff is None else eff,"" if mod is None else mod,tid,src,off))
+print("%s\t%s\t%s\t%s\t%s\t%s"%("" if eff is None else eff,"" if mod is None else mod,tid,src,off,rt))
 PY
+}
+
+# policy_record_sha <file> / policy_record_intact <file> <sha> — the persisted per-turn record is
+# hashed once, right after resolution, and re-checked before every consumer. Fails closed: no
+# sha256 utility, an unreadable file, or an empty expected hash is "not intact".
+policy_record_sha() {
+  local h
+  [ -f "$1" ] || return 1
+  if command -v shasum >/dev/null 2>&1; then h="$(shasum -a 256 < "$1")" || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then h="$(sha256sum < "$1")" || return 1
+  else return 1; fi
+  h="${h%% *}"
+  [[ "$h" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$h"
+}
+policy_record_intact() {
+  local now
+  [ -n "${2:-}" ] || return 1
+  now="$(policy_record_sha "$1")" || return 1
+  [ "$now" = "$2" ]
+}
+
+# turn_policy <run-dir> <policy-record> <decision-id> — APPEND the resolved per-turn policy to
+# turn.tsv, read from the SAME persisted record the config, preflight and attestation consume. It is
+# written at RESOLUTION time, before any session is launched, so every refusal after it (containment,
+# preflight, canary, attestation) carries what was requested. REQUESTED AND OBSERVED ARE RECORDED
+# SEPARATELY, and never conflated: a ledger that cannot express "we asked for X and got Y"
+# reproduces the blindness this arc exists to remove. (codex, live-proof r1: "identify whether its
+# model/effort fields are requested or verified".) A missing record — a refused resolution — records
+# `unknown` for every requested field rather than a default nobody asked for.
+turn_policy() {
+  local rd="$1" rec="$2" did="${3:-none}" k v
+  {
+    printf 'route_decision\t%s\n' "$did"
+    for k in map_version capability routing model_source effort_source fallback; do
+      v=""
+      [ -f "$rec" ] && v="$(awk -F'\t' -v k="$k" '$1==k{print $2; exit}' "$rec" 2>/dev/null)"
+      printf 'policy_%s\t%s\n' "$k" "${v:-unknown}"
+    done
+    for k in model effort; do
+      v=""
+      [ -f "$rec" ] && v="$(awk -F'\t' -v k="$k" '$1==k{print $2; exit}' "$rec" 2>/dev/null)"
+      printf 'requested_%s\t%s\n' "$k" "${v:-unknown}"
+    done
+  } >> "$rd/turn.tsv" 2>/dev/null || true
 }
 
 # turn_observe <run-dir> <effort> <model> <record> — APPEND observed columns to turn.tsv.
 # The identity block stays exactly where it is written; load_turn_identity ignores unknown
 # keys, so appending is safe, and a dead runner keeps its identity. These carry OBSERVED
-# values only — writing the policy literals here would report the expected depth even when
-# the attestation found divergence. Called on the failure path too, BEFORE acp_refuse
-# unmounts, so a refusal stays diagnosable. (codex + grok, plan r2/r3.)
+# values only — the requested pair was already appended by turn_policy from the persisted
+# record, and is never re-read from an accessor here: re-reading after the turn would report
+# whatever the policy had become by then, not what generated this turn's config (the ordering
+# limitation recorded in docs/ROADMAP.md, closed by resolving once). Called on the failure path
+# too, BEFORE acp_refuse unmounts, so a refusal stays diagnosable. (codex + grok, plan r2/r3.)
 turn_observe() {
-  # REQUESTED AND OBSERVED ARE RECORDED SEPARATELY, and never conflated. The whole point of the
-  # arc is that a declared depth and an executed depth were silently assumed equal for three
-  # weeks; a ledger that cannot express "we asked for X and got Y" reproduces that blindness.
-  # The requested pair comes from the policy accessor, the observed pair from the provider's own
-  # rollout, and a refusal records BOTH so the divergence is legible without the mount.
-  # (codex, live-proof r1: "identify whether its model/effort fields are requested or verified".)
-  local _req_m="unknown" _req_e="unknown" _pol
-  if _pol="$("$acp_sh" policy codex 2>/dev/null)"; then
-    _req_m="${_pol%%$'\t'*}"; _req_e="${_pol#*$'\t'}"
-  fi
-  { printf 'requested_model\t%s\n'  "$_req_m"
-    printf 'requested_effort\t%s\n' "$_req_e"
-  } >> "$1/turn.tsv" 2>/dev/null || true
   # The OBSERVED pair below carries what the provider's own rollout reported, and only that.
   # Do not copy the policy into these columns: that would report the expected depth even when
-  # the attestation found divergence, which is the failure this ledger exists to expose. The
-  # requested values live in their own keys above — they are not a violation of that rule, they
-  # are the other half of the comparison. An EXPLICIT empty observation is still "no evidence"
-  # and must read as unknown, not as a blank column a human has to interpret.
-  # (grok, implement r1; comment corrected requested-vs-observed r1.)
+  # the attestation found divergence, which is the failure this ledger exists to expose. An
+  # EXPLICIT empty observation is still "no evidence" and must read as unknown, not as a blank
+  # column a human has to interpret. (grok, implement r1; comment corrected requested-vs-observed r1.)
   { printf 'observed_effort\t%s\n' "${2:-}"
     printf 'observed_model\t%s\n'  "${3:-}"
     printf 'acp_record\t%s\n'      "${4:-}"
     printf 'observed_turn\t%s\n'   "${5:-}"
     printf 'evidence_file\t%s\n'   "${6:-}"
     printf 'evidence_offset\t%s\n' "${7:-}"
+    printf 'evidence_source\t%s\n' "${6:+provider-rollout}"
+    printf 'observed_runtime\t%s\n' "${8:-}"
   } | sed 's/\t$/\tunknown/' >> "$1/turn.tsv" 2>/dev/null || true
 }
 
@@ -2940,6 +3005,65 @@ cmd_run() {
     [ -x "$acp_sh" ] || die "run: --via acp but acp.sh is not installed next to runphase.sh"
     acp_profile="$("$acp_sh" profile "$provider" 2>/dev/null || true)"
     [ -n "$acp_profile" ] || die "run: '$provider' has no ACP profile"
+    # THE PER-TURN POLICY, RESOLVED ONCE AND PERSISTED BEFORE ANY SESSION IS LAUNCHED OR REUSED.
+    # `acp.sh resolve` turns the helper-stamped routing decision (an abstract tier/effort, or none)
+    # plus the operator's pins and the versioned map into ONE record in the run dir. The config
+    # write, the pre-canary preference check, the post-turn attestation and the ledger all read
+    # THAT FILE — and its hash is checked before each use — so a pin, map or reinstall changed
+    # mid-turn, or a reviewer that can write the run dir, cannot make them describe different
+    # policies, and the expectation can never be relabelled after the fact to fit what ran.
+    # Resolved for EVERY acp turn so the ledger says what applied: only a mounted codex turn is
+    # routing-eligible today; the others record `unsupported` rather than claiming a policy.
+    local acp_policy="$run_dir/policy.tsv" acp_policy_sha="" acp_policy_digest="" acp_route_id=""
+    local acp_route_tier=none acp_route_effort=none acp_route_src=none acp_routing=off
+    local acp_transport=acp acp_route_err="" acp_route_cur="" acp_route_cur_id="" acp_phase=""
+    [ -n "$mount_dir" ] && acp_transport=acp-mounted
+    acp_phase="$(frontmatter_field "$msg" phase || true)"
+    [[ "$acp_phase" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || acp_phase=-
+    "$COMMS" review-route enabled 2>/dev/null && acp_routing=on
+    # The stamped id is read ONLY when routing is on — with routing off a leftover id is ignored
+    # (fallback routing-disabled), never a reason to refuse a baseline turn — and it must be the
+    # decision CURRENTLY in force for this thread's base and phase: an old or planted id with a
+    # plausible thread never routes a turn.
+    if [ "$acp_routing" = off ]; then
+      # Recorded, never loaded: the ledger says a routed request ran unrouted and why. A value
+      # that is not even a well-formed id is dropped rather than handed to the resolver.
+      acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
+      [[ "$acp_route_id" =~ ^rd-[0-9a-f]{32}$ ]] || acp_route_id=""
+    else
+      acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
+      if [ -n "$acp_route_id" ]; then
+        if acp_route_cur="$("$COMMS" review-route current --thread "$msg_thread" --phase "$acp_phase" 2>>"$run_dir/runner.log")"; then
+          acp_route_cur_id="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="decision"{print $2; exit}')"
+          if [ "$acp_route_cur_id" = "$acp_route_id" ]; then
+            acp_route_tier="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="tier"{print $2; exit}')"
+            acp_route_effort="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="effort"{print $2; exit}')"
+            acp_route_src="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="source"{print $2; exit}')"
+            [ -n "$acp_route_tier" ] && [ -n "$acp_route_effort" ] && [ -n "$acp_route_src" ] \
+              || acp_route_err="routing decision $acp_route_id could not be read"
+          else
+            acp_route_err="the request's routing decision $acp_route_id is not the decision in force for this thread and phase (${acp_route_cur_id:-none})"
+          fi
+        else
+          acp_route_err="routing decision $acp_route_id could not be loaded for thread $msg_thread phase $acp_phase"
+        fi
+      fi
+    fi
+    if [ -z "$acp_route_err" ]; then
+      "$acp_sh" resolve "$provider" --transport "$acp_transport" --tier "$acp_route_tier" \
+          --effort "$acp_route_effort" --decision "${acp_route_id:-none}" --routing "$acp_routing" \
+          --phase "$acp_phase" --candidate-source "$acp_route_src" \
+          > "$acp_policy" 2>>"$run_dir/runner.log" \
+        || acp_route_err="the reviewer policy could not be resolved (see runner.log)"
+    fi
+    if [ -n "$acp_route_err" ]; then
+      rm -f "$acp_policy" 2>/dev/null || true
+    else
+      acp_policy_sha="$(policy_record_sha "$acp_policy")" || acp_route_err="the resolved policy record could not be hashed"
+      acp_policy_digest="$(awk -F'\t' '$1=="policy_digest"{print $2; exit}' "$acp_policy" 2>/dev/null)"
+    fi
+    turn_policy "$run_dir" "$acp_policy" "${acp_route_id:-none}"
+    printf 'policy resolved: %s\n' "$(tr '\t\n' '= ' < "$acp_policy" 2>/dev/null || echo "none ($acp_route_err)")" >>"$run_dir/runner.log"
     # Session identity is per THREAD, because that is what makes round N pay a delta.
     # A message with no thread (a one-off consult) must NOT fall into a shared bucket:
     # `agent-comms-loop` would mix unrelated consults into one warm context, leaking
@@ -2954,11 +3078,25 @@ cmd_run() {
     # the same raw-thread hash as the mount path so the two cannot disagree.
     if [ -n "${mount_ident:-}" ] && [ -n "$mount_dir" ]; then
       acp_session="agent-comms+mount+$mount_ident"
+      # A SESSION PER CONCRETE POLICY. The provider fixes model and effort when a session starts or
+      # resumes and sends them from its own state on every prompt, so a warm session cannot be
+      # trusted to adopt a changed config. Naming a policy-bearing session after its policy's digest
+      # makes any change — a new decision, a pin, a map bump, routing switched off, plan -> implement
+      # — a FRESH session under the new config (verified by the preflight before any prompt), while
+      # an unchanged policy keeps its warm session. The old session is left untouched. Only a record
+      # that applies and attests a policy carries a digest; the others keep the historic name.
+      if [[ "$acp_policy_digest" =~ ^[0-9a-f]{12}$ ]]; then
+        acp_session="$acp_session+p$acp_policy_digest"
+      fi
     elif [ -n "$msg_thread" ]; then
       acp_session="agent-comms-$(safe_name "$msg_thread")"
     else
       acp_session="agent-comms-oneoff-$(safe_name "$(frontmatter_field "$msg" message_id)")"
     fi
+    { printf 'policy_digest\t%s\n' "${acp_policy_digest:-none}"
+      printf 'acp_session\t%s\n' "$acp_session"
+      printf 'acpx_version\t%s\n' "$("$acp_sh" version 2>/dev/null || echo unknown)"
+    } >> "$run_dir/turn.tsv" 2>/dev/null || true
     # acpx GLOBAL options must precede the profile; only subcommand flags follow it.
     # (`--cwd` after the profile is rejected outright — caught live.) The turn runs
     # IN $workdir because acpx keys session identity on (agent, cwd, name) and compares
@@ -3101,7 +3239,13 @@ cmd_run() {
           # approval_policy and sandbox_mode, so a mounted reviewer ran the model's DEFAULT
           # effort and every gated review was shallower than the operator had configured.
           local acp_iso_cfg=""
-          acp_iso_cfg="$("$acp_sh" provider-config codex)" \
+          if [ -n "$acp_route_err" ]; then
+            ABORT_NOTE="refused: $acp_route_err"
+            die "run: $acp_route_err — refusing to write an isolated config"
+          fi
+          policy_record_intact "$acp_policy" "$acp_policy_sha" \
+            || { ABORT_NOTE="refused: the resolved policy record changed before the config was written"; die "run: the policy record changed after resolution"; }
+          acp_iso_cfg="$("$acp_sh" provider-config codex --policy-file "$acp_policy")" \
             || die "run: the codex reviewer policy is invalid — refusing to write an isolated config"
           [ -n "$acp_iso_cfg" ] || die "run: acp.sh returned an empty isolated codex config"
           _iso_place "" "$acp_iso_home/config.toml" 600 "$acp_iso_cfg" \
@@ -3321,9 +3465,21 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # owner can overwrite an external edit — so our exclusivity over it is unproven. Retiring the
     # session is the honest remedy. (codex + grok, plan r3.)
     if [ -n "$acp_iso_home" ]; then
+      if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
+        acp_refuse policy-unapplied "the resolved policy record changed after resolution — refusing to check a session against an expectation nobody resolved"
+        return 1
+      fi
       local pol_out="" pol_rc=0
       pol_out="$( acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" 2>>"$run_dir/runner.log" \
-                  | "$acp_sh" policy-check codex - 2>>"$run_dir/runner.log" )" || pol_rc=$?
+                  | "$acp_sh" policy-check codex - --policy-file "$acp_policy" 2>>"$run_dir/runner.log" )" || pol_rc=$?
+      # What the ADAPTER reported, kept apart from both the request and the provider's own
+      # rollout: an adapter accepting a value is not proof the billable turn ran it.
+      local pol_verdict=undecidable
+      case "$pol_rc" in 0) pol_verdict=match ;; 20) pol_verdict=mismatch ;; esac
+      { printf 'adapter_check\t%s\n' "$pol_verdict"
+        printf 'adapter_report\t%s\n' "$(printf '%s' "${pol_out:-unknown}" | tr '\t\n' '  ')"
+        printf 'adapter_source\t%s\n' "acpx-config_options"
+      } >> "$run_dir/turn.tsv" 2>/dev/null || true
       case "$pol_rc" in
         0)  printf 'policy preflight: %s\n' "$pol_out" >>"$run_dir/runner.log" ;;
         20) acp_refuse policy-unapplied "the reviewer session will not run the declared model/effort policy ($pol_out) — retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
@@ -3443,8 +3599,13 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
-      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off=""
+      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt=""
       att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
+      # The expectation must be the one resolved before launch. The reviewer ran in between, and a
+      # record it could rewrite to match its own rollout would turn a mismatch into a pass.
+      if [ "$att_rc" -eq 0 ] && ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
+        att_rc=22; att_msg="the resolved policy record changed during the turn"
+      fi
       if [ "$att_rc" -eq 0 ]; then
         # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
         # field after an empty one shifts left — a context missing its effort was reported as a
@@ -3456,15 +3617,16 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
         att_turn="$(printf '%s' "$att_out" | cut -f3)"
         att_src="$(printf '%s' "$att_out" | cut -f4)"
         att_off="$(printf '%s' "$att_out" | cut -f5)"
-        att_msg="$("$acp_sh" policy-attest codex "$att_eff" "$att_mod" 2>>"$run_dir/runner.log")" || att_rc=$?
+        att_rt="$(printf '%s' "$att_out" | cut -f6)"
+        att_msg="$("$acp_sh" policy-attest codex "$att_eff" "$att_mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || att_rc=$?
       fi
-      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}"
+      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}"
       if [ "$att_rc" -ne 0 ]; then
         printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
         if [ "$att_rc" -eq 20 ]; then
           acp_refuse policy-unapplied "the review turn did not run the declared model/effort policy ($att_msg) — refusing to publish a review of the wrong depth; retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
         else
-          acp_refuse policy-unapplied "could not attest the model/effort the review turn actually ran (status $att_rc) — refusing to publish a review of unknown depth"
+          acp_refuse policy-unapplied "could not attest the model/effort the review turn actually ran (status $att_rc${att_msg:+: $att_msg}) — refusing to publish a review of unknown depth"
         fi
         return 1
       fi

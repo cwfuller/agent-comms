@@ -26,17 +26,35 @@
 #   profile <agent> | version
 #       the acpx launch profile for an agent, and the pinned acpx version. Other
 #       helpers ask for these instead of keeping a second copy of the map.
-#   policy <agent>
+#   resolve <agent> [--transport acp-mounted|acp|headless] [--tier fast|balanced|strong|none]
+#           [--effort low|medium|high|xhigh|none] [--decision <id>|none] [--routing on|off]
+#       resolve an ABSTRACT routing candidate to the concrete reviewer policy
+#       for one turn, through the versioned policy-map.tsv beside this file.
+#       Prints the policy record (key<TAB>value lines) the caller persists and
+#       hands back via --policy-file. Precedence per dimension: operator pin
+#       (COMMS_ACP_CODEX_MODEL / COMMS_ACP_CODEX_EFFORT) > an eligible, enabled
+#       routed candidate > the map's baseline. Exit 0 resolved (including an
+#       `unsupported` provider/transport), 1 refused (invalid pair, bad map),
+#       2 usage.
+#   capabilities
+#       the map version and every provider/transport capability row, with the
+#       concrete controls of each routing-eligible combination.
+#   policy <agent> [--policy-file <record>]
 #       the reviewer model+effort policy for an agent, tab-separated
 #       (<model>\t<effort>); empty + exit 1 where no policy applies.
-#   provider-config <agent>
+#   provider-config <agent> [--policy-file <record>]
 #       the COMPLETE isolated provider config file text for a mounted review
 #       turn. runphase asks for this rather than holding a literal, so the
 #       policy is spelled exactly once.
-#   policy-check <agent> - | policy-attest <agent> <effort> [model]
+#   policy-check <agent> - [--policy-file <record>]
+#   policy-attest <agent> <effort> [model] [--policy-file <record>]
 #       compare an `acpx sessions show --format json` record on stdin, or an
 #       observed effort/model pair, against the policy. Exit 0 match,
 #       20 mismatch, 21 undecidable. Undecidable is never "it matched".
+#   With --policy-file every accessor reads the PERSISTED per-turn record and
+#   never re-resolves, so a pin, map or install changed mid-turn cannot make the
+#   config, the preflight and the attestation describe different policies.
+#   Without it they resolve the baseline plus pins (routing off), as before.
 #
 # Pinned: acpx is pre-1.0 with an evolving CLI — every invocation goes through
 # npx -y acpx@$ACPX_VERSION (cached by npm after first use; no global install).
@@ -59,8 +77,15 @@ NODE_MIN_MINOR=13
 #
 # EFFORT is the contract. The MODEL is an env-overridable default: a retired id must surface as a
 # refused turn, not a silent float to whatever the account now serves. (grok, plan r1/r3.)
-ACP_POLICY_CODEX_MODEL="${COMMS_ACP_CODEX_MODEL:-gpt-6-astra}"
-ACP_POLICY_CODEX_EFFORT="${COMMS_ACP_CODEX_EFFORT:-xhigh}"
+#
+# THE CONCRETE VALUES LIVE IN policy-map.tsv beside this file, and nowhere else: the baseline
+# (gpt-6-astra/xhigh as of map 2026-09-22.1), the tier->model and effort->value rows a routed
+# decision may select, and the efforts each model accepts. The operator's pins stay environment
+# variables (COMMS_ACP_CODEX_MODEL / COMMS_ACP_CODEX_EFFORT) and still win over everything. The
+# map is read ONLY from the sibling file, never from an environment override, so a second table
+# cannot appear beside the one the ledger names.
+ACP_POLICY_MAP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/policy-map.tsv"
+ACP_POLICY_RECORD_VERSION=1
 
 # Values reach a TOML file that governs the reviewer's sandbox, so they are ALLOWLISTED, never
 # scrubbed of known-bad characters: docs/advisories.md:363 records that neutralising by
@@ -134,37 +159,283 @@ profile_for() {  # acpx built-in launch profile per agent; empty = unsupported
   esac
 }
 
-policy_for() {  # <agent> -> "<model>\t<effort>"; empty + 1 where no policy applies
-  local m e
-  case "$1" in
-    codex) m="$ACP_POLICY_CODEX_MODEL"; e="$ACP_POLICY_CODEX_EFFORT" ;;
-    # claude/grok have no isolated provider config, so nothing carries a policy for them.
-    # The policy exists exactly where the isolated home exists. (plan r1.)
-    *)     return 1 ;;
-  esac
-  # VALIDATE AT THE ACCESSOR. Every consumer goes through here, so a second caller cannot
-  # reach the interpolation with an unvalidated value.
-  [[ "$m" =~ $ACP_POLICY_RE ]] || die "policy: model '$m' is not a bare identifier — refusing to interpolate it into the reviewer's isolated config"
-  [[ "$e" =~ $ACP_POLICY_RE ]] || die "policy: effort '$e' is not a bare identifier — refusing to interpolate it into the reviewer's isolated config"
+# ---------------------------------------------------------------------------------------------
+# THE POLICY MAP. Validated WHOLE before any value is used: a malformed row anywhere refuses every
+# lookup, rather than letting the rows a particular question happens to touch decide whether a
+# broken table is noticed. Bash 3.2 has no associative arrays, so the table stays in the file and
+# each lookup is one awk pass over it (a few dozen rows).
+policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic on any defect
+  [ -f "$ACP_POLICY_MAP" ] && [ -r "$ACP_POLICY_MAP" ] \
+    || { echo "acp.sh: the policy map is missing or unreadable ($ACP_POLICY_MAP) — re-run install.sh" >&2; return 1; }
+  awk -F'\t' -v re="$ACP_POLICY_RE" '
+    function bad(msg) { printf "acp.sh: policy map line %d: %s\n", NR, msg > "/dev/stderr"; err = 1 }
+    function tok(v) { return v ~ /^[a-z][a-z0-9-]*$/ }
+    function once(k) { if (k in seen) bad("duplicate row"); seen[k] = 1 }
+    { sub(/\r$/, "") }
+    /^[[:space:]]*(#|$)/ { next }
+    $1 == "version" { if (NF != 2 || $2 !~ re) bad("malformed version"); nv++; ver = $2; next }
+    $1 == "capability" {
+      if (NF != 8 || !tok($2) || !tok($3) || $4 !~ /^(eligible|fixed|unsupported)$/) bad("malformed capability")
+      once("c" SUBSEP $2 SUBSEP $3); next }
+    $1 == "baseline" {
+      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 !~ re) bad("malformed baseline")
+      once("b" SUBSEP $2 SUBSEP $3); next }
+    $1 == "tier" {
+      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ /^(fast|balanced|strong)$/ || $5 !~ re) bad("malformed tier")
+      once("t" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
+    $1 == "effort" {
+      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ /^(low|medium|high|xhigh)$/ || $5 !~ re) bad("malformed effort")
+      once("e" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
+    $1 == "pair" {
+      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 == "") bad("malformed pair")
+      n = split($5, a, ","); for (i = 1; i <= n; i++) if (a[i] !~ re) bad("malformed pair effort")
+      once("p" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
+    { bad("unknown row kind \"" $1 "\"") }
+    END {
+      if (nv != 1) { printf "acp.sh: policy map: expected exactly one version row, found %d\n", nv > "/dev/stderr"; err = 1 }
+      if (err) exit 1
+      print ver
+    }' "$ACP_POLICY_MAP"
+}
+# policy_map_get <kind> <provider> <transport> [key] — the value column(s) of ONE row, or nothing.
+#   capability -> <eligible|fixed|unsupported>   baseline -> <model>\t<effort>
+#   tier <t> -> <model>   effort <e> -> <provider-effort>   pair <model> -> <comma list>
+# Only ever called after policy_map_check has passed for this invocation.
+policy_map_get() {
+  awk -F'\t' -v k="$1" -v p="$2" -v t="$3" -v key="${4:-}" '
+    { sub(/\r$/, "") }
+    /^[[:space:]]*(#|$)/ { next }
+    $1 != k || $2 != p || $3 != t { next }
+    k == "capability" { print $4; exit }
+    k == "baseline"   { print $4 "\t" $5; exit }
+    $4 == key         { print $5; exit }' "$ACP_POLICY_MAP"
+}
+# policy_map_reverse <kind> <provider> <transport> <value> — the abstract label whose row maps to
+# <value> (tier: model -> fast|balanced|strong; effort: provider value -> low..xhigh), or `unmapped`.
+policy_map_reverse() {
+  local r
+  r="$(awk -F'\t' -v k="$1" -v p="$2" -v t="$3" -v v="$4" '
+    { sub(/\r$/, "") }
+    $1 == k && $2 == p && $3 == t && $5 == v { print $4; exit }' "$ACP_POLICY_MAP")"
+  printf '%s\n' "${r:-unmapped}"
+}
+
+# The operator's pins, per provider. Only codex has an applied policy, so only codex has pins; a
+# provider added here must also gain an `eligible` capability row with its own evidence.
+policy_pin_model()  { case "$1" in codex) printf '%s' "${COMMS_ACP_CODEX_MODEL:-}" ;; esac; }
+policy_pin_effort() { case "$1" in codex) printf '%s' "${COMMS_ACP_CODEX_EFFORT:-}" ;; esac; }
+
+# resolve_policy <agent> <transport> <tier> <effort> <decision> <routing> <phase> <candidate-source>
+# Sets the R_* globals describing the resolved policy. Returns 0 resolved, 1 refused (a message is
+# on stderr). NEVER prints the record — emit_policy_record does that — so every caller shares one
+# resolution and cannot drift into its own copy of the precedence rules.
+#   capability eligible     pin > enabled route > baseline, then the pair is validated
+#   capability fixed        the baseline (+ pins) is applied and attested; routing is ignored
+#   capability unsupported  nothing is applied, so nothing is claimed (verify none)
+# Only phase `implement` is routed: an approach review keeps the baseline, so changing reviewer
+# depth can never change what the plan phase is judged by.
+resolve_policy() {
+  local agent="$1" transport="$2" tier="$3" effort="$4" decision="$5" routing="$6"
+  local phase="${7:--}" csrc="${8:-none}"
+  local base bm be pm pe accepted fb="" route_ok=0
+  R_AGENT="$agent"; R_TRANSPORT="$transport"; R_TIER="$tier"; R_EFFORT_IN="$effort"
+  R_DECISION="$decision"; R_ROUTING="$routing"; R_PHASE="$phase"; R_CSRC="$csrc"; R_DIGEST=none
+  R_MAPV="$(policy_map_check)" || return 1
+  R_CAP="$(policy_map_get capability "$agent" "$transport")"; R_CAP="${R_CAP:-unsupported}"
+  if [ "$routing" = on ] && [ "$decision" = none ]; then fb="${fb:+$fb;}no-decision"; fi
+  if [ "$routing" = off ] && [ "$decision" != none ]; then fb="${fb:+$fb;}routing-disabled"; fi
+  if [ "$R_CAP" = unsupported ]; then
+    # NOTHING IS APPLIED, so nothing may be claimed. The record says so in every field that would
+    # otherwise look like a policy: no model, no effort, no verification requirement.
+    R_MODEL=n/a; R_EFFORT=n/a; R_MSRC=unsupported; R_ESRC=unsupported
+    R_ETIER=n/a; R_EEFF=n/a; R_PAIR=n/a; R_VERIFY=none
+    R_FALLBACK="${fb:+$fb;}capability-unsupported"
+    return 0
+  fi
+  base="$(policy_map_get baseline "$agent" "$transport")"
+  [ -n "$base" ] || { echo "acp.sh: resolve: the map has no baseline for $agent/$transport — refusing" >&2; return 1; }
+  bm="${base%%$'\t'*}"; be="${base#*$'\t'}"
+  pm="$(policy_pin_model "$agent")"; pe="$(policy_pin_effort "$agent")"
+  # VALIDATE AT THE ACCESSOR. Every consumer goes through here, so a second caller cannot reach
+  # the interpolation with an unvalidated value.
+  if [ -n "$pm" ] && ! [[ "$pm" =~ $ACP_POLICY_RE ]]; then
+    echo "acp.sh: policy: model '$pm' is not a bare identifier — refusing to interpolate it into the reviewer's isolated config" >&2; return 1
+  fi
+  if [ -n "$pe" ] && ! [[ "$pe" =~ $ACP_POLICY_RE ]]; then
+    echo "acp.sh: policy: effort '$pe' is not a bare identifier — refusing to interpolate it into the reviewer's isolated config" >&2; return 1
+  fi
+  if [ "$routing" = on ] && [ "$decision" != none ]; then
+    if [ "$R_CAP" != eligible ]; then fb="${fb:+$fb;}capability-$R_CAP"
+    elif [ "$phase" != implement ]; then fb="${fb:+$fb;}phase-excluded"
+    else route_ok=1; fi
+  fi
+  # EXPLICIT IS STRICT. An operator who named a tier or effort asked for THAT; a candidate the map
+  # cannot honour is refused and named, never quietly replaced by the baseline. (handoff item 7.)
+  explicit_refuse() {
+    echo "acp.sh: resolve: the explicit decision $decision asks for $1 — refusing rather than substituting (map $R_MAPV)" >&2
+  }
+  # PRECEDENCE, PER DIMENSION: pin > eligible+enabled route > baseline. A missing or `none`
+  # candidate keeps the concrete baseline; it is never passed on as an abstract default.
+  local rm="" re=""
+  if [ -n "$pm" ]; then R_MODEL="$pm"; R_MSRC=pin
+  elif [ "$route_ok" = 1 ] && [ "$tier" != none ]; then
+    rm="$(policy_map_get tier "$agent" "$transport" "$tier")"
+    if [ -n "$rm" ]; then R_MODEL="$rm"; R_MSRC=route
+    elif [ "$csrc" = explicit ]; then explicit_refuse "tier '$tier', which the map does not define for $agent/$transport"; return 1
+    else R_MODEL="$bm"; R_MSRC=baseline; fb="${fb:+$fb;}unmapped-tier"; fi
+  else
+    R_MODEL="$bm"; R_MSRC=baseline
+    if [ "$route_ok" = 1 ]; then fb="${fb:+$fb;}no-candidate-tier"; fi
+  fi
+  if [ -n "$pe" ]; then R_EFFORT="$pe"; R_ESRC=pin
+  elif [ "$route_ok" = 1 ] && [ "$effort" != none ]; then
+    re="$(policy_map_get effort "$agent" "$transport" "$effort")"
+    if [ -n "$re" ]; then R_EFFORT="$re"; R_ESRC=route
+    elif [ "$csrc" = explicit ]; then explicit_refuse "effort '$effort', which the map does not define for $agent/$transport"; return 1
+    else R_EFFORT="$be"; R_ESRC=baseline; fb="${fb:+$fb;}unmapped-effort"; fi
+  else
+    R_EFFORT="$be"; R_ESRC=baseline
+    if [ "$route_ok" = 1 ]; then fb="${fb:+$fb;}no-candidate-effort"; fi
+  fi
+  # THE PAIR IS VALIDATED, not each value alone: a model and an effort that are each fine can still
+  # be a combination the provider rejects or silently rewrites. A routed dimension that produces an
+  # invalid (or unverifiable) pair falls back to the baseline ONCE, recorded; a pin that does is
+  # REFUSED, never substituted — the operator asked for that value, and running something else is
+  # the silent float this policy exists to prevent.
+  local attempt bad=""
+  for attempt in 1 2; do
+    accepted="$(policy_map_get pair "$agent" "$transport" "$R_MODEL")"
+    bad=""
+    if [ -z "$accepted" ]; then
+      if [ "$R_MSRC" = pin ]; then
+        # A pinned model the map does not know: honoured, labelled unverified. A ROUTED effort on
+        # top of it would be an unvalidated combination the map never approved, so it is dropped.
+        if [ "$R_ESRC" = route ]; then bad=unverified-pin; else R_PAIR=unverified-pin; break; fi
+      else
+        bad=unsupported-pair
+      fi
+    elif case ",$accepted," in *",$R_EFFORT,"*) true ;; *) false ;; esac; then
+      R_PAIR=validated; break
+    else
+      bad=unsupported-pair
+    fi
+    if [ "$attempt" = 1 ] && { [ "$R_MSRC" = route ] || [ "$R_ESRC" = route ]; }; then
+      if [ "$csrc" = explicit ]; then explicit_refuse "model '$R_MODEL' with effort '$R_EFFORT' ($bad)"; return 1; fi
+      [ "$R_MSRC" = route ] && { R_MODEL="$bm"; R_MSRC=baseline; }
+      [ "$R_ESRC" = route ] && { R_EFFORT="$be"; R_ESRC=baseline; }
+      fb="${fb:+$fb;}$bad"
+      continue
+    fi
+    echo "acp.sh: resolve: model '$R_MODEL' does not accept effort '$R_EFFORT' (model from $R_MSRC, effort from $R_ESRC; map $R_MAPV) — refusing rather than substituting" >&2
+    return 1
+  done
+  R_ETIER="$(policy_map_reverse tier "$agent" "$transport" "$R_MODEL")"
+  R_EEFF="$(policy_map_reverse effort "$agent" "$transport" "$R_EFFORT")"
+  R_VERIFY="model,effort"
+  R_FALLBACK="${fb:-none}"
+  # THE CONCRETE POLICY'S IDENTITY. runphase names a mounted session after it, so any change to
+  # the pair — a new decision, a pin, a map bump, routing switched off — is a FRESH session under
+  # the new config instead of a warm one holding the old preference, and an unchanged pair keeps
+  # its warm session.
+  R_DIGEST="$(policy_digest "$R_MODEL" "$R_EFFORT")" || { echo "acp.sh: resolve: no sha256 utility to identify the policy" >&2; return 1; }
+  return 0
+}
+
+policy_digest() {  # <model> <effort> -> 12 hex
+  local d
+  if command -v shasum >/dev/null 2>&1; then d="$(printf '%s\0%s' "$1" "$2" | shasum -a 256)"
+  elif command -v sha256sum >/dev/null 2>&1; then d="$(printf '%s\0%s' "$1" "$2" | sha256sum)"
+  else return 1; fi
+  d="${d%% *}"; d="${d:0:12}"
+  [[ "$d" =~ ^[0-9a-f]{12}$ ]] || return 1
+  printf '%s' "$d"
+}
+
+emit_policy_record() {  # the persisted per-turn expectation; key<TAB>value, fixed order
+  printf 'policy_record\t%s\n'    "$ACP_POLICY_RECORD_VERSION"
+  printf 'map_version\t%s\n'      "$R_MAPV"
+  printf 'provider\t%s\n'         "$R_AGENT"
+  printf 'transport\t%s\n'        "$R_TRANSPORT"
+  printf 'capability\t%s\n'       "$R_CAP"
+  printf 'routing\t%s\n'          "$R_ROUTING"
+  printf 'decision\t%s\n'         "$R_DECISION"
+  printf 'candidate_source\t%s\n' "$R_CSRC"
+  printf 'phase\t%s\n'            "$R_PHASE"
+  printf 'candidate_tier\t%s\n'   "$R_TIER"
+  printf 'candidate_effort\t%s\n' "$R_EFFORT_IN"
+  printf 'model\t%s\n'            "$R_MODEL"
+  printf 'effort\t%s\n'           "$R_EFFORT"
+  printf 'model_source\t%s\n'     "$R_MSRC"
+  printf 'effort_source\t%s\n'    "$R_ESRC"
+  printf 'effective_tier\t%s\n'   "$R_ETIER"
+  printf 'effective_effort\t%s\n' "$R_EEFF"
+  printf 'pair\t%s\n'             "$R_PAIR"
+  printf 'fallback\t%s\n'         "${R_FALLBACK:-none}"
+  printf 'verify\t%s\n'           "$R_VERIFY"
+  printf 'policy_digest\t%s\n'    "$R_DIGEST"
+}
+
+# policy_from_record <agent> <file> — "<model>\t<effort>" from a PERSISTED record, or exit 1.
+# The record is runner-owned, but it is still re-validated here: this is the value that reaches the
+# TOML file, and "we wrote it ourselves" is not an allowlist. Every key must appear EXACTLY once —
+# a first-match reader and a last-match reader would otherwise disagree about a doubled key.
+policy_from_record() {
+  local agent="$1" f="$2" out
+  [ -f "$f" ] && [ -r "$f" ] || { echo "acp.sh: policy record '$f' is missing or unreadable" >&2; return 1; }
+  out="$(awk -F'\t' -v want="$ACP_POLICY_RECORD_VERSION" '
+    { sub(/\r$/, "") }
+    NF != 2 || $1 == "" || $2 == "" { bad = 1; next }
+    { n[$1]++; v[$1] = $2 }
+    END {
+      split("policy_record provider capability verify model effort", ks, " ")
+      for (i in ks) if (n[ks[i]] != 1) bad = 1
+      for (k in n) if (n[k] != 1) bad = 1
+      if (bad || v["policy_record"] != want) exit 1
+      print v["provider"] "\t" v["capability"] "\t" v["verify"] "\t" v["model"] "\t" v["effort"]
+    }' "$f")" || { echo "acp.sh: policy record '$f' is malformed" >&2; return 1; }
+  # cut, not `IFS=$'\t' read`: tab is IFS whitespace, so an empty field would collapse and shift
+  # every later one left. (The same defect runphase's attestation split was fixed for.)
+  local p c vf m e
+  p="$(printf '%s' "$out" | cut -f1)"; c="$(printf '%s' "$out" | cut -f2)"
+  vf="$(printf '%s' "$out" | cut -f3)"; m="$(printf '%s' "$out" | cut -f4)"; e="$(printf '%s' "$out" | cut -f5)"
+  [ "$p" = "$agent" ] || { echo "acp.sh: policy record is for '$p', not '$agent'" >&2; return 1; }
+  # Gate on WHAT IS VERIFIED, not on whether routing was eligible: a `fixed` combination still
+  # applies and attests its baseline; an `unsupported` one claims nothing and is refused here.
+  [ "$vf" = "model,effort" ] || { echo "acp.sh: policy record for '$p' ($c) applies no policy" >&2; return 1; }
+  [[ "$m" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: policy record model '$m' is not a bare identifier" >&2; return 1; }
+  [[ "$e" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: policy record effort '$e' is not a bare identifier" >&2; return 1; }
   printf '%s\t%s\n' "$m" "$e"
 }
 
-provider_config_for() {  # <agent> -> the COMPLETE isolated config text
+policy_for() {  # <agent> [record] -> "<model>\t<effort>"; empty + 1 where no policy applies
+  # With a record: the persisted per-turn expectation, never re-resolved. Without: the baseline
+  # plus pins for a mounted turn, with routing off — the pre-routing contract, unchanged.
+  if [ -n "${2:-}" ]; then policy_from_record "$1" "$2"; return; fi
+  resolve_policy "$1" acp-mounted none none none off || exit 1
+  # claude/grok have no isolated provider config, so nothing carries a policy for them.
+  # The policy exists exactly where the isolated home exists. (plan r1.)
+  [ "$R_VERIFY" = "model,effort" ] || return 1
+  printf '%s\t%s\n' "$R_MODEL" "$R_EFFORT"
+}
+
+provider_config_for() {  # <agent> [record] -> the COMPLETE isolated config text
   local pol m e
-  pol="$(policy_for "$1")" || return 1
+  pol="$(policy_for "$1" "${2:-}")" || return 1
   m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"
   # approval_policy and sandbox_mode are LITERALS, never concatenated from the environment —
   # only the two policy values are interpolated, and both are allowlisted above. (grok, plan r2.)
   printf 'approval_policy = "on-request"\nsandbox_mode = "read-only"\nmodel = "%s"\nmodel_reasoning_effort = "%s"\n' "$m" "$e"
 }
 
-# policy_verdict <agent> <observed-effort> <observed-model> — the ONE comparison, used by both
-# the pre-canary preference check and the post-turn attestation so they cannot drift.
+# policy_verdict <agent> <observed-effort> <observed-model> [record] — the ONE comparison, used by
+# both the pre-canary preference check and the post-turn attestation so they cannot drift.
 #   0 match | 20 mismatch | 21 undecidable
 # Undecidable is NEVER "it matched": an absent reading is exactly the case that hid this bug.
+# With a record, the expectation is the persisted one: an attestation that reloaded a changed
+# default would relabel the expectation to fit the turn, which is the one thing it may never do.
 policy_verdict() {
-  local agent="$1" oe="$2" om="${3:-}" pol m e
-  pol="$(policy_for "$agent")" || return 21
+  local agent="$1" oe="$2" om="${3:-}" rec="${4:-}" pol m e
+  pol="$(policy_for "$agent" "$rec")" || return 21
   m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"
   [ -n "$oe" ] && [ "$oe" != null ] || { printf 'undecidable: no observed effort\n'; return 21; }
   # BOTH keys are policy, so BOTH must be evidenced. provider-config writes the model into the
@@ -175,6 +446,69 @@ policy_verdict() {
     printf 'want effort=%s model=%s; got effort=%s model=%s\n' "$e" "$m" "$oe" "$om"; return 20
   fi
   printf 'effort=%s model=%s\n' "$oe" "$om"; return 0
+}
+
+# policy_args <args...> — split the accessors' arguments into positionals (PA_POS, empty values
+# PRESERVED: the attestation passes an empty observation on purpose) and --policy-file (PA_FILE).
+policy_args() {
+  PA_POS=(); PA_FILE=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --policy-file ]; then
+      [ "$#" -ge 2 ] && [ -n "$2" ] || die "--policy-file needs a path"
+      PA_FILE="$2"; shift 2; continue
+    fi
+    PA_POS+=("$1"); shift
+  done
+}
+
+cmd_resolve() {
+  local agent="${1:-}"; [ -n "$agent" ] || { echo "acp.sh: resolve: an agent name is required" >&2; exit 2; }
+  shift
+  [ -n "$(profile_for "$agent")" ] || { echo "acp.sh: resolve: unknown agent '$agent'" >&2; exit 2; }
+  local transport=acp-mounted tier=none effort=none decision=none routing=off phase=- csrc=none
+  while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || { echo "acp.sh: resolve: $1 needs a value" >&2; exit 2; }
+    case "$1" in
+      --transport) transport="$2" ;;
+      --tier)      tier="$2" ;;
+      --effort)    effort="$2" ;;
+      --decision)  decision="$2" ;;
+      --routing)   routing="$2" ;;
+      --phase)     phase="$2" ;;
+      --candidate-source) csrc="$2" ;;
+      *) echo "acp.sh: resolve: unknown option '$1'" >&2; exit 2 ;;
+    esac
+    shift 2
+  done
+  # Closed vocabularies. A value outside them is a CALLER defect, reported as usage — never
+  # quietly read as `none`, which would turn a typo into a baseline turn nobody asked for.
+  case "$transport" in acp-mounted|acp|headless) ;; *) echo "acp.sh: resolve: unknown transport '$transport'" >&2; exit 2 ;; esac
+  case "$tier"      in fast|balanced|strong|none) ;; *) echo "acp.sh: resolve: unknown tier '$tier'" >&2; exit 2 ;; esac
+  case "$effort"    in low|medium|high|xhigh|none) ;; *) echo "acp.sh: resolve: unknown effort '$effort'" >&2; exit 2 ;; esac
+  case "$routing"   in on|off) ;; *) echo "acp.sh: resolve: --routing must be on or off" >&2; exit 2 ;; esac
+  [ "$decision" = none ] || [[ "$decision" =~ $ACP_POLICY_RE ]] \
+    || { echo "acp.sh: resolve: decision '$decision' is not a bare token" >&2; exit 2; }
+  [ "$phase" = - ] || [[ "$phase" =~ $ACP_POLICY_RE ]] \
+    || { echo "acp.sh: resolve: phase '$phase' is not a bare token" >&2; exit 2; }
+  [[ "$csrc" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: resolve: candidate source '$csrc' is not a bare token" >&2; exit 2; }
+  resolve_policy "$agent" "$transport" "$tier" "$effort" "$decision" "$routing" "$phase" "$csrc" || exit 1
+  emit_policy_record
+}
+
+cmd_capabilities() {
+  local ver; ver="$(policy_map_check)" || exit 1
+  printf 'map_version: %s (%s)\n' "$ver" "$ACP_POLICY_MAP"
+  # Two passes, so a routing-eligible combination's rows print whatever order the map lists them in.
+  awk -F'\t' '
+    { sub(/\r$/, "") }
+    /^[[:space:]]*(#|$)/ { next }
+    FNR == NR { if ($1 == "capability") cap[$2 SUBSEP $3] = $4; next }
+    # the concrete rows print for every combination that APPLIES a policy (eligible or fixed)
+    $1 == "capability" { printf "%s/%s: %s\n  mechanism: %s\n  evidence: %s\n  versions tested: %s\n  notes: %s\n", $2, $3, $4, $5, $6, $7, $8; next }
+    $1 == "baseline" && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s baseline: model=%s effort=%s\n", $2, $3, $4, $5; next }
+    $1 == "tier"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s tier %s -> model %s\n", $2, $3, $4, $5; next }
+    $1 == "effort"   && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s effort %s -> %s\n", $2, $3, $4, $5; next }
+    $1 == "pair"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s accepts: %s\n", $2, $3, $4, $5; next }' "$ACP_POLICY_MAP" "$ACP_POLICY_MAP"
 }
 
 cmd_doctor() {
@@ -334,39 +668,43 @@ case "${1:-}" in
     printf '%s\n' "$(profile_for "$1")"
     ;;
   version) printf '%s\n' "$ACPX_VERSION" ;;
+  resolve) shift; cmd_resolve "$@" ;;
+  capabilities) shift; cmd_capabilities ;;
   policy)
-    shift
-    [ -n "${1:-}" ] || die "policy: an agent name is required"
-    policy_for "$1" || exit 1
+    shift; policy_args "$@"
+    [ -n "${PA_POS[0]:-}" ] || die "policy: an agent name is required"
+    policy_for "${PA_POS[0]}" "$PA_FILE" || exit 1
     ;;
   provider-config)
-    shift
-    [ -n "${1:-}" ] || die "provider-config: an agent name is required"
-    provider_config_for "$1" || exit 1
+    shift; policy_args "$@"
+    [ -n "${PA_POS[0]:-}" ] || die "provider-config: an agent name is required"
+    provider_config_for "${PA_POS[0]}" "$PA_FILE" || exit 1
     ;;
   policy-check)
-    # policy-check <agent> -   (record JSON on stdin)
+    # policy-check <agent> - [--policy-file <record>]   (session record JSON on stdin)
     # Reads an `acpx sessions show --format json` record and compares its CURRENT
     # config_options against the policy. This is the PREFLIGHT reading: necessary, and
     # explicitly NOT sufficient — a replacement session can replay a stale preference after
     # it passes (codex, plan r1 B1). The post-turn attestation is the control that gates.
-    shift
-    [ -n "${1:-}" ] || die "policy-check: an agent name is required"
-    _pc_agent="$1"; shift
-    [ "${1:-}" = "-" ] || die "policy-check: the record is read from stdin — pass '-'"
+    shift; policy_args "$@"
+    [ -n "${PA_POS[0]:-}" ] || die "policy-check: an agent name is required"
+    _pc_agent="${PA_POS[0]}"
+    [ "${PA_POS[1]:-}" = "-" ] || die "policy-check: the record is read from stdin — pass '-'"
     command -v python3 >/dev/null 2>&1 || { echo "undecidable: python3 is unavailable" >&2; exit 21; }
-    # THE SAVED PREFERENCE IS READ TOO, and this is the point of the check. acpx replays
-    # `desired_config_options` when it creates a REPLACEMENT session, so a leftover
-    # `reasoning_effort` that conflicts with the policy can be reinstated after the current
-    # options look clean. Reading only `config_options` would leave the approved
-    # refuse-and-retire control unimplemented. (codex, implement r1 B4.)
+    # THE SAVED PREFERENCES ARE READ TOO, and this is the point of the check. acpx replays
+    # `desired_config_options` (effort) and `session_options.model` (a model set with `acpx set
+    # model` or `--model`) when it creates a REPLACEMENT session, so a leftover preference that
+    # conflicts with the policy can be reinstated after the current options look clean. Reading
+    # only `config_options` would leave the approved refuse-and-retire control unimplemented.
+    # (codex, implement r1 B4; the saved MODEL matters once a routed turn may run a model other
+    # than the baseline.)
     _pc_out="$(python3 -c '
 import json,sys
 try: r=json.load(sys.stdin)
-except Exception: print("\t\tBAD"); sys.exit(0)
+except Exception: print("\t\tBAD\t"); sys.exit(0)
 ax=r.get("acpx") or {}
 opts=ax.get("config_options")
-if not isinstance(opts,list): print("\t\t"); sys.exit(0)
+if not isinstance(opts,list): print("\t\t\t"); sys.exit(0)
 d={}
 for o in opts:
     if isinstance(o,dict) and o.get("id") is not None:
@@ -388,32 +726,52 @@ elif isinstance(des,list):
             dv="" if v is None else str(v)
 else:
     dv="BAD"                   # a shape we do not understand is not a shape we may ignore
-print("%s\t%s\t%s" % (g("reasoning_effort"), g("model"), dv))
+so=ax.get("session_options")
+dm=""
+if so is None:
+    dm=""
+elif isinstance(so,dict):
+    v=so.get("model")
+    dm="" if v is None else str(v)
+else:
+    dm="BAD"
+print("%s\t%s\t%s\t%s" % (g("reasoning_effort"), g("model"), dv, dm))
 ' 2>/dev/null)" || { echo "undecidable: could not parse the session record" >&2; exit 21; }
-    _pc_eff="${_pc_out%%$'\t'*}"; _pc_rest="${_pc_out#*$'\t'}"
-    _pc_mod="${_pc_rest%%$'\t'*}"; _pc_des="${_pc_rest#*$'\t'}"
-    if [ "$_pc_des" = BAD ]; then
+    _pc_eff="$(printf '%s' "$_pc_out" | cut -f1)"; _pc_mod="$(printf '%s' "$_pc_out" | cut -f2)"
+    _pc_des="$(printf '%s' "$_pc_out" | cut -f3)"; _pc_dmod="$(printf '%s' "$_pc_out" | cut -f4)"
+    if [ "$_pc_des" = BAD ] || [ "$_pc_dmod" = BAD ]; then
       echo "undecidable: the session record's saved preferences are unreadable" >&2; exit 21
     fi
-    if [ -n "$_pc_des" ]; then
-      _pc_pol="$(policy_for "$_pc_agent")" || exit 21
-      if [ "$_pc_des" != "${_pc_pol#*$'\t'}" ]; then
+    if [ -n "$_pc_des" ] || [ -n "$_pc_dmod" ]; then
+      _pc_pol="$(policy_for "$_pc_agent" "$PA_FILE")" || exit 21
+      if [ -n "$_pc_des" ] && [ "$_pc_des" != "${_pc_pol#*$'\t'}" ]; then
         printf 'a saved effort preference (%s) conflicts with the policy and would be replayed onto a replacement session\n' "$_pc_des"
         exit 20
       fi
+      if [ -n "$_pc_dmod" ] && [ "$_pc_dmod" != "${_pc_pol%%$'\t'*}" ]; then
+        printf 'a saved model preference (%s) conflicts with the policy and would be replayed onto a replacement session\n' "$_pc_dmod"
+        exit 20
+      fi
+    fi
+    # A model the adapter does not list (hidden, retired, or not yet served to this account) comes
+    # back with NO reasoning_effort option at all (codex-acp createModelId). Say so specifically:
+    # the remedy is the map or the routing decision, not the session.
+    if [ -z "$_pc_eff" ] && [ -n "$_pc_mod" ]; then
+      printf 'undecidable: the session exposes no reasoning_effort option for model %s — an unlisted or retired model? fix policy-map.tsv, or replace the routing decision\n' "$_pc_mod"
+      exit 21
     fi
     # A missing list, a missing key, or unparseable JSON all land here as an empty effort and
     # are UNDECIDABLE — never "model matched, effort optional". (grok, plan r2.)
-    policy_verdict "$_pc_agent" "$_pc_eff" "$_pc_mod"; exit $?
+    policy_verdict "$_pc_agent" "$_pc_eff" "$_pc_mod" "$PA_FILE"; exit $?
     ;;
   policy-attest)
-    # policy-attest <agent> <observed-effort> [observed-model] — the post-turn comparison,
-    # fed from the provider's OWN rollout record. Same verdict function as policy-check so
-    # the two gates cannot drift apart.
-    shift
-    [ -n "${1:-}" ] || die "policy-attest: an agent name is required"
-    [ -n "${2:-}" ] || { echo "undecidable: no observed effort was supplied" >&2; exit 21; }
-    policy_verdict "$1" "$2" "${3:-}"; exit $?
+    # policy-attest <agent> <observed-effort> [observed-model] [--policy-file <record>] — the
+    # post-turn comparison, fed from the provider's OWN rollout record. Same verdict function as
+    # policy-check so the two gates cannot drift apart.
+    shift; policy_args "$@"
+    [ -n "${PA_POS[0]:-}" ] || die "policy-attest: an agent name is required"
+    [ -n "${PA_POS[1]:-}" ] || { echo "undecidable: no observed effort was supplied" >&2; exit 21; }
+    policy_verdict "${PA_POS[0]}" "${PA_POS[1]}" "${PA_POS[2]:-}" "$PA_FILE"; exit $?
     ;;
   launcher) acpx_prepare_cache; acpx_launcher; printf '\n' ;;
   supports)

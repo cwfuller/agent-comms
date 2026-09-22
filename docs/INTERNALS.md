@@ -13,7 +13,12 @@ helpers/
                                + route (delegates to route.sh)
   route.sh                     /auto query classifier: plan / effort / abstract tier
                                (policy in code; backends are opt-in)
-  route_backend.py             swappable decision backends (TypeSafe/Jev is one)
+  route_backend.py             swappable decision backends (TypeSafe/Jev is one), both rubrics,
+                               the bounded reviewer state builder, the transmission permit
+  route_review.py              reviewer routing DECISIONS: sticky per (thread, phase), recorded
+  route_shadow.py              the shadow collector (observes; never decides)
+  acp.sh                       ACP consults + the reviewer policy resolver/accessors
+  policy-map.tsv               THE versioned reviewer model/effort map (the only vendor model ids)
   runphase.sh                  peer-turn runner — ACP for every provider, direct headless for grok
                                only (COMMS_DELIVERY=headless): spawn → observe → record
 docs/loopspec/                 the portable review-loop kernel (spec, schemas, fixtures,
@@ -369,6 +374,49 @@ per-repo session — measured 2026-08-20 on codex: cold one-shot 18,562 fresh in
 tokens; warm round 2 **146** (~127x less). That number is why the ACP track exists;
 review loops stay on runphase until this consult path proves the transport.
 This is the ONLY Node-dependent surface in the repo, and it is opt-in per call.
+
+## Reviewer model/effort routing
+
+A reviewer turn's depth is a CONTRACT, not a hint: the isolated `CODEX_HOME` exists so the
+operator's own config never reaches a review, and the rollout attestation refuses to publish a
+turn that did not run the declared model and effort. Routing makes that contract per-turn without
+loosening it. The stages share one decision identity and one persisted record:
+
+```
+request ─send/panel (COMMS_REVIEW_ROUTE=1, implement phase)─▶ review-route decide
+          sticky per (workspace, base thread, phase); explicit, classified, or none
+          .comms/route-decisions/<id>.json  ── route_decision: <id> stamped by the helper
+runphase: current decision == stamped id? ─▶ acp.sh resolve ─▶ run_dir/policy.tsv (+ sha256)
+          session name +p<policy_digest> ─▶ config.toml ─▶ preflight ─▶ canary ─▶ prompt
+          ─▶ rollout attestation against THE SAME record ─▶ publish, or refuse unpublished
+```
+
+- **Abstract vs concrete.** Classifiers and decisions speak `fast|balanced|strong` and
+  `low..xhigh` only; `policy-map.tsv` is the one place a vendor model id appears, versioned and
+  recorded with every turn. A model update is one map edit, never a rubric change.
+- **Precedence per dimension**: operator pin > eligible, enabled, implement-phase route > baseline.
+  Missing, low-confidence, stub, not-permitted, disabled, unsupported or phase-excluded inputs all
+  keep the CONCRETE baseline — never the abstract fail-open values mapped to a cheaper model.
+- **Pairs are validated.** A classified dimension that forms an invalid pair falls back once
+  (recorded); a pin or an explicit decision that does is refused, never substituted.
+- **A session per concrete policy.** codex fixes model/effort when a session starts or resumes and
+  sends its own values every prompt; a warm session is not known to adopt a changed config. So a
+  mounted session is named after its `policy_digest`: an unchanged policy stays warm across rounds,
+  any change (new decision, pin, map bump, routing off, plan→implement) is a fresh session verified
+  by the preflight, and the old session is left untouched rather than patched or retired.
+- **Evidence never relabels the expectation.** `requested_*` is written from the record at
+  resolution time; `adapter_*` is what acpx reports; `observed_*` is the provider's own rollout
+  (with its `cli_version`). The record is hash-checked before the config, the preflight and the
+  attestation, because the reviewer runs in between.
+- **Capabilities.** Only codex/acp-mounted is `eligible`. Claude and Grok expose model/effort
+  controls in their adapters, but agent-comms neither applies them nor has isolated per-turn
+  evidence, so their rows are `unsupported` and their turns record that rather than a policy.
+- **Collection is not activation.** `route --shadow --reviewer` uses the same builder and rubric
+  as `review-route decide` but never writes a decision. Classification needs the same
+  out-of-tree per-project permit as the shadow collector.
+
+Routing is opt-in and off by default; whether it saves cost at acceptable quality is an
+experiment still to run (docs/ROADMAP.md), not a property this mechanism establishes.
 
 ## Delivery mechanics
 

@@ -193,6 +193,37 @@ fi
 if [ -n "${AX_CFG_LOG:-}" ] && [ -n "${CODEX_HOME:-}" ] && [ -f "$CODEX_HOME/config.toml" ]; then
   cat "$CODEX_HOME/config.toml" >> "$AX_CFG_LOG" 2>/dev/null || true
 fi
+# THE PROVIDER FIXES ITS POLICY WHEN A SESSION IS CREATED. Real codex reads model/effort from the
+# isolated config.toml at thread start and then sends its OWN in-memory values on every prompt; a
+# resumed session is NOT known to adopt a changed config. The stub models exactly that: `sessions
+# ensure` of a NEW record captures the config into the record, and every later show/prompt of that
+# session reports the CAPTURED pair. AX_RESUME_ADOPTS=1 models the other possibility (a resume
+# that re-reads the config). Explicit AX_MODEL / AX_EFFORT still win, for divergence tests; with no
+# config at all the historic gpt-6-astra/xhigh defaults apply.
+ax_cfg_model=""; ax_cfg_effort=""
+if [ -n "${CODEX_HOME:-}" ] && [ -f "$CODEX_HOME/config.toml" ]; then
+  ax_cfg_model="$(sed -n 's/^model = "\(.*\)"$/\1/p' "$CODEX_HOME/config.toml" | head -1)"
+  ax_cfg_effort="$(sed -n 's/^model_reasoning_effort = "\(.*\)"$/\1/p' "$CODEX_HOME/config.toml" | head -1)"
+fi
+ax_sname=""; ax_prev=""
+for ax_a in "$@"; do
+  { [ "$ax_prev" = "-s" ] || [ "$ax_prev" = "show" ] || [ "$ax_prev" = "--name" ]; } && ax_sname="$ax_a"
+  ax_prev="$ax_a"
+done
+ax_rec=""
+if [ -n "$ax_sname" ] && [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx-test-store" ]; then
+  if [ -n "${AX_RECORD_ID:-}" ]; then ax_rec="$HOME/.acpx/sessions/$AX_RECORD_ID.json"
+  else ax_rec="$HOME/.acpx/sessions/stub-$(printf '%s' "$ax_sname" | shasum -a 256 2>/dev/null | cut -c1-12).json"; fi
+fi
+ax_cap_model=""; ax_cap_effort=""
+if [ -n "$ax_rec" ] && [ -f "$ax_rec" ] && [ -z "${AX_RESUME_ADOPTS:-}" ]; then
+  ax_cap_model="$(sed -n 's/^  "stub_model": "\(.*\)",$/\1/p' "$ax_rec" | head -1)"
+  ax_cap_effort="$(sed -n 's/^  "stub_effort": "\(.*\)",$/\1/p' "$ax_rec" | head -1)"
+fi
+[ -n "${AX_MODEL:-}" ] || AX_MODEL="${ax_cap_model:-$ax_cfg_model}"
+[ -n "${AX_EFFORT:-}" ] || AX_EFFORT="${ax_cap_effort:-$ax_cfg_effort}"
+[ -n "$AX_MODEL" ] || unset AX_MODEL
+[ -n "$AX_EFFORT" ] || unset AX_EFFORT
 case " $* " in
   *" sessions ensure "*)
     # The session NAME drives the record id below, so it must be parsed before it is used.
@@ -212,10 +243,18 @@ case " $* " in
     # user's real ~/.acpx/sessions whenever a turn did not override HOME.
     if [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx-test-store" ]; then
       mkdir -p "$HOME/.acpx/sessions" 2>/dev/null
+      # A RESUMED record keeps the pair it was created with; only a new record captures the
+      # config the parent just wrote. (See the capture note at the top of this stub.)
+      ax_keep_m=""; ax_keep_e=""
+      if [ -f "$HOME/.acpx/sessions/$ax_id.json" ]; then
+        ax_keep_m="$(sed -n 's/^  "stub_model": "\(.*\)",$/\1/p' "$HOME/.acpx/sessions/$ax_id.json" | head -1)"
+        ax_keep_e="$(sed -n 's/^  "stub_effort": "\(.*\)",$/\1/p' "$HOME/.acpx/sessions/$ax_id.json" | head -1)"
+      fi
       # PRETTY-PRINTED, two-space indent, as acpx writes it: the production reader matches
       # `^  "cwd": "..."`, and a single-line record silently failed that match.
-      printf '{\n  "schema": "acpx.session.v1",\n  "acpx_record_id": "%s",\n  "cwd": "%s",\n  "name": "%s",\n  "closed": false\n}\n' \
-        "$ax_id" "${AX_LIE_CWD:-$(pwd -P)}" "$ax_name" > "$HOME/.acpx/sessions/$ax_id.json" 2>/dev/null || true
+      printf '{\n  "schema": "acpx.session.v1",\n  "acpx_record_id": "%s",\n  "cwd": "%s",\n  "name": "%s",\n  "stub_model": "%s",\n  "stub_effort": "%s",\n  "closed": false\n}\n' \
+        "$ax_id" "${AX_LIE_CWD:-$(pwd -P)}" "$ax_name" "${ax_keep_m:-${ax_cfg_model:-gpt-6-astra}}" "${ax_keep_e:-${ax_cfg_effort:-xhigh}}" \
+        > "$HOME/.acpx/sessions/$ax_id.json" 2>/dev/null || true
     fi
     printf '%s\t(%s)\n' "$ax_id" "${AX_ENSURE_STATE:-created}"; exit 0 ;;
   *" sessions show "*)

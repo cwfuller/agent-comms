@@ -45,7 +45,11 @@ RETIRED_HELPERS="fleet.sh"
 RETIRED_CODEX_SKILLS="read-from-claude send-to-claude"
 # Shared helper scripts — the single source of truth both agents call.
 AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
-HELPERS="comms.sh runphase.sh acp.sh route.sh route_backend.py route_shadow.py"
+# policy-map.tsv is DATA (the versioned reviewer model/effort map acp.sh reads as a SIBLING), listed
+# here rather than in a separate data manifest because every helper resolves its peers beside itself:
+# the map must land in exactly the directories acp.sh does, in every scope. It is made executable like
+# the rest, which is harmless for a table nothing executes.
+HELPERS="comms.sh runphase.sh acp.sh route.sh route_backend.py route_shadow.py route_review.py policy-map.tsv"
 # The reviewer's REVIEW BAR, installed as data. It used to be read out of the codex self-send
 # skills at runtime, which made "delete the self-send templates" silently equal to "delete the
 # reviewer's standard". Installed from docs/loopspec/fragments/ — their canonical home, and what
@@ -895,7 +899,7 @@ case "$SCOPE" in
     echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
     echo "    Global Grok:   /user:auto (bare /auto is Grok's permission-mode built-in) in $GROK_COMMANDS_DIR"
     echo "    Global Codex:  \$auto, \$ask, \$clean-comms in $CODEX_SKILLS_DIR"
-    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
+    echo "    Helpers:       $AGENT_COMMS_HOME/{$(printf '%s' "$HELPERS" | tr ' ' ',')}"
     ;;
   project)
     echo "    Project state: .comms/, .gitignore"
@@ -904,7 +908,7 @@ case "$SCOPE" in
     echo "    Global Claude: /auto, /ask, /clean-comms (plus /send-to-codex and /read-from-codex, used by the loop)"
     echo "    Global Grok:   /user:auto (bare /auto is Grok's permission-mode built-in) in $GROK_COMMANDS_DIR"
     echo "    Global Codex:  \$auto, \$ask, \$clean-comms in $CODEX_SKILLS_DIR"
-    echo "    Helpers:       $AGENT_COMMS_HOME/{comms.sh,runphase.sh,acp.sh}"
+    echo "    Helpers:       $AGENT_COMMS_HOME/{$(printf '%s' "$HELPERS" | tr ' ' ',')}"
     echo "    Project state: .comms/, .gitignore"
     ;;
 esac

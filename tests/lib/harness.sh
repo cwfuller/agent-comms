@@ -31,6 +31,15 @@ unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
 # section that tests adoption sets it explicitly per invocation. (Same class as the
 # scrub above.)
 unset CLAUDE_PID COMMS_PRESENCE_PID COMMS_SELF GROK_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT CODEX_SANDBOX CODEX_THREAD_ID 2>/dev/null || true
+# THE REVIEWER POLICY INPUTS. An operator's pins or reviewer-routing switch, inherited, would make
+# the policy assertions describe that operator's configuration instead of the committed map — and
+# COMMS_REVIEW_ROUTE would silently route every send in the corpus. The sections that exercise
+# them set them per invocation.
+# The classifier's own switches go too: with reviewer routing on, every send and panel fixture in
+# the corpus would classify, and an inherited backend would reach TypeSafe from the suite.
+unset COMMS_REVIEW_ROUTE COMMS_ACP_CODEX_MODEL COMMS_ACP_CODEX_EFFORT \
+      COMMS_ROUTE COMMS_ROUTE_BACKEND COMMS_ROUTE_STUB TYPESAFE_API_KEY COMMS_ROUTE_URL \
+      COMMS_ROUTE_LOG COMMS_ROUTE_SHADOW_ALLOW 2>/dev/null || true
 
 # THE DEFAULT IS `mailbox`. What the harness needs from a default is "write the file and
 # nudge nobody" — no spawned child, no network. It used to get that by asking for cmux and

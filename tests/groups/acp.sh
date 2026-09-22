@@ -779,6 +779,176 @@ sed 's/[[:space:]]*#.*$//' "$REPO/helpers/runphase.sh" | grep -qE 'gpt-6-astra|m
 [ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-astra"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":"weird"}}')" = 21 ] \
   && ok "a saved-preference shape we do not understand is undecidable, not ignored" || fail "unknown desired shape ignored"
 
+section "acp.sh: the reviewer policy resolver"
+# ONE RESOLVER, ONE VERSIONED MAP. An abstract candidate (tier fast|balanced|strong, effort
+# low..xhigh) becomes a concrete pair only through helpers/policy-map.tsv; the operator's pins
+# win per dimension; everything else keeps the concrete baseline. Every case RUNS the resolver
+# and reads the record it prints — the record is what runphase persists and every later gate reads.
+AP="$REPO/helpers/acp.sh"
+rv() { printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'; }
+res() { env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$@"; }
+MAPV="$(awk -F'\t' '$1=="version"{print $2; exit}' "$REPO/helpers/policy-map.tsv")"
+
+R="$(res "$AP" resolve codex)"
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = xhigh ] \
+  && [ "$(rv "$R" model_source)" = baseline ] && [ "$(rv "$R" pair)" = validated ] \
+  && [ "$(rv "$R" verify)" = "model,effort" ] && [ "$(rv "$R" map_version)" = "$MAPV" ] \
+  && ok "no candidate resolves to the map's baseline, validated, stamped with the map version" || fail "baseline resolution ($R)"
+R="$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-5.6-luna ] && [ "$(rv "$R" effort)" = low ] \
+  && [ "$(rv "$R" model_source)" = route ] && [ "$(rv "$R" effort_source)" = route ] \
+  && [ "$(rv "$R" effective_tier)" = fast ] && [ "$(rv "$R" fallback)" = none ] \
+  && ok "a confident fast/low candidate reaches a configured cheap pair — cost-down is reachable" || fail "fast/low not reachable ($R)"
+R="$(res "$AP" resolve codex --tier balanced --effort medium --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-5.6-terra ] && [ "$(rv "$R" effort)" = medium ] \
+  && ok "tier and effort are SEPARATE dimensions (balanced -> terra, medium -> medium)" || fail "balanced/medium ($R)"
+R="$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing off)"
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" fallback)" = routing-disabled ] \
+  && ok "routing disabled keeps the concrete baseline and says why" || fail "routing off ($R)"
+R="$(res "$AP" resolve codex --tier fast --effort low --routing on)"
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" fallback)" = no-decision ] \
+  && ok "routing on with no decision keeps the baseline (never the abstract fail-open values)" || fail "no decision ($R)"
+R="$(res "$AP" resolve codex --tier none --effort none --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = xhigh ] \
+  && [ "$(rv "$R" fallback)" = "no-candidate-tier;no-candidate-effort" ] \
+  && ok "a low-confidence (none) candidate selects the baseline once, recorded per dimension" || fail "none candidate ($R)"
+R="$(res COMMS_ACP_CODEX_MODEL=gpt-5.6-sol "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-5.6-sol ] && [ "$(rv "$R" model_source)" = pin ] \
+  && [ "$(rv "$R" effort)" = low ] && [ "$(rv "$R" effort_source)" = route ] \
+  && ok "an operator model pin beats the route for THAT dimension only" || fail "model pin precedence ($R)"
+R="$(res COMMS_ACP_CODEX_EFFORT=high "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" effort)" = high ] && [ "$(rv "$R" effort_source)" = pin ] && [ "$(rv "$R" model)" = gpt-5.6-luna ] \
+  && ok "an operator effort pin beats the route for that dimension only" || fail "effort pin precedence ($R)"
+OUT="$(res COMMS_ACP_CODEX_MODEL=gpt-5.6-luna COMMS_ACP_CODEX_EFFORT=ultra "$AP" resolve codex 2>/dev/null)"; RC=$?
+[ "$RC" = 1 ] && [ -z "$OUT" ] \
+  && ok "an explicitly pinned pair the model rejects is REFUSED, never substituted" || fail "invalid pinned pair (rc=$RC out=$OUT)"
+R="$(res COMMS_ACP_CODEX_EFFORT=ultra "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = ultra ] && [ "$(rv "$R" fallback)" = unsupported-pair ] \
+  && ok "a routed dimension that makes an invalid pair falls back to the baseline once, recorded" || fail "routed invalid pair ($R)"
+R="$(res COMMS_ACP_CODEX_MODEL=gpt-9-preview "$AP" resolve codex)"
+[ "$(rv "$R" model)" = gpt-9-preview ] && [ "$(rv "$R" pair)" = unverified-pin ] \
+  && ok "a pinned model the map does not know is honoured and labelled unverified (the attestation still gates)" || fail "unknown pinned model ($R)"
+R="$(res "$AP" resolve claude --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" capability)" = unsupported ] && [ "$(rv "$R" model)" = n/a ] && [ "$(rv "$R" verify)" = none ] \
+  && [ "$(rv "$R" fallback)" = capability-unsupported ] \
+  && ok "an unsupported provider claims no model, no effort and no verification" || fail "claude unsupported ($R)"
+R="$(res "$AP" resolve codex --transport acp --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" capability)" = unsupported ] && [ "$(rv "$R" model)" = n/a ] \
+  && ok "an UNMOUNTED codex turn is unsupported: nothing there applies or attests a policy" || fail "unmounted codex ($R)"
+res "$AP" resolve nosuch >/dev/null 2>&1; A=$?
+res "$AP" resolve codex --tier turbo >/dev/null 2>&1; B=$?
+res "$AP" resolve codex --transport pigeon >/dev/null 2>&1; C=$?
+res "$AP" resolve codex --decision ../x >/dev/null 2>&1; D=$?
+[ "$A$B$C$D" = 2222 ] \
+  && ok "unknown agent, tier, transport and a path-shaped decision id are usage errors, never read as none" || fail "usage errors ($A$B$C$D)"
+
+# PHASE: only an implement review is routed; an approach review keeps the baseline, so reviewer
+# depth can never change what a plan is judged by.
+R="$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase plan)"
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" fallback)" = phase-excluded ] \
+  && ok "a routed decision on a plan-phase turn keeps the baseline (phase-excluded)" || fail "plan phase routed ($R)"
+# EXPLICIT IS STRICT: an operator decision the map cannot honour is refused, never substituted.
+OUT="$(res COMMS_ACP_CODEX_EFFORT=ultra "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on \
+        --phase implement --candidate-source explicit 2>/dev/null)"; RC=$?
+[ "$RC" = 1 ] && [ -z "$OUT" ] \
+  && ok "an explicit decision that forms an invalid pair is refused, where a classified one falls back" || fail "explicit invalid pair (rc=$RC)"
+# THE CONCRETE POLICY'S IDENTITY (runphase names a mounted session after it).
+D1="$(rv "$(res "$AP" resolve codex)" policy_digest)"
+D2="$(rv "$(res "$AP" resolve codex --tier strong --effort xhigh --decision rd-a --routing on --phase implement)" policy_digest)"
+D3="$(rv "$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)" policy_digest)"
+D4="$(rv "$(res "$AP" resolve claude)" policy_digest)"
+[ -n "$D1" ] && [ "$D1" = "$D2" ] && [ "$D1" != "$D3" ] && [ "$D4" = none ] \
+  && printf '%s' "$D1" | grep -qE '^[0-9a-f]{12}$' \
+  && ok "the policy digest names the concrete pair: same pair same digest, a changed pair a new one, none where nothing applies" || fail "policy digest ($D1/$D2/$D3/$D4)"
+# A pinned model the map does not know may not be combined with a ROUTED effort.
+R="$(res COMMS_ACP_CODEX_MODEL=gpt-9-preview "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-9-preview ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" effort_source)" = baseline ] \
+  && [ "$(rv "$R" fallback)" = unverified-pin ] \
+  && ok "a routed effort is dropped rather than paired with an unverified pinned model" || fail "unverified pin + route ($R)"
+PCO="$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-reserve"}]}}' \
+        | res "$AP" policy-check codex - 2>/dev/null)"; RC=$?
+[ "$RC" = 21 ] && printf '%s\n' "$PCO" | grep -q 'no reasoning_effort option for model gpt-reserve' \
+  && ok "a session exposing no effort option for its model is undecidable with the specific cause" || fail "missing effort option message (rc=$RC $PCO)"
+
+# THE MAP IS THE ONLY TABLE and it is validated whole. A bare copy of acp.sh with a crafted
+# sibling map stands in for a broken install.
+PM="$WORK/policy-map-probe"; rm -rf "$PM"; mkdir -p "$PM"; cp "$AP" "$PM/acp.sh"; chmod +x "$PM/acp.sh"
+res "$PM/acp.sh" resolve codex >/dev/null 2>&1; A=$?
+res "$PM/acp.sh" policy codex >/dev/null 2>&1; B=$?
+[ "$A" = 1 ] && [ "$B" = 1 ] \
+  && ok "a missing map refuses resolution and the policy accessor (fail closed, no literal fallback)" || fail "missing map ($A/$B)"
+sed 's/^baseline	codex	acp-mounted	gpt-6-astra	xhigh$/baseline	codex	acp-mounted	gpt-6-astra"	xhigh/' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
+res "$PM/acp.sh" provider-config codex >/dev/null 2>&1 && fail "a map value carrying a quote reached the config" \
+  || ok "a map value that is not a bare identifier refuses the whole map"
+{ cat "$REPO/helpers/policy-map.tsv"; printf 'version\t9\n'; } > "$PM/policy-map.tsv"
+res "$PM/acp.sh" resolve codex >/dev/null 2>&1 && fail "a map with two versions was accepted" \
+  || ok "a map with a duplicated version row is refused"
+grep -v '^pair	codex	acp-mounted	gpt-5.6-luna	' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
+R="$(res "$PM/acp.sh" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" fallback)" = unsupported-pair ] \
+  && ok "a routed model the map lists no accepted efforts for is never run unvalidated" || fail "unpaired routed model ($R)"
+
+# FIXED: the baseline (plus pins) is applied and attested, routing is ignored.
+sed 's/^\(capability	codex	acp-mounted	\)eligible	/\1fixed	/' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
+R="$(res "$PM/acp.sh" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" capability)" = fixed ] && [ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" verify)" = "model,effort" ] \
+  && [ "$(rv "$R" fallback)" = capability-fixed ] \
+  && printf '%s\n' "$R" > "$PM/fixed.tsv" \
+  && res "$PM/acp.sh" provider-config codex --policy-file "$PM/fixed.tsv" | grep -qx 'model_reasoning_effort = "xhigh"' \
+  && ok "a fixed combination still applies and attests its baseline, and ignores the route" || fail "fixed capability ($R)"
+# An explicit tier the map does not define is refused, not replaced.
+grep -v '^tier	codex	acp-mounted	fast	' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
+res "$PM/acp.sh" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement \
+  --candidate-source explicit >/dev/null 2>&1; A=$?
+R="$(res "$PM/acp.sh" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement --candidate-source typesafe)"
+[ "$A" = 1 ] && [ "$(rv "$R" fallback)" = unmapped-tier ] && [ "$(rv "$R" model)" = gpt-6-astra ] \
+  && ok "an unmapped tier refuses an explicit decision and falls back (recorded) for a classified one" || fail "unmapped tier ($A / $R)"
+
+# --policy-file: every accessor reads the PERSISTED record and never re-resolves.
+PR="$WORK/policy-rec"; mkdir -p "$PR"
+res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement > "$PR/luna.tsv"
+res COMMS_ACP_CODEX_EFFORT=high "$AP" provider-config codex --policy-file "$PR/luna.tsv" > "$PR/luna.toml"
+grep -qx 'model = "gpt-5.6-luna"' "$PR/luna.toml" && grep -qx 'model_reasoning_effort = "low"' "$PR/luna.toml" \
+  && grep -qx 'sandbox_mode = "read-only"' "$PR/luna.toml" \
+  && ok "provider-config writes the persisted pair, not a pin set AFTER resolution" || fail "provider-config --policy-file"
+[ "$(res COMMS_ACP_CODEX_MODEL=gpt-5.6-sol "$AP" policy codex --policy-file "$PR/luna.tsv")" = "$(printf 'gpt-5.6-luna\tlow')" ] \
+  && ok "policy --policy-file returns the persisted pair" || fail "policy --policy-file"
+res "$AP" policy-attest codex low gpt-5.6-luna --policy-file "$PR/luna.tsv" >/dev/null 2>&1; A=$?
+res "$AP" policy-attest codex xhigh gpt-6-astra --policy-file "$PR/luna.tsv" >/dev/null 2>&1; B=$?
+[ "$A" = 0 ] && [ "$B" = 20 ] \
+  && ok "the attestation's expectation is the persisted record: a baseline turn is a MISMATCH for a routed one" || fail "attest --policy-file ($A/$B)"
+[ "$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-5.6-luna"},{"id":"reasoning_effort","currentValue":"low"}]}}' \
+     | res "$AP" policy-check codex - --policy-file "$PR/luna.tsv" >/dev/null 2>&1; echo $?)" = 0 ] \
+  && [ "$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-astra"},{"id":"reasoning_effort","currentValue":"xhigh"}]}}' \
+     | res "$AP" policy-check codex - --policy-file "$PR/luna.tsv" >/dev/null 2>&1; echo $?)" = 20 ] \
+  && ok "the preflight compares a session against the persisted record (a warm baseline session is refused)" || fail "policy-check --policy-file"
+# A saved MODEL preference acpx would replay onto a replacement session is read too, now that a
+# routed turn may run a model other than the baseline.
+[ "$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-5.6-luna"},{"id":"reasoning_effort","currentValue":"low"}],"session_options":{"model":"gpt-6-astra"}}}' \
+     | res "$AP" policy-check codex - --policy-file "$PR/luna.tsv" >/dev/null 2>&1; echo $?)" = 20 ] \
+  && [ "$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-5.6-luna"},{"id":"reasoning_effort","currentValue":"low"}],"session_options":"odd"}}' \
+     | res "$AP" policy-check codex - --policy-file "$PR/luna.tsv" >/dev/null 2>&1; echo $?)" = 21 ] \
+  && ok "a conflicting saved model preference is refused; an unreadable one is undecidable" || fail "session_options.model not read"
+# A tampered or foreign record is refused, never trusted because the runner wrote it.
+sed 's/^model	gpt-5.6-luna$/model	gpt-5.6-luna"x/' "$PR/luna.tsv" > "$PR/bad.tsv"
+res "$AP" provider-config codex --policy-file "$PR/bad.tsv" >/dev/null 2>&1; A=$?
+{ cat "$PR/luna.tsv"; printf 'model\tgpt-6-astra\n'; } > "$PR/dup.tsv"
+res "$AP" provider-config codex --policy-file "$PR/dup.tsv" >/dev/null 2>&1; B=$?
+res "$AP" resolve claude > "$PR/claude.tsv"
+res "$AP" provider-config codex --policy-file "$PR/claude.tsv" >/dev/null 2>&1; C=$?
+res "$AP" policy-attest codex low gpt-5.6-luna --policy-file "$PR/absent.tsv" >/dev/null 2>&1; D=$?
+[ "$A" = 1 ] && [ "$B" = 1 ] && [ "$C" = 1 ] && [ "$D" = 21 ] \
+  && ok "an injected, doubled-key, foreign-provider or missing record is refused (attestation: undecidable)" || fail "record validation ($A/$B/$C/$D)"
+CAPS="$(res "$AP" capabilities)"
+printf '%s\n' "$CAPS" | grep -q "^map_version: $MAPV" && printf '%s\n' "$CAPS" | grep -q '^codex/acp-mounted: eligible' \
+  && printf '%s\n' "$CAPS" | grep -q '^claude/acp-mounted: unsupported' \
+  && ok "capabilities shows the map version and which combinations are routing-eligible" || fail "capabilities output"
+# THE MAP IS THE ONLY PLACE A VENDOR MODEL ID LIVES IN CODE. Comments may describe history.
+MID_HITS="$(for f in acp.sh comms.sh runphase.sh route.sh route_backend.py route_review.py route_shadow.py; do
+  sed 's/[[:space:]]*#.*$//' "$REPO/helpers/$f" | grep -nE 'gpt-[0-9]' | sed "s|^|$f:|"; done)"
+[ -z "$MID_HITS" ] \
+  && ok "no helper carries a vendor model id in code — the versioned map is the one table" || fail "model ids outside the map: $MID_HITS"
+
 section "reviewer policy: a wrong-depth review is never published"
 # RUNNER-LEVEL, through the real mounted codex path — not an extracted function and not a
 # line-order grep. The guarantee under test is that a turn which did not run the declared
@@ -888,3 +1058,94 @@ AXD_OK="$WORK/acp-parity/legit-home"; rm -rf "$AXD_OK"; mkdir -p "$AXD_OK"
     ACP_PARITY_PAYLOAD="$AXD_PAY" "$AXB/npx" -y acpx@0.13.1 codex -s sess --file "$AXD_PAY" ) >/dev/null 2>&1 || true
 [ -n "$(find "$AXD_OK" -name 'rollout-*.jsonl' 2>/dev/null)" ] \
   && ok "a CODEX_HOME inside the suite work root still receives its rollout evidence" || fail "the guard blocked a legitimate fixture home"
+
+section "reviewer routing: a routed decision reaches the mounted codex turn"
+# END TO END through the real mounted codex path, with explicit decisions (no classifier, no
+# network). The acpx stub fixes model/effort when a session is CREATED from the isolated config and
+# reports the captured pair on every later show/prompt, as codex does — so a warm session does NOT
+# silently adopt a changed policy here; only a fresh one (a new policy digest) does.
+rr_decide() {  # <thread> <tier> <effort> [--replace] -> decision id
+  ( cd "$MA_FIX" && env -u COMMS_ROUTE "$COMMS" review-route decide --thread "$1" --phase implement \
+      --tier "$2" --effort "$3" ${4:+"$4"} 2>/dev/null ) | sed -n 's/^decision: //p'
+}
+rr_msg() {  # <thread> <decision-id-or-empty> -> an implement-phase mounted request carrying the id
+  local thr="$1" rid="$2" m
+  m="$(pol_msg "$thr")"
+  sed -i.bak -e 's/^phase: plan$/phase: implement/' "$m" && rm -f "$m.bak"
+  if [ -n "$rid" ]; then
+    awk -v rid="$rid" 'NR==1{print; next} !done && $0=="---"{print "route_decision: " rid; done=1} {print}' "$m" > "$m.tmp" && mv "$m.tmp" "$m"
+  fi
+  printf '%s' "$m"
+}
+rr_run() {  # <thread> <decision-id-or-empty> <dir> [extra env...]
+  local thr="$1" rid="$2" dir="$3" m; shift 3
+  mkdir -p "$dir"; m="$(rr_msg "$thr" "$rid")"
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$CN_MHOME" COMMS_MOUNT_BASE="$CN_MBASE" \
+      ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=pong COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+      "$@" "$RP" run --message "$m" --dir "$dir" --provider codex --via acp --timeout-secs 20 ) >/dev/null 2>&1
+}
+tv() { awk -F'\t' -v k="$2" '$1==k{v=$2} END{print v}' "$1/turn.tsv" 2>/dev/null; }
+
+RR1="$(rr_decide rr-arc fast low)"
+RR_D1="$WORK/rr-1"; RR_CFG="$WORK/rr-1.cfg"
+rr_run rr-arc "$RR1" "$RR_D1" COMMS_REVIEW_ROUTE=1 AX_CFG_LOG="$RR_CFG"
+[ -n "$RR1" ] && [ "$(cn_status "$RR_D1")" = completed ] && [ "$(pol_inbox_n rr-arc)" = 1 ] \
+  && ok "a routed fast/low turn completes and publishes exactly one review" || fail "routed turn: status=$(cn_status "$RR_D1") inbox=$(pol_inbox_n rr-arc) id=$RR1"
+grep -q 'model = "gpt-5.6-luna"' "$RR_CFG" 2>/dev/null && grep -q 'model_reasoning_effort = "low"' "$RR_CFG" 2>/dev/null \
+  && ok "the config the provider actually read carries the ROUTED pair" || fail "provider-visible config lacks the routed pair"
+[ "$(tv "$RR_D1" requested_model)" = gpt-5.6-luna ] && [ "$(tv "$RR_D1" requested_effort)" = low ] \
+  && [ "$(tv "$RR_D1" observed_model)" = gpt-5.6-luna ] && [ "$(tv "$RR_D1" observed_effort)" = low ] \
+  && [ "$(tv "$RR_D1" route_decision)" = "$RR1" ] && [ "$(tv "$RR_D1" policy_model_source)" = route ] \
+  && [ "$(tv "$RR_D1" adapter_check)" = match ] && [ "$(tv "$RR_D1" evidence_source)" = provider-rollout ] \
+  && ok "turn.tsv keeps requested, adapter-reported and provider-observed values apart, with the decision id" || fail "routed ledger ($(tr '\t\n' '= ' < "$RR_D1/turn.tsv"))"
+RR_S1="$(tv "$RR_D1" acp_session)"; RR_P1="$(tv "$RR_D1" policy_digest)"
+printf '%s' "$RR_P1" | grep -qE '^[0-9a-f]{12}$' && [ "${RR_S1%+p"$RR_P1"}" != "$RR_S1" ] \
+  && ok "the mounted session is named after the concrete policy's digest" || fail "session not policy-named ($RR_S1 / $RR_P1)"
+grep -q 'route_decision' "$RR_D1/prompt.md" 2>/dev/null \
+  && fail "the reviewer's prompt carries the routing id" || ok "the reviewer's prompt does not carry the routing id"
+
+# WARM RESUME under the same decision: same session, still the routed pair.
+RR_D2="$WORK/rr-2"; rr_run rr-arc "$RR1" "$RR_D2" COMMS_REVIEW_ROUTE=1
+[ "$(cn_status "$RR_D2")" = completed ] && [ "$(tv "$RR_D2" acp_session)" = "$RR_S1" ] \
+  && [ "$(tv "$RR_D2" observed_model)" = gpt-5.6-luna ] \
+  && ok "round 2 under the same decision resumes the SAME session at the routed pair" || fail "warm resume: status=$(cn_status "$RR_D2") session=$(tv "$RR_D2" acp_session)"
+# DELIBERATE CHANGE: a new decision id and a new concrete pair is a FRESH session, verified.
+RR2="$(rr_decide rr-arc balanced medium --replace)"
+RR_D3="$WORK/rr-3"; rr_run rr-arc "$RR2" "$RR_D3" COMMS_REVIEW_ROUTE=1
+[ -n "$RR2" ] && [ "$RR2" != "$RR1" ] && [ "$(cn_status "$RR_D3")" = completed ] \
+  && [ "$(tv "$RR_D3" acp_session)" != "$RR_S1" ] && [ "$(tv "$RR_D3" observed_model)" = gpt-5.6-terra ] \
+  && [ "$(tv "$RR_D3" observed_effort)" = medium ] \
+  && ok "a replaced decision runs in a fresh session under the new pair, never the warm old one" || fail "deliberate change: status=$(cn_status "$RR_D3") session=$(tv "$RR_D3" acp_session) obs=$(tv "$RR_D3" observed_model)"
+# THE OLD ID after a replace is not the decision in force: refused before any prompt, unpublished.
+RR_D4="$WORK/rr-4"; RR_L4="$WORK/rr-4.argv"; rr_run rr-arc "$RR1" "$RR_D4" COMMS_REVIEW_ROUTE=1 AX_CWD_LOG="$RR_L4"
+[ "$(cn_status "$RR_D4")" = failed ] \
+  && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L4" 2>/dev/null | grep -q . \
+  && ok "a stale (replaced) routing id refuses the turn before any prompt" || fail "stale id: status=$(cn_status "$RR_D4")"
+# A PLANTED id for another thread refuses too.
+RRX="$(rr_decide rr-other fast low)"
+RR_D5="$WORK/rr-5"; rr_run rr-arc "$RRX" "$RR_D5" COMMS_REVIEW_ROUTE=1
+[ "$(cn_status "$RR_D5")" = failed ] && [ "$(pol_inbox_n rr-arc)" = 3 ] \
+  && ok "a decision belonging to another thread never routes this one" || fail "foreign id: status=$(cn_status "$RR_D5") inbox=$(pol_inbox_n rr-arc)"
+# ROUTING OFF: a stamped id is ignored, never a reason to refuse; the baseline runs and says why.
+RR_D6="$WORK/rr-6"; rr_run rr-off "$RRX" "$RR_D6"
+[ "$(cn_status "$RR_D6")" = completed ] && [ "$(tv "$RR_D6" requested_model)" = gpt-6-astra ] \
+  && [ "$(tv "$RR_D6" requested_effort)" = xhigh ] && [ "$(tv "$RR_D6" policy_fallback)" = routing-disabled ] \
+  && ok "with routing off the baseline runs, recorded as routing-disabled" || fail "routing off: status=$(cn_status "$RR_D6") fb=$(tv "$RR_D6" policy_fallback)"
+# THE EXPECTATION IS NEVER RELABELLED: a routed turn that ran the baseline pair is a mismatch.
+RRY="$(rr_decide rr-div fast low)"
+RR_D7="$WORK/rr-7"; rr_run rr-div "$RRY" "$RR_D7" COMMS_REVIEW_ROUTE=1 AX_ROLLOUT_MODEL=gpt-6-astra AX_ROLLOUT_EFFORT=xhigh
+[ "$(cn_status "$RR_D7")" = failed ] && [ "$(pol_inbox_n rr-div)" = 0 ] \
+  && [ "$(tv "$RR_D7" requested_model)" = gpt-5.6-luna ] && [ "$(tv "$RR_D7" observed_model)" = gpt-6-astra ] \
+  && ok "a routed turn whose rollout shows the baseline is refused unpublished, requested vs observed legible" || fail "routed divergence: status=$(cn_status "$RR_D7")"
+# A SESSION THAT WILL NOT SERVE the routed pair (a stale preference) is refused before the canary.
+RRZ="$(rr_decide rr-stale fast low)"
+RR_D8="$WORK/rr-8"; RR_L8="$WORK/rr-8.argv"
+rr_run rr-stale "$RRZ" "$RR_D8" COMMS_REVIEW_ROUTE=1 AX_MODEL=gpt-6-astra AX_EFFORT=xhigh AX_CWD_LOG="$RR_L8"
+[ "$(cn_status "$RR_D8")" = failed ] && [ "$(tv "$RR_D8" adapter_check)" = mismatch ] \
+  && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L8" 2>/dev/null | grep -q . \
+  && ok "a session reporting the baseline for a routed turn is refused before any prompt" || fail "stale session: status=$(cn_status "$RR_D8") adapter=$(tv "$RR_D8" adapter_check)"
+# A PANEL LEG (`<base>-codex`) routes on its base thread's decision.
+RRP="$(rr_decide rr-panel fast low)"
+RR_D9="$WORK/rr-9"; rr_run rr-panel-codex "$RRP" "$RR_D9" COMMS_REVIEW_ROUTE=1
+[ "$(cn_status "$RR_D9")" = completed ] && [ "$(tv "$RR_D9" observed_model)" = gpt-5.6-luna ] \
+  && ok "a panel leg's thread resolves to its base thread's decision" || fail "panel leg: status=$(cn_status "$RR_D9")"

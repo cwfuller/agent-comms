@@ -223,6 +223,12 @@ LOCAL_OUT="$(cd "$INST_FIX" && bash "$REPO/install.sh" --scope=local 2>&1)"
 [ -x "$INST_FIX/.agent-comms/comms.sh" ] && ok "local scope installs executable helpers" || fail "local scope installs executable helpers"
 [ -x "$INST_FIX/.agent-comms/route.sh" ] && ok "local scope installs route.sh" || fail "local scope installs route.sh"
 [ -f "$INST_FIX/.agent-comms/route_backend.py" ] && ok "local scope installs route_backend.py" || fail "local scope installs route_backend.py"
+[ -f "$INST_FIX/.agent-comms/route_review.py" ] && [ -f "$INST_FIX/.agent-comms/policy-map.tsv" ] \
+  && ok "local scope installs the reviewer decider and the policy map" || fail "local scope misses route_review.py / policy-map.tsv"
+# THE INSTALLED accessor resolves through the map installed BESIDE it (sibling resolution is the
+# only lookup), so a local pin carries its own table rather than borrowing the source tree's.
+[ "$(env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$INST_FIX/.agent-comms/acp.sh" policy codex 2>/dev/null)" = "$(printf 'gpt-6-astra\txhigh')" ] \
+  && ok "the locally installed acp.sh resolves the baseline from its own sibling map" || fail "installed acp.sh cannot resolve"
 [ -f "$INST_FIX/.claude/commands/auto.md" ] && ok "local scope installs commands" || fail "local scope installs commands"
 [ -f "$INST_FIX/.claude/commands/ask.md" ] && ok "local scope installs /ask" || fail "local scope installs ask.md"
 # THE BLOCKING DEFECT r1 FOUND, pinned two ways. A local-only install — also the noninteractive

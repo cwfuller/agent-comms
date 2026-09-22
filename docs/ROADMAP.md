@@ -244,6 +244,12 @@ Treat any change there as a criteria amendment, not as an incomplete step.
 finishes, so if `acp.sh` were edited or reinstalled mid-turn, `requested_*` would describe the new
 policy rather than the one that generated that turn's config. Resolve and retain the pair at
 config-generation time when this logging is next extended.
+**CLOSED by the reviewer-routing binding (2026-09-22):** the pair is resolved once into
+`run_dir/policy.tsv` before any session is launched, hash-checked before every consumer, and
+`requested_*` is written from it at resolution time. That deliberately AMENDS the "ruled out" item
+above: pre-canary, containment and canary refusals now carry the requested pair too, beside
+`adapter_*` and `observed_*`, which keep "never started" and "ran the wrong depth" distinguishable
+by the observed columns rather than by the absence of the requested ones.
 
 ### APPROVED ON BRANCH 2026-09-19: a policy observation carries its attribution (step 3)
 
@@ -361,6 +367,32 @@ show `gpt-5.6-sol` / `low`. Those are 2026-08-30 legacy mounts on CLI `0.148.0`.
 store is `~/.local/state/agent-comms/mounts/` (`helpers/runphase.sh:1367`). Sample the live store,
 not `.comms/mounts/`.
 
+### BUILT ON BRANCH 2026-09-22: reviewer model/effort routing binds an abstract decision to the turn
+
+Implements the "reviewer turns are the right controllable boundary" note below, from the handoff
+`agent-comms-jev-routing-handoff-2026-09-22`. What exists now:
+
+- `helpers/policy-map.tsv` — the ONE versioned table naming vendor models (codex/acp-mounted:
+  baseline `gpt-6-astra`/`xhigh`; `fast`→`gpt-5.6-luna`, `balanced`→`gpt-5.6-terra`,
+  `strong`→`gpt-6-astra`; identity effort map; the efforts each model accepts), plus a capability
+  row per provider/transport (mechanism, evidence source, versions tested). Only codex/acp-mounted
+  is `eligible`; claude and grok are `unsupported` until their controls are proven live.
+- `acp.sh resolve` — precedence pin > eligible enabled implement-phase route > baseline, pair
+  validation, explicit decisions strict, a `policy_digest` naming the concrete pair.
+- `route_review.py` / `comms.sh review-route` — sticky per (thread, phase) decisions with a
+  reviewer rubric (`reviewer-v1`: no bump, split answers go deeper, low confidence = baseline),
+  bounded recorded input, git-measured risk signals, the shadow permit, stub never applied.
+- runphase resolves before launch, names the mounted codex session after the digest (a changed
+  policy is a fresh session; an unchanged one stays warm), and records requested / adapter /
+  observed / runtime separately.
+- The implementer classifier's bump is now the NAMED variant `implementer-bump-v1`, advisory only.
+
+**Still open:** a bounded live proof on real mounted codex turns (fresh routed, warm resume,
+deliberate change); claude/grok controls proven live before any row may become `eligible`; and the
+outcome experiment — frozen mapping, same artifacts and prompts under baseline vs routed,
+independently adjudicated misses, classifier + cache-loss + retry cost included — before default
+activation is even proposed. Routing stays opt-in (`COMMS_REVIEW_ROUTE=1`) and off by default.
+
 ### OPEN: the /auto model router computes a decision nothing consumes (2026-09-19, sev 3, claude+codex consult)
 
 The Jev classifier (`helpers/route.sh`, `helpers/route_backend.py`, landed 2026-09-17,
@@ -428,6 +460,10 @@ xhigh" — it is a counterfactual. The answerable questions are "does routing be
 operator's" (free retrospective labels; `plan` is the only binding output). Before either,
 ~20-30 logged live decisions answer the cheap question — *is it a constant function?* — with no
 labels and no confidence interval. Fix the log shape first or those rows are unjoinable forever.
+
+**Partly answered 2026-09-22:** the bump is now the named `implementer-bump-v1` variant and is
+never the candidate that routes a reviewer; reviewer routing uses `reviewer-v1` with no bump, so
+`fast`/`low` are reachable there. The implementer question below stands.
 
 **Open question the operator should settle:** what is `_step_up` FOR? If it is a safety margin for
 an untrusted classifier, make it confidence-conditional so `fast`/`low` return. If it is permanent

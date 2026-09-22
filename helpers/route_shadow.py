@@ -23,14 +23,9 @@ import route_backend  # noqa: E402
 
 # Bumped whenever the recorded shape or the transmitted state changes, so a replay can refuse
 # rows it does not understand rather than silently comparing incomparable records.
-SHADOW_RECORD_VERSION = 1
-
-# Git variables that can point a command at a DIFFERENT repository than the cwd.
-_GIT_SELECTORS = {
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES",
-    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX",
-}
+# v2: adds `role` (implementer | reviewer), `policy_variant` / `rubric_version`, and, for a
+# reviewer observation, the bounded-input record (`input`) and the structured state sent.
+SHADOW_RECORD_VERSION = 2
 
 # A decision id names a FILE. Anything but a bare token can traverse out of the record root.
 _ID_OK = re.compile(r"\A[0-9a-zA-Z][0-9a-zA-Z._-]{0,127}\Z")
@@ -46,49 +41,11 @@ TASK_LIMIT = 8000
 QUESTIONS = route_backend.QUESTIONS
 
 
-def _canonical_project():
-    """sha256 of the canonical MAIN repo root of the CURRENT working tree.
-
-    Derived here, never taken from the environment: permission that trusts a caller-supplied
-    identity is not permission. Mirrors route.sh's shadow_repo_key and runphase's
-    mount_repo_key so one clone is one project across worktrees and mounts.
-    """
-    import subprocess
-    env = {k: v for k, v in os.environ.items() if k not in _GIT_SELECTORS}
-    try:
-        out = subprocess.run(["git", "worktree", "list", "--porcelain"],
-                             capture_output=True, text=True, timeout=10, env=env)
-        if out.returncode != 0:
-            return "", ""
-        first = out.stdout.splitlines()[0] if out.stdout.splitlines() else ""
-        if not first.startswith("worktree "):
-            return "", ""
-        root = os.path.realpath(first[len("worktree "):].strip())
-    except Exception:
-        return "", ""
-    if not root:
-        return "", ""
-    return hashlib.sha256(root.encode("utf-8")).hexdigest(), root
-
-
-def _permitted(key):
-    """The allowlist check, enforced HERE as well as in route.sh.
-
-    This module is installed executable and has its own __main__, so a caller that runs it
-    directly — including the suite — bypassed the shell-side gate entirely and could reach
-    HTTP with an empty project key. Permission is a property of the backend-call boundary,
-    not of one entry path. (codex P1, implement r1.)
-    """
-    if not key:
-        return False
-    allow = os.environ.get("COMMS_ROUTE_SHADOW_ALLOW") or os.path.join(
-        os.environ.get("AGENT_COMMS_HOME") or os.path.expanduser("~/.agent-comms"),
-        "route-shadow-allow")
-    try:
-        with open(allow, "r", encoding="utf-8") as fh:
-            return any(line.strip() == key for line in fh)
-    except OSError:
-        return False
+# ONE project identity and ONE transmission permit, shared with the live reviewer decider
+# (route_review.py) so the two paths that can send project text off the machine cannot disagree
+# about which projects may. Defined in route_backend; the names stay for this module's callers.
+_canonical_project = route_backend.canonical_project
+_permitted = route_backend.transmission_permitted
 
 
 def _die(msg):
@@ -104,7 +61,19 @@ def main():
     task = env("COMMS_ROUTE_TASK") or ""
     if not task.strip():
         _die("empty task")
-    sent = task[:TASK_LIMIT]
+    role = env("COMMS_ROUTE_SHADOW_ROLE") or "implementer"
+    if role not in ("implementer", "reviewer"):
+        _die("unknown shadow role %r" % role)
+    # The REVIEWER observation goes through the SAME bounded builder and questions as the live
+    # reviewer decider (route_review.py); the task text is then the review request itself.
+    if role == "reviewer":
+        state, input_meta = route_backend.build_review_state(task)
+        questions = route_backend.REVIEW_QUESTIONS
+        sent = json.dumps(state["request"], sort_keys=True, ensure_ascii=False)
+    else:
+        sent = task[:TASK_LIMIT]
+        state, input_meta = route_backend.build_state(sent), None
+        questions = QUESTIONS
 
     rec = {
         "record_version": SHADOW_RECORD_VERSION,
@@ -120,7 +89,12 @@ def main():
         "sent_sha256": hashlib.sha256(sent.encode("utf-8")).hexdigest(),
         "sent_chars": len(sent),
         "task_chars": len(task),
-        "truncated": len(task) > TASK_LIMIT,
+        "truncated": (len(task) > TASK_LIMIT) if role == "implementer"
+                     else any(v["truncated"] for v in input_meta["sections"].values()),
+        "role": role,
+        "policy_variant": (route_backend.IMPLEMENTER_POLICY_VARIANT if role == "implementer"
+                           else route_backend.REVIEWER_POLICY_VARIANT),
+        "rubric_version": "implementer" if role == "implementer" else route_backend.REVIEW_RUBRIC_VERSION,
         # The EFFECTIVE POLICY INPUTS, without which a replay cannot reproduce `tier`.
         "policy_inputs": {
             "current_tier": env("COMMS_ROUTE_SHADOW_CURRENT_TIER") or "",
@@ -132,6 +106,8 @@ def main():
     # The transmitted text itself. This is the content the permission gate governs; it is
     # written only because the project was explicitly permitted before the call was made.
     rec["sent"] = sent
+    if input_meta is not None:
+        rec["input"] = input_meta
 
     # BEFORE the backend is resolved and long before any socket. The key is DERIVED from the
     # current tree; a supplied one that disagrees is a caller trying to borrow another
@@ -152,9 +128,8 @@ def main():
     except OSError as e:
         _die("cannot create %s (%s)" % (out_dir, type(e).__name__))
 
-    state = route_backend.build_state(sent)
     rec["questions_sha256"] = hashlib.sha256(
-        json.dumps(QUESTIONS, sort_keys=True).encode("utf-8")).hexdigest()
+        json.dumps(questions, sort_keys=True).encode("utf-8")).hexdigest()
     # The COMPLETE outbound payload, so a replay can prove it matched production.
     rec["state_sha256"] = hashlib.sha256(
         json.dumps(state, sort_keys=True).encode("utf-8")).hexdigest()
@@ -170,7 +145,7 @@ def main():
         timeout = 8.0
 
     try:
-        answers = fn(state, QUESTIONS, timeout)
+        answers = fn(state, questions, timeout)
         rec["status"] = "success"
         rec["answers"] = answers
     except route_backend.BackendError as e:

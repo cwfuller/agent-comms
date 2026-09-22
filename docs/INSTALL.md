@@ -21,7 +21,7 @@ Run interactively (no `--scope`) and the installer shows a menu:
 
 | scope | installs | where |
 |---|---|---|
-| `global` | 5 driver commands for Claude, Grok, and Codex; 3 helper scripts; 2 loopspec fragments; the Codex protocol note | `~/.claude/commands/`, `~/.grok/commands/`, `~/.codex/skills/`, `~/.agent-comms/`, `~/.codex/AGENTS.md` |
+| `global` | 5 driver commands for Claude, Grok, and Codex; 8 helper files (scripts plus the reviewer policy map); 2 loopspec fragments; the Codex protocol note | `~/.claude/commands/`, `~/.grok/commands/`, `~/.codex/skills/`, `~/.agent-comms/`, `~/.codex/AGENTS.md` |
 | `project` | per-repo state only | `.comms/{to-codex,to-claude,to-grok,archive}/`, `.gitignore` entries |
 | `both` | global + project | the recommended pair |
 | `local` | pinned copies of everything into the repo | `.claude/commands/`, `.grok/commands/`, `.agents/skills/`, `.agents/loopspec-fragments/`, `.agent-comms/` + project state |

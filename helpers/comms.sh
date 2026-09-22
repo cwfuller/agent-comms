@@ -98,6 +98,20 @@
 #                               Fail-open with no backend, on timeout, or on a
 #                               malformed answer. Prompt overrides win. Never
 #                               selects a reviewer or a vendor model id.
+#   review-route decide (--request <review-request> | --thread T --phase P) [--tier T] [--effort E] [--replace]
+#   review-route lookup --thread T --phase P
+#   review-route current --thread <message thread> --phase P
+#   review-route show <decision-id> [--thread T] [--phase P]
+#   review-route enabled
+#                               the REVIEWER routing decision for a (thread, phase): an
+#                               abstract tier/effort candidate (or `none` = baseline), made ONCE
+#                               and reused every round; --replace mints a new one. Only phase
+#                               `implement` is routed. Classifying sends request text to the
+#                               backend ONLY for a project in the route-shadow-allow permit.
+#                               send / panel dispatch stamp `route_decision:` from it ONLY
+#                               when COMMS_REVIEW_ROUTE=1 (and COMMS_ROUTE is not 0), and
+#                               strip any hand-typed value otherwise. runphase resolves it
+#                               per turn with `acp.sh resolve`. `enabled` exits 0 iff on.
 #   panel dispatch --to a,b <review-request> [--set ID]
 #                               fan ONE artifact out to N reviewers as N parallel 2-party
 #                               legs sharing a review_set. One snapshot for the whole set.
@@ -1517,6 +1531,107 @@ cmd_route() {
   exec /bin/bash "$sh" "$@"
 }
 
+# REVIEWER ROUTING IS OPT-IN, decided in ONE place. On only when COMMS_REVIEW_ROUTE says so, and
+# COMMS_ROUTE=0 (or `/auto --no-route`, which exports it) is the master switch that also turns it
+# off. The implementer classifier's own opt-in (COMMS_ROUTE=1 / a backend) does NOT enable it: a
+# reviewer turn changing depth is a separate decision from an advisory implementer hint.
+review_routing_enabled() {
+  case "${COMMS_ROUTE:-}" in 0|false|no|off|FALSE|NO|OFF) return 1 ;; esac
+  # NOT gated on COMMS_RUNPHASE_ALLOW_UNCONTAINED. An uncontained reviewer can write the decision
+  # store — and equally the mailbox, the thread state and the tree under review; that is what the
+  # operator accepted by setting it. Routing would widen nothing, and operators export the override
+  # globally, so gating on it would silently make routing unreachable for exactly them.
+  case "${COMMS_REVIEW_ROUTE:-}" in 1|true|yes|on|TRUE|YES|ON) return 0 ;; esac
+  return 1
+}
+
+cmd_review_route() {
+  local verb="${1:-}" py
+  [ -n "$verb" ] && shift
+  py="$(cd "$(dirname "$SELF")" && pwd)/route_review.py"
+  case "$verb" in
+    enabled) review_routing_enabled; return ;;
+    current)
+      # current --thread <message thread> --phase <p> — the decision CURRENTLY in force for the
+      # message's base thread and phase, in show's TSV form. runphase compares it with the id the
+      # request carries: an old or planted id that is not the current pointer never routes a turn.
+      local _ct="" _cp="" _co _cid _cb
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --thread) _ct="${2:-}"; shift 2 || shift ;;
+          --phase)  _cp="${2:-}"; shift 2 || shift ;;
+          *) usage_err "review-route current: unknown option '$(clip "$1")'" ;;
+        esac
+      done
+      [ -n "$_ct" ] && [ -n "$_cp" ] || usage_err "review-route current: --thread and --phase are required"
+      _cb="$(route_base_thread "$_ct")"
+      _co="$(cmd_review_route lookup --thread "$_cb" --phase "$_cp")" || return 1
+      _cid="$(printf '%s\n' "$_co" | sed -n 's/^decision: //p' | head -1)"
+      [ -n "$_cid" ] || return 1
+      cmd_review_route show "$_cid" --thread "$_cb" --phase "$_cp"
+      return ;;
+    decide|show|lookup) ;;
+    *) usage_err "review-route: expected decide|lookup|show|current|enabled" ;;
+  esac
+  command -v python3 >/dev/null 2>&1 || die "review-route: python3 is required"
+  [ -f "$py" ] || die "review-route: route_review.py is not installed next to comms.sh — re-run install.sh"
+  if [ "$verb" = decide ]; then
+    python3 "$py" decide --root "$(cmd_root)" --workspace "$(cmd_workspace)" \
+      --by "$(cmd_whoami 2>/dev/null || echo unknown)" "$@"
+  elif [ "$verb" = lookup ]; then
+    python3 "$py" lookup --root "$(cmd_root)" --workspace "$(cmd_workspace)" "$@"
+  else
+    python3 "$py" show --root "$(cmd_root)" "$@"
+  fi
+}
+
+# stamp_route_decision <file> <id-or-empty> — the ONLY writer of `route_decision:`. Drops every
+# existing line of the key in the frontmatter (a hand-typed value, a duplicate, a blank) and, when
+# an id is given, inserts one canonical line at the frontmatter close. The requesting driver is
+# the author under review, so the depth of its own review is helper-stamped, never author-typed.
+stamp_route_decision() {
+  local sf="$1" rid="$2" stamped
+  stamped="$(mktemp "${TMPDIR:-/tmp}/agent-comms-route.XXXXXX")" || return 1
+  LC_ALL=C awk -v rid="$rid" '
+    NR == 1 { nl = ($0 ~ /\r$/) ? "\r\n" : "\n" }
+    { probe = $0; sub(/\r$/, "", probe) }
+    NR == 1 && probe == "---" { fm = 1; print; next }
+    fm && probe == "---" { if (rid != "") printf "route_decision: %s%s", rid, nl; fm = 0; print; next }
+    fm && index(probe, "route_decision:") == 1 { next }
+    { print }
+  ' "$sf" > "$stamped" && mv -f "$stamped" "$sf" || { rm -f "$stamped" 2>/dev/null; return 1; }
+}
+
+# route_base_thread <thread> — the thread a reviewer decision is keyed on: a panel leg's
+# `<base>-<agent>` (and a `comms.sh shadow` of any leg) strips its trailing registered-agent
+# suffix. ONE accessor for send, panel dispatch and runphase, so they cannot key differently.
+route_base_thread() {
+  local t="$1" a
+  for a in $(registry_agents); do
+    case "$t" in *"-$a") printf '%s\n' "${t%-"$a"}"; return 0 ;; esac
+  done
+  printf '%s\n' "$t"
+}
+
+# route_decision_for <request> <base-thread> <phase> <artifact> <base> — decide (or reuse) the
+# reviewer decision for (base thread, phase) and print its id. Empty output + status 0 when
+# routing is off or the phase is not routed. Dies when routing is on and no decision can be
+# recorded: a request that asked to be routed must not silently go out unrouted. Called AFTER the
+# snapshot, so the decider measures the artifact itself rather than the author's summary of it.
+route_decision_for() {
+  local req="$1" thr="$2" ph="$3" aid="$4" base="$5" out rid
+  review_routing_enabled || return 0
+  # Only the implement phase is routed in this slice: an approach review keeps the baseline.
+  [ "$ph" = implement ] || return 0
+  [ -n "$thr" ] || die "reviewer routing is on but the request has no thread — cannot key a decision"
+  out="$(cmd_review_route decide --request "$req" --thread-override "$thr" --phase "$ph" \
+           ${aid:+--artifact "$aid"} ${base:+--base "$base"})" \
+    || die "reviewer routing: could not record a decision for thread '$thr' phase '$ph'"
+  rid="$(printf '%s\n' "$out" | sed -n 's/^decision: //p' | head -1)"
+  [ -n "$rid" ] || die "reviewer routing: the decider printed no decision id"
+  printf '%s\n' "$rid"
+}
+
 cmd_ask() {
   # ask --from <agent> --to <agent> [--wait] (--file F | words...)
   #
@@ -1756,6 +1871,13 @@ cmd_panel() {
   aid="${dispatch_pair%%	*}"
   dispatch_base="${dispatch_pair#*	}"
   [ "$dispatch_base" = "$dispatch_pair" ] && dispatch_base=""
+  # REVIEWER ROUTING: decided ONCE for the base thread and phase, after the snapshot (so the
+  # decider measures THIS artifact) and before any durable write (so a routing failure refuses
+  # the whole panel rather than half of it). Every leg carries the same id and each leg's send
+  # validates it without re-deciding; resolution per PROVIDER happens in runphase.
+  local panel_route_id=""
+  panel_route_id="$(route_decision_for "$req" "$(route_base_thread "$base_thread")" "$phase" "$aid" "$dispatch_base")" \
+    || die "panel dispatch: reviewer routing failed — refusing to fan out"
   # A SYNTHETIC snapshot means the tree was DIRTY at dispatch: the artifact reviewers read is
   # not any commit you made, and every uncommitted file — including work belonging to another
   # session in a shared checkout — is inside it. This needs no knowledge of WHOSE files they
@@ -1840,7 +1962,7 @@ cmd_panel() {
     mkdir -p "$(dirname "$leg_file")" 2>/dev/null || true
     # Same body, same artifact, same round — only identity and routing differ. Anything
     # else here would make the legs incomparable, which is the point of fanning out.
-    LC_ALL=C awk -v th="$leg_thread" -v mid="$leg_mid" -v setid="$set_id" -v aid="$aid" -v base="$dispatch_base" -v disp="$dispatch_id" '
+    LC_ALL=C awk -v th="$leg_thread" -v mid="$leg_mid" -v setid="$set_id" -v aid="$aid" -v base="$dispatch_base" -v disp="$dispatch_id" -v rid="$panel_route_id" '
       NR == 1 { nl = ($0 ~ /\r$/) ? "\r\n" : "\n" }
       { probe = $0; sub(/\r$/, "", probe) }
       NR == 1 && probe == "---" { fm = 1; print; next }
@@ -1849,8 +1971,11 @@ cmd_panel() {
         printf "dispatch: %s%s", disp, nl
         printf "artifact_id: %s%s", aid, nl
         if (base != "") printf "head_sha: %s%s", base, nl
+        if (rid != "") printf "route_decision: %s%s", rid, nl
         fm = 0; print; next
       }
+      # An inbound routing id is never carried: the helper decided the panel id above.
+      fm && index(probe, "route_decision:") == 1 { next }
       fm && index(probe, "thread:") == 1 { printf "thread: %s%s", th, nl; next }
       fm && index(probe, "message_id:") == 1 { printf "message_id: %s%s", mid, nl; next }
       fm && index(probe, "artifact_id:") == 1 { next }
@@ -2972,6 +3097,10 @@ cmd_shadow() {
   fi
 
   mkdir -p "$store" 2>/dev/null || { rm -rf "$tmpdir"; die "shadow: cannot create $(clip "$store")"; }
+  # WHAT DEPTH THE SHADOW RAN AT, requested and observed, kept before the run dir is deleted: a
+  # routed-vs-baseline comparison is meaningless without it.
+  cp "$run_dir/turn.tsv" "$store/$to.turn.tsv" 2>/dev/null || true
+  cp "$run_dir/policy.tsv" "$store/$to.policy.tsv" 2>/dev/null || true
   # Success is the RUNNER's verdict, not the presence of a file: grok_broker
   # writes reply.md and validates it afterwards, so a stamped-but-degenerate
   # reply exists on disk after a failed turn. Keying on the file alone would
@@ -5298,6 +5427,39 @@ cmd_send() {
     fi
   fi
 
+  # REVIEWER ROUTING — stamped by the helper, never typed by the author. Only a workflow
+  # review-request is routed, and only when routing is on; every other send, and every send
+  # while routing is off, has any `route_decision:` line REMOVED, so a hand-typed or stale id
+  # cannot ride into a turn. A panel leg (`dispatch:` present, thread `<base>-<to>`) reuses the
+  # decision its dispatch made for the base thread; it never classifies again. Deciding happens
+  # here, BEFORE validation and the fail-closed request-persisted event, so a routing failure
+  # refuses the send with nothing delivered.
+  local route_id="" route_thr route_phase route_have
+  if [ "$send_type" = "review-request" ] && [ -n "$(frontmatter_field "$file" workflow)" ] \
+     && review_routing_enabled; then
+    route_thr="$(route_base_thread "$(frontmatter_field "$file" thread)")"
+    route_phase="$(frontmatter_field "$file" phase)"
+    IFS= read -r route_have < <(fm_field_lines "$file" route_decision) || route_have=""
+    if [ -n "$(frontmatter_field "$file" dispatch)" ]; then
+      # A PANEL LEG keeps the id its dispatch stamped — validated, never re-decided, so a
+      # `--replace` between two legs cannot split one review set across two decisions.
+      if [ -n "$route_have" ]; then
+        cmd_review_route show "$route_have" --thread "$route_thr" --phase "$route_phase" >/dev/null \
+          || die "send: the panel's routing decision '$(clip "$route_have")' does not belong to thread '$route_thr' phase '$route_phase'"
+        route_id="$route_have"
+      fi
+    else
+      route_id="$(route_decision_for "$file" "$route_thr" "$route_phase" \
+                   "$(frontmatter_field "$file" artifact_id)" "$(frontmatter_field "$file" head_sha)")" \
+        || die "send: reviewer routing failed — refusing to dispatch"
+    fi
+  fi
+  local route_lines
+  route_lines="$(fm_field_lines "$file" route_decision | wc -l | tr -d ' ')"
+  if [ -n "$route_id" ] || [ "${route_lines:-0}" != 0 ]; then
+    stamp_route_decision "$file" "$route_id" || die "send: could not stamp the routing decision"
+  fi
+
   # Atomicity guard: never deliver or archive on a malformed outbound message.
   cmd_validate "$file" || die "send: refusing to deliver malformed message (and not archiving inbound)"
   # THE COORDINATOR LOG (contraction step 3, criterion 1). Identity is read ONCE, here,
@@ -5332,7 +5494,7 @@ cmd_send() {
     cmd_events append --kind request-persisted --set "$ev_set" --dispatch "$ev_dispatch" --thread "$ev_thread" \
       --round "$ev_round" --agent "$ev_agent" --artifact "$ev_aid" --request-id "$ev_reqid" \
       --message-id "$ev_mid" --status persisted \
-      --note "phase=$(frontmatter_field "$file" phase) workflow=$(frontmatter_field "$file" workflow)" \
+      --note "phase=$(frontmatter_field "$file" phase) workflow=$(frontmatter_field "$file" workflow)${route_id:+ route=$route_id}" \
       || die "send: could not record the request in the coordinator log — refusing to dispatch a leg nothing can recover"
   fi
   local root_send
@@ -5549,6 +5711,7 @@ case "${1:-}" in
   findings)       shift; cmd_findings "$@" ;;
   ask)            shift; cmd_ask "$@" ;;
   route)          shift; cmd_route "$@" ;;
+  review-route)   shift; cmd_review_route "$@" ;;
   panel)          shift; cmd_panel "$@" ;;
   compose)        shift; cmd_compose "$@" ;;
   round-note)     shift; cmd_round_note "$@" ;;

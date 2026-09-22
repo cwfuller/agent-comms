@@ -408,8 +408,15 @@ iso_observed5() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_AT" "$1" ) 2>/dev
 : > "$WORK/snap-attr.txt"
 iso_ctx t-attr t-attr gpt-6-astra xhigh > "$ISO_AF"
 ISO_AT_OUT="$(iso_observed5 "$WORK/snap-attr.txt")"
-[ "$(printf '%s' "$ISO_AT_OUT" | awk -F'\t' '{print NF}')" = 5 ] \
-  && ok "the attestation returns effort, model, turn id, evidence file and byte offset" || fail "attribution fields missing (got: $ISO_AT_OUT)"
+[ "$(printf '%s' "$ISO_AT_OUT" | awk -F'\t' '{print NF}')" = 6 ] \
+  && ok "the attestation returns effort, model, turn id, evidence file, byte offset and runtime" || fail "attribution fields missing (got: $ISO_AT_OUT)"
+# THE RUNTIME that produced the evidence rides with it (session_meta.cli_version, usually written
+# BEFORE the window — provenance, not turn evidence); absent reads as empty, never as a guess.
+[ -z "$(printf '%s' "$ISO_AT_OUT" | cut -f6)" ] \
+  && { printf '{"type":"session_meta","payload":{"cli_version":"0.154.0","originator":"acpx"}}\n'; cat "$ISO_AF"; } > "$ISO_AF.tmp" \
+  && mv "$ISO_AF.tmp" "$ISO_AF" \
+  && [ "$(iso_observed5 "$WORK/snap-attr.txt" | cut -f6)" = "0.154.0" ] \
+  && ok "the provider runtime version is captured from the evidence file, and absent reads as empty" || fail "runtime version not captured"
 [ "$(printf '%s' "$ISO_AT_OUT" | cut -f3)" = "t-attr" ] \
   && ok "the backend turn id of the attested context is captured" || fail "turn id not captured"
 [ "$(printf '%s' "$ISO_AT_OUT" | cut -f4)" = "$ISO_AF" ] \
@@ -450,27 +457,62 @@ AP_S="$REPO/helpers/acp.sh"
 # STEP 3 PROPER — REQUESTED vs OBSERVED must be separable in the ledger. Recording only what a
 # turn was observed to run reproduces the blindness this whole arc exists to fix: for three weeks
 # a declared depth and an executed depth were assumed equal because nothing wrote both down.
+# The requested half now comes from the PERSISTED per-turn record (`acp.sh resolve` output, the
+# same file the config, preflight and attestation read), written at resolution time by
+# turn_policy; turn_observe writes only what the provider reported.
 ISO_TO2="$(sed -n '/^turn_observe() {/,/^}/p' "$ISO_RP")"
+ISO_TP="$(sed -n '/^turn_policy() {/,/^}/p' "$ISO_RP")"
 ISO_RQ="$WORK/turnobs-req"; rm -rf "$ISO_RQ"; mkdir -p "$ISO_RQ"
-( acp_sh="$REPO/helpers/acp.sh"; eval "$ISO_TO2"; turn_observe "$ISO_RQ" medium gpt-6-astra rec-9 t-9 /r/y.jsonl 7 )
+env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$REPO/helpers/acp.sh" resolve codex > "$ISO_RQ/policy.tsv" 2>/dev/null
+( eval "$ISO_TP"; eval "$ISO_TO2"; turn_policy "$ISO_RQ" "$ISO_RQ/policy.tsv" none
+  turn_observe "$ISO_RQ" medium gpt-6-astra rec-9 t-9 /r/y.jsonl 7 )
 grep -qx "requested_effort	xhigh" "$ISO_RQ/turn.tsv" \
-  && ok "turn.tsv records the REQUESTED effort from the policy accessor" || fail "requested effort missing"
+  && ok "turn.tsv records the REQUESTED effort from the persisted policy record" || fail "requested effort missing"
 grep -qx "requested_model	gpt-6-astra" "$ISO_RQ/turn.tsv" \
   && ok "turn.tsv records the REQUESTED model" || fail "requested model missing"
 # The divergence must be legible from the file alone, with no mount and no rollout.
 grep -qx "observed_effort	medium" "$ISO_RQ/turn.tsv" && grep -qx "requested_effort	xhigh" "$ISO_RQ/turn.tsv" \
   && ok "a requested/observed divergence is readable from turn.tsv without the mount" || fail "divergence not legible"
-# The requested pair must come from the ACCESSOR, not be a second literal that can drift.
+# ONE requested pair per turn: turn_observe must not append a second, re-read copy.
+[ "$(grep -c '^requested_effort	' "$ISO_RQ/turn.tsv")" = 1 ] \
+  && ok "the observation step writes no second requested pair" || fail "requested pair written twice"
+# THE ORDERING LIMITATION, CLOSED. The requested pair is what was resolved when the config was
+# written; a pin changed afterwards (a reinstall, an edited env) must not relabel it.
 mkdir -p "$ISO_RQ-ov"
-( acp_sh="$REPO/helpers/acp.sh"; eval "$ISO_TO2"
-  COMMS_ACP_CODEX_EFFORT=high turn_observe "$ISO_RQ-ov" xhigh gpt-6-astra r t f 0 ) 2>/dev/null
+env -u COMMS_ACP_CODEX_MODEL COMMS_ACP_CODEX_EFFORT=high "$REPO/helpers/acp.sh" resolve codex > "$ISO_RQ-ov/policy.tsv" 2>/dev/null
+( eval "$ISO_TP"; COMMS_ACP_CODEX_EFFORT=low turn_policy "$ISO_RQ-ov" "$ISO_RQ-ov/policy.tsv" none ) 2>/dev/null
 grep -qx "requested_effort	high" "$ISO_RQ-ov/turn.tsv" 2>/dev/null \
-  && ok "the requested pair tracks the policy accessor, not a second hardcoded copy" || fail "requested pair does not follow the accessor"
-# An unreachable accessor records unknown rather than silently claiming the default.
+  && grep -qx "policy_effort_source	pin" "$ISO_RQ-ov/turn.tsv" 2>/dev/null \
+  && ok "the requested pair is the one resolved before launch, not whatever the env says later" || fail "requested pair followed a later env change"
+# A refused resolution (no record) records unknown rather than silently claiming the default.
 mkdir -p "$ISO_RQ-na"
-( acp_sh=/nonexistent/acp.sh; eval "$ISO_TO2"; turn_observe "$ISO_RQ-na" xhigh gpt-6-astra r t f 0 ) 2>/dev/null
+( eval "$ISO_TP"; turn_policy "$ISO_RQ-na" "$ISO_RQ-na/absent.tsv" rd-x ) 2>/dev/null
 grep -qx "requested_effort	unknown" "$ISO_RQ-na/turn.tsv" 2>/dev/null \
-  && ok "an unreachable policy accessor records requested=unknown, never an assumed default" || fail "unreachable accessor did not record unknown"
+  && grep -qx "route_decision	rd-x" "$ISO_RQ-na/turn.tsv" 2>/dev/null \
+  && ok "a missing policy record records requested=unknown, never an assumed default" || fail "missing record did not record unknown"
+# A ROUTED record lands with its provenance: decision id, map version, per-dimension source.
+mkdir -p "$ISO_RQ-rt"
+env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$REPO/helpers/acp.sh" resolve codex --tier fast --effort low \
+  --decision rd-0123 --routing on --phase implement > "$ISO_RQ-rt/policy.tsv" 2>/dev/null
+( eval "$ISO_TP"; turn_policy "$ISO_RQ-rt" "$ISO_RQ-rt/policy.tsv" rd-0123 ) 2>/dev/null
+grep -qx "route_decision	rd-0123" "$ISO_RQ-rt/turn.tsv" && grep -qx "policy_model_source	route" "$ISO_RQ-rt/turn.tsv" \
+  && grep -qx "policy_fallback	none" "$ISO_RQ-rt/turn.tsv" \
+  && grep -q "^policy_map_version	[0-9]" "$ISO_RQ-rt/turn.tsv" \
+  && ok "a routed turn records its decision id, map version and per-dimension source" || fail "routed provenance missing"
+
+# THE EXPECTATION IS PINNED BY HASH. The reviewer runs between resolution and attestation, and a
+# record it could rewrite to match its own rollout would turn a mismatch into a pass.
+ISO_PI="$(sed -n '/^policy_record_sha() {/,/^}/p;/^policy_record_intact() {/,/^}/p' "$ISO_RP")"
+( eval "$ISO_PI"
+  f="$ISO_RQ-rt/policy.tsv"; h="$(policy_record_sha "$f")" || exit 1
+  policy_record_intact "$f" "$h" || exit 2
+  sed 's/^model	gpt-5.6-luna$/model	gpt-6-astra/' "$f" > "$f.t" && mv "$f.t" "$f"
+  policy_record_intact "$f" "$h" && exit 3
+  policy_record_intact "$f" "" && exit 4
+  policy_record_intact "$ISO_RQ-rt/absent" "$h" && exit 5
+  exit 0 ) 2>/dev/null; ISO_PIR=$?
+[ "$ISO_PIR" = 0 ] \
+  && ok "a policy record rewritten after resolution, an empty expected hash, or a missing record is never intact" || fail "policy record integrity (stage $ISO_PIR)"
 
 # A refusal must be RECOVERABLE. `acpx <profile> sessions close` alone does not retire a MOUNTED
 # session: the record is keyed by (agent, cwd, name), so a hint that omits the session name and

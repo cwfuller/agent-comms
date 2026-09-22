@@ -623,3 +623,188 @@ RS_NOREPO="$WORK/not-a-repo"; mkdir -p "$RS_NOREPO"
 ( cd "$RS_NOREPO" && git rev-parse --show-toplevel ) >/dev/null 2>&1 \
   && fail "a git selector survived into the suite: a non-repo directory resolved a toplevel" \
   || ok "a non-repo directory resolves no toplevel inside the suite"
+
+section "comms.sh: reviewer routing decisions"
+# THE REVIEWER DECISION IS A RECORDED, STICKY, ABSTRACT CANDIDATE. Explicit decisions and the
+# stub backend drive every case: the suite never contacts TypeSafe. Classification additionally
+# needs the per-project transmission permit, supplied per call.
+RR_REPO="$WORK/rr-repo"; mkdir -p "$RR_REPO"; RR_REPO="$(cd "$RR_REPO" && pwd -P)"
+git -C "$RR_REPO" init -q -b feature/rr
+git -C "$RR_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+RR_BASE="$(git -C "$RR_REPO" rev-parse HEAD)"
+printf 'a\nb\nc\n' > "$RR_REPO/one.txt"; mkdir -p "$RR_REPO/helpers"; printf 'x\n' > "$RR_REPO/helpers/two.sh"
+git -C "$RR_REPO" add one.txt helpers/two.sh
+git -C "$RR_REPO" -c user.email=t@t -c user.name=t commit -q -m change
+RR_AID="$(git -C "$RR_REPO" rev-parse HEAD)"
+mkdir -p "$RR_REPO/.comms/to-codex" "$RR_REPO/.comms/to-grok" "$RR_REPO/.comms/to-claude" "$RR_REPO/.comms/archive"
+printf 'agents = claude codex grok\n' > "$RR_REPO/.comms/config"
+RR_CLEAN="env -u COMMS_REVIEW_ROUTE -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_STUB -u TYPESAFE_API_KEY -u COMMS_ROUTE_URL -u COMMS_ROUTE_SHADOW_ALLOW COMMS_DELIVERY=mailbox COMMS_SELF=claude"
+rrc() { ( cd "$RR_REPO" && $RR_CLEAN "$@" ); }
+rrv() { printf '%s\n' "$1" | sed -n "s/^$2: //p" | head -1; }
+RR_REC() { printf '%s' "$RR_REPO/.comms/route-decisions/$1.json"; }
+rrj() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(eval(sys.argv[2]))' "$(RR_REC "$1")" "$2" 2>/dev/null; }
+rr_req() {  # <file> <thread> <phase> [extra frontmatter line]
+  cat > "$1" <<RQ
+---
+type: review-request
+from: claude
+timestamp: 2026-09-22T10:00:00Z
+workspace: rr
+message_id: $(basename "$1" .md)
+thread: $2
+workflow: auto
+phase: $3
+round: 1
+max-rounds: 10
+${4:-}
+---
+
+## Intent / approach
+Rename a helper.
+
+## What was done
+$(python3 -c 'print("did a thing. " * 400)')
+
+## Acceptance criteria
+- it works
+
+## Files changed
+ 99 files changed, 9999 insertions(+), 1 deletion(-)
+RQ
+}
+
+rrc "$COMMS" review-route enabled; A=$?
+rrc COMMS_REVIEW_ROUTE=1 "$COMMS" review-route enabled; B=$?
+rrc COMMS_REVIEW_ROUTE=1 COMMS_ROUTE=0 "$COMMS" review-route enabled; C=$?
+[ "$A$B$C" = 101 ] && ok "reviewer routing is off by default, on with COMMS_REVIEW_ROUTE=1, and COMMS_ROUTE=0 is the master off" || fail "enabled accessor ($A$B$C)"
+
+OUT="$(rrc "$COMMS" review-route decide --thread t-exp --phase implement --tier fast --effort low 2>/dev/null)"
+RX="$(rrv "$OUT" decision)"
+printf '%s' "$RX" | grep -qE '^rd-[0-9a-f]{32}$' && [ "$(rrv "$OUT" source)" = explicit ] \
+  && [ "$(rrv "$OUT" tier)" = fast ] && [ "$(rrv "$OUT" effort)" = low ] && [ "$(rrj "$RX" 'd["decided_by"]')" = claude ] \
+  && ok "an explicit decision is recorded with its id, candidate, source and who made it" || fail "explicit decide ($OUT)"
+rrc "$COMMS" review-route decide --thread t-exp --phase implement --tier strong --effort high >/dev/null 2>&1; A=$?
+OUT2="$(rrc "$COMMS" review-route lookup --thread t-exp --phase implement 2>/dev/null)"
+[ "$A" = 1 ] && [ "$(rrv "$OUT2" decision)" = "$RX" ] && [ "$(rrv "$OUT2" tier)" = fast ] \
+  && ok "an explicit request against an existing decision is refused, never silently answered with the old one" || fail "explicit vs existing (rc=$A)"
+OUT3="$(rrc "$COMMS" review-route decide --thread t-exp --phase implement --tier balanced --effort medium --replace 2>/dev/null)"
+RX2="$(rrv "$OUT3" decision)"
+[ -n "$RX2" ] && [ "$RX2" != "$RX" ] && [ "$(rrj "$RX2" 'd["replaces"]')" = "$RX" ] \
+  && [ "$(rrv "$(rrc "$COMMS" review-route lookup --thread t-exp --phase implement 2>/dev/null)" decision)" = "$RX2" ] \
+  && ok "--replace mints a NEW decision id, records what it replaces, and becomes the one in force" || fail "replace ($OUT3)"
+OUT4="$(rrc "$COMMS" review-route decide --thread t-exp --phase plan --tier fast --effort low 2>/dev/null)"
+[ -n "$(rrv "$OUT4" decision)" ] && [ "$(rrv "$OUT4" decision)" != "$RX2" ] \
+  && ok "decisions are keyed per PHASE: the plan phase never inherits the implement decision" || fail "phase keying"
+rrc "$COMMS" review-route show "$RX2" --thread t-exp-codex --phase implement >/dev/null 2>&1; A=$?
+rrc "$COMMS" review-route show "$RX2" --thread t-exp --phase plan >/dev/null 2>&1; B=$?
+rrc "$COMMS" review-route show '../../etc/x' >/dev/null 2>&1; C=$?
+rrc "$COMMS" review-route lookup --thread t-none --phase implement >/dev/null 2>&1; D=$?
+[ "$A" != 0 ] && [ "$B" != 0 ] && [ "$C" != 0 ] && [ "$D" != 0 ] \
+  && ok "show refuses a foreign thread, a wrong phase and a path-shaped id; lookup refuses an absent decision" || fail "show/lookup refusals ($A$B$C$D)"
+[ "$(rrc "$COMMS" review-route current --thread t-exp-codex --phase implement 2>/dev/null | awk -F'\t' '$1=="decision"{print $2}')" = "$RX2" ] \
+  && ok "a panel leg's thread (<base>-<agent>) resolves to its base thread's current decision" || fail "current for a leg thread"
+
+# THE reviewer-v1 MAPPING, run directly: cheap outputs are reachable, and nothing malformed,
+# tied or split can land on the cheapest reviewer. No bump anywhere.
+rrmap() { python3 -c '
+import sys,json; sys.path.insert(0,sys.argv[1])
+import route_review as r
+try: t,e,g,_=r.map_answers(json.loads(sys.argv[2])); print(t,e,g)
+except ValueError: print("malformed")' "$REPO/helpers" "$1"; }
+[ "$(rrmap '{"review_depth":{"probabilities":{"0":0.9,"1":0.1,"2":0,"3":0},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.9}}')" = "fast low classify" ] \
+  && ok "a confident mechanical review maps to fast/low (reachable; no bump)" || fail "mechanical mapping"
+[ "$(rrmap '{"review_depth":{"probabilities":{"0":0.5,"1":0,"2":0,"3":0.5},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.9}}' | cut -d' ' -f1)" = strong ] \
+  && [ "$(rrmap '{"review_depth":{"probabilities":{"0":0.34,"1":0.33,"2":0.33,"3":0},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.9}}' | cut -d' ' -f1)" = strong ] \
+  && ok "a tie or a split distribution goes DEEPER, never to the cheapest tier" || fail "tie/split mapping"
+[ "$(rrmap '{"review_depth":{"probabilities":{"0":1.0},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.9}}')" = malformed ] \
+  && [ "$(rrmap '{"review_depth":{"probabilities":{"0":0.9,"1":0.9,"2":0,"3":0},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.9}}')" = malformed ] \
+  && ok "a partial or non-normalized distribution is malformed (baseline), not read as mechanical" || fail "partial distribution"
+[ "$(rrmap '{"review_depth":{"probabilities":{"0":1,"1":0,"2":0,"3":0},"confidence":0.2},"review_effort":{"choice":"low","confidence":0.2}}')" = "none none low-depth-confidence+low-effort-confidence" ] \
+  && ok "low confidence selects the baseline once per dimension (none), recorded as a gate" || fail "low confidence mapping"
+[ "$(rrmap '{"review_depth":{"probabilities":{"0":1,"1":0,"2":0,"3":0},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.9,"probabilities":{"low":0.5,"medium":0.5,"high":0,"xhigh":0}}}' | cut -d' ' -f2)" = medium ] \
+  && ok "a supplied effort distribution can only deepen the chosen effort" || fail "effort distribution"
+
+# CLASSIFICATION: permit first, measured signals, bounded recorded input, stub never routes.
+RR_ALLOW="$WORK/rr-allow"; RR_KEY="$(cd "$RR_REPO" && python3 -c 'import sys; sys.path.insert(0,sys.argv[1]); import route_backend as b; print(b.canonical_project()[0])' "$REPO/helpers")"
+printf '%s\n' "$RR_KEY" > "$RR_ALLOW"
+RR_STUB="$WORK/rr-stub.json"
+printf '%s' '{"answers":{"review_depth":{"probabilities":{"0":0.9,"1":0.1,"2":0,"3":0},"confidence":0.9},"review_effort":{"choice":"low","confidence":0.9}}}' > "$RR_STUB"
+rr_req "$WORK/rr-q1.md" t-cls implement
+OUT="$(rrc COMMS_ROUTE_STUB="$RR_STUB" "$COMMS" review-route decide --request "$WORK/rr-q1.md" --artifact "$RR_AID" --base "$RR_BASE" 2>/dev/null)"
+RC1="$(rrv "$OUT" decision)"
+[ "$(rrv "$OUT" source)" = not-permitted ] && [ "$(rrv "$OUT" tier)" = none ] \
+  && [ "$(rrj "$RC1" '"sent" in d')" = False ] \
+  && ok "without the project permit nothing is sent or retained, and the candidate is the baseline" || fail "not permitted ($OUT)"
+rr_req "$WORK/rr-q2.md" t-cls2 implement
+OUT="$(rrc COMMS_ROUTE_STUB="$RR_STUB" COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" "$COMMS" review-route decide --request "$WORK/rr-q2.md" 2>/dev/null)"
+[ "$(rrv "$OUT" source)" = fail-open ] && [ "$(rrv "$OUT" tier)" = none ] \
+  && ok "with no measurable artifact nothing is classified (an id alone conveys no content)" || fail "no artifact ($OUT)"
+rr_req "$WORK/rr-q3.md" t-cls3 implement
+OUT="$(rrc COMMS_ROUTE_STUB="$RR_STUB" COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" "$COMMS" review-route decide --request "$WORK/rr-q3.md" --artifact "$RR_AID" --base "$RR_BASE" 2>/dev/null)"
+RC3="$(rrv "$OUT" decision)"
+[ "$(rrv "$OUT" source)" = stub ] && [ "$(rrv "$OUT" gate)" = stub-source ] && [ "$(rrv "$OUT" tier)" = none ] \
+  && [ "$(rrj "$RC3" 'd["classified"]["tier"]+"/"+d["classified"]["effort"]')" = fast/low ] \
+  && ok "the stub test seam records what it WOULD choose but never routes a live turn" || fail "stub source ($OUT)"
+[ "$(rrj "$RC3" 'd["sent"]["risk_signals"]["files_changed"]')" = 2 ] && [ "$(rrj "$RC3" 'd["sent"]["risk_signals"]["insertions"]')" = 4 ] \
+  && [ "$(rrj "$RC3" 'd["sent"]["risk_signals"]["top_level"]["helpers"]')" = 1 ] \
+  && ok "risk signals are MEASURED from the artifact diff, not the author's claimed stat (99 files)" || fail "risk signals not measured"
+[ "$(rrj "$RC3" 'd["input"]["sections"]["done"]["truncated"]')" = True ] && [ "$(rrj "$RC3" '"prior" in d["input"]["omitted"]')" = True ] \
+  && [ "$(rrj "$RC3" 'd["input"]["sent_chars"] <= d["input"]["total_limit"]')" = True ] \
+  && [ "$(rrj "$RC3" 'd["rubric_version"]')" = reviewer-v1 ] && [ "$(rrj "$RC3" 'bool(d["raw_response"])')" = True ] \
+  && ok "the exact bounded input, its truncation and omissions, the rubric version and the raw answer are recorded" || fail "bounded input record"
+printf '%s' '{"answers":{"review_depth":{"probabilities":{"0":1}}}}' > "$WORK/rr-bad.json"
+rr_req "$WORK/rr-q4.md" t-cls4 implement
+OUT="$(rrc COMMS_ROUTE_STUB="$WORK/rr-bad.json" COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" "$COMMS" review-route decide --request "$WORK/rr-q4.md" --artifact "$RR_AID" --base "$RR_BASE" 2>/dev/null)"
+OUT5="$(rrc COMMS_ROUTE=0 COMMS_ROUTE_STUB="$RR_STUB" COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" "$COMMS" review-route decide --thread t-cls5 --phase implement --tier none --effort none 2>/dev/null)"
+rr_req "$WORK/rr-q6.md" t-cls6 implement
+OUT6="$(rrc COMMS_ROUTE=0 COMMS_ROUTE_STUB="$RR_STUB" COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" "$COMMS" review-route decide --request "$WORK/rr-q6.md" --artifact "$RR_AID" --base "$RR_BASE" 2>/dev/null)"
+[ "$(rrv "$OUT" source)" = fail-open ] && [ "$(rrv "$OUT" tier)" = none ] && [ "$(rrv "$OUT6" source)" = disabled ] \
+  && ok "a malformed answer fails open to the baseline and COMMS_ROUTE=0 disables classification" || fail "malformed/disabled ($OUT / $OUT6)"
+
+# SEND AND PANEL STAMP THE DECISION; NOTHING ELSE MAY.
+rr_req "$RR_REPO/.comms/rr-s1.md" t-send implement "route_decision: forged"
+rrc COMMS_REVIEW_ROUTE=1 "$COMMS" review-route decide --thread t-send --phase implement --tier fast --effort low >/dev/null 2>&1
+RS1="$(rrv "$(rrc "$COMMS" review-route lookup --thread t-send --phase implement 2>/dev/null)" decision)"
+rrc COMMS_REVIEW_ROUTE=1 "$COMMS" send --to codex "$RR_REPO/.comms/rr-s1.md" >/dev/null 2>&1
+RS1F="$(grep -l '^thread: t-send$' "$RR_REPO/.comms/to-codex"/*.md "$RR_REPO/.comms/rr-s1.md" 2>/dev/null | head -1)"
+[ -n "$RS1" ] && [ "$(grep -c '^route_decision:' "$RS1F")" = 1 ] && grep -qx "route_decision: $RS1" "$RS1F" \
+  && ok "send stamps the thread's decision as ONE line and replaces a hand-typed value" || fail "send stamping ($RS1 in $RS1F)"
+rr_req "$RR_REPO/.comms/rr-s2.md" t-send2 implement "route_decision: rd-0123456789abcdef0123456789abcdef"
+rrc "$COMMS" send --to codex "$RR_REPO/.comms/rr-s2.md" >/dev/null 2>&1
+RS2F="$(grep -l '^thread: t-send2$' "$RR_REPO/.comms/to-codex"/*.md "$RR_REPO/.comms/rr-s2.md" 2>/dev/null | head -1)"
+rr_req "$RR_REPO/.comms/rr-s3.md" t-send3 plan "route_decision: rd-0123456789abcdef0123456789abcdef"
+rrc COMMS_REVIEW_ROUTE=1 "$COMMS" send --to codex "$RR_REPO/.comms/rr-s3.md" >/dev/null 2>&1
+RS3F="$(grep -l '^thread: t-send3$' "$RR_REPO/.comms/to-codex"/*.md "$RR_REPO/.comms/rr-s3.md" 2>/dev/null | head -1)"
+[ -n "$RS2F" ] && ! grep -q '^route_decision:' "$RS2F" && [ -n "$RS3F" ] && ! grep -q '^route_decision:' "$RS3F" \
+  && ok "with routing off, or on a plan-phase request, any route_decision line is stripped" || fail "stripping ($RS2F / $RS3F)"
+rr_req "$RR_REPO/.comms/rr-p1.md" t-pan implement
+RR_NREC0="$(ls "$RR_REPO/.comms/route-decisions"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+rrc COMMS_REVIEW_ROUTE=1 "$COMMS" panel dispatch --to codex,grok "$RR_REPO/.comms/rr-p1.md" >/dev/null 2>&1
+RR_NREC1="$(ls "$RR_REPO/.comms/route-decisions"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+RP_C="$(grep -h '^route_decision:' $(grep -l '^thread: t-pan-codex$' "$RR_REPO/.comms/to-codex"/*.md 2>/dev/null) 2>/dev/null)"
+RP_G="$(grep -h '^route_decision:' $(grep -l '^thread: t-pan-grok$' "$RR_REPO/.comms/to-grok"/*.md 2>/dev/null) 2>/dev/null)"
+[ -n "$RP_C" ] && [ "$RP_C" = "$RP_G" ] && [ "$((RR_NREC1 - RR_NREC0))" = 1 ] \
+  && ok "a panel records ONE decision for its base thread and every leg carries the same id" || fail "panel stamping ($RP_C / $RP_G / $RR_NREC0->$RR_NREC1)"
+
+# THE SHADOW OBSERVES THE REVIEWER RUBRIC AND CANNOT ACTIVATE IT.
+rr_req "$WORK/rr-sh.md" t-shadow implement "artifact_id: $RR_AID"
+RR_ND0="$(ls "$RR_REPO/.comms/route-decisions" "$RR_REPO/.comms/route-decisions/threads" 2>/dev/null | wc -l | tr -d ' ')"
+RSH="$(rrc COMMS_ROUTE_SHADOW_ALLOW="$RR_ALLOW" COMMS_ROUTE_SHADOW_BACKEND=stub COMMS_ROUTE_STUB="$RR_STUB" \
+        "$REPO/helpers/route.sh" --shadow --reviewer --file "$WORK/rr-sh.md" 2>/dev/null)"
+RSH_ID="$(printf '%s' "$RSH" | sed -n 's/^shadow-decision //p')"
+RR_ND1="$(ls "$RR_REPO/.comms/route-decisions" "$RR_REPO/.comms/route-decisions/threads" 2>/dev/null | wc -l | tr -d ' ')"
+[ -n "$RSH_ID" ] && [ "$(printf '%s\n' "$RSH" | grep -c .)" = 1 ] && [ "$RR_ND0" = "$RR_ND1" ] \
+  && python3 -c '
+import json,sys,hashlib; sys.path.insert(0,sys.argv[2]); import route_backend as b
+d=json.load(open(sys.argv[1]))
+q=hashlib.sha256(json.dumps(b.REVIEW_QUESTIONS,sort_keys=True).encode()).hexdigest()
+sys.exit(0 if d["role"]=="reviewer" and d["rubric_version"]=="reviewer-v1" and d["questions_sha256"]==q and "input" in d else 1)' \
+     "$RR_REPO/.comms/route-shadow/$RSH_ID.json" "$REPO/helpers" \
+  && ok "a reviewer shadow uses the live rubric and builder, prints only its id, and writes no decision" || fail "reviewer shadow ($RSH)"
+rrc "$REPO/helpers/route.sh" --reviewer -- x >/dev/null 2>&1; A=$?
+[ "$A" = 2 ] && ok "--reviewer outside --shadow is a usage error (live decisions come from review-route)" || fail "--reviewer without --shadow rc=$A"
+# The implementer policy is NAMED, and the name is the shared constant.
+RR_IMP="$(rt COMMS_ROUTE_STUB="$ST/mech.json" -- "rename a typo" 2>/dev/null)"
+python3 -c 'import sys; sys.path.insert(0,sys.argv[1]); import route_backend as b; sys.exit(0 if ("policy="+b.IMPLEMENTER_POLICY_VARIANT) in sys.argv[2] else 1)' \
+  "$REPO/helpers" "$(rt_kv "$RR_IMP" reason)" \
+  && ok "the implementer classifier names its bumped policy variant in reason:" || fail "implementer variant not named ($RR_IMP)"
