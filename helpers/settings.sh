@@ -35,7 +35,7 @@ ac_file_mode() {
 }
 
 # ac_settings_apply <file> <allowed-keys> [secret|project] — apply one file under the rules above.
-# Every applied key is recorded in AC_SETTINGS_FROM ("KEY<TAB>file" lines) so `setup --show` can
+# Every applied key is recorded in AC_SETTINGS_FROM ("KEY<TAB>file<TAB>value" lines) so `setup --show` can
 # tell a file value from an environment override.
 ac_settings_apply() {
   local f="$1" allowed="$2" kind="${3:-}" line k v mode n=0
@@ -71,7 +71,7 @@ ac_settings_apply() {
     # $k is proven [A-Z0-9_]+ and allowlisted, so the eval below sees only a variable NAME.
     if eval "[ -z \"\${$k+x}\" ]"; then
       export "$k=$v"
-      AC_SETTINGS_FROM="${AC_SETTINGS_FROM:-}$k"$'\t'"$f"$'\n'
+      AC_SETTINGS_FROM="${AC_SETTINGS_FROM:-}$k"$'\t'"$f"$'\t'"$v"$'\n'
     fi
   done < "$f"
 }

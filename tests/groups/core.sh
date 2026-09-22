@@ -1212,6 +1212,28 @@ st -- "$COMMS" setup --set TYPESAFE_API_KEY=k2 >/dev/null 2>&1
 ls -l "$ST_HOME/secrets" | grep -q '^-rw-------' \
   && grep -qx 'TYPESAFE_API_KEY=k2' "$ST_HOME/secrets" && ! grep -q TYPESAFE "$ST_HOME/settings" \
   && ok "the API key goes only to the 0600 secrets file" || fail "secret written wrongly"
+# FRESH PROJECT (no default-target line): the default reviewer is derived, not shell text. This is
+# the path a first install takes, and bash 3.2 once turned it into a syntax error written to config.
+printf 'agents = claude codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
+st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
+grep -qx 'default-target = codex' "$ST_PROJ/.comms/config" && [ "$(grep -c . "$ST_PROJ/.comms/config")" = 3 ] \
+  && ok "a fresh project gets a real default reviewer" || fail "fresh default-target: $(tr '\n' '|' < "$ST_PROJ/.comms/config")"
+printf 'agents = claude codex\ndefault-target = codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
+# An explicit COMMS_ROUTE=0 beside a named backend is OFF; accepting defaults must keep it off.
+printf 'COMMS_ROUTE_BACKEND=typesafe\nCOMMS_ROUTE=0\n' > "$ST_HOME/settings"; st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
+OFF_F="$(cat "$ST_HOME/settings")"; : > "$ST_HOME/settings"
+! printf '%s' "$OFF_F" | grep -q '^COMMS_ROUTE_BACKEND=typesafe' \
+  && ok "setup --yes keeps routing off when the master switch disabled it" || fail "setup --yes re-enabled routing"
+# An UNREADABLE settings file is not an absent one: the write fails and the file is untouched.
+printf '# keep\nCOMMS_RUNPHASE_TIMEOUT_SECS=900\n' > "$ST_HOME/settings"; chmod 000 "$ST_HOME/settings"
+st -- "$COMMS" setup --set COMMS_REVIEW_ROUTE=1 >/dev/null 2>&1; A=$?; chmod 600 "$ST_HOME/settings"
+[ "$A" != 0 ] && grep -qx 'COMMS_RUNPHASE_TIMEOUT_SECS=900' "$ST_HOME/settings" \
+  && ok "an unreadable settings file fails the write instead of being replaced" || fail "unreadable settings replaced (rc=$A)"
+: > "$ST_HOME/settings"
+# An unreadable project config is not replaced by just the agent lines: setup fails and it is intact.
+chmod 000 "$ST_PROJ/.comms/config"; st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1; A=$?; chmod 644 "$ST_PROJ/.comms/config"
+[ "$A" != 0 ] && grep -qx 'suite-cmd = bash t.sh' "$ST_PROJ/.comms/config" \
+  && ok "an unreadable project config fails setup instead of losing its other lines" || fail "unreadable config replaced (rc=$A)"
 # The master switch follows the routing answer both ways: a stale COMMS_ROUTE in the user file
 # would otherwise keep classification ON after "no", or OFF after "yes". --yes takes the current
 # state as the answer, so =1 exercises the yes branch and =0 the no branch.

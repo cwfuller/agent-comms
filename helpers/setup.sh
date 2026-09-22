@@ -78,7 +78,9 @@ for l in os.environ["PENDING"].splitlines():
 lines=[]
 try:
     lines=open(src).read().splitlines()
-except OSError:
+except FileNotFoundError:
+    # Only ABSENT is empty. Unreadable (permissions, I/O) must fail before publication, or the
+    # replacement would silently drop every setting the file held.
     lines=["# agent-comms user settings — written by `comms.sh setup`; env vars override these.",
            "# KEY=value, one per line. See docs/INSTALL.md \"Settings\"."]
 out=[];seen=set()
@@ -120,10 +122,12 @@ if [ "${#SETS[@]}" -gt 0 ]; then
 fi
 
 # ---- --show: effective values and their source ------------------------------------------------
-source_of() {  # which layer supplied KEY, as the loader recorded it; anything else was the env
-  local f
-  f="$(printf '%s' "${AC_SETTINGS_FROM:-}" | awk -F'\t' -v k="$1" '$1==k {print $2; exit}')"
-  printf '%s' "${f:-environment}"
+source_of() {  # which layer supplied KEY, as the loader recorded it — only while the value is
+  # still the one it applied; a child that overrode it since is the environment.
+  local rec cur
+  rec="$(printf '%s' "${AC_SETTINGS_FROM:-}" | awk -F'\t' -v k="$1" '$1==k {print $2 "\t" $3; exit}')"
+  cur="$(eval "printf '%s' \"\${$1:-}\"")"
+  if [ -n "$rec" ] && [ "${rec#*$'\t'}" = "$cur" ]; then printf '%s' "${rec%%$'\t'*}"; else printf 'environment'; fi
 }
 if [ "$SHOW" = 1 ]; then
   echo "agent-comms settings (env > project .comms/settings > $SETTINGS > $SECRETS)"
@@ -182,13 +186,22 @@ if [ -n "$CFG" ]; then
     AGENTS="$CUR_AGENTS"
   fi
   first="${AGENTS%% *}"; dflt_default="$CUR_DEFAULT"
-  case " $AGENTS " in *" $dflt_default "*) ;; *) dflt_default="$( case " $AGENTS " in *" codex "*) echo codex ;; *) echo "$first" ;; esac )" ;; esac
+  # Plain statements, never a `case` inside $( ): bash 3.2 mis-parses that and assigns shell text.
+  case " $AGENTS " in *" $dflt_default "*) ;; *) dflt_default="" ;; esac
+  if [ -z "$dflt_default" ]; then case " $AGENTS " in *" codex "*) dflt_default=codex ;; *) dflt_default="$first" ;; esac; fi
   DEFAULT="$(ask "  default reviewer (for /ask and single-reviewer loops)" "$dflt_default")"
   case " $AGENTS " in *" $DEFAULT "*) ;; *) say "  '$DEFAULT' is not in the agent list — using $dflt_default"; DEFAULT="$dflt_default" ;; esac
   if [ -n "$AGENTS" ]; then
-    tmp="$(mktemp "$ROOT/.comms/.config.XXXXXX")" && {
-      { grep -vE '^[[:space:]]*(agents|default-target)[[:space:]]*=' "$CFG" 2>/dev/null
-        printf 'agents = %s\ndefault-target = %s\n' "$AGENTS" "$DEFAULT"; } > "$tmp" && mv -f "$tmp" "$CFG"; }
+    # Every step checked: an unreadable config (grep > 1) must not be replaced by just the two
+    # agent lines, and a failed publish must not read as success.
+    cfg_ok=0
+    if tmp="$(mktemp "$ROOT/.comms/.config.XXXXXX")"; then
+      g=0
+      if [ -e "$CFG" ]; then grep -vE '^[[:space:]]*(agents|default-target)[[:space:]]*=' "$CFG" > "$tmp"; g=$?; fi
+      if [ "$g" -le 1 ] && printf 'agents = %s\ndefault-target = %s\n' "$AGENTS" "$DEFAULT" >> "$tmp" && mv -f "$tmp" "$CFG"; then cfg_ok=1
+      else rm -f "$tmp"; fi
+    fi
+    [ "$cfg_ok" = 1 ] || { echo "setup: could not update $CFG; agents unchanged" >&2; FAILED=1; }
   fi
 else
   say "  (not inside an initialised project — run install.sh --scope=project there to register agents)"
@@ -215,7 +228,12 @@ say "  The classifier sizes work: whether a task needs an approach review, and h
 say "  Codex reviewer should think (cheap for trivial diffs, full depth otherwise). It sends task"
 say "  and review-request text to TypeSafe."
 if [ -n "${TYPESAFE_API_KEY:-}" ]; then say "  TypeSafe key: set ($(source_of TYPESAFE_API_KEY))"; else say "  TypeSafe key: not set"; fi
-cur_route="$( [ "${COMMS_ROUTE_BACKEND:-}" = typesafe ] || [ "$(yn_of "${COMMS_ROUTE:-}")" = y ] && echo y || echo n )"
+# The CURRENT state, judged the way route_backend reads it: an explicit COMMS_ROUTE=0 disables
+# routing whatever backend is named, so accepting the default must keep it off.
+case "${COMMS_ROUTE:-}" in
+  0|false|no|off|FALSE|NO|OFF) cur_route=n ;;
+  *) if [ "${COMMS_ROUTE_BACKEND:-}" = typesafe ] || [ "$(yn_of "${COMMS_ROUTE:-}")" = y ]; then cur_route=y; else cur_route=n; fi ;;
+esac
 if ask_yn "  enable routing" "$cur_route"; then
   k="$(ask_secret "  TypeSafe API key")"
   [ -n "$k" ] && { write_secret "$k" && say "  key saved to $SECRETS (mode 600)"; }
@@ -231,9 +249,17 @@ if ask_yn "  enable routing" "$cur_route"; then
     if [ -n "$key" ]; then
       permitted=n; grep -qxF "$key" "$ALLOW" 2>/dev/null && permitted=y
       if ask_yn "  allow THIS project's review text to be sent for classification" "$permitted"; then
-        [ "$permitted" = y ] || { mkdir -p "$(dirname "$ALLOW")" && printf '%s\n' "$key" >> "$ALLOW" && say "  permitted ($ROOT)"; }
+        if [ "$permitted" != y ]; then
+          if mkdir -p "$(dirname "$ALLOW")" && printf '%s\n' "$key" >> "$ALLOW"; then say "  permitted ($ROOT)"
+          else echo "setup: could not write the permit to $ALLOW; this project is NOT permitted" >&2; FAILED=1; fi
+        fi
       elif [ "$permitted" = y ]; then
-        tmp="$(mktemp "$ALLOW.XXXXXX")" && grep -vxF "$key" "$ALLOW" > "$tmp"; mv -f "$tmp" "$ALLOW"; say "  permit removed"
+        # grep exits 1 when no lines remain, which is success here; only >1 is a read failure.
+        if tmp="$(mktemp "$ALLOW.XXXXXX")"; then
+          grep -vxF "$key" "$ALLOW" > "$tmp"; g=$?
+          if [ "$g" -le 1 ] && mv -f "$tmp" "$ALLOW"; then say "  permit removed"
+          else rm -f "$tmp"; echo "setup: could not remove the permit from $ALLOW; this project is STILL permitted" >&2; FAILED=1; fi
+        else echo "setup: could not remove the permit from $ALLOW; this project is STILL permitted" >&2; FAILED=1; fi
       fi
     fi
   fi
@@ -261,6 +287,7 @@ case "$TO" in ''|*[!0-9]*) say "  not a number — keeping ${COMMS_RUNPHASE_TIME
   1800) set_user COMMS_RUNPHASE_TIMEOUT_SECS "" ;; *) set_user COMMS_RUNPHASE_TIMEOUT_SECS "$TO" ;; esac
 
 flush_user || { echo "setup: could not write $SETTINGS" >&2; exit 1; }
+[ "${FAILED:-0}" = 0 ] || exit 1
 say ""
 say "Saved. Settings: $SETTINGS   (show them: comms.sh setup --show)"
 say "Environment variables still override these for a single command, e.g. COMMS_ROUTE=0."
