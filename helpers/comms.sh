@@ -103,6 +103,11 @@
 #   review-route verify <decision-id> --thread <message thread> --phase P [--leg-dispatch D [--leg-agent A]]
 #   review-route show <decision-id> [--thread T] [--phase P]
 #   review-route enabled
+#   setup [--yes|--show|--set KEY=VALUE]
+#                               configure agent-comms: agents, reviewer containment, Jev
+#                               routing, codex reviewer runtime, timeouts. Re-runnable; writes
+#                               ~/.agent-comms/settings (+ 0600 secrets), which every helper
+#                               reads. Env vars override. See docs/INSTALL.md "Settings".
 #                               the REVIEWER routing decision for a (thread, phase): an
 #                               abstract tier/effort candidate (or `none` = baseline), made ONCE
 #                               and reused every round; --replace mints a new one. Only phase
@@ -164,6 +169,11 @@ case "$0" in
   /*) SELF="$0" ;;
   *)  SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")" ;;
 esac
+
+# User/project SETTINGS (helpers/settings.sh): fills unset variables from the settings files, so
+# a setting works in every shell — including agent tool shells that never read the shell rc.
+# Absent next to this script (an old install, a bare copy) it is simply skipped: env still works.
+[ -f "$(dirname "$SELF")/settings.sh" ] && . "$(dirname "$SELF")/settings.sh"
 
 main_repo_root() {
   # Consumes the WHOLE stream: `head -1` exits early and SIGPIPEs git once the worktree
@@ -5772,6 +5782,7 @@ case "${1:-}" in
   ask)            shift; cmd_ask "$@" ;;
   route)          shift; cmd_route "$@" ;;
   review-route)   shift; cmd_review_route "$@" ;;
+  setup)          shift; exec bash "$(dirname "$SELF")/setup.sh" "$@" ;;
   panel)          shift; cmd_panel "$@" ;;
   compose)        shift; cmd_compose "$@" ;;
   round-note)     shift; cmd_round_note "$@" ;;

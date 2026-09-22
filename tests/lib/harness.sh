@@ -41,9 +41,17 @@ unset CLAUDE_PID COMMS_PRESENCE_PID COMMS_SELF GROK_AGENT CLAUDECODE CLAUDE_CODE
 # would otherwise find whatever codex the developer has installed, and the routed-model assertions
 # would describe that machine. The runtime cases set their own stub binaries per invocation.
 export COMMS_ACP_CODEX_PATH=bundled
+# The installer offers interactive setup whenever /dev/tty opens; a suite run from a terminal
+# must never block on that prompt.
+export AGENT_COMMS_SETUP=0
 unset COMMS_REVIEW_ROUTE COMMS_REVIEW_MAX COMMS_ACP_CODEX_MODEL COMMS_ACP_CODEX_EFFORT \
       COMMS_ROUTE COMMS_ROUTE_BACKEND COMMS_ROUTE_STUB TYPESAFE_API_KEY COMMS_ROUTE_URL \
-      COMMS_ROUTE_LOG COMMS_ROUTE_SHADOW_ALLOW 2>/dev/null || true
+      COMMS_ROUTE_LOG COMMS_ROUTE_SHADOW_ALLOW COMMS_ROUTE_MODEL COMMS_ROUTE_TIMEOUT_SECS \
+      COMMS_ACP_CANARY_SECS COMMS_ACP_RUNTIME_PROBE_SECS 2>/dev/null || true
+# SETTINGS FILES ARE OFF for the corpus: the developer's ~/.agent-comms/settings (and a project
+# .comms/settings) would otherwise re-set the variables unset above, and the suite would describe
+# that machine. The loader skips when this is set; the settings section opts back in per case.
+export AC_SETTINGS_LOADED=1
 
 # THE DEFAULT IS `mailbox`. What the harness needs from a default is "write the file and
 # nudge nobody" — no spawned child, no network. It used to get that by asking for cmux and

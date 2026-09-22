@@ -67,6 +67,11 @@
 # `grok-build` profile (verified against `acpx --help`, 2026-08-25). Unsupported agents fail closed naming the fallback.
 set -euo pipefail
 
+# User/project SETTINGS (helpers/settings.sh): fills unset variables from the settings files, so
+# a setting works in every shell — including agent tool shells that never read the shell rc.
+# Absent next to this script (an old install, a bare copy) it is simply skipped: env still works.
+[ -f "$(dirname "${BASH_SOURCE[0]}")/settings.sh" ] && . "$(dirname "${BASH_SOURCE[0]}")/settings.sh"
+
 ACPX_VERSION="0.13.1"
 ACP_SESSION_NAME="agent-comms-ask"
 NODE_MIN_MAJOR=22

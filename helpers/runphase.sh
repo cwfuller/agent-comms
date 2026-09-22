@@ -86,6 +86,11 @@ case "$0" in
   *)  SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")" ;;
 esac
 HELPER_DIR="$(dirname "$SELF")"
+
+# User/project SETTINGS (helpers/settings.sh): fills unset variables from the settings files, so
+# a setting works in every shell — including agent tool shells that never read the shell rc.
+# Absent next to this script (an old install, a bare copy) it is simply skipped: env still works.
+[ -f "$HELPER_DIR/settings.sh" ] && . "$HELPER_DIR/settings.sh"
 # Sibling comms.sh is the single source of truth for root/workspace resolution —
 # runphase must derive the SAME names the driver derived, or reply prefixes and
 # state keys split mid-loop (a known field-incident class).

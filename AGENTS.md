@@ -322,6 +322,7 @@ runtime, quote the assertion count with it or measure both sides yourself.
 | | |
 |---|---|
 | `helpers/comms.sh` | the command router: messaging, presence, worktrees, panels, integrate |
+| `helpers/settings.sh`, `helpers/setup.sh` | the settings loader every entry helper sources (env > project `.comms/settings` > `~/.agent-comms/settings` > `secrets`), and the `comms.sh setup` flow that writes them |
 | `helpers/runphase.sh` | spawning and awaiting peer review turns over ACP |
 | `helpers/acp.sh`, `helpers/policy-map.tsv` | ACP consults; the reviewer model/effort resolver and its versioned map — the only place vendor model ids live |
 | `helpers/route.sh`, `route_backend.py`, `route_review.py`, `route_shadow.py` | the /auto classifier, the reviewer routing decisions, and the shadow collector |

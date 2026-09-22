@@ -1129,3 +1129,74 @@ run_comms clean --as claude all --yes >/dev/null
 [ -z "$(find "$REPO_FIX/.comms/to-codex" -type f 2>/dev/null)" ] && ok "clean all --yes wipes both inboxes" || fail "clean all wipes"
 
 echo ""
+
+section "comms.sh: settings and setup"
+# SETTINGS REACH EVERY HELPER WITHOUT THE SHELL RC. Agent tool shells often never read
+# ~/.zshrc, so a routing switch exported there silently did nothing (field, 2026-09-22).
+# Each case runs the real helpers against its own AGENT_COMMS_HOME and project.
+ST_HOME="$WORK/st-home"; ST_PROJ="$WORK/st-proj"; mkdir -p "$ST_HOME" "$ST_PROJ/.comms"
+git -C "$ST_PROJ" init -q; git -C "$ST_PROJ" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
+printf 'agents = claude codex\ndefault-target = codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
+st() {  # st [VAR=val...] -- <helper> <args...> : run from the project with an isolated home
+  local envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
+  ( cd "$ST_PROJ" && env -u AC_SETTINGS_LOADED -u COMMS_REVIEW_ROUTE -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND \
+      -u COMMS_ACP_CODEX_EFFORT -u TYPESAFE_API_KEY AGENT_COMMS_HOME="$ST_HOME" ${envs[@]+"${envs[@]}"} "$@" )
+}
+printf 'COMMS_REVIEW_ROUTE=1\n' > "$ST_HOME/settings"
+st -- "$COMMS" review-route enabled >/dev/null 2>&1; A=$?
+st COMMS_REVIEW_ROUTE=0 -- "$COMMS" review-route enabled >/dev/null 2>&1; B=$?
+[ "$A" = 0 ] && [ "$B" = 1 ] && ok "a user setting applies with no env var, and the environment overrides it" || fail "user settings / env precedence ($A$B)"
+printf 'COMMS_REVIEW_ROUTE=0\n' > "$ST_PROJ/.comms/settings"
+st -- "$COMMS" review-route enabled >/dev/null 2>&1; A=$?; rm -f "$ST_PROJ/.comms/settings"
+[ "$A" = 1 ] && ok "a project .comms/settings value beats the user setting" || fail "project settings precedence"
+printf 'COMMS_ROUTE=$(touch %s/st-pwned)\nBOGUS_KEY=1\nCOMMS_REVIEW_ROUTE=1\n' "$WORK" > "$ST_HOME/settings"
+ERR="$(st -- "$COMMS" review-route enabled 2>&1 >/dev/null)"
+[ ! -e "$WORK/st-pwned" ] && printf '%s' "$ERR" | grep -q "unknown setting 'BOGUS_KEY'" \
+  && ok "settings are parsed, never evaluated, and an unknown key is reported and ignored" || fail "settings evaluated or unknown key silent"
+printf 'COMMS_ROUTE=0\n' > "$ST_HOME/settings"
+[ "$(st -- "$COMMS" route -- 'rename a typo' 2>/dev/null | sed -n 's/^source: //p')" = disabled ] \
+  && ok "python-backed helpers see settings too (route: disabled from the settings file)" || fail "route did not see settings"
+printf 'COMMS_ACP_CODEX_EFFORT=high\n' > "$ST_HOME/settings"
+[ "$(st COMMS_ACP_CODEX_PATH=bundled -- "$REPO/helpers/acp.sh" policy codex 2>/dev/null)" = "$(printf 'gpt-6-astra\thigh')" ] \
+  && ok "acp.sh reads settings when run directly (reviewer effort pin)" || fail "acp.sh did not read settings"
+: > "$ST_HOME/settings"
+# ISOLATION: under the harness env (AC_SETTINGS_LOADED=1) a settings file is never read, so the
+# developer's own settings cannot make the corpus machine-dependent.
+printf 'COMMS_REVIEW_ROUTE=1\n' > "$ST_HOME/settings"
+( cd "$ST_PROJ" && env -u COMMS_REVIEW_ROUTE AGENT_COMMS_HOME="$ST_HOME" "$COMMS" review-route enabled >/dev/null 2>&1 ); A=$?
+[ "$A" = 1 ] && ok "the suite's own environment never reads a settings file" || fail "settings leak into the suite"
+: > "$ST_HOME/settings"
+# SECRETS: loaded only at mode 600.
+printf 'TYPESAFE_API_KEY=k-secret\n' > "$ST_HOME/secrets"; chmod 600 "$ST_HOME/secrets"
+SHOW600="$(st -- "$COMMS" setup --show 2>&1)"
+chmod 644 "$ST_HOME/secrets"; SHOW644="$(st -- "$COMMS" setup --show 2>&1)"
+printf '%s' "$SHOW600" | grep -q 'TYPESAFE_API_KEY *(set, 8 chars)' && ! printf '%s' "$SHOW600" | grep -q k-secret \
+  && printf '%s' "$SHOW644" | grep -q 'must be 600' && printf '%s' "$SHOW644" | grep -q 'TYPESAFE_API_KEY *(unset)' \
+  && ok "the secrets file loads only at mode 600, and --show never prints the key" || fail "secrets mode / masking"
+rm -f "$ST_HOME/secrets"
+# setup --set: writes, preserves foreign lines, removes on empty, refuses unknown keys.
+printf '# mine\nCOMMS_ROUTE_BACKEND=typesafe\nCOMMS_RUNPHASE_TIMEOUT_SECS=900\n' > "$ST_HOME/settings"
+st -- "$COMMS" setup --set COMMS_REVIEW_ROUTE=1 --set COMMS_RUNPHASE_TIMEOUT_SECS= >/dev/null 2>&1; A=$?
+cp "$ST_HOME/settings" "$WORK/st-before"
+st -- "$COMMS" setup --set NOT_A_SETTING=1 >/dev/null 2>&1; B=$?
+[ "$A" = 0 ] && [ "$B" = 2 ] && grep -qx '# mine' "$ST_HOME/settings" && grep -qx 'COMMS_ROUTE_BACKEND=typesafe' "$ST_HOME/settings" \
+  && grep -qx 'COMMS_REVIEW_ROUTE=1' "$ST_HOME/settings" && ! grep -q TIMEOUT "$ST_HOME/settings" && cmp -s "$WORK/st-before" "$ST_HOME/settings" \
+  && ok "setup --set rewrites only the named keys, an empty value removes one, an unknown key is refused unchanged" || fail "setup --set ($A/$B)"
+st -- "$COMMS" setup --set TYPESAFE_API_KEY=k2 >/dev/null 2>&1
+[ "$(ac_mode="$(stat -f '%Lp' "$ST_HOME/secrets" 2>/dev/null || stat -c '%a' "$ST_HOME/secrets")"; echo "$ac_mode")" = 600 ] \
+  && grep -qx 'TYPESAFE_API_KEY=k2' "$ST_HOME/secrets" && ! grep -q TYPESAFE "$ST_HOME/settings" \
+  && ok "the API key goes only to the 0600 secrets file" || fail "secret written wrongly"
+# setup --yes: no terminal, no prompts, keeps the project's non-agent config.
+ST_OUT="$(st -- "$COMMS" setup --yes </dev/null 2>&1)"; A=$?
+[ "$A" = 0 ] && grep -qx 'suite-cmd = bash t.sh' "$ST_PROJ/.comms/config" && grep -qx 'agents = claude codex' "$ST_PROJ/.comms/config" \
+  && printf '%s' "$ST_OUT" | grep -q '5/5 Codex reviewer runtime' \
+  && ok "setup --yes runs every section unattended and keeps unrelated project config" || fail "setup --yes (rc=$A)"
+# Wiring: every entry helper loads settings, and the installer ships and offers them.
+N=0; for h in comms.sh runphase.sh acp.sh route.sh; do grep -q 'settings.sh" \] && \.' "$REPO/helpers/$h" && N=$((N+1)); done
+grep -q '^HELPERS=.*settings\.sh.*setup\.sh' "$REPO/install.sh" && [ "$N" = 4 ] \
+  && ok "all four entry helpers load settings, and install.sh ships settings.sh and setup.sh" || fail "settings wiring ($N/4)"
+ST_INST="$WORK/st-inst"; mkdir -p "$ST_INST"; git -C "$ST_INST" init -q -b main
+INST_OUT="$(cd "$ST_INST" && AGENT_COMMS_SETUP=0 bash "$REPO/install.sh" --scope=local 2>&1 </dev/null)"
+printf '%s' "$INST_OUT" | grep -q 'next: .*comms.sh setup' && [ -f "$ST_INST/.agent-comms/settings.sh" ] \
+  && ok "a non-interactive install points at comms.sh setup instead of prompting" || fail "installer setup hand-off"

@@ -144,6 +144,38 @@ AGENT_COMMS_REPO_RAW="https://raw.githubusercontent.com/<you>/agent-comms/main" 
 `AGENT_COMMS_REPO_RAW` points template/helper downloads at any raw-file base URL
 (including `file:///path/to/checkout` for fully-local testing).
 
+## Settings (`comms.sh setup`)
+
+After installing, run `~/.agent-comms/comms.sh setup` (the installer offers it when it has a
+terminal). It checks prerequisites, detects the agent CLIs and registers them for the project,
+and asks about reviewer containment, Jev routing, the Codex reviewer runtime and the review
+timeout. Detected values are the defaults; re-run it any time to change them.
+
+Answers are saved to files that every helper reads, so a setting works in shells that never
+load your shell rc (agent tool shells, cron, CI). Precedence, highest first:
+
+| source | scope |
+|---|---|
+| the environment (`KEY=v cmd`, `export`) | one command or shell |
+| `<repo>/.comms/settings` | one project (gitignored with `.comms/`) |
+| `~/.agent-comms/settings` | the user (written by `setup`) |
+| `~/.agent-comms/secrets` | `TYPESAFE_API_KEY` only; ignored unless mode `600` |
+
+Files are `KEY=value` lines. They are parsed, never executed, and only known keys are accepted:
+`COMMS_REVIEW_ROUTE`, `COMMS_ROUTE`, `COMMS_ROUTE_BACKEND`, `COMMS_ROUTE_MODEL`,
+`COMMS_ROUTE_TIMEOUT_SECS`, `COMMS_ACP_CODEX_PATH`, `COMMS_ACP_CODEX_MODEL`,
+`COMMS_ACP_CODEX_EFFORT`, `COMMS_ACP_CANARY_SECS`, `COMMS_ACP_RUNTIME_PROBE_SECS`,
+`COMMS_RUNPHASE_TIMEOUT_SECS`, `COMMS_RUNPHASE_ALLOW_UNCONTAINED`, `ACPX_BIN`.
+
+```bash
+comms.sh setup                 # interactive
+comms.sh setup --yes           # accept detected defaults, no prompts
+comms.sh setup --show          # current values and where each comes from (the key is never printed)
+comms.sh setup --set COMMS_REVIEW_ROUTE=1 --set COMMS_RUNPHASE_TIMEOUT_SECS=   # empty removes
+```
+
+`AGENT_COMMS_SETUP=0` stops the installer from offering setup.
+
 ## Environment overrides
 
 | variable | default | purpose |

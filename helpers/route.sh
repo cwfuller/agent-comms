@@ -49,6 +49,11 @@
 # or COMMS_ROUTE=1. Prompt overrides still work with no backend.
 set -euo pipefail
 
+# User/project SETTINGS (helpers/settings.sh): fills unset variables from the settings files, so
+# a setting works in every shell — including agent tool shells that never read the shell rc.
+# Absent next to this script (an old install, a bare copy) it is simply skipped: env still works.
+[ -f "$(dirname "$0")/settings.sh" ] && . "$(dirname "$0")/settings.sh"
+
 usage_err() { echo "route.sh: $*" >&2; exit 2; }
 
 KEYS_FAIL_OPEN() { # <reason> [source]

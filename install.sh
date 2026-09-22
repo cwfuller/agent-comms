@@ -49,7 +49,7 @@ AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
 # here rather than in a separate data manifest because every helper resolves its peers beside itself:
 # the map must land in exactly the directories acp.sh does, in every scope. It is made executable like
 # the rest, which is harmless for a table nothing executes.
-HELPERS="comms.sh runphase.sh acp.sh route.sh route_backend.py route_shadow.py route_review.py policy-map.tsv"
+HELPERS="comms.sh runphase.sh acp.sh settings.sh setup.sh route.sh route_backend.py route_shadow.py route_review.py policy-map.tsv"
 # The reviewer's REVIEW BAR, installed as data. It used to be read out of the codex self-send
 # skills at runtime, which made "delete the self-send templates" silently equal to "delete the
 # reviewer's standard". Installed from docs/loopspec/fragments/ — their canonical home, and what
@@ -918,3 +918,21 @@ echo "    Claude: '/auto build feature X'     Grok: '/user:auto …' or '/local:
 echo "    Review turns you RECEIVE stay parent-brokered over ACP — nothing to invoke by hand"
 echo ""
 echo "  transport: ACP (no pane multiplexer required)"
+
+# SETTINGS. Everything a loop needs beyond the files above (which agents, reviewer containment,
+# Jev routing, the codex reviewer runtime) lives in ~/.agent-comms/settings, written by the
+# re-runnable `comms.sh setup` — never in shell-rc exports that agent tool shells can miss.
+# Offered only with a real terminal; AGENT_COMMS_SETUP=0 (or no terminal) skips it silently.
+case "$SCOPE" in local) SETUP_SH="$PROJECT_ROOT/.agent-comms/comms.sh" ;; *) SETUP_SH="$AGENT_COMMS_HOME/comms.sh" ;; esac
+echo ""
+if [ "${AGENT_COMMS_SETUP:-}" != 0 ] && [ -x "$SETUP_SH" ] && { exec 4<>/dev/tty; } 2>/dev/null; then
+  printf "  Run setup now (agents, reviewer safety, model routing, codex runtime)? [Y/n]: " >&4
+  read -r _run_setup <&4 || _run_setup=n
+  exec 4>&-
+  case "${_run_setup:-y}" in
+    y|Y|yes|Yes) "$SETUP_SH" setup ;;
+    *) echo "  skipped — run it any time: $SETUP_SH setup" ;;
+  esac
+else
+  echo "  next: $SETUP_SH setup    (agents, reviewer safety, model routing, codex runtime; re-runnable)"
+fi
