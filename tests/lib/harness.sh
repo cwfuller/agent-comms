@@ -47,11 +47,23 @@ export AGENT_COMMS_SETUP=0
 unset COMMS_REVIEW_ROUTE COMMS_REVIEW_MAX COMMS_ACP_CODEX_MODEL COMMS_ACP_CODEX_EFFORT \
       COMMS_ROUTE COMMS_ROUTE_BACKEND COMMS_ROUTE_STUB TYPESAFE_API_KEY COMMS_ROUTE_URL \
       COMMS_ROUTE_LOG COMMS_ROUTE_SHADOW_ALLOW COMMS_ROUTE_MODEL COMMS_ROUTE_TIMEOUT_SECS \
-      COMMS_ACP_CANARY_SECS COMMS_ACP_RUNTIME_PROBE_SECS 2>/dev/null || true
-# SETTINGS FILES ARE OFF for the corpus: the developer's ~/.agent-comms/settings (and a project
-# .comms/settings) would otherwise re-set the variables unset above, and the suite would describe
-# that machine. The loader skips when this is set; the settings section opts back in per case.
+      2>/dev/null || true
+# SETTINGS ARE OFF for the corpus, in BOTH directions. Files: the loader skips once
+# AC_SETTINGS_LOADED is set, so the developer's ~/.agent-comms/settings cannot re-set what is unset
+# here; the settings section opts back in per case. Inherited values: a parent that already loaded
+# them (`integrate` runs this suite from comms.sh) exported them, so EVERY settable key is scrubbed,
+# from the loader's own list so a new key cannot be forgotten (an inherited ACPX_BIN would bypass
+# the npx stubs and reach the real transport). Only the pinned runtime above is re-applied.
 export AC_SETTINGS_LOADED=1
+# (The coordinator's own tests run this harness from a tree without helpers/: nothing to scrub there.)
+_ac_settings="$(dirname "${BASH_SOURCE[0]}")/../../helpers/settings.sh"
+if [ -f "$_ac_settings" ]; then
+  . "$_ac_settings"
+  # shellcheck disable=SC2086
+  unset $AC_SETTINGS_KEYS $AC_SECRET_KEYS
+fi
+unset _ac_settings AC_SETTINGS_FROM
+export COMMS_ACP_CODEX_PATH=bundled
 
 # THE DEFAULT IS `mailbox`. What the harness needs from a default is "write the file and
 # nudge nobody" — no spawned child, no network. It used to get that by asking for cmux and

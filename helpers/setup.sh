@@ -92,15 +92,17 @@ for k,v in want.items():
     if k not in seen and v!="": out.append("%s=%s"%(k,v))
 open(dst,"w").write("\n".join(out)+"\n")
 PY
-  mv -f "$tmp" "$SETTINGS"
+  # PENDING is cleared only once the replacement is published: a failed rename must fail the
+  # run, never report "saved" over settings that were not written.
+  mv -f "$tmp" "$SETTINGS" || { rm -f "$tmp"; echo "setup: could not replace $SETTINGS" >&2; return 1; }
   PENDING=""
 }
 write_secret() {  # write_secret <value>
   mkdir -p "$HOME_DIR" || return 1
   local tmp; tmp="$(umask 077; mktemp "$HOME_DIR/.secrets.XXXXXX")" || return 1
   chmod 600 "$tmp"
-  { grep -v '^TYPESAFE_API_KEY=' "$SECRETS" 2>/dev/null; printf 'TYPESAFE_API_KEY=%s\n' "$1"; } > "$tmp"
-  mv -f "$tmp" "$SECRETS"
+  { grep -v '^TYPESAFE_API_KEY=' "$SECRETS" 2>/dev/null; printf 'TYPESAFE_API_KEY=%s\n' "$1"; } > "$tmp" \
+    && mv -f "$tmp" "$SECRETS" || { rm -f "$tmp"; echo "setup: could not write $SECRETS" >&2; return 1; }
 }
 
 # ---- --set: scripted writes, no questions -----------------------------------------------------
@@ -118,13 +120,10 @@ if [ "${#SETS[@]}" -gt 0 ]; then
 fi
 
 # ---- --show: effective values and their source ------------------------------------------------
-source_of() {  # which layer supplies KEY
-  local k="$1" root f
-  root="$(ac_project_root)"
-  for f in "$root/.comms/settings" "$SETTINGS" "$SECRETS"; do
-    [ -f "$f" ] && grep -q "^[[:space:]]*$k=" "$f" 2>/dev/null && { printf '%s' "$f"; return; }
-  done
-  printf 'environment'
+source_of() {  # which layer supplied KEY, as the loader recorded it; anything else was the env
+  local f
+  f="$(printf '%s' "${AC_SETTINGS_FROM:-}" | awk -F'\t' -v k="$1" '$1==k {print $2; exit}')"
+  printf '%s' "${f:-environment}"
 }
 if [ "$SHOW" = 1 ]; then
   echo "agent-comms settings (env > project .comms/settings > $SETTINGS > $SECRETS)"
@@ -168,10 +167,18 @@ if [ -n "$CFG" ]; then
   CUR_AGENTS="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$CFG" 2>/dev/null | head -1)"
   CUR_DEFAULT="$(sed -n 's/^[[:space:]]*default-target[[:space:]]*=[[:space:]]*//p' "$CFG" 2>/dev/null | head -1)"
   AGENTS="$(ask "  agents for this project ($ROOT)" "${CUR_AGENTS:-${DETECTED:-claude codex}}")"
-  bad_agent=""
-  for a in $AGENTS; do case " $KNOWN_AGENTS " in *" $a "*) ;; *) bad_agent="$a" ;; esac; done
+  # Validated to the registry's own rules before anything is written: supported names only, no
+  # duplicates, at least two (a loop needs an author and a reviewer). Anything else keeps the
+  # current line rather than publishing a config registry_parse() would then refuse.
+  bad_agent=""; seen=" "
+  for a in $AGENTS; do
+    case " $KNOWN_AGENTS " in *" $a "*) ;; *) bad_agent="'$a' is not a supported agent ($KNOWN_AGENTS)" ;; esac
+    case "$seen" in *" $a "*) bad_agent="'$a' is listed twice" ;; esac
+    seen="$seen$a "
+  done
+  [ -z "$bad_agent" ] && [ "$(printf '%s\n' $AGENTS | grep -c .)" -lt 2 ] && bad_agent="at least two agents are needed"
   if [ -n "$bad_agent" ]; then
-    say "  '$bad_agent' is not a supported agent ($KNOWN_AGENTS) — keeping: ${CUR_AGENTS:-unchanged}"
+    say "  $bad_agent — keeping: ${CUR_AGENTS:-unchanged}"
     AGENTS="$CUR_AGENTS"
   fi
   first="${AGENTS%% *}"; dflt_default="$CUR_DEFAULT"
@@ -214,6 +221,10 @@ if ask_yn "  enable routing" "$cur_route"; then
   [ -n "$k" ] && { write_secret "$k" && say "  key saved to $SECRETS (mode 600)"; }
   [ -n "$k" ] || [ -n "${TYPESAFE_API_KEY:-}" ] || say "  note: no key yet — routing stays at the default depth until one is set (comms.sh setup, or TYPESAFE_API_KEY)."
   set_user COMMS_ROUTE_BACKEND typesafe
+  # COMMS_ROUTE is the master switch and outranks the backend both ways (route_backend.resolve):
+  # a stale COMMS_ROUTE=0 would keep routing off, a stale =1 would keep it on after a "no".
+  # The answer here owns it, so the user file never carries one.
+  set_user COMMS_ROUTE ""
   if ask_yn "  also route REVIEWER depth per thread" "$(yn_of "${COMMS_REVIEW_ROUTE:-1}")"; then set_user COMMS_REVIEW_ROUTE 1; else set_user COMMS_REVIEW_ROUTE ""; fi
   if [ -n "$ROOT" ] && command -v python3 >/dev/null 2>&1; then
     key="$(cd "$ROOT" && python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import route_backend as b; print(b.canonical_project()[0])' "$HERE" 2>/dev/null)"
@@ -227,7 +238,13 @@ if ask_yn "  enable routing" "$cur_route"; then
     fi
   fi
 else
-  set_user COMMS_ROUTE_BACKEND ""; set_user COMMS_REVIEW_ROUTE ""
+  set_user COMMS_ROUTE_BACKEND ""; set_user COMMS_REVIEW_ROUTE ""; set_user COMMS_ROUTE ""
+  for v in COMMS_ROUTE_BACKEND COMMS_ROUTE COMMS_REVIEW_ROUTE; do
+    s="$(source_of "$v")"
+    if eval "[ -n \"\${$v:-}\" ]" && [ "$s" != "$SETTINGS" ]; then
+      say "  note: $v is still set by $s, which outranks this file; unset it there to turn routing off"
+    fi
+  done
 fi
 
 # ---- 5. codex reviewer runtime + timeout ------------------------------------------------------

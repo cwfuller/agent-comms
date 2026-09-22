@@ -167,6 +167,12 @@ Files are `KEY=value` lines. They are parsed, never executed, and only known key
 `COMMS_ACP_CODEX_EFFORT`, `COMMS_ACP_CANARY_SECS`, `COMMS_ACP_RUNTIME_PROBE_SECS`,
 `COMMS_RUNPHASE_TIMEOUT_SECS`, `COMMS_RUNPHASE_ALLOW_UNCONTAINED`, `ACPX_BIN`.
 
+A project file is repository content, not your consent, so it may only tune depth and time
+(`COMMS_REVIEW_ROUTE`, `COMMS_ACP_CODEX_MODEL`/`_EFFORT`, the `*_SECS` timeouts) and opt out
+with `COMMS_ROUTE=0`. Anything that runs a binary (`ACPX_BIN`, `COMMS_ACP_CODEX_PATH`), lifts
+containment (`COMMS_RUNPHASE_ALLOW_UNCONTAINED`) or turns classification on
+(`COMMS_ROUTE_BACKEND`, `COMMS_ROUTE=1`, `COMMS_ROUTE_MODEL`) is honoured only from the user file.
+
 ```bash
 comms.sh setup                 # interactive
 comms.sh setup --yes           # accept detected defaults, no prompts

@@ -79,4 +79,4 @@ reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)	21
 any-agent driver surface	40
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5
 harness: complete parallel worker reports	1
-comms.sh: settings and setup	12
+comms.sh: settings and setup	18

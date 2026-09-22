@@ -1141,7 +1141,7 @@ st() {  # st [VAR=val...] -- <helper> <args...> : run from the project with an i
   local envs=()
   while [ "$#" -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
   ( cd "$ST_PROJ" && env -u AC_SETTINGS_LOADED -u COMMS_REVIEW_ROUTE -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND \
-      -u COMMS_ACP_CODEX_EFFORT -u TYPESAFE_API_KEY AGENT_COMMS_HOME="$ST_HOME" ${envs[@]+"${envs[@]}"} "$@" )
+      -u COMMS_ACP_CODEX_EFFORT -u TYPESAFE_API_KEY -u COMMS_ACP_CODEX_PATH AGENT_COMMS_HOME="$ST_HOME" ${envs[@]+"${envs[@]}"} "$@" )
 }
 printf 'COMMS_REVIEW_ROUTE=1\n' > "$ST_HOME/settings"
 st -- "$COMMS" review-route enabled >/dev/null 2>&1; A=$?
@@ -1167,6 +1167,31 @@ printf 'COMMS_REVIEW_ROUTE=1\n' > "$ST_HOME/settings"
 ( cd "$ST_PROJ" && env -u COMMS_REVIEW_ROUTE AGENT_COMMS_HOME="$ST_HOME" "$COMMS" review-route enabled >/dev/null 2>&1 ); A=$?
 [ "$A" = 1 ] && ok "the suite's own environment never reads a settings file" || fail "settings leak into the suite"
 : > "$ST_HOME/settings"
+# PROJECT TRUST: a project file is repository content, so it may tune depth and time but never
+# name a binary, lift containment, or switch classification ON. COMMS_ROUTE=0 (opting out) is kept.
+printf 'ACPX_BIN=/tmp/evil\nCOMMS_RUNPHASE_ALLOW_UNCONTAINED=1\nCOMMS_ACP_CODEX_PATH=/tmp/evil\nCOMMS_ROUTE_BACKEND=typesafe\nCOMMS_ROUTE=1\nCOMMS_RUNPHASE_TIMEOUT_SECS=77\n' > "$ST_PROJ/.comms/settings"
+PSHOW="$(st -- "$COMMS" setup --show 2>&1)"
+printf 'COMMS_ROUTE=0\n' > "$ST_PROJ/.comms/settings"
+PSHOW0="$(st -- "$COMMS" setup --show 2>&1)"; rm -f "$ST_PROJ/.comms/settings"
+N=0; for k in ACPX_BIN COMMS_RUNPHASE_ALLOW_UNCONTAINED COMMS_ACP_CODEX_PATH COMMS_ROUTE_BACKEND COMMS_ROUTE; do
+  printf '%s\n' "$PSHOW" | grep -qE "^  $k +\(unset\)" && N=$((N+1)); done
+[ "$N" = 5 ] && printf '%s\n' "$PSHOW" | grep -qE '^  COMMS_RUNPHASE_TIMEOUT_SECS +77 ' \
+  && printf '%s' "$PSHOW" | grep -q "honoured only in" && printf '%s\n' "$PSHOW0" | grep -qE '^  COMMS_ROUTE +0 ' \
+  && ok "a project file cannot set a binary, containment or turn routing on; it can tune time and opt out" || fail "project settings trust ($N/5)"
+# PROVENANCE: an environment override is attributed to the environment, not to a file holding the key.
+printf 'COMMS_REVIEW_ROUTE=1\n' > "$ST_HOME/settings"
+PSHOW="$(st COMMS_REVIEW_ROUTE=0 -- "$COMMS" setup --show 2>&1)"
+printf '%s\n' "$PSHOW" | grep -qE '^  COMMS_REVIEW_ROUTE +0 +environment$' \
+  && ok "--show attributes an environment override to the environment" || fail "--show provenance"
+: > "$ST_HOME/settings"
+# GNU stat: `stat -f FMT` is a filesystem query there that prints a dump AND fails. A stub with
+# exactly that behaviour must still yield mode 600, or a correct secrets file is refused on Linux.
+mkdir -p "$WORK/st-gnu"; printf '#!/bin/sh\ncase "$1" in -c) echo 600 ;; *) echo "  File: \\"$2\\" ID: 0 Namelen: 255"; exit 1 ;; esac\n' > "$WORK/st-gnu/stat"; chmod +x "$WORK/st-gnu/stat"
+printf 'TYPESAFE_API_KEY=k-gnu\n' > "$ST_HOME/secrets"; chmod 600 "$ST_HOME/secrets"
+PSHOW="$(st PATH="$WORK/st-gnu:$PATH" -- "$COMMS" setup --show 2>&1)"
+printf '%s\n' "$PSHOW" | grep -q 'TYPESAFE_API_KEY *(set, 5 chars)' \
+  && ok "the secrets mode check works with GNU stat semantics" || fail "GNU stat mode probe"
+rm -f "$ST_HOME/secrets"
 # SECRETS: loaded only at mode 600.
 printf 'TYPESAFE_API_KEY=k-secret\n' > "$ST_HOME/secrets"; chmod 600 "$ST_HOME/secrets"
 SHOW600="$(st -- "$COMMS" setup --show 2>&1)"
@@ -1184,9 +1209,30 @@ st -- "$COMMS" setup --set NOT_A_SETTING=1 >/dev/null 2>&1; B=$?
   && grep -qx 'COMMS_REVIEW_ROUTE=1' "$ST_HOME/settings" && ! grep -q TIMEOUT "$ST_HOME/settings" && cmp -s "$WORK/st-before" "$ST_HOME/settings" \
   && ok "setup --set rewrites only the named keys, an empty value removes one, an unknown key is refused unchanged" || fail "setup --set ($A/$B)"
 st -- "$COMMS" setup --set TYPESAFE_API_KEY=k2 >/dev/null 2>&1
-[ "$(ac_mode="$(stat -f '%Lp' "$ST_HOME/secrets" 2>/dev/null || stat -c '%a' "$ST_HOME/secrets")"; echo "$ac_mode")" = 600 ] \
+ls -l "$ST_HOME/secrets" | grep -q '^-rw-------' \
   && grep -qx 'TYPESAFE_API_KEY=k2' "$ST_HOME/secrets" && ! grep -q TYPESAFE "$ST_HOME/settings" \
   && ok "the API key goes only to the 0600 secrets file" || fail "secret written wrongly"
+# The master switch follows the routing answer both ways: a stale COMMS_ROUTE in the user file
+# would otherwise keep classification ON after "no", or OFF after "yes". --yes takes the current
+# state as the answer, so =1 exercises the yes branch and =0 the no branch.
+printf 'COMMS_ROUTE=1\n' > "$ST_HOME/settings"; st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
+YES_F="$(cat "$ST_HOME/settings")"
+printf 'COMMS_ROUTE=0\nCOMMS_ROUTE_BACKEND=\n' > "$ST_HOME/settings"; st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
+NO_F="$(cat "$ST_HOME/settings")"; : > "$ST_HOME/settings"
+! printf '%s' "$YES_F" | grep -q '^COMMS_ROUTE=' && printf '%s' "$YES_F" | grep -qx 'COMMS_ROUTE_BACKEND=typesafe' \
+  && ! printf '%s' "$NO_F" | grep -q '^COMMS_ROUTE' \
+  && ok "the routing answer owns COMMS_ROUTE: it is cleared on both yes and no" || fail "routing master switch left stale"
+# A failed publish is a failure: with the rename refused, --set must not report success.
+mkdir -p "$WORK/st-nomv"; printf '#!/bin/sh\nexit 1\n' > "$WORK/st-nomv/mv"; chmod +x "$WORK/st-nomv/mv"
+SOUT="$(st PATH="$WORK/st-nomv:$PATH" -- "$COMMS" setup --set COMMS_REVIEW_ROUTE=1 2>&1)"; A=$?
+[ "$A" != 0 ] && ! printf '%s' "$SOUT" | grep -q 'wrote' && ! grep -q COMMS_REVIEW_ROUTE "$ST_HOME/settings" \
+  && ok "a settings write that cannot be published fails instead of reporting saved" || fail "failed write reported success (rc=$A)"
+# The corpus scrubs every settable key it could have inherited (integrate runs it from comms.sh,
+# which already exported the operator's settings); only the pinned runtime remains.
+N=0; for k in $(sed -n 's/^AC_SETTINGS_KEYS="\(.*\)"$/\1/p' "$REPO/helpers/settings.sh") TYPESAFE_API_KEY; do
+  [ "$k" = COMMS_ACP_CODEX_PATH ] && continue; eval "[ -n \"\${$k+x}\" ]" && N=$((N+1)); done
+grep -q 'unset \$AC_SETTINGS_KEYS \$AC_SECRET_KEYS' "$REPO/tests/lib/harness.sh" && [ "$N" = 0 ] \
+  && ok "the harness scrubs every settable key, from the loader's own list" || fail "inherited settings reach the corpus ($N)"
 # setup --yes: no terminal, no prompts, keeps the project's non-agent config.
 ST_OUT="$(st -- "$COMMS" setup --yes </dev/null 2>&1)"; A=$?
 [ "$A" = 0 ] && grep -qx 'suite-cmd = bash t.sh' "$ST_PROJ/.comms/config" && grep -qx 'agents = claude codex' "$ST_PROJ/.comms/config" \
@@ -1197,6 +1243,9 @@ N=0; for h in comms.sh runphase.sh acp.sh route.sh; do grep -q 'settings.sh" \] 
 grep -q '^HELPERS=.*settings\.sh.*setup\.sh' "$REPO/install.sh" && [ "$N" = 4 ] \
   && ok "all four entry helpers load settings, and install.sh ships settings.sh and setup.sh" || fail "settings wiring ($N/4)"
 ST_INST="$WORK/st-inst"; mkdir -p "$ST_INST"; git -C "$ST_INST" init -q -b main
-INST_OUT="$(cd "$ST_INST" && AGENT_COMMS_SETUP=0 bash "$REPO/install.sh" --scope=local 2>&1 </dev/null)"
+# AGENT_COMMS_SETUP is UNSET here: the predicate itself (scripted --scope, stdin not a terminal)
+# must decline to prompt even where /dev/tty would open. The alarm turns a regression into a
+# failure instead of a hung suite.
+INST_OUT="$(cd "$ST_INST" && echo | env -u AGENT_COMMS_SETUP perl -e 'alarm shift; exec @ARGV' 120 bash "$REPO/install.sh" --scope=local 2>&1)"
 printf '%s' "$INST_OUT" | grep -q 'next: .*comms.sh setup' && [ -f "$ST_INST/.agent-comms/settings.sh" ] \
   && ok "a non-interactive install points at comms.sh setup instead of prompting" || fail "installer setup hand-off"

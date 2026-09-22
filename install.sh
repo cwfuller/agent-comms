@@ -125,6 +125,7 @@ choose_scope() {
     return
   fi
 
+  MENU_SHOWN=1
   cat >&3 <<'MENU'
 Choose install scope:
   1) Global + project init (recommended)
@@ -922,10 +923,14 @@ echo "  transport: ACP (no pane multiplexer required)"
 # SETTINGS. Everything a loop needs beyond the files above (which agents, reviewer containment,
 # Jev routing, the codex reviewer runtime) lives in ~/.agent-comms/settings, written by the
 # re-runnable `comms.sh setup` — never in shell-rc exports that agent tool shells can miss.
-# Offered only with a real terminal; AGENT_COMMS_SETUP=0 (or no terminal) skips it silently.
+# Offered only to an install a person is DRIVING: one that just showed the scope menu, or one
+# whose stdin is a terminal. Merely being able to open /dev/tty is not that: a piped install with
+# an explicit --scope (CI, a provisioning script, the documented one-liner) still has a
+# controlling terminal, and must not stop to wait on it. AGENT_COMMS_SETUP=0 always skips.
 case "$SCOPE" in local) SETUP_SH="$PROJECT_ROOT/.agent-comms/comms.sh" ;; *) SETUP_SH="$AGENT_COMMS_HOME/comms.sh" ;; esac
 echo ""
-if [ "${AGENT_COMMS_SETUP:-}" != 0 ] && [ -x "$SETUP_SH" ] && { exec 4<>/dev/tty; } 2>/dev/null; then
+if [ "${AGENT_COMMS_SETUP:-}" != 0 ] && [ -x "$SETUP_SH" ] && { [ "${MENU_SHOWN:-0}" = 1 ] || [ -t 0 ]; } \
+   && { exec 4<>/dev/tty; } 2>/dev/null; then
   printf "  Run setup now (agents, reviewer safety, model routing, codex runtime)? [Y/n]: " >&4
   read -r _run_setup <&4 || _run_setup=n
   exec 4>&-
