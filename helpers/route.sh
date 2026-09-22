@@ -80,7 +80,7 @@ shadow_repo_key() {  # -> 64-hex sha256 of the canonical MAIN repo root
   local root
   root="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
       -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_CEILING_DIRECTORIES \
-      git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')" || return 1
+      git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')" || return 1
   [ -n "$root" ] || return 1
   root="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
   printf '%s' "$root" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256
@@ -90,7 +90,7 @@ shadow_main_root() {
   local root
   root="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
       -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_CEILING_DIRECTORIES \
-      git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')" || return 1
+      git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')" || return 1
   [ -n "$root" ] || return 1
   (cd "$root" 2>/dev/null && pwd -P)
 }

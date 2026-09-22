@@ -561,9 +561,27 @@ ISO_OUT="$(bash -c 'set -euo pipefail; corr_json="'"$ISO_BIGREC"'"; '"$ISO_READ"
 [ "$ISO_OUT" = "/some/mount/view/tree" ] \
   && ok "...and it still returns the first cwd" || fail "wrong cwd from the large record: $ISO_OUT"
 # CONTROL: the OLD pipeline shape must actually fail, or the test above proves nothing.
-bash -c 'set -euo pipefail; body="$(cat "'"$ISO_BIGREC"'")"; v="$(printf "%s\n" "$body" | sed -n "s/^[[:space:]]*\"cwd\":[[:space:]]*\"\(.*\)\",*$/\1/p" | head -1)"; printf "%s" "$v"' >/dev/null 2>&1 \
-  && fail "the old slurp|head pipeline survived the large record — the control proves nothing" \
-  || ok "the old slurp|head shape does die on this fixture, so the fix is what makes it pass"
+# REQUIRE EXIT 141 SPECIFICALLY. "any nonzero" would let a syntax error or a bad fixture
+# masquerade as the SIGPIPE this control exists to demonstrate. (codex, sigpipe r1 advisory.)
+bash -c 'set -euo pipefail; body="$(cat "'"$ISO_BIGREC"'")"; v="$(printf "%s\n" "$body" | sed -n "s/^[[:space:]]*\"cwd\":[[:space:]]*\"\(.*\)\",*$/\1/p" | head -1)"; printf "%s" "$v"' >/dev/null 2>&1
+ISO_OLDRC=$?
+[ "$ISO_OLDRC" -eq 141 ] \
+  && ok "the old slurp|head shape dies with SIGPIPE (141) on this fixture, so the fix is what makes it pass" \
+  || fail "the control did not reproduce SIGPIPE (got rc=$ISO_OLDRC), so it proves nothing"
 # And no slurp|head pipeline remains anywhere in the runner.
 [ "$(grep -cE "printf .*\| *sed .*\| *head -1" "$ISO_RP")" = 0 ] \
   && ok "no slurp-into-sed-into-head pipeline remains in runphase.sh" || fail "a slurp|head pipeline remains"
+
+# THE SAME SHAPE ELSEWHERE. Grepping one file found one instance; codex found two more live
+# ones by looking at what else can grow. `main_repo_root` is called on nearly every path, and
+# its input grows with every durable mount.
+for _f in comms.sh route.sh runphase.sh acp.sh; do
+  [ -f "$REPO/helpers/$_f" ] || continue
+  [ "$(grep -cE 'git worktree list --porcelain.*\| *head -1' "$REPO/helpers/$_f")" = 0 ] \
+    || fail "helpers/$_f still pipes an expanding worktree listing through head -1"
+done
+ok "no helper pipes the worktree listing through head -1"
+# And the replacement must still yield the main root, not merely avoid dying.
+ISO_MRR="$(sed -n '/^main_repo_root() {/,/^}/p' "$REPO/helpers/comms.sh")"
+[ -n "$ISO_MRR" ] && [ "$( ( cd "$REPO" && eval "$ISO_MRR"; main_repo_root ) )" = "$(cd "$REPO" && git worktree list --porcelain | sed -n '1s/^worktree //p')" ] \
+  && ok "main_repo_root still returns the main checkout after losing the pipe" || fail "main_repo_root changed behaviour"

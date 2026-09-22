@@ -152,7 +152,9 @@ case "$0" in
 esac
 
 main_repo_root() {
-  git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //'
+  # Consumes the WHOLE stream: `head -1` exits early and SIGPIPEs git once the worktree
+  # listing outgrows the pipe buffer, which kills the caller under `set -euo pipefail`.
+  git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p'
 }
 
 
@@ -4293,7 +4295,9 @@ PYRC
 )" || rc=$?
   [ -n "$tmp" ] && rm -f "$tmp"
   # The exit status and the sentinel must AGREE, or the classifier did not complete as contracted.
-  local first; first="$(printf '%s\n' "$out" | head -1)"
+  # Parameter expansion, not a pipe: provider error text is unbounded, and `head -1` on it
+  # exited 141 in codex's probe. (codex, sigpipe r1 advisory.)
+  local first; first="${out%%$'\n'*}"
   case "$rc" in
     10) if [ "$first" = "verdict: answer" ]; then return 10; fi ;;
     11) if [ "$first" = "verdict: error" ]; then printf '%s\n' "$out"; return 11; fi ;;
