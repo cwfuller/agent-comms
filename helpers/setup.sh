@@ -99,12 +99,17 @@ PY
   mv -f "$tmp" "$SETTINGS" || { rm -f "$tmp"; echo "setup: could not replace $SETTINGS" >&2; return 1; }
   PENDING=""
 }
-write_secret() {  # write_secret <value>
-  mkdir -p "$HOME_DIR" || return 1
-  local tmp; tmp="$(umask 077; mktemp "$HOME_DIR/.secrets.XXXXXX")" || return 1
+write_secret() {  # write_secret <value> — the ONE secret writer; both --set and the prompt use it
+  local tmp g=0
+  mkdir -p "$HOME_DIR" || { echo "setup: cannot create $HOME_DIR" >&2; return 1; }
+  tmp="$(umask 077; mktemp "$HOME_DIR/.secrets.XXXXXX")" || { echo "setup: could not write $SECRETS" >&2; return 1; }
   chmod 600 "$tmp"
-  { grep -v '^TYPESAFE_API_KEY=' "$SECRETS" 2>/dev/null; printf 'TYPESAFE_API_KEY=%s\n' "$1"; } > "$tmp" \
-    && mv -f "$tmp" "$SECRETS" || { rm -f "$tmp"; echo "setup: could not write $SECRETS" >&2; return 1; }
+  # Existing lines are kept except the key being replaced, matched with the LOADER's grammar
+  # (whitespace around the name is trimmed there, so ` TYPESAFE_API_KEY=old` is live and must go).
+  # Absent is empty; unreadable (grep > 1) aborts before anything is published.
+  if [ -e "$SECRETS" ]; then grep -vE '^[[:space:]]*TYPESAFE_API_KEY[[:space:]]*=' "$SECRETS" > "$tmp"; g=$?; fi
+  if [ "$g" -le 1 ] && printf 'TYPESAFE_API_KEY=%s\n' "$1" >> "$tmp" && mv -f "$tmp" "$SECRETS"; then return 0; fi
+  rm -f "$tmp"; echo "setup: could not write $SECRETS; the key was NOT saved" >&2; return 1
 }
 
 # ---- --set: scripted writes, no questions -----------------------------------------------------
@@ -236,7 +241,9 @@ case "${COMMS_ROUTE:-}" in
 esac
 if ask_yn "  enable routing" "$cur_route"; then
   k="$(ask_secret "  TypeSafe API key")"
-  [ -n "$k" ] && { write_secret "$k" && say "  key saved to $SECRETS (mode 600)"; }
+  if [ -n "$k" ]; then
+    if write_secret "$k"; then say "  key saved to $SECRETS (mode 600)"; else FAILED=1; k=""; fi
+  fi
   [ -n "$k" ] || [ -n "${TYPESAFE_API_KEY:-}" ] || say "  note: no key yet — routing stays at the default depth until one is set (comms.sh setup, or TYPESAFE_API_KEY)."
   set_user COMMS_ROUTE_BACKEND typesafe
   # COMMS_ROUTE is the master switch and outranks the backend both ways (route_backend.resolve):

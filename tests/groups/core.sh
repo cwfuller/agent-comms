@@ -1212,6 +1212,16 @@ st -- "$COMMS" setup --set TYPESAFE_API_KEY=k2 >/dev/null 2>&1
 ls -l "$ST_HOME/secrets" | grep -q '^-rw-------' \
   && grep -qx 'TYPESAFE_API_KEY=k2' "$ST_HOME/secrets" && ! grep -q TYPESAFE "$ST_HOME/settings" \
   && ok "the API key goes only to the 0600 secrets file" || fail "secret written wrongly"
+# Replacement matches the loader's key grammar: an indented old assignment (live to the loader,
+# which trims the name) is removed, not left ahead of the new one. Other lines survive.
+printf '# mine\n  TYPESAFE_API_KEY = old\n' > "$ST_HOME/secrets"; chmod 600 "$ST_HOME/secrets"
+st -- "$COMMS" setup --set TYPESAFE_API_KEY=k3 >/dev/null 2>&1
+[ "$(grep -c TYPESAFE_API_KEY "$ST_HOME/secrets")" = 1 ] && grep -qx 'TYPESAFE_API_KEY=k3' "$ST_HOME/secrets" && grep -qx '# mine' "$ST_HOME/secrets" \
+  && ok "replacing the key removes every live assignment of it and keeps other lines" || fail "old key left live: $(tr '\n' '|' < "$ST_HOME/secrets" | sed 's/k[0-9]*/K/g')"
+# An UNREADABLE secrets file is not replaced: the write fails and the file is untouched.
+chmod 000 "$ST_HOME/secrets"; st -- "$COMMS" setup --set TYPESAFE_API_KEY=k4 >/dev/null 2>&1; A=$?; chmod 600 "$ST_HOME/secrets"
+[ "$A" != 0 ] && grep -qx '# mine' "$ST_HOME/secrets" && grep -qx 'TYPESAFE_API_KEY=k3' "$ST_HOME/secrets" \
+  && ok "an unreadable secrets file fails the write instead of being replaced" || fail "unreadable secrets replaced (rc=$A)"
 # FRESH PROJECT (no default-target line): the default reviewer is derived, not shell text. This is
 # the path a first install takes, and bash 3.2 once turned it into a syntax error written to config.
 printf 'agents = claude codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"

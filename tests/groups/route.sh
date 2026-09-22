@@ -387,8 +387,8 @@ RS_MISS="$("$RS_TMP/comms.sh" route --shadow -- 'x' 2>/dev/null)"; RS_MRC=$?
   && ok "a missing route.sh refuses --shadow instead of inventing a decision" || fail "missing helper answered --shadow with classify keys"
 # Captured, not piped: `grep -q` exits at the match, and under pipefail the writer's SIGPIPE
 # failed this line intermittently under load.
-RS_OPEN="$("$RS_TMP/comms.sh" route -- 'x' 2>/dev/null)"
-printf '%s\n' "$RS_OPEN" | grep -qx 'source: fail-open' \
+RS_OPEN="$("$RS_TMP/comms.sh" route -- 'x' 2>/dev/null)"; RS_ORC=$?
+[ "$RS_ORC" = 0 ] && printf '%s\n' "$RS_OPEN" | grep -qx 'source: fail-open' \
   && ok "...while a plain classify argv still fails open unchanged" || fail "missing-helper fail-open regressed"
 
 # 5. THE RECORD. Run the collector for real against a stub and read what it wrote.
