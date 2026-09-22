@@ -1,43 +1,26 @@
 # agent-comms
 
 Autonomous code-review loops between AI coding agents. One agent implements, the
-others review the same pinned artifact, and the loop runs until they approve.
-No babysitting.
-
-It exists because asking one agent to write code, then asking another to critique
-it, then feeding the critique back produces markedly better results than either
-alone. This is that loop, automated.
+others review the same pinned snapshot, and the loop repeats until they approve.
 
 ```
-                 ┌─────────► other registered agents ──┐
-  any driver ────┤  same artifact                      ├────► one composed verdict ──► fix ──► repeat
-  (claude,       └─────────► on the panel              ┘        until approved
-   codex, grok)
+                 ┌─► other agents review ─┐
+  any driver ────┤   the same snapshot    ├─► one composed verdict ─► fix ─► repeat until approved
+  (claude, codex,└─► (a panel, by default)┘
+   grok)
 ```
 
-## Quick start
-
-From your project's root:
+## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh \
-  | bash -s -- --scope=both
+curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=both
 ```
 
-Piping a script into a shell means running code you have not read. Prefer cloning
-and inspecting first — the result is identical:
+Needs git, Node >= 22.13 and at least two agent CLIs (`claude` and `codex` work
+out of the box). Clone-first install, scopes and reviewer containment:
+[docs/INSTALL.md](docs/INSTALL.md).
 
-```bash
-git clone https://github.com/cwfuller/agent-comms ~/src/agent-comms
-less ~/src/agent-comms/install.sh
-cd /path/to/your/project && bash ~/src/agent-comms/install.sh --scope=both
-```
-
-`--scope=both` writes driver commands/skills for Claude, Grok, and Codex, the
-shared helpers, a Codex protocol note, and this project's `.comms/` mailboxes
-(plus `.gitignore` entries). Nothing else.
-
-Then drive from whichever agent you are in. Same task, different invocation:
+## Use
 
 | Driver | Run |
 | --- | --- |
@@ -45,145 +28,54 @@ Then drive from whichever agent you are in. Same task, different invocation:
 | Grok | `/user:auto add rate limiting to the API` |
 | Codex | `$auto add rate limiting to the API` |
 
-Grok notes: bare `/auto` is Grok's own permission-mode built-in, so the global
-install is `/user:auto`. A project pin is `/local:auto`. Codex notes: if you
-have both a local pin (`.agents/skills/auto`) and a global install
-(`~/.codex/skills/auto`), both can appear in the `$` selector — pick the one
-you mean, or disable the other with `/skills`.
-
-That's it. The driving agent implements, snapshots the tree, and every other
-registered agent reviews **that same pinned artifact**. Shared blockers gate the
-next round; unique ones are flagged for you. It repeats until they approve or it
-hits the round cap (default 10 per phase).
-
-Nothing else is required: no terminal panes, no second window. Review turns run
-over ACP in the background.
-
-## Everyday use
-
-Invocation differs by driver (see the table above). The flags are the same:
-
 ```text
-<auto> <task>                 # implement → review → fix, until approved
-                              #   reviewed by a PANEL of every other agent by default
-                              #   a query classifier may enable an approach review
-<auto> --reviewers codex      # narrow it to one reviewer
-<auto> --plan <task>          # force an approach review first (high-stakes work)
-<auto> --no-plan <task>       # skip approach review even if the classifier would request one
-<auto> --rounds 3 <task>      # a tighter cap than the default 10
-
-<ask> codex <question>        # one-off consult, no loop, no verdict
-<ask>                         # "thoughts?" on the current discussion
+<auto> <task>               implement → panel review → fix, until approved (10 rounds max)
+<auto> --reviewers codex    one reviewer instead of the whole panel
+<auto> --plan <task>        approach review first, for high-stakes work
+<auto> --max <task>         deepest review: strongest model, highest effort
+<ask> codex <question>      one-off consult, no loop
 ```
 
-`<auto>` / `<ask>` mean `/auto` and `/ask` in Claude, `/user:auto` and
-`/user:ask` in Grok (or `/local:…` for a pin), and `$auto` / `$ask` in Codex.
+Every flag and the helper CLI: [docs/COMMANDS.md](docs/COMMANDS.md).
 
-**When to reach for `--plan`:** only when a wrong *approach* would be expensive
-to discover after implementing — novel architecture, high blast radius,
-safety-critical. Most work should let the implementation speak for itself.
-Without an explicit `--plan` / `--no-plan`, `comms.sh route` may request the
-approach-review phase and recommend an abstract `fast|balanced|strong` tier plus
-effort (a live classification is raised one step; fail-open stays medium /
-balanced). The decision backend is opt-in (`COMMS_ROUTE_BACKEND=typesafe` or
-`COMMS_ROUTE=1` plus `TYPESAFE_API_KEY`); a key in the environment is not enough
-by itself. Prompt phrases (`use strong`, `skip plan`) override it with no backend.
-It never chooses a reviewer or a vendor model id — map the tier in the runtime
-to whatever that session currently offers for cheap / default / best. That
-bumped mapping is the named `implementer-bump-v1` hint for the implementer only.
+## Why you can trust the verdict
 
-**Reviewer routing (opt-in, off by default).** With `COMMS_REVIEW_ROUTE=1`,
-`send` / `panel dispatch` record one reviewer decision per thread and phase
-(implement only) and each mounted Codex review turn resolves it through the
-versioned `helpers/policy-map.tsv` — the one place vendor model ids live —
-then attests from the provider's own rollout that it actually ran that
-model and effort, or refuses to publish. Claude and Grok stay on their fixed
-behaviour until their controls are proven. Reviewers use your installed `codex`
-when it is new enough (GPT-6 Sol/Luna need >= 0.155), else fall back to the
-gpt-5.6 models. `/auto --max` (or "use max") runs every reviewer at the
-strongest model and highest effort. See `acp.sh doctor` / `acp.sh capabilities`
-and `docs/INTERNALS.md` "Reviewer model/effort routing".
+- **Pinned artifact.** Every reviewer reads the same snapshot, not your live tree.
+- **Corroboration gates.** A blocker two reviewers raise blocks; a lone one is
+  flagged for you, so one noisy reviewer cannot stall the loop.
+- **Nothing silently dropped.** Malformed messages are refused, an unanswered
+  reviewer blocks the gate, and leftover advisories feed later rounds.
+- **Proven review depth.** Each Codex review is checked against the model and
+  effort Codex itself logged; a review at the wrong depth is never published.
 
-**A panel is the default.** Every registered agent except the driver reviews the
-same pinned artifact. They find different things. A blocking finding two of them
-raise (same `path:line`) gates the loop; a finding only one raises is flagged
-for you to cross-check rather than obeyed automatically, so one noisy reviewer
-cannot cost you a round. Narrow with `--reviewers` when you want speed over
-coverage.
+How: [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/INTERNALS.md](docs/INTERNALS.md).
 
-Full command reference: **[docs/COMMANDS.md](docs/COMMANDS.md)**
+## Model routing (optional)
 
-## What makes the loops trustworthy
+A classifier (Jev, via TypeSafe) sizes the work so easy things run cheap:
 
-- **Every reviewer reads the same thing.** The tree is snapshotted when the
-  request is sent and mounted for the reviewer, so a review is about a pinned
-  artifact, not whatever you happened to be typing while it ran.
-- **Messages are validated before delivery.** Malformed messages are refused,
-  never half-processed. A failed delivery says so and is recoverable; it never
-  looks like "the reviewer is just slow".
-- **One noisy reviewer cannot hold the loop hostage.** A lone unsupported
-  blocking finding is cross-checked, not automatically obeyed.
-- **Nothing is silently dropped.** Composition keeps every finding, attributed
-  to the reviewer who made it. An unanswered panel leg blocks the gate rather
-  than counting as approval.
-- **Advisories survive.** On an approval, un-actioned advisory findings are
-  appended to `docs/advisories.md`, and `comms.sh lessons` reads that file back
-  into later rounds, so lessons compound instead of evaporating.
-- **ACP is the default transport.** Reviewers run in the background; you do not
-  babysit a pane. The old `--via cmux` pane transport was deleted — asking for it
-  is refused rather than silently downgraded. Later rounds on the same thread
-  reuse a stable mount path so ACP can stay warm. A running turn is watchable in
-  its run dir (`.comms/logs/<message>.<ts>.<pid>/runner.log`).
+- **The loop:** decides whether a task needs an approach review first.
+  Enable with `COMMS_ROUTE_BACKEND=typesafe`.
+- **Reviewers:** picks each Codex reviewer's model tier and effort per thread
+  from a versioned table (GPT-6 Luna / Sol / Astra when your installed codex is
+  new enough, else GPT-5.6). Low confidence keeps the default depth. Enable with
+  `COMMS_REVIEW_ROUTE=1`.
 
-## Requirements
-
-- A git repository
-- At least two agent CLIs. **`claude` and `codex` work out of the box.** `grok`
-  is registered by default, but read the containment note below before relying
-  on it as a *reviewer*.
-- Node ≥ 22.13 for the ACP transport. Setting `ACPX_BIN` to an already-installed
-  `acpx` skips the `npx` download; the Node floor still applies.
-- No pane multiplexer. Loops run over ACP.
-
-**A reviewer runs against a mounted copy of your tree, so it has to be
-contained.** `claude` and `codex` have verified isolation backends and are
-constrained automatically, though not identically: `codex` runs under its own
-kernel sandbox, while `claude`'s backend is measured write-contained but still
-reaches the network. Read that as "was unable to modify the machine in our write
-probes" rather than a kernel boundary — behavioural defence, and it does not
-stop the reviewer phoning home.
-
-**`grok` has no verified backend on any platform**, so a mounted grok *review*
-turn is refused rather than run unconstrained, and a default panel that includes
-it will not complete. Grok as a *driver* is fine. Two ways forward for review:
-
-- narrow the roster: `<auto> --reviewers codex`, or drop `grok` from `agents` in
-  `.comms/config`
-- or accept an uncontained reviewer deliberately:
-  `export COMMS_RUNPHASE_ALLOW_UNCONTAINED=1`
-
-Understand the second before using it. An uncontained turn can write outside its
-mount and reach the network with your git credentials. That is a fair trade for
-reviewing your own code on your own machine, and a poor one for anything you did
-not write.
+Both are off by default; `--no-route` turns them off for one loop. Details:
+[reviewer routing](docs/INTERNALS.md#reviewer-modeleffort-routing),
+`acp.sh doctor`, `acp.sh capabilities`.
 
 ## Docs
 
-Start here if you are installing or driving a loop. The rest is for deeper
-detail or for agents working *on* this repository.
-
-| For you | |
+| | |
 | --- | --- |
-| [docs/INSTALL.md](docs/INSTALL.md) | install scopes, local pinning, upgrading |
-| [docs/COMMANDS.md](docs/COMMANDS.md) | driver commands (Claude, Grok, Codex) and the helper CLI |
-
-| Deeper / for agents | |
-| --- | --- |
-| [docs/PROTOCOL.md](docs/PROTOCOL.md) | message format, transports, state, archive discipline |
-| [docs/loopspec/SPEC.md](docs/loopspec/SPEC.md) | portable review-loop contract: verdicts, rounds, schemas, fixtures |
-| [docs/INTERNALS.md](docs/INTERNALS.md) | architecture, the template/helper split, test harness |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | decisions, field reports, what's next |
-| [AGENTS.md](AGENTS.md) | contributing to agent-comms itself (`CLAUDE.md` symlinks here) |
+| [INSTALL](docs/INSTALL.md) | install, requirements, containment, upgrading |
+| [COMMANDS](docs/COMMANDS.md) | driver commands and the helper CLI |
+| [PROTOCOL](docs/PROTOCOL.md) | message format, transports, state |
+| [loopspec](docs/loopspec/SPEC.md) | the portable review-loop contract |
+| [INTERNALS](docs/INTERNALS.md) | architecture and the reasoning behind it |
+| [ROADMAP](docs/ROADMAP.md) | decisions, field reports, what's next |
+| [AGENTS.md](AGENTS.md) | contributing to agent-comms itself |
 
 ## License
 

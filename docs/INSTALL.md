@@ -7,6 +7,46 @@
 curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=both
 ```
 
+Piping a script into a shell runs code you have not read. Cloning and inspecting first gives
+the same result:
+
+```bash
+git clone https://github.com/cwfuller/agent-comms ~/src/agent-comms
+less ~/src/agent-comms/install.sh
+cd /path/to/your/project && bash ~/src/agent-comms/install.sh --scope=both
+```
+
+`--scope=both` writes driver commands/skills for Claude, Grok and Codex, the shared helpers, a
+Codex protocol note, and this project's `.comms/` mailboxes (plus `.gitignore` entries). Nothing
+else.
+
+## Requirements
+
+- A git repository.
+- At least two agent CLIs. `claude` and `codex` work out of the box; `grok` is registered by
+  default, but read the containment note below before using it as a *reviewer*.
+- Node >= 22.13 for the ACP transport. `ACPX_BIN` pointing at an installed `acpx` skips the
+  `npx` download; the Node floor still applies.
+- No pane multiplexer: loops run over ACP in the background.
+
+### Reviewer containment
+
+A reviewer runs against a mounted copy of your tree, so it has to be contained. `claude` and
+`codex` have verified isolation backends, though not identical ones: `codex` runs under its own
+kernel sandbox; `claude` was measured write-contained but still reaches the network, which is
+behavioural defence rather than a kernel boundary. Both measurements are due a re-probe on
+current adapters and on the installed codex runtime reviewers now use (docs/ROADMAP.md).
+
+`grok` has no verified backend, so a mounted grok *review* turn is refused rather than run
+unconstrained, and a default panel that includes it will not complete. Grok as a *driver* is
+fine. Either narrow the roster (`<auto> --reviewers codex`, or drop `grok` from `agents` in
+`.comms/config`), or accept an uncontained reviewer deliberately with
+`export COMMS_RUNPHASE_ALLOW_UNCONTAINED=1`. An uncontained turn can write outside its mount and
+reach the network with your git credentials: fine for your own code on your own machine, not
+for code you did not write.
+
+## Interactive install
+
 Run interactively (no `--scope`) and the installer shows a menu:
 
 ```
