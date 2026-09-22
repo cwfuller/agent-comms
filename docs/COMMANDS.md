@@ -356,7 +356,8 @@ Nothing needs setting on a new machine with a current codex installed; `acp.sh d
 only codex/acp-mounted is eligible. The printed record (`policy_digest`, sources, `fallback`,
 `map_version`, …) is what runphase persists; `policy`, `provider-config`, `policy-check` and
 `policy-attest` take `--policy-file <record>` and then never re-resolve. `acp.sh capabilities`
-prints the table. Exit codes: resolve 0/1/2; check/attest 0 match, 20 mismatch, 21 undecidable.
+prints the table (`acp.sh doctor` also names the reviewer codex runtime and its version). Exit
+codes: resolve 0/1/2; check/attest 0 match, 20 mismatch, 21 undecidable.
 
 ### `runphase.sh` (experimental)
 
