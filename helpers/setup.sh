@@ -190,12 +190,18 @@ if [ -n "$CFG" ]; then
     say "  $bad_agent — keeping: ${CUR_AGENTS:-unchanged}"
     AGENTS="$CUR_AGENTS"
   fi
+  # One separator form from here on: tabs or runs of spaces would defeat every " $x " match below.
+  AGENTS="$(printf '%s' "$AGENTS" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
   first="${AGENTS%% *}"; dflt_default="$CUR_DEFAULT"
   # Plain statements, never a `case` inside $( ): bash 3.2 mis-parses that and assigns shell text.
   case " $AGENTS " in *" $dflt_default "*) ;; *) dflt_default="" ;; esac
   if [ -z "$dflt_default" ]; then case " $AGENTS " in *" codex "*) dflt_default=codex ;; *) dflt_default="$first" ;; esac; fi
   DEFAULT="$(ask "  default reviewer (for /ask and single-reviewer loops)" "$dflt_default")"
-  case " $AGENTS " in *" $DEFAULT "*) ;; *) say "  '$DEFAULT' is not in the agent list — using $dflt_default"; DEFAULT="$dflt_default" ;; esac
+  # Exactly ONE registered name: "claude codex" would otherwise match " $AGENTS " as a substring.
+  case "$DEFAULT" in
+    ''|*[[:space:]]*) say "  '$DEFAULT' is not one agent name — using $dflt_default"; DEFAULT="$dflt_default" ;;
+    *) case " $AGENTS " in *" $DEFAULT "*) ;; *) say "  '$DEFAULT' is not in the agent list — using $dflt_default"; DEFAULT="$dflt_default" ;; esac ;;
+  esac
   if [ -n "$AGENTS" ]; then
     # Every step checked: an unreadable config (grep > 1) must not be replaced by just the two
     # agent lines, and a failed publish must not read as success.

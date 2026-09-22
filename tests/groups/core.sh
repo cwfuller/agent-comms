@@ -1229,6 +1229,12 @@ st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
 grep -qx 'default-target = codex' "$ST_PROJ/.comms/config" && [ "$(grep -c . "$ST_PROJ/.comms/config")" = 3 ] \
   && ok "a fresh project gets a real default reviewer" || fail "fresh default-target: $(tr '\n' '|' < "$ST_PROJ/.comms/config")"
 printf 'agents = claude codex\ndefault-target = codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
+# A tab-separated current roster is written back in canonical single-space form.
+printf 'agents =\tclaude\t codex\ndefault-target = codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
+st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
+grep -qx 'agents = claude codex' "$ST_PROJ/.comms/config" && grep -qx 'default-target = codex' "$ST_PROJ/.comms/config" \
+  && ok "a whitespace-irregular roster is normalised before it is written back" || fail "roster not normalised: $(tr '\n\t' '|^' < "$ST_PROJ/.comms/config")"
+printf 'agents = claude codex\ndefault-target = codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
 # An explicit COMMS_ROUTE=0 beside a named backend is OFF; accepting defaults must keep it off.
 printf 'COMMS_ROUTE_BACKEND=typesafe\nCOMMS_ROUTE=0\n' > "$ST_HOME/settings"; st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
 OFF_F="$(cat "$ST_HOME/settings")"; : > "$ST_HOME/settings"
