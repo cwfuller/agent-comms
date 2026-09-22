@@ -1206,12 +1206,18 @@ rr_run rr-stale "$RRZ" "$RR_D8" COMMS_REVIEW_ROUTE=1 AX_MODEL=gpt-6-astra AX_EFF
 [ "$(cn_status "$RR_D8")" = failed ] && [ "$(tv "$RR_D8" adapter_check)" = mismatch ] \
   && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L8" 2>/dev/null | grep -q . \
   && ok "a session reporting the baseline for a routed turn is refused before any prompt" || fail "stale session: status=$(cn_status "$RR_D8") adapter=$(tv "$RR_D8" adapter_check)"
-# A PANEL LEG (`<base>-codex`) routes on its base thread's decision ONLY when the coordinator log
-# corroborates it (a panel-planned row for its dispatch, agent and base thread). A lookalike thread
+# A PANEL LEG (`<base>-codex`) routes on its base thread's decision ONLY when its panel recorded it
+# (dispatch, the stamped decision, raw base thread, agent). A lookalike thread
 # — with no dispatch, or with a dispatch the author typed — never borrows another thread's decision.
 RRP="$(rr_decide rr-panel fast low)"
-( cd "$MA_FIX" && "$COMMS" events append --kind panel-planned --set rr-panel-set --dispatch d-rr-test \
-    --agent codex --thread rr-panel --status planned ) >/dev/null 2>&1
+RR_PF="$MA_FIX/.comms/route-decisions/legs/$(printf '%s' d-rr-test | shasum -a 256 | cut -c1-12)"
+mkdir -p "$(dirname "$RR_PF")"
+printf 'dispatch	d-rr-test
+decision	%s
+base	rr-panel
+agent	codex
+agent	grok
+' "$RRP" > "$RR_PF"
 RR_D9="$WORK/rr-9"; RR_LEG=d-rr-test rr_run rr-panel-codex "$RRP" "$RR_D9" COMMS_REVIEW_ROUTE=1
 RR_D10="$WORK/rr-10"; rr_run rr-panel-codex "$RRP" "$RR_D10" COMMS_REVIEW_ROUTE=1
 RR_D10b="$WORK/rr-10b"; RR_LEG=d-typed-by-author rr_run rr-panel-codex "$RRP" "$RR_D10b" COMMS_REVIEW_ROUTE=1

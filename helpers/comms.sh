@@ -1555,10 +1555,10 @@ cmd_review_route() {
       # verify <id> --thread <message thread> --phase <p> [--leg-dispatch <d> [--leg-agent <a>]]
       # — the id a request CARRIES, checked against the decision IN FORCE (the record names its
       # own workspace, so the caller's cwd or branch cannot change the answer). The thread must
-      # equal the decision's thread, EXCEPT for a panel leg that the coordinator log corroborates:
-      # a `panel-planned` row for that dispatch naming agent <a> and base thread <thread minus
-      # -a>. A `dispatch:` value the author typed, with no such row, earns no exception — so a
-      # thread merely NAMED `x-codex` never borrows `x`'s decision. (codex, implement r1.)
+      # equal the decision's thread, EXCEPT for a routed panel leg its panel recorded (dispatch,
+      # this exact decision, raw base thread, agent — see record_panel_route). A `dispatch:` value
+      # the author typed earns no exception, so a thread merely NAMED `x-codex` never borrows
+      # `x`'s decision. (codex, implement r1/r2.)
       local _vid="${1:-}" _vt="" _vp="" _vd="" _va="" _vbase="" _vleg=""; [ "$#" -gt 0 ] && shift
       while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -1574,7 +1574,7 @@ cmd_review_route() {
       command -v python3 >/dev/null 2>&1 || die "review-route: python3 is required"
       [ -f "$py" ] || die "review-route: route_review.py is not installed next to comms.sh — re-run install.sh"
       if [ -n "$_vd" ]; then
-        _vleg="$(panel_leg_agent "$_vt" "$_vd" "$_va")" || _vleg=""
+        _vleg="$(panel_leg_agent "$_vt" "$_vd" "$_vid" "$_va")" || _vleg=""
       fi
       python3 "$py" verify --root "$(cmd_root)" --thread "$_vt" --phase "$_vp" ${_vleg:+--leg-agents "$_vleg"} -- "$_vid"
       return ;;
@@ -1613,26 +1613,49 @@ stamp_route_decision() {
   ' "$sf" > "$stamped" && mv -f "$stamped" "$sf" || { rm -f "$stamped" 2>/dev/null; return 1; }
 }
 
-# panel_leg_agent <thread> <dispatch> [<agent>] — the agent whose PANEL LEG this thread is, per the
-# coordinator log: a `panel-planned` row for <dispatch> naming agent A and base thread T such that
-# <thread> == T-A (optionally only for the given agent). Prints A and returns 0, else returns 1.
-# The comparison goes through event_identity, the transform the writer applied, so a long base
-# thread clipped on the way into the log still matches itself.
+# THE PANEL'S OWN RECORD OF ITS ROUTED LEGS. When a routed panel is dispatched it writes, before
+# any leg is sent, exactly which decision it stamped, for which RAW base thread, and to which
+# agents. The leg exception is granted only against this record, compared byte for byte. The
+# coordinator log was not enough: it stores a long thread as a shortened identity, and that
+# shortened form is itself a valid thread name, so a request named after it could pass as a leg
+# of the long thread's panel. (codex, implement r2.)
+panel_routes_file() {  # <dispatch> -> path
+  local h; h="$(printf '%s' "$1" | hash_stdin)"
+  printf '%s/route-decisions/legs/%s\n' "$(cmd_root)" "$h"
+}
+record_panel_route() {  # <dispatch> <decision> <raw base thread> <agents...>
+  local disp="$1" rid="$2" base="$3" f tmp ag; shift 3
+  case "$base" in *"$(printf '\t')"*|*"
+"*) die "panel dispatch: a routed base thread may not contain a tab or newline" ;; esac
+  f="$(panel_routes_file "$disp")"
+  mkdir -p "$(dirname "$f")" || die "panel dispatch: cannot create $(dirname "$f")"
+  tmp="$(mktemp "$f.XXXXXX")" || die "panel dispatch: cannot stage the panel route record"
+  { printf 'dispatch\t%s\n' "$disp"; printf 'decision\t%s\n' "$rid"; printf 'base\t%s\n' "$base"
+    for ag in "$@"; do printf 'agent\t%s\n' "$ag"; done
+  } > "$tmp" && mv -f "$tmp" "$f" || { rm -f "$tmp"; die "panel dispatch: cannot record the panel's routed legs"; }
+}
+# panel_leg_agent <thread> <dispatch> <decision> [<agent>] — the agent whose ROUTED PANEL LEG this
+# thread is, per the panel's own record: the record names this dispatch and this decision, and
+# <thread> == <raw base>-<agent> for one of its agents (optionally only the given one). Prints the
+# agent and returns 0, else returns 1.
 panel_leg_agent() {
-  local thr="$1" disp="$2" only="${3:-}" rows ag rthr base
-  [ -n "$thr" ] && [ -n "$disp" ] || return 1
-  rows="$(cmd_events --dispatch "$disp" --kind panel-planned 2>/dev/null | awk -F'\t' 'NR>1 {print $8 "\t" $6}')" || return 1
-  while IFS="$(printf '\t')" read -r ag rthr; do
-    [ -n "$ag" ] || continue
-    [ -z "$only" ] || [ "$ag" = "$only" ] || continue
-    case "$thr" in *"-$ag") base="${thr%-"$ag"}" ;; *) continue ;; esac
-    if [ -n "$base" ] && [ "$(event_identity "$base" "$EVENT_W_THREAD")" = "$rthr" ]; then
-      printf '%s\n' "$ag"; return 0
-    fi
-  done <<EOF
-$rows
-EOF
-  return 1
+  local thr="$1" disp="$2" rid="$3" only="${4:-}" f
+  [ -n "$thr" ] && [ -n "$disp" ] && [ -n "$rid" ] || return 1
+  f="$(panel_routes_file "$disp")"
+  [ -f "$f" ] || return 1
+  THR="$thr" DISP="$disp" RID="$rid" ONLY="$only" LC_ALL=C awk -F'\t' '
+    $1 == "dispatch" { nd++; d = $2; next }
+    $1 == "decision" { nr++; r = $2; next }
+    $1 == "base"     { nb++; b = $2; next }
+    $1 == "agent"    { ag[++na] = $2; next }
+    END {
+      if (nd != 1 || nr != 1 || nb != 1 || d != ENVIRON["DISP"] || r != ENVIRON["RID"] || b == "") exit 1
+      for (i = 1; i <= na; i++) {
+        if (ENVIRON["ONLY"] != "" && ag[i] != ENVIRON["ONLY"]) continue
+        if (ENVIRON["THR"] == b "-" ag[i]) { print ag[i]; exit 0 }
+      }
+      exit 1
+    }' "$f"
 }
 
 # route_decision_for <request> <base-thread> <phase> <artifact> <base> — decide (or reuse) the
@@ -1966,6 +1989,12 @@ cmd_panel() {
   # gating as a complete one, which is the hole the roster event was added to close.
   # Recording the planned reviewer in the `agent` column makes the roster a set of rows any
   # reader can compare against. (codex, implement r5, blocking.)
+  # The routed legs are recorded BEFORE any leg is sent; each leg's send and runphase verify
+  # against this record rather than guessing a base thread from the leg's name.
+  if [ -n "$panel_route_id" ]; then
+    # shellcheck disable=SC2086
+    record_panel_route "$dispatch_id" "$panel_route_id" "$base_thread" $roster
+  fi
   local plan_ag
   for plan_ag in $roster; do
     cmd_events append --kind panel-planned --set "$set_id" --dispatch "$dispatch_id" \

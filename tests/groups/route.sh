@@ -701,14 +701,41 @@ rrc "$COMMS" review-route show '../../etc/x' >/dev/null 2>&1; C=$?
 rrc "$COMMS" review-route lookup --thread t-none --phase implement >/dev/null 2>&1; D=$?
 [ "$A" != 0 ] && [ "$B" != 0 ] && [ "$C" != 0 ] && [ "$D" != 0 ] \
   && ok "show refuses a foreign thread, a wrong phase and a path-shaped id; lookup refuses an absent decision" || fail "show/lookup refusals ($A$B$C$D)"
-rrc "$COMMS" events append --kind panel-planned --set rr-v --dispatch d-rr-v --agent codex --thread t-exp --status planned >/dev/null 2>&1
+# A routed panel's own record of its legs (what `panel dispatch` writes before any leg is sent).
+rr_panel_record() {  # <dispatch> <decision> <raw base thread> <agents...>
+  local d="$1" r="$2" b="$3" f; shift 3
+  f="$RR_REPO/.comms/route-decisions/legs/$(printf '%s' "$d" | shasum -a 256 | cut -c1-12)"
+  mkdir -p "$(dirname "$f")"
+  { printf 'dispatch	%s
+decision	%s
+base	%s
+' "$d" "$r" "$b"; for a in "$@"; do printf 'agent	%s
+' "$a"; done; } > "$f"
+}
+rr_panel_record d-rr-v "$RX2" t-exp codex grok
 rrc "$COMMS" review-route verify "$RX2" --thread t-exp-codex --phase implement --leg-dispatch d-rr-v >/dev/null 2>&1; A=$?
 rrc "$COMMS" review-route verify "$RX2" --thread t-exp-codex --phase implement >/dev/null 2>&1; B=$?
 rrc "$COMMS" review-route verify "$RX2" --thread t-exp-codex --phase implement --leg-dispatch d-typed >/dev/null 2>&1; E=$?
 rrc "$COMMS" review-route verify "$RX" --thread t-exp --phase implement >/dev/null 2>&1; C=$?
 rrc "$COMMS" review-route verify "-h" --thread t-exp --phase implement >/dev/null 2>&1; D=$?
 [ "$A" = 0 ] && [ "$B" != 0 ] && [ "$E" != 0 ] && [ "$C" != 0 ] && [ "$D" != 0 ] \
-  && ok "verify: a log-corroborated leg may carry its base decision; a bare or typed-dispatch lookalike may not; a replaced id is stale; an option-shaped id is refused" || fail "verify ($A$B$E$C$D)"
+  && ok "verify: a leg its panel recorded may carry its base decision; a bare or typed-dispatch lookalike may not; a replaced id is stale; an option-shaped id is refused" || fail "verify ($A$B$E$C$D)"
+# THE SHORTENED-IDENTITY ALIAS (codex, implement r2): a long base thread and a thread literally named
+# after its shortened log identity must not share a panel's leg exception. Authorization is the
+# panel's RAW record, and it names the one decision it stamped.
+RR_LONG="t-$(python3 -c 'print("x" * 100)')"
+# The shortened form the coordinator log would store (event_identity at the thread width: the
+# first 67 bytes, `~`, and 12 hex of the value's sha256).
+RR_SHORT="$(python3 -c 'import hashlib,sys; v=sys.argv[1]; print(v[:67] + "~" + hashlib.sha256(v.encode()).hexdigest()[:12])' "$RR_LONG")"
+rrc "$COMMS" review-route decide --thread "$RR_LONG" --phase implement --tier strong --effort xhigh >/dev/null 2>&1
+rrc "$COMMS" review-route decide --thread "$RR_SHORT" --phase implement --tier fast --effort low >/dev/null 2>&1
+RL_ID="$(rrv "$(rrc "$COMMS" review-route lookup --thread "$RR_LONG" --phase implement 2>/dev/null)" decision)"
+RS_ID="$(rrv "$(rrc "$COMMS" review-route lookup --thread "$RR_SHORT" --phase implement 2>/dev/null)" decision)"
+rr_panel_record d-rr-long "$RL_ID" "$RR_LONG" codex
+rrc "$COMMS" review-route verify "$RL_ID" --thread "$RR_LONG-codex" --phase implement --leg-dispatch d-rr-long >/dev/null 2>&1; A=$?
+rrc "$COMMS" review-route verify "$RS_ID" --thread "$RR_SHORT-codex" --phase implement --leg-dispatch d-rr-long >/dev/null 2>&1; B=$?
+[ -n "$RR_SHORT" ] && [ "$RR_SHORT" != "$RR_LONG" ] && [ "$A" = 0 ] && [ "$B" != 0 ] \
+  && ok "a thread named after a long thread's shortened identity cannot pass as a leg of that thread's panel" || fail "identity alias ($A$B short=$RR_SHORT)"
 
 # THE reviewer-v1 MAPPING, run directly: cheap outputs are reachable, and nothing malformed,
 # tied or split can land on the cheapest reviewer. No bump anywhere.
