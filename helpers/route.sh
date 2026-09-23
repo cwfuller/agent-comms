@@ -277,23 +277,32 @@ export COMMS_ROUTE_TASK="$task"
 # git CONFIRMS the path is ignored: the helpers are installed globally, so `route` also runs in
 # repositories that never ran project init, and there a record would be an ordinary untracked
 # file carrying task text that `git add -A` commits. (codex, implement r1.)
+# The probe covers EVERY path that will hold task data, not a stand-in name: the directory, the
+# exact final `<id>.json`, and the exact temp `.<id>.tmp`. A sample filename proves nothing under
+# negation rules (`!…/*-*.json`, or `.comms/**` + `!.comms/**/` re-including files), where the
+# probe reads ignored while the real UUID names stay committable. (codex, implement r2.)
 _route_root="$(shadow_main_root 2>/dev/null || true)"
+COMMS_ROUTE_RECORD_ID="$(shadow_decision_id 2>/dev/null || true)"
 COMMS_ROUTE_RECORD_DIR=""
-if [ -n "$_route_root" ]; then
-  if (cd "$_route_root" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
-        git check-ignore -q ".comms/route-decisions/implementer/probe.json") 2>/dev/null; then
+route_record_ignored() {  # <root> <id> -> 0 only when git ignores all three paths
+  local rel=".comms/route-decisions/implementer" p
+  for p in "$rel/" "$rel/$2.json" "$rel/.$2.tmp"; do
+    (cd "$1" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git check-ignore -q "$p") 2>/dev/null || return 1
+  done
+}
+if [ -n "$_route_root" ] && [ -n "$COMMS_ROUTE_RECORD_ID" ]; then
+  if route_record_ignored "$_route_root" "$COMMS_ROUTE_RECORD_ID"; then
     COMMS_ROUTE_RECORD_DIR="$_route_root/.comms/route-decisions/implementer"
   else
-    echo "route.sh: not recording this decision: .comms/ is not gitignored in $_route_root (run install.sh --scope=project there)" >&2
+    echo "route.sh: not recording this decision: git does not ignore .comms/route-decisions/implementer/ in $_route_root (run install.sh --scope=project there)" >&2
   fi
 fi
-export COMMS_ROUTE_RECORD_DIR
-export COMMS_ROUTE_RECORD_ID="$(shadow_decision_id 2>/dev/null || true)"
+export COMMS_ROUTE_RECORD_DIR COMMS_ROUTE_RECORD_ID
 export COMMS_ROUTE_CURRENT_TIER="$current_tier"
 export COMMS_ROUTE_CONTEXT_TOKENS="${context_tokens:-0}"
 
 python3 - <<'PY' || fail_open "classifier python exited non-zero"
-import hashlib, json, os, re, sys, tempfile, time
+import hashlib, json, os, re, sys, time
 
 KEYS = (
     "plan", "effort", "complexity", "tier", "gate",
@@ -340,7 +349,9 @@ def _record_write(rdir, rid, fields):
         "decision": {k: fields[k] for k in KEYS},
     }
     os.makedirs(rdir, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".rec.", dir=rdir)
+    # The temp name is the one the shell proved ignored; O_EXCL so a stale one is never reused.
+    tmp = os.path.join(rdir, "." + rid + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(rec, fh, ensure_ascii=False, indent=1)

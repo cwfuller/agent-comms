@@ -80,4 +80,4 @@ any-agent driver surface	40
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5
 harness: complete parallel worker reports	1
 comms.sh: settings and setup	26
-route.sh: implementer decision records	9
+route.sh: implementer decision records	11

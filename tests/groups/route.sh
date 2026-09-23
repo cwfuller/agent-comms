@@ -960,9 +960,30 @@ IR_BARE="$WORK/ir-unignored"; mkdir -p "$IR_BARE"; git -C "$IR_BARE" init -q
 IR_OUT="$(cd "$IR_BARE" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_STUB GIT_CONFIG_GLOBAL=/dev/null \
           bash "$REPO/helpers/route.sh" -- "rename a typo" 2>"$WORK/ir-unignored.err")"; A=$?
 [ "$A" = 0 ] && [ -z "$(rt_kv "$IR_OUT" route_id)" ] && [ "$(rt_kv "$IR_OUT" source)" = fail-open ] \
-  && [ ! -e "$IR_BARE/.comms" ] && grep -q 'not gitignored' "$WORK/ir-unignored.err" \
+  && [ ! -e "$IR_BARE/.comms" ] && grep -q 'not recording this decision' "$WORK/ir-unignored.err" \
   && [ -z "$(git -C "$IR_BARE" status --porcelain)" ] \
   && ok "a repo that does not ignore .comms/ gets no record and nothing untracked" || fail "record written where git would commit it (rc=$A)"
+# NEGATION: rules that ignore a sample name but re-include the real UUID records must not pass.
+# Each layout is one git would let `git add -A` pick a record up from.
+N=0
+for IR_RULES in '.comms/route-decisions/implementer/*.json\n!.comms/route-decisions/implementer/*-*.json' \
+                '.comms/**\n!.comms/**/\n!.comms/**/*-*.json' \
+                '.comms/*\n!.comms/route-decisions/'; do
+  printf "$IR_RULES\n" > "$IR_BARE/.gitignore"
+  IR_OUT="$(cd "$IR_BARE" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_STUB GIT_CONFIG_GLOBAL=/dev/null \
+            bash "$REPO/helpers/route.sh" -- "rename a typo" 2>/dev/null)"
+  [ -z "$(rt_kv "$IR_OUT" route_id)" ] && [ ! -e "$IR_BARE/.comms" ] && N=$((N+1))
+  rm -rf "$IR_BARE/.comms"
+done
+[ "$N" = 3 ] && ok "negated or selective ignore rules that expose record names get no record" || fail "negation layouts recorded ($N/3)"
+# ...while a plain `.comms/` rule (what project init writes) does record.
+printf '.comms/\n' > "$IR_BARE/.gitignore"
+IR_OUT="$(cd "$IR_BARE" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_STUB GIT_CONFIG_GLOBAL=/dev/null \
+          bash "$REPO/helpers/route.sh" -- "rename a typo" 2>/dev/null)"; IR4="$(rt_kv "$IR_OUT" route_id)"
+[ -n "$IR4" ] && [ -f "$IR_BARE/.comms/route-decisions/implementer/$IR4.json" ] \
+  && [ -z "$(ls -A "$IR_BARE/.comms/route-decisions/implementer" | grep -v "^$IR4.json$")" ] \
+  && [ "$(git -C "$IR_BARE" status --porcelain --untracked-files=all)" = "?? .gitignore" ] \
+  && ok "the project-init rule records, leaves no temp file, and nothing but .gitignore is untracked" || fail "plain .comms/ rule ($IR4)"
 # /auto stamps the id on the loop's first request.
 grep -q "sed -n 's/^route_id: //p'" "$REPO/templates/claude-commands/auto.md" \
   && grep -q '^route_id: <ROUTE_ID' "$REPO/templates/claude-commands/auto.md" \
