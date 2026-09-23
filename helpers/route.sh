@@ -273,9 +273,21 @@ fi
 
 export COMMS_ROUTE_HOME="$(cd "$(dirname "$0")" && pwd)"
 export COMMS_ROUTE_TASK="$task"
-# Set unconditionally here, so an inherited value can never redirect the records.
+# Set unconditionally here, so an inherited value can never redirect the records. And only where
+# git CONFIRMS the path is ignored: the helpers are installed globally, so `route` also runs in
+# repositories that never ran project init, and there a record would be an ordinary untracked
+# file carrying task text that `git add -A` commits. (codex, implement r1.)
 _route_root="$(shadow_main_root 2>/dev/null || true)"
-export COMMS_ROUTE_RECORD_DIR="${_route_root:+$_route_root/.comms/route-decisions/implementer}"
+COMMS_ROUTE_RECORD_DIR=""
+if [ -n "$_route_root" ]; then
+  if (cd "$_route_root" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+        git check-ignore -q ".comms/route-decisions/implementer/probe.json") 2>/dev/null; then
+    COMMS_ROUTE_RECORD_DIR="$_route_root/.comms/route-decisions/implementer"
+  else
+    echo "route.sh: not recording this decision: .comms/ is not gitignored in $_route_root (run install.sh --scope=project there)" >&2
+  fi
+fi
+export COMMS_ROUTE_RECORD_DIR
 export COMMS_ROUTE_RECORD_ID="$(shadow_decision_id 2>/dev/null || true)"
 export COMMS_ROUTE_CURRENT_TIER="$current_tier"
 export COMMS_ROUTE_CONTEXT_TOKENS="${context_tokens:-0}"
@@ -300,6 +312,13 @@ def _record(fields):
     rid = os.environ.get("COMMS_ROUTE_RECORD_ID") or ""
     if not rdir or not re.fullmatch(r"[0-9a-f-]{8,64}", rid):
         return ""
+    try:
+        return _record_write(rdir, rid, fields)
+    except Exception as e:  # recording must never cost the decision (e.g. a vanished cwd)
+        sys.stderr.write(f"route.sh: could not record decision in {rdir}: {e}\n")
+        return ""
+
+def _record_write(rdir, rid, fields):
     task_raw = os.environ.get("COMMS_ROUTE_TASK") or ""
     rec = {
         "record_version": 1,
@@ -320,16 +339,18 @@ def _record(fields):
         "answers": TRACE["answers"],
         "decision": {k: fields[k] for k in KEYS},
     }
+    os.makedirs(rdir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".rec.", dir=rdir)
     try:
-        os.makedirs(rdir, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".rec.", dir=rdir)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(rec, fh, ensure_ascii=False, indent=1)
         os.replace(tmp, os.path.join(rdir, rid + ".json"))
-    except (OSError, TypeError, ValueError) as e:
-        # Loud, never fatal: the decision is still valid; only its record is missing.
-        sys.stderr.write(f"route.sh: could not record decision in {rdir}: {e}\n")
-        return ""
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return rid
 
 def _write(fields):

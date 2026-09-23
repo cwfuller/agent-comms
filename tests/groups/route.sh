@@ -58,6 +58,9 @@ PY
 }
 
 ST="$WORK/route-stubs"; mkdir -p "$ST"
+# The fixture ignores .comms/ the way an initialised project does: decision records are only
+# written where git confirms they cannot be committed.
+printf '.comms/\n' >> "$REPO_FIX/.git/info/exclude"
 
 section "comms.sh: route fail-open"
 OUT="$(rt -- "rename a typo" 2>/dev/null)" && rc=0 || rc=$?
@@ -950,6 +953,16 @@ chmod 755 "$IR_DIR"
 [ "$A" = 0 ] && [ "$(rt_kv "$OUT" source)" = fail-open ] && [ -z "$(rt_kv "$OUT" route_id)" ] \
   && printf '%s' "$IR_ERR" | grep -q 'could not record decision' \
   && ok "an unwritable record dir warns and leaves the decision intact" || fail "record write failure (rc=$A)"
+# A repo whose .gitignore does not cover .comms/ gets NO record (it would be a committable
+# untracked file carrying task text); the decision is unchanged and the reason is on stderr.
+# The global excludes file is neutralised so the developer's own ignores cannot mask the case.
+IR_BARE="$WORK/ir-unignored"; mkdir -p "$IR_BARE"; git -C "$IR_BARE" init -q
+IR_OUT="$(cd "$IR_BARE" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_STUB GIT_CONFIG_GLOBAL=/dev/null \
+          bash "$REPO/helpers/route.sh" -- "rename a typo" 2>"$WORK/ir-unignored.err")"; A=$?
+[ "$A" = 0 ] && [ -z "$(rt_kv "$IR_OUT" route_id)" ] && [ "$(rt_kv "$IR_OUT" source)" = fail-open ] \
+  && [ ! -e "$IR_BARE/.comms" ] && grep -q 'not gitignored' "$WORK/ir-unignored.err" \
+  && [ -z "$(git -C "$IR_BARE" status --porcelain)" ] \
+  && ok "a repo that does not ignore .comms/ gets no record and nothing untracked" || fail "record written where git would commit it (rc=$A)"
 # /auto stamps the id on the loop's first request.
 grep -q "sed -n 's/^route_id: //p'" "$REPO/templates/claude-commands/auto.md" \
   && grep -q '^route_id: <ROUTE_ID' "$REPO/templates/claude-commands/auto.md" \
