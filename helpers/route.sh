@@ -40,6 +40,14 @@
 #   COMMS_ROUTE_TIMEOUT_SECS  default 8
 #   COMMS_ROUTE_STUB          canned System One JSON (selects the stub backend)
 #   COMMS_ROUTE_LOG           optional JSONL decision log (tests / calibration)
+#
+# RECORDS. Every classification python makes (typesafe, stub, override, fail-open) is also written
+# to <main repo>/.comms/route-decisions/implementer/<route_id>.json — UTC time, workspace, the
+# bounded state, whether anything was sent, the raw answers, and the ten keys — and the id is
+# printed as an eleventh line, `route_id: <id>`, which /auto stamps on its review request so a
+# decision joins to the loop it sized. The directory is NOT env-settable (the same rule as the
+# shadow records: a settable destination could be a tracked path). Outside a git repo there is
+# nowhere to record; a failed write warns on stderr and never changes the decision.
 #   COMMS_ROUTE_CURRENT_TIER  fast|balanced|strong — session's current tier
 #                             (honoured when --current-tier is omitted)
 #   COMMS_ROUTE_CONTEXT_TOKENS  approx conversation size; blocks downgrades past 20k
@@ -265,11 +273,15 @@ fi
 
 export COMMS_ROUTE_HOME="$(cd "$(dirname "$0")" && pwd)"
 export COMMS_ROUTE_TASK="$task"
+# Set unconditionally here, so an inherited value can never redirect the records.
+_route_root="$(shadow_main_root 2>/dev/null || true)"
+export COMMS_ROUTE_RECORD_DIR="${_route_root:+$_route_root/.comms/route-decisions/implementer}"
+export COMMS_ROUTE_RECORD_ID="$(shadow_decision_id 2>/dev/null || true)"
 export COMMS_ROUTE_CURRENT_TIER="$current_tier"
 export COMMS_ROUTE_CONTEXT_TOKENS="${context_tokens:-0}"
 
 python3 - <<'PY' || fail_open "classifier python exited non-zero"
-import json, os, re, sys, time
+import hashlib, json, os, re, sys, tempfile, time
 
 KEYS = (
     "plan", "effort", "complexity", "tier", "gate",
@@ -279,16 +291,60 @@ KEYS = (
 # different mapping must get a different name so logged rows stay comparable.
 POLICY_VARIANT = "implementer-bump-v1"
 
+# What the record needs beyond the ten keys; filled in as the run gets that far.
+TRACE = {"state": None, "sent": False, "backend": None, "answers": None}
+
+def _record(fields):
+    """Persist this decision; returns the route id, or "" when nothing could be recorded."""
+    rdir = os.environ.get("COMMS_ROUTE_RECORD_DIR") or ""
+    rid = os.environ.get("COMMS_ROUTE_RECORD_ID") or ""
+    if not rdir or not re.fullmatch(r"[0-9a-f-]{8,64}", rid):
+        return ""
+    task_raw = os.environ.get("COMMS_ROUTE_TASK") or ""
+    rec = {
+        "record_version": 1,
+        "route_id": rid,
+        "role": "implementer",
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "workspace": os.environ.get("COMMS_ROUTE_RECORD_WORKSPACE") or "",
+        "cwd": os.getcwd(),
+        "policy_variant": POLICY_VARIANT,
+        "task_sha256": hashlib.sha256(task_raw.encode("utf-8", "replace")).hexdigest(),
+        "task_excerpt": task_raw[:200],
+        "current_tier": os.environ.get("COMMS_ROUTE_CURRENT_TIER") or "",
+        "context_tokens": os.environ.get("COMMS_ROUTE_CONTEXT_TOKENS") or "",
+        "overrides": dict(overrides),
+        "backend": TRACE["backend"],
+        "sent": TRACE["sent"],
+        "state": TRACE["state"],
+        "answers": TRACE["answers"],
+        "decision": {k: fields[k] for k in KEYS},
+    }
+    try:
+        os.makedirs(rdir, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".rec.", dir=rdir)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, os.path.join(rdir, rid + ".json"))
+    except (OSError, TypeError, ValueError) as e:
+        # Loud, never fatal: the decision is still valid; only its record is missing.
+        sys.stderr.write(f"route.sh: could not record decision in {rdir}: {e}\n")
+        return ""
+    return rid
+
 def _write(fields):
     reason = " ".join(str(fields["reason"]).split())
     fields = dict(fields)
     fields["reason"] = reason
+    rid = _record(fields)
     for k in KEYS:
         sys.stdout.write(f"{k}: {fields[k]}\n")
+    if rid:
+        sys.stdout.write(f"route_id: {rid}\n")
     log_path = os.environ.get("COMMS_ROUTE_LOG") or ""
     if log_path:
         rec = {
-            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "task": (os.environ.get("COMMS_ROUTE_TASK") or "")[:110],
         }
         rec.update({k: fields[k] for k in KEYS if k != "reason"})
@@ -419,10 +475,17 @@ except ValueError:
 # ONE state builder, shared with the shadow collector so an observation can never be made
 # under a different prompt than production sends. (codex P2 + grok, implement r1.)
 state = route_backend.build_state(task)
+TRACE["state"] = state
 try:
+    _bname, _bfn = route_backend.resolve()
+    TRACE["backend"] = _bname
+    # "sent" = the backend was asked. For the stub nothing leaves the machine, but it is the
+    # same code path; the record names the backend, so a reader can tell.
+    TRACE["sent"] = _bfn is not None
     backend_name, answers = route_backend.classify(state, timeout)
 except route_backend.BackendError as e:
     fail_open(e.reason, e.source)
+TRACE["answers"] = answers
 
 if answers is None:
     fail_open(

@@ -145,7 +145,12 @@ asked. Do not narrate every dispatch.
    ROUTE_EFFORT="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^effort: //p' | head -1)"
    ROUTE_TIER="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^tier: //p' | head -1)"
    ROUTE_SOURCE="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^source: //p' | head -1)"
+   ROUTE_ID="$(printf '%s\n' "$ROUTE_OUT" | sed -n 's/^route_id: //p' | head -1)"
    ```
+   `route_id` names the saved record of this decision (`.comms/route-decisions/implementer/`).
+   When it is non-empty, put `route_id: <ROUTE_ID>` in the frontmatter of the loop's FIRST
+   request (plan or implement round 1), so the decision can later be joined to how the loop
+   went. Never invent one; omit the line when route printed none.
    If `ROUTE_PLAN` is `yes` and `ROUTE_SOURCE` is not `stub`, `fail-open`, or
    `disabled`, run the plan phase (step 3) as if `--plan` was passed. That
    includes `typesafe` / `jev` and `override`. A `source: stub` result is the
@@ -220,6 +225,7 @@ workflow: auto
 phase: implement
 round: 1
 max-rounds: <N>
+route_id: <ROUTE_ID — only if route printed one; omit otherwise>
 ---
 
 <!-- head_sha and artifact_id are STAMPED BY SEND from the retained snapshot — never hand-type a SHA -->

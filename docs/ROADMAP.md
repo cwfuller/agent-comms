@@ -459,6 +459,8 @@ no `route.sh` and no `cmd_route`; the **local copy wins**, so reinstalling globa
 checkout stale. `install.sh:48` already lists both helpers.
 
 **Auditability is incomplete, not zero.** The runtime mount records recover what a turn used.
+(2026-09-23: implementer decisions are now saved under `.comms/route-decisions/implementer/` and
+joined to their loop by a `route_id:` on the first request; the text below is the earlier state.)
 Missing is durable correlated reporting: `COMMS_ROUTE_LOG` (`route.sh:168-180`) is a working writer
 nothing ever sets; its `at` is local-time `strftime` with no offset while `events.tsv` /
 `rounds.tsv` are UTC-Z; it carries no `thread` / `workspace`, so rows could not be joined even if

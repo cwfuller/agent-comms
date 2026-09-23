@@ -1535,6 +1535,8 @@ cmd_route() {
     printf 'plan: no\neffort: medium\ncomplexity: standard\ntier: balanced\ngate: fail-open\nplan_p: -\neffort_p: -\ncomplexity_confidence: -\nsource: fail-open\nreason: route.sh is not installed next to comms.sh\n'
     return 0
   fi
+  # Display-only label for the decision record (route.sh cannot resolve a pinned workspace itself).
+  COMMS_ROUTE_RECORD_WORKSPACE="$(cmd_workspace 2>/dev/null || true)"; export COMMS_ROUTE_RECORD_WORKSPACE
   if [ -x "$sh" ]; then
     exec "$sh" "$@"
   fi

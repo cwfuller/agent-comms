@@ -104,7 +104,9 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/missing.json" -- "rename a typo" 2>/dev/null)" &
 
 OUT="$(rt -- "rename a typo" 2>/dev/null)"
 keys="$(printf '%s\n' "$OUT" | awk -F': ' '{print $1}' | paste -sd, -)"
-[ "$keys" = "plan,effort,complexity,tier,gate,plan_p,effort_p,complexity_confidence,source,reason" ] \
+# The ten classify keys, then `route_id` naming the saved record (the fixture repo has somewhere
+# to record it).
+[ "$keys" = "plan,effort,complexity,tier,gate,plan_p,effort_p,complexity_confidence,source,reason,route_id" ] \
   && ok "fail-open emits the stable key set" || fail "key set ($keys)"
 
 OUT="$(rt TYPESAFE_API_KEY=fake COMMS_ROUTE_URL="http://127.0.0.1:1" \
@@ -130,7 +132,7 @@ OUT="$(rt COMMS_ROUTE_STUB="$ST/arch.json" COMMS_ROUTE_URL="http://127.0.0.1:1" 
   && [ "$(rt_kv "$OUT" source)" = "stub" ] && [ "$(rt_kv "$OUT" tier)" = "strong" ] \
   && ok "high noul + architectural => plan yes (source=stub)" || fail "arch plan (rc=$rc out=$OUT)"
 keys="$(printf '%s\n' "$OUT" | awk -F': ' '{print $1}' | paste -sd, -)"
-[ "$keys" = "plan,effort,complexity,tier,gate,plan_p,effort_p,complexity_confidence,source,reason" ] \
+[ "$keys" = "plan,effort,complexity,tier,gate,plan_p,effort_p,complexity_confidence,source,reason,route_id" ] \
   && ok "stub success emits the stable key set" || fail "success key set ($keys)"
 
 rt_stub 0.91 0 0.92 high 0.81 "$ST/mech.json"
@@ -356,10 +358,12 @@ RS_KEY="$( cd "$RS_REPO" && eval "$RS_KEYFN"; shadow_repo_key )"
 # NO LIVE ROUTING SETTINGS may reach these calls: the suite must never contact TypeSafe, and
 # the harness does not clear the developer's environment. (codex P1, implement r1/r2.)
 RS_CLEAN="env -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE -u COMMS_ROUTE_STUB -u TYPESAFE_API_KEY -u COMMS_ROUTE_URL -u COMMS_ROUTE_MODEL -u COMMS_ROUTE_LOG -u COMMS_ROUTE_SHADOW_ALLOW -u COMMS_ROUTE_SHADOW_KEY"
-RS_BASE="$(cd "$REPO" && $RS_CLEAN "$RS_SH" -- 'add a null check' 2>/dev/null)"
-RS_WITH="$(cd "$REPO" && $RS_CLEAN COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_ID=x \
+# Classify runs in the FIXTURE repo: from $REPO it would write a decision record into the real
+# checkout's .comms. The per-run route_id differs by design, so it is dropped before comparing.
+RS_BASE="$(cd "$REPO_FIX" && $RS_CLEAN "$RS_SH" -- 'add a null check' 2>/dev/null | grep -v '^route_id: ')"
+RS_WITH="$(cd "$REPO_FIX" && $RS_CLEAN COMMS_ROUTE_SHADOW_ALLOW="$RS_ALLOW" COMMS_ROUTE_SHADOW_ID=x \
              COMMS_ROUTE_SHADOW_DIR="$WORK" COMMS_ROUTE_SHADOW_KEY=k COMMS_ROUTE_SHADOW_BACKEND=stub \
-             "$RS_SH" -- 'add a null check' 2>/dev/null)"
+             "$RS_SH" -- 'add a null check' 2>/dev/null | grep -v '^route_id: ')"
 [ -n "$RS_BASE" ] && [ "$RS_BASE" = "$RS_WITH" ] \
   && ok "every collector variable exported leaves the classify path byte-identical" || fail "collector env changed the classify path"
 printf '%s\n' "$RS_BASE" | grep -qx 'source: fail-open' \
@@ -489,7 +493,7 @@ grep -q 'COMMS_ROUTE_SHADOW_BACKEND' "$RS_SH" \
 # THE CRITERION ITSELF, executed: with live routing settings inherited and a dummy credential,
 # the classify path must still make no request. Point the URL at a closed port so a real
 # attempt would be visible as a connection error rather than silently succeeding.
-RS_NOHTTP="$(cd "$REPO" && env COMMS_ROUTE_BACKEND=typesafe TYPESAFE_API_KEY=dummy \
+RS_NOHTTP="$(cd "$REPO_FIX" && env COMMS_ROUTE_BACKEND=typesafe TYPESAFE_API_KEY=dummy \
    COMMS_ROUTE_URL=http://127.0.0.1:1/never $RS_CLEAN "$RS_SH" -- 'add a null check' 2>&1)"
 printf '%s' "$RS_NOHTTP" | grep -qx 'source: fail-open' \
   && ok "inherited live routing settings are stripped, so the suite cannot reach TypeSafe" || fail "suite reached a backend with inherited settings"
@@ -904,3 +908,49 @@ rrc COMMS_REVIEW_ROUTE=1 "$COMMS" send --to codex "$RR_REPO/.comms/rr-s5.md" >/d
 OUT="$(rt -- "use max to fix the parser" 2>/dev/null)"
 [ "$(rt_kv "$OUT" tier)" = strong ] && [ "$(rt_kv "$OUT" effort)" = xhigh ] && [ "$(rt_kv "$OUT" source)" = override ] \
   && ok "'use max' overrides the implementer hint to strong / xhigh" || fail "use max override ($OUT)"
+
+section "route.sh: implementer decision records"
+# Every classification python makes is saved under the MAIN repo's .comms, and its id printed as
+# `route_id:` so /auto can stamp it on the loop's first request and the decision can be judged
+# against how the loop went. Previously nothing survived the session (field, 2026-09-23).
+IR_DIR="$REPO_FIX/.comms/route-decisions/implementer"
+ir_rec() { python3 - "$IR_DIR/$1.json" "$2" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); print(eval(sys.argv[2], {"d": d}))
+PY
+}
+OUT="$(rt COMMS_ROUTE_STUB="$ST/would-plan.json" -- "redesign the auth stack" 2>/dev/null)"; IR1="$(rt_kv "$OUT" route_id)"
+[ -n "$IR1" ] && [ -f "$IR_DIR/$IR1.json" ] \
+  && [ "$(ir_rec "$IR1" 'd["decision"]["plan"]+"/"+d["decision"]["tier"]+"/"+d["decision"]["source"]')" = "$(rt_kv "$OUT" plan)/$(rt_kv "$OUT" tier)/$(rt_kv "$OUT" source)" ] \
+  && [ "$(ir_rec "$IR1" 'd["at"].endswith("Z") and d["sent"] is True and d["backend"]=="stub" and isinstance(d["answers"], dict) and bool(d["state"]) and len(d["task_sha256"])==64 and d["role"]=="implementer"')" = True ] \
+  && ok "a classification is saved with UTC time, backend, state, raw answers and the printed decision" || fail "implementer record ($IR1)"
+[ -n "$(ir_rec "$IR1" 'd["workspace"]')" ] \
+  && ok "the record carries the workspace comms.sh resolved" || fail "record workspace empty"
+OUT="$(rt -- "rename a typo" 2>/dev/null)"; IR2="$(rt_kv "$OUT" route_id)"
+[ -n "$IR2" ] && [ "$(ir_rec "$IR2" 'd["sent"] is False and d["answers"] is None and d["decision"]["source"]=="fail-open"')" = True ] \
+  && ok "a fail-open is recorded too, marked as nothing sent" || fail "fail-open record ($IR2)"
+OUT="$(rt COMMS_ROUTE=0 -- "rename a typo" 2>/dev/null)"
+[ -z "$(rt_kv "$OUT" route_id)" ] && [ "$(rt_kv "$OUT" source)" = disabled ] \
+  && ok "a disabled classifier records nothing and prints no route_id" || fail "disabled path recorded"
+# The destination is not settable: an inherited directory is ignored, the record lands in .comms.
+mkdir -p "$WORK/ir-elsewhere"
+OUT="$(rt COMMS_ROUTE_RECORD_DIR="$WORK/ir-elsewhere" COMMS_ROUTE_RECORD_ID=deadbeef-0000 -- "rename a typo" 2>/dev/null)"; IR3="$(rt_kv "$OUT" route_id)"
+[ -n "$IR3" ] && [ "$IR3" != deadbeef-0000 ] && [ -f "$IR_DIR/$IR3.json" ] && [ -z "$(ls -A "$WORK/ir-elsewhere")" ] \
+  && ok "an inherited record dir or id cannot redirect the record" || fail "record redirected ($IR3)"
+# Outside a git repo there is nowhere to record: the ten keys, no route_id, still exit 0.
+mkdir -p "$WORK/ir-nogit"
+OUT="$(cd "$WORK/ir-nogit" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_STUB GIT_CEILING_DIRECTORIES="$WORK" \
+        bash "$REPO/helpers/route.sh" -- "rename a typo" 2>/dev/null)"; A=$?
+[ "$A" = 0 ] && [ "$(printf '%s\n' "$OUT" | grep -c .)" = 10 ] && [ -z "$(rt_kv "$OUT" route_id)" ] \
+  && ok "outside a repo the decision is unchanged and no route_id is printed" || fail "no-repo classify (rc=$A)"
+# A record that cannot be written warns on stderr and never changes the decision.
+chmod 555 "$IR_DIR"
+IR_ERR="$(rt -- "rename a typo" 2>&1 >/dev/null)"; OUT="$(rt -- "rename a typo" 2>/dev/null)"; A=$?
+chmod 755 "$IR_DIR"
+[ "$A" = 0 ] && [ "$(rt_kv "$OUT" source)" = fail-open ] && [ -z "$(rt_kv "$OUT" route_id)" ] \
+  && printf '%s' "$IR_ERR" | grep -q 'could not record decision' \
+  && ok "an unwritable record dir warns and leaves the decision intact" || fail "record write failure (rc=$A)"
+# /auto stamps the id on the loop's first request.
+grep -q "sed -n 's/^route_id: //p'" "$REPO/templates/claude-commands/auto.md" \
+  && grep -q '^route_id: <ROUTE_ID' "$REPO/templates/claude-commands/auto.md" \
+  && ok "/auto reads route_id and puts it in the first request's frontmatter" || fail "/auto template does not carry route_id"
