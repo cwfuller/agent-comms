@@ -67,7 +67,13 @@
 #                               checkout idling on main at the expected tip is
 #                               self-healed through the landing; suite-attest-secs
 #                               = N config accepts a fresh attest-green record for
-#                               the candidate OID in place of the re-run
+#                               the candidate OID in place of the re-run.
+#                               Exit: 0 landed / 2 usage / 10 config / 11 lease held /
+#                               12 not ff / 13 main occupied / 14 suite red /
+#                               15 suite unverified / 16 CAS lost / 17 unreadable env /
+#                               1 other. A landing prints one line
+#                               `integrate-result v1 status=landed cand= main_before=
+#                               main_after= branch= suite=ran|skipped-docs|attested`
 #   attest-green [--passed N] [--expect <oid>]
 #                               record "suite green at this exact HEAD" (clean
 #                               tracked tree required) for integrate's opt-in skip.
@@ -4181,6 +4187,71 @@ cmd_attest_green() {
 }
 
 
+# INTEGRATE EXIT CODES — the driver contract. An external driver (a scheduler that lands
+# work unattended) must tell "retry later" from "rebase" from "fix the repo" without
+# parsing prose, and a single exit 1 for every refusal made that impossible. This table is
+# the ONE definition: docs/COMMANDS.md documents it, the header banner summarises it, and
+# every refusal in cmd_integrate names a constant from it. 0 = landed, 2 = usage (the shared
+# usage_err), 1 = anything unclassified. 10+ keeps clear of presence's 3/4/5 and of the
+# shell's own 126/127/128+.
+INTEGRATE_RC_CONFIG=10      # no/empty/duplicate suite-cmd, no main ref, no repo root
+INTEGRATE_RC_LEASE=11       # another live session holds the integrating lease (retry later)
+INTEGRATE_RC_NOT_FF=12      # the candidate is not a descendant of main (rebase first)
+INTEGRATE_RC_OCCUPIED=13    # main is checked out where it cannot be healed (dirty, moved, several)
+INTEGRATE_RC_SUITE_RED=14   # the suite exited non-zero at the candidate
+INTEGRATE_RC_UNVERIFIED=15  # the suite result cannot be trusted (no completion proof, partial
+                            # run, tree moved or dirtied, candidate not materialized)
+INTEGRATE_RC_CAS_LOST=16    # main moved during the attempt; nothing landed (re-run re-verifies)
+INTEGRATE_RC_ENV=17         # a precondition could not be READ (sessions dir, worktree list,
+                            # occupant state, the pinned /usr/bin/env), or main could not be
+                            # written although it had not moved (lock, permissions, disk)
+
+integrate_fail() {  # <code> <message...> — die with a classified exit code
+  local code="$1"; shift
+  echo "comms.sh: $*" >&2
+  exit "$code"
+}
+
+integrate_kv() {  # <string> — one whitespace-free result-line value (%XX outside a safe set)
+  # The result line is key=value separated by spaces, so a value may never contain a space,
+  # an '=', or a '%' unescaped. Branch arguments are revisions, and `@{1 day ago}` is one.
+  local LC_ALL=C s="$1" out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9._/@{}~^:+-]) out+="$c" ;;
+      # A byte above 0x7F reads back NEGATIVE through printf "'c" (sign-extended char),
+      # so mask to one byte or `é` prints as %FFFFFFFFFFFFFFC3.
+      *) out+="$(printf '%%%02X' $(( $(printf '%d' "'$c") & 255 )))" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+integrate_oneline() {  # <string> — one inert line: no byte in it can start a new line for any reader
+  # stdout is reserved for integrate's own lines and the parsed `integrate-result` line. git
+  # accepts a revision carrying a literal newline (`HEAD^{/.|<LF>integrate-result ...<LF>}`
+  # resolves), so any caller-supplied or path value echoed there must stay on ONE line or it
+  # can forge a result. (codex, driver-contract r2, blocking.)
+  # Escaped, not stripped: a backslash itself (so the output is unambiguous), CR/LF and every
+  # other control byte, and the Unicode separators a splitlines() reader honours (NEL, LS, PS).
+  # (codex r3 advisory.) Print the result with printf '%s', NEVER echo: under xpg_echo or posix
+  # mode echo expands `\n` back into a newline and undoes all of this. (codex + grok, r3.)
+  local LC_ALL=C s="$1" out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      $'\n') out+='\n' ;;
+      $'\r') out+='\r' ;;
+      \\) out+='\\' ;;
+      [[:cntrl:]]) out+="$(printf '\\x%02X' $(( $(printf '%d' "'$c") & 255 )))" ;;
+      *) out+="$c" ;;
+    esac
+  done
+  out="${out//$'\xc2\x85'/\\u0085}"; out="${out//$'\xe2\x80\xa8'/\\u2028}"; out="${out//$'\xe2\x80\xa9'/\\u2029}"
+  printf '%s' "$out"
+}
+
 integrate_is_docs_only() {  # <root> <base-oid> <cand-oid> — 0 iff every changed path is prose
   # Prose = README.md, LICENSE, or a top-level docs/*.md file. Nested docs
   # (docs/loopspec — the installed review bar) and AGENTS.md (the onboarding
@@ -4233,22 +4304,33 @@ cmd_integrate() {
   local name="${COMMS_PRESENCE_NAME:-}" instance="${COMMS_PRESENCE_INSTANCE:-}"
   while [ $# -gt 0 ]; do
     case "$1" in
-      --name) shift; name="${1:-}" ;;
-      --instance) shift; instance="${1:-}" ;;
+      # A value-taking flag REQUIRES its value: the bare `shift; name="${1:-}"` shape left
+      # $# at 0 and the loop's trailing shift then exited 1 under errexit with no message,
+      # which a driver reads as "unclassified" instead of usage. (codex, driver-contract r1.)
+      --name) [ $# -ge 2 ] || usage_err "integrate: --name needs a value"; shift; name="$1" ;;
+      --instance) [ $# -ge 2 ] || usage_err "integrate: --instance needs a value"; shift; instance="$1" ;;
       -?*) usage_err "integrate: unknown option '$(clip "$1")'" ;;
+      *) usage_err "integrate: unexpected argument '$(clip "$1")'" ;;
     esac; shift
   done
-  local root; root="$(main_repo_root)"; [ -n "$root" ] || die "integrate: no main repo root"
+  # The assignment carries its own guard: `main_repo_root` is a git|sed pipeline, and outside a
+  # repository (or with an unreadable .git) git exits 128, so under `set -e -o pipefail` the
+  # bare assignment aborted with 128 and no message before the empty check below could run.
+  # The empty check stays for a zero-status empty answer. (codex + grok, driver-contract r1.)
+  local root
+  root="$(main_repo_root)" || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: no main repo root (not inside a git repository, or it cannot be read)"
+  [ -n "$root" ] || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: no main repo root"
   local suite_cmd
-  suite_cmd="$(config_scalar "$root" suite-cmd)"
-  [ -n "$suite_cmd" ] || die "integrate: no 'suite-cmd = ...' in .comms/config — refusing to land unverified (explicit configuration required)"
+  suite_cmd="$(config_scalar "$root" suite-cmd)" \
+    || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: cannot read suite-cmd from .comms/config (see above)"
+  [ -n "$suite_cmd" ] || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: no 'suite-cmd = ...' in .comms/config — refusing to land unverified (explicit configuration required)"
   # Advisory lease: refuse while any OTHER live presence is integrating. The scan
   # fails CLOSED on an unenumerable dir — a silent empty glob read as lease-free
   # (CAS keeps correctness, but blind concurrent suites are waste). (codex+grok, impl r3.)
   local dir f
   dir="$(presence_dir)"
   if [ -d "$dir" ] && { [ ! -r "$dir" ] || [ ! -x "$dir" ]; }; then
-    die "integrate: sessions dir unreadable — cannot verify the integrating lease; refusing"
+    integrate_fail "$INTEGRATE_RC_ENV" "integrate: sessions dir unreadable — cannot verify the integrating lease; refusing"
   fi
   if [ -d "$dir" ]; then
     for f in "$dir"/*.json; do
@@ -4256,11 +4338,11 @@ cmd_integrate() {
       [ "$(basename "$f" .json)" = "$name-$instance" ] && continue
       [ "$(presence_field "$f" state)" = "integrating" ] || continue
       [ "$(presence_eval "$f")" = "dead" ] && continue
-      die "integrate: $(presence_field "$f" name) holds a live integrating lease — serialize (advisory; re-run when it releases)"
+      integrate_fail "$INTEGRATE_RC_LEASE" "integrate: $(presence_field "$f" name) holds a live integrating lease — serialize (advisory; re-run when it releases)"
     done
   fi
   if [ -n "$name" ] || [ -n "$instance" ]; then
-    presence_validate_ids "$name" "$instance" || die "integrate: invalid presence name/instance"
+    presence_validate_ids "$name" "$instance" || usage_err "integrate: invalid presence name/instance"
   fi
   # The restoration trap is installed BEFORE the first state mutation: setting the
   # lease first and trapping later leaked a live integrating lease on every early
@@ -4306,11 +4388,11 @@ cmd_integrate() {
   if [ -n "$name" ] && [ -n "$instance" ] && [ -f "$(presence_dir)/$name-$instance.json" ]; then
     "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1 || true
   fi
-  expected="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" || die "integrate: no refs/heads/main"
-  cand="$(git -C "$root" rev-parse --verify "$branch^{commit}" 2>/dev/null)" || die "integrate: cannot resolve '$branch'"
-  echo "integrate: candidate $cand (from $branch), expected main $expected"
+  expected="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: no refs/heads/main"
+  cand="$(git -C "$root" rev-parse --verify "$branch^{commit}" 2>/dev/null)" || usage_err "integrate: cannot resolve '$(clip "$branch")'"
+  printf '%s\n' "integrate: candidate $cand (from $(integrate_oneline "$branch")), expected main $expected"
   git -C "$root" merge-base --is-ancestor "$expected" "$cand" \
-    || die "integrate: $branch is not a descendant of main — rebase first (ff-only)"
+    || integrate_fail "$INTEGRATE_RC_NOT_FF" "integrate: $branch is not a descendant of main — rebase first (ff-only)"
   # NEVER-OCCUPY-MAIN, decided BEFORE the suite: refusing after a green
   # 10-minute run is the expensive way to learn main was occupied (user,
   # 2026-08-27 — the arc's own first landing hit exactly that). ONE clean
@@ -4320,16 +4402,16 @@ cmd_integrate() {
   # fast-forward. Anything else (dirty, diverged, multiple occupants) refuses:
   # re-pointing a tree someone is working in corrupts their session.
   local heal_list occ occ_n occ_head occ_status healed=""
-  heal_list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || die "integrate: cannot enumerate worktrees — refusing"
+  heal_list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_ENV" "integrate: cannot enumerate worktrees — refusing"
   occ="$(printf '%s\n' "$heal_list" | LC_ALL=C awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/main$/{print p}')"
   if [ -n "$occ" ]; then
     occ_n="$(printf '%s\n' "$occ" | grep -c .)"
-    [ "$occ_n" = 1 ] || die "integrate: main is checked out in $occ_n worktrees — refusing (never-occupy-main)"
-    occ_head="$(git -C "$occ" rev-parse --verify HEAD 2>/dev/null)" || die "integrate: cannot read main occupant's HEAD ($occ) — refusing (never-occupy-main)"
-    [ "$occ_head" = "$expected" ] || die "integrate: main occupant $occ sits at $occ_head, not the main tip — refusing (never-occupy-main)"
-    occ_status="$(git -C "$occ" status --porcelain -uno 2>/dev/null)" || die "integrate: cannot read main occupant's status ($occ) — refusing (never-occupy-main)"
-    [ -z "$occ_status" ] || die "integrate: main occupant $occ has uncommitted changes — refusing (never-occupy-main; commit them or move it off main)"
-    git -C "$occ" checkout --detach >/dev/null 2>&1 || die "integrate: could not detach main occupant $occ — refusing (never-occupy-main)"
+    [ "$occ_n" = 1 ] || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: main is checked out in $occ_n worktrees — refusing (never-occupy-main)"
+    occ_head="$(git -C "$occ" rev-parse --verify HEAD 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_ENV" "integrate: cannot read main occupant's HEAD ($occ) — refusing (never-occupy-main)"
+    [ "$occ_head" = "$expected" ] || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: main occupant $occ sits at $occ_head, not the main tip — refusing (never-occupy-main)"
+    occ_status="$(git -C "$occ" status --porcelain -uno 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_ENV" "integrate: cannot read main occupant's status ($occ) — refusing (never-occupy-main)"
+    [ -z "$occ_status" ] || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: main occupant $occ has uncommitted changes — refusing (never-occupy-main; commit them or move it off main)"
+    git -C "$occ" checkout --detach >/dev/null 2>&1 || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: could not detach main occupant $occ — refusing (never-occupy-main)"
     healed="$occ"
     # Re-arm the trap WITH the undo baked in as a literal: a die past this point
     # must put the occupant back on main, not strand it detached. The undo is
@@ -4339,7 +4421,7 @@ cmd_integrate() {
     # (codex, r1.) Leaving it detached is the safe residual; the message says so.
     # shellcheck disable=SC2064
     trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
-    echo "integrate: healed — detached clean main occupant $occ for the landing"
+    printf '%s\n' "integrate: healed — detached clean main occupant $(integrate_oneline "$occ") for the landing"
   fi
   # DOCS-ONLY SKIP. A tree diff that is only README.md, LICENSE, or top-level
   # docs/*.md cannot change helper/protocol behavior. Nested docs (docs/loopspec,
@@ -4356,7 +4438,8 @@ cmd_integrate() {
   # the tree cannot have changed under an identical commit id, so the second run
   # proves nothing the first did not. Absent, stale, or wrong-OID attestations
   # fall through to the full suite; with no config the behavior is unchanged.
-  attest_secs="$(config_scalar "$root" suite-attest-secs)"
+  attest_secs="$(config_scalar "$root" suite-attest-secs)" \
+    || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: cannot read suite-attest-secs from .comms/config (see above)"
   case "$attest_secs" in ''|*[!0-9]*) attest_secs=0 ;; esac
   if [ -z "$skip_suite" ] && [ "$attest_secs" -gt 0 ] && [ -f "$root/.comms/cache/suite-attest.log" ]; then
     local att_epoch
@@ -4375,13 +4458,13 @@ cmd_integrate() {
     git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
     git -C "$root" worktree prune >/dev/null 2>&1 || true
     rm -rf "$tw" 2>/dev/null || true
-    git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || die "integrate: could not materialize $cand"
+    git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: could not materialize $cand"
     # Structured argv: whitespace split only, nothing shell-interpreted. An
     # empty/whitespace-only suite-cmd expanded to zero argv and SUCCEEDED as a
     # no-op — the exact unverified landing the config gate exists to refuse.
     # (codex, impl r1.)
     set -f; set -- $suite_cmd; set +f
-    [ $# -gt 0 ] || die "integrate: suite-cmd is empty after splitting — refusing to land unverified"
+    [ $# -gt 0 ] || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: suite-cmd is empty after splitting — refusing to land unverified"
     # SHELL-STARTUP SCRUB. Non-interactive bash sources $BASH_ENV *before* the script
     # runs, so a suite's own guards are installed too late to matter: `BASH_ENV` naming
     # a file that says `exit 0` makes `bash tests/run.sh` return 0 with no output and no
@@ -4413,7 +4496,7 @@ cmd_integrate() {
     # impersonation, and a shell whose function table is attacker-controlled is out of
     # scope for any in-process check.
     command test -x /usr/bin/env \
-      || die "integrate: /usr/bin/env is missing — refusing to run the suite unpinned"
+      || integrate_fail "$INTEGRATE_RC_ENV" "integrate: /usr/bin/env is missing — refusing to run the suite unpinned"
     local -a clean_env
     clean_env=(command /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD)
     # Keep the output of the run we are judging. A refusal whose evidence was discarded
@@ -4426,6 +4509,11 @@ cmd_integrate() {
     # path it describes. Landing stayed fail-closed, but the operator lost the message.
     # (codex, panel r5, advisory — the same errexit class as the assignment above.)
     set +e
+    # SUITE OUTPUT GOES TO STDERR. stdout is reserved for integrate's own lines, above all the
+    # `integrate-result` line a driver parses: a forwarded suite line of that shape would forge
+    # a second result on success, or a result on a refusal. A nested integrate inside the suite
+    # does exactly that without any malice. The raw output is still kept whole in $suite_log.
+    # (codex, driver-contract r1, blocking.)
     # THIRD SITE, and the one no short test could reach: `with-beat`'s beater sleeps TTL/3
     # (default 900s) and then beats, which HEALS an absent record — manufacturing the same
     # pid-less, unreapable record the two explicit gates prevent, fifteen minutes in, long
@@ -4440,10 +4528,10 @@ cmd_integrate() {
       local hb=""
       [ -f "$presence_record" ] || hb="--no-heartbeat"
       # shellcheck disable=SC2086
-      ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat $hb --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log"
+      ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat $hb --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log" >&2
       rc=${PIPESTATUS[0]}
     else
-      ( cd "$tw" && "${clean_env[@]}" "$@" ) 2>&1 | tee "$suite_log"
+      ( cd "$tw" && "${clean_env[@]}" "$@" ) 2>&1 | tee "$suite_log" >&2
       rc=${PIPESTATUS[0]}
     fi
     set -e
@@ -4455,7 +4543,7 @@ cmd_integrate() {
     # directory would teach this tool what `node_modules` is, and the same shape covers an
     # ignored `.npmrc`, a `.env`, or a build cache. Worded as a LIKELY cause, not a verdict —
     # most suite failures really are just failures. (codex + grok, plan r1.)
-    [ "$rc" = 0 ] || die "integrate: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log
+    [ "$rc" = 0 ] || integrate_fail "$INTEGRATE_RC_SUITE_RED" "integrate: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log
 integrate: note — the verification tree is a FRESH checkout of the candidate: untracked and
 integrate: ignored files are absent. If this suite passes in your working checkout, the likely
 integrate: cause is suite-cmd depending on something only that checkout has; suite-cmd must
@@ -4478,19 +4566,19 @@ integrate: provision its own prerequisites. Read $suite_log for the underlying f
       proof_fail="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\2/p' "$suite_log" | tail -1)" || proof_fail=""
       proof_skip="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\3/p' "$suite_log" | tail -1)" || proof_skip=""
       [ -n "$proof_pass" ] \
-        || die "integrate: the suite exited 0 but emitted no completion line — it did not run to the end (a shell-startup hook can pre-empt it); refusing. Output: $suite_log"
+        || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the suite exited 0 but emitted no completion line — it did not run to the end (a shell-startup hook can pre-empt it); refusing. Output: $suite_log"
       [ "$proof_fail" = 0 ] \
-        || die "integrate: the suite reported $proof_fail failures despite exit 0 — refusing. Output: $suite_log"
+        || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the suite reported $proof_fail failures despite exit 0 — refusing. Output: $suite_log"
       [ "$((proof_pass + proof_skip))" = "$exp_total" ] \
-        || die "integrate: the suite ran $((proof_pass + proof_skip)) of $exp_total assertions the candidate declares — refusing a partial run. Output: $suite_log"
+        || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the suite ran $((proof_pass + proof_skip)) of $exp_total assertions the candidate declares — refusing a partial run. Output: $suite_log"
     fi
     # BIND the result to the candidate: a suite that checked out another OID and
     # passed there proves nothing about $cand. Every verification below fails
     # CLOSED — a command that cannot answer refuses the landing. (codex, impl r1.)
     local tw_head tw_status
-    tw_head="$(git -C "$tw" rev-parse HEAD 2>/dev/null)" || die "integrate: cannot read the verification tree's HEAD — refusing"
-    [ "$tw_head" = "$cand" ] || die "integrate: the verification tree is at $tw_head, not the candidate $cand — the suite result is not about this landing; refusing"
-    tw_status="$(git -C "$tw" status --porcelain 2>/dev/null)" || die "integrate: cannot read the verification tree's status — refusing"
+    tw_head="$(git -C "$tw" rev-parse HEAD 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: cannot read the verification tree's HEAD — refusing"
+    [ "$tw_head" = "$cand" ] || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the verification tree is at $tw_head, not the candidate $cand — the suite result is not about this landing; refusing"
+    tw_status="$(git -C "$tw" status --porcelain 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: cannot read the verification tree's status — refusing"
     # SIBLING OF THE HINT ABOVE, and the one an operator acting on that hint hits next: told to
     # provision prerequisites, they write a wrapper, and it lands here if its output is
     # git-VISIBLE. Ignored output is fine — an installed dependency tree is the intended shape.
@@ -4498,7 +4586,7 @@ integrate: provision its own prerequisites. Read $suite_log for the underlying f
     # that rewrites a tracked lockfile produces exactly the latter. Print the dirt: "refusing to
     # trust the result" without saying WHAT dirtied it is a refusal nobody can act on.
     # (grok, plan r1 — worth more here than on the suite-FAILED path.)
-    [ -z "$tw_status" ] || die "integrate: the suite dirtied the verification tree — refusing to trust the result
+    [ -z "$tw_status" ] || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the suite dirtied the verification tree — refusing to trust the result
 integrate: note — suite-cmd MAY create IGNORED files (an installed dependency tree is fine); it
 integrate: may NOT leave git-visible changes. Modified tracked files and untracked-but-unignored
 integrate: output both land here. Dirt:
@@ -4507,11 +4595,23 @@ $tw_status"
   # Final occupancy guard — a checkout could have moved onto main DURING the
   # suite; the CAS must still never move a ref under a live working tree.
   local wt_list
-  wt_list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || die "integrate: cannot enumerate worktrees — refusing"
+  wt_list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_ENV" "integrate: cannot enumerate worktrees — refusing"
   printf '%s\n' "$wt_list" | grep -qx 'branch refs/heads/main' \
-    && die "integrate: main is checked out somewhere — refusing (never-occupy-main)"
-  git -C "$root" update-ref refs/heads/main "$cand" "$expected" \
-    || die "integrate: main moved (CAS refused) — nothing landed; re-run to re-verify against the new tip"
+    && integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: main is checked out somewhere — refusing (never-occupy-main)"
+  # A refused update-ref is only a LOST COMPARE if main really moved. A lock file, a
+  # permissions error or a full disk refuses it too, with main still at the expected tip, and a
+  # driver that treats 16 as "re-run against the new tip" would retry a permanent fault that has
+  # no new tip. (grok, driver-contract r1, advisory.)
+  if ! git -C "$root" update-ref refs/heads/main "$cand" "$expected"; then
+    local main_now
+    # An UNREADABLE ref after the failure is not evidence that main moved: classify it as the
+    # environment fault it is. (codex, driver-contract r2, advisory.)
+    main_now="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" \
+      || integrate_fail "$INTEGRATE_RC_ENV" "integrate: could not update refs/heads/main, and cannot read it back — nothing landed"
+    [ "$main_now" = "$expected" ] \
+      || integrate_fail "$INTEGRATE_RC_CAS_LOST" "integrate: main moved (CAS refused) — nothing landed; re-run to re-verify against the new tip"
+    integrate_fail "$INTEGRATE_RC_ENV" "integrate: could not update refs/heads/main although it is still at $expected (a lock, permissions, or disk fault) — nothing landed"
+  fi
   # Success path: clean up and clear the trap NOW, inside function scope, so the
   # process-exit path has nothing deferred left to evaluate.
   git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
@@ -4525,11 +4625,11 @@ $tw_status"
     local heal_now
     heal_now="$(git -C "$healed" rev-parse HEAD 2>/dev/null || true)"
     if [ "$heal_now" != "$expected" ]; then
-      echo "integrate: warning — $healed moved to $heal_now during the landing; left detached (its commits are intact, re-attach by hand)"
+      printf '%s\n' "integrate: warning — $(integrate_oneline "$healed") moved to $heal_now during the landing; left detached (its commits are intact, re-attach by hand)"
     elif git -C "$healed" checkout main >/dev/null 2>&1; then
-      echo "integrate: healed occupant $healed fast-forwarded onto the new main"
+      printf '%s\n' "integrate: healed occupant $(integrate_oneline "$healed") fast-forwarded onto the new main"
     else
-      echo "integrate: warning — could not re-attach $healed to main; it is parked detached at $expected"
+      printf '%s\n' "integrate: warning — could not re-attach $(integrate_oneline "$healed") to main; it is parked detached at $expected"
     fi
   fi
   # Same rule: only refresh a record that exists. Nothing here manufactures one.
@@ -4537,13 +4637,23 @@ $tw_status"
     "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
   fi
   trap - EXIT
+  local suite_kind
   if [ "$skip_suite" = docs ]; then
+    suite_kind=skipped-docs
     echo "integrate: LANDED $cand as main (was $expected); docs-only skip, suite not run"
   elif [ -n "$skip_suite" ]; then
+    suite_kind=attested
     echo "integrate: LANDED $cand as main (was $expected); green by attestation (${attest_age}s old)"
   else
+    suite_kind=ran
     echo "integrate: LANDED $cand as main (was $expected); suite green at the landed OID"
   fi
+  # THE RESULT LINE — exactly once, on success only, after the human line. A driver reads
+  # this instead of the prose above. main_after is the value THIS landing wrote by CAS, not a
+  # later read (another writer may have advanced main since). Versioned so the fields can
+  # grow without breaking a parser that reads v1. Format: docs/COMMANDS.md.
+  printf 'integrate-result v1 status=landed cand=%s main_before=%s main_after=%s branch=%s suite=%s\n' \
+    "$cand" "$expected" "$cand" "$(integrate_kv "$branch")" "$suite_kind"
 }
 
 cmd_snapshot() {

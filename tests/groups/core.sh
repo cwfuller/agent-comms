@@ -1376,3 +1376,160 @@ rs_refused "$RS_OUT" && printf '%s\n' "$RS_OUT" | grep -qF "'claude-review' is n
 # Leave the shared fixture as the section above left it.
 printf 'agents = claude codex\ndefault-target = codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
 : > "$ST_HOME/settings"
+
+section "integrate: driver contract (classified exit codes + one result line)"
+# A driver that lands work unattended must tell "retry later" from "rebase" from "fix the
+# repo" without parsing prose. Every refusal class gets its own exit code, and a landing
+# prints exactly one machine-readable line. Self-contained fixture; the primary checkout
+# sits on a session branch so main is unoccupied except where a test occupies it.
+IX="$WORK/integrate-rc"; mkdir -p "$IX"; IX="$(cd "$IX" && pwd -P)"
+git -C "$IX" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IX/.gitignore"
+echo base > "$IX/a.txt"
+printf '#!/bin/bash\ntest -f a.txt\n' > "$IX/suite.sh"
+git -C "$IX" add -A >/dev/null 2>&1
+git -C "$IX" -c user.email=t@t -c user.name=t commit -qm init
+git -C "$IX" checkout -q -b session-primary
+mkdir -p "$IX/.comms"; printf 'suite-cmd = bash ./suite.sh\n' > "$IX/.comms/config"
+ix() { (cd "$IX" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE COMMS_PRESENCE_TTL_SECS=60 "$COMMS" "$@"); }
+ix_rc() { local rc=0; ix "$@" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+ix_main() { git -C "$IX" rev-parse refs/heads/main; }
+ix_br() { # <branch> <base> <path> <content> — one commit on a new branch, primary left on session-primary
+  git -C "$IX" checkout -q -b "$1" "$2" \
+    && printf '%s' "$4" > "$IX/$3" && git -C "$IX" add "$3" \
+    && git -C "$IX" -c user.email=t@t -c user.name=t commit -qm "$1"
+  git -C "$IX" checkout -q session-primary
+}
+
+# Landing: exit 0 and exactly one result line, AFTER the human LANDED line.
+IX_M0="$(ix_main)"
+ix_br land1 main b.txt $'one\n'; IX_C1="$(git -C "$IX" rev-parse land1)"
+IX_OUT="$(ix integrate land1 2>/dev/null)"; IX_RC=$?
+[ "$IX_RC" = 0 ] && [ "$(ix_main)" = "$IX_C1" ] \
+  && ok "integrate exits 0 when it lands the candidate" || fail "landing rc=$IX_RC"
+[ "$(printf '%s\n' "$IX_OUT" | grep -c '^integrate-result ')" = 1 ] \
+  && [ "$(printf '%s\n' "$IX_OUT" | tail -1)" = "integrate-result v1 status=landed cand=$IX_C1 main_before=$IX_M0 main_after=$IX_C1 branch=land1 suite=ran" ] \
+  && printf '%s\n' "$IX_OUT" | grep -q '^integrate: LANDED ' \
+  && ok "a landing prints exactly one result line, last, naming the OIDs and suite=ran" \
+  || fail "result line: $(printf '%s\n' "$IX_OUT" | grep 'integrate-result' | head -2)"
+IX_M1="$(ix_main)"; ix_br docs1 main README.md $'# readme\n'; IX_D1="$(git -C "$IX" rev-parse docs1)"
+IX_OUT="$(ix integrate docs1 2>/dev/null)"
+printf '%s\n' "$IX_OUT" | grep -qx "integrate-result v1 status=landed cand=$IX_D1 main_before=$IX_M1 main_after=$IX_D1 branch=docs1 suite=skipped-docs" \
+  && ok "a prose-only landing reports suite=skipped-docs" || fail "docs result line: $(printf '%s\n' "$IX_OUT" | grep 'integrate-result')"
+printf 'suite-cmd = bash ./suite.sh\nsuite-attest-secs = 600\n' > "$IX/.comms/config"
+ix_br att1 main c.txt $'c\n'
+mkdir -p "$IX/.comms/cache"
+printf '%s %s 0\n' "$(git -C "$IX" rev-parse att1)" "$(date +%s)" >> "$IX/.comms/cache/suite-attest.log"
+IX_OUT="$(ix integrate att1 2>/dev/null)"
+printf '%s\n' "$IX_OUT" | grep -qE '^integrate-result v1 status=landed cand=[0-9a-f]{40} main_before=[0-9a-f]{40} main_after=[0-9a-f]{40} branch=att1 suite=attested$' \
+  && ok "an attested landing reports suite=attested" || fail "attested result line: $(printf '%s\n' "$IX_OUT" | grep 'integrate-result')"
+printf 'suite-cmd = bash ./suite.sh\n' > "$IX/.comms/config"
+# A branch argument is escaped so the line stays whitespace-free key=value pairs.
+ix_br "feat-é" main g.txt $'g\n'
+IX_OUT="$(ix integrate "feat-é" 2>/dev/null)"
+printf '%s\n' "$IX_OUT" | grep -q '^integrate-result v1 .* branch=feat-%C3%A9 suite=ran$' \
+  && ok "a non-ASCII branch is %-escaped in the result line" || fail "escaped branch: $(printf '%s\n' "$IX_OUT" | grep 'integrate-result')"
+
+# Refusals: one class, one code. Each uses a candidate only that class can refuse.
+IX_U1="$(ix_rc integrate)"; IX_U2="$(ix_rc integrate no-such-branch)"
+[ "$IX_U1" = 2 ] && [ "$IX_U2" = 2 ] \
+  && ok "usage errors exit 2 (no branch, unresolvable branch)" || fail "usage rc: missing=$IX_U1 unresolvable=$IX_U2"
+ix_br cfg1 main d.txt $'d\n'
+: > "$IX/.comms/config"; IX_R_EMPTY="$(ix_rc integrate cfg1)"
+printf 'suite-cmd = bash ./suite.sh\nsuite-cmd = true\n' > "$IX/.comms/config"; IX_R_DUP="$(ix_rc integrate cfg1)"
+printf 'suite-cmd = bash ./suite.sh\n' > "$IX/.comms/config"
+[ "$IX_R_EMPTY" = 10 ] && [ "$IX_R_DUP" = 10 ] \
+  && ok "a missing or duplicate suite-cmd exits 10 (configuration)" || fail "config rc: empty=$IX_R_EMPTY dup=$IX_R_DUP"
+IX_LC="$(ix presence claim --name landlord --role landing --state integrating 2>/dev/null)"
+IX_LI="$(printf '%s' "$IX_LC" | sed -n 's/.*instance: //p')"
+IX_R_LEASE="$(ix_rc integrate cfg1)"
+ix presence release --name landlord --instance "$IX_LI" >/dev/null 2>&1
+[ "$IX_R_LEASE" = 11 ] && ok "a live integrating lease exits 11 (retry later)" || fail "lease rc=$IX_R_LEASE"
+ix_br stale1 "$IX_M0" e.txt $'e\n'
+IX_R_FF="$(ix_rc integrate stale1)"
+[ "$IX_R_FF" = 12 ] && ok "a non-descendant candidate exits 12 (rebase first)" || fail "non-ff rc=$IX_R_FF"
+git -C "$IX" checkout -q main && echo dirty >> "$IX/a.txt"
+IX_R_OCC="$(ix_rc integrate cfg1)"
+git -C "$IX" checkout -q -- a.txt && git -C "$IX" checkout -q session-primary
+[ "$IX_R_OCC" = 13 ] && ok "a dirty main occupant exits 13 (main occupied)" || fail "occupied rc=$IX_R_OCC"
+ix_br red1 main suite.sh $'#!/bin/bash\nexit 1\n'
+IX_MR="$(ix_main)"; IX_OUT_RED="$(ix integrate red1 2>/dev/null)"; IX_R_RED=$?
+[ "$IX_R_RED" = 14 ] && [ "$(ix_main)" = "$IX_MR" ] && ! printf '%s\n' "$IX_OUT_RED" | grep -q '^integrate-result' \
+  && ok "a red suite exits 14, leaves main, and prints no result line" || fail "red suite rc=$IX_R_RED"
+ix_br dirty1 main suite.sh $'#!/bin/bash\ntouch junk.txt\n'
+IX_R_UNV="$(ix_rc integrate dirty1)"
+[ "$IX_R_UNV" = 15 ] && ok "a suite that dirties the verification tree exits 15 (unverified)" || fail "unverified rc=$IX_R_UNV"
+# CAS lost: the candidate's own suite moves main to another descendant mid-run, so the
+# compare-and-swap refuses. Deterministic, no timing.
+ix_br target1 main f.txt $'f\n'; IX_T="$(git -C "$IX" rev-parse target1)"
+ix_br race1 main suite.sh "#!/bin/bash
+git update-ref refs/heads/main $IX_T
+"
+IX_R_CAS="$(ix_rc integrate race1)"
+[ "$IX_R_CAS" = 16 ] && [ "$(ix_main)" = "$IX_T" ] \
+  && ok "a compare-and-swap lost to a concurrent move exits 16 and lands nothing" || fail "CAS rc=$IX_R_CAS main=$(ix_main)"
+mkdir -p "$IX/.comms/sessions"; chmod 000 "$IX/.comms/sessions"
+IX_R_ENV="$(ix_rc integrate cfg1)"
+chmod 755 "$IX/.comms/sessions"
+[ "$IX_R_ENV" = 17 ] && ok "an unreadable sessions dir exits 17 (precondition unreadable)" || fail "env rc=$IX_R_ENV"
+# Round-1 review (codex, grok): the result line cannot be forged by suite output, early
+# aborts are classified rather than escaping through errexit, and a refused ref update is
+# CAS-lost only when main actually moved.
+ix_br forge1 main suite.sh $'#!/bin/bash\necho "integrate-result v1 status=landed cand=forged main_before=x main_after=x branch=x suite=ran"\ntest -f a.txt\n'
+IX_F1="$(git -C "$IX" rev-parse forge1)"
+IX_OUT="$(ix integrate forge1 2>/dev/null)"
+[ "$(printf '%s\n' "$IX_OUT" | grep -c '^integrate-result ')" = 1 ] \
+  && printf '%s\n' "$IX_OUT" | grep -q "^integrate-result v1 status=landed cand=$IX_F1 " \
+  && ok "a suite that prints a result-shaped line cannot forge a second result on stdout" \
+  || fail "forged result on success: $(printf '%s\n' "$IX_OUT" | grep 'integrate-result')"
+ix_br forge2 main suite.sh $'#!/bin/bash\necho "integrate-result v1 status=landed cand=forged main_before=x main_after=x branch=x suite=ran"\nexit 1\n'
+IX_OUT="$(ix integrate forge2 2>/dev/null)"; IX_R_F2=$?
+[ "$IX_R_F2" = 14 ] && ! printf '%s\n' "$IX_OUT" | grep -q '^integrate-result' \
+  && ok "a red suite that prints a result-shaped line leaves no result on stdout" \
+  || fail "forged result on refusal: rc=$IX_R_F2 $(printf '%s\n' "$IX_OUT" | grep 'integrate-result')"
+IX_NR="$WORK/integrate-no-repo"; mkdir -p "$IX_NR"
+IX_R_NR=0; (cd "$IX_NR" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE GIT_CEILING_DIRECTORIES="$WORK" "$COMMS" integrate some-branch) >/dev/null 2>&1 || IX_R_NR=$?
+[ "$IX_R_NR" = 10 ] && ok "integrate outside a repository exits 10, not a silent shell abort" || fail "no-repo rc=$IX_R_NR"
+IX_R_OPT="$(ix_rc integrate cfg1 --name)"
+[ "$IX_R_OPT" = 2 ] && ok "an option with no value exits 2 (usage), not a bare errexit 1" || fail "valueless option rc=$IX_R_OPT"
+# A lock on main refuses the update-ref while main stays put: that is an environment fault,
+# not a lost race, so it must not read as "re-run against the new tip".
+ix_br lock1 main suite.sh $'#!/bin/bash\ntouch "$(git rev-parse --git-common-dir)/refs/heads/main.lock"\n'
+IX_ML="$(ix_main)"
+IX_R_LOCK="$(ix_rc integrate lock1)"
+rm -f "$IX/.git/refs/heads/main.lock"
+[ "$IX_R_LOCK" = 17 ] && [ "$(ix_main)" = "$IX_ML" ] \
+  && ok "a refused ref update with main unmoved exits 17, not 16 (CAS lost)" || fail "locked ref rc=$IX_R_LOCK"
+# Round-2 review (codex): git resolves a revision carrying literal newlines, so a caller-
+# supplied branch argument must not be able to start a stdout line anywhere, including the
+# progress line printed before verification.
+IX_ML_FORGE=$'\nintegrate-result v1 status=landed cand=forged main_before=x main_after=x branch=x suite=ran\n'
+ix_br mlok main h.txt $'h\n'; IX_MLOK="$(git -C "$IX" rev-parse mlok)"
+IX_OUT="$(ix integrate "mlok^{/.|${IX_ML_FORGE}}" 2>/dev/null)"; IX_R_ML=$?
+[ "$IX_R_ML" = 0 ] && [ "$(printf '%s\n' "$IX_OUT" | grep -c '^integrate-result ')" = 1 ] \
+  && printf '%s\n' "$IX_OUT" | grep -q "^integrate-result v1 status=landed cand=$IX_MLOK " \
+  && ok "a multiline revision cannot inject a result line on a landing" \
+  || fail "multiline landing: rc=$IX_R_ML $(printf '%s\n' "$IX_OUT" | grep -c '^integrate-result ') result lines"
+ix_br mlred main suite.sh $'#!/bin/bash\nexit 1\n'
+IX_OUT="$(ix integrate "mlred^{/.|${IX_ML_FORGE}}" 2>/dev/null)"; IX_R_MR=$?
+[ "$IX_R_MR" = 14 ] && ! printf '%s\n' "$IX_OUT" | grep -q '^integrate-result' \
+  && ok "a multiline revision cannot inject a result line on a refusal" \
+  || fail "multiline refusal: rc=$IX_R_MR $(printf '%s\n' "$IX_OUT" | grep 'integrate-result')"
+# Round-3 review (codex, grok): echo re-expands `\n` under xpg_echo or posix mode, and a
+# splitlines() reader also breaks on the Unicode separators NEL, LS and PS.
+if grep -n 'echo .*integrate_oneline' "$REPO/helpers/comms.sh" >/dev/null; then
+  fail "a sanitized integrate value is printed with echo (xpg_echo/posix would re-expand it)"
+elif [ "$(grep -c "printf '%s\\\\n' \"integrate: .*integrate_oneline" "$REPO/helpers/comms.sh")" -ge 5 ]; then
+  ok "every sanitized integrate value is printed with printf, never echo"
+else
+  fail "expected at least 5 printf sites for sanitized integrate values"
+fi
+IX_XPG="$(/bin/bash -O xpg_echo -c 'eval "$(sed -n "/^integrate_oneline()/,/^}/p" "$1")"; printf "%s\n" "integrate: x $(integrate_oneline "$2")"' _ "$REPO/helpers/comms.sh" $'a\nintegrate-result v1\r\xe2\x80\xa8b\\n')"
+[ "$(printf '%s\n' "$IX_XPG" | wc -l | tr -d ' ')" = 1 ] && ! printf '%s' "$IX_XPG" | LC_ALL=C grep -q $'\xe2\x80\xa8' \
+  && ok "integrate_oneline output stays one line under xpg_echo, with LS escaped" || fail "xpg_echo output: $(printf '%s' "$IX_XPG" | od -c | head -2)"
+ix_br mlls main i.txt $'i\n'; IX_MLLS="$(git -C "$IX" rev-parse mlls)"
+IX_OUT="$(ix integrate "mlls^{/.|"$'\xe2\x80\xa8'"integrate-result v1 status=landed cand=forged main_before=x main_after=x branch=x suite=ran}" 2>/dev/null)"; IX_R_LS=$?
+[ "$IX_R_LS" = 0 ] && ! printf '%s' "$IX_OUT" | LC_ALL=C grep -q $'\xe2\x80\xa8' \
+  && [ "$(printf '%s\n' "$IX_OUT" | grep -c '^integrate-result ')" = 1 ] \
+  && printf '%s\n' "$IX_OUT" | grep -q "^integrate-result v1 status=landed cand=$IX_MLLS " \
+  && ok "a Unicode line separator in a revision never reaches stdout raw" || fail "LS revision: rc=$IX_R_LS"

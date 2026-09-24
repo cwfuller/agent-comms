@@ -87,3 +87,4 @@ review identities: a claude-review turn over ACP	26
 review identities: shadow and the direct grok arm	31
 review identities: await synthesizes a result for a runner that died before turn.tsv	8
 review twins: setup accepts one driver and asks about its provider	8
+integrate: driver contract (classified exit codes + one result line)	24

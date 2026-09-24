@@ -161,7 +161,7 @@ agnostic.
 | `send --to <agent> <file> [--wait] [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`spawned`/`completed`/`manual`/`pickup`/`failed`; `delivered` and `blocked` died with cmux and are read-only history). `--wait` runs the peer turn in the foreground; success is `RESULT: completed`, never "NOT spawned". A `review-feedback` inherits the request's `artifact_id`/`head_sha` and is refused on mismatch. Before any durable write it refuses a `review-request` or `question` whose `from:` equals `--to` (naming the file; for a review-request the remedy is the author's own twin, `--to <self>-review`, which `agents --roster` swaps in; for a question, another driver), and anything but a `review-request` or `error` to a review twin. It stamps `review_provider:` (the twin's driver's provider) on a `review-request` or `error` to a review twin (both start a review turn there) and strips a hand-typed one from either to a driver |
 | `presence claim\|beat\|others\|release\|expire\|with-beat` | advisory multi-session coordination on `.comms/sessions/` — claim-then-check (exit 0 direct-safe / 3 peers / 4 fail-closed ambiguity), whole-file heartbeats (exit 5 = healed, re-check before writing), exact-self release, two-pass byte-identical reap with nonce tombstone covers (which `claim` itself runs, so dead records are collected without anyone invoking `expire`), an auto-adopted session pid that `claim` and `beat` both verify by `ps` (explicit `--pid` first, then `COMMS_PRESENCE_PID`, then `CLAUDE_PID`, each TRIED in turn so a stale override cannot shadow a good handle; an auto-adopted value that does not verify falls back to pid-less, while an explicit `--pid` is taken as given). `beat` AND `others` both re-pin the handle, so a RESUMED session — which runs under a new harness process — is not collected while alive, including in the window before its first heartbeat, since `others` is the re-check a resumed session runs first. `others` therefore WRITES (a successful re-check beats self) and fails closed: exit 5 when this session's own record is gone or carries a reap tombstone, exit 4 when the re-pin cannot be written, and a beat-wrapper for long-running children. See PROTOCOL "Presence & worktrees" |
 | `worktree new [<slug>]` | session worktree under the MAIN root's `.claude/worktrees/` on branch `worktree-<slug>`, from the LOCAL default-branch tip; refuses without ignore coverage |
-| `integrate <branch>` | land on `main`: advisory lease, ff-only, suite (config `suite-cmd = ...`) at the candidate OID in a detached worktree — a FRESH checkout with no untracked or ignored files, so `suite-cmd` must provision its own prerequisites and may leave ignored files but no git-visible changes; it is whitespace-split into argv with no shell, so point it at a committed script — then CAS `update-ref` — a race loses cleanly, main only ever advances to suite-verified commits. A prose-only tree diff (`README.md`, `LICENSE`, top-level `docs/*.md`; not `docs/loopspec/`, not `AGENTS.md`) skips the suite and does not mint an attestation. A single clean checkout idling on `main` at the expected tip is self-healed through the landing; `suite-attest-secs = N` config accepts a fresh same-OID `attest-green` record in place of the re-run |
+| `integrate <branch>` | land on `main`: advisory lease, ff-only, suite (config `suite-cmd = ...`) at the candidate OID in a detached worktree — a FRESH checkout with no untracked or ignored files, so `suite-cmd` must provision its own prerequisites and may leave ignored files but no git-visible changes; it is whitespace-split into argv with no shell, so point it at a committed script — then CAS `update-ref` — a race loses cleanly, main only ever advances to suite-verified commits. A prose-only tree diff (`README.md`, `LICENSE`, top-level `docs/*.md`; not `docs/loopspec/`, not `AGENTS.md`) skips the suite and does not mint an attestation. A single clean checkout idling on `main` at the expected tip is self-healed through the landing; `suite-attest-secs = N` config accepts a fresh same-OID `attest-green` record in place of the re-run. Every refusal exits with a classified code, and a landing prints one `integrate-result v1` line (see [integrate exit codes and result line](#integrate-exit-codes-and-result-line)) |
 | `attest-green [--passed N] [--expect <oid>]` | record "suite green at this checkout's exact HEAD" (clean tracked tree required) into the main root's `.comms/cache/suite-attest.log`; a green `tests/run.sh` records itself automatically, passing `--expect` with the commit it started on so a HEAD that moved mid-run refuses instead of inheriting the result |
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |
@@ -323,6 +323,37 @@ inflate the "constant" and defeat the cap.
 - **`archive-search` filters by match first, then sorts the matches globally, then
   applies `--limit`** — so the limit can never discard a newer match, and the per-file
   frontmatter parse runs only on hits.
+
+#### `integrate` exit codes and result line
+
+`integrate` is meant to be driven by a program as well as a person, so its outcome is machine-readable. The human messages on stderr are unchanged; a driver reads the exit code, and on success the result line.
+
+| Exit | Meaning | What a driver does |
+| --- | --- | --- |
+| 0 | landed | record the landing from the result line |
+| 1 | unclassified failure | stop and surface the stderr message |
+| 2 | usage: missing or unknown argument, an unresolvable branch, an invalid presence name or instance | fix the call |
+| 10 | configuration: no, empty, or duplicate `suite-cmd` (or duplicate `suite-attest-secs`), no `refs/heads/main`, no repository root | fix the repo's config |
+| 11 | another live session holds the integrating lease | retry later |
+| 12 | the candidate is not a descendant of `main` | rebase, re-verify, retry |
+| 13 | `main` is checked out where it cannot be healed: a dirty or moved occupant, several occupants, or one that appeared during the suite | free `main`, retry |
+| 14 | the suite exited non-zero at the candidate | fix the code; full output is kept under `.comms/logs/` |
+| 15 | the suite result cannot be trusted: the candidate could not be materialized, no completion line, failures despite exit 0, a partial run, or the verification tree moved or was dirtied | investigate; do not retry blindly |
+| 16 | `main` moved during the attempt (the compare-and-swap lost); nothing landed | re-run: it re-verifies against the new tip |
+| 17 | a precondition could not be read (the sessions directory, the worktree list, the `main` occupant's state, the pinned `/usr/bin/env`), or `refs/heads/main` could not be written although it had not moved (a lock, permissions, or disk fault) | fix the environment |
+
+On success, after the human `LANDED` line, stdout carries exactly one line:
+
+```
+integrate-result v1 status=landed cand=<oid> main_before=<oid> main_after=<oid> branch=<ref> suite=ran|skipped-docs|attested
+```
+
+- Fields are space-separated `key=value` pairs. Values never contain whitespace: `branch` is the argument as given, with any byte outside `A-Z a-z 0-9 . _ / @ { } ~ ^ : + -` written as `%XX`.
+- `main_after` is the value this landing wrote by compare-and-swap, not a later read; another writer may have advanced `main` since.
+- `suite` says how the candidate was verified: the suite ran, a prose-only diff skipped it, or a fresh `attest-green` record stood in.
+- A refusal prints no result line. Parsers must ignore unknown keys; a breaking change bumps `v1`.
+- The suite's own output goes to stderr (and is kept whole under `.comms/logs/`), so nothing the suite prints can appear on stdout as a result line.
+- Split stdout on LF only. The result line is printable ASCII. On every stdout line, a caller-supplied or path value has backslashes, CR, LF, other control bytes and the Unicode separators NEL, LS and PS escaped, so no value can begin a line for any reader.
 
 ### `docs/loopspec/check.sh`
 
