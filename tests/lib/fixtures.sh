@@ -62,6 +62,13 @@ export GROK_STUB_LOG="$WORK/grok.log"
 cat > "$STUB_BIN/grok" <<'GSTUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "${GROK_STUB_LOG:-/dev/null}"
+# GROK_IDENT_LOG: the identity environment the DIRECT grok child inherited (see AX_IDENT_LOG).
+if [ -n "${GROK_IDENT_LOG:-}" ]; then
+  for gv in COMMS_REVIEW_TURN COMMS_SELF COMMS_PRESENCE_NAME COMMS_PRESENCE_INSTANCE COMMS_PRESENCE_PID \
+            CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; do
+    printf '%s=%s\n' "$gv" "$(printenv "$gv" 2>/dev/null || printf '<unset>')" >> "$GROK_IDENT_LOG" 2>/dev/null || true
+  done
+fi
 # GROK_STUB_HANG mirrors CODEX_STUB_HANG: the killed-runner fixture needs a child that outlives
 # its budget. It moved to grok when codex lost the headless path in step 4 (S4-2).
 [ -n "${GROK_STUB_HANG:-}" ] && sleep "$GROK_STUB_HANG"
@@ -196,6 +203,15 @@ fi
 # AX_ENV_LOG records the CODEX_PATH the CHILD inherited (the runtime the adapter would launch).
 if [ -n "${AX_ENV_LOG:-}" ]; then
   printf 'CODEX_PATH=%s\n' "${CODEX_PATH-<unset>}" >> "$AX_ENV_LOG" 2>/dev/null || true
+fi
+# AX_IDENT_LOG records the IDENTITY environment the CHILD inherited: the reviewer boundary must
+# scrub the driver's session identity and carry the review-turn marker. `<unset>` is recorded
+# explicitly, so an absent variable is an observation rather than a missing line.
+if [ -n "${AX_IDENT_LOG:-}" ]; then
+  for ax_v in COMMS_REVIEW_TURN COMMS_SELF COMMS_PRESENCE_NAME COMMS_PRESENCE_INSTANCE COMMS_PRESENCE_PID \
+              CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; do
+    printf '%s=%s\n' "$ax_v" "$(printenv "$ax_v" 2>/dev/null || printf '<unset>')" >> "$AX_IDENT_LOG" 2>/dev/null || true
+  done
 fi
 # THE PROVIDER FIXES ITS POLICY WHEN A SESSION IS CREATED. Real codex reads model/effort from the
 # isolated config.toml at thread start and then sends its OWN in-memory values on every prompt; a

@@ -569,7 +569,16 @@ cmd_agents() {
       local drv oth="" d
       drv="$(registry_drivers)" || exit 2
       for d in $drv; do [ "$d" = "$1" ] || oth="$oth $d"; done
-      [ -n "$oth" ] || { oth=" $(registry_review_agents)" || exit 2; }
+      # Fallback: ONE review identity per provider, the first declared for each — two on one
+      # provider would be a default roster that dispatch must then refuse.
+      if [ -z "$oth" ]; then
+        local rmap pr seenp=" "
+        rmap="$(registry_review_map)" || exit 2
+        for pr in $rmap; do
+          case "$seenp" in *" ${pr#*:} "*) continue ;; esac
+          seenp="$seenp${pr#*:} "; oth="$oth ${pr%%:*}"
+        done
+      fi
       oth="$(printf '%s' "$oth" | tr -s ' ' | sed 's/^ //; s/ $//')"
       [ -n "$oth" ] || usage_err "agents --others $1: no other registered agent can review — register one in .comms/config (agents =), or declare a review identity (review-agents = <name>:<provider>)"
       printf '%s\n' "$oth" | tr ' ' ','
