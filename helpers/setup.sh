@@ -175,12 +175,9 @@ CFG=""
 if [ -n "$CFG" ]; then
   CUR_AGENTS="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$CFG" 2>/dev/null | head -1)"
   CUR_DEFAULT="$(sed -n 's/^[[:space:]]*default-target[[:space:]]*=[[:space:]]*//p' "$CFG" 2>/dev/null | head -1)"
-  # Review identities (`review-agents = claude-review:claude`) are declared by hand and kept by the
-  # rewrite below; they are read here only so step 3 can see which PROVIDERS reviews run on.
-  CUR_REVIEW="$(sed -n 's/^[[:space:]]*review-agents[[:space:]]*=[[:space:]]*//p' "$CFG" 2>/dev/null | head -1)"
   AGENTS="$(ask "  agents for this project ($ROOT)" "${CUR_AGENTS:-${DETECTED:-claude codex}}")"
   # Validated to the registry's own rules before anything is written: supported names only, no
-  # duplicates, at least two (a loop needs an author and a reviewer). Anything else keeps the
+  # duplicates, at least one (its built-in review twin is its reviewer). Anything else keeps the
   # current line rather than publishing a config registry_parse() would then refuse.
   bad_agent=""; seen=" "
   for a in $AGENTS; do
@@ -188,10 +185,10 @@ if [ -n "$CFG" ]; then
     case "$seen" in *" $a "*) bad_agent="'$a' is listed twice" ;; esac
     seen="$seen$a "
   done
-  # One driver is enough once a review identity is declared: it is that driver's reviewer.
-  min_agents=2; [ -n "${CUR_REVIEW:-}" ] && min_agents=1
-  [ -z "$bad_agent" ] && [ "$(printf '%s\n' $AGENTS | grep -c .)" -lt "$min_agents" ] \
-    && bad_agent="at least two agents are needed (or one, plus a review identity under review-agents)"
+  # One driver is enough: every driver has a built-in review twin (<driver>-review), so a lone
+  # driver still has a reviewer.
+  [ -z "$bad_agent" ] && [ "$(printf '%s\n' $AGENTS | grep -c .)" -lt 1 ] \
+    && bad_agent="at least one agent is needed"
   if [ -n "$bad_agent" ]; then
     say "  $bad_agent — keeping: ${CUR_AGENTS:-unchanged}"
     AGENTS="$CUR_AGENTS"
@@ -236,13 +233,9 @@ say "  turn is refused unless you allow uncontained reviews — then it can writ
 say "  mount and reach the network with your git credentials. Fine for your own code on your"
 say "  own machine; not for code you did not write."
 cur_unc="$(yn_of "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-}")"
-# Containment is a property of the PROVIDER: a review identity on grok (grok-review:grok) needs this
-# as much as a registered grok does. The review line is split exactly as the registry splits it
-# (on any whitespace), and each pair's provider is compared whole — a raw-text match missed a pair
-# followed by a tab.
-PROVIDERS=" $AGENTS "
-set -f; for rp in ${CUR_REVIEW:-}; do PROVIDERS="$PROVIDERS${rp#*:} "; done; set +f
-case "$PROVIDERS" in
+# Containment is a property of the PROVIDER. Review twins run on their driver's provider, so the
+# agents line alone decides it: grok-review exists exactly when grok does.
+case " $AGENTS " in
   *" grok "*) if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi ;;
   *) say "  grok is not registered here — nothing to allow." ;;
 esac

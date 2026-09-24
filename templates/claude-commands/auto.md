@@ -102,33 +102,33 @@ asked. Do not narrate every dispatch.
      outrank it. It only ever raises depth. Ceiling turns run long — add
      `COMMS_RUNPHASE_TIMEOUT_SECS=3600` inline too if a reviewer times out.
    - `--reviewers a,b` selects the reviewing agents. **The default is a PANEL: every
-     other registered driver** — or, when no other driver is registered, one review
-     identity per provider (below). Narrow it explicitly when you want one
-     (`--reviewers codex`). Derive the default from the registry — never hardcode a
-     roster, or adding an agent silently leaves it out:
+     other registered driver** (`agents --others`) — your own model is NOT on it unless
+     you ask, except in a repo whose only driver is you, where your review twin is the only
+     reviewer there is. Narrow it explicitly when you want one (`--reviewers codex`).
+     Resolve the roster through the ONE helper every runtime uses — never hardcode it, and
+     never hand-edit the list:
      ```bash
      SELF="$("$COMMS_SH" whoami)"                          # never write a literal agent name
-     REVIEWERS="$("$COMMS_SH" agents --others "$SELF")"    # the other drivers, else one review identity per provider
-     # ...unless --reviewers was passed, in which case use it verbatim
+     # WANT = the literal --reviewers value (e.g. "codex" or "claude,codex"), or empty for the default panel
+     REVIEWERS="$("$COMMS_SH" agents --roster "$SELF" "$WANT")" || { echo "reviewer list refused (see above)"; exit 1; }
      GATING="${REVIEWERS%%,*}"                            # first reviewer gates the loop
      ```
      `whoami` fails closed if it cannot tell which agent is driving; set `COMMS_SELF`
      only as an override. Copying `from: claude` out of an old example impersonates
      Claude — dispatch then fans the request back at you.
-     Validate EVERY name against `"$COMMS_SH" agents` (it lists review identities too).
-     Hold them as a LIST, never a single scalar copied across write paths.
-   - **`--reviewers` never names `$SELF`.** `send` and `panel dispatch` refuse a request
-     whose `from:` is also its target. Same-model review goes to a **review identity**: a
-     review-only name the operator declares in `.comms/config`
-     (`review-agents = claude-review:claude`), with its own inbox and leg thread, running
-     on the named provider. `"$COMMS_SH" agents --review` lists them and
-     `"$COMMS_SH" agents --provider <name>` prints the model behind one. If the user asked
-     to be reviewed by their own model and none is declared, stop and tell them the line
-     to add — never substitute your own name.
-   - **One reviewer per provider.** `panel dispatch` refuses a roster with two legs on one
-     provider (a driver plus its own review identity, say), and `compose` refuses to count
-     two answers that one provider produced. Mix a review identity with OTHER providers
-     (`--reviewers codex,claude-review` from a claude driver), not with its own.
+     `--roster` validates every name, collapses repeats, and refuses two reviewers on one
+     provider. Hold the result as a LIST, never a single scalar copied across write paths.
+   - **Naming yourself means your own model.** Every driver has a built-in review twin —
+     `claude-review`, `codex-review`, `grok-review` — with its own inbox and leg thread,
+     running on that driver's model. No config: `--roster` swaps it in whenever `--reviewers`
+     names `$SELF` (`--reviewers claude,codex` from Claude resolves to `claude-review,codex`;
+     from Grok, `--reviewers grok` resolves to `grok-review`). A request never goes to
+     `$SELF` itself: `send` and `panel dispatch` refuse that. `"$COMMS_SH" agents --review`
+     lists the twins and `"$COMMS_SH" agents --provider <name>` prints the model behind one.
+   - **One reviewer per provider.** `--roster` and `panel dispatch` refuse two reviewers on
+     one provider (a driver plus its own twin, say), and `compose` refuses to count two
+     answers that one provider produced. Mix your twin with OTHER providers
+     (`--reviewers claude,codex` from Claude), not with itself.
    - **When `$GATING` runs on your own model, say so** (`"$COMMS_SH" agents --provider
      "$GATING"` prints the word `whoami` printed) — in the first status line to the user
      and in the request's `## Context` (e.g. "gating reviewer: claude-review, the author's

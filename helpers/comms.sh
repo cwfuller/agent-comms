@@ -9,15 +9,17 @@
 #   root                        print the main repo's .comms path (worktree-safe)
 #   workspace [set <name>]      print the mailbox identity (pin > branch > repo
 #                               dir); `set` pins it repo-scoped in .comms/workspace
-#   agents [default|--drivers|--review|--provider <id>|--others <driver>|--supported]
-#                                  registered identities from .comms/config: every
-#                                  identity (bare), the drivers (`agents =`), the
-#                                  review-only identities (`review-agents =
-#                                  <name>:<provider>`), one identity's provider, or the
-#                                  provider capability table. --others is the default
-#                                  panel for a driver: the OTHER drivers, else ONE review
-#                                  identity per provider (first declared). (zero-config:
-#                                  claude codex grok, target codex, no review identities)
+#   agents [default|--drivers|--review|--provider <id>|--others <driver>|
+#           --roster <driver> [a,b,...]|--supported]
+#                                  registered identities: every identity (bare), the
+#                                  drivers (`agents =` in .comms/config), their built-in
+#                                  review twins (<driver>-review, no config), one
+#                                  identity's provider, or the provider capability table.
+#                                  --others is the default panel for a driver (the OTHER
+#                                  drivers; a lone driver gets its own twin). --roster is
+#                                  the ONE reviewer-list resolver /auto uses: no list =
+#                                  --others; a list naming the driver itself swaps in its
+#                                  twin. (zero-config: claude codex grok, target codex)
 #   whoami                      print the driving agent (COMMS_SELF → session env →
 #                               ancestor executable). Fails closed on no signal, on
 #                               conflicting signals, on a review-only identity, and
@@ -272,11 +274,11 @@ cmd_workspace() {
 # IDENTITY vs PROVIDER. An identity is who a message is from / to, whose inbox, whose leg
 # thread, whose events. A provider is the runtime that serves a turn (acpx profile,
 # isolation arm, policy map row). A DRIVER identity (`agents =`) is named after its
-# provider. A REVIEW identity (`review-agents = claude-review:claude`) runs on a declared
-# provider under its own name, so a driver can be reviewed by its own model without the
-# two sharing an inbox, a thread, or awaiting_from. It is review-only: it never drives,
-# authors a request, or answers a consult. Everything above the process boundary is keyed
-# on the identity; only the spawn resolves the provider (registry_provider).
+# provider. Every driver X has a built-in REVIEW TWIN, `X-review`, running on provider X under
+# its own name — no config — so a driver can be reviewed by its own model without the two
+# sharing an inbox, a thread, or awaiting_from. A twin is review-only: it never drives,
+# authors a request, or answers a consult. Everything above the process boundary is keyed on
+# the identity; only the spawn resolves the provider (registry_provider).
 SUPPORTED_AGENTS="claude codex grok"   # the PROVIDERS. claude/codex: interactive+acp; grok: headless reviewer/consult
 REGISTRY_DEFAULT_AGENTS="claude codex grok"
 REGISTRY_DEFAULT_TARGET="codex"
@@ -302,21 +304,27 @@ validate_agent_name() {  # <name> [source] — grammar: ^[a-z][a-z0-9-]{1,15}$
 # unsupported/duplicate agents, empty values, invalid default) is a hard error
 # no matter which command touched it first; unknown keys warn everywhere.
 # Prints three lines: the DRIVER list, the default target, then the review map
-# (`name:provider ...`, empty when none is declared). Read it only through the
+# (`<driver>-review:<driver> ...`, one built-in twin per driver). Read it only through the
 # accessors below — each concern has exactly one.
+review_twin_of() { printf '%s-review\n' "$1"; }   # <driver> — the ONE place a twin's name is formed
+
+review_twins_of() {  # <driver list> -> "X-review:X ..."
+  local d out=""
+  for d in $1; do out="$out $(review_twin_of "$d"):$d"; done
+  printf '%s\n' "${out# }"
+}
+
 registry_parse() {
-  local f agents_ct default_ct review_ct line a agents="" dflt pair rname rprov review=""
+  local f agents_ct default_ct line a agents="" dflt review=""
   f="$(registry_file)"
   if [ ! -f "$f" ]; then
-    printf '%s\n%s\n\n' "$REGISTRY_DEFAULT_AGENTS" "$REGISTRY_DEFAULT_TARGET"
+    printf '%s\n%s\n%s\n' "$REGISTRY_DEFAULT_AGENTS" "$REGISTRY_DEFAULT_TARGET" "$(review_twins_of "$REGISTRY_DEFAULT_AGENTS")"
     return 0
   fi
   agents_ct="$(grep -c '^[[:space:]]*agents[[:space:]]*=' "$f" 2>/dev/null || true)"
   default_ct="$(grep -c '^[[:space:]]*default-target[[:space:]]*=' "$f" 2>/dev/null || true)"
-  review_ct="$(grep -c '^[[:space:]]*review-agents[[:space:]]*=' "$f" 2>/dev/null || true)"
   [ "${agents_ct:-0}" -le 1 ] || die "config: duplicate 'agents' key in $f"
   [ "${default_ct:-0}" -le 1 ] || die "config: duplicate 'default-target' key in $f"
-  [ "${review_ct:-0}" -le 1 ] || die "config: duplicate 'review-agents' key in $f"
   # The suite keys are validated through the SAME accessor their consumers use
   # (config_scalar dies on duplicates), so this path and integrate's can never
   # disagree about what the config says. (codex, ergonomics r1-r2.)
@@ -326,7 +334,7 @@ registry_parse() {
     config_scalar "$cfg_root" suite-cmd >/dev/null
     config_scalar "$cfg_root" suite-attest-secs >/dev/null
   fi
-  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|review-agents[[:space:]]*=|suite-cmd[[:space:]]*=|suite-attest-secs[[:space:]]*=)' "$f" \
+  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|suite-cmd[[:space:]]*=|suite-attest-secs[[:space:]]*=)' "$f" \
     | head -3 | sed 's/^/warning: config: unknown line: /' >&2 || true
   if [ "${agents_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
@@ -348,37 +356,10 @@ registry_parse() {
   else
     agents="$REGISTRY_DEFAULT_AGENTS"
   fi
-  # REVIEW IDENTITIES: an explicit `<name>:<provider>` pair, never inferred from a name
-  # prefix — a bare `claude-review` on the agents line above stays "unsupported". A name
-  # that equals a provider would make identity and provider ambiguous everywhere they
-  # meet (whoami, the capability table), so it is refused rather than disambiguated.
-  if [ "${review_ct:-0}" -eq 1 ]; then
-    line="$(sed -n 's/^[[:space:]]*review-agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
-    [ -n "$line" ] || die "config: 'review-agents' key present but empty in $f (delete the line to declare none)"
-    set -f
-    for pair in $line; do
-      case "$pair" in
-        *:*:*|:*|*:) die "config: malformed review-agents entry '$pair' in $f — expected <name>:<provider>" ;;
-        *:*) ;;
-        *) die "config: malformed review-agents entry '$pair' in $f — expected <name>:<provider>" ;;
-      esac
-      rname="${pair%%:*}"; rprov="${pair#*:}"
-      validate_agent_name "$rname" "$f"
-      case " $SUPPORTED_AGENTS " in
-        *" $rname "*) die "config: review agent '$rname' in $f is a provider name — give the review identity its own name (e.g. $rname-review)" ;;
-      esac
-      case " $SUPPORTED_AGENTS " in
-        *" $rprov "*) ;;
-        *) die "config: review agent '$rname' in $f names unsupported provider '$rprov' — supported: $SUPPORTED_AGENTS" ;;
-      esac
-      case " $review " in
-        *" $rname:"*) die "config: duplicate review agent '$rname' in $f" ;;
-      esac
-      review="$review $rname:$rprov"
-    done
-    set +f
-    review="${review# }"
-  fi
+  # REVIEW TWINS are derived, never declared: one per driver, named `<driver>-review`. A
+  # driver name is always a provider name (checked above), so a twin can never collide with a
+  # driver, and `claude-review` on the agents line itself stays "unsupported".
+  review="$(review_twins_of "$agents")"
   if [ "${default_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*default-target[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
     [ -n "$line" ] || die "config: 'default-target' key present but empty in $f"
@@ -571,31 +552,45 @@ cmd_agents() {
       registry_provider "$1" || die "agents --provider: unknown agent '$1' (registered: $(registry_agents))"
       ;;
     --others)
-      # The default panel for a loop <driver> is driving: every OTHER DRIVER. Review
-      # identities are opt-in (`--reviewers`) — a codex driver's default panel must not
-      # silently grow a second claude-backed leg — EXCEPT when no other driver exists,
-      # where they are the only reviewers there are (`agents = claude` +
-      # `review-agents = claude-review:claude`). Derived from the registry so adding an
-      # agent changes the panel without editing a template.
+      # The default panel for a loop <driver> is driving: every OTHER DRIVER. Its own review twin
+      # is opt-in — same-model review is off unless asked for — EXCEPT when no other driver
+      # exists, where the twin is the only reviewer there is. Derived from the registry so adding
+      # an agent changes the panel without editing a template.
       shift
       [ -n "${1:-}" ] || usage_err "agents --others <agent>: an agent name is required"
       require_driver "$1" "agents --others"
       local drv oth="" d
       drv="$(registry_drivers)" || exit 2
       for d in $drv; do [ "$d" = "$1" ] || oth="$oth $d"; done
-      # Fallback: ONE review identity per provider, the first declared for each — two on one
-      # provider would be a default roster that dispatch must then refuse.
-      if [ -z "$oth" ]; then
-        local rmap pr seenp=" "
-        rmap="$(registry_review_map)" || exit 2
-        for pr in $rmap; do
-          case "$seenp" in *" ${pr#*:} "*) continue ;; esac
-          seenp="$seenp${pr#*:} "; oth="$oth ${pr%%:*}"
-        done
-      fi
-      oth="$(printf '%s' "$oth" | tr -s ' ' | sed 's/^ //; s/ $//')"
-      [ -n "$oth" ] || usage_err "agents --others $1: no other registered agent can review — register one in .comms/config (agents =), or declare a review identity (review-agents = <name>:<provider>)"
-      printf '%s\n' "$oth" | tr ' ' ','
+      [ -n "$oth" ] || oth="$(review_twin_of "$1")"
+      printf '%s\n' "${oth# }" | tr ' ' ','
+      ;;
+    --roster)
+      # THE reviewer-list resolver every runtime's /auto uses (one template serves claude, codex
+      # and grok), so "name yourself to be reviewed by your own model" means the same thing
+      # everywhere. No list: the default panel (--others). With a list: each name is validated,
+      # the driver's OWN name becomes its review twin (a driver never reviews itself under its
+      # own name — send and panel dispatch still refuse that), repeats collapse, and two
+      # reviewers on one provider are refused here, before anything is written.
+      shift
+      [ -n "${1:-}" ] || usage_err "agents --roster <driver> [a,b,...]: the driving agent is required"
+      local rself="$1" rwant="${2:-}" rr rout="" rprovs=" " rp
+      require_driver "$rself" "agents --roster"
+      if [ -z "$rwant" ]; then cmd_agents --others "$rself"; return; fi
+      set -f
+      for rr in $(printf '%s' "$rwant" | tr ',' ' '); do
+        [ "$rr" = "$rself" ] && rr="$(review_twin_of "$rself")"
+        require_agent "$rr" "agents --roster"
+        case " $rout " in *" $rr "*) continue ;; esac
+        rp="$(registry_provider "$rr")" || exit 2
+        case "$rprovs" in
+          *" $rp "*) usage_err "agents --roster: two reviewers on provider '$rp' in '$rwant' — one model reviewing twice is not two reviews; keep one" ;;
+        esac
+        rprovs="$rprovs$rp "; rout="$rout $rr"
+      done
+      set +f
+      [ -n "$rout" ] || usage_err "agents --roster: '$rwant' names no reviewer"
+      printf '%s\n' "${rout# }" | tr ' ' ','
       ;;
     --supported)
       # NOT 'headless': headless_ok refuses both, and runphase requires --via acp. A caller
@@ -1841,14 +1836,11 @@ send_role_check() {
   case "$ftype" in
     review-request|question)
       if [ -n "$ffrom" ] && [ "$ffrom" = "$to" ]; then
-        local ra hint="" r remedy
-        if [ "$ftype" = "review-request" ]; then
-          ra="$(registry_review_agents)" || exit 2
-          for r in $ra; do
-            [ "$(registry_provider "$r")" = "$to" ] && { hint="$r"; break; }
-          done
-          if [ -n "$hint" ]; then remedy="Same-model review goes to its review identity: --to $hint."
-          else remedy="Same-model review goes to a review identity — declare one with review-agents = <name>:$to."; fi
+        local remedy
+        if registry_is_review "$to"; then
+          remedy="A review twin never authors a request."
+        elif [ "$ftype" = "review-request" ]; then
+          remedy="Same-model review goes to its review twin: --to $(review_twin_of "$to") (\`agents --roster\` swaps it in for you)."
         else
           # A review identity never answers a consult, so it is not the remedy here.
           remedy="Consult another driver ($(registry_drivers))."
@@ -4858,8 +4850,13 @@ cmd_validate() {
     rp_have="$val"
     rp_want="$(reply_provider "$file")"
     if registry_is_review "$from_agent"; then
-      is_provider "$rp_have" \
-        || errors="${errors}  review-feedback from review identity '$from_agent' carries no valid review_provider (got '${rp_have:-<none>}')\n"
+      # A twin's provider is FIXED (claude-review runs on claude), so its stamp must name exactly
+      # that provider: anything else is a forged or corrupted reply, never a history to honour.
+      if ! is_provider "$rp_have"; then
+        errors="${errors}  review-feedback from review identity '$from_agent' carries no valid review_provider (got '${rp_have:-<none>}')\n"
+      elif [ "$rp_have" != "$(registry_provider "$from_agent")" ]; then
+        errors="${errors}  review-feedback from '$from_agent' claims review_provider '$rp_have', but '$from_agent' runs on '$(registry_provider "$from_agent")'\n"
+      fi
     elif [ -n "$rp_have" ] && [ "$rp_have" != "$rp_want" ]; then
       errors="${errors}  review-feedback from driver '$from_agent' claims review_provider '$rp_have' — a driver's provider is its own name\n"
     fi
