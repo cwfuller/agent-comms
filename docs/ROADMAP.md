@@ -8,6 +8,33 @@ Backlog from the 2026-06-04 multi-agent audit (64 agents, 56 raw findings → 49
 after adversarial verification) plus field reports from three agents running the loops
 daily. Check items off as they land.
 
+## DECIDED (2026-09-24): orchestration moves to basis; Symphony is deprecated
+
+**Owner decision.** This reverses the division recorded in the 2026-09-02 NEXT item below
+("symphony owns ORCHESTRATION"). Symphony is deprecated. Cross-repo orchestration (the task
+ledger, scheduling, recovery, the phone-facing manager, landing policy) moves to **basis**, a
+separate tool that drives this repo as its review and landing kernel. Do not build that
+orchestration here, and do not revive Symphony for it.
+
+- **agent-comms keeps** the review kernel (loopspec, panels, `compose`, ACP legs) plus
+  `integrate`, session worktrees and presence.
+- **Step 7 is reversed for worktrees, `integrate` and presence.** They stay in the installed
+  product: parallel development depends on them, and basis lands every repo through
+  `integrate`. Step 7 still applies to grading, suite attestation and cmux.
+- **The Symphony NEXT item below (loopspec sync, then a `RunPhase` provider) is parked.** Do not
+  start it.
+- **basis is the event-resumed driver the dropped `comms.sh auto` called for, built outside this
+  kernel:** a deterministic runner over a durable SQLite ledger that starts a short, fresh session
+  per phase and never resumes from conversational memory. codex's structural requirements for any
+  loop driver (checkpoints either side of every effect; resume from events; never infer success
+  from a missing event) bind it. The four-arm finding stands, and so does its limit: implement
+  turns were not measured.
+- **Kernel changes basis needs,** each a normal reviewed change here: distinct `integrate` exit
+  codes plus one machine-readable landing line; `worktree list` and an explicit, hand-run
+  `worktree retire` (the 2026-09-03 retirement design, with one added gate: ignored files that
+  cannot be regenerated block removal); a `gate=pass|block|escalate` line in composition output;
+  `comms.sh version`.
+
 ## Contraction (2026-08-28) — current program
 
 ### Step 4 status and the S4-2 plan verdict (2026-09-01)
@@ -706,6 +733,9 @@ evidence for a driver design.
 
 ### NEXT: sync the loopspec kernel into symphony, then the RunPhase provider (2026-09-02)
 
+**PARKED 2026-09-24:** Symphony is deprecated and orchestration moved to basis. See
+"DECIDED (2026-09-24)" at the top. Kept below as history.
+
 **Symphony's vendored review bar is two months stale.** `elixir/priv/loopspec/PIN` reads
 `ref: d053606f923eca2f80248a1463c3315f0d28a293, synced: 2026-07-06`. Its
 `fragments/verdict-discipline.md` is **689 bytes against this repo's 1451** — it is missing
@@ -999,6 +1029,9 @@ the author fixes or a human is asked.
 **Not in the installed product:** presence, session worktrees, `integrate`,
 grading, suite attestation, cmux. Those stay this-repo contributor tooling until
 step 7 removes them from the install surface.
+
+**Amended 2026-09-24:** presence, session worktrees and `integrate` stay in the installed
+product. See "DECIDED (2026-09-24)" at the top.
 
 **Keep:** loopspec, retained artifacts, two-party legs, fail-closed parsing,
 provenance, partial-panel refusal, human escalation. Markdown is the human
