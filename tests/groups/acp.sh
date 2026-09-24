@@ -945,6 +945,31 @@ RID_DRV_REPLY="$(rid_answers "$RID_DRV_MID")"
   && ok "the driver's reply lands in to-codex from: claude and carries NO review_provider line" \
   || fail "driver reply (found: $(rid_answers "$RID_DRV_MID" | tr '\n' ' '); envelope: $(sed -n '2,6p' "$RID_DRV_REPLY" 2>/dev/null | tr '\n' ' '))"
 
+# ---- (6) THE DETACHED RUNNER DOES NOT CARRY THE DRIVER'S PRESENCE ----
+# A detached runner outlives its driver, and its broker's `send` beats whatever presence record
+# the environment names — HEALING one the driver has already released, as a pid-less record no
+# reaper can collect. So spawn drops COMMS_PRESENCE_* / COMMS_SELF; the foreground run (the driver
+# is alive and waiting on it) keeps them. The control proves the injected pair really would beat.
+RID_PN=rid-driver; RID_PI=0123456789abcdef0123456789abcdef
+RID_PR="$MA_FIX/.comms/sessions/$RID_PN-$RID_PI.json"
+rm -f "$RID_PR"
+RID_PC_MSG="$(rid_msg claude-review pctl claude claude)"
+RID_PC_DIR="$(rid_run claude-review "$RID_PC_MSG" pctl COMMS_PRESENCE_NAME="$RID_PN" COMMS_PRESENCE_INSTANCE="$RID_PI")"
+[ "$(rid_json "$RID_PC_DIR" status)" = completed ] && [ -f "$RID_PR" ] \
+  && ok "control: a foreground run keeps the driver's presence env, and its broker's send beats that record" \
+  || fail "presence control (status=$(rid_json "$RID_PC_DIR" status) record=$(ls "$MA_FIX/.comms/sessions" 2>/dev/null | tr '\n' ' '))"
+rm -f "$RID_PR"
+RID_PS_MSG="$(rid_msg claude-review pspawn claude claude)"
+RID_PS_OUT="$( (cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$RID_HOME" ACP_PARITY_PAYLOAD="$BRK_PAY" \
+    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_PRESENCE_NAME="$RID_PN" COMMS_PRESENCE_INSTANCE="$RID_PI" COMMS_SELF=claude \
+    "$RP" spawn --agent claude-review --message "$RID_PS_MSG" --via acp --timeout-secs 20 ) 2>&1)"
+RID_PS_DIR="$(rundir_of "$RID_PS_OUT")"
+[ -n "$RID_PS_DIR" ] && rid_await "$RID_PS_DIR"
+[ "$(rid_json "$RID_PS_DIR" status)" = completed ] && [ ! -f "$RID_PR" ] \
+  && ok "a detached spawn's broker never beats (or heals) the driver's presence record" \
+  || fail "detached runner carried the driver's presence (status=$(rid_json "$RID_PS_DIR" status) record present=$([ -f "$RID_PR" ] && echo yes || echo no))"
+rm -f "$RID_PR"
+
 cp "$RID_CFG_SAVED" "$RID_CFG"
 
 section "acp.sh: the reviewer model+effort policy"
@@ -1486,6 +1511,18 @@ RR_D10c="$WORK/rr-10c"; RR_LEG=d-rr-test rr_run rr-panel-codex "$RRPC" "$RR_D10c
 [ "$(cn_status "$RR_D9")" = completed ] && [ "$(tv "$RR_D9" observed_model)" = gpt-5.6-luna ] \
   && [ "$(cn_status "$RR_D10")" = failed ] && [ "$(cn_status "$RR_D10b")" = failed ] && [ "$(cn_status "$RR_D10c")" = failed ] \
   && ok "a recorded panel leg carries its base decision; a lookalike (bare or typed dispatch) or a substituted decision does not" || fail "panel leg: leg=$(cn_status "$RR_D9") lookalike=$(cn_status "$RR_D10") fabricated=$(cn_status "$RR_D10b") substituted=$(cn_status "$RR_D10c")"
+# THE LEG'S OWNER IS BOUND BY IDENTITY; A SHADOW IS NOT. A delivering codex turn on the GROK leg's
+# thread is not that leg and is refused. A --no-deliver shadow of the grok leg by codex (what
+# `comms.sh shadow --to codex` runs on the leg's private copy) measures another reviewer on the SAME
+# routed request, so it still verifies on the thread alone and runs at the leg's routed pair.
+RR_D10d="$WORK/rr-10d"; RR_LEG=d-rr-test rr_run rr-panel-grok "$RRP" "$RR_D10d" COMMS_REVIEW_ROUTE=1
+[ "$(cn_status "$RR_D10d")" = failed ] \
+  && ok "a delivering codex turn on the grok leg's thread is refused: the leg decision is bound to its owner" \
+  || fail "codex delivered on grok's leg decision (status=$(cn_status "$RR_D10d"))"
+RR_D10e="$WORK/rr-10e"; RR_LEG=d-rr-test rr_run rr-panel-grok "$RRP" "$RR_D10e" COMMS_REVIEW_ROUTE=1 RUNPHASE_NO_DELIVER=1
+[ "$(cn_status "$RR_D10e")" = completed ] && [ "$(tv "$RR_D10e" observed_model)" = gpt-5.6-luna ] \
+  && ok "a codex shadow of the routed grok leg still runs at the leg's routed pair" \
+  || fail "routed shadow of another leg: status=$(cn_status "$RR_D10e") observed=$(tv "$RR_D10e" observed_model)"
 # THE RUNTIME REACHES THE CHILD: the resolved binary is the adapter's CODEX_PATH, and `bundled`
 # removes an inherited one, so the ledger always names what launched.
 RRN="$(rr_decide rr-rt fast low)"

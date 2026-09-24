@@ -322,6 +322,7 @@ registry_parse() {
   if [ "${agents_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
     [ -n "$line" ] || die "config: 'agents' key present but empty in $f (delete the line for zero-config defaults)"
+    set -f   # a config value is data: never glob-expand it against the caller's cwd
     for a in $line; do
       validate_agent_name "$a" "$f"
       case " $SUPPORTED_AGENTS " in
@@ -333,6 +334,7 @@ registry_parse() {
       esac
       agents="$agents $a"
     done
+    set +f
     agents="${agents# }"
   else
     agents="$REGISTRY_DEFAULT_AGENTS"
@@ -344,6 +346,7 @@ registry_parse() {
   if [ "${review_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*review-agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
     [ -n "$line" ] || die "config: 'review-agents' key present but empty in $f (delete the line to declare none)"
+    set -f
     for pair in $line; do
       case "$pair" in
         *:*:*|:*|*:) die "config: malformed review-agents entry '$pair' in $f — expected <name>:<provider>" ;;
@@ -364,12 +367,13 @@ registry_parse() {
       esac
       review="$review $rname:$rprov"
     done
+    set +f
     review="${review# }"
   fi
   if [ "${default_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*default-target[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
     [ -n "$line" ] || die "config: 'default-target' key present but empty in $f"
-    set -- $line
+    set -f; set -- $line; set +f
     [ "$#" -eq 1 ] || die "config: default-target must be exactly one agent (got: $line)"
     dflt="$1"
   else
@@ -1827,12 +1831,19 @@ send_role_check() {
   case "$ftype" in
     review-request|question)
       if [ -n "$ffrom" ] && [ "$ffrom" = "$to" ]; then
-        local ra hint="" r
-        ra="$(registry_review_agents)" || exit 2
-        for r in $ra; do
-          [ "$(registry_provider "$r")" = "$to" ] && { hint="$r"; break; }
-        done
-        die "send: '$to' authored this $ftype — an agent cannot review or answer its own request. Same-model review goes to a review identity (${hint:+--to $hint; }declare one with review-agents = <name>:<provider>). Nothing was sent; remove the outbound if it sits in an inbox: $file"
+        local ra hint="" r remedy
+        if [ "$ftype" = "review-request" ]; then
+          ra="$(registry_review_agents)" || exit 2
+          for r in $ra; do
+            [ "$(registry_provider "$r")" = "$to" ] && { hint="$r"; break; }
+          done
+          if [ -n "$hint" ]; then remedy="Same-model review goes to its review identity: --to $hint."
+          else remedy="Same-model review goes to a review identity — declare one with review-agents = <name>:$to."; fi
+        else
+          # A review identity never answers a consult, so it is not the remedy here.
+          remedy="Consult another driver ($(registry_drivers))."
+        fi
+        die "send: '$to' authored this $ftype — an agent cannot review or answer its own request. $remedy Nothing was sent; remove the outbound if it sits in an inbox: $file"
       fi ;;
   esac
 }

@@ -2266,11 +2266,16 @@ Most of the plumbing is already agent-neutral: the registry, `inbox_for`, `trans
     one review identity per provider only when no other driver exists; zero-config output is
     byte-identical.
   Accepted residual: a claude-backed review identity shares `~/.claude` and the keychain
-  credential with a claude driver. **Pending: live validation of one real `claude-review` ACP
-  turn** (`send --wait --to claude-review` from a claude driver: the turn completes with the
-  Claude Code session variables scrubbed, the reply lands in `to-claude` stamped
-  `from: claude-review` / `review_provider: claude`, and the inbound is archived from
-  `to-claude-review`). Only the fake-npx suite has exercised the turn so far. `panel status
+  credential with a claude driver. **Live-validated 2026-09-24** (scratch repo, real
+  claude-agent-acp, sent from inside a Claude Code session whose `CLAUDECODE`,
+  `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_CHILD_SESSION` were all
+  set): `send --wait --to claude-review` completed under `claude-plan`; the reply landed in
+  `to-claude` as `from: claude-review` / `review_provider: claude`; every coordinator event of
+  the turn carried `agent=claude-review`; and the reviewer's own shell reported
+  `printenv COMMS_REVIEW_TURN` = `claude-review`, so the marker reaches the tool shell. The first
+  attempt timed out in the 60s compatibility canary at load ~135; two controls at the same time
+  (pre-change and post-change helpers, codex-authored request to plain `claude`) both passed
+  the canary, and the retry passed — load, not the scrub. `panel status
   --set` warns (stderr) on a duplicate-provider set from the same reply stamps, so it never
   shows a healthy panel that `compose` will refuse.
 - [ ] **Reviewer instructions are per-agent products.** Codex has skills, grok gets a

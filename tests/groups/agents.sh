@@ -1171,6 +1171,11 @@ RI_SELFQ="$RI_FIX/.comms/to-claude/${RI_WS}_2026-09-24T12-23-00_selfq-1.md"
 ri_msg "$RI_SELFQ" question claude
 ri_try "$COMMS" send --to claude "$RI_SELFQ"
 ri_expect "a claude question sent --to claude is refused too" 1 "'claude' authored this question"
+# ...and its remedy is another DRIVER: a review identity refuses consults, so suggesting one
+# would send the caller from one refusal straight into another.
+printf '%s\n' "$RI_OUT" | grep -qF "Consult another driver" && ! printf '%s\n' "$RI_OUT" | grep -q -- '-review' \
+  && ok "a self-addressed question points at another driver, never at a review identity" \
+  || fail "self-addressed question remedy (got: $RI_OUT)"
 
 # A review identity receives exactly what a review turn consumes: requests and the error lane.
 RI_Q="$RI_FIX/.comms/to-claude-review/${RI_WS}_2026-09-24T12-24-00_q-1.md"
@@ -1242,3 +1247,28 @@ ri_try "$COMMS" ask --from claude --to claude-review "will you answer a consult?
 ri_expect "ask --to a review identity is a usage error (exit 2)" 2 "ask: 'claude-review' is a review-only identity .* consult a driver"
 [ -z "$(find "$RI_FIX/.comms" -name "*_ask-claude-to-claude-review-*" 2>/dev/null)" ] \
   && ok "...and no question was written into claude-review's inbox" || fail "ask --to claude-review wrote a question"
+
+# --- a config value is DATA: never glob-expanded against the caller's cwd ---------------------
+# With globbing on, `review-agents = *` expanded to whatever the cwd held — here a file named
+# like a valid pair — and silently registered an identity nobody declared.
+: > "$RI_FIX/zz-rev:codex"
+ri_cfg 'agents = claude codex grok\nreview-agents = *\n'
+ri_try "$COMMS" agents
+ri_expect "review-agents = * is refused as the literal '*', never expanded to a file name in cwd" 1 \
+  "malformed review-agents entry '\\*'"
+rm -f "$RI_FIX/zz-rev:codex"
+ri_cfg "$RI_CFG"
+
+# --- a from-less inbound to a DRIVER keeps its old reason --------------------------------------
+# The review-identity wording ("refusing to guess who reads its reply") is for review identities,
+# which have no complement by design. A driver with no complement (grok) was never told it was one.
+RI_NOFROM="$MA_FIX/.comms/to-grok/${MA_WS}_2026-09-24T12-40-00_nofrom-1.md"
+mkdir -p "$MA_FIX/.comms/to-grok"
+sed -e '/^from: /d' -e 's/^thread: .*/thread: ri-nofrom/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$RI_NOFROM"
+RI_NF_DIR="$WORK/ri-nofrom"; mkdir -p "$RI_NF_DIR"
+run_grok_leg "$RI_NOFROM" "$RI_NF_DIR" >/dev/null 2>&1
+grep -q "inbound from: '<absent>' is not a registered agent" "$RI_NF_DIR/result.json" 2>/dev/null \
+  && ! grep -q 'is a review identity' "$RI_NF_DIR/result.json" \
+  && ok "a from-less inbound to a grok driver is refused with the driver wording, not the review-identity one" \
+  || fail "from-less grok driver refusal (got: $(sed -n 's/.*"note": "\(.*\)".*/\1/p' "$RI_NF_DIR/result.json" 2>/dev/null))"
+rm -f "$RI_NOFROM"

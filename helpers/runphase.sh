@@ -1286,10 +1286,12 @@ cmd_spawn() {
   # its broker's `send` would otherwise keep beating the driver's presence record after the
   # driver released it — healing it back as a pid-less record that no reaper can ever collect.
   # The driver's own `await` beats while it waits; the COMMS_WAIT foreground run keeps them.
-  nohup env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u COMMS_PRESENCE_PID -u COMMS_SELF \
-    "$SELF" run --message "$msg" --dir "$run_dir" --agent "$agent" \
-    ${sandbox:+--sandbox "$sandbox"} ${timeout:+--timeout-secs "$timeout"} \
-    ${via:+--via "$via"} \
+  # `unset` in a subshell that execs, not `env -u`: env would read a helper path containing
+  # '=' as an assignment. The subshell execs nohup, which execs the runner, so $! is its pid.
+  ( unset COMMS_PRESENCE_NAME COMMS_PRESENCE_INSTANCE COMMS_PRESENCE_PID COMMS_SELF
+    exec nohup "$SELF" run --message "$msg" --dir "$run_dir" --agent "$agent" \
+      ${sandbox:+--sandbox "$sandbox"} ${timeout:+--timeout-secs "$timeout"} \
+      ${via:+--via "$via"} ) \
     </dev/null >>"$run_dir/runner.log" 2>&1 &
   local pid=$!
   printf '%s' "$pid" > "$claim/pid" 2>/dev/null || true
@@ -2934,8 +2936,10 @@ cmd_run() {
   local peer_refusal="" registered drivers want_prov
   registered="$("$COMMS" agents 2>/dev/null)" || registered=""
   drivers="$("$COMMS" agents --drivers 2>/dev/null)" || drivers=""
-  if [ -z "$peer" ]; then
+  if [ -z "$peer" ] && [ "$agent" != "$provider" ]; then
     peer_refusal="inbound has no from: and '$agent' is a review identity — refusing to guess who reads its reply"
+  elif [ -z "$peer" ]; then
+    peer_refusal="inbound from: '<absent>' is not a registered agent — refusing to route a reply"
   elif ! printf '%s\n' "$registered" | tr ' ' '\n' | grep -qx -- "$peer"; then
     peer_refusal="inbound from: '$peer' is not a registered agent — refusing to route a reply"
   elif ! printf '%s\n' "$drivers" | tr ' ' '\n' | grep -qx -- "$peer"; then
@@ -3126,8 +3130,12 @@ cmd_run() {
     local acp_transport=acp acp_route_err="" acp_route_cur="" acp_route_cur_id="" acp_phase=""
     [ -n "$mount_dir" ] && acp_transport=acp-mounted
     acp_phase="$(frontmatter_field "$msg" phase || true)"
-    local acp_leg_dispatch=""
+    local acp_leg_dispatch="" acp_leg_agent=""
     acp_leg_dispatch="$(frontmatter_field "$msg" dispatch || true)"
+    # A DELIVERING leg turn is that leg's owner, so its decision is bound to its identity too.
+    # A --no-deliver shadow is never the leg whose request it copied (it measures another
+    # reviewer on the same routed request), so it verifies on the thread alone, as before.
+    [ -z "$acp_leg_dispatch" ] || [ "${RUNPHASE_NO_DELIVER:-}" = 1 ] || acp_leg_agent="$agent"
     [[ "$acp_phase" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || acp_phase=-
     "$COMMS" review-route enabled 2>/dev/null && acp_routing=on
     # The stamped id is read ONLY when routing is on — with routing off a leftover id is ignored
@@ -3144,7 +3152,7 @@ cmd_run() {
       acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
       if [ -n "$acp_route_id" ]; then
         if acp_route_cur="$("$COMMS" review-route verify "$acp_route_id" --thread "$msg_thread" --phase "$acp_phase" \
-                              ${acp_leg_dispatch:+--leg-dispatch "$acp_leg_dispatch" --leg-agent "$agent"} 2>>"$run_dir/runner.log")"; then
+                              ${acp_leg_dispatch:+--leg-dispatch "$acp_leg_dispatch"} ${acp_leg_agent:+--leg-agent "$acp_leg_agent"} 2>>"$run_dir/runner.log")"; then
           acp_route_cur_id="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="decision"{print $2; exit}')"
           if [ "$acp_route_cur_id" = "$acp_route_id" ]; then
             acp_route_tier="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="tier"{print $2; exit}')"

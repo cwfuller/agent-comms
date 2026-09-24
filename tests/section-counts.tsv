@@ -38,7 +38,7 @@ acp.sh: consult transport (stubbed npx)	45
 acp.sh: the reviewer model+effort policy	25
 acp.sh: the reviewer policy resolver	43
 reviewer policy: a wrong-depth review is never published	16
-reviewer routing: a routed decision reaches the mounted codex turn	15
+reviewer routing: a routed decision reaches the mounted codex turn	17
 runphase: the compatibility canary gates every ACP turn	24
 runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15
@@ -81,9 +81,9 @@ comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5
 harness: complete parallel worker reports	1
 comms.sh: settings and setup	26
 route.sh: implementer decision records	11
-review identities: registry, roles and send	68
+review identities: registry, roles and send	71
 review identities: panel dispatch and compose provenance	37
-review identities: a claude-review turn over ACP	23
+review identities: a claude-review turn over ACP	25
 review identities: shadow and the direct grok arm	31
 review identities: await synthesizes a result for a runner that died before turn.tsv	8
-review identities: setup preserves them and asks about their provider	6
+review identities: setup preserves them and asks about their provider	8

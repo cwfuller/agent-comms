@@ -188,7 +188,10 @@ if [ -n "$CFG" ]; then
     case "$seen" in *" $a "*) bad_agent="'$a' is listed twice" ;; esac
     seen="$seen$a "
   done
-  [ -z "$bad_agent" ] && [ "$(printf '%s\n' $AGENTS | grep -c .)" -lt 2 ] && bad_agent="at least two agents are needed"
+  # One driver is enough once a review identity is declared: it is that driver's reviewer.
+  min_agents=2; [ -n "${CUR_REVIEW:-}" ] && min_agents=1
+  [ -z "$bad_agent" ] && [ "$(printf '%s\n' $AGENTS | grep -c .)" -lt "$min_agents" ] \
+    && bad_agent="at least two agents are needed (or one, plus a review identity under review-agents)"
   if [ -n "$bad_agent" ]; then
     say "  $bad_agent — keeping: ${CUR_AGENTS:-unchanged}"
     AGENTS="$CUR_AGENTS"
@@ -238,7 +241,7 @@ cur_unc="$(yn_of "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-}")"
 # (on any whitespace), and each pair's provider is compared whole — a raw-text match missed a pair
 # followed by a tab.
 PROVIDERS=" $AGENTS "
-for rp in ${CUR_REVIEW:-}; do PROVIDERS="$PROVIDERS${rp#*:} "; done
+set -f; for rp in ${CUR_REVIEW:-}; do PROVIDERS="$PROVIDERS${rp#*:} "; done; set +f
 case "$PROVIDERS" in
   *" grok "*) if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi ;;
   *) say "  grok is not registered here — nothing to allow." ;;

@@ -82,8 +82,9 @@ A review identity is **review-only**, and each rule sits at the one funnel that 
   else from it, so every writer — `send`, panel legs, the broker, `ask`, `shadow` — is covered.
 - **It receives only a `review-request` or an `error`** (the per-leg error lane). `send`
   refuses anything else, before any durable write.
-- **It is never consulted.** `ask --to <review identity>` is a usage error; `/ask` the driver
-  that runs on the same model instead.
+- **It is never consulted.** `ask --to <review identity>` is a usage error. A same-model
+  consult is `/ask` of the driver that runs on that model over ACP (a separate session); the
+  mailbox path refuses a question addressed to its own author.
 
 It inherits everything provider-keyed from its provider — containment (a `grok`-backed one
 needs `COMMS_RUNPHASE_ALLOW_UNCONTAINED` exactly as grok does), transport, and the policy map
@@ -93,8 +94,10 @@ covers every leg. **Residual:** a claude-backed review identity runs under the s
 machine. The identity separates the mailbox, not the model's configuration.
 
 **Self-address is refused.** `send` refuses a `review-request` or `question` whose `from:`
-equals `--to`, naming the stranded outbound and, when one is registered, the review identity
-for that provider. Replies are unaffected, and `from: claude` → `--to claude-review` is legal.
+equals `--to`, naming the stranded outbound. For a review-request it points at that provider's
+review identity (or says how to declare one); for a question it points at another driver, since
+a review identity never answers a consult. Replies are unaffected, and `from: claude` →
+`--to claude-review` is legal.
 
 **One provider, one voice.** Two reviewers on one provider are one model reviewing twice —
 same routing decision, same policy, same prompt — so their agreement is not corroboration.

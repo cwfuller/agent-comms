@@ -171,9 +171,11 @@ were live.)
    section above; they are unrelated. Dispatch prints an `await:` command per leg, and
    every leg reviews the same snapshot.
    `ME` is always a DRIVER: `whoami` refuses a review-only identity and fails closed inside
-   a review turn. To be reviewed by your OWN model, add a review identity to the roster by
-   name (`review-agents = claude-review:claude` in `.comms/config`, then e.g.
-   `--to "$ROSTER,claude-review"` from a claude driver) — never your own name. A panel takes
+   a review turn. To be reviewed by your OWN model, declare a review identity
+   (`review-agents = claude-review:claude` in `.comms/config`) and put it on the roster by
+   name — never your own name. With other drivers registered, append it
+   (`--to "$ROSTER,claude-review"` from a claude driver); with a single driver, `$ROSTER`
+   already IS the review identity, so use it unchanged. A panel takes
    one reviewer per provider: dispatch refuses two legs on one provider, and compose refuses
    two answers from one. `agents --others` adds review identities only when no other driver
    is registered. See docs/PROTOCOL.md "Identities and providers".
