@@ -23,8 +23,9 @@ else.
 ## Requirements
 
 - A git repository.
-- At least two agent CLIs. `claude` and `codex` work out of the box; `grok` is registered by
-  default, but read the containment note below before using it as a *reviewer*.
+- An agent CLI — two or more for cross-model review; a lone agent is reviewed by its own model
+  (its built-in `<agent>-review` twin). `claude` and `codex` work out of the box; `grok` is
+  registered by default, but read the containment note below before using it as a *reviewer*.
 - Node >= 22.13 for the ACP transport. `ACPX_BIN` pointing at an installed `acpx` skips the
   `npx` download; the Node floor still applies.
 - No pane multiplexer: loops run over ACP in the background.

@@ -30,7 +30,6 @@ the landing gate's suite keys:
 ```
 agents = claude codex grok
 default-target = codex
-review-agents = claude-review:claude
 suite-cmd = bash ci/verify.sh
 suite-attest-secs = 600
 ```
@@ -63,68 +62,81 @@ rule, the acpx profile, the isolation/containment arm, the hostile-artifact refu
 reviewer policy map row. The `agents =` line lists **drivers**, each named after its provider,
 so for a driver the two are the same word and nothing about it changed.
 
-`review-agents = <name>:<provider> ...` (optional, one line) declares **review identities**:
-review-only names that run on a provider under their own identity. `claude-review:claude`
-lets a claude driver be reviewed by claude without the request and the reply sharing one
-inbox, one thread and one `awaiting_from`. Parse rules, each a hard `config:` error: the name
-follows the grammar above, is not a provider name, and is declared once; a pair has exactly
-one `:` with both sides non-empty; the provider is supported (it need not be a registered
-driver); the key is single-valued and non-empty; and `default-target` must be a driver.
-Nothing is inferred from a name — `claude-review` on the `agents =` line is still an
-unsupported agent. Only whole-line `#` comments are allowed in the file, so never annotate the
-pair list inline. `comms.sh setup` keeps the line and offers no UI for it.
+**Every driver has a built-in review twin.** For each driver X on the `agents =` line there is a
+review-only identity `X-review` running on provider X under its own name — `claude-review`,
+`codex-review` and `grok-review` in the zero-config registry — with its own inbox
+(`to-claude-review/`), leg thread, state, events and `from:`. It lets a driver be reviewed by
+its own model without the request and the reply sharing one inbox, one thread and one
+`awaiting_from`. There is **no config key**: a twin exists exactly when its driver does, and
+its provider is fixed — `claude-review` always runs on `claude`. `comms.sh agents --review`
+lists the twins and `agents --provider <twin>` prints the model behind one. Twins are derived,
+never declared: `claude-review` on the `agents =` line is still an unsupported agent, a
+`default-target` naming a twin is refused (it must be a driver), and a leftover
+`review-agents = …` line from the short-lived per-project config is an unknown line — it warns
+(`warning: config: unknown line`) and registers nothing.
 
-A review identity is **review-only**, and each rule sits at the one funnel that sees it:
+A review twin is **review-only**, and each rule sits at the one funnel that sees it:
 
-- **It never drives.** `whoami` refuses it (so `COMMS_SELF=<review identity>` fails), as do
-  `agents --others`, `ask --from` and `panel dispatch` when it is the author.
+- **It never drives.** `whoami` refuses it (so `COMMS_SELF=<twin>` fails), as do
+  `agents --others`, `agents --roster`, `ask --from` and `panel dispatch` when it is the author.
 - **It authors only the `review-feedback` its broker stamps.** `validate` refuses anything
   else from it, so every writer — `send`, panel legs, the broker, `ask`, `shadow` — is covered.
 - **It receives only a `review-request` or an `error`** (the per-leg error lane). `send`
   refuses anything else, before any durable write.
-- **It is never consulted.** `ask --to <review identity>` is a usage error. A same-model
-  consult is `/ask` of the driver that runs on that model over ACP (a separate session); the
-  mailbox path refuses a question addressed to its own author.
+- **It is never consulted.** `ask --to <twin>` is a usage error. A same-model consult is
+  `/ask` of the driver that runs on that model over ACP (a separate session); the mailbox path
+  refuses a question addressed to its own author.
 
-It inherits everything provider-keyed from its provider — containment (a `grok`-backed one
+It inherits everything provider-keyed from its driver's provider — containment (`grok-review`
 needs `COMMS_RUNPHASE_ALLOW_UNCONTAINED` exactly as grok does), transport, and the policy map
 row. There are no per-identity pins or map rows, and one routing decision per base thread
-covers every leg. **Residual:** a claude-backed review identity runs under the same `~/.claude`
-(settings, user instructions, memory) and keychain credential as a claude driver on the same
-machine. The identity separates the mailbox, not the model's configuration.
+covers every leg. **Residual:** `claude-review` runs under the same `~/.claude` (settings, user
+instructions, memory) and keychain credential as a claude driver on the same machine. The twin
+separates the mailbox, not the model's configuration.
 
 **Self-address is refused.** `send` refuses a `review-request` or `question` whose `from:`
-equals `--to`, naming the stranded outbound. For a review-request it points at that provider's
-review identity (or says how to declare one); for a question it points at another driver, since
-a review identity never answers a consult. Replies are unaffected, and `from: claude` →
-`--to claude-review` is legal.
+equals `--to`, naming the stranded outbound. For a review-request the remedy it prints is the
+author's own twin (`--to <self>-review`; `agents --roster` swaps it in for you); for a question
+it points at another driver, since a twin never answers a consult. Replies are unaffected, and
+`from: claude` → `--to claude-review` is legal.
 
 **One provider, one voice.** Two reviewers on one provider are one model reviewing twice —
 same routing decision, same policy, same prompt — so their agreement is not corroboration.
-`panel dispatch` refuses a roster with two legs on one provider (early and friendly, before any
-durable write), and `compose` refuses to count two answered legs from one provider (exit 3,
-`composition-refused` with status `duplicate-provider`). compose reads each reply's provider
-from the reply itself, never from the config as it reads now: a driver's reply is its own
-name, a review identity's is the `review_provider` its broker stamped (see Frontmatter). So a
-retry, a concurrent dispatch or a remapped identity cannot make one model count twice.
-`panel status --set` applies the same rule and warns on stderr, so it never shows a healthy
-panel that compose will refuse.
+`agents --roster` and `panel dispatch` refuse a roster with two reviewers on one provider
+(early and friendly, before any durable write), and `compose` refuses to count two answered
+legs from one provider (exit 3, `composition-refused` with status `duplicate-provider`).
+compose reads each reply's provider from the reply itself, never from the registry as it reads
+now: a driver's reply is its own name, a twin's is the `review_provider` its broker stamped —
+which `validate` holds to the twin's fixed provider (see Frontmatter). So a retry, a concurrent
+dispatch or a forged stamp cannot make one model count twice. `panel status --set` applies the
+same rule and warns on stderr, so it never shows a healthy panel that compose will refuse.
 
-`agents --others <driver>` — the default panel — is the other drivers. Only when there is no
-other driver does it fall back to review identities, one per provider (the first declared),
-so a default roster can never trip the refusal above; with nothing to return it exits 2 naming
-`review-agents`. With two or more drivers, a review identity joins a panel only by name.
-
-**Enabling it.** Add the line to `.comms/config`, then name the identity:
+**Choosing reviewers.** Same-model review is **off by default**. `agents --others <driver>` —
+the default panel — is the other drivers; only a lone driver (no other driver registered) gets
+its own twin, since that is the only reviewer there is. `agents --roster <driver> [a,b,...]`
+is the ONE reviewer-list resolver every runtime's loop uses (claude `/auto`, codex `$auto`,
+grok `/user:auto`), so naming yourself means the same thing everywhere. With no list it is
+`--others`. With a list it validates each name (an unknown one exits 1), swaps the driver's
+OWN name for its twin, collapses repeats, keeps the order (the first name gates), and refuses
+two reviewers on one provider (exit 2, `two reviewers on provider`) — before anything is
+written. `<driver>` must be a driver; a twin there is refused.
 
 ```
-review-agents = claude-review:claude
+agents --roster claude                         ->  codex,grok   (the default panel)
+agents --roster claude claude,codex            ->  claude-review,codex
+agents --roster grok grok                      ->  grok-review
+agents --roster claude claude,claude-review    ->  claude-review
+agents --roster claude codex,codex-review      ->  refused: two reviewers on provider 'codex'
 ```
 
-`/auto --reviewers claude-review` from a claude driver, or mix it with other providers
-(`--reviewers codex,grok,claude-review`). A single-driver project (`agents = claude`) also
-needs `default-target = claude`, since the default target must be a registered driver; its
-default panel is then `claude-review`.
+**Enabling it.** Nothing to configure: name yourself in `--reviewers`.
+`/auto --reviewers claude,codex` from a claude driver is your own model plus codex
+(`claude-review,codex`); `--reviewers claude` alone is same-model review only, and naming the
+twin directly (`--reviewers claude-review`) resolves the same way. A request never goes to the
+driver's own name — `send` and `panel dispatch` refuse that; the twin is the only route to your
+own model. A single-driver project needs only `agents = claude`: with no `default-target`
+line the default target is `codex` when registered and otherwise the first driver, and the
+default panel is then `claude-review` (`comms.sh setup` accepts a single driver too).
 
 ## Presence & worktrees (multi-session coordination)
 
@@ -284,7 +296,7 @@ to track/push to `main`). When creating a worktree for a loop:
 ```markdown
 ---
 type: review-request            # see the type table in loopspec/SPEC.md
-from: claude                    # a REGISTERED identity; a review identity only on review-feedback
+from: claude                    # a REGISTERED identity; a review twin only on review-feedback
 timestamp: 2026-06-04T18:30:14Z
 branch: main
 head_sha: <stamped by send>     # the artifact's base commit — helper-stamped, never hand-typed
@@ -300,27 +312,30 @@ max-rounds: 4
 verdict: APPROVE | REQUEST_CHANGES   # reviewer replies only; read normalized
 route_decision: <stamped by send>    # reviewer routing only (COMMS_REVIEW_ROUTE=1); helper-stamped,
                                      # stripped everywhere else, never shown to the reviewer
-review_provider: claude              # review identities only; helper-stamped, never hand-typed
+review_provider: claude              # review twins only; helper-stamped, never hand-typed
 ---
 ```
 
 `review_provider` names a provider, and which one depends on direction:
 
 - **On a `review-request` or an `error`** it is the RECIPIENT's provider — both start a review
-  turn at a review identity (the error lane asks it to answer again). `send` stamps it on either
-  when the target is a review identity (the provider the config maps it to at send time) and
-  strips a hand-typed value when the target is a driver, so driver-bound messages stay
-  byte-identical. `shadow`
-  stamps its private request copy for the shadow's own target. `validate` only checks that a
-  present value is a supported provider — a `codex`-authored request to `claude-review`
-  stamped `claude` is valid.
-- **At execution** runphase refuses a review-identity turn whose inbound `review_provider` is
-  absent or differs from what the identity maps to NOW (`result.json` note: "… was bound to
-  provider …"). A remap between send and run fails the leg closed — it reads unanswered —
-  rather than running another model under the old name.
-- **On a `review-feedback`** it is the SENDER's provider, stamped by the broker on a review
-  identity's reply. `validate` requires it there (a supported provider) and refuses a driver
-  reply that claims any provider other than its own name. This stamp is what `compose` counts.
+  turn at a review twin (the error lane asks it to answer again). `send` stamps it on either
+  when the target is a twin (its driver's provider) and strips a hand-typed value when the
+  target is a driver, so driver-bound messages stay byte-identical. `shadow` stamps its private
+  request copy for the shadow's own target. `validate` only checks that a present value is a
+  single supported provider — a `codex`-authored request to `claude-review` stamped `claude`
+  is valid.
+- **At execution** runphase refuses a twin's turn whose inbound `review_provider` is absent or
+  differs from the provider the twin runs on (`result.json` note: "… was bound to provider …").
+  A twin's provider is fixed, so a mismatch is a forged or hand-edited stamp, or a request left
+  over from the retired `review-agents` config, which could map a name onto another provider:
+  the leg fails closed — it reads unanswered — rather than running one model under a name that
+  claims another.
+- **On a `review-feedback`** it is the SENDER's provider, stamped by the broker on a twin's
+  reply. `validate` requires it there and requires it to equal the twin's own provider — a
+  `claude-review` reply stamped `codex` is refused ("claims review_provider 'codex', but
+  'claude-review' runs on 'claude'"). A driver's reply may carry no stamp or its own name,
+  nothing else. This stamp is what `compose` counts.
 
 **Validation rules, message types, verdict semantics, and the loop invariants are
 normative in [loopspec/SPEC.md](loopspec/SPEC.md)** — enforced here by
@@ -423,7 +438,7 @@ ts  workspace  event  review_set  dispatch  thread  round  agent  role  artifact
 
 File order **is** the sequence — `ts` is for humans, not for sorting. `agent` names the
 LEG's reviewer (the target of a request, the author of a reply), never the send target. It is
-the IDENTITY (`claude-review`), never the provider it ran on; a review identity's
+the IDENTITY (`claude-review`), never the provider it ran on; a review twin's
 `turn-started` note carries `provider=claude agent=claude-review`.
 `role` is `gating` or `shadow`; a `--no-deliver` measurement turn is recorded and is
 structurally distinguishable from the leg that gates.

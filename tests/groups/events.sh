@@ -1000,7 +1000,8 @@ EVRI="$WORK/events-review-ident"; mkdir -p "$EVRI"; EVRI="$(cd "$EVRI" && pwd -P
 git -C "$EVRI" init -q -b main
 git -C "$EVRI" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 mkdir -p "$EVRI/.comms"
-printf 'agents = claude codex grok\nreview-agents = claude-review:claude\ndefault-target = codex\n' > "$EVRI/.comms/config"
+# claude on the agents line is what registers its built-in twin claude-review (no config key).
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$EVRI/.comms/config"
 C_RD=$(EV_COL run_dir)
 # A run dir exactly as an early-killed runner leaves it: a pid naming a process that is gone.
 # `wait` reaps the child first, so the pid is dead before await ever probes it.

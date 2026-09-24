@@ -16,8 +16,9 @@ others review the same pinned snapshot, and the loop repeats until they approve.
 curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=both
 ```
 
-Needs git, Node >= 22.13 and at least two agent CLIs (`claude` and `codex` work
-out of the box). Clone-first install, scopes and reviewer containment:
+Needs git, Node >= 22.13 and an agent CLI — two or more for cross-model review
+(`claude` and `codex` work out of the box); a lone agent is reviewed by its own
+model. Clone-first install, scopes and reviewer containment:
 [docs/INSTALL.md](docs/INSTALL.md).
 
 Then run `~/.agent-comms/comms.sh setup` (re-runnable): it detects your agents and
@@ -34,9 +35,10 @@ saves [settings](docs/INSTALL.md#settings-commssh-setup), so nothing depends on 
 ```text
 <auto> <task>               implement → panel review → fix, until approved (10 rounds max)
 <auto> --reviewers codex    one reviewer instead of the whole panel
-<auto> --reviewers claude-review
-                            same-model review, after declaring the identity in
-                            .comms/config: review-agents = claude-review:claude
+<auto> --reviewers claude,codex
+                            name yourself to add your own model: from Claude this
+                            is Claude plus Codex (your built-in claude-review
+                            twin reviews; no config). One reviewer per model.
 <auto> --plan <task>        approach review first, for high-stakes work
 <auto> --max <task>         deepest Codex review: strongest model, highest effort
 <ask> codex <question>      one-off consult, no loop

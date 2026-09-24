@@ -7,12 +7,13 @@ mkdir -p "$MA_FIX/.comms/to-claude" "$MA_FIX/.comms/to-codex" "$MA_FIX/.comms/ar
 run_ma() { (cd "$MA_FIX" && env "$COMMS" "$@"); }
 MA_WS="$(run_ma workspace)"
 
-[ "$(run_ma agents)" = "claude codex grok" ] && ok "zero-config agents default includes grok" || fail "zero-config agents (got: $(run_ma agents))"
+# Bare `agents` is every identity: the drivers, then each driver's built-in review twin.
+[ "$(run_ma agents)" = "claude codex grok claude-review codex-review grok-review" ] && ok "zero-config agents default includes grok" || fail "zero-config agents (got: $(run_ma agents))"
 [ "$(run_ma agents default)" = "codex" ] && ok "zero-config default target" || fail "zero-config default target"
 run_ma agents --supported | grep -q 'grok' && ok "supported table lists grok" || fail "supported table lists grok"
 
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$MA_FIX/.comms/config"
-[ "$(run_ma agents)" = "claude codex grok" ] && ok "registry registers grok" || fail "registry registers grok (got: $(run_ma agents))"
+[ "$(run_ma agents)" = "claude codex grok claude-review codex-review grok-review" ] && ok "registry registers grok" || fail "registry registers grok (got: $(run_ma agents))"
 printf 'agents = claude Codex\n' > "$MA_FIX/.comms/config"
 check_not "uppercase agent name rejected" run_ma agents
 printf 'agents = claude ../evil\n' > "$MA_FIX/.comms/config"
@@ -873,13 +874,16 @@ echo "$MISMATCH_OUT" | grep -q 'delivered to' && fail "mismatch must refuse BEFO
 rm -f "$STRAY" "$OUTB"
 
 section "review identities: registry, roles and send"
-# A REVIEW IDENTITY (`review-agents = claude-review:claude`) runs on a provider under its own
-# name, so a claude driver can be reviewed by claude without the two sharing an inbox, a thread
-# or awaiting_from. It is review-only. Most rules here are refusals, and a refusal passes
-# vacuously when the command could not have succeeded anyway — so each one sits next to a
-# CONTROL showing the legitimate neighbour succeeds, and each is judged on its own refusal text
-# or on durable state, never on a bare non-zero exit. Every assertion was checked against a
-# helper with its rule deliberately broken, and went red.
+# Every registered DRIVER X (the `agents =` line) has a built-in REVIEW TWIN, `X-review`, running
+# on provider X under its own name — derived, never declared: there is no config key — so a claude
+# driver can be reviewed by claude without the two sharing an inbox, a thread or awaiting_from. A
+# twin is review-only. Most rules here are refusals, and a refusal passes vacuously when the
+# command could not have succeeded anyway — so each one sits next to a CONTROL showing the
+# legitimate neighbour succeeds, and each is judged on its own refusal text or on durable state,
+# never on a bare non-zero exit.
+#
+# PREFIX TRAP: `claude` is a prefix of `claude-review`. Every identity comparison below is exact —
+# a whole output, `grep -x`, or a quoted/flagged name — because a bare `grep claude` passes on both.
 #
 # Its OWN fixture repo: the MA fixture above is pinned to `agents = claude codex grok` by a
 # dozen legs, and this section rewrites the config on nearly every assertion.
@@ -892,10 +896,19 @@ mkdir -p "$RI_FIX/.comms/to-claude" "$RI_FIX/.comms/to-codex" "$RI_FIX/.comms/ar
 RI_WS="$(cd "$RI_FIX" && "$COMMS" workspace)"
 RI_HEAD="$(git -C "$RI_FIX" rev-parse HEAD)"
 RI_MSGS="$WORK/ri-msgs"; mkdir -p "$RI_MSGS"
-RI_CFG='agents = claude codex grok\ndefault-target = codex\nreview-agents = claude-review:claude grok-review:grok\n'
+RI_CFG='agents = claude codex grok\ndefault-target = codex\n'
+# The retired per-project key, left behind in a config: it must be an unknown line and nothing more.
+RI_STALE_CFG='agents = claude codex grok\ndefault-target = codex\nreview-agents = claude-review:codex x-review:grok\n'
+RI_ALL6="claude codex grok claude-review codex-review grok-review"
 ri_cfg() { printf '%b' "$1" > "$RI_FIX/.comms/config"; }
 # ri_try <env-args...> — run in the fixture, keep stdout+stderr in RI_OUT and the status in RI_RC.
 ri_try() { RI_OUT="$( (cd "$RI_FIX" && env "$@") 2>&1)" && RI_RC=0 || RI_RC=$?; }
+# ri_split <env-args...> — as ri_try, but stdout ALONE in RI_OUT and stderr in RI_ERR: a listing is
+# judged on stdout, where a config warning can neither pad it nor stand in for it.
+ri_split() {
+  RI_OUT="$( (cd "$RI_FIX" && env "$@") 2>"$RI_MSGS/ri-stderr")" && RI_RC=0 || RI_RC=$?
+  RI_ERR="$(cat "$RI_MSGS/ri-stderr" 2>/dev/null)"
+}
 # ri_expect <desc> <rc|nonzero> <ERE> — judge the last ri_try on its status AND its words. 126/127
 # are "could not execute", never a refusal, so they fail even under `nonzero`.
 ri_expect() {
@@ -905,6 +918,11 @@ ri_expect() {
   esac
   if [ "$rc_ok" = 1 ] && printf '%s\n' "$RI_OUT" | grep -qE -- "$3"; then ok "$1"
   else fail "$1 (rc=$RI_RC, wanted $2 and /$3/; got: $(printf '%s' "$RI_OUT" | head -3 | tr '\n' ' ' | cut -c1-240))"; fi
+}
+# ri_is <desc> <expected stdout> — the last ri_try/ri_split exited 0 with EXACTLY this output.
+ri_is() {
+  if [ "$RI_RC" = 0 ] && [ "$RI_OUT" = "$2" ]; then ok "$1"
+  else fail "$1 (rc=$RI_RC, wanted '$2'; got: $(printf '%s' "$RI_OUT" | head -3 | tr '\n' ' ' | cut -c1-240))"; fi
 }
 # ri_msg <path> <type> <from> [frontmatter-line...] — a minimal valid message.
 ri_msg() {
@@ -917,102 +935,169 @@ ri_msg() {
 }
 ri_fm_count() { sed -n '2,/^---$/p' "$1" | grep -c "$2" || true; }   # <file> <BRE> — frontmatter hits
 
-# --- the registry: one parse, one accessor per concern ---------------------------------------
-# Zero-config first: it is the baseline every "unchanged" assertion below compares against.
-ri_try "$COMMS" agents
-[ "$RI_RC" = 0 ] && [ "$RI_OUT" = "claude codex grok" ] \
-  && ok "zero-config: bare agents is unchanged by the review-identity split" || fail "zero-config agents (rc=$RI_RC got: $RI_OUT)"
-ri_try "$COMMS" agents --others claude; RI_ZC_OTHERS="$RI_OUT"
+# --- the registry: twins are DERIVED from the drivers, never declared ------------------------
+# Zero-config first (no .comms/config at all): the baseline every explicit line is compared to.
+rm -f "$RI_FIX/.comms/config"
+ri_split "$COMMS" agents
+[ "$RI_RC" = 0 ] && [ "$RI_OUT" = "$RI_ALL6" ] && [ -z "$RI_ERR" ] \
+  && ok "zero-config: bare agents lists the three drivers, then one twin per driver" \
+  || fail "zero-config agents (rc=$RI_RC got: $RI_OUT; stderr: $RI_ERR)"
+ri_try "$COMMS" agents --drivers
+ri_is "zero-config: --drivers is the default agents line alone, no twin" "claude codex grok"
 ri_try "$COMMS" agents --review
-[ "$RI_RC" = 0 ] && [ -z "$RI_OUT" ] \
-  && ok "zero-config declares no review identity (--review is empty, not an error)" || fail "zero-config --review (rc=$RI_RC got: $RI_OUT)"
+ri_is "zero-config: --review lists exactly the three twins" "claude-review codex-review grok-review"
+ri_try "$COMMS" agents --others claude; RI_ZC_OTHERS="$RI_OUT"
 
 ri_cfg "$RI_CFG"
-ri_try "$COMMS" agents
-[ "$RI_RC" = 0 ] && [ "$RI_OUT" = "claude codex grok claude-review grok-review" ] \
-  && ok "bare agents lists every identity, drivers first" || fail "agents with review identities (rc=$RI_RC got: $RI_OUT)"
-ri_try "$COMMS" agents --drivers
-[ "$RI_OUT" = "claude codex grok" ] && ok "agents --drivers lists only the agents= line" || fail "agents --drivers (got: $RI_OUT)"
-ri_try "$COMMS" agents --review
-[ "$RI_OUT" = "claude-review grok-review" ] && ok "agents --review lists only the review identities" || fail "agents --review (got: $RI_OUT)"
+ri_split "$COMMS" agents
+[ "$RI_RC" = 0 ] && [ "$RI_OUT" = "$RI_ALL6" ] && [ -z "$RI_ERR" ] \
+  && ok "an explicit 'agents = claude codex grok' derives the same six identities as zero-config" \
+  || fail "explicit agents line (rc=$RI_RC got: $RI_OUT; stderr: $RI_ERR)"
 RI_P1="$(cd "$RI_FIX" && "$COMMS" agents --provider claude-review 2>&1)"
-RI_P2="$(cd "$RI_FIX" && "$COMMS" agents --provider grok-review 2>&1)"
-[ "$RI_P1" = "claude" ] && [ "$RI_P2" = "grok" ] \
-  && ok "agents --provider maps each review identity to its declared provider" || fail "--provider review (got: $RI_P1 / $RI_P2)"
-RI_P3="$(cd "$RI_FIX" && "$COMMS" agents --provider codex 2>&1)"
-[ "$RI_P3" = "codex" ] && ok "agents --provider maps a driver to itself" || fail "--provider driver (got: $RI_P3)"
+RI_P2="$(cd "$RI_FIX" && "$COMMS" agents --provider codex-review 2>&1)"
+RI_P3="$(cd "$RI_FIX" && "$COMMS" agents --provider grok-review 2>&1)"
+[ "$RI_P1" = "claude" ] && [ "$RI_P2" = "codex" ] && [ "$RI_P3" = "grok" ] \
+  && ok "agents --provider maps each twin to its own driver's provider" \
+  || fail "--provider twin (got: $RI_P1 / $RI_P2 / $RI_P3)"
+ri_try "$COMMS" agents --provider codex
+ri_is "agents --provider maps a driver to itself" "codex"
 # An unknown identity must not answer with an empty provider: every spawn resolves through this.
 ri_try "$COMMS" agents --provider claude-rev
-ri_expect "agents --provider refuses an unregistered name (a prefix of a review identity included)" 1 "unknown agent 'claude-rev'"
+ri_expect "agents --provider refuses an unregistered name (a prefix of a twin included)" 1 "unknown agent 'claude-rev'"
+# Twins are one level deep: a twin is not a driver, so it has no twin of its own.
+ri_try "$COMMS" agents --provider grok-review-review
+ri_expect "a twin has no twin (grok-review-review is unregistered)" 1 "unknown agent 'grok-review-review'"
 ri_try "$COMMS" agents default
-[ "$RI_OUT" = "codex" ] && ok "default target is unchanged by declaring review identities" || fail "default target (got: $RI_OUT)"
+ri_is "the default target is unchanged by the twins" "codex"
 ri_try "$COMMS" agents --supported
 [ "$RI_RC" = 0 ] && printf '%s\n' "$RI_OUT" | grep -q '^claude	' \
   && ! printf '%s\n' "$RI_OUT" | grep -q -- '-review' \
   && ok "--supported stays a provider table with no identity rows" || fail "--supported gained identity rows (got: $RI_OUT)"
 
-# --- every parse refusal, one assertion each ---------------------------------------------------
+# A custom agents line derives twins for ITS drivers only: no codex driver, so no codex-review.
+ri_cfg 'agents = claude grok\ndefault-target = grok\n'
+ri_split "$COMMS" agents
+[ "$RI_RC" = 0 ] && [ "$RI_OUT" = "claude grok claude-review grok-review" ] && [ -z "$RI_ERR" ] \
+  && ok "'agents = claude grok' registers claude-review and grok-review, and no codex-review" \
+  || fail "custom agents line (rc=$RI_RC got: $RI_OUT; stderr: $RI_ERR)"
+ri_try "$COMMS" agents --review
+ri_is "...and --review lists only those two twins" "claude-review grok-review"
+# The refusal is judged next to its control on the SAME config: grok-review resolves, so the
+# lookup itself works and codex-review is refused for being absent.
+RI_P4="$(cd "$RI_FIX" && "$COMMS" agents --provider grok-review 2>&1)"
+ri_try "$COMMS" agents --provider codex-review
+[ "$RI_P4" = "grok" ] && [ "$RI_RC" = 1 ] && printf '%s\n' "$RI_OUT" | grep -qF "unknown agent 'codex-review'" \
+  && ok "the twin of an unregistered driver does not exist (control: grok-review resolves to grok)" \
+  || fail "codex-review under a claude/grok registry (grok-review=$RI_P4; rc=$RI_RC got: $RI_OUT)"
+
+# A leftover review-agents line (the retired per-project key) is an unknown line like any other:
+# it warns, and it registers NOTHING — neither a new name nor a remap of a twin's provider.
+ri_cfg "$RI_STALE_CFG"
+ri_split "$COMMS" agents
+[ "$RI_RC" = 0 ] && [ "$RI_OUT" = "$RI_ALL6" ] \
+  && printf '%s\n' "$RI_ERR" | grep -qxF 'warning: config: unknown line: review-agents = claude-review:codex x-review:grok' \
+  && ok "a stale review-agents line warns as an unknown line and registers no identity" \
+  || fail "stale review-agents line (rc=$RI_RC got: $RI_OUT; stderr: $RI_ERR)"
+ri_try "$COMMS" agents --provider x-review
+ri_expect "...the name it declared (x-review) is unregistered" 1 "unknown agent 'x-review'"
+ri_split "$COMMS" agents --provider claude-review
+ri_is "...and it cannot remap a twin: claude-review still runs on claude, not codex" "claude"
+
+# --- config refusals: a twin is never a driver --------------------------------------------------
 ri_parse_refuses() {  # <desc> <ERE> <config> — the whole parse is refused, exit 1, with its reason
   ri_cfg "$3"; ri_try "$COMMS" agents; ri_expect "$1" 1 "$2"
 }
-ri_parse_refuses "a review name equal to its own provider is refused" \
-  "config: review agent 'claude' in .* is a provider name" 'agents = claude codex grok\nreview-agents = claude:claude\n'
-# The sharper case: a name that is ANOTHER provider. A check of name == own-provider misses it.
-ri_parse_refuses "a review name equal to a different provider is refused" \
-  "config: review agent 'codex' in .* is a provider name" 'agents = claude codex grok\nreview-agents = codex:claude\n'
-ri_parse_refuses "a review identity on an unsupported provider is refused" \
-  "config: review agent 'claude-review' in .* names unsupported provider 'gemini'" 'agents = claude codex grok\nreview-agents = claude-review:gemini\n'
-ri_parse_refuses "a review entry with no colon is refused, never inferred from its name" \
-  "config: malformed review-agents entry 'claude-review' in" 'agents = claude codex grok\nreview-agents = claude-review\n'
-ri_parse_refuses "a review entry with two colons is refused" \
-  "config: malformed review-agents entry 'claude-review:claude:x'" 'agents = claude codex grok\nreview-agents = claude-review:claude:x\n'
-ri_parse_refuses "a review entry with an empty name is refused" \
-  "config: malformed review-agents entry ':claude'" 'agents = claude codex grok\nreview-agents = :claude\n'
-ri_parse_refuses "a review entry with an empty provider is refused" \
-  "config: malformed review-agents entry 'claude-review:' in" 'agents = claude codex grok\nreview-agents = claude-review:\n'
-# Same name, DIFFERENT provider: last-wins would silently remap a live identity.
-ri_parse_refuses "a duplicate review name is refused even on another provider" \
-  "config: duplicate review agent 'claude-review'" 'agents = claude codex grok\nreview-agents = claude-review:claude claude-review:codex\n'
-ri_parse_refuses "an empty review-agents key is refused" \
-  "config: 'review-agents' key present but empty" 'agents = claude codex grok\nreview-agents =\n'
-ri_parse_refuses "a duplicate review-agents key is refused, not resolved by precedence" \
-  "config: duplicate 'review-agents' key" 'agents = claude codex grok\nreview-agents = claude-review:claude\nreview-agents = grok-review:grok\n'
-ri_parse_refuses "a review name outside the agent-name grammar is refused" \
-  "config: invalid agent name 'Claude-Review'" 'agents = claude codex grok\nreview-agents = Claude-Review:claude\n'
-ri_parse_refuses "a default-target naming a review identity is refused" \
-  "config: default-target 'claude-review' is a review-only identity" 'agents = claude codex grok\ndefault-target = claude-review\nreview-agents = claude-review:claude\n'
-ri_parse_refuses "a bare claude-review on the agents line stays an unsupported agent" \
+ri_parse_refuses "a twin name on the agents line stays an unsupported agent" \
   "config: unsupported agent 'claude-review'" 'agents = claude codex claude-review\n'
-# Every reader parses the WHOLE config, so a bad review line cannot hide behind a command that
-# never asks about review identities.
-ri_cfg 'agents = claude codex grok\nreview-agents = claude-review:claude claude-review:codex\n'
+ri_parse_refuses "a default-target naming a twin is refused" \
+  "config: default-target 'claude-review' is a review-only identity" 'agents = claude codex grok\ndefault-target = claude-review\n'
+# The twin of a driver that is NOT on the line is not a twin at all — the ordinary unregistered refusal.
+ri_parse_refuses "a default-target naming an unregistered driver's twin is refused as unregistered" \
+  "config: default-target 'codex-review' is not a registered agent" 'agents = claude grok\ndefault-target = codex-review\n'
+ri_cfg 'agents = claude codex grok\ndefault-target = claude\n'
+ri_try "$COMMS" agents default
+ri_is "control: a default-target naming a driver parses" "claude"
+# With NO default-target line the default is codex when registered, else the first driver — so a
+# lone driver's config is one line. (Before twins, `agents = claude` alone failed on codex.)
+ri_cfg 'agents = claude\n'
+ri_try "$COMMS" agents default
+ri_is "a lone driver with no default-target line defaults to itself" "claude"
+ri_cfg 'agents = grok codex\n'
+ri_try "$COMMS" agents default
+ri_is "control: with codex registered the implicit default stays codex" "codex"
+# Every reader parses the WHOLE config, so a bad agents line cannot hide behind a command that
+# never asks about identities.
+ri_cfg 'agents = claude codex grok-review\n'
 ri_try "$COMMS" status
-ri_expect "a malformed review-agents line fails status closed too, not only agents" nonzero "config: duplicate review agent 'claude-review'"
+ri_expect "a twin on the agents line fails status closed too, not only agents" nonzero "config: unsupported agent 'grok-review'"
 
 # --- the default panel -------------------------------------------------------------------------
 ri_cfg "$RI_CFG"
 ri_try "$COMMS" agents --others claude
 [ "$RI_RC" = 0 ] && [ "$RI_OUT" = "codex,grok" ] && [ "$RI_OUT" = "$RI_ZC_OTHERS" ] \
-  && ok "with two or more drivers a review identity never joins the default panel (same as zero-config)" \
-  || fail "--others with review identities (rc=$RI_RC got: $RI_OUT, zero-config: $RI_ZC_OTHERS)"
-# ONE per provider, first declared: b-review would give dispatch two claude legs to refuse.
-ri_cfg 'agents = claude\ndefault-target = claude\nreview-agents = a-review:claude b-review:claude g-review:grok\n'
-ri_try "$COMMS" agents --others claude
-[ "$RI_RC" = 0 ] && [ "$RI_OUT" = "a-review,g-review" ] \
-  && ok "a lone driver falls back to one review identity per provider, first declared" \
-  || fail "--others single-driver fallback (rc=$RI_RC got: $RI_OUT)"
+  && ok "with two or more drivers a twin never joins the default panel (same as zero-config)" \
+  || fail "--others with three drivers (rc=$RI_RC got: $RI_OUT, zero-config: $RI_ZC_OTHERS)"
+ri_cfg 'agents = claude codex\n'
+ri_try "$COMMS" agents --others codex
+ri_is "two drivers: each one's default panel is the other driver alone, no twin" "claude"
 ri_cfg 'agents = claude\ndefault-target = claude\n'
 ri_try "$COMMS" agents --others claude
-ri_expect "a lone driver with no review identity gets exit 2 naming review-agents, not empty output" 2 "review-agents = <name>:<provider>"
+ri_is "a lone claude driver's default panel is its own twin" "claude-review"
+ri_cfg 'agents = grok\ndefault-target = grok\n'
+ri_try "$COMMS" agents --others grok
+ri_is "a lone grok driver's default panel is grok-review" "grok-review"
 ri_cfg "$RI_CFG"
 ri_try "$COMMS" agents --others claude-review
-ri_expect "--others refuses a review identity: it never drives a loop" 1 "'claude-review' is a review-only identity"
+ri_expect "--others refuses a twin: it never drives a loop" 1 "agents --others: 'claude-review' is a review-only identity"
+
+# --- the roster resolver: ONE rule for "who reviews me", shared by every runtime's /auto --------
+ri_try "$COMMS" agents --roster claude
+[ "$RI_RC" = 0 ] && [ "$RI_OUT" = "codex,grok" ] && [ "$RI_OUT" = "$RI_ZC_OTHERS" ] \
+  && ok "--roster with no list is --others (codex,grok from claude)" \
+  || fail "--roster default (rc=$RI_RC got: $RI_OUT, --others: $RI_ZC_OTHERS)"
+ri_cfg 'agents = claude\ndefault-target = claude\n'
+ri_try "$COMMS" agents --roster claude
+ri_is "--roster with no list for a lone driver is its twin, as --others" "claude-review"
+ri_cfg "$RI_CFG"
+ri_try "$COMMS" agents --roster claude claude,codex
+ri_is "from claude, 'claude,codex' swaps the driver's own name for claude-review, in place" "claude-review,codex"
+ri_try "$COMMS" agents --roster grok grok
+ri_is "from grok, 'grok' becomes grok-review" "grok-review"
+# Only the DRIVER's own name is swapped: another driver named in the list is a real reviewer.
+ri_try "$COMMS" agents --roster grok claude,grok
+ri_is "from grok, 'claude,grok' keeps claude and swaps only grok" "claude,grok-review"
+ri_try "$COMMS" agents --roster claude claude,claude-review
+ri_is "repeats collapse: from claude, 'claude,claude-review' is claude-review once" "claude-review"
+# The documented "panel + my own model" recipe, run as written: --others, then the driver's own
+# name appended. With other drivers the twin is appended last (the first still gates); with a lone
+# driver --others already IS the twin, so the appended name collapses into it.
+RI_REC3="$(cd "$RI_FIX" && "$COMMS" agents --roster claude "$("$COMMS" agents --others claude),claude" 2>&1)"
+ri_cfg 'agents = claude\ndefault-target = claude\n'
+RI_REC1="$(cd "$RI_FIX" && "$COMMS" agents --roster claude "$("$COMMS" agents --others claude),claude" 2>&1)"
+ri_cfg "$RI_CFG"
+[ "$RI_REC3" = "codex,grok,claude-review" ] && [ "$RI_REC1" = "claude-review" ] \
+  && ok "the documented roster recipe appends the twin (codex,grok,claude-review), and a lone driver's collapses to it" \
+  || fail "roster recipe (three drivers: $RI_REC3; lone driver: $RI_REC1)"
+# The same two names from ANOTHER driver are two distinct reviewers on one provider — refused.
+ri_try "$COMMS" agents --roster codex claude,claude-review
+ri_expect "from codex, 'claude,claude-review' is refused as two reviewers on one provider" 2 \
+  "agents --roster: two reviewers on provider 'claude' in 'claude,claude-review'"
+ri_try "$COMMS" agents --roster codex claude-review,grok
+ri_is "control: from codex, one reviewer per provider (claude-review,grok) resolves" "claude-review,grok"
+ri_try "$COMMS" agents --roster claude codex,gemini
+ri_expect "--roster refuses an unknown name" 1 "agents --roster: unknown agent 'gemini'"
+ri_try "$COMMS" agents --roster claude claude-rev
+ri_expect "--roster refuses a prefix of a twin, never matching it loosely" 1 "agents --roster: unknown agent 'claude-rev'"
+ri_try "$COMMS" agents --roster claude-review codex
+ri_expect "--roster refuses a twin as the driving agent" 1 "agents --roster: 'claude-review' is a review-only identity"
 
 # --- whoami ------------------------------------------------------------------------------------
 ri_try COMMS_SELF=claude "$COMMS" whoami
-[ "$RI_RC" = 0 ] && [ "$RI_OUT" = "claude" ] && ok "control: whoami resolves a driver named by COMMS_SELF" || fail "whoami control (rc=$RI_RC got: $RI_OUT)"
+ri_is "control: whoami resolves a driver named by COMMS_SELF" "claude"
 ri_try COMMS_SELF=claude-review "$COMMS" whoami
-ri_expect "whoami refuses COMMS_SELF naming a review identity" 1 "whoami: 'claude-review' is a review-only identity"
+ri_expect "whoami refuses COMMS_SELF naming a twin" 1 "whoami: 'claude-review' is a review-only identity"
+ri_try COMMS_SELF=grok-review "$COMMS" whoami
+ri_expect "...and refuses grok-review the same way" 1 "whoami: 'grok-review' is a review-only identity"
 # The marker beats every other signal: a same-provider reviewer child carries exactly its
 # driver's signals, so without it whoami would answer "claude" from inside claude-review's turn.
 ri_try COMMS_REVIEW_TURN=claude-review COMMS_SELF=claude "$COMMS" whoami
@@ -1021,16 +1106,36 @@ ri_expect "whoami fails closed inside a review turn even when COMMS_SELF names a
 # --- validate: who may author what, and what review_provider means by direction ---------------
 ri_msg "$RI_MSGS/fb-noprov.md" review-feedback claude-review 'verdict: APPROVE'
 ri_try "$COMMS" validate "$RI_MSGS/fb-noprov.md"
-ri_expect "a review identity's reply without review_provider is refused" 1 "carries no valid review_provider \(got '<none>'\)"
+ri_expect "a twin's reply without review_provider is refused" 1 "carries no valid review_provider \(got '<none>'\)"
 ri_msg "$RI_MSGS/fb-prov.md" review-feedback claude-review 'verdict: APPROVE' 'review_provider: claude'
 ri_try "$COMMS" validate "$RI_MSGS/fb-prov.md"
-[ "$RI_RC" = 0 ] && ok "control: the same reply stamped review_provider: claude validates" || fail "stamped review-identity reply (got: $RI_OUT)"
+[ "$RI_RC" = 0 ] && ok "control: the same reply stamped review_provider: claude validates" || fail "stamped twin reply (got: $RI_OUT)"
 ri_msg "$RI_MSGS/fb-badprov.md" review-feedback claude-review 'verdict: APPROVE' 'review_provider: gemini'
 ri_try "$COMMS" validate "$RI_MSGS/fb-badprov.md"
-ri_expect "a review identity's reply stamped with an unsupported provider is refused" 1 "carries no valid review_provider \(got 'gemini'\)"
+ri_expect "a twin's reply stamped with an unsupported provider is refused" 1 "carries no valid review_provider \(got 'gemini'\)"
+# A twin's provider is FIXED. A supported-but-wrong stamp is a forged or stale reply: compose would
+# count a claude-review answer as a codex one, and an independent codex leg as its duplicate.
+ri_msg "$RI_MSGS/fb-forged.md" review-feedback claude-review 'verdict: APPROVE' 'review_provider: codex'
+ri_try "$COMMS" validate "$RI_MSGS/fb-forged.md"
+ri_expect "claude-review stamped review_provider: codex is refused (a twin's provider is fixed)" 1 \
+  "review-feedback from 'claude-review' claims review_provider 'codex', but 'claude-review' runs on 'claude'"
+ri_msg "$RI_MSGS/fb-grok-forged.md" review-feedback grok-review 'verdict: APPROVE' 'review_provider: claude'
+ri_msg "$RI_MSGS/fb-grok-ok.md" review-feedback grok-review 'verdict: APPROVE' 'review_provider: grok'
+RI_V0="$(cd "$RI_FIX" && "$COMMS" validate "$RI_MSGS/fb-grok-ok.md" >/dev/null 2>&1 && echo y)"
+ri_try "$COMMS" validate "$RI_MSGS/fb-grok-forged.md"
+[ "$RI_V0" = y ] && [ "$RI_RC" = 1 ] \
+  && printf '%s\n' "$RI_OUT" | grep -qF "review-feedback from 'grok-review' claims review_provider 'claude', but 'grok-review' runs on 'grok'" \
+  && ok "grok-review stamped claude is refused; stamped grok validates (control)" \
+  || fail "grok-review fixed provider (grok-stamped=$RI_V0; rc=$RI_RC got: $RI_OUT)"
+# A leftover `review-agents = claude-review:codex` cannot launder the forged stamp: it maps nothing.
+ri_cfg "$RI_STALE_CFG"
+ri_try "$COMMS" validate "$RI_MSGS/fb-forged.md"
+ri_expect "...and a stale review-agents remap line does not make the codex stamp valid" 1 \
+  "claims review_provider 'codex', but 'claude-review' runs on 'claude'"
+ri_cfg "$RI_CFG"
 ri_msg "$RI_MSGS/rr-byrev.md" review-request claude-review
 ri_try "$COMMS" validate "$RI_MSGS/rr-byrev.md"
-ri_expect "a review identity may not author a review-request" 1 "from 'claude-review' is a review-only identity .* not 'review-request'"
+ri_expect "a twin may not author a review-request" 1 "from 'claude-review' is a review-only identity .* not 'review-request'"
 ri_msg "$RI_MSGS/rr-bydrv.md" review-request claude
 ri_try "$COMMS" validate "$RI_MSGS/rr-bydrv.md"
 [ "$RI_RC" = 0 ] && ok "control: the same review-request from a driver validates" || fail "driver review-request (got: $RI_OUT)"
@@ -1058,22 +1163,32 @@ ri_try "$COMMS" validate "$RI_MSGS/rr-multi.md"
 ri_expect "a multi-word request stamp is refused, not matched as a substring" 1 "review_provider 'claude codex' is not a supported provider"
 ri_msg "$RI_MSGS/fb-rev-multi.md" review-feedback claude-review 'verdict: APPROVE' 'review_provider: claude codex'
 ri_try "$COMMS" validate "$RI_MSGS/fb-rev-multi.md"
-ri_expect "a review identity's reply with a multi-word review_provider is refused" 1 "carries no valid review_provider \\(got 'claude codex'\\)"
+ri_expect "a twin's reply with a multi-word review_provider is refused" 1 "carries no valid review_provider \\(got 'claude codex'\\)"
+# A reply from the twin of a driver that is not registered here comes from nobody.
+ri_msg "$RI_MSGS/fb-cxr.md" review-feedback codex-review 'verdict: APPROVE' 'review_provider: codex'
+RI_V3="$(cd "$RI_FIX" && "$COMMS" validate "$RI_MSGS/fb-cxr.md" >/dev/null 2>&1 && echo y)"
+ri_cfg 'agents = claude grok\ndefault-target = grok\n'
+ri_try "$COMMS" validate "$RI_MSGS/fb-cxr.md"
+[ "$RI_V3" = y ] && [ "$RI_RC" = 1 ] && printf '%s\n' "$RI_OUT" | grep -qF "from 'codex-review' is not a registered agent" \
+  && ok "a codex-review reply validates with codex registered, and is unregistered without it" \
+  || fail "codex-review reply by registry (with codex=$RI_V3; without: rc=$RI_RC got: $RI_OUT)"
+ri_cfg "$RI_CFG"
 
 # --- a registered inbox that was never created -------------------------------------------------
 # BEFORE any send below: send and list both mkdir their target inbox, which would destroy the
-# shape under test. to-claude-review, to-grok-review and to-grok have never existed here.
+# shape under test. No twin inbox, and not to-grok, has ever existed here.
 RI_PEND="$RI_FIX/.comms/to-claude/${RI_WS}_2026-09-24T12-10-00_pending-1.md"
 ri_msg "$RI_PEND" review-feedback codex 'verdict: APPROVE' 'thread: ri-pending'
 ri_try "$COMMS" list --as claude
 [ "$RI_RC" = 0 ] && printf '%s\n' "$RI_OUT" | grep -qF "$RI_PEND" \
-  && ok "a never-created review inbox does not hide a driver's pending message from list" || fail "list --as claude (rc=$RI_RC got: $RI_OUT)"
+  && ok "a never-created twin inbox does not hide a driver's pending message from list" || fail "list --as claude (rc=$RI_RC got: $RI_OUT)"
 ri_try "$COMMS" status
 [ "$RI_RC" = 0 ] && printf '%s\n' "$RI_OUT" | grep -qx 'pending in to-claude: 1' \
   && printf '%s\n' "$RI_OUT" | grep -qx 'pending in to-claude-review: 0' \
+  && printf '%s\n' "$RI_OUT" | grep -qx 'pending in to-codex-review: 0' \
   && printf '%s\n' "$RI_OUT" | grep -qx 'pending in to-grok-review: 0' \
-  && ok "status walks every registered inbox, including never-created review ones, to the last" \
-  || fail "status over missing review inboxes (rc=$RI_RC got: $(printf '%s' "$RI_OUT" | tr '\n' '|'))"
+  && ok "status walks every registered inbox, including all three never-created twin inboxes, to the last" \
+  || fail "status over missing twin inboxes (rc=$RI_RC got: $(printf '%s' "$RI_OUT" | tr '\n' '|'))"
 # list and status cannot show the hazard on bash 3.2: list mkdirs its own inbox and status wraps
 # the scan in `|| true` (verified by deleting the guard: both stay green). The walk that CAN lose
 # a reply is leg_reply_candidates, which panel status and compose run over EVERY registered inbox.
@@ -1087,9 +1202,10 @@ RI_SCAN="$(bash -c 'set -euo pipefail; eval "$1"; leg_reply_candidates "$2" "$3"
   && ok "a leg scan with a never-created inbox listed first still finds the reply behind it" \
   || fail "leg scan over a missing inbox (rc=$RI_SCAN_RC got: $RI_SCAN)"
 # Without this the assertions above could pass against inboxes some earlier step created.
-[ ! -e "$RI_FIX/.comms/to-claude-review" ] && [ ! -e "$RI_FIX/.comms/to-grok-review" ] \
+[ ! -e "$RI_FIX/.comms/to-claude-review" ] && [ ! -e "$RI_FIX/.comms/to-codex-review" ] \
+  && [ ! -e "$RI_FIX/.comms/to-grok-review" ] \
   && ok "the scans really ran against never-created inboxes (list and status created none)" \
-  || fail "a review inbox exists, so the missing-inbox assertions proved nothing"
+  || fail "a twin inbox exists, so the missing-inbox assertions proved nothing"
 
 # --- transport follows the PROVIDER --------------------------------------------------------------
 # Real node on a developer's PATH would decide the ACP rung, so both answers are pinned with stub
@@ -1109,13 +1225,13 @@ RI_T_C2="$(ri_transport "$RI_OLDNODE" claude)"; RI_T_CR2="$(ri_transport "$RI_OL
   || fail "transport without ACP (claude=$RI_T_C2 claude-review=$RI_T_CR2)"
 RI_T_G2="$(ri_transport "$RI_OLDNODE" grok)"; RI_T_GR2="$(ri_transport "$RI_OLDNODE" grok-review)"
 [ "$RI_T_G2" = "headless" ] && [ "$RI_T_GR2" = "$RI_T_G2" ] \
-  && ok "a grok-backed review identity routes as grok (headless), not as claude" \
+  && ok "grok-review routes as grok (headless), not as claude" \
   || fail "grok-review transport (grok=$RI_T_G2 grok-review=$RI_T_GR2)"
 
 # --- the reader's reviewer derivation, executed from the template -------------------------------
 # read-from-codex.md derives REVIEWER from the reply's from: and registry-checks it with an
-# anchored grep over bare `agents`. Run the template's OWN two lines: a review identity's reply
-# must route back to it, and a prefix of its name must not pass the anchored check.
+# anchored grep over bare `agents`. Run the template's OWN two lines: a twin's reply must route
+# back to it, and a prefix of its name must not pass the anchored check.
 RI_RFC="$REPO/templates/claude-commands/read-from-codex.md"
 RI_EXTRACT="$(grep -m1 'REVIEWER=\$(awk' "$RI_RFC" | sed 's/^ *//')"
 RI_REGCHK="$(grep -m1 'agents | tr ' "$RI_RFC" | sed 's/^ *//')"
@@ -1128,7 +1244,7 @@ ri_msg "$RI_MSGS/reply-prefix.md" review-feedback claude-rev 'verdict: APPROVE'
 RI_R1="$(ri_reader "$RI_MSGS/reply-rev.md")"
 [ -n "$RI_EXTRACT" ] && printf '%s' "$RI_REGCHK" | grep -q 'grep -qx' && [ "$RI_R1" = "claude-review" ] \
   && ok "the reader's extractor and registry check accept a from: claude-review reply" \
-  || fail "reader derivation for a review identity (got: '$RI_R1')"
+  || fail "reader derivation for a twin (got: '$RI_R1')"
 RI_R2="$(ri_reader "$RI_MSGS/reply-prefix.md")"
 [ -z "$RI_R2" ] && ok "control: an unregistered prefix of claude-review fails the anchored check" || fail "reader accepted '$RI_R2'"
 
@@ -1152,7 +1268,7 @@ ri_req "$RI_OK_REQ" review-request claude ri-rq-ok
 ri_try "$COMMS" send --to claude-review "$RI_OK_REQ"
 [ "$RI_RC" = 0 ] && [ "$(ri_event "$(basename "$RI_OK_REQ" .md)")" -ge 1 ] && [ "$(ri_state ri-rq-ok)" = 1 ] \
   && ok "claude -> claude-review review-request is accepted (event row and thread state written)" \
-  || fail "send to a review identity (rc=$RI_RC events=$(ri_event "$(basename "$RI_OK_REQ" .md)") state=$(ri_state ri-rq-ok) out: $RI_OUT)"
+  || fail "send to a twin (rc=$RI_RC events=$(ri_event "$(basename "$RI_OK_REQ" .md)") state=$(ri_state ri-rq-ok) out: $RI_OUT)"
 [ "$(ri_fm_count "$RI_OK_REQ" '^review_provider:')" = 1 ] && [ "$(ri_fm_count "$RI_OK_REQ" '^review_provider: claude$')" = 1 ] \
   && ok "send stamps exactly one review_provider: claude on a request to claude-review" \
   || fail "review_provider stamp ($(sed -n '2,/^---$/p' "$RI_OK_REQ" | grep '^review_provider' | tr '\n' '|'))"
@@ -1161,31 +1277,35 @@ RI_SELF="$RI_FIX/.comms/to-claude/${RI_WS}_2026-09-24T12-21-00_self-1.md"
 ri_req "$RI_SELF" review-request claude ri-self
 ri_try "$COMMS" send --to claude "$RI_SELF"
 ri_expect "a claude review-request sent --to claude is refused" 1 "'claude' authored this review-request .* cannot review or answer its own request"
-printf '%s\n' "$RI_OUT" | grep -qF -- "--to claude-review" && printf '%s\n' "$RI_OUT" | grep -qF "$RI_SELF" \
-  && ok "the self-address refusal names the stranded file and suggests claude-review" || fail "self-address message (got: $RI_OUT)"
+printf '%s\n' "$RI_OUT" | grep -qF -- "--to claude-review" && printf '%s\n' "$RI_OUT" | grep -qF "agents --roster" \
+  && printf '%s\n' "$RI_OUT" | grep -qF "$RI_SELF" \
+  && ok "the self-address refusal names the stranded file, suggests --to claude-review, and points at agents --roster" \
+  || fail "self-address message (got: $RI_OUT)"
 [ "$(ri_event "$(basename "$RI_SELF" .md)")" = 0 ] && [ "$(ri_state ri-self)" = 0 ] \
   && ok "the self-address refusal lands before any durable write (no event row, no thread state)" \
   || fail "self-address refusal wrote state (events=$(ri_event "$(basename "$RI_SELF" .md)") state=$(ri_state ri-self))"
-# The hint names the review identity FOR THAT PROVIDER: codex has none, so claude-review (a
-# claude-backed reviewer) must not be offered as codex's same-model review.
+# The remedy is the author's OWN twin: codex's same-model review is codex-review, and another
+# provider's twin (claude-review) is never offered as codex's same-model review.
 RI_SELF2="$RI_FIX/.comms/to-codex/${RI_WS}_2026-09-24T12-22-00_self-2.md"
 ri_req "$RI_SELF2" review-request codex ri-self2
 ri_try "$COMMS" send --to codex "$RI_SELF2"
 [ "$RI_RC" = 1 ] && printf '%s\n' "$RI_OUT" | grep -qF "'codex' authored this review-request" \
+  && printf '%s\n' "$RI_OUT" | grep -qF -- "--to codex-review" \
   && ! printf '%s\n' "$RI_OUT" | grep -qF -- "--to claude-review" \
-  && ok "a codex self-send is refused without suggesting another provider's review identity" \
-  || fail "codex self-address hint (rc=$RI_RC got: $RI_OUT)"
+  && ok "a codex self-send's remedy is its own twin (--to codex-review), never another driver's" \
+  || fail "codex self-address remedy (rc=$RI_RC got: $RI_OUT)"
 RI_SELFQ="$RI_FIX/.comms/to-claude/${RI_WS}_2026-09-24T12-23-00_selfq-1.md"
 ri_msg "$RI_SELFQ" question claude
 ri_try "$COMMS" send --to claude "$RI_SELFQ"
 ri_expect "a claude question sent --to claude is refused too" 1 "'claude' authored this question"
-# ...and its remedy is another DRIVER: a review identity refuses consults, so suggesting one
-# would send the caller from one refusal straight into another.
+# ...and its remedy is another DRIVER: a twin refuses consults, so suggesting one (or the roster
+# that swaps one in) would send the caller from one refusal straight into another.
 printf '%s\n' "$RI_OUT" | grep -qF "Consult another driver" && ! printf '%s\n' "$RI_OUT" | grep -q -- '-review' \
-  && ok "a self-addressed question points at another driver, never at a review identity" \
+  && ! printf '%s\n' "$RI_OUT" | grep -qF -- "--roster" \
+  && ok "a self-addressed question points at another driver, never at a twin or the roster" \
   || fail "self-addressed question remedy (got: $RI_OUT)"
 
-# A review identity receives exactly what a review turn consumes: requests and the error lane.
+# A twin receives exactly what a review turn consumes: requests and the error lane.
 RI_Q="$RI_FIX/.comms/to-claude-review/${RI_WS}_2026-09-24T12-24-00_q-1.md"
 ri_msg "$RI_Q" question claude
 ri_try "$COMMS" send --to claude-review "$RI_Q"
@@ -1194,16 +1314,16 @@ RI_PING="$RI_FIX/.comms/to-claude-review/${RI_WS}_2026-09-24T12-25-00_ping-1.md"
 ri_msg "$RI_PING" ping claude
 ri_try "$COMMS" send --to claude-review "$RI_PING"
 ri_expect "any other type (ping) to claude-review is refused" 1 "'claude-review' is a review-only identity .* not 'ping'"
-RI_ERR="$RI_FIX/.comms/to-claude-review/${RI_WS}_2026-09-24T12-26-00_err-1.md"
-ri_msg "$RI_ERR" error claude "thread: ri-rq-ok" "workflow: auto" "phase: plan" "round: 1" "max-rounds: 4" \
+RI_ERR_MSG="$RI_FIX/.comms/to-claude-review/${RI_WS}_2026-09-24T12-26-00_err-1.md"
+ri_msg "$RI_ERR_MSG" error claude "thread: ri-rq-ok" "workflow: auto" "phase: plan" "round: 1" "max-rounds: 4" \
   "in-reply-to: ${RI_WS}_2026-09-24T12-20-00_rq-ok-1"
-ri_try "$COMMS" send --to claude-review "$RI_ERR"
-[ "$RI_RC" = 0 ] && ok "control: an error to claude-review is accepted (the per-leg error lane)" || fail "error to a review identity (rc=$RI_RC out: $RI_OUT)"
+ri_try "$COMMS" send --to claude-review "$RI_ERR_MSG"
+[ "$RI_RC" = 0 ] && ok "control: an error to claude-review is accepted (the per-leg error lane)" || fail "error to a twin (rc=$RI_RC out: $RI_OUT)"
 # ...and it carries the same binding a request does: the error lane starts a review turn there,
-# and runphase refuses any review-identity turn whose inbound names no provider.
-[ "$(ri_fm_count "$RI_ERR" '^review_provider: claude$')" = 1 ] \
+# and runphase refuses any twin turn whose inbound names no provider.
+[ "$(ri_fm_count "$RI_ERR_MSG" '^review_provider: claude$')" = 1 ] \
   && ok "the error lane to claude-review is stamped review_provider: claude, like a request" \
-  || fail "error to a review identity carries no binding ($(sed -n '2,/^---$/p' "$RI_ERR" | grep '^review_provider' | tr '\n' '|'))"
+  || fail "error to a twin carries no binding ($(sed -n '2,/^---$/p' "$RI_ERR_MSG" | grep '^review_provider' | tr '\n' '|'))"
 
 # The stamp is helper-owned in BOTH directions: a forged value is replaced by the registry's,
 # and a request to a driver carries none at all.
@@ -1214,6 +1334,16 @@ ri_try "$COMMS" send --to claude-review "$RI_FORGE"
   && [ "$(ri_fm_count "$RI_FORGE" '^review_provider: claude$')" = 1 ] \
   && ok "a hand-typed review_provider on a request to claude-review is replaced by the registry's" \
   || fail "forged request stamp survived (rc=$RI_RC; $(sed -n '2,/^---$/p' "$RI_FORGE" | grep '^review_provider' | tr '\n' '|'))"
+# A stale remap line in the config cannot steer the stamp either: it is not the registry.
+ri_cfg "$RI_STALE_CFG"
+RI_STALE_REQ="$RI_FIX/.comms/to-claude-review/${RI_WS}_2026-09-24T12-27-30_stale-1.md"
+ri_req "$RI_STALE_REQ" review-request claude ri-stale
+ri_try "$COMMS" send --to claude-review "$RI_STALE_REQ"
+[ "$RI_RC" = 0 ] && [ "$(ri_fm_count "$RI_STALE_REQ" '^review_provider:')" = 1 ] \
+  && [ "$(ri_fm_count "$RI_STALE_REQ" '^review_provider: claude$')" = 1 ] \
+  && ok "with a stale 'review-agents = claude-review:codex' line, a request to claude-review is still stamped claude" \
+  || fail "stale remap steered the stamp (rc=$RI_RC; $(sed -n '2,/^---$/p' "$RI_STALE_REQ" | grep '^review_provider' | tr '\n' '|'); out: $RI_OUT)"
+ri_cfg "$RI_CFG"
 RI_STRIP="$RI_FIX/.comms/to-codex/${RI_WS}_2026-09-24T12-28-00_strip-1.md"
 ri_req "$RI_STRIP" review-request claude ri-strip "review_provider: grok"
 ri_try "$COMMS" send --to codex "$RI_STRIP"
@@ -1221,55 +1351,64 @@ ri_try "$COMMS" send --to codex "$RI_STRIP"
   && ok "a hand-typed review_provider on a request to a driver is stripped" \
   || fail "driver-target stamp not stripped (rc=$RI_RC; $(sed -n '2,/^---$/p' "$RI_STRIP" | grep '^review_provider' | tr '\n' '|'))"
 
-# ZERO-CONFIG BYTES: an ordinary claude -> codex request must come out of send exactly as it did
-# before review identities existed. Two checks, because either alone has a blind spot:
+# DRIVER-REQUEST BYTES: an ordinary claude -> codex request must come out of send exactly as it
+# did before review twins existed. Two checks, because either alone has a blind spot:
 #  - send adds nothing but the stamps that predate review identities (artifact_id, head_sha).
 #    A comparison between two configs cannot see a stamp added to BOTH -- verified: stamping
 #    every request, driver targets included, left that comparison green.
-#  - with review-agents absent vs declared, the outputs match once the two lines this fixture
-#    varies (thread, message_id) are removed.
+#  - zero-config (no config file) and an explicit line carrying a stale review-agents key give
+#    the same bytes once the two lines this fixture varies (thread, message_id) are removed.
 RI_PLAIN_A="$RI_FIX/.comms/to-codex/${RI_WS}_2026-09-24T12-29-00_plain-a.md"
 RI_PLAIN_B="$RI_FIX/.comms/to-codex/${RI_WS}_2026-09-24T12-29-00_plain-b.md"
 ri_req "$RI_PLAIN_A" review-request claude ri-plain-a
 ri_req "$RI_PLAIN_B" review-request claude ri-plain-b
 cp "$RI_PLAIN_B" "$RI_MSGS/plain-b.before"
-ri_cfg 'agents = claude codex grok\ndefault-target = codex\n'
+rm -f "$RI_FIX/.comms/config"
 ri_try "$COMMS" send --to codex "$RI_PLAIN_A"; RI_RC_A="$RI_RC"
-ri_cfg "$RI_CFG"
+ri_cfg "$RI_STALE_CFG"
 ri_try "$COMMS" send --to codex "$RI_PLAIN_B"; RI_RC_B="$RI_RC"
 ri_unstamp() { sed -e '/^artifact_id: /d' -e '/^head_sha: /d' "$1"; }
 [ "$RI_RC_B" = 0 ] && grep -q '^head_sha: ' "$RI_PLAIN_B" \
   && [ "$(ri_unstamp "$RI_PLAIN_B")" = "$(ri_unstamp "$RI_MSGS/plain-b.before")" ] \
-  && ok "with review-agents declared, send adds nothing to a driver request but artifact_id/head_sha" \
+  && ok "send adds nothing to a driver request but artifact_id/head_sha" \
   || fail "driver request gained bytes (rc=$RI_RC_B; diff: $(diff <(ri_unstamp "$RI_MSGS/plain-b.before") <(ri_unstamp "$RI_PLAIN_B") | tr '\n' '|'))"
 ri_norm() { sed -e '/^message_id: /d' -e '/^thread: /d' "$1"; }
 [ "$RI_RC_A" = 0 ] && [ "$RI_RC_B" = 0 ] \
   && [ "$(ri_norm "$RI_PLAIN_A")" = "$(ri_norm "$RI_PLAIN_B")" ] \
-  && ok "an ordinary claude -> codex request is byte-identical with and without review-agents declared" \
+  && ok "an ordinary claude -> codex request is byte-identical under zero-config and with a stale review-agents line" \
   || fail "driver request bytes changed (rc A=$RI_RC_A B=$RI_RC_B; diff: $(diff <(ri_norm "$RI_PLAIN_A") <(ri_norm "$RI_PLAIN_B") | tr '\n' '|'))"
+ri_cfg "$RI_CFG"
 
 # --- ask: an operator verb, drivers only on both ends --------------------------------------------
 ri_try "$COMMS" ask --from claude --to codex "is the retry approach sound?"
 [ "$RI_RC" = 0 ] && [ -n "$(find "$RI_FIX/.comms/to-codex" -name "${RI_WS}_*_ask-claude-to-codex-*" 2>/dev/null)" ] \
   && ok "control: ask --from claude --to codex writes and sends the question" || fail "ask control (rc=$RI_RC out: $RI_OUT)"
 ri_try "$COMMS" ask --from claude-review --to codex "may a reviewer consult?"
-ri_expect "ask --from a review identity is refused" nonzero "ask: 'claude-review' is a review-only identity"
+ri_expect "ask --from a twin is refused" nonzero "ask: 'claude-review' is a review-only identity"
 [ -z "$(find "$RI_FIX/.comms" -name "*_ask-claude-review-to-*" 2>/dev/null)" ] \
   && ok "...and no question from claude-review was written anywhere" || fail "ask --from claude-review wrote a question"
 ri_try "$COMMS" ask --from claude --to claude-review "will you answer a consult?"
-ri_expect "ask --to a review identity is a usage error (exit 2)" 2 "ask: 'claude-review' is a review-only identity .* consult a driver"
+ri_expect "ask --to a twin is a usage error (exit 2)" 2 "ask: 'claude-review' is a review-only identity .* consult a driver"
 [ -z "$(find "$RI_FIX/.comms" -name "*_ask-claude-to-claude-review-*" 2>/dev/null)" ] \
   && ok "...and no question was written into claude-review's inbox" || fail "ask --to claude-review wrote a question"
 
 # --- a config value is DATA: never glob-expanded against the caller's cwd ---------------------
-# With globbing on, `review-agents = *` expanded to whatever the cwd held — here a file named
-# like a valid pair — and silently registered an identity nobody declared.
-: > "$RI_FIX/zz-rev:codex"
-ri_cfg 'agents = claude codex grok\nreview-agents = *\n'
-ri_try "$COMMS" agents
-ri_expect "review-agents = * is refused as the literal '*', never expanded to a file name in cwd" 1 \
-  "malformed review-agents entry '\\*'"
-rm -f "$RI_FIX/zz-rev:codex"
+# With globbing on, `agents = *` would expand to whatever the cwd held — here exactly one file,
+# named `codex` — and silently register a driver (and so its twin) nobody declared. The probe is
+# sharp only if `*` really would expand to `codex` alone, and only if a real `agents = codex`
+# in that same cwd visibly registers codex, so both are checked in the same breath.
+: > "$RI_FIX/codex"
+RI_GLOB="$(cd "$RI_FIX" && echo *)"
+ri_cfg 'agents = codex\n'
+RI_GLOB_CTL="$(cd "$RI_FIX" && "$COMMS" agents 2>&1)"
+ri_cfg 'agents = *\n'
+ri_split "$COMMS" agents
+[ "$RI_GLOB" = "codex" ] && [ "$RI_GLOB_CTL" = "codex codex-review" ] && [ "$RI_RC" = 1 ] \
+  && printf '%s\n' "$RI_ERR" | grep -qF "config: invalid agent name '*'" \
+  && ! printf '%s\n' "$RI_OUT" | grep -q 'codex' \
+  && ok "agents = * is refused as the literal '*', never expanded to a file named codex in cwd" \
+  || fail "agents = * glob safety (cwd glob: $RI_GLOB; control: $RI_GLOB_CTL; rc=$RI_RC stdout: $RI_OUT; stderr: $RI_ERR)"
+rm -f "$RI_FIX/codex"
 ri_cfg "$RI_CFG"
 
 # --- a from-less inbound to a DRIVER keeps its old reason --------------------------------------

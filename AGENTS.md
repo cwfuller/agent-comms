@@ -171,14 +171,19 @@ were live.)
    section above; they are unrelated. Dispatch prints an `await:` command per leg, and
    every leg reviews the same snapshot.
    `ME` is always a DRIVER: `whoami` refuses a review-only identity and fails closed inside
-   a review turn. To be reviewed by your OWN model, declare a review identity
-   (`review-agents = claude-review:claude` in `.comms/config`) and put it on the roster by
-   name — never your own name. With other drivers registered, append it
-   (`--to "$ROSTER,claude-review"` from a claude driver); with a single driver, `$ROSTER`
-   already IS the review identity, so use it unchanged. A panel takes
-   one reviewer per provider: dispatch refuses two legs on one provider, and compose refuses
-   two answers from one. `agents --others` adds review identities only when no other driver
-   is registered. See docs/PROTOCOL.md "Identities and providers".
+   a review turn. Same-model review is off by default. To include your OWN model, pass your
+   own name through the roster resolver — never dispatch to `"$ME"` itself:
+   ```bash
+   ROSTER="$(helpers/comms.sh agents --roster "$ME" "$(helpers/comms.sh agents --others "$ME"),$ME")"   # the panel + your own model
+   ```
+   (or name your twin directly, `"$ME-review"`). Every driver has a built-in review twin —
+   `claude-review`, `codex-review`, `grok-review` — with its own inbox, running on that
+   driver's model; there is no config to add. `agents --roster` swaps your name for your twin,
+   collapses repeats, keeps the order (the first still gates) and refuses unknown names. With a
+   single driver, `agents --others` already IS your twin, so use it unchanged. A panel takes
+   one reviewer per provider: `--roster` and dispatch refuse two on one provider
+   (`codex,codex-review`), and compose refuses two answers from one. See docs/PROTOCOL.md
+   "Identities and providers".
 4. **Wait for every leg, then compose** — `helpers/comms.sh compose --set <id>` (the set
    id is printed by dispatch; `panel status --set <id>` shows who has answered). Compose
    refuses a partial panel and labels findings by corroboration. A lone approval is not

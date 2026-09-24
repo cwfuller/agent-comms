@@ -832,8 +832,8 @@ printf '%s\n' "$G2_SP" | grep -q 'unstamped, unmounted reply that still reported
   && ok "the spawn refusal is require_acp_transport's, not an earlier die" || fail "spawn refusal text (got: $G2_SP)"
 
 section "review identities: shadow and the direct grok arm"
-# A review identity (`review-agents = <name>:<provider>`) is a NAME that runs on a provider. The
-# shadow and the direct grok exec are the two paths that reach a provider WITHOUT going through
+# A review identity (the built-in twin `<driver>-review` of every registered driver, no config) is
+# a NAME that runs on a provider. The shadow and the direct grok exec are the two paths that reach a provider WITHOUT going through
 # cmd_send, so each has to resolve the provider itself. Swapping the two either way is a real
 # defect: the identity where the provider belongs fails the capability gate or runs a binary
 # named after the identity, and the provider where the identity belongs publishes the review
@@ -845,14 +845,20 @@ git -C "$RI_FIX" init -q -b main
 git -C "$RI_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 mkdir -p "$RI_FIX/.comms/to-claude" "$RI_FIX/.comms/to-codex" "$RI_FIX/.comms/to-grok" \
          "$RI_FIX/.comms/to-claude-review" "$RI_FIX/.comms/to-grok-review" "$RI_FIX/.comms/archive"
-printf 'agents = claude codex grok\ndefault-target = codex\nreview-agents = grok-review:grok claude-review:claude\n' > "$RI_FIX/.comms/config"
+# No review-identity config: claude and grok on the agents line are what register the built-in
+# twins claude-review and grok-review, each on its own driver's provider.
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$RI_FIX/.comms/config"
 printf '.comms/\n.agent-comms/\n' > "$RI_FIX/.gitignore"
 echo "code under review" > "$RI_FIX/subject.txt"
 run_ri() { (cd "$RI_FIX" && env "$COMMS" "$@"); }
 # Precondition, so every later failure is about the path under test and not a config that did
-# not parse: the fixture's registry really maps the identity onto grok.
-[ "$(run_ri agents --provider grok-review 2>/dev/null)" = "grok" ] \
-  && ok "fixture: the registry maps grok-review onto provider grok" || fail "fixture registry (got: $(run_ri agents --provider grok-review 2>&1))"
+# not parse: both twins this section uses resolve onto their driver's provider, and the config
+# parses clean (empty stderr — no unknown-line warning, so nothing here leans on a dead key).
+RI_PG="$(run_ri agents --provider grok-review 2>"$WORK/ri-reg.err")"
+RI_PC="$(run_ri agents --provider claude-review 2>>"$WORK/ri-reg.err")"
+[ "$RI_PG" = "grok" ] && [ "$RI_PC" = "claude" ] && [ ! -s "$WORK/ri-reg.err" ] \
+  && ok "fixture: the built-in twins resolve (grok-review -> grok, claude-review -> claude) from a clean config" \
+  || fail "fixture registry (grok-review='$RI_PG' claude-review='$RI_PC' stderr: $(cat "$WORK/ri-reg.err" 2>/dev/null))"
 
 # This section's own grok: it answers --version (agent_version reads it), copies the prompt it
 # was handed (the only view of the runner's PRIVATE request copy, which shadow deletes), and

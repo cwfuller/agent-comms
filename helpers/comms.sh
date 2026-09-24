@@ -367,7 +367,12 @@ registry_parse() {
     [ "$#" -eq 1 ] || die "config: default-target must be exactly one agent (got: $line)"
     dflt="$1"
   else
-    dflt="$REGISTRY_DEFAULT_TARGET"
+    # The built-in default (codex) when it is registered; otherwise the first driver, so a
+    # config listing only `agents = claude` works without also naming its default target.
+    case " $agents " in
+      *" $REGISTRY_DEFAULT_TARGET "*) dflt="$REGISTRY_DEFAULT_TARGET" ;;
+      *) dflt="${agents%% *}" ;;
+    esac
   fi
   # The default target serves /ask and single-reviewer handoffs for EVERY driver, so it
   # must be a driver: a review identity there would make same-model review the silent
@@ -600,7 +605,7 @@ cmd_agents() {
       printf '%s\tinteractive,acp\n' codex
       printf '%s\theadless,reviewer-consult-only\n' grok
       ;;
-    *) die "agents: unknown argument '$1' (expected: default | --drivers | --review | --provider <id> | --others <driver> | --supported)" ;;
+    *) die "agents: unknown argument '$1' (expected: default | --drivers | --review | --provider <id> | --others <driver> | --roster <driver> [a,b,...] | --supported)" ;;
   esac
 }
 

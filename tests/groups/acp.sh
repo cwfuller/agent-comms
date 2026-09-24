@@ -702,14 +702,10 @@ section "review identities: a claude-review turn over ACP"
 # stamps, not that a real claude adapter behaves. What the stub can witness from inside the child
 # (AX_IDENT_LOG) is the environment the parent handed it, which is the boundary under test.
 #
-# The registry is rewritten for this section only and RESTORED at its end: every later section
-# assumes the fixture's three-driver config.
-RID_CFG="$MA_FIX/.comms/config"; RID_CFG_SAVED="$WORK/rid-config.saved"
-cp "$RID_CFG" "$RID_CFG_SAVED"
-rid_map() {  # <provider> — the fixture's drivers plus claude-review mapped onto <provider>
-  { cat "$RID_CFG_SAVED"; printf 'review-agents = claude-review:%s\n' "$1"; } > "$RID_CFG"
-}
-rid_map claude
+# claude-review is the BUILT-IN review twin of the fixture's claude driver: no config declares it
+# and nothing here rewrites the registry, so every later section sees the fixture's config as-is.
+# A twin's provider is fixed (claude-review runs on claude), which is why the execution-binding
+# case below forges a STALE stamp on the request rather than remapping the identity.
 # A marked store, so the stub may persist session records here and never in a real ~/.acpx.
 RID_HOME="$WORK/rid-home"; mkdir -p "$RID_HOME/.acpx/sessions" "$RID_HOME/.acpx/queues"; : > "$RID_HOME/.acpx-test-store"
 # A review-request written straight into an inbox, as `send` leaves it (its file name IS its
@@ -774,10 +770,12 @@ rid_ident_all() {  # <ident log> <VAR> <value> — every child launch saw exactl
 }
 
 # PRECONDITION: the registry this section runs against. Without it every failure below would read
-# as a runphase defect when the fixture simply never declared the identity.
+# as a runphase defect when the fixture simply never registered the twin. The config carries NO
+# review-agents line, so claude-review resolving here is the built-in twin, not a declaration.
 [ "$( (cd "$MA_FIX" && "$COMMS" agents --provider claude-review) 2>/dev/null)" = claude ] \
-  && ok "the fixture registry maps review identity claude-review onto provider claude" \
-  || fail "claude-review is not registered on claude (config: $(tr '\n' ';' < "$RID_CFG"))"
+  && ! grep -q 'review-agents' "$MA_FIX/.comms/config" 2>/dev/null \
+  && ok "the fixture's claude driver has its built-in review twin claude-review on provider claude" \
+  || fail "claude-review is not a built-in twin on claude (provider: $( (cd "$MA_FIX" && "$COMMS" agents --provider claude-review) 2>&1 | head -1); config: $(tr '\n' ';' < "$MA_FIX/.comms/config"))"
 
 # ---- (1) THE REAL spawn -> run HOP, from a claude driver to its own model's review identity ----
 RID_E2E_MSG="$(rid_msg claude-review e2e claude claude)"; RID_E2E_MID="$(basename "$RID_E2E_MSG" .md)"
@@ -868,27 +866,29 @@ done
   || fail "marker in the scrubbed children: status=$(rid_json "$RID_ENV_DIR" status) $(grep '^COMMS_REVIEW_TURN=' "$WORK/rid-envb.ident" 2>/dev/null | sort -u | tr '\n' ' ')"
 
 # ---- (3) EXECUTION BINDING: a request runs only on the provider it was sent to ----
-# The send stamped `review_provider: claude`; the map then moved claude-review onto codex. Running
-# it would publish a codex review under a name compose counts as claude -- so it must fail closed
-# before any acpx call, and the leg reads unanswered rather than as a different model.
-RID_STALE_MSG="$(rid_msg claude-review stale claude claude)"; RID_STALE_MID="$(basename "$RID_STALE_MSG" .md)"
-rid_map codex
+# A twin cannot be remapped, but the stamp on a request is still just a line in a file: a stale or
+# forged `review_provider: codex` on a request to claude-review names a model this turn would not
+# be. Running it would publish a claude review against a leg its request says is codex's -- so it
+# must fail closed before any acpx call, and the leg reads unanswered rather than as another model.
+RID_STALE_MSG="$(rid_msg claude-review stale claude codex)"; RID_STALE_MID="$(basename "$RID_STALE_MSG" .md)"
 RID_STALE_DIR="$(rid_run claude-review "$RID_STALE_MSG" stale)"
 [ "$(rid_json "$RID_STALE_DIR" status)" = failed ] \
-  && rid_json "$RID_STALE_DIR" note | grep -qF "was bound to provider 'claude'" \
-  && rid_json "$RID_STALE_DIR" note | grep -qF "now resolves to 'codex'" \
-  && ok "a request bound to claude is refused when claude-review now resolves to codex" \
-  || fail "remap not refused: status=$(rid_json "$RID_STALE_DIR" status) note=$(rid_json "$RID_STALE_DIR" note | cut -c1-200)"
+  && rid_json "$RID_STALE_DIR" note | grep -qF "was bound to provider 'codex'" \
+  && rid_json "$RID_STALE_DIR" note | grep -qF "now resolves to 'claude'" \
+  && ok "a request to claude-review stamped review_provider: codex is refused (claude-review resolves to claude)" \
+  || fail "stale stamp not refused: status=$(rid_json "$RID_STALE_DIR" status) note=$(rid_json "$RID_STALE_DIR" note | cut -c1-200)"
 [ "$(rid_answers_n "$RID_STALE_MID")" = 0 ] && [ -f "$RID_STALE_MSG" ] && [ ! -s "$WORK/rid-stale.argv" ] \
-  && ok "the remapped turn published nothing, left the inbound in place, and never launched acpx" \
-  || fail "remapped turn side effects (replies=$(rid_answers_n "$RID_STALE_MID") inbound=$([ -f "$RID_STALE_MSG" ] && echo kept || echo gone) acpx-calls=$(grep -c . "$WORK/rid-stale.argv" 2>/dev/null))"
-# PAIRED CONTROL: the SAME file, with only the map put back, runs and publishes. So the refusal
-# above was the binding, not anything else about the request.
-rid_map claude
+  && ok "the stale-stamped turn published nothing, left the inbound in place, and never launched acpx" \
+  || fail "stale-stamped turn side effects (replies=$(rid_answers_n "$RID_STALE_MID") inbound=$([ -f "$RID_STALE_MSG" ] && echo kept || echo gone) acpx-calls=$(grep -c . "$WORK/rid-stale.argv" 2>/dev/null))"
+# PAIRED CONTROL: the SAME file (same message_id), with only its stamp corrected to the twin's
+# provider, runs and publishes. So the refusal above was the binding, not anything else about the
+# request -- and the refused turn left nothing behind that blocks the corrected one.
+sed -i.bak -e 's/^review_provider: codex$/review_provider: claude/' "$RID_STALE_MSG" && rm -f "$RID_STALE_MSG.bak"
+RID_REBIND_STAMP="$(sed -n '2,/^---$/p' "$RID_STALE_MSG" 2>/dev/null | grep -c '^review_provider: claude$' || true)"
 RID_REBIND_DIR="$(rid_run claude-review "$RID_STALE_MSG" rebind)"
-[ "$(rid_json "$RID_REBIND_DIR" status)" = completed ] && [ "$(rid_answers_n "$RID_STALE_MID")" = 1 ] \
-  && ok "CONTROL: the same request completes once claude-review maps back to the provider it was bound to" \
-  || fail "rebound control: status=$(rid_json "$RID_REBIND_DIR" status) replies=$(rid_answers_n "$RID_STALE_MID") note=$(rid_json "$RID_REBIND_DIR" note | cut -c1-200)"
+[ "$RID_REBIND_STAMP" = 1 ] && [ "$(rid_json "$RID_REBIND_DIR" status)" = completed ] && [ "$(rid_answers_n "$RID_STALE_MID")" = 1 ] \
+  && ok "CONTROL: the same request completes once its stamp names claude-review's own provider (claude)" \
+  || fail "corrected-stamp control: stamp=$RID_REBIND_STAMP status=$(rid_json "$RID_REBIND_DIR" status) replies=$(rid_answers_n "$RID_STALE_MID") note=$(rid_json "$RID_REBIND_DIR" note | cut -c1-200)"
 # An UNSTAMPED request (hand-placed, or from a send before identities) has no binding to honour.
 RID_NOBIND_MSG="$(rid_msg claude-review nobind claude -)"; RID_NOBIND_MID="$(basename "$RID_NOBIND_MSG" .md)"
 RID_NOBIND_DIR="$(rid_run claude-review "$RID_NOBIND_MSG" nobind)"
@@ -916,8 +916,9 @@ RID_SELF_DIR="$(rid_run claude "$RID_SELF_MSG" selfrev)"
   && [ "$(rid_answers_n "$RID_SELF_MID")" = 0 ] && [ -f "$RID_SELF_MSG" ] && [ ! -s "$WORK/rid-selfrev.argv" ] \
   && ok "a claude turn answering claude's own request is refused (own identity), before acpx, unpublished" \
   || fail "self-review: status=$(rid_json "$RID_SELF_DIR" status) replies=$(rid_answers_n "$RID_SELF_MID") note=$(rid_json "$RID_SELF_DIR" note | cut -c1-200)"
-# A driver with no from: falls back to its two-party complement; a review identity has none (its
-# driver may share its provider), so guessing would be a guess about who reads the reply.
+# A driver with no from: falls back to its two-party complement; a review twin has none (it shares
+# its driver's provider, and any driver may send to it), so guessing would be a guess about who
+# reads the reply.
 RID_NF_MSG="$(rid_msg claude-review nofrom - claude)"; RID_NF_MID="$(basename "$RID_NF_MSG" .md)"
 RID_NF_DIR="$(rid_run claude-review "$RID_NF_MSG" nofrom)"
 [ "$(rid_json "$RID_NF_DIR" status)" = failed ] && rid_json "$RID_NF_DIR" note | grep -qF 'inbound has no from:' \
@@ -986,8 +987,6 @@ RID_PS_DIR="$(rundir_of "$RID_PS_OUT")"
   && ok "a detached spawn's broker never beats (or heals) the driver's presence record" \
   || fail "detached runner carried the driver's presence (status=$(rid_json "$RID_PS_DIR" status) record present=$([ -f "$RID_PR" ] && echo yes || echo no))"
 rm -f "$RID_PR"
-
-cp "$RID_CFG_SAVED" "$RID_CFG"
 
 section "acp.sh: the reviewer model+effort policy"
 # THE POLICY IS DECLARED ONCE, VALIDATED AT THE ACCESSOR, AND ASSERTED ON BYTES.

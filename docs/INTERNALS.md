@@ -243,7 +243,7 @@ there (permission rules still apply); real checkouts under `$HOME` etc. are cove
 live-verified both ways on grok 1.0.5. The pickup
 peer derives from the inbound message's `from:`, which must be a registered DRIVER other than
 the turn's own identity; the old claude↔codex complement survives only as a fallback for a
-driver turn whose inbound has none — a review-identity turn without a `from:` is refused.
+driver turn whose inbound has none — a review twin's turn without a `from:` is refused.
 Live-verified 2026-08-20 (grok 1.0.5, sentineled linked-worktree probe: both trees byte-identical after a
 completed review turn; an instructed in-repo write attempt was denied mid-turn).
 
@@ -253,9 +253,20 @@ Two Claudes could not share `to-claude/`: one inbox, one `peer_of`, one `awaitin
 claude driver reviewing itself had its request and the reply in the same place. The fix
 separates two things that used to be one word. An IDENTITY is who a message is from or to; a
 PROVIDER is the runtime that serves a turn. Drivers (`agents =`) are still named after their
-provider, and a review identity (`review-agents = claude-review:claude`) runs on a declared
-provider under its own name. The rules for users are in
+provider, and every driver X has a built-in review twin, `X-review`, that runs on X under its
+own name. The rules for users are in
 [PROTOCOL](PROTOCOL.md#identities-and-providers-same-model-review); the reasons are here.
+
+- **Built in, not configured.** The first version (landed and replaced on the same day,
+  2026-09-24) declared review identities per project, `review-agents = claude-review:claude`.
+  That made same-model review a setup step every project had to discover, and let any name be
+  mapped onto any provider, so every consumer had to treat the name→provider map as mutable.
+  Twins are derived from the `agents =` line instead: the name is formed in one place
+  (`review_twin_of`), the provider is fixed, and a twin exists exactly when its driver does.
+  Naming yourself works the same in every runtime because one resolver does the swap —
+  `agents --roster`, which `/auto`, `$auto` and `/user:auto` all call — rather than each
+  template re-deriving the rule. Same-model review stays opt-in: `agents --others` returns a
+  twin only to a lone driver, so adding twins changed no multi-driver default panel.
 
 - **The provider is resolved in one place, at the process boundary.** Above it everything is
   keyed on the identity — inbox, leg thread, `sets.tsv`, events, `awaiting_from`, pickup,
@@ -269,9 +280,9 @@ provider under its own name. The rules for users are in
   match on the provider's name — which is why a caller can pass only the identity. `spawn`
   forwards the identity, never the resolved provider, and `run` re-resolves it through the
   same accessor.
-- **Review-only, deliberately.** A review identity never drives, authors a request or answers
-  a consult: `/ask claude` already serves same-model consults, and a driving review identity
-  would need its own presence, whoami and loop state for no new capability. Each rule sits at
+- **Review-only, deliberately.** A twin never drives, authors a request or answers a
+  consult: `/ask claude` already serves same-model consults, and a driving twin would need its
+  own presence, whoami and loop state for no new capability. Each rule sits at
   the funnel that sees it — `whoami`/`require_driver` for driving, `validate` for authoring
   (every writer passes through it), `send` for what a target may receive (frontmatter has no
   `to:`, so validate cannot).
@@ -283,11 +294,13 @@ provider under its own name. The rules for users are in
   carried-forward legs, concurrent attempts and retries with no lock.
 - **Provenance comes from the reply, not the registry.** compose asks `reply_provider` of each
   counted reply: a driver's is its own name, unconditionally (validate already refused a
-  conflicting stamp), and a review identity's is the `review_provider` its broker stamped. The
-  request carries the provider `send` resolved, and runphase refuses a turn whose request was
-  bound to a different provider than the identity maps to at run time. A remap between
-  dispatch and execution therefore fails the leg closed instead of publishing one model's
-  review under a name compose would count as another's.
+  conflicting stamp), and a twin's is the `review_provider` its broker stamped, which validate
+  holds to the twin's fixed provider. The request carries the provider `send` resolved, and
+  runphase refuses a turn whose request was bound to a different provider than the twin runs
+  on. With the map fixed there is no live remap left to catch; the same two checks now catch a
+  forged or hand-edited stamp, or a request stamped under the retired per-project config, and
+  fail the leg closed instead of publishing one model's review under a name compose would
+  count as another's.
 - **The marker, not a scrub, stops a reviewer resolving to its driver.** whoami's
   conflicting-signals check catches a CROSS-provider child (codex under claude). A claude
   reviewer under a claude driver carries only claude's signals and would resolve to the
@@ -296,20 +309,23 @@ provider under its own name. The rules for users are in
   `COMMS_PRESENCE_*`, the Claude Code session variables) is one array applied by `acp_exec`
   and by the direct exec alike, so the two launch sites cannot drift. `CODEX_SANDBOX` and
   `GROK_AGENT` are left alone — the marker is what makes whoami safe.
-- **acpx sessions stay disjoint.** acpx keys a session on (profile, cwd, name), and a review
-  identity shares its provider's profile, so an unmounted `claude-review` turn would resume a
+- **acpx sessions stay disjoint.** acpx keys a session on (profile, cwd, name), and a twin
+  shares its provider's profile, so an unmounted `claude-review` turn would resume a
   `claude` reviewer's warm session on the same thread. Its session name gains `+as+<identity>`
   (outside `safe_name`'s alphabet, like `+mount+`); a mounted session already carries the
   identity through its mount ident. Driver names are unchanged, so their sessions stay warm.
-- **Byte-identical for everyone who declares nothing.** For a driver the identity is the
-  provider, so idents, session names, state keys, events and frontmatter come out as before;
-  `review_provider` is stamped only on requests to and replies from a review identity.
+- **Byte-identical for drivers.** For a driver the identity is the provider, so idents,
+  session names, state keys, events and frontmatter come out as before; `review_provider` is
+  stamped only on requests to and replies from a twin. What every project does see: bare
+  `agents` and every inbox enumeration now include the twins (zero-config lists six
+  identities), and a twin's inbox exists only after its first send, so a missing inbox reads as
+  empty.
 
 **Residual, accepted:** the claude provider's containment (`claude-plan`) sets no config-home
-override — pointing `CLAUDE_CONFIG_DIR` at the mount breaks authentication — so a claude-backed
-review identity shares `~/.claude` (settings, user instructions, memory) and the keychain
-credential with a claude driver on the same machine. The review identity separates the mailbox
-and the session, not the model's configuration.
+override — pointing `CLAUDE_CONFIG_DIR` at the mount breaks authentication — so
+`claude-review` shares `~/.claude` (settings, user instructions, memory) and the keychain
+credential with a claude driver on the same machine. The twin separates the mailbox and the
+session, not the model's configuration.
 
 ## Grading pilot storage (`.comms/grades/`)
 

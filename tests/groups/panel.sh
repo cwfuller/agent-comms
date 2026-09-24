@@ -649,14 +649,14 @@ grep -q 'synthesized by await' "$REPO/helpers/runphase.sh" \
   && ok "a pid that dies without a result gets a synthetic one" || fail "synthetic failed result"
 
 section "review identities: panel dispatch and compose provenance"
-# A REVIEW IDENTITY (`review-agents = claude-review:claude`) is a second NAME on an existing
-# provider: its own inbox, leg thread and `from:`, the provider's model. A panel must let a
-# claude driver be reviewed by claude-review, because that is the point of the identity. It must
+# A REVIEW TWIN (`claude-review`, built in for every driver, no config) is a second NAME on its
+# driver's provider: its own inbox, leg thread and `from:`, the driver's model. A panel must let a
+# claude driver be reviewed by claude-review, because that is the point of the twin. It must
 # also never count two answers from ONE provider as two independent reviewers. Dispatch refuses a
 # same-provider roster early, but only for the roster it was handed. compose re-checks what it
-# actually counts, from each reply's own provenance: a driver is its own provider, and a review
-# identity's provider is its broker's `review_provider` stamp. It never reads the registry as it
-# happens to stand at compose time.
+# actually counts, from each reply's own provenance: a driver is its own provider, and a twin's
+# provider is its broker's `review_provider` stamp, which validate holds to the twin's FIXED
+# provider. A forged or stale stamp is an invalid reply, so it is never the one compose counts.
 # 'claude' is a prefix of 'claude-review', so every lookup below is ANCHORED (sets.tsv columns,
 # exact frontmatter lines). An unanchored `*panel-claude*` glob or `thread: x-claude` grep would
 # conflate the two legs and could pass on the wrong one.
@@ -666,9 +666,10 @@ printf '.comms/\n' > "$RP_FIX/.gitignore"
 echo "subject" > "$RP_FIX/s.txt"
 git -C "$RP_FIX" add -A >/dev/null 2>&1
 git -C "$RP_FIX" -c user.email=t@t -c user.name=t commit -q -m init
-# No to-claude-review/ yet: a registered review identity has no inbox until its first leg lands.
+# No to-claude-review/ yet: a built-in twin has no inbox until its first leg lands. No config
+# declares it either: every driver on the agents line has one.
 mkdir -p "$RP_FIX/.comms/to-codex" "$RP_FIX/.comms/to-grok" "$RP_FIX/.comms/to-claude" "$RP_FIX/.comms/archive"
-printf 'agents = claude codex grok\nreview-agents = claude-review:claude\ndefault-target = codex\n' > "$RP_FIX/.comms/config"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$RP_FIX/.comms/config"
 run_rp() { (cd "$RP_FIX" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 RP_WS="$(run_rp workspace)"
 # Requests live OUTSIDE the fixture. A file in the tree would dirty it, so every dispatch would
@@ -792,6 +793,37 @@ printf '%s\n' "$RP_PC2" | grep -qF '[claude-review]' \
   && ok "its findings are attributed to claude-review, not folded into claude" \
   || fail "claude-review attribution lost in composition"
 
+# ---- /auto's roster resolver feeds dispatch as-is. ----
+# `agents --roster` is the one place a driver's own name becomes its twin. What it prints must be
+# a roster dispatch takes unchanged: from claude, "claude,codex" means claude-review and codex, and
+# the panel gets exactly those two legs, none of them at claude itself.
+RP_ROS="$(run_rp agents --roster claude claude,codex 2>/dev/null)" && RP_ROS_RC=0 || RP_ROS_RC=$?
+[ "$RP_ROS_RC" = "0" ] && [ "$RP_ROS" = "claude-review,codex" ] \
+  && ok "agents --roster claude claude,codex swaps the driver's own name for its twin: claude-review,codex" \
+  || fail "agents --roster claude claude,codex (rc=$RP_ROS_RC: $RP_ROS)"
+RP_RQ="$(rp_req rp-roster claude rp-roster)"
+RP_RD_OUT="$(run_rp panel dispatch --to "$RP_ROS" --set rp-roster "$RP_RQ" 2>&1)" && RP_RD_RC=0 || RP_RD_RC=$?
+RP_RD_SET="$(rp_set_of "$RP_RD_OUT")"
+[ "$RP_RD_RC" = "0" ] && [ -n "$RP_RD_SET" ] \
+  && ok "the --roster output dispatches unchanged from a claude-authored request" \
+  || fail "panel dispatch --to \"\$(agents --roster claude claude,codex)\" refused (rc=$RP_RD_RC: $RP_RD_OUT)"
+RP_RD_MID_R="$(rp_leg_mid "$RP_RD_SET" claude-review)"
+RP_RD_MID_C="$(rp_leg_mid "$RP_RD_SET" codex)"
+# Planned agents read from the events column, so a claude leg cannot hide behind the prefix.
+RP_RD_PLAN="$(awk -F'\t' -v s="$RP_RD_SET" '$3=="panel-planned" && $4==s {print $8}' "$RP_FIX/.comms/events.tsv" | sort | tr '\n' ' ')"
+[ "$RP_RD_PLAN" = "claude-review codex " ] \
+  && [ -n "$RP_RD_MID_R" ] && [ -f "$RP_FIX/.comms/to-claude-review/$RP_RD_MID_R.md" ] \
+  && [ -n "$RP_RD_MID_C" ] && [ -f "$RP_FIX/.comms/to-codex/$RP_RD_MID_C.md" ] \
+  && [ -z "$(rp_leg_mid "$RP_RD_SET" claude)" ] \
+  && ! grep -rqE '^thread: rp-roster(-|$)' "$RP_FIX/.comms/to-claude" \
+  && ok "its legs are exactly claude-review and codex: two planned, each in its own inbox, none at claude" \
+  || fail "--roster-driven legs (planned: '$RP_RD_PLAN', claude-review mid=$RP_RD_MID_R, codex mid=$RP_RD_MID_C)"
+# The same resolver refuses what dispatch refuses below, so /auto never gets a roster to hand it.
+RP_ROS2="$(run_rp agents --roster codex claude,claude-review 2>&1)" && RP_ROS2_RC=0 || RP_ROS2_RC=$?
+[ "$RP_ROS2_RC" = "2" ] && printf '%s\n' "$RP_ROS2" | grep -q "two reviewers on provider 'claude'" \
+  && ok "agents --roster refuses claude,claude-review from codex: two reviewers on provider 'claude' (exit 2)" \
+  || fail "agents --roster accepted one provider twice (rc=$RP_ROS2_RC: $RP_ROS2)"
+
 # ---- Two legs on one provider: refused at dispatch, before any durable write. ----
 RP_CX="$(rp_req rp-carry codex rp-carry)"
 RP_PRE="$(rp_durable)"
@@ -875,43 +907,80 @@ RP_CL_COMP="$(run_rp compose --set "$RP_C_SET" 2>&1)" && RP_CL_RC=0 || RP_CL_RC=
   && ok "a newer driver reply with a foreign stamp does not launder the duplicate" \
   || fail "a driver's own review_provider claim changed what compose counted (rc=$RP_CL_RC: $(printf '%s' "$RP_CL_COMP" | head -3))"
 
-# ---- REMAP: the reply's stamp decides, never the registry as it reads now. ----
-# At dispatch claude-review maps to grok, so claude,claude-review is two providers and
-# dispatch accepts it. The reply is stamped claude (it ran while mapped to claude). If compose
-# re-read the registry it would see grok and compose, so a refusal here can only come from the
-# stamp.
+# ---- FORGED / STALE STAMPS: a twin's provider is fixed, so its stamp can only agree. ----
+# A twin runs on its driver's provider and nothing remaps it: there is no config for it. So a
+# claude-review reply stamped anything but claude is forged, or stale from the retired
+# `review-agents` map. validate refuses it, and compose never counts it. Counting it would let a
+# stamp launder a same-provider duplicate into what reads as an independent review.
+# The roster where a lie would pay: attempt 1 is claude,grok, both answered. Attempt 2 on the SAME
+# set is claude-review alone, legal on its own, so compose counts the carried claude and grok legs
+# beside it. Stamped claude (the truth), that is claude twice. Stamped codex (forged), it would be
+# three providers and a clean compose.
+RP_FG="$(rp_req rp-forge codex rp-forge)"
+RP_FGA_OUT="$(run_rp panel dispatch --to claude,grok --set rp-forge "$RP_FG" 2>&1)" && RP_FGA_RC=0 || RP_FGA_RC=$?
+RP_FG_SET="$(rp_set_of "$RP_FGA_OUT")"
+RP_FGA_DSP="$(rp_dispatch_of "$RP_FG_SET")"
+rp_reply codex claude rp-forge-claude "$(rp_leg_mid "$RP_FG_SET" claude)" 30 "" rp-forge-claude >/dev/null
+rp_reply codex grok rp-forge-grok "$(rp_leg_mid "$RP_FG_SET" grok)" 31 "" rp-forge-grok >/dev/null
+RP_FGB_OUT="$(run_rp panel dispatch --to claude-review --set rp-forge "$RP_FG" 2>&1)" && RP_FGB_RC=0 || RP_FGB_RC=$?
+RP_FGB_DSP="$(rp_dispatch_of "$RP_FG_SET")"
+[ "$RP_FGA_RC" = "0" ] && [ "$RP_FGB_RC" = "0" ] && [ -n "$RP_FG_SET" ] && [ "$(rp_set_of "$RP_FGB_OUT")" = "$RP_FG_SET" ] \
+  && [ -n "$RP_FGA_DSP" ] && [ -n "$RP_FGB_DSP" ] && [ "$RP_FGB_DSP" != "$RP_FGA_DSP" ] \
+  && ok "a codex-authored claude,grok attempt, then claude-review alone on the SAME set, both dispatch" \
+  || fail "forge fixture dispatch (a rc=$RP_FGA_RC: $RP_FGA_OUT / b rc=$RP_FGB_RC: $RP_FGB_OUT)"
+# Non-vacuity: both driver legs are carried and answered, so the claude-review stamp is the only
+# thing that decides between a clean compose and a duplicate.
+RP_FG_ST0="$(run_rp panel status --set "$RP_FG_SET" 2>/dev/null)"
+printf '%s\n' "$RP_FG_ST0" | awk -F'\t' '$1=="claude" && $3=="yes"' | grep -q . \
+  && printf '%s\n' "$RP_FG_ST0" | awk -F'\t' '$1=="grok" && $3=="yes"' | grep -q . \
+  && printf '%s\n' "$RP_FG_ST0" | awk -F'\t' '$1=="claude-review" && $3=="no"' | grep -q . \
+  && ok "the second attempt carries both answered driver legs; only claude-review is open" \
+  || fail "forge carry-forward (got: $RP_FG_ST0)"
+RP_FG_MID_R="$(rp_leg_mid "$RP_FG_SET" claude-review)"
+# FORGED: stamped codex, the one provider that would make the counted set look independent.
+RP_FGF="$(rp_reply codex claude-review rp-forge-claude-review "$RP_FG_MID_R" 33 codex rp-forge-cr-forged)"
+RP_FGF_V="$(run_rp validate "$RP_FGF" 2>&1)" && RP_FGF_VRC=0 || RP_FGF_VRC=$?
+[ "$RP_FGF_VRC" != "0" ] && printf '%s\n' "$RP_FGF_V" | grep -qF "claims review_provider 'codex', but 'claude-review' runs on 'claude'" \
+  && ok "validate refuses a claude-review reply stamped codex, naming the provider it runs on" \
+  || fail "a forged codex stamp on claude-review validated (rc=$RP_FGF_VRC: $RP_FGF_V)"
+# STALE: stamped grok, as a reply would have been under the retired `review-agents =
+# claude-review:grok`, read in a repo whose config still carries that line. The line is inert now
+# (an unknown-line warning), so it cannot vouch for the stamp. It stays in place through compose.
+command cp -f "$RP_FIX/.comms/config" "$WORK/rp-config.bak"
 printf 'agents = claude codex grok\nreview-agents = claude-review:grok\ndefault-target = codex\n' > "$RP_FIX/.comms/config"
-RP_RM="$(rp_req rp-remap codex rp-remap)"
-RP_RM_OUT="$(run_rp panel dispatch --to claude,claude-review --set rp-remap "$RP_RM" 2>&1)" && RP_RM_RC=0 || RP_RM_RC=$?
-RP_RM_SET="$(rp_set_of "$RP_RM_OUT")"
-[ "$RP_RM_RC" = "0" ] && [ -n "$RP_RM_SET" ] \
-  && ok "with claude-review mapped to grok, the claude,claude-review roster refused above dispatches" \
-  || fail "claude,claude-review under a grok mapping refused (rc=$RP_RM_RC: $RP_RM_OUT)"
-RP_RM_MID_C="$(rp_leg_mid "$RP_RM_SET" claude)"
-RP_RM_MID_R="$(rp_leg_mid "$RP_RM_SET" claude-review)"
-grep -qx 'review_provider: grok' "$RP_FIX/.comms/to-claude-review/$RP_RM_MID_R.md" 2>/dev/null \
-  && ok "the claude-review leg is bound to the provider the map named at send (grok)" \
-  || fail "remapped leg stamp (got: $(grep '^review_provider' "$RP_FIX/.comms/to-claude-review/$RP_RM_MID_R.md" 2>/dev/null))"
-rp_reply codex claude rp-remap-claude "$RP_RM_MID_C" 30 "" rp-remap-claude >/dev/null
-rp_reply codex claude-review rp-remap-claude-review "$RP_RM_MID_R" 31 claude rp-remap-cr >/dev/null
-RP_RM_C1="$(run_rp compose --set "$RP_RM_SET" 2>&1)" && RP_RM_C1_RC=0 || RP_RM_C1_RC=$?
-[ "$RP_RM_C1_RC" = "3" ] && printf '%s\n' "$RP_RM_C1" | grep -qE '(claude and claude-review|claude-review and claude) both answered on provider claude$' \
-  && ok "compose refuses on the reply's stamp (claude) although the registry still maps claude-review to grok" \
-  || fail "compose trusted the current registry over the reply's provider stamp (rc=$RP_RM_C1_RC: $(printf '%s' "$RP_RM_C1" | head -3))"
-awk -F'\t' -v s="$RP_RM_SET" '$3=="composition-refused" && $4==s && $14=="duplicate-provider"' "$RP_FIX/.comms/events.tsv" | grep -q . \
-  && ok "the remap refusal is logged with status duplicate-provider" \
-  || fail "no duplicate-provider composition-refused event for the remapped set"
-# CONTROL: the same set and the same registry, with the reply stamped grok. The only change is
-# the stamp, so the refusal above came from the stamp.
-rp_reply codex claude-review rp-remap-claude-review "$RP_RM_MID_R" 31 grok rp-remap-cr >/dev/null
-RP_RM_C2="$(run_rp compose --set "$RP_RM_SET" 2>&1)" && RP_RM_C2_RC=0 || RP_RM_C2_RC=$?
-[ "$RP_RM_C2_RC" = "0" ] && printf '%s\n' "$RP_RM_C2" | grep -q '2 legs, all answered' \
-  && ok "control: the same set with the reply stamped grok composes" \
-  || fail "a claude-review reply stamped grok did not compose beside claude (rc=$RP_RM_C2_RC: $(printf '%s' "$RP_RM_C2" | head -3))"
-# The other direction: remapping AFTER the reply cannot turn an independent reply into a
-# duplicate either. The stamp says grok, and nothing else is consulted.
-printf 'agents = claude codex grok\nreview-agents = claude-review:claude\ndefault-target = codex\n' > "$RP_FIX/.comms/config"
-RP_RM_C3="$(run_rp compose --set "$RP_RM_SET" 2>&1)" && RP_RM_C3_RC=0 || RP_RM_C3_RC=$?
-[ "$RP_RM_C3_RC" = "0" ] && printf '%s\n' "$RP_RM_C3" | grep -q '2 legs, all answered' \
-  && ok "a remap back to claude after the reply changes nothing: compose never re-reads the map" \
-  || fail "a later remap retroactively changed a counted reply's provider (rc=$RP_RM_C3_RC: $(printf '%s' "$RP_RM_C3" | head -3))"
+RP_FGS="$(rp_reply codex claude-review rp-forge-claude-review "$RP_FG_MID_R" 34 grok rp-forge-cr-stale)"
+RP_FGS_V="$(run_rp validate "$RP_FGS" 2>&1)" && RP_FGS_VRC=0 || RP_FGS_VRC=$?
+[ "$RP_FGS_VRC" != "0" ] && printf '%s\n' "$RP_FGS_V" | grep -qF "claims review_provider 'grok', but 'claude-review' runs on 'claude'" \
+  && printf '%s\n' "$RP_FGS_V" | grep -q '^warning: config: unknown line: review-agents' \
+  && ok "a stale grok stamp is refused beside a leftover review-agents line, which only warns" \
+  || fail "a stale grok stamp on claude-review validated, or the leftover line was not inert (rc=$RP_FGS_VRC: $RP_FGS_V)"
+# Neither lie is counted. Had the forged one been, this set would compose clean (claude, grok,
+# codex); had the stale one, the newest, been, it would refuse on grok. Unanswered is neither.
+RP_FGC1="$(run_rp compose --set "$RP_FG_SET" 2>&1)" && RP_FGC1_RC=0 || RP_FGC1_RC=$?
+[ "$RP_FGC1_RC" = "3" ] && printf '%s\n' "$RP_FGC1" | grep -qF 'INCOMPLETE — no reply yet from: claude-review (2 of 3 legs answered)' \
+  && ! printf '%s\n' "$RP_FGC1" | grep -q 'both answered on provider' \
+  && ok "compose counts neither invalid stamp: claude-review's leg is unanswered (2 of 3), not composed or a grok duplicate" \
+  || fail "compose counted a forged or stale twin stamp (rc=$RP_FGC1_RC: $(printf '%s' "$RP_FGC1" | head -3))"
+command cp -f "$WORK/rp-config.bak" "$RP_FIX/.comms/config"
+# panel status reads the same validity rule, so it shows the leg open and warns about nothing.
+RP_FG_ST1="$(run_rp panel status --set "$RP_FG_SET" 2>&1)"
+printf '%s\n' "$RP_FG_ST1" | awk -F'\t' '$1=="claude-review" && $3=="no"' | grep -q . \
+  && ! printf '%s\n' "$RP_FG_ST1" | grep -q 'both answered on provider' \
+  && ok "panel status agrees: claude-review still unanswered, no provider warning" \
+  || fail "panel status counted an invalid twin stamp (got: $RP_FG_ST1)"
+# The TRUE stamp, written OLDEST of the three, so compose has to skip both newer lies to reach it.
+# Counted, it is claude twice. This is also the control for the two refusals above: the same
+# identity, leg and body, stamped with its real provider, validates.
+RP_FGT="$(rp_reply codex claude-review rp-forge-claude-review "$RP_FG_MID_R" 32 claude rp-forge-cr)"
+check "control: the same claude-review reply stamped claude validates" run_rp validate "$RP_FGT"
+RP_FGC2="$(run_rp compose --set "$RP_FG_SET" 2>&1)" && RP_FGC2_RC=0 || RP_FGC2_RC=$?
+[ "$RP_FGC2_RC" = "3" ] && printf '%s\n' "$RP_FGC2" | grep -qE '(claude and claude-review|claude-review and claude) both answered on provider claude$' \
+  && ok "beneath two newer invalid stamps, compose counts the true one: claude and claude-review on provider claude (exit 3)" \
+  || fail "compose did not reach the true stamp past the invalid ones (rc=$RP_FGC2_RC: $(printf '%s' "$RP_FGC2" | head -3))"
+run_rp panel status --set "$RP_FG_SET" 2>&1 >/dev/null \
+  | grep -qE '^panel status: WARNING — (claude and claude-review|claude-review and claude) both answered on provider claude; compose will refuse this set$' \
+  && ok "panel status warns that the carried claude leg and claude-review share provider claude" \
+  || fail "panel status showed the forge set's duplicate without a warning"
+awk -F'\t' -v s="$RP_FG_SET" -v d="$RP_FGB_DSP" '$3=="composition-refused" && $4==s && $5==d && $14=="duplicate-provider"' "$RP_FIX/.comms/events.tsv" | grep -q . \
+  && ok "the refusal is logged as composition-refused, status duplicate-provider, on the claude-review attempt" \
+  || fail "no duplicate-provider composition-refused event for the forge set's second attempt"

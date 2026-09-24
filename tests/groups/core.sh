@@ -1292,22 +1292,19 @@ INST_OUT="$(cd "$ST_INST" && echo | env -u AGENT_COMMS_SETUP perl -e 'alarm shif
 printf '%s' "$INST_OUT" | grep -q 'next: .*comms.sh setup' && [ -f "$ST_INST/.agent-comms/settings.sh" ] \
   && ok "a non-interactive install points at comms.sh setup instead of prompting" || fail "installer setup hand-off"
 
-section "review identities: setup preserves them and asks about their provider"
-# CONTAINMENT IS A PROPERTY OF THE PROVIDER. A review identity that runs on grok is a grok review
-# turn, refused unless uncontained reviews are allowed, so setup must ask the grok question for it
-# exactly as for a grok driver, although grok is not on the agents line. `review-agents` is
-# declared by hand and has no setup UI, so the one thing setup may do to it is leave it alone.
-# (plan §5, Decision 4.)
+section "review twins: setup accepts one driver and asks about its provider"
+# CONTAINMENT IS A PROPERTY OF THE PROVIDER. Every driver X has a built-in review twin X-review
+# that runs on X, so a grok review turn exists exactly when grok is on the agents line: setup
+# asks the grok question iff grok is a driver, and no config key can add a grok reviewer beside
+# it. A `review-agents` line left over from before twins is an unknown line: setup keeps it (it
+# keeps every line it does not own), and the registry warns about it and registers nothing.
 # Under --yes nothing is PROMPTED, so the question is observed by its ANSWER: the current value
 # is the default, and answering writes it back in canonical form. A hand-written `yes` becomes
 # `1` only if the question ran; the branch that skips it never touches the key. Same fixture and
 # driver (`st`) as the section above.
-# Irregular spacing on purpose: setup re-renders the agents line, so only a line it does NOT
-# re-render can prove it was kept byte-for-byte rather than rewritten into an equal form.
-RS_LINE='review-agents =  grok-review:grok   claude-review:claude'
-rs_setup() { # <review-agents line or empty> -> setup's output, then "rc=N"
-  { printf 'agents = claude codex\ndefault-target = codex\n'
-    [ -z "$1" ] || printf '%s\n' "$1"
+rs_setup() { # <agents value> [extra config line] -> setup's output, then "rc=N"
+  { printf 'agents = %s\n' "$1"
+    [ -z "${2:-}" ] || printf '%s\n' "$2"
     printf 'suite-cmd = bash t.sh\n'; } > "$ST_PROJ/.comms/config"
   printf 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=yes\n' > "$ST_HOME/settings"
   st -- "$COMMS" setup --yes </dev/null 2>&1; printf 'rc=%s\n' "$?"
@@ -1321,61 +1318,61 @@ rs_skipped() { # <setup output> — 0 when step 3 ran and said there is nothing 
   printf '%s\n' "$1" | grep -qx 'rc=0' && printf '%s\n' "$1" | grep -q 'grok is not registered here' \
     && grep -qx 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=yes' "$ST_HOME/settings"
 }
-RS_OUT="$(rs_setup '')"
+# Every refusal of the agents answer ends "— keeping: <current>". A refusal KEEPS the current
+# line, so "the line still says X" alone cannot tell acceptance from rejection; this is.
+rs_refused() { printf '%s\n' "$1" | grep -qF -- '— keeping:'; }
+rs_reg() { (cd "$ST_PROJ" && "$COMMS" agents "$@") 2>/dev/null; }  # the registry, read from what setup published
+RS_OUT="$(rs_setup 'claude codex')"
 rs_skipped "$RS_OUT" \
-  && ok "control: with no grok anywhere, setup says so and leaves the containment key untouched" \
+  && ok "control: with no grok driver, setup says so and leaves the containment key untouched" \
   || fail "no-grok control (settings: $(tr '\n' '|' < "$ST_HOME/settings"); out: $(printf '%s' "$RS_OUT" | grep -m1 -i 'grok is\|rc='))"
-RS_OUT="$(rs_setup "$RS_LINE")"
-rs_asked "$RS_OUT" \
-  && ok "a review identity on grok makes setup ask the grok containment question" \
-  || fail "grok review identity not asked (settings: $(tr '\n' '|' < "$ST_HOME/settings"); out: $(printf '%s' "$RS_OUT" | grep -m1 -i 'grok is\|rc='))"
+RS_OUT="$(rs_setup 'claude codex grok')"
+rs_asked "$RS_OUT" && [ "$(rs_reg --provider grok-review)" = grok ] \
+  && ok "grok on the agents line makes setup ask the grok question, and its twin grok-review runs on grok" \
+  || fail "grok driver not asked (settings: $(tr '\n' '|' < "$ST_HOME/settings"); out: $(printf '%s' "$RS_OUT" | grep -m1 -i 'grok is\|rc='); grok-review on: '$(rs_reg --provider grok-review)')"
+# A lone grok: its only reviewer is grok-review, a grok turn, so the question matters most here.
+RS_OUT="$(rs_setup grok)"
+rs_asked "$RS_OUT" && ! rs_refused "$RS_OUT" && grep -qx 'agents = grok' "$ST_PROJ/.comms/config" \
+  && [ "$(rs_reg --others grok)" = grok-review ] \
+  && ok "a lone grok driver is accepted and asked about: its only reviewer, grok-review, is a grok turn" \
+  || fail "lone grok (refusal: '$(printf '%s' "$RS_OUT" | grep -m1 -- '— keeping:')'; settings: $(tr '\n' '|' < "$ST_HOME/settings"); others: '$(rs_reg --others grok)')"
+# Irregular spacing on purpose: setup re-renders the agents line, so only a line it does NOT
+# re-render can prove it was kept byte-for-byte rather than rewritten into an equal form. The
+# line names grok as a provider and remaps claude-review to codex; before twins both counted.
+RS_LINE='review-agents =  grok-review:grok   claude-review:codex'
+RS_OUT="$(rs_setup 'claude codex' "$RS_LINE")"
+rs_skipped "$RS_OUT" \
+  && ok "a leftover review-agents line naming grok does not make setup ask the grok question" \
+  || fail "leftover review-agents drove the containment question (settings: $(tr '\n' '|' < "$ST_HOME/settings"); out: $(printf '%s' "$RS_OUT" | grep -m1 -i 'grok is\|rc='))"
 # Re-run over the config the previous run PUBLISHED, not a freshly seeded one.
 st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1; A=$?
 [ "$A" = 0 ] && [ "$(grep -cxF "$RS_LINE" "$ST_PROJ/.comms/config")" = 1 ] \
   && [ "$(grep -c 'review-agents' "$ST_PROJ/.comms/config")" = 1 ] \
-  && ok "re-running setup keeps the review-agents line byte-for-byte, exactly once" \
+  && ok "re-running setup keeps a leftover review-agents line byte-for-byte, exactly once" \
   || fail "review-agents line not preserved (rc=$A): $(tr '\n' '|' < "$ST_PROJ/.comms/config")"
-# ...and what setup published is still a registry the helpers accept, with the identity bound to
-# its provider — a kept line that no longer parses would be a preserved outage.
-[ "$( (cd "$ST_PROJ" && "$COMMS" agents --review) 2>/dev/null)" = "grok-review claude-review" ] \
-  && [ "$( (cd "$ST_PROJ" && "$COMMS" agents --provider grok-review) 2>/dev/null)" = grok ] \
-  && ok "the config setup rewrote still registers both review identities on their providers" \
-  || fail "post-setup registry: $( (cd "$ST_PROJ" && "$COMMS" agents --review) 2>&1 | head -1)"
-# Named for grok, runs on claude: the question follows the PROVIDER, never a name that merely
-# contains `grok` — nothing is inferred from an identity's name.
-RS_OUT="$(rs_setup 'review-agents = grok-review:claude')"
-rs_skipped "$RS_OUT" \
-  && ok "a review identity NAMED for grok but running on claude does not trigger the grok question" \
-  || fail "name-keyed containment question (settings: $(tr '\n' '|' < "$ST_HOME/settings"); out: $(printf '%s' "$RS_OUT" | grep -m1 -i 'grok is\|rc='))"
-# The registry splits review-agents on ANY whitespace, so a tab between pairs is a valid
-# declaration of a grok identity. Setup has to reach the same answer the registry does.
-RS_TAB="$(printf 'review-agents = grok-review:grok\tclaude-review:claude')"
-RS_OUT="$(rs_setup "$RS_TAB")"
-[ "$( (cd "$ST_PROJ" && "$COMMS" agents --provider grok-review) 2>/dev/null)" = grok ] && rs_asked "$RS_OUT" \
-  && ok "a tab-separated review-agents line is read by setup as the registry reads it" \
-  || fail "tab-separated grok review identity: registry says '$( (cd "$ST_PROJ" && "$COMMS" agents --provider grok-review) 2>&1 | head -1)', setup $(printf '%s' "$RS_OUT" | grep -q 'grok is not registered here' && echo 'said grok is not registered' || echo 'asked')"
-# ONE DRIVER IS ENOUGH once a review identity is declared: that identity is its reviewer, and the
-# registry already accepts the shape (its default panel is the review identity). setup must not
-# refuse it with "at least two agents"; the control is the same line with no review identity.
-# A refusal KEEPS the current agents line, so "the line still says claude" alone cannot tell
-# acceptance from rejection. Setup's own diagnostic is what distinguishes them: the refusal text
-# must be ABSENT here, and PRESENT for the same line without a review identity (the control).
-rs_single() { # <review-agents line or empty> -> setup's output
-  { printf 'agents = claude\ndefault-target = claude\n'
-    [ -z "$1" ] || printf '%s\n' "$1"
-    printf 'suite-cmd = bash t.sh\n'; } > "$ST_PROJ/.comms/config"
-  st -- "$COMMS" setup --yes </dev/null 2>&1
-}
-RS_ONE_OUT="$(rs_single 'review-agents = claude-review:claude')"
-RS_ONE="$(sed -n 's/^agents = //p' "$ST_PROJ/.comms/config")"
-[ "$RS_ONE" = claude ] && ! printf '%s\n' "$RS_ONE_OUT" | grep -q 'at least two agents are needed' \
-  && [ "$( (cd "$ST_PROJ" && "$COMMS" agents --others claude) 2>/dev/null)" = claude-review ] \
-  && ok "setup ACCEPTS a single driver when a review identity is declared, and its default panel is that identity" \
-  || fail "single driver + review identity: agents='$RS_ONE' refusal='$(printf '%s' "$RS_ONE_OUT" | grep -m1 'at least two')' others='$( (cd "$ST_PROJ" && "$COMMS" agents --others claude) 2>&1 | head -1)'"
-RS_ONE_OUT="$( { printf 'agents = claude\ndefault-target = claude\nsuite-cmd = bash t.sh\n'; } > "$ST_PROJ/.comms/config"; st -- "$COMMS" setup --yes </dev/null 2>&1)"
-printf '%s\n' "$RS_ONE_OUT" | grep -q 'at least two agents are needed' \
-  && ok "control: a single driver with NO review identity is still refused as too few agents" \
-  || fail "single driver without a reviewer was accepted (out: $(printf '%s' "$RS_ONE_OUT" | grep -m1 -i 'agent'))"
+# ...and the kept line registers NOTHING: the registry names it as an unknown line, the twins are
+# the drivers' own (no grok-review without a grok driver; the positive control is the grok case
+# above), and claude-review still runs on claude, not the codex the line claimed.
+RS_WARN="$( (cd "$ST_PROJ" && "$COMMS" agents) 2>&1 >/dev/null)"
+RS_GR="$( (cd "$ST_PROJ" && "$COMMS" agents --provider grok-review) 2>&1)"; RS_GRC=$?
+[ "$(rs_reg)" = "claude codex claude-review codex-review" ] && [ "$(rs_reg --provider claude-review)" = claude ] \
+  && [ "$RS_GRC" = 1 ] && printf '%s\n' "$RS_GR" | grep -qF "unknown agent 'grok-review'" \
+  && printf '%s\n' "$RS_WARN" | grep -qxF "warning: config: unknown line: $RS_LINE" \
+  && ok "the kept review-agents line is warned about as unknown and registers no identity or remap" \
+  || fail "leftover review-agents registered something: agents='$(rs_reg)' claude-review on '$(rs_reg --provider claude-review)' grok-review rc=$RS_GRC warn='$(printf '%s' "$RS_WARN" | head -1)'"
+# ONE DRIVER IS ENOUGH: its twin is its reviewer, so setup must not refuse it, and its default
+# panel is that twin. The refusal marker must be ABSENT here and PRESENT in the control below.
+RS_OUT="$(rs_setup claude)"
+printf '%s\n' "$RS_OUT" | grep -qx 'rc=0' && ! rs_refused "$RS_OUT" && ! printf '%s\n' "$RS_OUT" | grep -q 'at least' \
+  && grep -qx 'agents = claude' "$ST_PROJ/.comms/config" && [ "$(rs_reg --others claude)" = claude-review ] \
+  && ok "setup ACCEPTS a single driver, and its default panel is that driver's own twin" \
+  || fail "single driver: refusal='$(printf '%s' "$RS_OUT" | grep -m1 -- '— keeping:\|at least')' config='$(tr '\n' '|' < "$ST_PROJ/.comms/config")' others='$( (cd "$ST_PROJ" && "$COMMS" agents --others claude) 2>&1 | head -1)'"
+# Control: an unsupported agents answer is still refused. A twin's name is the pointed case —
+# twins are built in, so one can never be registered on the agents line.
+RS_OUT="$(rs_setup claude-review)"
+rs_refused "$RS_OUT" && printf '%s\n' "$RS_OUT" | grep -qF "'claude-review' is not a supported agent" \
+  && ok "control: an unsupported agents answer (a twin's name) is still refused" \
+  || fail "twin name accepted on the agents line (out: $(printf '%s' "$RS_OUT" | grep -m1 -i 'agent'))"
 # Leave the shared fixture as the section above left it.
 printf 'agents = claude codex\ndefault-target = codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
 : > "$ST_HOME/settings"

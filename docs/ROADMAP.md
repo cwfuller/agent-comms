@@ -2311,6 +2311,19 @@ Most of the plumbing is already agent-neutral: the registry, `inbox_for`, `trans
   the canary, and the retry passed — load, not the scrub. `panel status
   --set` warns (stderr) on a duplicate-provider set from the same reply stamps, so it never
   shows a healthy panel that `compose` will refuse.
+  **2026-09-24, same day: the `review-agents` key was replaced by built-in `<driver>-review`
+  twins resolved by `agents --roster`** (user request: no per-project config, and it must work
+  for every agent, not only claude). Every driver X now has `X-review` running on X — derived
+  from the `agents =` line, never declared; a leftover `review-agents` line only warns as an
+  unknown line. Naming yourself in `--reviewers` swaps in your twin in every runtime (`/auto`,
+  `$auto`, `/user:auto` all resolve through `agents --roster <driver> [list]`, which also
+  collapses repeats and refuses two reviewers on one provider). Same-model review stays off by
+  default: `agents --others` returns the twin only to a lone driver, and `setup` now accepts a
+  single driver. A twin's provider is fixed, so remapping is impossible; `validate` refuses a
+  twin reply stamped with another provider, and runphase's execution binding now catches a
+  forged or pre-twin stamp rather than a live remap. Superseded above: the pair-syntax parse
+  rules, "one review identity per provider (first declared)", and "zero-config output is
+  byte-identical" — bare `agents` now lists the three twins after the drivers.
 - [ ] **Reviewer instructions are per-agent products.** Codex has skills, grok gets a
   parent-built prompt. Unifying on parent-brokering (already required for artifact mounts)
   would make reviewer-side instructions prompt FRAGMENTS rather than a second install

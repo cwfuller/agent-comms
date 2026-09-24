@@ -622,7 +622,7 @@ Local file-based message queue between registered agents (claude, codex, grok). 
 that has a `.comms/` directory, and nowhere else — this note is global, the mailbox is not.
 
 - **Your inbox:** `.comms/to-codex/` — messages addressed to you land here
-- **Driving:** `$auto` is the implement+review loop; `$ask` is a one-off consult. `from:` is the output of `comms.sh whoami` — never a copied name. The default panel is every other registered driver; to be reviewed by your own model, name a review identity declared in `.comms/config` (`review-agents = codex-review:codex`), never yourself.
+- **Driving:** `$auto` is the implement+review loop; `$ask` is a one-off consult. `from:` is the output of `comms.sh whoami` — never a copied name. The default panel is the other drivers (alone: your built-in review twin `codex-review`); to add your own model, name yourself in `--reviewers` and it resolves to `codex-review` — no config.
 - **Reviewing:** turns are parent-brokered over ACP. The driving session inlines the prompt, stamps, and delivers the reply. Do not read the mailbox or send a reply yourself.
 PROTOCOL
 }
