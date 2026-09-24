@@ -31,6 +31,10 @@ unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
 # section that tests adoption sets it explicitly per invocation. (Same class as the
 # scrub above.)
 unset CLAUDE_PID COMMS_PRESENCE_PID COMMS_SELF GROK_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT CODEX_SANDBOX CODEX_THREAD_ID 2>/dev/null || true
+# THE REVIEW-TURN MARKER, for the same reason: a suite run from INSIDE a reviewer turn (a codex
+# reviewer running this corpus) inherits it, and `whoami` would then refuse every driver fixture.
+# The identity section sets it explicitly per invocation.
+unset COMMS_REVIEW_TURN 2>/dev/null || true
 # THE REVIEWER POLICY INPUTS. An operator's pins or reviewer-routing switch, inherited, would make
 # the policy assertions describe that operator's configuration instead of the committed map — and
 # COMMS_REVIEW_ROUTE would silently route every send in the corpus. The sections that exercise

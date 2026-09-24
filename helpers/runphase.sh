@@ -13,10 +13,14 @@
 # the decision. The cmux pane transport was deleted in step 4 (S4-4).
 #
 # Subcommands:
-#   spawn --message <file> [--provider codex|claude|grok] [--sandbox <mode>] [--timeout-secs N]
+#   spawn --message <file> [--agent <registered identity>] [--sandbox <mode>] [--timeout-secs N]
 #         detach a `run` and return immediately; prints pid + run dir.
+#         --agent is WHO reviews (default codex); its provider (claude|codex|grok) comes
+#         from the registry, never from the caller — a review identity such as
+#         claude-review runs on claude under its own name. --provider is the older
+#         spelling of --agent and takes the same identity value.
 #         Refuses (HELD) while the thread — or everything — is held; see hold.
-#   run --message <file> --dir <run-dir> [--provider ...] [--sandbox <mode>]
+#   run --message <file> --dir <run-dir> [--agent <identity>] [--sandbox <mode>]
 #       [--timeout-secs N] [--no-deliver] [--via acp]
 #         --via acp: run the turn through a WARM per-thread ACP session instead of a
 #         cold CLI spawn. Measured on one real loop: 114,688 / 144,975 fresh input
@@ -216,6 +220,10 @@ cmd_release() {
 
 RESULT_WRITTEN=false
 RUN_PROVIDER=codex
+# The turn's IDENTITY (who the reply is from, whose leg, whose events) — distinct from
+# RUN_PROVIDER (which runtime served it) only for a review identity such as claude-review.
+# Initialised here so a runner that died before recording it cannot trip `set -u` in await.
+RUN_AGENT=""
 # Turn identity, captured ONCE from the inbound before the child archives it — the same
 # reason update_thread_state takes the thread VALUE rather than the message path. Every
 # coordinator-log line this runner writes is stamped from these.
@@ -244,8 +252,11 @@ GROK_BROKER_NOTE=""
 # of the policy lives in `comms.sh send`, at the one point where refusing changes nothing
 # that has already happened.
 #
-# `agent` is the provider, because on this side the reviewer IS this turn. `role` marks a
-# `--no-deliver` measurement run, which must never read as the leg that gates. (grok.)
+# `agent` is the turn's IDENTITY — the name the reply is stamped with and the name `send`
+# records its request/reply rows under — so one leg's history is one agent value even when a
+# review identity runs on another name's provider. A run dir from before identities existed
+# carries only `provider`, which then WAS the identity. `role` marks a `--no-deliver`
+# measurement run, which must never read as the leg that gates. (grok.)
 # load_turn_identity <run-dir> — adopt a dead runner's identity so THIS process can record
 # a terminal event for the right leg. Fixed two-column file written by cmd_run; parsed, not
 # sourced, because a run dir is data.
@@ -262,6 +273,7 @@ load_turn_identity() {
       request)  RUN_MID="$v" ;;
       artifact) RUN_ARTIFACT="$v" ;;
       provider) [ -n "$v" ] && RUN_PROVIDER="$v" ;;
+      agent)    [ -n "$v" ] && RUN_AGENT="$v" ;;
     esac
   done < "$f"
   return 0
@@ -272,7 +284,7 @@ log_event() {
   [ "${RUNPHASE_NO_DELIVER:-}" = 1 ] && role=shadow
   "$COMMS" events append --kind "$kind" --status "$status" --note "$note" \
     --set "$RUN_SET" --dispatch "$RUN_DISPATCH" --thread "$RUN_THREAD" --round "$RUN_ROUND" \
-    --role "$role" --agent "$RUN_PROVIDER" --artifact "$RUN_ARTIFACT" --request-id "$RUN_MID" \
+    --role "$role" --agent "${RUN_AGENT:-$RUN_PROVIDER}" --artifact "$RUN_ARTIFACT" --request-id "$RUN_MID" \
     --message-id "$mid" --run-dir "$RUN_DIR" >/dev/null 2>&1 && return 0
   LOG_INCOMPLETE=1
   [ -n "$RUN_DIR" ] && echo "warning: coordinator log not updated ($kind)" >> "$RUN_DIR/runner.log" 2>/dev/null
@@ -293,7 +305,8 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
   local dir="$1" status="$2" rc="$3" sid="$4" mf="$5" note="$6" reason="${7:-}"
   [ "$RESULT_WRITTEN" = true ] && return 0
   local RESULT_COMPOSED=1
-  printf '{\n  "provider": "'"$RUN_PROVIDER"'",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s"\n}\n' \
+  printf '{\n  "provider": "%s",\n  "agent": "%s",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s"\n}\n' \
+    "$(json_escape "$RUN_PROVIDER")" "$(json_escape "${RUN_AGENT:-$RUN_PROVIDER}")" \
     "$(json_escape "$status")" "$(json_escape "$reason")" "$(json_escape "$rc")" "$(json_escape "$sid")" \
     "$(json_escape "$mf")" "$(json_escape "$dir")" \
     "$(json_escape "${STARTED_AT:-}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -1051,6 +1064,9 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
     printf -- '---\n'
     printf 'type: %s\n' "$GROK_RTYPE"
     printf 'from: %s\n' "$GROK_AGENT"
+    # A review identity's reply names the PROVIDER that produced it — the fact compose counts
+    # (reply_provider). A driver's provider is its own name, so its envelope is unchanged.
+    [ "$GROK_AGENT" = "$RUN_PROVIDER" ] || printf 'review_provider: %s\n' "$RUN_PROVIDER"
     printf 'timestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'workspace: %s\n' "$GROK_WS"
     printf 'message_id: %s\n' "$GROK_REPLY_ID"
@@ -1179,12 +1195,34 @@ require_acp_transport() {   # <verb> <provider> <via>
   fi
 }
 
+# resolve_turn_agent <verb> <identity> — the ONE place a turn's identity becomes a provider,
+# called first thing by BOTH spawn and run (the COMMS_WAIT foreground path calls run
+# directly). Sets RESOLVED_PROVIDER. The provider comes from the registry, never from a
+# caller: a caller-supplied provider could publish one model's review under another name.
+# After this, `$provider` means the provider at every provider-keyed site (ACP-only rule,
+# capability lookup, hostile-config refusals, isolation arm, acp.sh) and `$agent` the identity
+# at every identity site (from:, inbox, events, mount, session, thread state).
+RESOLVED_PROVIDER=""
+resolve_turn_agent() {
+  local verb="$1" id="$2" p
+  [ -n "$id" ] || die "$verb: --agent <registered identity> is required"
+  p="$("$COMMS" agents --provider "$id" 2>/dev/null)" \
+    || die "$verb: '$id' is not a registered agent (or the registry is malformed) — refusing to guess its provider"
+  case "$p" in
+    claude|codex|grok) ;;
+    *) die "$verb: '$id' resolves to provider '${p:-<none>}' — a provider must be claude, codex, or grok" ;;
+  esac
+  RESOLVED_PROVIDER="$p"
+}
+
 cmd_spawn() {
-  local msg="" sandbox="" timeout="" provider="codex" via="${COMMS_RUNPHASE_VIA:-}"
+  local msg="" sandbox="" timeout="" agent="codex" provider="" via="${COMMS_RUNPHASE_VIA:-}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --message) shift; msg="${1:-}" ;;
-      --provider) shift; provider="${1:-}" ;;
+      # --provider is the pre-identity spelling of --agent: its VALUE is the identity, and it
+      # never sets $provider — only the registry does.
+      --agent|--provider) shift; agent="${1:-}" ;;
       --sandbox) shift; sandbox="${1:-}" ;;
       --timeout-secs) shift; timeout="${1:-}" ;;
       --via) shift; via="${1:-}" ;;
@@ -1192,7 +1230,7 @@ cmd_spawn() {
     esac
     shift
   done
-  case "$provider" in claude|codex|grok) ;; *) die "spawn: provider must be claude, codex, or grok" ;; esac
+  resolve_turn_agent spawn "$agent"; provider="$RESOLVED_PROVIDER"
   require_acp_transport spawn "$provider" "$via"
   [ -n "$msg" ] || die "spawn: --message <file> is required"
   [ -f "$msg" ] || die "spawn: no such message file: $msg"
@@ -1242,7 +1280,14 @@ cmd_spawn() {
   # $$ suffix: same-second re-spawns must not clobber each other's records.
   run_dir="$root/logs/$(safe_name "$mid").$(date +%s).$$"
   mkdir -p "$run_dir" || { rm -rf "$claim" 2>/dev/null || true; die "spawn: cannot create run dir $run_dir"; }
-  nohup "$SELF" run --message "$msg" --dir "$run_dir" --provider "$provider" \
+  # The IDENTITY is forwarded, never the resolved provider: run re-resolves it through the same
+  # accessor, and forwarding the provider would run a review identity as its provider's name.
+  # The DETACHED runner also drops the driver's session identity: it outlives the driver, and
+  # its broker's `send` would otherwise keep beating the driver's presence record after the
+  # driver released it — healing it back as a pid-less record that no reaper can ever collect.
+  # The driver's own `await` beats while it waits; the COMMS_WAIT foreground run keeps them.
+  nohup env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u COMMS_PRESENCE_PID -u COMMS_SELF \
+    "$SELF" run --message "$msg" --dir "$run_dir" --agent "$agent" \
     ${sandbox:+--sandbox "$sandbox"} ${timeout:+--timeout-secs "$timeout"} \
     ${via:+--via "$via"} \
     </dev/null >>"$run_dir/runner.log" 2>&1 &
@@ -1253,7 +1298,7 @@ cmd_spawn() {
   # you await by run dir); acp/headless is the surface it went out over. Collapsing the
   # two is what made an ACP dispatch announce itself as "headless mode" and sent
   # operators to fix a transport that was working. Empty --via means direct exec.
-  echo "spawned runphase pid=$pid provider=$provider via=${via:-headless}"
+  echo "spawned runphase pid=$pid provider=$provider via=${via:-headless}${agent:+$([ "$agent" = "$provider" ] || printf ' agent=%s' "$agent")}"
   echo "  run dir: $run_dir"
   echo "  events:  $run_dir/events.ndjson"
   echo "  await:   \"$SELF\" await \"$run_dir\""
@@ -2435,25 +2480,36 @@ acp_canary() {
   esac
 }
 
+# THE REVIEWER ENVIRONMENT BOUNDARY — one definition, applied at EVERY provider launch (acp_exec
+# below and the direct exec in cmd_run). A reviewer child is launched from the driver's shell, so
+# without this it inherits the driver's identity: COMMS_SELF and the presence record it would
+# beat, and Claude Code's own session variables, which make a claude-backed child look like a
+# nested copy of the driving session. Scrubbed, a claude reviewer launched by a claude driver sees
+# what one launched by a codex or grok driver always saw. COMMS_REVIEW_TURN (exported by cmd_run)
+# is deliberately NOT scrubbed: it is what makes `comms.sh whoami` fail closed inside the turn.
+TURN_CHILD_SCRUB=(-u COMMS_SELF -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u COMMS_PRESENCE_PID
+                  -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID)
+
 acp_exec() {  # <cwd> [acpx args...]
   local _cwd="$1"; shift
   ( cd "$_cwd" && PATH="${acp_shim:+$acp_shim:}$PATH" \
       env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
           -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+          "${TURN_CHILD_SCRUB[@]}" \
       ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" "$@" )
 }
 
 # ---------- run (spawn's detached child) ----------
 
 cmd_run() {
-  local msg="" run_dir="" provider="codex" sandbox="${COMMS_RUNPHASE_SANDBOX:-workspace-write}"
+  local msg="" run_dir="" agent="codex" provider="" sandbox="${COMMS_RUNPHASE_SANDBOX:-workspace-write}"
   local timeout="${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}"
   local via="${COMMS_RUNPHASE_VIA:-}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --message) shift; msg="${1:-}" ;;
       --dir) shift; run_dir="${1:-}" ;;
-      --provider) shift; provider="${1:-}" ;;
+      --agent|--provider) shift; agent="${1:-}" ;;   # --provider: the pre-identity spelling
       --sandbox) shift; sandbox="${1:-}" ;;
       --timeout-secs) shift; timeout="${1:-}" ;;
       --no-deliver) RUNPHASE_NO_DELIVER=1; export RUNPHASE_NO_DELIVER ;;
@@ -2462,6 +2518,15 @@ cmd_run() {
     esac
     shift
   done
+  # FIRST, before anything reads $provider (the --no-deliver capability lookup below included).
+  resolve_turn_agent run "$agent"; provider="$RESOLVED_PROVIDER"
+  RUN_AGENT="$agent"
+  # THE REVIEW-TURN MARKER, for this whole process tree. cmd_run is always a child (spawn's
+  # nohup, the COMMS_WAIT foreground run, shadow's subshell), so it reaches every provider
+  # launch — acpx and the direct exec alike — and never a driver. `comms.sh whoami` fails
+  # closed on it: a reviewer on its driver's OWN provider carries only that provider's session
+  # signals, which is exactly the case the conflicting-signals net cannot see.
+  export COMMS_REVIEW_TURN="$agent"
   # Validate the budget HERE, before anything consumes it. Validating at the point of the
   # arithmetic was too late twice over: acpx had already been handed the raw value on its
   # own `--timeout` flag, and the check could then only disable classification rather than
@@ -2498,7 +2563,6 @@ cmd_run() {
       *) die "run: --no-deliver is not available for '$provider' without --via acp — that provider is ACP-only since step 4, so there is no non-ACP turn to suppress" ;;
     esac
   fi
-  case "$provider" in claude|codex|grok) ;; *) die "run: provider must be claude, codex, or grok" ;; esac
   # ACP-ONLY FOR THE PROVIDERS THAT USED TO SELF-SEND (contraction step 4, S4-2).
   # Deleting the arm alone would leave a non-ACP claude/codex run skipping `build_grok_prompt`,
   # invoking the provider with no prompt, and still taking `rc=0 -> completed` — a FALSE SUCCESS,
@@ -2511,7 +2575,7 @@ cmd_run() {
   RUN_PROVIDER="$provider"
   STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local sfield
-  sfield="$(session_field_of "$provider")"
+  sfield="$(session_field_of "$agent")"
 
   # Capture the thread NOW: the child archives (moves) the message file as part
   # of its reply, so exit-time re-reads of $msg fail on the success path.
@@ -2535,6 +2599,7 @@ cmd_run() {
     printf 'request\t%s\n' "$RUN_MID"
     printf 'artifact\t%s\n' "$RUN_ARTIFACT"
     printf 'provider\t%s\n' "$RUN_PROVIDER"
+    printf 'agent\t%s\n' "$RUN_AGENT"
   } > "$run_dir/turn.tsv" 2>/dev/null || true
 
   # If anything below aborts unexpectedly (set -e, TERM/INT), reap the provider
@@ -2611,7 +2676,7 @@ cmd_run() {
   # THE FIRST DURABLE EVIDENCE that a turn is running, written by this process — which is
   # detached, so everything from here on outlives the dispatching shell (criterion 4).
   # `sets.tsv` says a leg was dispatched and can never say more than that.
-  log_event turn-started running "provider=$provider via=${via:-direct} artifact=${msg_artifact:-none}"
+  log_event turn-started running "provider=$provider${agent:+$([ "$agent" = "$provider" ] || printf ' agent=%s' "$agent")} via=${via:-direct} artifact=${msg_artifact:-none}"
 
   if [ -n "$msg_artifact" ]; then
     local mount_base
@@ -2654,7 +2719,7 @@ cmd_run() {
     # `$root/mounts` durable gate is GONE — ignore-coverage of `.comms` no longer decides
     # mount safety now that mounts live outside the repo entirely.
     if [ "$via" = "acp" ] \
-       && mount_ident="$(acp_mount_ident "$main_root" "${msg_thread:-$(frontmatter_field "$msg" message_id)}" "$provider")" \
+       && mount_ident="$(acp_mount_ident "$main_root" "${msg_thread:-$(frontmatter_field "$msg" message_id)}" "$agent")" \
        && [ -n "$mount_ident" ] \
        && mount_alloc "$mount_store" "$mount_key" "$main_root" "$mount_ident"; then
       mount_kdir="$MOUNT_ALLOC_DIR"
@@ -2860,16 +2925,41 @@ cmd_run() {
   # are reachable WITHOUT cmd_send having validated the message — so an
   # unregistered or path-shaped from: must fail the run here, before use.
   peer="$(frontmatter_field "$msg" from || true)"
-  [ -n "$peer" ] || peer="$(peer_of "$provider")"
-  if ! "$COMMS" agents | tr ' ' '\n' | grep -qx "$peer"; then
+  # The complement is a two-party guess about a DRIVER's counterpart; a review identity has
+  # none (its driver may share its provider), so a from-less inbound is refused for it.
+  [ -n "$peer" ] || [ "$agent" != "$provider" ] || peer="$(peer_of "$provider")"
+  # The peer AUTHORED the request, so it must be a DRIVER — review identities never author,
+  # and the bare registry list now includes them. Refusal reasons are collected in one place so
+  # every one of them fails the turn the same way.
+  local peer_refusal="" registered drivers want_prov
+  registered="$("$COMMS" agents 2>/dev/null)" || registered=""
+  drivers="$("$COMMS" agents --drivers 2>/dev/null)" || drivers=""
+  if [ -z "$peer" ]; then
+    peer_refusal="inbound has no from: and '$agent' is a review identity — refusing to guess who reads its reply"
+  elif ! printf '%s\n' "$registered" | tr ' ' '\n' | grep -qx -- "$peer"; then
+    peer_refusal="inbound from: '$peer' is not a registered agent — refusing to route a reply"
+  elif ! printf '%s\n' "$drivers" | tr ' ' '\n' | grep -qx -- "$peer"; then
+    peer_refusal="inbound from: '$peer' is a review-only identity — it never authors a request; refusing to route a reply"
+  elif [ "$peer" = "$agent" ]; then
+    peer_refusal="inbound from: '$peer' is this turn's own identity — an agent never reviews or answers its own request"
+  elif [ "$agent" != "$provider" ]; then
+    # EXECUTION BINDING. A request to a review identity carries the provider its send resolved
+    # (stamp_review_provider). If the map has changed since, this turn would run on a provider
+    # the request was never bound to and its reply would be counted as that provider's — so it
+    # fails closed and the leg reads unanswered, never as a different model.
+    want_prov="$(frontmatter_field "$msg" review_provider || true)"
+    [ "$want_prov" = "$provider" ] \
+      || peer_refusal="request to review identity '$agent' was bound to provider '${want_prov:-<none>}', but '$agent' now resolves to '$provider' — refusing to run it on a provider it was not sent to"
+  fi
+  if [ -n "$peer_refusal" ]; then
     update_thread_state "$msg_thread" failed "" "$sfield" || true
-    write_result "$run_dir" failed 1 "" "$msg" "inbound from: '${peer:-<absent>}' is not a registered agent — refusing to route a reply"
+    write_result "$run_dir" failed 1 "" "$msg" "$peer_refusal"
     unmount_artifact
     trap - EXIT
     exit 1
   fi
   if [ "$provider" = "grok" ] || [ "$via" = "acp" ]; then
-    if ! build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root" "$provider" "${mount_dir:-}"; then
+    if ! build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root" "$agent" "${mount_dir:-}"; then
       update_thread_state "$msg_thread" failed "" "$sfield" || true
       write_result "$run_dir" failed 1 "" "$msg" "${GROK_PROMPT_NOTE:-$provider prompt build refused}"
       unmount_artifact
@@ -2980,9 +3070,8 @@ cmd_run() {
         *dangerously-skip-permissions*|*bypassPermissions*)
           die "run: bypass/danger permission flags are refused in headless loop turns" ;;
       esac
-      # stream-json requires --verbose in print mode. CLAUDECODE is unset so the
-      # child doesn't detect itself as nested inside the driving session.
-      child_env=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT)
+      # stream-json requires --verbose in print mode. The driving session's identity is
+      # scrubbed for every arm below (TURN_CHILD_SCRUB), not here.
       cmd=(claude -p --verbose --output-format stream-json
            --permission-mode "${COMMS_RUNPHASE_CLAUDE_PERMISSION_MODE:-acceptEdits}"
            --allowedTools "${COMMS_RUNPHASE_CLAUDE_ALLOWED_TOOLS:-Bash}"
@@ -2998,6 +3087,8 @@ cmd_run() {
       fi
       ;;
   esac
+  # Every direct launch crosses the same reviewer environment boundary as an ACP one.
+  child_env=(env "${TURN_CHILD_SCRUB[@]}")
 
   # ACP MODE. A cold `codex exec` rebuilds context from nothing every round —
   # measured on one real loop at 114,688 then 144,975 FRESH input tokens for rounds
@@ -3053,7 +3144,7 @@ cmd_run() {
       acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
       if [ -n "$acp_route_id" ]; then
         if acp_route_cur="$("$COMMS" review-route verify "$acp_route_id" --thread "$msg_thread" --phase "$acp_phase" \
-                              ${acp_leg_dispatch:+--leg-dispatch "$acp_leg_dispatch"} 2>>"$run_dir/runner.log")"; then
+                              ${acp_leg_dispatch:+--leg-dispatch "$acp_leg_dispatch" --leg-agent "$agent"} 2>>"$run_dir/runner.log")"; then
           acp_route_cur_id="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="decision"{print $2; exit}')"
           if [ "$acp_route_cur_id" = "$acp_route_id" ]; then
             acp_route_tier="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="tier"{print $2; exit}')"
@@ -3112,6 +3203,15 @@ cmd_run() {
       acp_session="agent-comms-$(safe_name "$msg_thread")"
     else
       acp_session="agent-comms-oneoff-$(safe_name "$(frontmatter_field "$msg" message_id)")"
+    fi
+    # acpx keys a session on (profile, cwd, name), and a review identity shares its PROVIDER's
+    # profile — so an unmounted claude-review turn would resume the warm session of a `claude`
+    # reviewer on the same thread and cwd, inheriting its context. `+as+` is outside
+    # safe_name's alphabet, so the namespace is disjoint; a driver identity (== its provider)
+    # keeps its historic name and its warm session. (Mounted names already carry the identity
+    # through mount_ident.)
+    if [ -z "${mount_ident:-}" ] && [ "$agent" != "$provider" ]; then
+      acp_session="$acp_session+as+$agent"
     fi
     # acpx GLOBAL options must precede the profile; only subcommand flags follow it.
     # (`--cwd` after the profile is rejected outright — caught live.) The turn runs

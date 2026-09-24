@@ -175,6 +175,9 @@ CFG=""
 if [ -n "$CFG" ]; then
   CUR_AGENTS="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$CFG" 2>/dev/null | head -1)"
   CUR_DEFAULT="$(sed -n 's/^[[:space:]]*default-target[[:space:]]*=[[:space:]]*//p' "$CFG" 2>/dev/null | head -1)"
+  # Review identities (`review-agents = claude-review:claude`) are declared by hand and kept by the
+  # rewrite below; they are read here only so step 3 can see which PROVIDERS reviews run on.
+  CUR_REVIEW="$(sed -n 's/^[[:space:]]*review-agents[[:space:]]*=[[:space:]]*//p' "$CFG" 2>/dev/null | head -1)"
   AGENTS="$(ask "  agents for this project ($ROOT)" "${CUR_AGENTS:-${DETECTED:-claude codex}}")"
   # Validated to the registry's own rules before anything is written: supported names only, no
   # duplicates, at least two (a loop needs an author and a reviewer). Anything else keeps the
@@ -230,8 +233,10 @@ say "  turn is refused unless you allow uncontained reviews — then it can writ
 say "  mount and reach the network with your git credentials. Fine for your own code on your"
 say "  own machine; not for code you did not write."
 cur_unc="$(yn_of "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-}")"
-case " $AGENTS " in
-  *" grok "*) if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi ;;
+# Containment is a property of the PROVIDER: a review identity on grok (grok-review:grok) needs this
+# as much as a registered grok does.
+case " $AGENTS ${CUR_REVIEW:-} " in
+  *" grok "*|*":grok "*) if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi ;;
   *) say "  grok is not registered here — nothing to allow." ;;
 esac
 

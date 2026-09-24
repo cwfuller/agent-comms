@@ -9,14 +9,19 @@
 #   root                        print the main repo's .comms path (worktree-safe)
 #   workspace [set <name>]      print the mailbox identity (pin > branch > repo
 #                               dir); `set` pins it repo-scoped in .comms/workspace
-#   agents [default|--supported|--others <agent>]
-#                                  registered agents from .comms/config; --others lists
-#                                  everyone EXCEPT one (the default panel for its driver).
-#                                  (zero-config
-#                                  default: claude codex / target codex)
+#   agents [default|--drivers|--review|--provider <id>|--others <driver>|--supported]
+#                                  registered identities from .comms/config: every
+#                                  identity (bare), the drivers (`agents =`), the
+#                                  review-only identities (`review-agents =
+#                                  <name>:<provider>`), one identity's provider, or the
+#                                  provider capability table. --others is the default
+#                                  panel for a driver: the OTHER drivers, else the review
+#                                  identities. (zero-config: claude codex grok, target codex,
+#                                  no review identities)
 #   whoami                      print the driving agent (COMMS_SELF → session env →
-#                               ancestor executable). Fails closed on no signal AND on
-#                               conflicting signals; never defaults to claude.
+#                               ancestor executable). Fails closed on no signal, on
+#                               conflicting signals, on a review-only identity, and
+#                               inside a review turn; never defaults to claude.
 #   list --as <agent> [--thread <t>]   pending inbox messages, newest first
 #   status                      one-screen loop state: latest archive, verdict, pending counts
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
@@ -263,7 +268,16 @@ cmd_workspace() {
 # back-compat). Names become directory suffixes and state-field prefixes, so the
 # grammar is enforced hard. A name may be registered only when a supported backend
 # exists for it — otherwise /ask etc. would accept mail that can never be served.
-SUPPORTED_AGENTS="claude codex grok"   # claude/codex: interactive+headless; grok: headless reviewer/consult
+#
+# IDENTITY vs PROVIDER. An identity is who a message is from / to, whose inbox, whose leg
+# thread, whose events. A provider is the runtime that serves a turn (acpx profile,
+# isolation arm, policy map row). A DRIVER identity (`agents =`) is named after its
+# provider. A REVIEW identity (`review-agents = claude-review:claude`) runs on a declared
+# provider under its own name, so a driver can be reviewed by its own model without the
+# two sharing an inbox, a thread, or awaiting_from. It is review-only: it never drives,
+# authors a request, or answers a consult. Everything above the process boundary is keyed
+# on the identity; only the spawn resolves the provider (registry_provider).
+SUPPORTED_AGENTS="claude codex grok"   # the PROVIDERS. claude/codex: interactive+acp; grok: headless reviewer/consult
 REGISTRY_DEFAULT_AGENTS="claude codex grok"
 REGISTRY_DEFAULT_TARGET="codex"
 
@@ -278,18 +292,22 @@ validate_agent_name() {  # <name> [source] — grammar: ^[a-z][a-z0-9-]{1,15}$
 # config that criterion-level rules call malformed (duplicate keys, bad names,
 # unsupported/duplicate agents, empty values, invalid default) is a hard error
 # no matter which command touched it first; unknown keys warn everywhere.
-# Prints two lines: the agent list, then the default target.
+# Prints three lines: the DRIVER list, the default target, then the review map
+# (`name:provider ...`, empty when none is declared). Read it only through the
+# accessors below — each concern has exactly one.
 registry_parse() {
-  local f agents_ct default_ct line a agents="" dflt
+  local f agents_ct default_ct review_ct line a agents="" dflt pair rname rprov review=""
   f="$(registry_file)"
   if [ ! -f "$f" ]; then
-    printf '%s\n%s\n' "$REGISTRY_DEFAULT_AGENTS" "$REGISTRY_DEFAULT_TARGET"
+    printf '%s\n%s\n\n' "$REGISTRY_DEFAULT_AGENTS" "$REGISTRY_DEFAULT_TARGET"
     return 0
   fi
   agents_ct="$(grep -c '^[[:space:]]*agents[[:space:]]*=' "$f" 2>/dev/null || true)"
   default_ct="$(grep -c '^[[:space:]]*default-target[[:space:]]*=' "$f" 2>/dev/null || true)"
+  review_ct="$(grep -c '^[[:space:]]*review-agents[[:space:]]*=' "$f" 2>/dev/null || true)"
   [ "${agents_ct:-0}" -le 1 ] || die "config: duplicate 'agents' key in $f"
   [ "${default_ct:-0}" -le 1 ] || die "config: duplicate 'default-target' key in $f"
+  [ "${review_ct:-0}" -le 1 ] || die "config: duplicate 'review-agents' key in $f"
   # The suite keys are validated through the SAME accessor their consumers use
   # (config_scalar dies on duplicates), so this path and integrate's can never
   # disagree about what the config says. (codex, ergonomics r1-r2.)
@@ -299,7 +317,7 @@ registry_parse() {
     config_scalar "$cfg_root" suite-cmd >/dev/null
     config_scalar "$cfg_root" suite-attest-secs >/dev/null
   fi
-  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|suite-cmd[[:space:]]*=|suite-attest-secs[[:space:]]*=)' "$f" \
+  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|review-agents[[:space:]]*=|suite-cmd[[:space:]]*=|suite-attest-secs[[:space:]]*=)' "$f" \
     | head -3 | sed 's/^/warning: config: unknown line: /' >&2 || true
   if [ "${agents_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
@@ -319,6 +337,35 @@ registry_parse() {
   else
     agents="$REGISTRY_DEFAULT_AGENTS"
   fi
+  # REVIEW IDENTITIES: an explicit `<name>:<provider>` pair, never inferred from a name
+  # prefix — a bare `claude-review` on the agents line above stays "unsupported". A name
+  # that equals a provider would make identity and provider ambiguous everywhere they
+  # meet (whoami, the capability table), so it is refused rather than disambiguated.
+  if [ "${review_ct:-0}" -eq 1 ]; then
+    line="$(sed -n 's/^[[:space:]]*review-agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
+    [ -n "$line" ] || die "config: 'review-agents' key present but empty in $f (delete the line to declare none)"
+    for pair in $line; do
+      case "$pair" in
+        *:*:*|:*|*:) die "config: malformed review-agents entry '$pair' in $f — expected <name>:<provider>" ;;
+        *:*) ;;
+        *) die "config: malformed review-agents entry '$pair' in $f — expected <name>:<provider>" ;;
+      esac
+      rname="${pair%%:*}"; rprov="${pair#*:}"
+      validate_agent_name "$rname" "$f"
+      case " $SUPPORTED_AGENTS " in
+        *" $rname "*) die "config: review agent '$rname' in $f is a provider name — give the review identity its own name (e.g. $rname-review)" ;;
+      esac
+      case " $SUPPORTED_AGENTS " in
+        *" $rprov "*) ;;
+        *) die "config: review agent '$rname' in $f names unsupported provider '$rprov' — supported: $SUPPORTED_AGENTS" ;;
+      esac
+      case " $review " in
+        *" $rname:"*) die "config: duplicate review agent '$rname' in $f" ;;
+      esac
+      review="$review $rname:$rprov"
+    done
+    review="${review# }"
+  fi
   if [ "${default_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*default-target[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
     [ -n "$line" ] || die "config: 'default-target' key present but empty in $f"
@@ -328,16 +375,92 @@ registry_parse() {
   else
     dflt="$REGISTRY_DEFAULT_TARGET"
   fi
+  # The default target serves /ask and single-reviewer handoffs for EVERY driver, so it
+  # must be a driver: a review identity there would make same-model review the silent
+  # default for its own provider's driver, and a consult target it can never answer.
+  case " $review " in
+    *" $dflt:"*) die "config: default-target '$dflt' is a review-only identity — it must be a driver (one of: $agents)" ;;
+  esac
   case " $agents " in
     *" $dflt "*) ;;
     *) die "config: default-target '$dflt' is not a registered agent (registered: $agents)" ;;
   esac
-  printf '%s\n%s\n' "$agents" "$dflt"
+  printf '%s\n%s\n%s\n' "$agents" "$dflt" "$review"
 }
 
-registry_agents() { registry_parse | sed -n 1p; }
+# ONE ACCESSOR PER CONCERN, every one fed by the single parse above.
+registry_drivers() { registry_parse | sed -n 1p; }
 
 registry_default() { registry_parse | sed -n 2p; }
+
+registry_review_map() { registry_parse | sed -n 3p; }   # "name:provider ..."
+
+# EVERY identity — drivers first, review identities last. This is the membership set:
+# inboxes, `from:` validation, require_agent and every to-<agent> enumeration need the
+# review inboxes too. Drivers first keeps a never-created review inbox from ever
+# preceding a real one in a scan.
+registry_agents() {
+  registry_parse | awk 'NR==1 { d = $0 }
+    NR==3 { n = split($0, P, " "); for (i = 1; i <= n; i++) { sub(/:.*/, "", P[i]); r = r " " P[i] } }
+    END { if (d != "") printf "%s%s\n", d, r }'
+}
+
+registry_review_agents() {  # the review identities' names, space-separated
+  local map a out=""
+  map="$(registry_review_map)" || exit 2
+  for a in $map; do out="$out ${a%%:*}"; done
+  printf '%s\n' "${out# }"
+}
+
+registry_provider() {  # <identity> — its provider (a driver is its own); 1 if unregistered
+  local out a
+  out="$(registry_parse)" || exit 2
+  for a in $(printf '%s\n' "$out" | sed -n 1p); do
+    [ "$a" = "$1" ] && { printf '%s\n' "$1"; return 0; }
+  done
+  for a in $(printf '%s\n' "$out" | sed -n 3p); do
+    [ "${a%%:*}" = "$1" ] && { printf '%s\n' "${a#*:}"; return 0; }
+  done
+  return 1
+}
+
+registry_is_review() {  # <identity> — 0 iff a review-only identity; malformed config exits
+  local map a
+  map="$(registry_review_map)" || exit 2
+  for a in $map; do [ "${a%%:*}" = "$1" ] && return 0; done
+  return 1
+}
+
+# reply_provider <reply> — the provider that PRODUCED a reply, and the one rule for it: a driver
+# identity is its own provider, unconditionally; a review identity's is its broker's
+# `review_provider` stamp. validate (consistency), compose (independence) and panel status all
+# read it here, so none of them can consult the CURRENT registry map for a historical fact.
+reply_provider() {
+  local from
+  from="$(frontmatter_field "$1" from)"
+  if registry_is_review "$from"; then
+    frontmatter_field "$1" review_provider
+  else
+    printf '%s\n' "$from"
+  fi
+}
+
+# stamp_review_provider <request> <target> — the ONE writer of `review_provider:` on a request.
+# A request to a review identity carries the provider the registry maps it to NOW (runphase
+# refuses the turn if that has changed by the time it runs); any other request has a hand-typed
+# value removed. Two callers: cmd_send, and shadow's private request copy.
+stamp_review_provider() {
+  local f="$1" to="$2" want="" has
+  if registry_is_review "$to"; then
+    want="$(registry_provider "$to")" || return 1
+  fi
+  has="$(LC_ALL=C awk 'NR == 1 { if ($0 !~ /^---\r?$/) exit; next }
+    /^---\r?$/ { exit }
+    index($0, "review_provider:") == 1 { print "y"; exit }' "$f")"
+  if [ -n "$want" ] || [ -n "$has" ]; then
+    stamp_fm_key "$f" review_provider "$want"
+  fi
+}
 
 registry_has() {  # <name> — 0 iff registered; a MALFORMED config exits hard
   # Capture-with-check: `for a in $(...)` swallows a failing substitution, which
@@ -351,6 +474,13 @@ registry_has() {  # <name> — 0 iff registered; a MALFORMED config exits hard
 require_agent() {  # <name> [context] — die unless registered
   [ -n "${1:-}" ] || die "${2:-agent}: agent name required (registered: $(registry_agents))"
   registry_has "$1" || die "${2:-agent}: unknown agent '$1' (registered: $(registry_agents))"
+}
+
+require_driver() {  # <name> [context] — die unless a registered DRIVER (never a review identity)
+  require_agent "$@"
+  if registry_is_review "$1"; then
+    die "${2:-agent}: '$1' is a review-only identity — it reviews, it never drives or authors (drivers: $(registry_drivers))"
+  fi
 }
 
 # Detect the driving agent. Templates MUST call this rather than writing a
@@ -380,6 +510,12 @@ whoami_from_ancestors() {
 }
 
 cmd_whoami() {
+  # INSIDE A REVIEW TURN nothing is a driver. runphase exports the marker for the whole
+  # turn; without it a reviewer child on its driver's OWN provider (claude-review under a
+  # claude driver) carries exactly one provider's signals, so the conflicting-signals net
+  # below — which catches CROSS-provider children — would resolve it to the driver.
+  [ -z "${COMMS_REVIEW_TURN:-}" ] \
+    || die "whoami: this process is inside a review turn for '$(clip "$COMMS_REVIEW_TURN")' — a reviewer never drives or authors; its parent brokers the reply"
   local me="${COMMS_SELF:-}"
   if [ -z "$me" ]; then
     # Collect EVERY matching session signal. Silent precedence (GROK_AGENT beating
@@ -404,7 +540,7 @@ cmd_whoami() {
     fi
   fi
   [ -n "$me" ] || die "whoami: cannot detect the driving agent — set COMMS_SELF to a registered name"
-  require_agent "$me" "whoami"
+  require_driver "$me" "whoami"
   printf '%s\n' "$me"
 }
 
@@ -412,14 +548,31 @@ cmd_agents() {
   case "${1:-}" in
     "")          registry_agents ;;
     default)     registry_default ;;
+    --drivers)   registry_drivers ;;
+    --review)    registry_review_agents ;;
+    --provider)
+      shift
+      [ -n "${1:-}" ] || usage_err "agents --provider <identity>: an identity is required"
+      require_agent "$1" "agents --provider"
+      registry_provider "$1"
+      ;;
     --others)
-      # Every registered agent EXCEPT the named one — the default panel for a loop that
-      # agent is driving. Derived from the registry so adding an agent changes the panel
-      # without editing a template, and so nothing has to hardcode "codex,grok".
+      # The default panel for a loop <driver> is driving: every OTHER DRIVER. Review
+      # identities are opt-in (`--reviewers`) — a codex driver's default panel must not
+      # silently grow a second claude-backed leg — EXCEPT when no other driver exists,
+      # where they are the only reviewers there are (`agents = claude` +
+      # `review-agents = claude-review:claude`). Derived from the registry so adding an
+      # agent changes the panel without editing a template.
       shift
       [ -n "${1:-}" ] || usage_err "agents --others <agent>: an agent name is required"
-      require_agent "$1" "agents --others"
-      registry_agents | tr ' ' '\n' | grep -vx "$1" | paste -sd, - | sed 's/,$//'
+      require_driver "$1" "agents --others"
+      local drv oth="" d
+      drv="$(registry_drivers)" || exit 2
+      for d in $drv; do [ "$d" = "$1" ] || oth="$oth $d"; done
+      [ -n "$oth" ] || { oth=" $(registry_review_agents)" || exit 2; }
+      oth="$(printf '%s' "$oth" | tr -s ' ' | sed 's/^ //; s/ $//')"
+      [ -n "$oth" ] || usage_err "agents --others $1: no other registered agent can review — register one in .comms/config (agents =), or declare a review identity (review-agents = <name>:<provider>)"
+      printf '%s\n' "$oth" | tr ' ' ','
       ;;
     --supported)
       # NOT 'headless': headless_ok refuses both, and runphase requires --via acp. A caller
@@ -429,7 +582,7 @@ cmd_agents() {
       printf '%s\tinteractive,acp\n' codex
       printf '%s\theadless,reviewer-consult-only\n' grok
       ;;
-    *) die "agents: unknown argument '$1' (expected: default | --supported)" ;;
+    *) die "agents: unknown argument '$1' (expected: default | --drivers | --review | --provider <id> | --others <driver> | --supported)" ;;
   esac
 }
 
@@ -628,6 +781,10 @@ sort_paths_by_timestamp() {
 sorted_message_files() {
   local dir="$1" ws="$2" sender="${3:-}" thread="${4:-}" order="${5:-oldest}" pat="${6:-}"
   [ -n "$pat" ] || pat="${ws}_*"
+  # A registered inbox that was never created is an EMPTY inbox, not an error: under pipefail a
+  # failing find killed the whole scan, so one never-used review identity could hide every
+  # inbox listed after it. (ROADMAP: missing-inbox hazard.)
+  [ -d "$dir" ] || return 0
   find "$dir" -maxdepth 1 -type f -name "$pat" 2>/dev/null \
     | sort_paths_by_timestamp "$order" "$sender" "$thread"
 }
@@ -1619,17 +1776,56 @@ cmd_review_route() {
 # existing line of the key in the frontmatter (a hand-typed value, a duplicate, a blank) and, when
 # an id is given, inserts one canonical line at the frontmatter close. The requesting driver is
 # the author under review, so the depth of its own review is helper-stamped, never author-typed.
-stamp_route_decision() {
-  local sf="$1" rid="$2" stamped
-  stamped="$(mktemp "${TMPDIR:-/tmp}/agent-comms-route.XXXXXX")" || return 1
-  LC_ALL=C awk -v rid="$rid" '
+stamp_route_decision() { stamp_fm_key "$1" route_decision "$2"; }
+
+# stamp_fm_key <file> <key> <value-or-empty> — the one writer of a HELPER-STAMPED frontmatter
+# key: drops every existing line of <key> (hand-typed, duplicate, blank) and, when a value is
+# given, inserts one canonical line at the frontmatter close.
+stamp_fm_key() {
+  local sf="$1" key="$2" val="$3" stamped
+  stamped="$(mktemp "${TMPDIR:-/tmp}/agent-comms-stamp.XXXXXX")" || return 1
+  LC_ALL=C awk -v key="$key:" -v val="$val" '
     NR == 1 { nl = ($0 ~ /\r$/) ? "\r\n" : "\n" }
     { probe = $0; sub(/\r$/, "", probe) }
     NR == 1 && probe == "---" { fm = 1; print; next }
-    fm && probe == "---" { if (rid != "") printf "route_decision: %s%s", rid, nl; fm = 0; print; next }
-    fm && index(probe, "route_decision:") == 1 { next }
+    fm && probe == "---" { if (val != "") printf "%s %s%s", key, val, nl; fm = 0; print; next }
+    fm && index(probe, key) == 1 { next }
     { print }
   ' "$sf" > "$stamped" && mv -f "$stamped" "$sf" || { rm -f "$stamped" 2>/dev/null; return 1; }
+}
+
+# send_role_check <file> <to> — the role rules that need the TARGET. Frontmatter has no `to:`,
+# so validate cannot see them; cmd_send is the funnel every template path, every panel leg and
+# the broker's reply all reach. Runs before any durable write.
+send_role_check() {
+  local file="$1" to="$2" ftype ffrom
+  [ -f "$file" ] || return 0   # a missing file is validate's refusal, with its own message
+  ftype="$(frontmatter_field "$file" type)"
+  ffrom="$(frontmatter_field "$file" from)"
+  # A review identity receives exactly what a reviewer turn consumes: the request, and the
+  # per-leg error lane (`error` is either-direction). Anything else would be turned into an
+  # unrequested review by runphase, or is a consult it is not allowed to answer.
+  if registry_is_review "$to"; then
+    case "$ftype" in
+      review-request|error) ;;
+      *) die "send: '$to' is a review-only identity — it accepts a review-request or an error, not '${ftype:-<no type>}'" ;;
+    esac
+  fi
+  # SELF-ADDRESS. An agent never reviews or answers its own request: the request and the reply
+  # would share one inbox, one thread and one awaiting_from. panel dispatch, ask and shadow each
+  # refused this; the single-reviewer send did not, so `/auto --reviewers <self>` worked by
+  # omission. Same-model review is a review IDENTITY — a different name, compared as a name.
+  case "$ftype" in
+    review-request|question)
+      if [ -n "$ffrom" ] && [ "$ffrom" = "$to" ]; then
+        local ra hint="" r
+        ra="$(registry_review_agents)" || exit 2
+        for r in $ra; do
+          [ "$(registry_provider "$r")" = "$to" ] && { hint="$r"; break; }
+        done
+        die "send: '$to' authored this $ftype — an agent cannot review or answer its own request. Same-model review goes to a review identity (${hint:+--to $hint; }declare one with review-agents = <name>:<provider>). Nothing was sent; remove the outbound if it sits in an inbox: $file"
+      fi ;;
+  esac
 }
 
 # THE PANEL'S OWN RECORD OF ITS ROUTED LEGS. When a routed panel is dispatched it writes, before
@@ -1718,8 +1914,12 @@ cmd_ask() {
   done
   [ -n "$from" ] || usage_err "ask: --from <agent> is required (who is asking)"
   [ -n "$to" ]   || usage_err "ask: --to <agent> is required"
-  require_agent "$from" "ask"; require_agent "$to" "ask"
+  require_driver "$from" "ask"; require_agent "$to" "ask"
   [ "$from" != "$to" ] || usage_err "ask: '$from' cannot consult itself"
+  # A review identity is review-only: it answers review requests, never consults.
+  if registry_is_review "$to"; then
+    usage_err "ask: '$to' is a review-only identity — consult a driver instead (drivers: $(registry_drivers))"
+  fi
   [ -n "$qfile" ] || [ -n "$words" ] || usage_err "ask: a question is required (--file F or words)"
   [ -z "$qfile" ] || [ -f "$qfile" ] || usage_err "ask: no such file '$(clip "$qfile")'"
 
@@ -1921,11 +2121,26 @@ cmd_panel() {
 
   # Validate the whole roster BEFORE dispatching any leg: a half-fanned panel is worse
   # than none, because the composed gate would silently be missing a voice.
-  local ag roster=""
+  # The AUTHOR must be a driver: a review identity never authors (validate refuses it too, but
+  # only per leg, after the plan events are written — too late to refuse cleanly).
+  [ -n "$author" ] && registry_has "$author" && registry_is_review "$author" \
+    && usage_err "panel dispatch: '$author' is a review-only identity — it cannot author a review request"
+  local ag roster="" prov provs=""
   for ag in $(printf '%s' "$to" | tr ',' ' '); do
     require_agent "$ag" "panel dispatch"
+    # IDENTITY compare, deliberately: a leg on the author's own PROVIDER under its own name
+    # (claude-review reviewing claude) is the point of review identities.
     [ "$ag" != "$author" ] || usage_err "panel dispatch: '$ag' authored this request — it cannot review it"
     case " $roster " in *" $ag "*) usage_err "panel dispatch: '$ag' listed twice" ;; esac
+    # Two legs on one PROVIDER are one model reviewing twice: same routing decision, same
+    # provider-keyed policy, same prompt — compose would count their agreement as two
+    # independent reviewers. This is the early, friendly refusal; compose re-checks what it
+    # actually counts, from the replies' own provider stamps.
+    prov="$(registry_provider "$ag")" || usage_err "panel dispatch: cannot resolve the provider of '$ag'"
+    case " $provs " in
+      *" $prov "*) usage_err "panel dispatch: two legs on provider '$prov' ($(printf '%s' "$to" | tr ',' ' ')) — a panel's reviewers must be independent; keep one '$prov'-backed reviewer" ;;
+    esac
+    provs="$provs $prov"
     roster="$roster $ag"
   done
   roster="${roster# }"
@@ -2218,7 +2433,7 @@ cmd_compose() {
   fi
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
-  local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread="" blind="" answered_agents=""
+  local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread="" blind="" answered_agents="" leg_providers=""
   while IFS=$'\t' read -r ag th rnd req_mid; do
     [ -n "$ag" ] || continue
     n_legs=$((n_legs + 1))
@@ -2249,6 +2464,8 @@ cmd_compose() {
     done
     if [ -z "$reply" ]; then pending="$pending $ag"; continue; fi
     n_answered=$((n_answered + 1)); answered_agents="$answered_agents $ag"
+    leg_providers="$leg_providers
+$ag	$(reply_provider "$reply")"
     # A panel must never print a finding count over content it could not read. The broker
     # refuses to STAMP such a reply, but a leg can reach compose by other routes (a
     # self-sending agent authors its own envelope), and a partially-unreadable lane is not
@@ -2366,6 +2583,23 @@ $ag_d	$(degrade_boundary_state "$set_id" "$compose_dispatch" "$ag_d")"
         || echo "warning: coordinator log not updated (composition-refused)" >&2
       return 3
     fi
+  fi
+
+  # TWO ANSWERS FROM ONE PROVIDER ARE NOT TWO REVIEWERS. Dispatch refuses a same-provider roster,
+  # but only for the roster it was handed: concurrent attempts, carried-forward legs and a
+  # remapped review identity can all put two replies from one model into what is counted here.
+  # So the evidence is the counted replies themselves (reply_provider: a driver is its own
+  # provider, a review identity's is its broker's stamp) — never the registry as it reads now.
+  local dup_prov
+  dup_prov="$(printf '%s\n' "$leg_providers" | awk -F'\t' 'NF == 2 && $2 != "" {
+      if ($2 in first) { printf "%s and %s both answered on provider %s\n", first[$2], $1, $2 } else first[$2] = $1 }')"
+  if [ -n "$dup_prov" ]; then
+    printf '%s\n' "$dup_prov" | sed 's/^/compose: /'
+    echo "compose: refusing to count one model's agreement with itself as corroboration — re-dispatch with one reviewer per provider"
+    cmd_events append --kind composition-refused --set "$set_id" --dispatch "$compose_dispatch" --status duplicate-provider \
+      --note "$(printf '%s' "$dup_prov" | tr '\n' ' ')" \
+      || echo "warning: coordinator log not updated (composition-refused)" >&2
+    return 3
   fi
 
   # A leg whose zero-blocking count is a FAILED READ is not an answer either, for the same
@@ -3026,8 +3260,10 @@ cmd_shadow() {
   # record thread state, so for those the "cannot gate" guarantee would be a
   # convention rather than a mechanism — and this command's whole value is that it
   # is a mechanism. Refuse rather than silently downgrade. (grok, live 2026-08-22.)
-  local shadow_via=""
-  shadow_via="$(suppression_ok "$to")" \
+  local shadow_via="" shadow_prov
+  # Capability is a property of the PROVIDER; the shadow's name, store and stamp stay the identity.
+  shadow_prov="$(registry_provider "$to")" || usage_err "shadow: cannot resolve the provider of '$to'"
+  shadow_via="$(suppression_ok "$shadow_prov")" \
     || usage_err "shadow: '$to' would author and send its own reply here, so a shadow run could not be prevented from reaching an inbox — it can only be shadowed over a parent-brokered transport (ACP), and ACP is not available for it on this machine"
   [ -n "$req" ] || usage_err "shadow: a review-request file is required"
   [ -f "$req" ] || usage_err "shadow: no such file '$(clip "$req")'"
@@ -3136,9 +3372,13 @@ cmd_shadow() {
     ' "$req" > "$child_msg"
   fi
   grep -q "^cwd: $tree\$" "$child_msg" || { shadow_cleanup; die "shadow: could not point the request at the mounted artifact"; }
+  # The private copy is addressed to the SHADOW, not to whoever the original went to, so it
+  # carries the shadow target's provider stamp (or none) — never an inherited one. The
+  # original request is not touched.
+  stamp_review_provider "$child_msg" "$to" || { shadow_cleanup; die "shadow: could not stamp the review provider on the private copy"; }
   cmd_validate "$child_msg" >/dev/null || { shadow_cleanup; die "shadow: the mounted-artifact copy did not validate"; }
 
-  local rver_now; rver_now="$(agent_version "$to")"
+  local rver_now; rver_now="$(agent_version "$shadow_prov")"
   local run_dir="$tmpdir/run"
   mkdir -p "$run_dir"
   echo "shadow: $to reviewing artifact ${aid} (set $rsid) in an isolated checkout — not delivered, cannot gate"
@@ -3146,7 +3386,7 @@ cmd_shadow() {
   # The transport is the thing that MAKES suppression honourable for a self-sending agent, so it
   # is passed, not assumed: without it runphase refuses the flag at its own boundary — correctly.
   ( cd "$tree" && RUNPHASE_NO_DELIVER=1 "$rp" run --message "$child_msg" --dir "$run_dir" \
-      --provider "$to" --no-deliver ${shadow_via:+--via "$shadow_via"} \
+      --agent "$to" --no-deliver ${shadow_via:+--via "$shadow_via"} \
       ${timeout:+--timeout-secs "$timeout"} ) >/dev/null 2>&1 || rc=$?
   git -C "$root" worktree remove --force "$tree" 2>/dev/null || true
 
@@ -4552,6 +4792,37 @@ cmd_validate() {
   if [ -n "$from_agent" ] && ! registry_has "$from_agent"; then
     errors="${errors}  from '$from_agent' is not a registered agent (registered: $(registry_agents))\n"
   fi
+  # A REVIEW identity authors exactly one thing: the review-feedback its broker stamps. Every
+  # writer (send, panel legs, the broker, ask, shadow) passes here, so this is the one place the
+  # rule lives.
+  if [ -n "$from_agent" ] && registry_is_review "$from_agent" && [ "$msg_type" != "review-feedback" ]; then
+    errors="${errors}  from '$from_agent' is a review-only identity — it may author only review-feedback, not '${msg_type:-<no type>}'\n"
+  fi
+  # `review_provider` means different things by DIRECTION, so each direction has one rule.
+  # On a reply it names the SENDER's provider — the fact compose counts — so it must agree with
+  # reply_provider: required from a review identity, and a driver's is its own name,
+  # unconditionally. On a request it names the RECIPIENT's provider; it is helper-stamped
+  # (stamp_review_provider) and bound to the real target by send, shadow and runphase, so all
+  # validate can say is that a present value is a provider.
+  val="$(frontmatter_field "$file" review_provider)"
+  if [ "$msg_type" = "review-feedback" ] && [ -n "$from_agent" ] && registry_has "$from_agent"; then
+    local rp_have rp_want
+    rp_have="$val"
+    rp_want="$(reply_provider "$file")"
+    if registry_is_review "$from_agent"; then
+      case " $SUPPORTED_AGENTS " in
+        *" ${rp_have:-<none>} "*) ;;
+        *) errors="${errors}  review-feedback from review identity '$from_agent' carries no valid review_provider (got '${rp_have:-<none>}')\n" ;;
+      esac
+    elif [ -n "$rp_have" ] && [ "$rp_have" != "$rp_want" ]; then
+      errors="${errors}  review-feedback from driver '$from_agent' claims review_provider '$rp_have' — a driver's provider is its own name\n"
+    fi
+  elif [ -n "$val" ]; then
+    case " $SUPPORTED_AGENTS " in
+      *" $val "*) ;;
+      *) errors="${errors}  review_provider '$val' is not a supported provider ($SUPPORTED_AGENTS)\n" ;;
+    esac
+  fi
   if [ -n "$workflow" ]; then
     for field in phase round max-rounds; do
       val="$(frontmatter_field "$file" "$field")"
@@ -4670,7 +4941,7 @@ deliver_headless() {
     fg_dir="$(cmd_root)/logs/$(safe_name "$(basename "$msgfile" .md)").$(date +%s).fg$$"
     mkdir -p "$fg_dir" || die "send --wait: cannot create $fg_dir"
     echo "running $target in the foreground (no detach) — run dir: $fg_dir"
-    if "$rp" run --message "$msgfile" --dir "$fg_dir" --provider "$target" >>"$fg_dir/runner.log" 2>&1; then
+    if "$rp" run --message "$msgfile" --dir "$fg_dir" --agent "$target" >>"$fg_dir/runner.log" 2>&1; then
       echo "completed: $target finished; the reply is in the inbox"
       return 0
     fi
@@ -4678,7 +4949,7 @@ deliver_headless() {
     return 0
   fi
   local out
-  if out="$("$rp" spawn --provider "$target" --message "$msgfile" 2>&1)"; then
+  if out="$("$rp" spawn --agent "$target" --message "$msgfile" 2>&1)"; then
     printf '%s\n' "$out"
   else
     printf '%s\n' "$out"
@@ -4707,7 +4978,7 @@ runphase_available() { [ -x "$(dirname "$SELF")/runphase.sh" ]; }
 # Do NOT "fix" this by adding `reviewer-consult-only` to claude/codex in the registry: that
 # same string is read by runphase's NON-ACP guard, so it would let `--no-deliver` through on
 # the self-send path, where the child writes to an inbox itself and suppression is a lie.
-suppression_ok() {  # <agent> -> echoes "acp" | "" ; rc 1 if suppression cannot be honoured
+suppression_ok() {  # <provider> -> echoes "acp" | "" ; rc 1 if suppression cannot be honoured
   case "$(cmd_agents --supported | awk -v a="$1" -F'\t' '$1==a {print $2}')" in
     *reviewer-consult-only*) printf ''; return 0 ;;   # brokered on every path already
   esac
@@ -4716,13 +4987,13 @@ suppression_ok() {  # <agent> -> echoes "acp" | "" ; rc 1 if suppression cannot 
   return 1
 }
 
-acp_supports() {  # <agent> — can an ACP turn actually run here for this agent?
+acp_supports() {  # <provider> — can an ACP turn actually run here for this provider?
   local acp_sh; acp_sh="$(dirname "$SELF")/acp.sh"
   [ -x "$acp_sh" ] || return 1
   "$acp_sh" supports "$1" >/dev/null 2>&1
 }
 
-# headless_ok <agent> — may this agent take the headless transport? Only a provider that is
+# headless_ok <provider> — may this provider take the headless transport? Only a provider that is
 # parent-brokered WITHOUT ACP may: headless used to route a SELF-SENDING child, and that arm is
 # gone (step 4, S4-2). grok qualifies via its registry marker; claude/codex must use ACP, and
 # runphase fails them closed. Gating every rung on ONE predicate is what stops `transport` handing
@@ -4778,13 +5049,17 @@ cmd_transport() {
   done
   [ -n "$agent" ] || usage_err "transport: an agent name is required (registered: $(registry_agents))"
   require_agent "$agent" "transport"
+  # Routing is a property of the PROVIDER; every rung below reads it, never the identity. A
+  # review identity (claude-review) routes exactly as its provider (claude) does.
+  local prov
+  prov="$(registry_provider "$agent")" || die "transport: cannot resolve the provider of '$agent'"
 
   # HEADLESS IS NO LONGER UNIVERSAL. It used to route a SELF-SENDING child, and that arm is gone
   # (step 4, S4-2), so it is valid only for a provider that is parent-brokered WITHOUT ACP. grok is
   # that provider today; claude/codex must go through ACP or fail closed in runphase. Keyed on the
   # registry marker rather than the name, so a second brokered provider needs no edit here.
   if [ "${COMMS_DELIVERY:-}" = "headless" ]; then
-    headless_ok "$agent" && { printf 'headless\n'; return 0; }
+    headless_ok "$prov" && { printf 'headless\n'; return 0; }
     die "transport: COMMS_DELIVERY=headless is not available for '$agent' — its self-send path was removed in step 4; use ACP"
   fi
   if [ "${COMMS_DELIVERY:-}" = "acp" ]; then printf 'acp\n'; return 0; fi
@@ -4796,7 +5071,7 @@ cmd_transport() {
   if [ "${COMMS_DELIVERY:-}" = "mailbox" ]; then printf 'mailbox\n'; return 0; fi
 
   local caps
-  caps="$(cmd_agents --supported | awk -v a="$agent" -F'\t' '$1==a {print $2}')"
+  caps="$(cmd_agents --supported | awk -v a="$prov" -F'\t' '$1==a {print $2}')"
 
   # NOT gated here: both callers gate first — the router for the CLI verb, and cmd_deliver
   # at its own top. A third copy would be a rule with three owners. (grok, S4-4 r4.)
@@ -4812,11 +5087,11 @@ cmd_transport() {
   # round N pay a delta rather than re-sending a large uncached prefix per model call.
   # headless stays available and opt-in (COMMS_DELIVERY / --via), grok only.
   if [ "$mode" = "loop" ]; then
-    if acp_supports "$agent"; then printf 'acp\n'; return 0; fi
+    if acp_supports "$prov"; then printf 'acp\n'; return 0; fi
     # Fall back to headless only when ACP is genuinely unavailable: flipping the default
     # must not strand every loop on an install where runphase.sh never landed. There is no
     # pane arm below this any more — cmux was deleted in step 4 (S4-4).
-    if runphase_available && headless_ok "$agent"; then printf 'headless\n'; return 0; fi
+    if runphase_available && headless_ok "$prov"; then printf 'headless\n'; return 0; fi
     # A LOOP MUST NOT FALL BACK TO A PANE for a provider whose self-send path is gone. Deleting
     # headless for claude/codex (step 4, S4-2) made this ladder drop straight through to a pane —
     # the SAME self-send model in another costume: a nudge tells a live agent to read and reply
@@ -4833,8 +5108,8 @@ cmd_transport() {
   # Consults only: a loop turn must be able to EXECUTE (read files, run git) and that
   # permission policy is unbuilt, so silently re-routing a loop would change its
   # semantics rather than just its transport.
-  if [ "$mode" = "consult" ] && acp_supports "$agent"; then printf 'acp\n'; return 0; fi
-  case "$caps" in *interactive*) ;; *) headless_ok "$agent" && { printf 'headless\n'; return 0; } ;; esac
+  if [ "$mode" = "consult" ] && acp_supports "$prov"; then printf 'acp\n'; return 0; fi
+  case "$caps" in *interactive*) ;; *) headless_ok "$prov" && { printf 'headless\n'; return 0; } ;; esac
   printf 'mailbox\n'
 }
 
@@ -4876,7 +5151,7 @@ cmd_deliver() {
   route="$(cmd_transport "$target" $mode_flag)"
   case "$route" in
     headless)
-      case "$target" in
+      case "$(registry_provider "$target")" in
         claude|codex) ;;
         *) echo "note: '$target' is a headless-only agent — routing delivery via runphase" ;;
       esac
@@ -5035,19 +5310,11 @@ state_update_from() {
   # plan message. (codex, panel r1.)
   loopr="$(frontmatter_field "$mf" loop-rounds)"
   from="$(frontmatter_field "$mf" from)"
-  # The EXPLICIT send --to target is authoritative for who owes the next message
-  # — a complement of the sender is only a two-party assumption and breaks at
-  # three agents. The complement remains solely as a fallback for callers that
-  # cannot supply a target.
-  if [ -n "$awaiting_override" ]; then
-    awaiting_from="$awaiting_override"
-  else
-    case "$from" in
-      claude) awaiting_from=codex ;;
-      codex)  awaiting_from=claude ;;
-      *)      awaiting_from=unknown ;;
-    esac
-  fi
+  # The EXPLICIT send --to target is authoritative for who owes the next message. A
+  # complement of the sender (claude<->codex) was a two-party assumption: wrong at three
+  # agents, and wrong for a review identity, whose driver shares its provider. The one
+  # caller always passes the target, so no target means "unknown", never a guess.
+  awaiting_from="${awaiting_override:-unknown}"
   mid="$(frontmatter_field "$mf" message_id)"
   [ -n "$mid" ] || mid="$(basename "$mf" .md)"
   dir="$(state_dir)"
@@ -5265,6 +5532,7 @@ cmd_send() {
   [ -n "$to" ] || die "send: --to <agent> is required (registered: $(registry_agents))"
   require_agent "$to" "send"
   [ -n "$file" ] || die "send: outbound file argument required"
+  send_role_check "$file" "$to"
 
   # RETAIN THE ARTIFACT THE REVIEWER WILL READ, before anyone reads it. Without this
   # the reviewer reads the LIVE tree, so what it reviewed is whatever the author was
@@ -5530,6 +5798,16 @@ cmd_send() {
   route_lines="$(fm_field_lines "$file" route_decision | wc -l | tr -d ' ')"
   if [ -n "$route_id" ] || [ "${route_lines:-0}" != 0 ]; then
     stamp_route_decision "$file" "$route_id" || die "send: could not stamp the routing decision"
+  fi
+
+  # PROVIDER PROVENANCE — helper-stamped, never typed. A request to a review identity carries
+  # the provider the registry maps it to NOW; runphase refuses the turn if the map has changed
+  # by the time it runs, and the broker stamps the same value on the reply, which is what
+  # compose counts. So "these two replies came from different providers" is a fact recorded on
+  # the replies, not a reading of whatever the registry says later. A request to a driver
+  # carries none (its provider is its name), and any hand-typed value is removed.
+  if [ "$send_type" = "review-request" ]; then
+    stamp_review_provider "$file" "$to" || die "send: could not stamp the review provider for '$to'"
   fi
 
   # Atomicity guard: never deliver or archive on a malformed outbound message.
