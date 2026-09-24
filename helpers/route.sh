@@ -392,10 +392,13 @@ def _write(fields, reused_id=""):
     fields = dict(fields)
     fields["reason"] = reason
     rid = reused_id or _record(fields)
-    for k in KEYS:
-        sys.stdout.write(f"{k}: {fields[k]}\n")
-    if rid:
-        sys.stdout.write(f"route_id: {rid}\n")
+    # Composed and encoded in full BEFORE anything is printed: if a value cannot be written, no
+    # partial key block reaches stdout ahead of the shell's fail-open block (/auto reads the FIRST
+    # match of each key). (codex, implement r1.)
+    out = "".join(f"{k}: {fields[k]}\n" for k in KEYS) + (f"route_id: {rid}\n" if rid else "")
+    out.encode("utf-8")
+    sys.stdout.write(out)
+    sys.stdout.flush()
     log_path = os.environ.get("COMMS_ROUTE_LOG") or ""
     if log_path:
         rec = {
@@ -553,6 +556,9 @@ def _input_key():
         "questions": hashlib.sha256(json.dumps(getattr(route_backend, "QUESTIONS", None),
                                                sort_keys=True, default=str).encode()).hexdigest(),
         "task": task,
+        # The whole outbound state (task AND the classifier instructions around it), so a change
+        # to what is sent is a new input even when the task text is the same. (codex, r1 advisory.)
+        "state": hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode()).hexdigest(),
         "current_tier": os.environ.get("COMMS_ROUTE_CURRENT_TIER") or "",
         "context_tokens": os.environ.get("COMMS_ROUTE_CONTEXT_TOKENS") or "",
         "url": os.environ.get("COMMS_ROUTE_URL") or "",
@@ -574,8 +580,16 @@ def _decision_ok(dec):
     # A record is a file on disk; its values reach stdout, which /auto parses line by line. Only
     # well-formed values are reused: the enumerations must be members, and nothing may carry a
     # control character (a newline in any value would forge a key line).
-    if not all(isinstance(dec.get(k), str) and not re.search(r"[\x00-\x1f\x7f]", dec[k]) for k in KEYS):
+    if not isinstance(dec, dict):
         return False
+    for k in KEYS:
+        v = dec.get(k)
+        if not isinstance(v, str) or re.search(r"[\x00-\x1f\x7f]", v):
+            return False
+        try:
+            v.encode("utf-8")   # lone surrogates survive json.load but cannot be printed
+        except UnicodeEncodeError:
+            return False
     return (dec["plan"] in ("yes", "no") and dec["effort"] in EFFORTS and dec["tier"] in TIERS
             and dec["complexity"] in LEVELS)
 
@@ -605,7 +619,11 @@ def _reusable(key):
             at = calendar.timegm(time.strptime(rec["at"], "%Y-%m-%dT%H:%M:%SZ"))
         except (OSError, ValueError, KeyError, TypeError):
             continue
-        dec = rec.get("decision") or {}
+        if not isinstance(rec, dict):
+            continue
+        dec = rec.get("decision")
+        if not isinstance(dec, dict):
+            continue
         if (rec.get("input_key") != key or rec.get("probe") or not rec.get("sent")
                 or dec.get("source") != _bname or not (0 <= now - at <= window)
                 or not _decision_ok(dec)
@@ -617,7 +635,11 @@ def _reusable(key):
 
 if _bfn is not None:
     TRACE["input_key"] = _input_key()
-    _hit = _reusable(TRACE["input_key"])
+    try:
+        _hit = _reusable(TRACE["input_key"])
+    except Exception as e:   # the cache is an optimisation: any failure reading it means classify fresh
+        sys.stderr.write(f"route.sh: decision reuse skipped: {e}\n")
+        _hit = None
     if _hit is not None:
         sys.stderr.write(f"route.sh: reused decision {_hit['route_id']} (identical input, {_hit['at']})\n")
         _write({k: _hit["decision"][k] for k in KEYS}, reused_id=_hit["route_id"])

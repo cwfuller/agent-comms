@@ -1012,16 +1012,19 @@ ID1="$(rt_kv "$O1" route_id)"; N=0
 for O in "$O3" "$O4" "$O5"; do I="$(rt_kv "$O" route_id)"; [ -n "$I" ] && [ "$I" != "$ID1" ] && N=$((N+1)); done
 [ "$N" = 3 ] && [ "$(rt_kv "$O5" complexity)" = hard ] \
   && ok "a different task, current tier, or backend answer is a fresh decision" || fail "input change reused ($N/3)"
-# The window: 0 disables reuse; a record older than the window is not reused.
-O6="$(rt COMMS_ROUTE_STUB="$ST/dd.json" COMMS_ROUTE_DEDUP_SECS=0 -- "dedup: add a null check to the parser" 2>/dev/null)"
+# The window: 0 disables reuse; a record older than the window is not reused. The expiry case uses
+# its OWN task, so the aged record is the only candidate and a new id proves age was checked.
 ID5="$(rt_kv "$O5" route_id)"
-python3 - "$DD_DIR/$ID5.json" <<'PY'
+O6="$(rt COMMS_ROUTE_STUB="$ST/dd.json" COMMS_ROUTE_DEDUP_SECS=0 -- "dedup: add a null check to the parser" 2>/dev/null)"
+E1="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: expiry only" 2>/dev/null)"; EID="$(rt_kv "$E1" route_id)"
+python3 - "$DD_DIR/$EID.json" <<'PY'
 import json, os, sys, time
 p = sys.argv[1]; d = json.load(open(p)); old = time.time() - 7200
 d["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(old)); json.dump(d, open(p, "w")); os.utime(p, (old, old))
 PY
-O7="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: add a null check to the parser" 2>/dev/null)"
-[ "$(rt_kv "$O6" route_id)" != "$ID5" ] && [ -n "$(rt_kv "$O7" route_id)" ] && [ "$(rt_kv "$O7" route_id)" != "$ID5" ] \
+N0="$(dd_n)"; E2="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: expiry only" 2>/dev/null)"
+[ -n "$(rt_kv "$O6" route_id)" ] && [ "$(rt_kv "$O6" route_id)" != "$ID5" ] && [ -n "$EID" ] \
+  && [ -n "$(rt_kv "$E2" route_id)" ] && [ "$(rt_kv "$E2" route_id)" != "$EID" ] && [ "$(dd_n)" = $((N0 + 1)) ] \
   && ok "reuse stops at COMMS_ROUTE_DEDUP_SECS (0 disables it)" || fail "window not honoured"
 # Fail-opens are never reused: each is its own record.
 F1="$(rt -- "dedup: no backend here" 2>/dev/null)"; F2="$(rt -- "dedup: no backend here" 2>/dev/null)"
@@ -1029,7 +1032,7 @@ F1="$(rt -- "dedup: no backend here" 2>/dev/null)"; F2="$(rt -- "dedup: no backe
   && ok "a fail-open is never reused" || fail "fail-open reused"
 # A reuse is still a served decision: the optional JSONL log gets a line naming the reused id.
 rt COMMS_ROUTE_STUB="$ST/dd.json" COMMS_ROUTE_LOG="$WORK/dd.jsonl" -- "dedup: add a null check to the parser" >/dev/null 2>&1
-grep -q "\"reused\": \"$(rt_kv "$O7" route_id)\"" "$WORK/dd.jsonl" \
+grep -q "\"reused\": \"$(rt_kv "$O6" route_id)\"" "$WORK/dd.jsonl" \
   && ok "COMMS_ROUTE_LOG records a reuse with the reused route_id" || fail "reuse not logged"
 # PROBE: the whole path, no request. The record says probe, nothing sent, no answers.
 N0="$(dd_n)"
@@ -1064,3 +1067,23 @@ PY
 B2="$(rt COMMS_ROUTE_STUB="$ST/dd-bad.json" -- "dedup: hostile record" 2>/dev/null)"
 [ -n "$BID" ] && [ "$(rt_kv "$B2" route_id)" != "$BID" ] && [ "$(printf '%s\n' "$B2" | grep -c '^plan:')" = 1 ] \
   && ok "a record with a control character in a value is not reused" || fail "malformed record reused"
+# A record that is not an object, or whose decision is not an object, or holds a value that cannot
+# be printed, is skipped and the call classifies fresh, with exactly one clean key block.
+rt_stub 0.2 1 0.9 medium 0.9 "$ST/dd-bad2.json"
+N=0
+for BAD in '["bad"]' '"bad"' 'SURR'; do
+  M1="$(rt COMMS_ROUTE_STUB="$ST/dd-bad2.json" -- "dedup: malformed $N" 2>/dev/null)"; MID="$(rt_kv "$M1" route_id)"
+  python3 - "$DD_DIR/$MID.json" "$BAD" <<'PY'
+import json, sys
+p, bad = sys.argv[1], sys.argv[2]; d = json.load(open(p))
+if bad == "SURR":
+    d["decision"]["reason"] = "\ud800"; s = json.dumps(d)   # json escapes the lone surrogate
+else:
+    d["decision"] = json.loads(bad); s = json.dumps(d)
+open(p, "w").write(s)
+PY
+  M2="$(rt COMMS_ROUTE_STUB="$ST/dd-bad2.json" -- "dedup: malformed $N" 2>/dev/null)"; A=$?
+  [ "$A" = 0 ] && [ "$(rt_kv "$M2" source)" = stub ] && [ "$(rt_kv "$M2" route_id)" != "$MID" ] \
+    && [ "$(printf '%s\n' "$M2" | grep -c '^plan:')" = 1 ] && N=$((N+1))
+done
+[ "$N" = 3 ] && ok "non-object, wrong-typed or unprintable records fall through to a fresh classification" || fail "malformed records ($N/3)"
