@@ -48,6 +48,20 @@
 # decision joins to the loop it sized. The directory is NOT env-settable (the same rule as the
 # shadow records: a settable destination could be a tracked path). Outside a git repo there is
 # nowhere to record; a failed write warns on stderr and never changes the decision.
+#
+# REUSE. A live classification whose INPUT is identical to one recorded in the last
+# COMMS_ROUTE_DEDUP_SECS (default 900; 0 disables) — same task text, policy variant, backend,
+# model, question set, current tier and context size — is answered from that record: same ten
+# keys, same route_id, no new request and no new record (a stderr note says so). Any input
+# change is a fresh decision. Only successful backend answers are reused; fail-opens and probes
+# never are. (A repeat call used to re-ask Jev and could land on the other side of
+# a confidence cutoff seconds later.)
+#
+# --probe exercises the whole path (state, backend resolution, record) WITHOUT contacting any
+# backend: it prints a fail-open decision with `source: probe` and saves a record marked
+# `probe: true`, so evaluation can drop it. Use it instead of a throwaway task like `x`, which
+# is a real, billed classification. An empty or whitespace-only task is a usage error and is
+# never sent; a short real task ("fix typo in README") is classified normally.
 #   COMMS_ROUTE_CURRENT_TIER  fast|balanced|strong — session's current tier
 #                             (honoured when --current-tier is omitted)
 #   COMMS_ROUTE_CONTEXT_TOKENS  approx conversation size; blocks downgrades past 20k
@@ -172,6 +186,7 @@ shadow_permitted() {
 task=""
 file=""
 shadow_mode=0
+probe_mode=0
 shadow_role=implementer
 shadow_thread=""
 explicit_task=0
@@ -182,6 +197,7 @@ tokens_from_cli=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --shadow) shadow_mode=1; shift ;;
+    --probe) probe_mode=1; shift ;;
     --reviewer)
       [ "$shadow_mode" -eq 1 ] || usage_err "--reviewer is only valid with --shadow (live reviewer decisions are made by comms.sh review-route)"
       shadow_role=reviewer; shift ;;
@@ -260,6 +276,7 @@ case "$(printf '%s' "$task" | tr -d ' \t\n\r')" in
 esac
 
 if [ "$shadow_mode" -eq 1 ]; then
+  [ "$probe_mode" -eq 0 ] || usage_err "--probe is a classify-path option; the shadow collector has none"
   shadow_run   # never returns; never prints the classify keys
 fi
 
@@ -273,6 +290,8 @@ fi
 
 export COMMS_ROUTE_HOME="$(cd "$(dirname "$0")" && pwd)"
 export COMMS_ROUTE_TASK="$task"
+# From the flag only — an inherited COMMS_ROUTE_PROBE cannot silently turn a live /auto into a probe.
+export COMMS_ROUTE_PROBE="$probe_mode"
 # Set unconditionally here, so an inherited value can never redirect the records. And only where
 # git CONFIRMS the path is ignored: the helpers are installed globally, so `route` also runs in
 # repositories that never ran project init, and there a record would be an ordinary untracked
@@ -302,7 +321,7 @@ export COMMS_ROUTE_CURRENT_TIER="$current_tier"
 export COMMS_ROUTE_CONTEXT_TOKENS="${context_tokens:-0}"
 
 python3 - <<'PY' || fail_open "classifier python exited non-zero"
-import hashlib, json, os, re, sys, time
+import calendar, hashlib, json, os, re, sys, time
 
 KEYS = (
     "plan", "effort", "complexity", "tier", "gate",
@@ -313,7 +332,8 @@ KEYS = (
 POLICY_VARIANT = "implementer-bump-v1"
 
 # What the record needs beyond the ten keys; filled in as the run gets that far.
-TRACE = {"state": None, "sent": False, "backend": None, "answers": None}
+TRACE = {"state": None, "sent": False, "backend": None, "answers": None, "input_key": None,
+         "probe": os.environ.get("COMMS_ROUTE_PROBE") == "1"}
 
 def _record(fields):
     """Persist this decision; returns the route id, or "" when nothing could be recorded."""
@@ -346,6 +366,8 @@ def _record_write(rdir, rid, fields):
         "sent": TRACE["sent"],
         "state": TRACE["state"],
         "answers": TRACE["answers"],
+        "input_key": TRACE["input_key"],
+        "probe": TRACE["probe"],
         "decision": {k: fields[k] for k in KEYS},
     }
     os.makedirs(rdir, exist_ok=True)
@@ -364,11 +386,12 @@ def _record_write(rdir, rid, fields):
         raise
     return rid
 
-def _write(fields):
+def _write(fields, reused_id=""):
+    # reused_id: answer from an existing record (REUSE) — print and log it, write no new record.
     reason = " ".join(str(fields["reason"]).split())
     fields = dict(fields)
     fields["reason"] = reason
-    rid = _record(fields)
+    rid = reused_id or _record(fields)
     for k in KEYS:
         sys.stdout.write(f"{k}: {fields[k]}\n")
     if rid:
@@ -382,6 +405,8 @@ def _write(fields):
         rec.update({k: fields[k] for k in KEYS if k != "reason"})
         rec["reason"] = reason
         rec["policy_variant"] = POLICY_VARIANT
+        if reused_id:
+            rec["reused"] = reused_id
         try:
             with open(log_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -510,10 +535,97 @@ state = route_backend.build_state(task)
 TRACE["state"] = state
 try:
     _bname, _bfn = route_backend.resolve()
-    TRACE["backend"] = _bname
-    # "sent" = the backend was asked. For the stub nothing leaves the machine, but it is the
-    # same code path; the record names the backend, so a reader can tell.
-    TRACE["sent"] = _bfn is not None
+except route_backend.BackendError as e:
+    fail_open(e.reason, e.source)
+TRACE["backend"] = _bname
+
+if TRACE["probe"]:
+    # Everything up to the request, and no request.
+    fail_open("probe: no backend was contacted", "probe")
+
+def _input_key():
+    # Everything that can change Jev's answer or its mapping. The questions are hashed rather than
+    # named so an edited rubric is a new input even under the same policy name.
+    ident = {
+        "policy": POLICY_VARIANT,
+        "backend": _bname,
+        "model": os.environ.get("COMMS_ROUTE_MODEL") or "",
+        "questions": hashlib.sha256(json.dumps(getattr(route_backend, "QUESTIONS", None),
+                                               sort_keys=True, default=str).encode()).hexdigest(),
+        "task": task,
+        "current_tier": os.environ.get("COMMS_ROUTE_CURRENT_TIER") or "",
+        "context_tokens": os.environ.get("COMMS_ROUTE_CONTEXT_TOKENS") or "",
+        "url": os.environ.get("COMMS_ROUTE_URL") or "",
+        # The stub's canned body IS its answer, so a different body is a different input.
+        "stub": _file_sha(os.environ.get("COMMS_ROUTE_STUB") or ""),
+    }
+    return hashlib.sha256(json.dumps(ident, sort_keys=True).encode()).hexdigest()
+
+def _file_sha(path):
+    if not path:
+        return ""
+    try:
+        with open(path, "rb") as fh:
+            return path + ":" + hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return path + ":unreadable"
+
+def _decision_ok(dec):
+    # A record is a file on disk; its values reach stdout, which /auto parses line by line. Only
+    # well-formed values are reused: the enumerations must be members, and nothing may carry a
+    # control character (a newline in any value would forge a key line).
+    if not all(isinstance(dec.get(k), str) and not re.search(r"[\x00-\x1f\x7f]", dec[k]) for k in KEYS):
+        return False
+    return (dec["plan"] in ("yes", "no") and dec["effort"] in EFFORTS and dec["tier"] in TIERS
+            and dec["complexity"] in LEVELS)
+
+def _reusable(key):
+    """The newest record in the window with this input and a live answer, or None."""
+    rdir = os.environ.get("COMMS_ROUTE_RECORD_DIR") or ""
+    try:
+        window = int(os.environ.get("COMMS_ROUTE_DEDUP_SECS", "900"))
+    except ValueError:
+        window = 900
+    if not rdir or window <= 0:
+        return None
+    now = time.time()
+    best = None
+    try:
+        entries = list(os.scandir(rdir))
+    except OSError:
+        return None
+    for ent in entries:
+        if not ent.name.endswith(".json") or ent.name.startswith("."):
+            continue
+        try:
+            if now - ent.stat().st_mtime > window:
+                continue   # cheap prefilter; `at` below is authoritative
+            with open(ent.path, encoding="utf-8") as fh:
+                rec = json.load(fh)
+            at = calendar.timegm(time.strptime(rec["at"], "%Y-%m-%dT%H:%M:%SZ"))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        dec = rec.get("decision") or {}
+        if (rec.get("input_key") != key or rec.get("probe") or not rec.get("sent")
+                or dec.get("source") != _bname or not (0 <= now - at <= window)
+                or not _decision_ok(dec)
+                or not re.fullmatch(r"[0-9a-f-]{8,64}", str(rec.get("route_id", "")))):
+            continue
+        if best is None or rec["at"] > best["at"]:
+            best = rec
+    return best
+
+if _bfn is not None:
+    TRACE["input_key"] = _input_key()
+    _hit = _reusable(TRACE["input_key"])
+    if _hit is not None:
+        sys.stderr.write(f"route.sh: reused decision {_hit['route_id']} (identical input, {_hit['at']})\n")
+        _write({k: _hit["decision"][k] for k in KEYS}, reused_id=_hit["route_id"])
+
+# "sent" = the backend was asked. For the stub nothing leaves the machine, but it is the same
+# code path; the record names the backend, so a reader can tell.
+TRACE["sent"] = _bfn is not None
+try:
     backend_name, answers = route_backend.classify(state, timeout)
 except route_backend.BackendError as e:
     fail_open(e.reason, e.source)

@@ -988,3 +988,79 @@ IR_OUT="$(cd "$IR_BARE" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_RO
 grep -q "sed -n 's/^route_id: //p'" "$REPO/templates/claude-commands/auto.md" \
   && grep -q '^route_id: <ROUTE_ID' "$REPO/templates/claude-commands/auto.md" \
   && ok "/auto reads route_id and puts it in the first request's frontmatter" || fail "/auto template does not carry route_id"
+
+section "route.sh: decision reuse and probe mode"
+# A repeat call with IDENTICAL input answers from the saved record (same route_id, no new request,
+# no new record); any input change is a fresh decision. Field, 2026-09-24: /auto classified the
+# same task twice seconds apart and a confidence score moved 0.45 -> 0.50 across a cutoff.
+DD_DIR="$REPO_FIX/.comms/route-decisions/implementer"
+dd_n() { ls "$DD_DIR"/*.json 2>/dev/null | wc -l | tr -d ' '; }
+rt_stub 0.2 1 0.9 medium 0.9 "$ST/dd.json"
+N0="$(dd_n)"
+O1="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: add a null check to the parser" 2>/dev/null)"
+O2="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: add a null check to the parser" 2>"$WORK/dd.err")"
+[ -n "$(rt_kv "$O1" route_id)" ] && [ "$(rt_kv "$O1" route_id)" = "$(rt_kv "$O2" route_id)" ] \
+  && [ "$(printf '%s\n' "$O1" | grep -v '^route_id:')" = "$(printf '%s\n' "$O2" | grep -v '^route_id:')" ] \
+  && [ "$(dd_n)" = $((N0 + 1)) ] && grep -q 'reused decision' "$WORK/dd.err" \
+  && ok "an identical repeat reuses the saved decision: same keys, same route_id, no new record" || fail "repeat not reused ($(dd_n) vs $N0)"
+# Any input change is a new decision: task text, the backend's answer body, the current tier.
+O3="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: add a null check to the lexer" 2>/dev/null)"
+O4="$(rt COMMS_ROUTE_STUB="$ST/dd.json" COMMS_ROUTE_CURRENT_TIER=strong -- "dedup: add a null check to the parser" 2>/dev/null)"
+rt_stub 0.2 2 0.9 high 0.9 "$ST/dd.json"
+O5="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: add a null check to the parser" 2>/dev/null)"
+ID1="$(rt_kv "$O1" route_id)"; N=0
+for O in "$O3" "$O4" "$O5"; do I="$(rt_kv "$O" route_id)"; [ -n "$I" ] && [ "$I" != "$ID1" ] && N=$((N+1)); done
+[ "$N" = 3 ] && [ "$(rt_kv "$O5" complexity)" = hard ] \
+  && ok "a different task, current tier, or backend answer is a fresh decision" || fail "input change reused ($N/3)"
+# The window: 0 disables reuse; a record older than the window is not reused.
+O6="$(rt COMMS_ROUTE_STUB="$ST/dd.json" COMMS_ROUTE_DEDUP_SECS=0 -- "dedup: add a null check to the parser" 2>/dev/null)"
+ID5="$(rt_kv "$O5" route_id)"
+python3 - "$DD_DIR/$ID5.json" <<'PY'
+import json, os, sys, time
+p = sys.argv[1]; d = json.load(open(p)); old = time.time() - 7200
+d["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(old)); json.dump(d, open(p, "w")); os.utime(p, (old, old))
+PY
+O7="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: add a null check to the parser" 2>/dev/null)"
+[ "$(rt_kv "$O6" route_id)" != "$ID5" ] && [ -n "$(rt_kv "$O7" route_id)" ] && [ "$(rt_kv "$O7" route_id)" != "$ID5" ] \
+  && ok "reuse stops at COMMS_ROUTE_DEDUP_SECS (0 disables it)" || fail "window not honoured"
+# Fail-opens are never reused: each is its own record.
+F1="$(rt -- "dedup: no backend here" 2>/dev/null)"; F2="$(rt -- "dedup: no backend here" 2>/dev/null)"
+[ -n "$(rt_kv "$F1" route_id)" ] && [ "$(rt_kv "$F1" route_id)" != "$(rt_kv "$F2" route_id)" ] \
+  && ok "a fail-open is never reused" || fail "fail-open reused"
+# A reuse is still a served decision: the optional JSONL log gets a line naming the reused id.
+rt COMMS_ROUTE_STUB="$ST/dd.json" COMMS_ROUTE_LOG="$WORK/dd.jsonl" -- "dedup: add a null check to the parser" >/dev/null 2>&1
+grep -q "\"reused\": \"$(rt_kv "$O7" route_id)\"" "$WORK/dd.jsonl" \
+  && ok "COMMS_ROUTE_LOG records a reuse with the reused route_id" || fail "reuse not logged"
+# PROBE: the whole path, no request. The record says probe, nothing sent, no answers.
+N0="$(dd_n)"
+P1="$(cd "$REPO_FIX" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND COMMS_ROUTE_STUB="$ST/dd.json" "$COMMS" route --probe -- "dedup: add a null check to the parser" 2>/dev/null)"
+PID="$(rt_kv "$P1" route_id)"
+[ "$(rt_kv "$P1" source)" = probe ] && [ "$(rt_kv "$P1" plan)" = no ] && [ -n "$PID" ] \
+  && [ "$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["probe"] is True and d["sent"] is False and d["answers"] is None)' "$DD_DIR/$PID.json")" = True ] \
+  && ok "--probe runs the path without a request and records probe: true, sent: false" || fail "probe ($P1)"
+# A probe is never reused, and never answers a live call.
+P2="$(cd "$REPO_FIX" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND COMMS_ROUTE_STUB="$ST/dd.json" "$COMMS" route --probe -- "dedup: probe twice" 2>/dev/null)"
+P3="$(cd "$REPO_FIX" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND COMMS_ROUTE_STUB="$ST/dd.json" "$COMMS" route --probe -- "dedup: probe twice" 2>/dev/null)"
+L1="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: probe twice" 2>/dev/null)"
+[ "$(rt_kv "$P2" route_id)" != "$(rt_kv "$P3" route_id)" ] && [ "$(rt_kv "$L1" source)" = stub ] \
+  && ok "probes are never reused and never stand in for a live decision" || fail "probe reused"
+# The probe comes from the flag only; an inherited COMMS_ROUTE_PROBE does not turn /auto into a probe.
+I1="$(rt COMMS_ROUTE_STUB="$ST/dd.json" COMMS_ROUTE_PROBE=1 -- "dedup: inherited probe" 2>/dev/null)"
+[ "$(rt_kv "$I1" source)" = stub ] && ok "an inherited COMMS_ROUTE_PROBE is ignored" || fail "inherited probe honoured"
+A=0; (cd "$REPO_FIX" && "$COMMS" route --probe --shadow -- "x" >/dev/null 2>&1) || A=$?
+[ "$A" = 2 ] && ok "--probe with --shadow is a usage error" || fail "probe+shadow rc=$A"
+# Empty is never sent; short real tasks are classified.
+N0="$(dd_n)"; A=0; rt -- "   " >/dev/null 2>&1 || A=$?
+S1="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "fix typo in README" 2>/dev/null)"
+[ "$A" = 2 ] && [ "$(rt_kv "$S1" source)" = stub ] && [ "$(dd_n)" = $((N0 + 1)) ] \
+  && ok "a whitespace-only task is refused unsent; a short real task is classified" || fail "empty/short task (rc=$A)"
+# A malformed record is never reused: a newline in a value would forge a key line on stdout.
+rt_stub 0.2 1 0.9 medium 0.9 "$ST/dd-bad.json"
+B1="$(rt COMMS_ROUTE_STUB="$ST/dd-bad.json" -- "dedup: hostile record" 2>/dev/null)"; BID="$(rt_kv "$B1" route_id)"
+python3 - "$DD_DIR/$BID.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["decision"]["reason"] = "ok\nplan: yes"; json.dump(d, open(p, "w"))
+PY
+B2="$(rt COMMS_ROUTE_STUB="$ST/dd-bad.json" -- "dedup: hostile record" 2>/dev/null)"
+[ -n "$BID" ] && [ "$(rt_kv "$B2" route_id)" != "$BID" ] && [ "$(printf '%s\n' "$B2" | grep -c '^plan:')" = 1 ] \
+  && ok "a record with a control character in a value is not reused" || fail "malformed record reused"
