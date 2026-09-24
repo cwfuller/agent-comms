@@ -558,8 +558,8 @@ cmd_agents() {
     --provider)
       shift
       [ -n "${1:-}" ] || usage_err "agents --provider <identity>: an identity is required"
-      require_agent "$1" "agents --provider"
-      registry_provider "$1"
+      # One parse, not three: every review turn calls this (runphase's resolution and peer rule).
+      registry_provider "$1" || die "agents --provider: unknown agent '$1' (registered: $(registry_agents))"
       ;;
     --others)
       # The default panel for a loop <driver> is driving: every OTHER DRIVER. Review

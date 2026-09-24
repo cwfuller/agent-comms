@@ -2933,16 +2933,16 @@ cmd_run() {
   # The peer AUTHORED the request, so it must be a DRIVER — review identities never author,
   # and the bare registry list now includes them. Refusal reasons are collected in one place so
   # every one of them fails the turn the same way.
-  local peer_refusal="" registered drivers want_prov
-  registered="$("$COMMS" agents 2>/dev/null)" || registered=""
-  drivers="$("$COMMS" agents --drivers 2>/dev/null)" || drivers=""
+  # ONE registry read answers both questions: `agents --provider` fails for an unregistered name,
+  # and a driver is exactly a name whose provider is itself (a review identity may never be named
+  # after a provider). One call, as before identities existed — every turn pays for it.
+  local peer_refusal="" peer_prov="" want_prov
+  [ -z "$peer" ] || peer_prov="$("$COMMS" agents --provider "$peer" 2>/dev/null)" || peer_prov=""
   if [ -z "$peer" ] && [ "$agent" != "$provider" ]; then
     peer_refusal="inbound has no from: and '$agent' is a review identity — refusing to guess who reads its reply"
-  elif [ -z "$peer" ]; then
-    peer_refusal="inbound from: '<absent>' is not a registered agent — refusing to route a reply"
-  elif ! printf '%s\n' "$registered" | tr ' ' '\n' | grep -qx -- "$peer"; then
-    peer_refusal="inbound from: '$peer' is not a registered agent — refusing to route a reply"
-  elif ! printf '%s\n' "$drivers" | tr ' ' '\n' | grep -qx -- "$peer"; then
+  elif [ -z "$peer" ] || [ -z "$peer_prov" ]; then
+    peer_refusal="inbound from: '${peer:-<absent>}' is not a registered agent — refusing to route a reply"
+  elif [ "$peer_prov" != "$peer" ]; then
     peer_refusal="inbound from: '$peer' is a review-only identity — it never authors a request; refusing to route a reply"
   elif [ "$peer" = "$agent" ]; then
     peer_refusal="inbound from: '$peer' is this turn's own identity — an agent never reviews or answers its own request"
