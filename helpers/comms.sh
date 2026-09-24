@@ -283,6 +283,15 @@ REGISTRY_DEFAULT_TARGET="codex"
 
 registry_file() { echo "$(cmd_root)/config"; }
 
+# is_provider <value> — EXACT membership: one supported provider name, nothing else. A substring
+# test against " $SUPPORTED_AGENTS " would accept "claude codex", which compose would then count
+# as a provider of its own.
+is_provider() {
+  case "$1" in ""|*[!a-z0-9-]*) return 1 ;; esac
+  case " $SUPPORTED_AGENTS " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
 validate_agent_name() {  # <name> [source] — grammar: ^[a-z][a-z0-9-]{1,15}$
   printf '%s' "$1" | grep -qE '^[a-z][a-z0-9-]{1,15}$' \
     || die "config: invalid agent name '$1'${2:+ in $2} — must match [a-z][a-z0-9-]{1,15} (it becomes a directory suffix)"
@@ -4849,18 +4858,13 @@ cmd_validate() {
     rp_have="$val"
     rp_want="$(reply_provider "$file")"
     if registry_is_review "$from_agent"; then
-      case " $SUPPORTED_AGENTS " in
-        *" ${rp_have:-<none>} "*) ;;
-        *) errors="${errors}  review-feedback from review identity '$from_agent' carries no valid review_provider (got '${rp_have:-<none>}')\n" ;;
-      esac
+      is_provider "$rp_have" \
+        || errors="${errors}  review-feedback from review identity '$from_agent' carries no valid review_provider (got '${rp_have:-<none>}')\n"
     elif [ -n "$rp_have" ] && [ "$rp_have" != "$rp_want" ]; then
       errors="${errors}  review-feedback from driver '$from_agent' claims review_provider '$rp_have' — a driver's provider is its own name\n"
     fi
   elif [ -n "$val" ]; then
-    case " $SUPPORTED_AGENTS " in
-      *" $val "*) ;;
-      *) errors="${errors}  review_provider '$val' is not a supported provider ($SUPPORTED_AGENTS)\n" ;;
-    esac
+    is_provider "$val" || errors="${errors}  review_provider '$val' is not a supported provider ($SUPPORTED_AGENTS)\n"
   fi
   if [ -n "$workflow" ]; then
     for field in phase round max-rounds; do

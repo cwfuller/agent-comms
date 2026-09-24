@@ -1051,6 +1051,14 @@ ri_try "$COMMS" validate "$RI_MSGS/rr-cross.md"
 ri_msg "$RI_MSGS/rr-gemini.md" review-request claude 'review_provider: gemini'
 ri_try "$COMMS" validate "$RI_MSGS/rr-gemini.md"
 ri_expect "a request stamp that is not a supported provider is refused" 1 "review_provider 'gemini' is not a supported provider"
+# Membership is EXACT, one name: "claude codex" contains two providers as substrings, and compose
+# would otherwise count it as a third provider of its own.
+ri_msg "$RI_MSGS/rr-multi.md" review-request claude 'review_provider: claude codex'
+ri_try "$COMMS" validate "$RI_MSGS/rr-multi.md"
+ri_expect "a multi-word request stamp is refused, not matched as a substring" 1 "review_provider 'claude codex' is not a supported provider"
+ri_msg "$RI_MSGS/fb-rev-multi.md" review-feedback claude-review 'verdict: APPROVE' 'review_provider: claude codex'
+ri_try "$COMMS" validate "$RI_MSGS/fb-rev-multi.md"
+ri_expect "a review identity's reply with a multi-word review_provider is refused" 1 "carries no valid review_provider \\(got 'claude codex'\\)"
 
 # --- a registered inbox that was never created -------------------------------------------------
 # BEFORE any send below: send and list both mkdir their target inbox, which would destroy the
