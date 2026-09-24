@@ -1206,6 +1206,10 @@ RESOLVED_PROVIDER=""
 resolve_turn_agent() {
   local verb="$1" id="$2" p
   [ -n "$id" ] || die "$verb: --agent <registered identity> is required"
+  # A provider's own name IS that provider's driver identity — the registry refuses a review
+  # identity named after a provider — so only another name needs the registry. Driver turns
+  # therefore cost exactly what they did before identities existed.
+  case "$id" in claude|codex|grok) RESOLVED_PROVIDER="$id"; return 0 ;; esac
   p="$("$COMMS" agents --provider "$id" 2>/dev/null)" \
     || die "$verb: '$id' is not a registered agent (or the registry is malformed) — refusing to guess its provider"
   case "$p" in
