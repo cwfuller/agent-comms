@@ -306,9 +306,11 @@ review_provider: claude              # review identities only; helper-stamped, n
 
 `review_provider` names a provider, and which one depends on direction:
 
-- **On a `review-request`** it is the RECIPIENT's provider. `send` stamps it on a request to a
-  review identity (the provider the config maps it to at send time) and strips a hand-typed
-  value from a request to a driver, so driver-bound requests stay byte-identical. `shadow`
+- **On a `review-request` or an `error`** it is the RECIPIENT's provider — both start a review
+  turn at a review identity (the error lane asks it to answer again). `send` stamps it on either
+  when the target is a review identity (the provider the config maps it to at send time) and
+  strips a hand-typed value when the target is a driver, so driver-bound messages stay
+  byte-identical. `shadow`
   stamps its private request copy for the shadow's own target. `validate` only checks that a
   present value is a supported provider — a `codex`-authored request to `claude-review`
   stamped `claude` is valid.

@@ -81,9 +81,9 @@ comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5
 harness: complete parallel worker reports	1
 comms.sh: settings and setup	26
 route.sh: implementer decision records	11
-review identities: registry, roles and send	71
+review identities: registry, roles and send	72
 review identities: panel dispatch and compose provenance	37
-review identities: a claude-review turn over ACP	25
+review identities: a claude-review turn over ACP	26
 review identities: shadow and the direct grok arm	31
 review identities: await synthesizes a result for a runner that died before turn.tsv	8
 review identities: setup preserves them and asks about their provider	8

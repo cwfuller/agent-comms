@@ -1357,17 +1357,21 @@ RS_OUT="$(rs_setup "$RS_TAB")"
 # ONE DRIVER IS ENOUGH once a review identity is declared: that identity is its reviewer, and the
 # registry already accepts the shape (its default panel is the review identity). setup must not
 # refuse it with "at least two agents"; the control is the same line with no review identity.
-rs_single() { # <review-agents line or empty> -> the agents line setup published
+# A refusal KEEPS the current agents line, so "the line still says claude" alone cannot tell
+# acceptance from rejection. Setup's own diagnostic is what distinguishes them: the refusal text
+# must be ABSENT here, and PRESENT for the same line without a review identity (the control).
+rs_single() { # <review-agents line or empty> -> setup's output
   { printf 'agents = claude\ndefault-target = claude\n'
     [ -z "$1" ] || printf '%s\n' "$1"
     printf 'suite-cmd = bash t.sh\n'; } > "$ST_PROJ/.comms/config"
-  st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1
-  sed -n 's/^agents = //p' "$ST_PROJ/.comms/config"
+  st -- "$COMMS" setup --yes </dev/null 2>&1
 }
-RS_ONE="$(rs_single 'review-agents = claude-review:claude')"
-[ "$RS_ONE" = claude ] && [ "$( (cd "$ST_PROJ" && "$COMMS" agents --others claude) 2>/dev/null)" = claude-review ] \
-  && ok "setup keeps a single driver when a review identity is declared, and its default panel is that identity" \
-  || fail "single driver + review identity: agents='$RS_ONE' others='$( (cd "$ST_PROJ" && "$COMMS" agents --others claude) 2>&1 | head -1)'"
+RS_ONE_OUT="$(rs_single 'review-agents = claude-review:claude')"
+RS_ONE="$(sed -n 's/^agents = //p' "$ST_PROJ/.comms/config")"
+[ "$RS_ONE" = claude ] && ! printf '%s\n' "$RS_ONE_OUT" | grep -q 'at least two agents are needed' \
+  && [ "$( (cd "$ST_PROJ" && "$COMMS" agents --others claude) 2>/dev/null)" = claude-review ] \
+  && ok "setup ACCEPTS a single driver when a review identity is declared, and its default panel is that identity" \
+  || fail "single driver + review identity: agents='$RS_ONE' refusal='$(printf '%s' "$RS_ONE_OUT" | grep -m1 'at least two')' others='$( (cd "$ST_PROJ" && "$COMMS" agents --others claude) 2>&1 | head -1)'"
 RS_ONE_OUT="$( { printf 'agents = claude\ndefault-target = claude\nsuite-cmd = bash t.sh\n'; } > "$ST_PROJ/.comms/config"; st -- "$COMMS" setup --yes </dev/null 2>&1)"
 printf '%s\n' "$RS_ONE_OUT" | grep -q 'at least two agents are needed' \
   && ok "control: a single driver with NO review identity is still refused as too few agents" \

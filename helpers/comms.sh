@@ -449,7 +449,8 @@ reply_provider() {
   fi
 }
 
-# stamp_review_provider <request> <target> — the ONE writer of `review_provider:` on a request.
+# stamp_review_provider <request> <target> — the ONE writer of `review_provider:` on a request
+# (a review-request, or the error lane — both start a review turn at a review identity).
 # A request to a review identity carries the provider the registry maps it to NOW (runphase
 # refuses the turn if that has changed by the time it runs); any other request has a hand-typed
 # value removed. Two callers: cmd_send, and shadow's private request copy.
@@ -5844,9 +5845,12 @@ cmd_send() {
   # compose counts. So "these two replies came from different providers" is a fact recorded on
   # the replies, not a reading of whatever the registry says later. A request to a driver
   # carries none (its provider is its name), and any hand-typed value is removed.
-  if [ "$send_type" = "review-request" ]; then
-    stamp_review_provider "$file" "$to" || die "send: could not stamp the review provider for '$to'"
-  fi
+  # Every type a review identity accepts starts a review turn there — the request, and the per-leg
+  # error lane that asks it to answer again — so every one of them carries the binding.
+  case "$send_type" in
+    review-request|error)
+      stamp_review_provider "$file" "$to" || die "send: could not stamp the review provider for '$to'" ;;
+  esac
 
   # Atomicity guard: never deliver or archive on a malformed outbound message.
   cmd_validate "$file" || die "send: refusing to deliver malformed message (and not archiving inbound)"

@@ -945,6 +945,23 @@ RID_DRV_REPLY="$(rid_answers "$RID_DRV_MID")"
   && ok "the driver's reply lands in to-codex from: claude and carries NO review_provider line" \
   || fail "driver reply (found: $(rid_answers "$RID_DRV_MID" | tr '\n' ' '); envelope: $(sed -n '2,6p' "$RID_DRV_REPLY" 2>/dev/null | tr '\n' ' '))"
 
+# ---- (5b) THE ERROR LANE RUNS AT A REVIEW IDENTITY ----
+# The driver's per-leg error lane ("your last reply was malformed — resend") is the other type a
+# review identity accepts, and it starts a review turn there too. So it must carry the binding the
+# runner requires: stamped by the real `send` (mailbox: the stamp, no spawn), then executed by the
+# real runner. A mailbox-only check would pass while every real resend failed "bound to '<none>'".
+RID_EL="$(rid_msg claude-review errlane claude -)"; RID_EL_MID="$(basename "$RID_EL" .md)"
+sed -i.bak -e 's/^type: review-request$/type: error/' "$RID_EL" && rm -f "$RID_EL.bak"
+( cd "$MA_FIX" && env COMMS_DELIVERY=mailbox "$COMMS" send --to claude-review "$RID_EL" ) >/dev/null 2>&1
+RID_EL_STAMP="$(sed -n '2,/^---$/p' "$RID_EL" | grep -c '^review_provider: claude$' || true)"
+RID_EL_DIR="$(rid_run claude-review "$RID_EL" errlane)"
+RID_EL_REPLY="$(rid_answers "$RID_EL_MID")"
+[ "$RID_EL_STAMP" = 1 ] && [ "$(rid_json "$RID_EL_DIR" status)" = completed ] \
+  && [ "$(rid_answers_n "$RID_EL_MID")" = 1 ] && [ "$(dirname "$RID_EL_REPLY")" = "$MA_FIX/.comms/to-claude" ] \
+  && grep -qx 'from: claude-review' "$RID_EL_REPLY" 2>/dev/null \
+  && ok "an error-lane message sent to claude-review is stamped by send and actually runs there" \
+  || fail "error lane at a review identity: stamp=$RID_EL_STAMP status=$(rid_json "$RID_EL_DIR" status) note=$(rid_json "$RID_EL_DIR" note | cut -c1-160) replies=$(rid_answers_n "$RID_EL_MID")"
+
 # ---- (6) THE DETACHED RUNNER DOES NOT CARRY THE DRIVER'S PRESENCE ----
 # A detached runner outlives its driver, and its broker's `send` beats whatever presence record
 # the environment names — HEALING one the driver has already released, as a pid-less record no

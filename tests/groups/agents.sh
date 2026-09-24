@@ -1191,6 +1191,11 @@ ri_msg "$RI_ERR" error claude "thread: ri-rq-ok" "workflow: auto" "phase: plan" 
   "in-reply-to: ${RI_WS}_2026-09-24T12-20-00_rq-ok-1"
 ri_try "$COMMS" send --to claude-review "$RI_ERR"
 [ "$RI_RC" = 0 ] && ok "control: an error to claude-review is accepted (the per-leg error lane)" || fail "error to a review identity (rc=$RI_RC out: $RI_OUT)"
+# ...and it carries the same binding a request does: the error lane starts a review turn there,
+# and runphase refuses any review-identity turn whose inbound names no provider.
+[ "$(ri_fm_count "$RI_ERR" '^review_provider: claude$')" = 1 ] \
+  && ok "the error lane to claude-review is stamped review_provider: claude, like a request" \
+  || fail "error to a review identity carries no binding ($(sed -n '2,/^---$/p' "$RI_ERR" | grep '^review_provider' | tr '\n' '|'))"
 
 # The stamp is helper-owned in BOTH directions: a forged value is replaced by the registry's,
 # and a request to a driver carries none at all.
