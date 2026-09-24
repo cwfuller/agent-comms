@@ -830,3 +830,257 @@ printf '%s\n' "$G2_SP" | grep -q '^spawned runphase' && fail "spawn reported suc
 # require_acp_transport — the same hole the --no-deliver pin already closed. (grok, r3.)
 printf '%s\n' "$G2_SP" | grep -q 'unstamped, unmounted reply that still reported success' \
   && ok "the spawn refusal is require_acp_transport's, not an earlier die" || fail "spawn refusal text (got: $G2_SP)"
+
+section "review identities: shadow and the direct grok arm"
+# A review identity (`review-agents = <name>:<provider>`) is a NAME that runs on a provider. The
+# shadow and the direct grok exec are the two paths that reach a provider WITHOUT going through
+# cmd_send, so each has to resolve the provider itself. Swapping the two either way is a real
+# defect: the identity where the provider belongs fails the capability gate or runs a binary
+# named after the identity, and the provider where the identity belongs publishes the review
+# under the provider's name. grok is the one provider that keeps a non-ACP route, so a
+# grok-backed identity is the only way to reach the direct exec arm under an identity at all.
+RI_FIX="$WORK/ri-repo"
+mkdir -p "$RI_FIX"; RI_FIX="$(cd "$RI_FIX" && pwd -P)"
+git -C "$RI_FIX" init -q -b main
+git -C "$RI_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$RI_FIX/.comms/to-claude" "$RI_FIX/.comms/to-codex" "$RI_FIX/.comms/to-grok" \
+         "$RI_FIX/.comms/to-claude-review" "$RI_FIX/.comms/to-grok-review" "$RI_FIX/.comms/archive"
+printf 'agents = claude codex grok\ndefault-target = codex\nreview-agents = grok-review:grok claude-review:claude\n' > "$RI_FIX/.comms/config"
+printf '.comms/\n.agent-comms/\n' > "$RI_FIX/.gitignore"
+echo "code under review" > "$RI_FIX/subject.txt"
+run_ri() { (cd "$RI_FIX" && env "$COMMS" "$@"); }
+# Precondition, so every later failure is about the path under test and not a config that did
+# not parse: the fixture's registry really maps the identity onto grok.
+[ "$(run_ri agents --provider grok-review 2>/dev/null)" = "grok" ] \
+  && ok "fixture: the registry maps grok-review onto provider grok" || fail "fixture registry (got: $(run_ri agents --provider grok-review 2>&1))"
+
+# This section's own grok: it answers --version (agent_version reads it), copies the prompt it
+# was handed (the only view of the runner's PRIVATE request copy, which shadow deletes), and
+# records the review-turn marker it inherited.
+RI_BIN="$WORK/ri-bin"; mkdir -p "$RI_BIN"
+cat > "$RI_BIN/grok" <<'RISTUB'
+#!/bin/bash
+case "$1" in --version) echo "grok 7.7.7-ri-stub"; exit 0 ;; esac
+pf=""; prev=""
+for a in "$@"; do [ "$prev" = "--prompt-file" ] && pf="$a"; prev="$a"; done
+[ -n "$pf" ] && [ -f "$pf" ] || { echo "stub: no prompt file" >&2; exit 2; }
+[ -n "${RI_PROMPT_COPY:-}" ] && cp "$pf" "$RI_PROMPT_COPY"
+[ -n "${RI_MARK_COPY:-}" ] && printf 'COMMS_REVIEW_TURN=%s\n' "$(printenv COMMS_REVIEW_TURN || printf '<unset>')" > "$RI_MARK_COPY"
+esc() { printf '%s' "$1" | awk '{printf "%s\\n", $0}'; }
+printf '{"type":"system","subtype":"init","session_id":"stub-ri-1"}\n'
+REPLY="$(printf -- 'VERDICT: REQUEST_CHANGES\n\n## Summary\nidentity pass\n\n## Findings\n\n### Blocking\n- `subject.txt:1` — the review identity found something.\n\n### Advisory\n- None.')"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$(esc "$REPLY")"
+RISTUB
+chmod +x "$RI_BIN/grok"
+# A binary NAMED AFTER THE IDENTITY. agent_version runs `<name> --version`, so handed the identity
+# instead of the provider it would EXECUTE this and record its version — or, on a machine with no
+# such binary, record an empty version, which reads exactly like "never probed". Planting it makes
+# the wrong call observable instead of merely empty.
+cat > "$RI_BIN/grok-review" <<RITRAP
+#!/bin/sh
+: > "$WORK/ri-identity-binary-ran"
+echo "grok-review 0.0.0-identity-binary"
+RITRAP
+chmod +x "$RI_BIN/grok-review"
+rm -f "$WORK/ri-identity-binary-ran"
+
+# (1) A shadow by a review identity of a DRIVER-targeted request (no review_provider of its own).
+RI_REQ="$RI_FIX/.comms/to-codex/ri-repo_2026-09-24T09-00-00_req-1.md"
+cat > "$RI_REQ" <<'RIEOF'
+---
+type: review-request
+from: claude
+timestamp: 2026-09-24T09:00:00Z
+workspace: ri-repo
+message_id: ri-repo_2026-09-24T09-00-00_req-1
+thread: ri-thread-1
+workflow: auto-implement
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## What was done
+Changed subject.txt.
+RIEOF
+RI_SUM_BEFORE="$(shasum -a 256 < "$RI_REQ")"
+RI_PROMPT1="$WORK/ri-prompt-1.md"; RI_MARK1="$WORK/ri-mark-1.txt"
+RI_OUT1="$( (cd "$RI_FIX" && env PATH="$RI_BIN:$PATH" RI_PROMPT_COPY="$RI_PROMPT1" RI_MARK_COPY="$RI_MARK1" \
+  COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" shadow --to grok-review --review-set ri-drv "$RI_REQ") 2>&1 )" && RI_RC1=0 || RI_RC1=$?
+# COMPLETING is itself evidence the capability gate was asked about the PROVIDER: there is no
+# capability row for 'grok-review', so suppression_ok on the identity refuses it as unbrokerable,
+# and runphase's execution binding refuses a private copy that was not stamped grok.
+[ "$RI_RC1" = "0" ] && ok "shadow --to grok-review of a driver-targeted request COMPLETES" \
+  || fail "grok-review shadow (rc=$RI_RC1): $RI_OUT1"
+RI_STORE1="$(find "$RI_FIX/.comms/grades/shadow" -maxdepth 1 -mindepth 1 -type d -name 'ri-drv-*' 2>/dev/null | head -1)"
+# Exact names only: 'grok' is a prefix of 'grok-review', so a glob would conflate the two.
+[ -n "$RI_STORE1" ] && [ -s "$RI_STORE1/grok-review.md" ] && [ ! -e "$RI_STORE1/grok.md" ] \
+  && ok "the stored reply is keyed by the IDENTITY (grok-review.md, no grok.md beside it)" \
+  || fail "shadow store keying (dir=$RI_STORE1: $(ls "$RI_STORE1" 2>/dev/null | tr '\n' ' '))"
+grep -qx 'from: grok-review' "$RI_STORE1/grok-review.md" 2>/dev/null \
+  && ok "the stored shadow reply is from: grok-review" || fail "stored reply from: ($(grep -m1 '^from:' "$RI_STORE1/grok-review.md" 2>/dev/null))"
+grep -qx 'review_provider: grok' "$RI_STORE1/grok-review.md" 2>/dev/null \
+  && ok "the stored shadow reply carries review_provider: grok (the provider that ran it)" \
+  || fail "stored reply review_provider ($(grep -m1 '^review_provider:' "$RI_STORE1/grok-review.md" 2>/dev/null))"
+[ "$(shasum -a 256 < "$RI_REQ")" = "$RI_SUM_BEFORE" ] && ! grep -q '^review_provider:' "$RI_REQ" \
+  && ok "the original request is byte-unchanged (the stamp went on the private copy only)" \
+  || fail "shadow modified the original request"
+# The PRIVATE copy the reviewer actually read: the prompt inlines the request's frontmatter.
+[ -s "$RI_PROMPT1" ] && grep -qx 'review_provider: grok' "$RI_PROMPT1" \
+  && ok "the reviewer's private copy is stamped review_provider: grok" \
+  || fail "private copy stamp ($(grep '^review_provider:' "$RI_PROMPT1" 2>/dev/null || echo '<none, or prompt not captured>'))"
+grep -qx 'COMMS_REVIEW_TURN=grok-review' "$RI_MARK1" 2>/dev/null \
+  && ok "the shadow's reviewer runs under the IDENTITY's review-turn marker (runphase got --agent grok-review)" \
+  || fail "shadow child marker ($(cat "$RI_MARK1" 2>/dev/null || echo '<not captured>'))"
+awk -F'\t' '$1=="agent" && $2=="grok-review" {a=1} $1=="provider" && $2=="grok" {p=1} END {exit !(a && p)}' "$RI_STORE1/grok-review.turn.tsv" 2>/dev/null \
+  && ok "the stored turn.tsv records agent grok-review on provider grok" \
+  || fail "stored turn.tsv identity ($(tr '\t\n' '= ' < "$RI_STORE1/grok-review.turn.tsv" 2>/dev/null))"
+grep -q '"agent": "grok-review"' "$RI_STORE1/grok-review.result.json" 2>/dev/null \
+  && grep -q '"provider": "grok"' "$RI_STORE1/grok-review.result.json" 2>/dev/null \
+  && grep -q '"status": "completed"' "$RI_STORE1/grok-review.result.json" 2>/dev/null \
+  && ok "the stored result.json records a completed turn by agent grok-review on provider grok" \
+  || fail "stored result.json identity"
+awk -F'\t' 'NR>1 && $3=="ri-thread-1" && $10=="grok-review"' "$RI_FIX/.comms/grades/sets.tsv" 2>/dev/null | grep -q . \
+  && ok "the set index records grok-review as the shadow agent" || fail "set index shadow_agent"
+[ -z "$(find "$RI_FIX/.comms/to-claude" "$RI_FIX/.comms/to-grok-review" -type f 2>/dev/null)" ] \
+  && ok "a review-identity shadow still delivers NOTHING to any inbox" || fail "review-identity shadow leaked into an inbox"
+
+# (4) agent_version is asked about the PROVIDER. Control first: the identity-named binary IS on
+# the shadow's PATH, so its not running below is the accessor's choice, not a lookup miss.
+[ "$(PATH="$RI_BIN:$PATH"; command -v grok-review)" = "$RI_BIN/grok-review" ] \
+  && ok "control: a binary named grok-review is on the shadow's PATH" || fail "trap binary not resolvable"
+[ ! -e "$WORK/ri-identity-binary-ran" ] \
+  && ok "no binary named after the identity was ever executed" || fail "agent_version executed the identity-named binary"
+[ "$(cat "$RI_STORE1/grok-review.version" 2>/dev/null)" = "grok 7.7.7-ri-stub" ] \
+  && ok "the recorded reviewer version is the grok provider's CLI version" \
+  || fail "recorded version ($(cat "$RI_STORE1/grok-review.version" 2>/dev/null || echo '<none>'))"
+tail -n +2 "$RI_FIX/.comms/grades/findings.tsv" 2>/dev/null \
+  | awk -F'\t' '$12=="shadow" && $9=="grok-review" && $10=="grok 7.7.7-ri-stub"' | grep -q . \
+  && ok "the ledger row pairs reviewer grok-review with the provider's version" || fail "ledger reviewer/version"
+
+# (2) A request addressed to ANOTHER review identity already carries a stamp — the one its send
+# resolved for claude-review. The shadow's copy is addressed to grok-review, so inheriting that
+# stamp would bind the turn to the wrong provider (and the execution binding would refuse it).
+RI_REQ2="$RI_FIX/.comms/to-claude-review/ri-repo_2026-09-24T09-10-00_req-2.md"
+cat > "$RI_REQ2" <<'RIEOF'
+---
+type: review-request
+from: codex
+timestamp: 2026-09-24T09:10:00Z
+workspace: ri-repo
+message_id: ri-repo_2026-09-24T09-10-00_req-2
+thread: ri-thread-2
+review_provider: claude
+workflow: auto-implement
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## What was done
+Changed subject.txt again.
+RIEOF
+# Control: the request is VALID as it stands — a codex-authored request to claude-review stamped
+# with the RECIPIENT's provider — so the shadow below starts from a legitimate message.
+check "fixture: a codex request to claude-review stamped claude validates" run_ri validate "$RI_REQ2"
+RI_SUM2_BEFORE="$(shasum -a 256 < "$RI_REQ2")"
+RI_PROMPT2="$WORK/ri-prompt-2.md"
+RI_OUT2="$( (cd "$RI_FIX" && env PATH="$RI_BIN:$PATH" RI_PROMPT_COPY="$RI_PROMPT2" \
+  COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" shadow --to grok-review --review-set ri-restamp "$RI_REQ2") 2>&1 )" && RI_RC2=0 || RI_RC2=$?
+[ "$RI_RC2" = "0" ] && ok "a grok-review shadow of a request stamped for claude-review completes" \
+  || fail "re-stamp shadow (rc=$RI_RC2): $RI_OUT2"
+[ -s "$RI_PROMPT2" ] && grep -qx 'review_provider: grok' "$RI_PROMPT2" \
+  && [ "$(grep -c '^review_provider:' "$RI_PROMPT2")" = "1" ] \
+  && ok "the private copy is RE-stamped grok (exactly one stamp; claude is never inherited)" \
+  || fail "re-stamp ($(grep '^review_provider:' "$RI_PROMPT2" 2>/dev/null | tr '\n' ' '))"
+[ "$(shasum -a 256 < "$RI_REQ2")" = "$RI_SUM2_BEFORE" ] && grep -qx 'review_provider: claude' "$RI_REQ2" \
+  && ok "the original claude-review request keeps its own stamp, byte-unchanged" || fail "shadow rewrote the other identity's request"
+RI_STORE2="$(find "$RI_FIX/.comms/grades/shadow" -maxdepth 1 -mindepth 1 -type d -name 'ri-restamp-*' 2>/dev/null | head -1)"
+grep -qx 'review_provider: grok' "$RI_STORE2/grok-review.md" 2>/dev/null && grep -qx 'from: grok-review' "$RI_STORE2/grok-review.md" 2>/dev/null \
+  && ok "its stored reply is from: grok-review with review_provider: grok" || fail "re-stamp stored reply envelope"
+awk -F'\t' 'NR>1 && $3=="ri-thread-2" && $9=="claude-review" && $10=="grok-review"' "$RI_FIX/.comms/grades/sets.tsv" 2>/dev/null | grep -q . \
+  && ok "the pair records claude-review (the inbox it was dispatched to) as the gating agent" || fail "gating identity for a review-identity inbox"
+# The other branch of the same writer: shadowed by the DRIVER grok, the copy's inherited stamp is
+# REMOVED rather than kept or re-written — a driver's provider is its own name, so its request
+# carries none, and its reply envelope stays exactly what it was before identities existed.
+RI_REQ3="$RI_FIX/.comms/to-claude-review/ri-repo_req-strip.md"
+sed -e 's|^thread: .*|thread: ri-thread-3|' -e 's|^message_id: .*|message_id: ri-repo_req-strip|' "$RI_REQ2" > "$RI_REQ3"
+RI_PROMPT3="$WORK/ri-prompt-3.md"
+(cd "$RI_FIX" && env PATH="$RI_BIN:$PATH" RI_PROMPT_COPY="$RI_PROMPT3" \
+  COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" shadow --to grok --review-set ri-strip "$RI_REQ3") >/dev/null 2>&1 || true
+[ -s "$RI_PROMPT3" ] && ! grep -q '^review_provider:' "$RI_PROMPT3" && grep -qx 'review_provider: claude' "$RI_REQ3" \
+  && ok "shadowed by the driver grok, the copy's inherited stamp is stripped (the original keeps it)" \
+  || fail "driver shadow copy stamp ($(grep '^review_provider:' "$RI_PROMPT3" 2>/dev/null || echo '<prompt not captured>'))"
+RI_STORE3="$(find "$RI_FIX/.comms/grades/shadow" -maxdepth 1 -mindepth 1 -type d -name 'ri-strip-*' 2>/dev/null | head -1)"
+grep -qx 'from: grok' "$RI_STORE3/grok.md" 2>/dev/null && ! grep -q '^review_provider:' "$RI_STORE3/grok.md" 2>/dev/null \
+  && ok "the driver's stored reply carries no review_provider (its envelope is unchanged)" || fail "driver shadow reply envelope"
+
+# (3) THE DIRECT GROK ARM. The shadow above reaches it through shadow's subshell; this is the
+# plain dispatched turn, invoked the way the full-arc grok legs are (runphase run, no --via).
+# The reviewer child is launched from the DRIVER's environment, so the driver's identity is
+# injected here and must be gone in the child — while the review-turn marker must be present.
+RI_WS="$(run_ri workspace)"
+RI_DMSG="$RI_FIX/.comms/to-grok-review/${RI_WS}_2026-09-24T09-20-00_req-direct.md"
+cat > "$RI_DMSG" <<RIEOF
+---
+type: review-request
+from: claude
+timestamp: 2026-09-24T09:20:00Z
+workspace: $RI_WS
+message_id: ${RI_WS}_2026-09-24T09-20-00_req-direct
+thread: ri-direct-1
+review_provider: grok
+workflow: auto-implement
+phase: implement
+round: 1
+max-rounds: 4
+---
+
+## What was done
+A direct-arm review by a review identity.
+RIEOF
+RI_RD="$WORK/ri-direct-run"; mkdir -p "$RI_RD"
+RI_CTL="$WORK/ri-direct-ctl.txt"; RI_IDENT="$WORK/ri-direct-ident.txt"
+rm -f "$RI_CTL" "$RI_IDENT"
+# ALL EIGHT scrubbed variables are injected, not just the ones a developer's shell happens to
+# carry: an `<unset>` below is only evidence for a variable that was SET going in, and on a clean
+# CI host most of them never are. The exec wrapper records runphase's OWN environment (exec keeps
+# it), so a variable missing in the child is the scrub, not an injection that never arrived.
+# (A foreground run keeps the driver's presence, so the broker's send heals a record for
+# 'ri-driver' — inside this fixture's .comms/sessions, which nothing else reads.)
+RI_INJ="COMMS_SELF=grok COMMS_PRESENCE_NAME=ri-driver COMMS_PRESENCE_INSTANCE=0123456789abcdef0123456789abcdef COMMS_PRESENCE_PID=$$ CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_CHILD_SESSION=1 CLAUDE_CODE_SESSION_ID=ri-session"
+# shellcheck disable=SC2086  # RI_INJ is deliberately word-split into NAME=value arguments for env
+(cd "$RI_FIX" && env PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 GROK_IDENT_LOG="$RI_IDENT" $RI_INJ \
+   bash -c 'for v in COMMS_SELF COMMS_PRESENCE_NAME COMMS_PRESENCE_INSTANCE COMMS_PRESENCE_PID \
+                     CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; do
+              printf "%s=%s " "$v" "$(printenv "$v" || printf "<unset>")"; done > "$1"; shift; exec "$@"' \
+   ri-ctl "$RI_CTL" "$RP" run --message "$RI_DMSG" --dir "$RI_RD" --agent grok-review) >/dev/null 2>&1 || true
+[ "$(cat "$RI_CTL" 2>/dev/null)" = "$RI_INJ " ] \
+  && ok "control: runphase itself received all eight injected driver-identity variables" \
+  || fail "injection control (got: $(cat "$RI_CTL" 2>/dev/null))"
+grep -q '"status": "completed"' "$RI_RD/result.json" 2>/dev/null && grep -q '"agent": "grok-review"' "$RI_RD/result.json" 2>/dev/null \
+  && grep -q '"provider": "grok"' "$RI_RD/result.json" 2>/dev/null \
+  && ok "the direct-arm grok-review turn completes on provider grok" || fail "direct-arm turn result (see $RI_RD/result.json)"
+grep -qx 'COMMS_REVIEW_TURN=grok-review' "$RI_IDENT" 2>/dev/null \
+  && ok "the direct grok child carries COMMS_REVIEW_TURN=grok-review (the identity, not the provider)" \
+  || fail "direct child marker ($(grep '^COMMS_REVIEW_TURN=' "$RI_IDENT" 2>/dev/null || echo '<ident log not written>'))"
+RI_LEAK=""
+for v in COMMS_SELF COMMS_PRESENCE_NAME COMMS_PRESENCE_INSTANCE COMMS_PRESENCE_PID; do
+  grep -qx "$v=<unset>" "$RI_IDENT" 2>/dev/null || RI_LEAK="$RI_LEAK $v"
+done
+[ -s "$RI_IDENT" ] && [ -z "$RI_LEAK" ] \
+  && ok "the direct grok child sees COMMS_SELF and COMMS_PRESENCE_* unset (it cannot act as the driver)" \
+  || fail "driver identity leaked into the direct child:${RI_LEAK:- <ident log not written>}"
+RI_LEAK=""
+for v in CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; do
+  grep -qx "$v=<unset>" "$RI_IDENT" 2>/dev/null || RI_LEAK="$RI_LEAK $v"
+done
+[ -s "$RI_IDENT" ] && [ -z "$RI_LEAK" ] \
+  && ok "the direct grok child sees every Claude Code session variable unset" \
+  || fail "session variables leaked into the direct child:${RI_LEAK:- <ident log not written>}"
+RI_DREPLY="$(find "$RI_FIX/.comms/to-claude" -type f -name '*_grok-review-reply-*' 2>/dev/null | head -1)"
+[ -n "$RI_DREPLY" ] && grep -qx 'from: grok-review' "$RI_DREPLY" && grep -qx 'review_provider: grok' "$RI_DREPLY" \
+  && ok "the direct-arm reply lands in to-claude as from: grok-review with review_provider: grok" \
+  || fail "direct-arm reply envelope ($(ls "$RI_FIX/.comms/to-claude" 2>/dev/null | tr '\n' ' '))"
+[ ! -f "$RI_DMSG" ] && [ -f "$RI_FIX/.comms/archive/$(basename "$RI_DMSG")" ] \
+  && ok "the inbound is archived out of to-grok-review" || fail "direct-arm inbound archive"

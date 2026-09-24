@@ -17,8 +17,9 @@ agent runs from):
 
 ```
 .comms/
-  config       agent registry (optional — see below; absent = claude + codex)
-  to-<agent>/  each registered agent's inbox (to-claude/, to-codex/, to-grok/, …)
+  config       agent registry (optional — see below; absent = claude codex grok)
+  to-<agent>/  each registered identity's inbox (to-claude/, to-codex/, to-grok/,
+               to-claude-review/, …) — created on first send; a missing one reads as empty
   archive/     processed messages (every agent moves its own inbox here)
   state/       per-thread loop state, JSON (written by comms.sh send)
 ```
@@ -29,6 +30,7 @@ the landing gate's suite keys:
 ```
 agents = claude codex grok
 default-target = codex
+review-agents = claude-review:claude
 suite-cmd = bash ci/verify.sh
 suite-attest-secs = 600
 ```
@@ -50,6 +52,76 @@ the inbound's owner from the OUTBOUND message's `from:` (validated against the
 directory the inbound actually occupies; already-archived is an idempotent no-op).
 
 `.comms/` is gitignored — messages are local plumbing, not project history.
+
+### Identities and providers (same-model review)
+
+An **identity** is a name in the mailbox: whose inbox, whose `from:`, whose leg thread
+(`<thread>-<identity>`), whose thread state (`awaiting_from`), events (`agent`), shadow store
+and acpx session. A **provider** is the runtime that serves a turn — `claude`, `codex` or
+`grok` — and it keys everything at the process boundary: transport capability, the ACP-only
+rule, the acpx profile, the isolation/containment arm, the hostile-artifact refusals and the
+reviewer policy map row. The `agents =` line lists **drivers**, each named after its provider,
+so for a driver the two are the same word and nothing about it changed.
+
+`review-agents = <name>:<provider> ...` (optional, one line) declares **review identities**:
+review-only names that run on a provider under their own identity. `claude-review:claude`
+lets a claude driver be reviewed by claude without the request and the reply sharing one
+inbox, one thread and one `awaiting_from`. Parse rules, each a hard `config:` error: the name
+follows the grammar above, is not a provider name, and is declared once; a pair has exactly
+one `:` with both sides non-empty; the provider is supported (it need not be a registered
+driver); the key is single-valued and non-empty; and `default-target` must be a driver.
+Nothing is inferred from a name — `claude-review` on the `agents =` line is still an
+unsupported agent. Only whole-line `#` comments are allowed in the file, so never annotate the
+pair list inline. `comms.sh setup` keeps the line and offers no UI for it.
+
+A review identity is **review-only**, and each rule sits at the one funnel that sees it:
+
+- **It never drives.** `whoami` refuses it (so `COMMS_SELF=<review identity>` fails), as do
+  `agents --others`, `ask --from` and `panel dispatch` when it is the author.
+- **It authors only the `review-feedback` its broker stamps.** `validate` refuses anything
+  else from it, so every writer — `send`, panel legs, the broker, `ask`, `shadow` — is covered.
+- **It receives only a `review-request` or an `error`** (the per-leg error lane). `send`
+  refuses anything else, before any durable write.
+- **It is never consulted.** `ask --to <review identity>` is a usage error; `/ask` the driver
+  that runs on the same model instead.
+
+It inherits everything provider-keyed from its provider — containment (a `grok`-backed one
+needs `COMMS_RUNPHASE_ALLOW_UNCONTAINED` exactly as grok does), transport, and the policy map
+row. There are no per-identity pins or map rows, and one routing decision per base thread
+covers every leg. **Residual:** a claude-backed review identity runs under the same `~/.claude`
+(settings, user instructions, memory) and keychain credential as a claude driver on the same
+machine. The identity separates the mailbox, not the model's configuration.
+
+**Self-address is refused.** `send` refuses a `review-request` or `question` whose `from:`
+equals `--to`, naming the stranded outbound and, when one is registered, the review identity
+for that provider. Replies are unaffected, and `from: claude` → `--to claude-review` is legal.
+
+**One provider, one voice.** Two reviewers on one provider are one model reviewing twice —
+same routing decision, same policy, same prompt — so their agreement is not corroboration.
+`panel dispatch` refuses a roster with two legs on one provider (early and friendly, before any
+durable write), and `compose` refuses to count two answered legs from one provider (exit 3,
+`composition-refused` with status `duplicate-provider`). compose reads each reply's provider
+from the reply itself, never from the config as it reads now: a driver's reply is its own
+name, a review identity's is the `review_provider` its broker stamped (see Frontmatter). So a
+retry, a concurrent dispatch or a remapped identity cannot make one model count twice.
+`panel status --set` applies the same rule and warns on stderr, so it never shows a healthy
+panel that compose will refuse.
+
+`agents --others <driver>` — the default panel — is the other drivers. Only when there is no
+other driver does it fall back to review identities, one per provider (the first declared),
+so a default roster can never trip the refusal above; with nothing to return it exits 2 naming
+`review-agents`. With two or more drivers, a review identity joins a panel only by name.
+
+**Enabling it.** Add the line to `.comms/config`, then name the identity:
+
+```
+review-agents = claude-review:claude
+```
+
+`/auto --reviewers claude-review` from a claude driver, or mix it with other providers
+(`--reviewers codex,grok,claude-review`). A single-driver project (`agents = claude`) also
+needs `default-target = claude`, since the default target must be a registered driver; its
+default panel is then `claude-review`.
 
 ## Presence & worktrees (multi-session coordination)
 
@@ -209,7 +281,7 @@ to track/push to `main`). When creating a worktree for a loop:
 ```markdown
 ---
 type: review-request            # see the type table in loopspec/SPEC.md
-from: claude                    # any REGISTERED agent — validate rejects others
+from: claude                    # a REGISTERED identity; a review identity only on review-feedback
 timestamp: 2026-06-04T18:30:14Z
 branch: main
 head_sha: <stamped by send>     # the artifact's base commit — helper-stamped, never hand-typed
@@ -225,8 +297,25 @@ max-rounds: 4
 verdict: APPROVE | REQUEST_CHANGES   # reviewer replies only; read normalized
 route_decision: <stamped by send>    # reviewer routing only (COMMS_REVIEW_ROUTE=1); helper-stamped,
                                      # stripped everywhere else, never shown to the reviewer
+review_provider: claude              # review identities only; helper-stamped, never hand-typed
 ---
 ```
+
+`review_provider` names a provider, and which one depends on direction:
+
+- **On a `review-request`** it is the RECIPIENT's provider. `send` stamps it on a request to a
+  review identity (the provider the config maps it to at send time) and strips a hand-typed
+  value from a request to a driver, so driver-bound requests stay byte-identical. `shadow`
+  stamps its private request copy for the shadow's own target. `validate` only checks that a
+  present value is a supported provider — a `codex`-authored request to `claude-review`
+  stamped `claude` is valid.
+- **At execution** runphase refuses a review-identity turn whose inbound `review_provider` is
+  absent or differs from what the identity maps to NOW (`result.json` note: "… was bound to
+  provider …"). A remap between send and run fails the leg closed — it reads unanswered —
+  rather than running another model under the old name.
+- **On a `review-feedback`** it is the SENDER's provider, stamped by the broker on a review
+  identity's reply. `validate` requires it there (a supported provider) and refuses a driver
+  reply that claims any provider other than its own name. This stamp is what `compose` counts.
 
 **Validation rules, message types, verdict semantics, and the loop invariants are
 normative in [loopspec/SPEC.md](loopspec/SPEC.md)** — enforced here by
@@ -328,7 +417,9 @@ ts  workspace  event  review_set  dispatch  thread  round  agent  role  artifact
 ```
 
 File order **is** the sequence — `ts` is for humans, not for sorting. `agent` names the
-LEG's reviewer (the target of a request, the author of a reply), never the send target.
+LEG's reviewer (the target of a request, the author of a reply), never the send target. It is
+the IDENTITY (`claude-review`), never the provider it ran on; a review identity's
+`turn-started` note carries `provider=claude agent=claude-review`.
 `role` is `gating` or `shadow`; a `--no-deliver` measurement turn is recorded and is
 structurally distinguishable from the leg that gates.
 
@@ -415,7 +506,7 @@ The lifecycle, in the order it is written:
 | `reply-refused` | the broker | it refused to STAMP, and why (`note`) |
 | `reply-accepted` | `send`, for a reply | the reply reached the driver's inbox (`status` = verdict) |
 | `turn-finished` | the runner (or `await`, for a runner that died) | the TURN's terminal status, which differs from the provider's; `log-incomplete` when an event this turn produced never reached the log |
-| `composition-completed` / `composition-refused` | `compose` | the gate ran, or refused a partial/unreadable panel |
+| `composition-completed` / `composition-refused` | `compose` | the gate ran, or refused a partial/unreadable panel or two answers from one provider (`duplicate-provider`) |
 
 Read it with
 `comms.sh events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--limit N]`.
@@ -462,7 +553,8 @@ After a driver dies, `comms.sh events --set <id>` answers what to do next:
   and attempt, so leaving it in makes a shadow look like the leg that gates. `events --role
   gating` does this for you.
 - **`composition-refused`** — a human decides; `status` says whether the panel was partial or
-  a leg was unreadable.
+  a leg was unreadable. `duplicate-provider` means two counted replies came from one provider
+  (the `note` names the legs): re-dispatch with one reviewer per provider.
 
 Two corroborations belong in that walk, because the log alone cannot settle them: the
 MAILBOX decides compose-versus-re-dispatch (a reply already in the inbox needs no new turn),
@@ -682,6 +774,23 @@ pinned permission mode. For worktree turns, `.comms/` and the main `.git/` are a
 `COMMS_DELIVERY`: exporting `headless` onto the child also landed it on the driver, where it
 tripped the parent's own delivery gate and killed the broker's `send` while the copied reply
 made every leg look answered. (grok, S4-2 r1, blocking.)
+
+**The reviewer environment boundary.** A review turn is launched from the driver's shell, so
+without a boundary it inherits the driver's identity. `runphase.sh run` exports
+`COMMS_REVIEW_TURN=<identity>` for the whole turn, and `comms.sh whoami` fails closed whenever
+it is set — nothing inside a review turn resolves to a driver. The marker, not a scrub, is what
+covers a claude reviewer under a claude driver: that child carries only claude's session
+signals, which is exactly the case whoami's conflicting-signals check cannot see. Every child
+launch (acpx, and grok's direct exec) also drops `COMMS_SELF`, `COMMS_PRESENCE_NAME`,
+`COMMS_PRESENCE_INSTANCE`, `COMMS_PRESENCE_PID`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`,
+`CLAUDE_CODE_CHILD_SESSION` and `CLAUDE_CODE_SESSION_ID`, so a claude reviewer launched by a
+claude driver sees what one launched by codex or grok always saw.
+
+The DETACHED runner that `spawn` starts drops `COMMS_PRESENCE_*` and `COMMS_SELF` as well. It
+can outlive the driver, and its broker's `send` would otherwise keep beating the driver's
+released presence record back into existence as a pid-less peer nobody can reap. The
+foreground `send --wait` run keeps them (the driver is alive), and the driver's own `await`
+beats while it waits.
 
 ## Archive discipline
 

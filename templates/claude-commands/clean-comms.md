@@ -17,7 +17,7 @@ Delete messages from `.comms/` directories.
    ```bash
    "$COMMS_SH" clean --as "$SELF" <mode>
    ```
-   Modes: **no argument / `workspace`** (this workspace's files from your inbox `to-$SELF/` + `archive/` only — never another agent's unread mail), **`all`** (everything in both inboxes + archive — the only mode that touches the other agent's inbox), **`archive`** (archive/ only), or **a specific filename**.
+   Modes: **no argument / `workspace`** (this workspace's files from your inbox `to-$SELF/` + `archive/` only — never another agent's unread mail), **`all`** (everything in every registered inbox — drivers' and review identities' — plus archive; the only mode that touches another agent's inbox), **`archive`** (archive/ only), or **a specific filename**.
 
 3. Show the dry-run's "would delete" list to the user and confirm.
 

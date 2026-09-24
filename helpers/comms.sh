@@ -15,9 +15,9 @@
 #                                  review-only identities (`review-agents =
 #                                  <name>:<provider>`), one identity's provider, or the
 #                                  provider capability table. --others is the default
-#                                  panel for a driver: the OTHER drivers, else the review
-#                                  identities. (zero-config: claude codex grok, target codex,
-#                                  no review identities)
+#                                  panel for a driver: the OTHER drivers, else ONE review
+#                                  identity per provider (first declared). (zero-config:
+#                                  claude codex grok, target codex, no review identities)
 #   whoami                      print the driving agent (COMMS_SELF → session env →
 #                               ancestor executable). Fails closed on no signal, on
 #                               conflicting signals, on a review-only identity, and
@@ -2084,6 +2084,7 @@ cmd_panel() {
         set_legs "$idx" "$set_id" "$status_dispatch"
       fi
     } | { printf 'reviewer\tthread\tanswered\tverdict\n'
+    local st_provs="" st_dup=""
     while IFS=$'\t' read -r ag th rnd req_mid; do
       [ -n "$ag" ] || continue
       local reply="" verdict="" answered=no cand
@@ -2098,9 +2099,26 @@ cmd_panel() {
         cmd_validate "$cand" >/dev/null 2>&1 || continue
         reply="$cand"; break
       done
-      if [ -n "$reply" ]; then answered=yes; verdict="$(cmd_verdict "$reply" 2>/dev/null || true)"; fi
+      if [ -n "$reply" ]; then
+        answered=yes; verdict="$(cmd_verdict "$reply" 2>/dev/null || true)"
+        # The same provenance rule compose gates on (reply_provider), so status cannot show a
+        # healthy panel that compose will refuse. Reported on stderr: the table is a pinned shape.
+        local st_p st_first
+        st_p="$(reply_provider "$reply")"
+        if [ -n "$st_p" ]; then
+          st_first="$(printf '%s\n' "$st_provs" | awk -F'\t' -v p="$st_p" '$1 == p { print $2; exit }')"
+          if [ -n "$st_first" ]; then
+            st_dup="$st_dup
+panel status: WARNING — $st_first and $ag both answered on provider $st_p; compose will refuse this set"
+          else
+            st_provs="$st_provs
+$st_p	$ag"
+          fi
+        fi
+      fi
       printf '%s\t%s\t%s\t%s\n' "$ag" "$th" "$answered" "$verdict"
-    done; }
+    done
+    [ -z "$st_dup" ] || printf '%s\n' "${st_dup#?}" >&2; }
     return 0
   fi
 

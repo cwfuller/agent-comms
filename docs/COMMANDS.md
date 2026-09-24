@@ -24,6 +24,14 @@ rounds (default 10). The task text can describe work or reference an existing pl
 Round messages keep stable context (latest findings bundle + `git diff --stat` +
 validation results), never per-finding fix narration.
 
+The default panel is `comms.sh agents --others <driver>`: the other drivers, or — when no
+other driver is registered — one review identity per provider. `--reviewers` may name review
+identities, never the driver itself: same-model review is `--reviewers claude-review` after
+`review-agents = claude-review:claude` in `.comms/config` (see
+[PROTOCOL](PROTOCOL.md#identities-and-providers-same-model-review)). A panel takes one
+reviewer per provider — `panel dispatch` refuses two legs on one, and `compose` refuses two
+answers from one. When the gating reviewer shares the author's model, the loop says so.
+
 Without `--plan` / `--no-plan`, `comms.sh route` classifies the stripped task and may
 enable the approach-review phase (`plan: yes`) and recommend implementer effort.
 `--plan` forces the phase; `--no-plan` skips it; `--no-route` (or `COMMS_ROUTE=0`)
@@ -47,7 +55,9 @@ One-off judgment call — no review framing, no loop, no verdict.
 it names the target and the rest is the question; otherwise the whole argument —
 unrecognized first word included, unmodified — is a question to the default agent
 (`comms.sh agents default`). `/ask grok is X sound?` targets grok when grok is
-registered; an unregistered word (e.g. `gemini`) stays part of the question text.
+registered; an unregistered word (e.g. `gemini`) stays part of the question text. A review
+identity (`comms.sh agents --review`) is review-only: `/ask claude-review …` is refused and
+nothing is sent — ask the driver that runs on that model instead.
 
 **Explicit question:** body carries `## Question` (verbatim), optional `## Context` /
 `## Current Thinking` (your draft take so the agent refines rather than starts blank),
@@ -97,7 +107,8 @@ filename, or a thread.
 
 Guarded cleanup via `comms.sh clean` — always dry-runs first, deletes only after you
 confirm (`--yes`). Default `workspace` mode touches **your inbox + archive only**; `all`
-is the only mode that deletes the other agent's unread mail.
+is the only mode that deletes another agent's unread mail — it covers every registered
+inbox, review identities' included.
 
 ## Codex skills
 
@@ -132,9 +143,9 @@ agnostic.
 |---|---|
 | `root` | print the main repo's `.comms` path (worktree-safe) |
 | `workspace` | print the resolved workspace name (explicit pin → branch → repo dir) |
-| `agents [default\|--supported]` | registered agents from `.comms/config` (zero-config: `claude codex grok`), the default target, or the supported-backend table |
+| `agents [default\|--drivers\|--review\|--provider <id>\|--others <driver>\|--supported]` | the registry in `.comms/config`. Bare: every identity, drivers first then review identities (zero-config: `claude codex grok`, no review identities). `default`: the default target (always a driver). `--drivers`: the `agents =` line. `--review`: the names declared by `review-agents = <name>:<provider> ...`. `--provider <id>`: the provider an identity runs on (a driver is its own). `--others <driver>`: the default panel, comma-separated — every other driver, or with none, one review identity per provider (the first declared); refuses a review identity, and exits 2 naming `review-agents` when nothing can review. `--supported`: the PROVIDER capability table (no identity rows). See PROTOCOL "Identities and providers" |
 | `setup [--yes] [--show] [--set KEY=VALUE ...]` | re-runnable setup: prerequisites, agent detection (writes `agents` / `default-target` in `.comms/config`, other lines kept), reviewer containment, Jev routing (key to the 0600 `secrets` file, backend, reviewer routing, project permit), Codex reviewer runtime, review timeout. Saves to `~/.agent-comms/settings`, which every helper reads below the environment and a project `.comms/settings` ([INSTALL](INSTALL.md#settings-commssh-setup)). `--yes` takes the detected defaults without prompting; `--show` prints each value and its source (never the key); `--set` writes keys directly, an empty value removes one. |
-| `whoami` | print the driving agent: `COMMS_SELF` → session env (`GROK_AGENT=1`, `CLAUDECODE`, `CODEX_SANDBOX`, …) → ancestor executable. Fails closed on no signal and on conflicting signals; never defaults to `claude` |
+| `whoami` | print the driving agent: `COMMS_SELF` → session env (`GROK_AGENT=1`, `CLAUDECODE`, `CODEX_SANDBOX`, …) → ancestor executable. Fails closed on no signal, on conflicting signals, on a review identity (it never drives), and whenever `COMMS_REVIEW_TURN` is set — runphase exports that marker for every review turn, so nothing inside one resolves to a driver; never defaults to `claude` |
 | `list --as <agent> [--thread <t>]` | pending inbox messages, newest first; non-zero + "latest archived" hint when empty |
 | `status` | one-screen loop summary: workspace, latest archived message + its loop fields, pending counts per inbox |
 | `validate <file>` | frontmatter/body checks; reasons on stderr, non-zero on failure |
@@ -143,7 +154,7 @@ agnostic.
 | `verdict <file>` | normalized verdict: whitespace-stripped, uppercased, loopspec synonyms mapped (`pass` → `APPROVE`, `fail` → `REQUEST_CHANGES`) |
 | `archive --as <claude\|codex> <file...>` | idempotent move to `archive/`; refuses files outside your own inbox |
 | `deliver <claude\|codex\|grok> [file]` | routes via `transport`, classifying the MESSAGE: one carrying `workflow:` is a loop, anything else is a consult/one-shot. Both resolve to `acp` (a parent-brokered turn through `runphase --via acp`), to `headless` for grok, or to `mailbox`. Prints the chosen route and outcome: `spawned` / `no nudge needed` (pickup) / manual pickup. An unknown `COMMS_DELIVERY` — including the removed `cmux` — is REFUSED, not degraded. |
-| `send --to <claude\|codex> <file> [--wait] [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`spawned`/`completed`/`manual`/`pickup`/`failed`; `delivered` and `blocked` died with cmux and are read-only history). `--wait` runs the peer turn in the foreground; success is `RESULT: completed`, never "NOT spawned". A `review-feedback` inherits the request's `artifact_id`/`head_sha` and is refused on mismatch |
+| `send --to <agent> <file> [--wait] [--archive-inbound <file>]` | validate → deliver → record state → archive inbound, atomically; ends with a loud `RESULT:` line (`spawned`/`completed`/`manual`/`pickup`/`failed`; `delivered` and `blocked` died with cmux and are read-only history). `--wait` runs the peer turn in the foreground; success is `RESULT: completed`, never "NOT spawned". A `review-feedback` inherits the request's `artifact_id`/`head_sha` and is refused on mismatch. Before any durable write it refuses a `review-request` or `question` whose `from:` equals `--to` (naming the file, and the review identity for that provider when one exists), and anything but a `review-request` or `error` to a review identity. It stamps `review_provider:` on a `review-request` to a review identity and strips a hand-typed one from a `review-request` to a driver |
 | `presence claim\|beat\|others\|release\|expire\|with-beat` | advisory multi-session coordination on `.comms/sessions/` — claim-then-check (exit 0 direct-safe / 3 peers / 4 fail-closed ambiguity), whole-file heartbeats (exit 5 = healed, re-check before writing), exact-self release, two-pass byte-identical reap with nonce tombstone covers (which `claim` itself runs, so dead records are collected without anyone invoking `expire`), an auto-adopted session pid that `claim` and `beat` both verify by `ps` (explicit `--pid` first, then `COMMS_PRESENCE_PID`, then `CLAUDE_PID`, each TRIED in turn so a stale override cannot shadow a good handle; an auto-adopted value that does not verify falls back to pid-less, while an explicit `--pid` is taken as given). `beat` AND `others` both re-pin the handle, so a RESUMED session — which runs under a new harness process — is not collected while alive, including in the window before its first heartbeat, since `others` is the re-check a resumed session runs first. `others` therefore WRITES (a successful re-check beats self) and fails closed: exit 5 when this session's own record is gone or carries a reap tombstone, exit 4 when the re-pin cannot be written, and a beat-wrapper for long-running children. See PROTOCOL "Presence & worktrees" |
 | `worktree new [<slug>]` | session worktree under the MAIN root's `.claude/worktrees/` on branch `worktree-<slug>`, from the LOCAL default-branch tip; refuses without ignore coverage |
 | `integrate <branch>` | land on `main`: advisory lease, ff-only, suite (config `suite-cmd = ...`) at the candidate OID in a detached worktree — a FRESH checkout with no untracked or ignored files, so `suite-cmd` must provision its own prerequisites and may leave ignored files but no git-visible changes; it is whitespace-split into argv with no shell, so point it at a committed script — then CAS `update-ref` — a race loses cleanly, main only ever advances to suite-verified commits. A prose-only tree diff (`README.md`, `LICENSE`, top-level `docs/*.md`; not `docs/loopspec/`, not `AGENTS.md`) skips the suite and does not mint an attestation. A single clean checkout idling on `main` at the expected tip is self-healed through the landing; `suite-attest-secs = N` config accepts a fresh same-OID `attest-green` record in place of the re-run |
@@ -160,7 +171,7 @@ agnostic.
 | `review-route decide (--request <file> \| --thread T --phase P) [--tier T] [--effort E] [--replace]` | record the reviewer routing decision for (workspace, base thread, phase): an abstract candidate `tier` (`fast\|balanced\|strong\|none`) and `effort` (`low..xhigh\|none`; `none` = keep the baseline). Made ONCE and reused every round (sticky pointer); an existing decision is returned unchanged, explicit flags against one are refused without `--replace`, and `--replace` mints a NEW id. `--tier/--effort` = an explicit OPERATOR decision (strict: the resolver refuses it rather than substituting). Otherwise it classifies the request with the reviewer rubric (`reviewer-v1`, no bump, split/tied answers go deeper, low confidence or a malformed answer = `none`), but only for a project in `route-shadow-allow` (else `not-permitted`, nothing sent), only with a measurable artifact diff (risk signals come from `git diff --numstat`, never the author's stat), and a `stub` answer is recorded but never applied. Records live in `.comms/route-decisions/<id>.json` with the bounded input, omissions, raw answer and who decided. |
 | `review-route lookup --thread T --phase P` / `verify <id> --thread <msg thread> --phase P [--leg-dispatch D [--leg-agent A]]` / `show <id> [--thread T] [--phase P]` / `enabled` | `lookup`: the decision in force for this workspace's thread+phase. `verify`: the id a request CARRIES must be the decision in force for the record's own thread+phase (keyed on the record, so the caller's cwd or branch cannot change the answer); only a routed panel leg its panel RECORDED (`panel dispatch` writes `.comms/route-decisions/legs/<hash>`: dispatch, the stamped decision, the raw base thread, the agents — before any leg is sent) may be that thread plus `-<agent>`, compared byte for byte — a thread merely named `x-grok`, bare or with a typed `dispatch:`, never borrows `x`'s decision. `show` refuses a foreign thread or phase. `enabled` exits 0 iff `COMMS_REVIEW_ROUTE=1` and `COMMS_ROUTE` is not `0`. `send` and `panel dispatch` call `decide` after the snapshot and stamp `route_decision:` (helper-only: every other send strips it). |
 | `findings [--out F] [--role gating\|shadow] [--review-set ID] [--artifact ID] [--reviewer-version V] [--prompt-version V] [--header] [<message>...]` | extract review findings to TSV (default: the whole archive, oldest first); `--out` appends and is idempotent by `finding_id` |
-| `shadow --to <agent> <review-request> [--review-set ID] [--out F] [--timeout-secs N]` | run a SECOND reviewer on the same artifact; the reply is stored but never delivered and never written to thread state |
+| `shadow --to <agent> <review-request> [--review-set ID] [--out F] [--timeout-secs N]` | run a SECOND reviewer on the same artifact; the reply is stored but never delivered and never written to thread state. `--to` may be a review identity: capability is checked on its provider, and the private request copy is stamped with the shadow target's own `review_provider` (the original request is untouched) |
 | `events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R] [--limit N]` | read the coordinator's append-only log (`.comms/events.tsv`): roster planned → request persisted → dispatched → turn started → provider result → reply validated/refused → reply accepted → turn finished → composition completed. Filters apply before `--limit`; a malformed row is named on stderr, never parsed. See PROTOCOL "Coordinator event log" for the recovery walk |
 | `events append --kind <kind> [--set\|--dispatch\|--thread\|--round\|--agent\|--role\|--artifact\|--request-id\|--message-id\|--run-dir\|--status\|--note]` | the single writer every producer calls; closed kind and role vocabularies, per-column budgets, and a refusal — on EVERY append, against an allowlist of local filesystem types — to write the log where appends are not sound |
 | `snapshot [create\|list] [--with-base]` | retain the tree under review as a durable git object under `refs/agent-comms/artifacts/`; `--with-base` prints `artifact_id<TAB>base_sha` from the one operation |
@@ -250,7 +261,9 @@ findings one reviewer raised and the other did not.
 #### Transport selection — loops are ACP-first, and ACP-ONLY for claude/codex
 
 `comms.sh transport <agent> [--loop]` is the single decision point; `deliver`, the
-templates, and these docs all read from it rather than each re-deciding.
+templates, and these docs all read from it rather than each re-deciding. Routing is a property
+of the PROVIDER: a review identity routes exactly as its provider does
+(`transport claude-review --loop` answers what `transport claude --loop` would).
 
 | context | default | why |
 |---|---|---|
@@ -378,13 +391,27 @@ prompts because the mode is persistent owner state a contained canary cannot mov
 with no cache (`COMMS_ACP_CANARY_SECS`, default 60). Consults do not run a separate canary — a
 consult's own reply is its probe, verified by the same `reply-check`.
 
+**`--agent` is WHO reviews; the provider comes from the registry.** `spawn` and `run` take a
+registered identity (default `codex`) and resolve its provider (`comms.sh agents --provider`)
+before anything else reads it; a caller can never name the provider. `--provider` is the older
+spelling and takes the same identity value. The identity is what the reply is stamped with
+(`from: claude-review`, plus `review_provider: claude`), whose inbox the inbound is archived
+from, and what events, `turn.tsv` (`agent` line) and `result.json` (`"agent"`) record; the
+provider picks the acpx profile, the containment arm and the policy. An unmounted review
+identity's acpx session is `<name>+as+<identity>`, so it never resumes its provider's warm
+session on the same thread. The inbound `from:` must be a registered DRIVER other than the
+turn's own identity, and a review-identity turn is refused when its request carries no
+`from:` or a `review_provider` other than the provider it maps to now. `run` exports
+`COMMS_REVIEW_TURN=<identity>` and every child launch drops the driver's session identity —
+see PROTOCOL "The reviewer environment boundary".
+
 `deliver`/`send` call `spawn` for you — `await`, `result`, `hold`, and `release` are
 the operator surface:
 
 | subcommand | effect |
 |---|---|
-| `run --message <file> --dir <run-dir> [--provider ...] [--no-deliver]` | foreground runner. `--no-deliver` produces and validates the reply in the run dir but touches **neither the mailbox nor thread state** — the measurement mode behind `comms.sh shadow` |
-| `spawn --message <file> [--provider claude\|codex\|grok] [--via acp] [--sandbox <mode>] [--timeout-secs N]` | detach a peer turn — ACP-only for claude/codex since step 4; a non-ACP request for them is refused; prints pid + run dir immediately; refuses (`HELD`) while the thread is held; won't double-spawn while a prior runner for the message is alive |
+| `run --message <file> --dir <run-dir> [--agent <identity>] [--no-deliver]` | foreground runner. `--no-deliver` produces and validates the reply in the run dir but touches **neither the mailbox nor thread state** — the measurement mode behind `comms.sh shadow` |
+| `spawn --message <file> [--agent <identity>] [--via acp] [--sandbox <mode>] [--timeout-secs N]` | detach a peer turn — ACP-only for claude/codex since step 4; a non-ACP request for them is refused; prints pid + run dir immediately (plus ` agent=<id>` when the identity is not its provider's name); refuses (`HELD`) while the thread is held; won't double-spawn while a prior runner for the message is alive |
 | `await <run-dir> [--timeout-secs N]` | block until the turn's `result.json` exists (or the runner dies); prints it; exit 0 only for `status=completed` |
 | `result <run-dir>` | print `result.json` if present |
 | `hold [thread]` | pause: block new spawns for the thread (all threads with no arg); prints the attach commands (`claude --resume <sid>` / `codex resume <tid>`) from state |
@@ -392,7 +419,7 @@ the operator surface:
 
 Each turn is recorded under `.comms/logs/<message_id>.<epoch>.<pid>/`: `prompt.md`
 (what the peer was told), `events.ndjson` (the full JSONL event stream — token usage
-lives here), `result.json` (provider, status, exit code, session id), `pid`,
+lives here), `result.json` (provider, agent, status, exit code, session id), `pid`,
 `runner.log`, `policy.tsv` (the per-turn policy record resolved BEFORE the session is
 launched; hash-checked before every consumer) and `turn.tsv` (identity, then
 `route_decision`, `policy_*`, `requested_model/effort` at resolution time,

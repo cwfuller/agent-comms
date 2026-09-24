@@ -102,20 +102,38 @@ asked. Do not narrate every dispatch.
      outrank it. It only ever raises depth. Ceiling turns run long — add
      `COMMS_RUNPHASE_TIMEOUT_SECS=3600` inline too if a reviewer times out.
    - `--reviewers a,b` selects the reviewing agents. **The default is a PANEL: every
-     registered agent except the one driving.** Narrow it explicitly when you want one
+     other registered driver** — or, when no other driver is registered, one review
+     identity per provider (below). Narrow it explicitly when you want one
      (`--reviewers codex`). Derive the default from the registry — never hardcode a
      roster, or adding an agent silently leaves it out:
      ```bash
      SELF="$("$COMMS_SH" whoami)"                          # never write a literal agent name
-     REVIEWERS="$("$COMMS_SH" agents --others "$SELF")"    # every registered agent except the driver
+     REVIEWERS="$("$COMMS_SH" agents --others "$SELF")"    # the other drivers, else one review identity per provider
      # ...unless --reviewers was passed, in which case use it verbatim
      GATING="${REVIEWERS%%,*}"                            # first reviewer gates the loop
      ```
      `whoami` fails closed if it cannot tell which agent is driving; set `COMMS_SELF`
      only as an override. Copying `from: claude` out of an old example impersonates
      Claude — dispatch then fans the request back at you.
-     Validate EVERY name against `"$COMMS_SH" agents`. Hold them as a LIST, never a single
-     scalar copied across write paths.
+     Validate EVERY name against `"$COMMS_SH" agents` (it lists review identities too).
+     Hold them as a LIST, never a single scalar copied across write paths.
+   - **`--reviewers` never names `$SELF`.** `send` and `panel dispatch` refuse a request
+     whose `from:` is also its target. Same-model review goes to a **review identity**: a
+     review-only name the operator declares in `.comms/config`
+     (`review-agents = claude-review:claude`), with its own inbox and leg thread, running
+     on the named provider. `"$COMMS_SH" agents --review` lists them and
+     `"$COMMS_SH" agents --provider <name>` prints the model behind one. If the user asked
+     to be reviewed by their own model and none is declared, stop and tell them the line
+     to add — never substitute your own name.
+   - **One reviewer per provider.** `panel dispatch` refuses a roster with two legs on one
+     provider (a driver plus its own review identity, say), and `compose` refuses to count
+     two answers that one provider produced. Mix a review identity with OTHER providers
+     (`--reviewers codex,claude-review` from a claude driver), not with its own.
+   - **When `$GATING` runs on your own model, say so** (`"$COMMS_SH" agents --provider
+     "$GATING"` prints the word `whoami` printed) — in the first status line to the user
+     and in the request's `## Context` (e.g. "gating reviewer: claude-review, the author's
+     own model"). It is allowed, and it is weaker independence than a cross-model gate;
+     the human should never have to infer that.
    - `--via headless` forces the detached runner — **grok only**. Step 4 made `claude` and
      `codex` review turns ACP-only, so asking for headless on those providers is REFUSED,
      not silently downgraded. The `--via cmux` pane transport was deleted in step 4.
@@ -205,9 +223,9 @@ asked. Do not narrate every dispatch.
    - Filename: `<workspace>_YYYY-MM-DDTHH-MM-SS_auto-$RANDOM.md`
    - Write with a quoted heredoc (`<<'EOF'`) so backticks and dollar signs are never
      evaluated.
-   - `from:` is the exact word `whoami` printed (one of `claude`, `codex`, `grok`). A
-     quoted heredoc will not expand `$SELF` — paste the word. Never copy a name out of
-     this file.
+   - `from:` is the exact word `whoami` printed — always a DRIVER identity (one of
+     `"$COMMS_SH" agents --drivers`; `whoami` refuses a review identity). A quoted heredoc
+     will not expand `$SELF` — paste the word. Never copy a name out of this file.
    - `thread` names this loop and is constant across every message in it; `message_id` is
      the filename sans `.md`.
 
@@ -274,8 +292,9 @@ verdict format. The cycle continues until APPROVE or max rounds.
    ```
    That writes one 2-party leg per reviewer (`<thread>-<agent>`), all sharing one
    `review_set` and **one snapshot**, and validates the whole roster before sending any
-   leg — a half-fanned panel silently drops a voice from the composed gate. It prints the
-   `review_set` id; keep it, you need it to compose.
+   leg — a half-fanned panel silently drops a voice from the composed gate. That check
+   refuses the author as a leg, and two legs on one provider, before writing anything. It
+   prints the `review_set` id; keep it, you need it to compose.
 
    Reviewer routing (only with `COMMS_REVIEW_ROUTE=1`, implement phase only) happens inside
    these two commands: the first implement request on a thread records the decision, later
@@ -329,7 +348,9 @@ verdict format. The cycle continues until APPROVE or max rounds.
      the loop hostage, and it is the token discipline that keeps a panel affordable.
    - **Unanchored** / **Advisory** — carried, never gating.
 
-   `compose` REFUSES a partial panel. An unanswered leg is not an approval.
+   `compose` REFUSES a partial panel. An unanswered leg is not an approval. It also
+   refuses (exit 3) when two answered legs came from one provider — read from each reply's
+   own stamp, not the current config — so re-dispatch with one reviewer per provider.
    **Do not auto-address every blocking bullet from every reviewer** — work the
    corroborated set, the gating reviewer's blockers, and any unique blocker that
    independently meets verdict discipline. Still split after one confirmation round →

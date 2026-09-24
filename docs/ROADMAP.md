@@ -2240,10 +2240,39 @@ Most of the plumbing is already agent-neutral: the registry, `inbox_for`, `trans
 - [ ] **Agent-named internals.** `send-to-codex` / `read-from-codex` bake a peer into the
   name; they should be `send` / `read` over `$REVIEWER` / `$SELF`, which the helper
   already is underneath.
-- [ ] **Same-model panelists need distinct registered identities.** Two Claudes cannot
+- [x] **Same-model panelists need distinct registered identities.** Two Claudes cannot
   share `to-claude/` — one inbox, one `peer_of`, one `awaiting_from`. A self-panel needs a
   second registered identity (e.g. `claude-review`, same backend, its own inbox), which is
   a registry and protocol change rather than a prompt one. *(grok, 2026-08-25.)*
+  **BUILT ON BRANCH 2026-09-24** (`worktree-same-model-review`; plan approved
+  at round 4, thread `same-model-review-26120`). `review-agents = claude-review:claude`
+  declares a review identity: its own inbox, leg thread, state, events and `from:`, running on a
+  declared provider, which alone keys transport, containment and policy. Decisions:
+  - **Review-only.** It never drives (whoami refuses it, and fails closed inside any review
+    turn via `COMMS_REVIEW_TURN`), authors only the broker-stamped `review-feedback`, receives
+    only `review-request`/`error`, and is never consulted — `/ask claude` already covers
+    same-model consults.
+  - **Same-provider legs are refused, not down-weighted** — same model, effort, prompt and
+    `~/.claude`. `panel dispatch` refuses them before any durable write; `compose` is the
+    authoritative gate (exit 3, `composition-refused` `duplicate-provider`) and reads each
+    counted reply's provider from its own `review_provider` stamp, never the current config,
+    so retries, concurrent attempts and remaps cannot count one model twice.
+  - **Execution binding.** `send` stamps the target's provider on the request; runphase fails
+    a review-identity turn whose stamp is absent or no longer matches the map.
+  - **Environment boundary.** Every child launch drops `COMMS_SELF`, `COMMS_PRESENCE_*` and the
+    Claude Code session variables; the detached runner drops `COMMS_PRESENCE_*`/`COMMS_SELF`
+    too, so it can no longer resurrect a released driver's presence record.
+  - `send` refuses a self-addressed `review-request`/`question`; `agents --others` falls back to
+    one review identity per provider only when no other driver exists; zero-config output is
+    byte-identical.
+  Accepted residual: a claude-backed review identity shares `~/.claude` and the keychain
+  credential with a claude driver. **Pending: live validation of one real `claude-review` ACP
+  turn** (`send --wait --to claude-review` from a claude driver: the turn completes with the
+  Claude Code session variables scrubbed, the reply lands in `to-claude` stamped
+  `from: claude-review` / `review_provider: claude`, and the inbound is archived from
+  `to-claude-review`). Only the fake-npx suite has exercised the turn so far. `panel status
+  --set` warns (stderr) on a duplicate-provider set from the same reply stamps, so it never
+  shows a healthy panel that `compose` will refuse.
 - [ ] **Reviewer instructions are per-agent products.** Codex has skills, grok gets a
   parent-built prompt. Unifying on parent-brokering (already required for artifact mounts)
   would make reviewer-side instructions prompt FRAGMENTS rather than a second install
@@ -3659,7 +3688,9 @@ fix is to observe the thing itself.
     and the outcome table, so the fragment is the surface that disagrees — and changing it
     is a fragment edit plus a pin sync for every vendoring consumer, which is why it was
     not folded into a docs round. (codex.)
-  - [ ] `sorted_message_files` treats a MISSING inbox directory as a failing `find` under
+  - [x] *(Fixed on branch 2026-09-24 with review identities, whose inboxes exist only after
+    their first send: the accessor now returns empty for a missing directory.)*
+    `sorted_message_files` treats a MISSING inbox directory as a failing `find` under
     `pipefail`. `cmd_status` already papers over it with `|| true`; the panel scan now
     walks every registered inbox, and `install.sh` creates only `to-claude` and `to-codex`
     while the zero-config registry is `claude codex grok`. bash 3.2 hides it inside

@@ -170,6 +170,13 @@ were live.)
    not write it. `ME` is the *registered agent* name, not the presence name from the
    section above; they are unrelated. Dispatch prints an `await:` command per leg, and
    every leg reviews the same snapshot.
+   `ME` is always a DRIVER: `whoami` refuses a review-only identity and fails closed inside
+   a review turn. To be reviewed by your OWN model, add a review identity to the roster by
+   name (`review-agents = claude-review:claude` in `.comms/config`, then e.g.
+   `--to "$ROSTER,claude-review"` from a claude driver) — never your own name. A panel takes
+   one reviewer per provider: dispatch refuses two legs on one provider, and compose refuses
+   two answers from one. `agents --others` adds review identities only when no other driver
+   is registered. See docs/PROTOCOL.md "Identities and providers".
 4. **Wait for every leg, then compose** — `helpers/comms.sh compose --set <id>` (the set
    id is printed by dispatch; `panel status --set <id>` shows who has answered). Compose
    refuses a partial panel and labels findings by corroboration. A lone approval is not

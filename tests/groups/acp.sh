@@ -689,6 +689,264 @@ python3 -c 'import json,sys; sys.exit(0 if json.loads("\"%s\"" % sys.argv[1]) ==
 [ -n "$JE_RP" ] && [ "$JE_RP" = "$JE_CS" ] \
   && ok "runphase.sh and comms.sh carry byte-identical json_escape definitions" || fail "json_escape drifted between helpers"
 
+section "review identities: a claude-review turn over ACP"
+# A REVIEW IDENTITY runs on its PROVIDER's runtime under its OWN name. Every other ACP fixture in
+# this group runs a driver, whose identity IS its provider, so a runphase that put the identity
+# where the provider belongs -- or the provider where the identity belongs -- was byte-identical
+# there and could not fail. Here the two differ, and each site is asserted on the side it belongs
+# to: the acpx profile, result `provider` and the reply's `review_provider` are the PROVIDER
+# (claude); from:, the inbox, turn.tsv/result `agent`, the coordinator log and the unmounted
+# session namespace are the IDENTITY (claude-review).
+#
+# STUB FIDELITY, as in the brokered section above: $AXB/npx proves what the PARENT sends and
+# stamps, not that a real claude adapter behaves. What the stub can witness from inside the child
+# (AX_IDENT_LOG) is the environment the parent handed it, which is the boundary under test.
+#
+# The registry is rewritten for this section only and RESTORED at its end: every later section
+# assumes the fixture's three-driver config.
+RID_CFG="$MA_FIX/.comms/config"; RID_CFG_SAVED="$WORK/rid-config.saved"
+cp "$RID_CFG" "$RID_CFG_SAVED"
+rid_map() {  # <provider> — the fixture's drivers plus claude-review mapped onto <provider>
+  { cat "$RID_CFG_SAVED"; printf 'review-agents = claude-review:%s\n' "$1"; } > "$RID_CFG"
+}
+rid_map claude
+# A marked store, so the stub may persist session records here and never in a real ~/.acpx.
+RID_HOME="$WORK/rid-home"; mkdir -p "$RID_HOME/.acpx/sessions" "$RID_HOME/.acpx/queues"; : > "$RID_HOME/.acpx-test-store"
+# A review-request written straight into an inbox, as `send` leaves it (its file name IS its
+# message_id). `-` omits a field: a request to a review identity carries the provider its send
+# resolved (`review_provider`), and the binding and peer cases below need it absent or wrong.
+rid_msg() {  # <inbox> <tag> <from|-> <review_provider|-> -> echoes the inbound's path
+  local inbox="$1" tag="$2" from="$3" rp="$4" m
+  mkdir -p "$MA_FIX/.comms/to-$inbox"
+  m="$MA_FIX/.comms/to-$inbox/${MA_WS}_${MA_TS}_rid-$tag.md"
+  sed -e "s/^thread: ma-arc-1\$/thread: ma-rid-$tag/" -e "s/_review-req-1\$/_rid-$tag/" \
+      "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" \
+    | awk -v from="$from" -v rp="$rp" '
+        /^from: / && !body { if (from != "-") print "from: " from; next }
+        NR > 1 && $0 == "---" && !body { if (rp != "-") print "review_provider: " rp; body = 1 }
+        { print }' > "$m"
+  printf '%s' "$m"
+}
+# BOTH HOPS a turn can take. `spawn` is the detached path every real dispatch uses: it must
+# FORWARD the identity to `run`, never the provider it resolved, or the turn silently runs as
+# `claude`. `run` is the foreground path (`send --wait`); it deliberately KEEPS the driver's
+# presence/identity environment, so it is the hop on which only the child-launch scrub stands
+# between that environment and the reviewer. RID_LAUNCH lets the boundary case interpose a probe.
+rid_spawn() {  # <agent> <inbound> <tag> -> spawn's stdout (the run dir is on its `run dir:` line)
+  local agent="$1" msg="$2" tag="$3"
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$RID_HOME" ACP_PARITY_PAYLOAD="$BRK_PAY" \
+      AX_CWD_LOG="$WORK/rid-$tag.argv" AX_IDENT_LOG="$WORK/rid-$tag.ident" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+      "$RP" spawn --agent "$agent" --message "$msg" --via acp --timeout-secs 20 ) 2>&1
+}
+rid_await() { ( cd "$MA_FIX" && "$RP" await "$1" --timeout-secs 120 ) >/dev/null 2>&1; }
+rid_run() {  # <agent> <inbound> <tag> [env assignments...] -> the run dir
+  local agent="$1" msg="$2" tag="$3" dir; shift 3
+  dir="$WORK/rid-$tag"; mkdir -p "$dir"
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$RID_HOME" ACP_PARITY_PAYLOAD="$BRK_PAY" \
+      AX_CWD_LOG="$WORK/rid-$tag.argv" AX_IDENT_LOG="$WORK/rid-$tag.ident" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$@" \
+      "${RID_LAUNCH:-$RP}" run --message "$msg" --dir "$dir" --agent "$agent" --via acp --timeout-secs 20 ) >/dev/null 2>&1
+  printf '%s' "$dir"
+}
+rid_json() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$1/result.json" "$2" 2>/dev/null; }
+rid_tv() { awk -F'\t' -v k="$2" '$1==k{v=$2} END{print v}' "$1/turn.tsv" 2>/dev/null; }
+# EVERY published reply answering an inbound, in ANY inbox, found by ENVELOPE. Reply files are
+# named after the reviewer, never the request, so a name glob could not see a leak; and a
+# `*claude-reply*` glob would conflate claude with claude-review. The e2e below must find exactly
+# one, which is what gives every "published nothing" assertion after it its teeth.
+rid_answers() { grep -lxF "in-reply-to: $1" "$MA_FIX/.comms"/to-*/*.md 2>/dev/null; }
+rid_answers_n() { rid_answers "$1" | grep -c . | tr -d ' '; }
+# The distinct acpx (P)rofile and (S)ession tokens across every invocation the stub saw: the
+# profile is what the provider resolved to, the session name is the identity's namespace.
+rid_sessions() {
+  awk -F'\t' '{ n = split($2, a, " ")
+    for (i = 1; i <= n; i++) {
+      if (a[i] == "-s" || a[i] == "--name" || (a[i] == "show" && a[i-1] == "sessions")) print "S " a[i+1]
+      if (a[i] == "-s" || a[i] == "sessions") print "P " a[i-1]
+    } }' "$1" 2>/dev/null | sort -u | tr '\n' ' '
+}
+rid_ident_all() {  # <ident log> <VAR> <value> — every child launch saw exactly VAR=value, and there was one
+  local n bad
+  n="$(grep -c "^$2=" "$1" 2>/dev/null)"
+  bad="$(grep "^$2=" "$1" 2>/dev/null | grep -vxF "$2=$3" | head -1)"
+  [ "${n:-0}" -gt 0 ] && [ -z "$bad" ]
+}
+
+# PRECONDITION: the registry this section runs against. Without it every failure below would read
+# as a runphase defect when the fixture simply never declared the identity.
+[ "$( (cd "$MA_FIX" && "$COMMS" agents --provider claude-review) 2>/dev/null)" = claude ] \
+  && ok "the fixture registry maps review identity claude-review onto provider claude" \
+  || fail "claude-review is not registered on claude (config: $(tr '\n' ';' < "$RID_CFG"))"
+
+# ---- (1) THE REAL spawn -> run HOP, from a claude driver to its own model's review identity ----
+RID_E2E_MSG="$(rid_msg claude-review e2e claude claude)"; RID_E2E_MID="$(basename "$RID_E2E_MSG" .md)"
+RID_E2E_OUT="$(rid_spawn claude-review "$RID_E2E_MSG" e2e)"
+RID_E2E_DIR="$(rundir_of "$RID_E2E_OUT")"
+[ -n "$RID_E2E_DIR" ] && rid_await "$RID_E2E_DIR"
+printf '%s\n' "$RID_E2E_OUT" | grep '^spawned runphase ' | grep -q ' provider=claude via=acp agent=claude-review$' \
+  && ok "spawn names both the provider it resolved and the identity it runs as" \
+  || fail "spawned line lacks provider=claude/agent=claude-review (got: $(printf '%s' "$RID_E2E_OUT" | head -3 | tr '\n' ' '))"
+[ "$(rid_json "$RID_E2E_DIR" status)" = completed ] && [ "$(rid_json "$RID_E2E_DIR" provider)" = claude ] \
+  && [ "$(rid_json "$RID_E2E_DIR" agent)" = claude-review ] \
+  && ok "the detached claude-review turn completes; result.json says provider claude, agent claude-review" \
+  || fail "e2e result: status=$(rid_json "$RID_E2E_DIR" status) provider=$(rid_json "$RID_E2E_DIR" provider) agent=$(rid_json "$RID_E2E_DIR" agent) note=$(rid_json "$RID_E2E_DIR" note | cut -c1-200)"
+[ "$(rid_tv "$RID_E2E_DIR" agent)" = claude-review ] && [ "$(rid_tv "$RID_E2E_DIR" provider)" = claude ] \
+  && ok "turn.tsv records the identity and the provider as separate facts" \
+  || fail "turn.tsv agent=$(rid_tv "$RID_E2E_DIR" agent) provider=$(rid_tv "$RID_E2E_DIR" provider)"
+RID_E2E_REPLY="$(rid_answers "$RID_E2E_MID")"
+[ "$(rid_answers_n "$RID_E2E_MID")" = 1 ] && [ "$(dirname "$RID_E2E_REPLY")" = "$MA_FIX/.comms/to-claude" ] \
+  && ok "exactly one reply answers the request, and it lands in the DRIVER's inbox (to-claude)" \
+  || fail "e2e reply placement (found: $(rid_answers "$RID_E2E_MID" | tr '\n' ' '))"
+# THE MISATTRIBUTION REGRESSION for identities: a broker that stamped the provider would publish
+# `from: claude` into to-claude -- the driver reading its own name as its reviewer.
+grep -qx 'type: review-feedback' "$RID_E2E_REPLY" 2>/dev/null && grep -qx 'from: claude-review' "$RID_E2E_REPLY" 2>/dev/null \
+  && grep -qx 'review_provider: claude' "$RID_E2E_REPLY" 2>/dev/null \
+  && ok "the reply is from: claude-review and names the provider that produced it (review_provider: claude)" \
+  || fail "e2e reply envelope ($(sed -n '2,6p' "$RID_E2E_REPLY" 2>/dev/null | tr '\n' ' '))"
+[ ! -f "$RID_E2E_MSG" ] && [ -f "$MA_FIX/.comms/archive/$(basename "$RID_E2E_MSG")" ] \
+  && ok "the inbound was archived out of to-claude-review by the parent" || fail "claude-review inbound archive movement"
+# PROVIDER at the profile, IDENTITY in the session name. Unmounted, acpx keys a session on
+# (profile, cwd, name): without `+as+` this turn would resume a plain `claude` reviewer's warm
+# session on the same thread and inherit its context.
+RID_E2E_SESS="agent-comms-ma-rid-e2e+as+claude-review"
+[ "$(rid_sessions "$WORK/rid-e2e.argv")" = "P claude S $RID_E2E_SESS " ] \
+  && awk -F'\t' '$2 ~ / --file /' "$WORK/rid-e2e.argv" 2>/dev/null | grep -q . \
+  && [ "$(rid_tv "$RID_E2E_DIR" acp_session)" = "$RID_E2E_SESS" ] \
+  && ok "every acpx call used profile claude and the disjoint session $RID_E2E_SESS, and the prompt went out" \
+  || fail "e2e acpx argv (tokens: $(rid_sessions "$WORK/rid-e2e.argv"); turn.tsv session: $(rid_tv "$RID_E2E_DIR" acp_session))"
+rid_ident_all "$WORK/rid-e2e.ident" COMMS_REVIEW_TURN claude-review \
+  && ok "the review-turn marker rides the detached hop into every acpx child" \
+  || fail "COMMS_REVIEW_TURN in the e2e children: $(grep '^COMMS_REVIEW_TURN=' "$WORK/rid-e2e.ident" 2>/dev/null | sort -u | tr '\n' ' ')"
+# THE COORDINATOR LOG is identity-keyed: `--degrade`, the leg fingerprint and `events --set` find
+# a leg by the name its request was sent to. A row under `claude` would be a second, phantom leg.
+RID_EV="$( (cd "$MA_FIX" && "$COMMS" events --thread ma-rid-e2e --all) 2>/dev/null | tail -n +2 )"
+rid_ev_has() { printf '%s\n' "$RID_EV" | awk -F'\t' -v k="$1" '$3 == k' | grep -q .; }
+[ "$(printf '%s\n' "$RID_EV" | awk -F'\t' 'NF > 1 {print $8}' | sort -u | tr '\n' ' ')" = "claude-review " ] \
+  && rid_ev_has turn-started && rid_ev_has reply-accepted && rid_ev_has turn-finished \
+  && printf '%s\n' "$RID_EV" | awk -F'\t' '$3 == "turn-started" {print $15}' | grep -q 'provider=claude agent=claude-review' \
+  && ok "every coordinator event for the turn carries agent claude-review, and turn-started names both" \
+  || fail "e2e events (agents: $(printf '%s\n' "$RID_EV" | awk -F'\t' 'NF > 1 {print $3 "=" $8}' | tr '\n' ' '))"
+
+# ---- (2) THE ENVIRONMENT BOUNDARY, on the foreground hop that keeps the driver's env ----
+# A claude reviewer launched from a claude driver's shell inherits Claude Code's session variables
+# and the driver's comms identity; unscrubbed, the child reads as a nested copy of the driving
+# session and can beat the driver's presence record. Injected into runphase ITSELF, so only the
+# child-launch scrub can remove them. All eight scrubbed names are injected, not a sample.
+RID_WRAP="$WORK/rid-runphase-wrap"; RID_WRAP_LOG="$WORK/rid-runphase.env"
+cat > "$RID_WRAP" <<RIDWRAP
+#!/bin/bash
+# The CONTROL: record what runphase itself is started with, then become runphase.
+for v in COMMS_SELF COMMS_PRESENCE_NAME COMMS_PRESENCE_INSTANCE COMMS_PRESENCE_PID \\
+         CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; do
+  printf '%s=%s\n' "\$v" "\$(printenv "\$v" 2>/dev/null || printf '<unset>')"
+done > "$RID_WRAP_LOG"
+exec "$RP" "\$@"
+RIDWRAP
+chmod +x "$RID_WRAP"
+RID_ENV_MSG="$(rid_msg claude-review envb claude claude)"
+RID_ENV_DIR="$(RID_LAUNCH="$RID_WRAP" rid_run claude-review "$RID_ENV_MSG" envb \
+  COMMS_SELF=claude COMMS_PRESENCE_NAME=x COMMS_PRESENCE_INSTANCE=y COMMS_PRESENCE_PID=$$ \
+  CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_CHILD_SESSION=1 CLAUDE_CODE_SESSION_ID=z)"
+# Without this control, "absent in the child" could mean the injection never reached runphase.
+[ "$(cat "$RID_WRAP_LOG" 2>/dev/null)" = "$(printf '%s\n' COMMS_SELF=claude COMMS_PRESENCE_NAME=x COMMS_PRESENCE_INSTANCE=y \
+      "COMMS_PRESENCE_PID=$$" CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_CHILD_SESSION=1 CLAUDE_CODE_SESSION_ID=z)" ] \
+  && ok "CONTROL: runphase itself was started with all eight driver identity variables set" \
+  || fail "the injection did not reach runphase ($(tr '\n' ' ' < "$RID_WRAP_LOG" 2>/dev/null))"
+RID_LEAK=""
+for RID_V in COMMS_SELF COMMS_PRESENCE_NAME COMMS_PRESENCE_INSTANCE COMMS_PRESENCE_PID \
+             CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; do
+  rid_ident_all "$WORK/rid-envb.ident" "$RID_V" '<unset>' || RID_LEAK="$RID_LEAK $RID_V"
+done
+[ -z "$RID_LEAK" ] \
+  && ok "every acpx child of the turn saw none of them (the reviewer boundary scrubs each one)" \
+  || fail "driver identity reached the reviewer child:$RID_LEAK"
+# The stub prints this marker's VALUE through the same loop that printed `<unset>` above, so its
+# presence also proves the probe can see a variable that IS set -- the absences are observations.
+[ "$(rid_json "$RID_ENV_DIR" status)" = completed ] && rid_ident_all "$WORK/rid-envb.ident" COMMS_REVIEW_TURN claude-review \
+  && ok "the review-turn marker survives the scrub (COMMS_REVIEW_TURN=claude-review in every child)" \
+  || fail "marker in the scrubbed children: status=$(rid_json "$RID_ENV_DIR" status) $(grep '^COMMS_REVIEW_TURN=' "$WORK/rid-envb.ident" 2>/dev/null | sort -u | tr '\n' ' ')"
+
+# ---- (3) EXECUTION BINDING: a request runs only on the provider it was sent to ----
+# The send stamped `review_provider: claude`; the map then moved claude-review onto codex. Running
+# it would publish a codex review under a name compose counts as claude -- so it must fail closed
+# before any acpx call, and the leg reads unanswered rather than as a different model.
+RID_STALE_MSG="$(rid_msg claude-review stale claude claude)"; RID_STALE_MID="$(basename "$RID_STALE_MSG" .md)"
+rid_map codex
+RID_STALE_DIR="$(rid_run claude-review "$RID_STALE_MSG" stale)"
+[ "$(rid_json "$RID_STALE_DIR" status)" = failed ] \
+  && rid_json "$RID_STALE_DIR" note | grep -qF "was bound to provider 'claude'" \
+  && rid_json "$RID_STALE_DIR" note | grep -qF "now resolves to 'codex'" \
+  && ok "a request bound to claude is refused when claude-review now resolves to codex" \
+  || fail "remap not refused: status=$(rid_json "$RID_STALE_DIR" status) note=$(rid_json "$RID_STALE_DIR" note | cut -c1-200)"
+[ "$(rid_answers_n "$RID_STALE_MID")" = 0 ] && [ -f "$RID_STALE_MSG" ] && [ ! -s "$WORK/rid-stale.argv" ] \
+  && ok "the remapped turn published nothing, left the inbound in place, and never launched acpx" \
+  || fail "remapped turn side effects (replies=$(rid_answers_n "$RID_STALE_MID") inbound=$([ -f "$RID_STALE_MSG" ] && echo kept || echo gone) acpx-calls=$(grep -c . "$WORK/rid-stale.argv" 2>/dev/null))"
+# PAIRED CONTROL: the SAME file, with only the map put back, runs and publishes. So the refusal
+# above was the binding, not anything else about the request.
+rid_map claude
+RID_REBIND_DIR="$(rid_run claude-review "$RID_STALE_MSG" rebind)"
+[ "$(rid_json "$RID_REBIND_DIR" status)" = completed ] && [ "$(rid_answers_n "$RID_STALE_MID")" = 1 ] \
+  && ok "CONTROL: the same request completes once claude-review maps back to the provider it was bound to" \
+  || fail "rebound control: status=$(rid_json "$RID_REBIND_DIR" status) replies=$(rid_answers_n "$RID_STALE_MID") note=$(rid_json "$RID_REBIND_DIR" note | cut -c1-200)"
+# An UNSTAMPED request (hand-placed, or from a send before identities) has no binding to honour.
+RID_NOBIND_MSG="$(rid_msg claude-review nobind claude -)"; RID_NOBIND_MID="$(basename "$RID_NOBIND_MSG" .md)"
+RID_NOBIND_DIR="$(rid_run claude-review "$RID_NOBIND_MSG" nobind)"
+[ "$(rid_json "$RID_NOBIND_DIR" status)" = failed ] \
+  && rid_json "$RID_NOBIND_DIR" note | grep -qF "was bound to provider '<none>'" \
+  && [ "$(rid_answers_n "$RID_NOBIND_MID")" = 0 ] && [ ! -s "$WORK/rid-nobind.argv" ] \
+  && ok "a request to a review identity with no review_provider is refused before acpx, unpublished" \
+  || fail "unstamped request: status=$(rid_json "$RID_NOBIND_DIR" status) replies=$(rid_answers_n "$RID_NOBIND_MID") note=$(rid_json "$RID_NOBIND_DIR" note | cut -c1-200)"
+
+# ---- (4) PEER RULES: who may author the request a turn answers ----
+# runphase is public, so these are reachable without `send` having validated anything. The
+# positive controls are (1) above (claude -> claude-review) and (5) below (codex -> claude).
+# A review identity never AUTHORS: answering one would route review-feedback into to-claude-review.
+RID_RA_MSG="$(rid_msg claude revauthor claude-review -)"; RID_RA_MID="$(basename "$RID_RA_MSG" .md)"
+RID_RA_DIR="$(rid_run claude "$RID_RA_MSG" revauthor)"
+[ "$(rid_json "$RID_RA_DIR" status)" = failed ] && rid_json "$RID_RA_DIR" note | grep -qF 'is a review-only identity' \
+  && [ "$(rid_answers_n "$RID_RA_MID")" = 0 ] && [ -f "$RID_RA_MSG" ] && [ ! -s "$WORK/rid-revauthor.argv" ] \
+  && ok "a request authored by a review identity is refused as review-only, before acpx, unpublished" \
+  || fail "review-identity author: status=$(rid_json "$RID_RA_DIR" status) replies=$(rid_answers_n "$RID_RA_MID") note=$(rid_json "$RID_RA_DIR" note | cut -c1-200)"
+# Identity == peer: claude reviewing claude's own request would share one inbox, thread and
+# awaiting_from with itself. Same-model review is what claude-review is for.
+RID_SELF_MSG="$(rid_msg claude selfrev claude -)"; RID_SELF_MID="$(basename "$RID_SELF_MSG" .md)"
+RID_SELF_DIR="$(rid_run claude "$RID_SELF_MSG" selfrev)"
+[ "$(rid_json "$RID_SELF_DIR" status)" = failed ] && rid_json "$RID_SELF_DIR" note | grep -qF "this turn's own identity" \
+  && [ "$(rid_answers_n "$RID_SELF_MID")" = 0 ] && [ -f "$RID_SELF_MSG" ] && [ ! -s "$WORK/rid-selfrev.argv" ] \
+  && ok "a claude turn answering claude's own request is refused (own identity), before acpx, unpublished" \
+  || fail "self-review: status=$(rid_json "$RID_SELF_DIR" status) replies=$(rid_answers_n "$RID_SELF_MID") note=$(rid_json "$RID_SELF_DIR" note | cut -c1-200)"
+# A driver with no from: falls back to its two-party complement; a review identity has none (its
+# driver may share its provider), so guessing would be a guess about who reads the reply.
+RID_NF_MSG="$(rid_msg claude-review nofrom - claude)"; RID_NF_MID="$(basename "$RID_NF_MSG" .md)"
+RID_NF_DIR="$(rid_run claude-review "$RID_NF_MSG" nofrom)"
+[ "$(rid_json "$RID_NF_DIR" status)" = failed ] && rid_json "$RID_NF_DIR" note | grep -qF 'inbound has no from:' \
+  && [ "$(rid_answers_n "$RID_NF_MID")" = 0 ] && [ ! -s "$WORK/rid-nofrom.argv" ] \
+  && ok "a review-identity turn whose inbound has no from: is refused rather than guessing a peer" \
+  || fail "from-less review-identity inbound: status=$(rid_json "$RID_NF_DIR" status) note=$(rid_json "$RID_NF_DIR" note | cut -c1-200)"
+
+# ---- (5) STABILITY: a DRIVER identity is byte-identical to before identities existed ----
+# Same registry, same hop: a claude turn answering codex keeps its historic session name (and so
+# its warm session), announces no separate identity, and stamps no review_provider.
+RID_DRV_MSG="$(rid_msg claude drv codex -)"; RID_DRV_MID="$(basename "$RID_DRV_MSG" .md)"
+RID_DRV_OUT="$(rid_spawn claude "$RID_DRV_MSG" drv)"
+RID_DRV_DIR="$(rundir_of "$RID_DRV_OUT")"
+[ -n "$RID_DRV_DIR" ] && rid_await "$RID_DRV_DIR"
+printf '%s\n' "$RID_DRV_OUT" | grep '^spawned runphase ' | grep -q ' provider=claude via=acp$' \
+  && [ "$(rid_json "$RID_DRV_DIR" status)" = completed ] && [ "$(rid_json "$RID_DRV_DIR" agent)" = claude ] \
+  && ok "a driver turn's spawn line and result are unchanged (no separate agent=, agent == provider)" \
+  || fail "driver turn: spawned=[$(printf '%s' "$RID_DRV_OUT" | head -3 | tr '\n' ' ')] status=$(rid_json "$RID_DRV_DIR" status) agent=$(rid_json "$RID_DRV_DIR" agent)"
+[ "$(rid_sessions "$WORK/rid-drv.argv")" = "P claude S agent-comms-ma-rid-drv " ] \
+  && ok "a driver turn keeps the historic session name agent-comms-<thread>, with no +as+ suffix" \
+  || fail "driver session namespace changed (tokens: $(rid_sessions "$WORK/rid-drv.argv"))"
+RID_DRV_REPLY="$(rid_answers "$RID_DRV_MID")"
+[ "$(rid_answers_n "$RID_DRV_MID")" = 1 ] && [ "$(dirname "$RID_DRV_REPLY")" = "$MA_FIX/.comms/to-codex" ] \
+  && grep -qx 'from: claude' "$RID_DRV_REPLY" 2>/dev/null && ! grep -q '^review_provider:' "$RID_DRV_REPLY" 2>/dev/null \
+  && ok "the driver's reply lands in to-codex from: claude and carries NO review_provider line" \
+  || fail "driver reply (found: $(rid_answers "$RID_DRV_MID" | tr '\n' ' '); envelope: $(sed -n '2,6p' "$RID_DRV_REPLY" 2>/dev/null | tr '\n' ' '))"
+
+cp "$RID_CFG_SAVED" "$RID_CFG"
+
 section "acp.sh: the reviewer model+effort policy"
 # THE POLICY IS DECLARED ONCE, VALIDATED AT THE ACCESSOR, AND ASSERTED ON BYTES.
 # The predecessor of these assertions grepped templates/claude-commands/auto.md for the

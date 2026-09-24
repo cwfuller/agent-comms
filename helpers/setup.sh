@@ -234,9 +234,13 @@ say "  mount and reach the network with your git credentials. Fine for your own 
 say "  own machine; not for code you did not write."
 cur_unc="$(yn_of "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-}")"
 # Containment is a property of the PROVIDER: a review identity on grok (grok-review:grok) needs this
-# as much as a registered grok does.
-case " $AGENTS ${CUR_REVIEW:-} " in
-  *" grok "*|*":grok "*) if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi ;;
+# as much as a registered grok does. The review line is split exactly as the registry splits it
+# (on any whitespace), and each pair's provider is compared whole — a raw-text match missed a pair
+# followed by a tab.
+PROVIDERS=" $AGENTS "
+for rp in ${CUR_REVIEW:-}; do PROVIDERS="$PROVIDERS${rp#*:} "; done
+case "$PROVIDERS" in
+  *" grok "*) if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi ;;
   *) say "  grok is not registered here — nothing to allow." ;;
 esac
 

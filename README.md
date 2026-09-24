@@ -34,6 +34,9 @@ saves [settings](docs/INSTALL.md#settings-commssh-setup), so nothing depends on 
 ```text
 <auto> <task>               implement → panel review → fix, until approved (10 rounds max)
 <auto> --reviewers codex    one reviewer instead of the whole panel
+<auto> --reviewers claude-review
+                            same-model review, after declaring the identity in
+                            .comms/config: review-agents = claude-review:claude
 <auto> --plan <task>        approach review first, for high-stakes work
 <auto> --max <task>         deepest Codex review: strongest model, highest effort
 <ask> codex <question>      one-off consult, no loop

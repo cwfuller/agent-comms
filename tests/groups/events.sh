@@ -985,3 +985,90 @@ EV_AID="$(run_ev snapshot create 2>/dev/null | head -1)"
 git -C "$EV" ls-tree -r --name-only "$EV_AID" 2>/dev/null | grep -q '^\.comms/' \
   && fail "the coordinator log rides into the reviewed artifact" \
   || ok "the reviewed artifact never carries the coordinator log"
+
+section "review identities: await synthesizes a result for a runner that died before turn.tsv"
+# The pid file is written at spawn; turn.tsv only once cmd_run has read the inbound. A runner
+# killed in between leaves a run dir with NO identity, and `await` is then the one process left
+# to record the failure. Every identity global the result writer and the terminal event read
+# must already be defined, or `set -u` kills that process too and the leg is a permanent
+# unknown. When turn.tsv DOES exist for a review identity, the synthesized event must carry its
+# NAME (claude-review), never the provider it ran on (claude): the leg fingerprint and
+# `--degrade` find a killed leg by identity. (plan §4, load_turn_identity.)
+# Its own repo: the no-identity row is attributed to the codex default with an empty thread,
+# which would skew the shared fixture's per-agent counts.
+EVRI="$WORK/events-review-ident"; mkdir -p "$EVRI"; EVRI="$(cd "$EVRI" && pwd -P)"
+git -C "$EVRI" init -q -b main
+git -C "$EVRI" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$EVRI/.comms"
+printf 'agents = claude codex grok\nreview-agents = claude-review:claude\ndefault-target = codex\n' > "$EVRI/.comms/config"
+C_RD=$(EV_COL run_dir)
+# A run dir exactly as an early-killed runner leaves it: a pid naming a process that is gone.
+# `wait` reaps the child first, so the pid is dead before await ever probes it.
+evri_rundir() { # <name> -> path
+  local d="$WORK/$1" p
+  mkdir -p "$d"
+  sh -c 'exit 0' & p=$!
+  wait "$p" 2>/dev/null || true
+  printf '%s\n' "$p" > "$d/pid"
+  printf '%s' "$d"
+}
+# stdout/stderr kept BESIDE the run dir, so nothing the test writes can look like runner output.
+evri_await() { # <run-dir>
+  (cd "$EVRI" && env PATH="$STUB_BIN:$PATH" "$RUNPHASE" await "$1" --timeout-secs 30 >"$1.out" 2>"$1.err") || true
+}
+evri_field() { sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1/result.json" 2>/dev/null | head -1; }
+run_evri() { (cd "$EVRI" && env "$COMMS" "$@"); }
+
+# 1. No turn.tsv at all.
+EVRI_D1="$(evri_rundir evri-noturn)"
+evri_await "$EVRI_D1"
+# 2. A LEGACY turn.tsv, from before identities: provider only. The provider then WAS the
+#    identity, so the agent falls back to it — not to the codex default.
+EVRI_D2="$(evri_rundir evri-legacy)"
+printf 'thread\tevri-legacy\nprovider\tgrok\n' > "$EVRI_D2/turn.tsv"
+evri_await "$EVRI_D2"
+# 3. A review identity's turn.tsv, exactly as cmd_run writes it.
+EVRI_LEG="evri-loop-claude-review"
+EVRI_D3="$(evri_rundir evri-review)"
+printf 'thread\t%s\nset\tevri-set\ndispatch\tevri-d1\nround\t1\nrequest\tevri-req-1\nartifact\t\nprovider\tclaude\nagent\tclaude-review\n' \
+  "$EVRI_LEG" > "$EVRI_D3/turn.tsv"
+evri_await "$EVRI_D3"
+
+[ "$(evri_field "$EVRI_D1" status)" = failed ] && grep -q 'synthesized by await' "$EVRI_D1/result.json" \
+  && ok "a runner that died before writing turn.tsv still gets a synthesized failed result" \
+  || fail "no synthesized result without turn.tsv (got: $(tr '\n' ' ' < "$EVRI_D1/result.json" 2>/dev/null; cat "$EVRI_D1.err" 2>/dev/null))"
+# The positive half proves each stderr is the awaiting process's, captured past write_result —
+# an empty file would pass the negative half vacuously.
+EVRI_N=0; for d in "$EVRI_D1" "$EVRI_D2" "$EVRI_D3"; do
+  grep -q 'recorded a synthetic failed result' "$d.err" 2>/dev/null && EVRI_N=$((EVRI_N+1)); done
+[ "$EVRI_N" = 3 ] \
+  && ! cat "$EVRI_D1.err" "$EVRI_D2.err" "$EVRI_D3.err" "$EVRI_D1/runner.log" "$EVRI_D2/runner.log" "$EVRI_D3/runner.log" 2>/dev/null | grep -q 'unbound variable' \
+  && ok "no synthesis trips an unbound variable, with or without an identity on disk" \
+  || fail "synthesis stderr ($EVRI_N/3 reached the end): $(cat "$EVRI_D1.err" "$EVRI_D2.err" "$EVRI_D3.err" 2>/dev/null | grep -m2 -i 'unbound\|error')"
+EVRI_P1="$(evri_field "$EVRI_D1" provider)"; EVRI_A1="$(evri_field "$EVRI_D1" agent)"
+[ -n "$EVRI_P1" ] && [ -n "$EVRI_A1" ] && [ "$EVRI_A1" = "$EVRI_P1" ] \
+  && ok "with no identity recorded, the result still names a provider and an agent, and they agree" \
+  || fail "no-identity result fields (provider='$EVRI_P1' agent='$EVRI_A1')"
+# Through the READER, which refuses malformed rows: a row the log holds but no consumer can
+# read is not a terminal event.
+run_evri events --kind turn-finished --all 2>/dev/null \
+  | awk -F'\t' -v rd="$C_RD" -v st="$C_ST" -v d="$EVRI_D1" 'NR>1 && $rd==d && $st=="failed"' | grep -q . \
+  && ok "the terminal event reaches the log even with no identity to stamp it" \
+  || fail "no readable turn-finished row for the identity-less run dir"
+[ "$(evri_field "$EVRI_D2" provider)" = grok ] && [ "$(evri_field "$EVRI_D2" agent)" = grok ] \
+  && ok "a provider-only turn.tsv is attributed to that provider, not to a default" \
+  || fail "legacy turn.tsv (provider='$(evri_field "$EVRI_D2" provider)' agent='$(evri_field "$EVRI_D2" agent)')"
+[ "$(evri_field "$EVRI_D3" provider)" = claude ] && [ "$(evri_field "$EVRI_D3" agent)" = claude-review ] \
+  && ok "a killed review-identity turn's result names the identity and the provider it ran on" \
+  || fail "review-identity result (provider='$(evri_field "$EVRI_D3" provider)' agent='$(evri_field "$EVRI_D3" agent)')"
+EVRI_BYID="$(run_evri events --thread "$EVRI_LEG" --kind turn-finished --agent claude-review 2>/dev/null | tail -n +2)"
+[ "$(printf '%s\n' "$EVRI_BYID" | grep -c .)" = 1 ] && [ "$(printf '%s' "$EVRI_BYID" | cut -f"$C_ST")" = failed ] \
+  && ok "the synthesized terminal event carries the review identity" \
+  || fail "no failed turn-finished for agent claude-review (got: $EVRI_BYID)"
+# The exact-match control: the leg has exactly one terminal row, and the provider's name finds
+# none of it — so the row above was matched by identity, not by a filter that also admits
+# `claude` (a prefix of `claude-review`).
+[ "$(run_evri events --thread "$EVRI_LEG" --kind turn-finished 2>/dev/null | tail -n +2 | grep -c .)" = 1 ] \
+  && [ "$(run_evri events --thread "$EVRI_LEG" --kind turn-finished --agent claude 2>/dev/null | tail -n +2 | grep -c .)" = 0 ] \
+  && ok "the leg's terminal event is never recorded under the provider's name" \
+  || fail "the synthesized event was attributed to the provider claude (or the leg has no single terminal row)"

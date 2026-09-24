@@ -1291,3 +1291,69 @@ ST_INST="$WORK/st-inst"; mkdir -p "$ST_INST"; git -C "$ST_INST" init -q -b main
 INST_OUT="$(cd "$ST_INST" && echo | env -u AGENT_COMMS_SETUP perl -e 'alarm shift; exec @ARGV' 120 bash "$REPO/install.sh" --scope=local 2>&1)"
 printf '%s' "$INST_OUT" | grep -q 'next: .*comms.sh setup' && [ -f "$ST_INST/.agent-comms/settings.sh" ] \
   && ok "a non-interactive install points at comms.sh setup instead of prompting" || fail "installer setup hand-off"
+
+section "review identities: setup preserves them and asks about their provider"
+# CONTAINMENT IS A PROPERTY OF THE PROVIDER. A review identity that runs on grok is a grok review
+# turn, refused unless uncontained reviews are allowed, so setup must ask the grok question for it
+# exactly as for a grok driver, although grok is not on the agents line. `review-agents` is
+# declared by hand and has no setup UI, so the one thing setup may do to it is leave it alone.
+# (plan §5, Decision 4.)
+# Under --yes nothing is PROMPTED, so the question is observed by its ANSWER: the current value
+# is the default, and answering writes it back in canonical form. A hand-written `yes` becomes
+# `1` only if the question ran; the branch that skips it never touches the key. Same fixture and
+# driver (`st`) as the section above.
+# Irregular spacing on purpose: setup re-renders the agents line, so only a line it does NOT
+# re-render can prove it was kept byte-for-byte rather than rewritten into an equal form.
+RS_LINE='review-agents =  grok-review:grok   claude-review:claude'
+rs_setup() { # <review-agents line or empty> -> setup's output, then "rc=N"
+  { printf 'agents = claude codex\ndefault-target = codex\n'
+    [ -z "$1" ] || printf '%s\n' "$1"
+    printf 'suite-cmd = bash t.sh\n'; } > "$ST_PROJ/.comms/config"
+  printf 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=yes\n' > "$ST_HOME/settings"
+  st -- "$COMMS" setup --yes </dev/null 2>&1; printf 'rc=%s\n' "$?"
+}
+rs_asked() { # <setup output> — 0 when step 3 ran AND asked the grok question
+  printf '%s\n' "$1" | grep -qx 'rc=0' && printf '%s\n' "$1" | grep -q '3/5 Reviewer containment' \
+    && ! printf '%s\n' "$1" | grep -q 'grok is not registered here' \
+    && grep -qx 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=1' "$ST_HOME/settings"
+}
+rs_skipped() { # <setup output> — 0 when step 3 ran and said there is nothing to allow
+  printf '%s\n' "$1" | grep -qx 'rc=0' && printf '%s\n' "$1" | grep -q 'grok is not registered here' \
+    && grep -qx 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=yes' "$ST_HOME/settings"
+}
+RS_OUT="$(rs_setup '')"
+rs_skipped "$RS_OUT" \
+  && ok "control: with no grok anywhere, setup says so and leaves the containment key untouched" \
+  || fail "no-grok control (settings: $(tr '\n' '|' < "$ST_HOME/settings"); out: $(printf '%s' "$RS_OUT" | grep -m1 -i 'grok is\|rc='))"
+RS_OUT="$(rs_setup "$RS_LINE")"
+rs_asked "$RS_OUT" \
+  && ok "a review identity on grok makes setup ask the grok containment question" \
+  || fail "grok review identity not asked (settings: $(tr '\n' '|' < "$ST_HOME/settings"); out: $(printf '%s' "$RS_OUT" | grep -m1 -i 'grok is\|rc='))"
+# Re-run over the config the previous run PUBLISHED, not a freshly seeded one.
+st -- "$COMMS" setup --yes </dev/null >/dev/null 2>&1; A=$?
+[ "$A" = 0 ] && [ "$(grep -cxF "$RS_LINE" "$ST_PROJ/.comms/config")" = 1 ] \
+  && [ "$(grep -c 'review-agents' "$ST_PROJ/.comms/config")" = 1 ] \
+  && ok "re-running setup keeps the review-agents line byte-for-byte, exactly once" \
+  || fail "review-agents line not preserved (rc=$A): $(tr '\n' '|' < "$ST_PROJ/.comms/config")"
+# ...and what setup published is still a registry the helpers accept, with the identity bound to
+# its provider — a kept line that no longer parses would be a preserved outage.
+[ "$( (cd "$ST_PROJ" && "$COMMS" agents --review) 2>/dev/null)" = "grok-review claude-review" ] \
+  && [ "$( (cd "$ST_PROJ" && "$COMMS" agents --provider grok-review) 2>/dev/null)" = grok ] \
+  && ok "the config setup rewrote still registers both review identities on their providers" \
+  || fail "post-setup registry: $( (cd "$ST_PROJ" && "$COMMS" agents --review) 2>&1 | head -1)"
+# Named for grok, runs on claude: the question follows the PROVIDER, never a name that merely
+# contains `grok` — nothing is inferred from an identity's name.
+RS_OUT="$(rs_setup 'review-agents = grok-review:claude')"
+rs_skipped "$RS_OUT" \
+  && ok "a review identity NAMED for grok but running on claude does not trigger the grok question" \
+  || fail "name-keyed containment question (settings: $(tr '\n' '|' < "$ST_HOME/settings"); out: $(printf '%s' "$RS_OUT" | grep -m1 -i 'grok is\|rc='))"
+# The registry splits review-agents on ANY whitespace, so a tab between pairs is a valid
+# declaration of a grok identity. Setup has to reach the same answer the registry does.
+RS_TAB="$(printf 'review-agents = grok-review:grok\tclaude-review:claude')"
+RS_OUT="$(rs_setup "$RS_TAB")"
+[ "$( (cd "$ST_PROJ" && "$COMMS" agents --provider grok-review) 2>/dev/null)" = grok ] && rs_asked "$RS_OUT" \
+  && ok "a tab-separated review-agents line is read by setup as the registry reads it" \
+  || fail "tab-separated grok review identity: registry says '$( (cd "$ST_PROJ" && "$COMMS" agents --provider grok-review) 2>&1 | head -1)', setup $(printf '%s' "$RS_OUT" | grep -q 'grok is not registered here' && echo 'said grok is not registered' || echo 'asked')"
+# Leave the shared fixture as the section above left it.
+printf 'agents = claude codex\ndefault-target = codex\nsuite-cmd = bash t.sh\n' > "$ST_PROJ/.comms/config"
+: > "$ST_HOME/settings"
