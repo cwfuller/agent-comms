@@ -1762,6 +1762,20 @@ VF_R2=0; wait "$VF_PID" || VF_R2=$?
   && [ -z "$(git -C "$VF" worktree list --porcelain | grep '/\.verify-')" ] && ! ls -d "$VF/.claude/worktrees/".verify-* >/dev/null 2>&1 \
   && ok "concurrent preflights of one commit keep separate logs: a silent run cannot borrow another's proof (15), and both clean up" \
   || fail "concurrent verify fresh: proving=$VF_R1 silent=$VF_R2 logs=$(ls "$VF/.comms/logs/" 2>&1 | tr '\n' ' ')"
+# Called by a RELATIVE path, as AGENTS.md shows (`.agent-comms/comms.sh integrate`), with a presence
+# identity: the routine re-enters comms.sh from inside the fresh checkout, where a relative "$0"
+# does not resolve, and both verbs died with 127.
+VR="$(vx_repo relpath "$VX_IG" ci/ok.sh=$'#!/bin/bash\necho fine\n')"; VR="$(cd "$VR" && pwd -P)"
+(cd "$VR" && bash "$REPO/install.sh" --scope=local >/dev/null 2>&1)
+git -C "$VR" checkout -q -b work; mkdir -p "$VR/.comms"; printf 'suite-cmd = bash ci/ok.sh\n' > "$VR/.comms/config"
+git -C "$VR" checkout -q -b land main && echo more > "$VR/more.txt" && git -C "$VR" add more.txt \
+  && git -C "$VR" -c user.email=t@t -c user.name=t commit -qm land && git -C "$VR" checkout -q work
+vr() { (cd "$VR" && env -u CI COMMS_PRESENCE_NAME=relpath-check COMMS_PRESENCE_INSTANCE=0123456789abcdef .agent-comms/comms.sh "$@"); }
+VR_R1=0; vr verify fresh land >/dev/null 2>&1 || VR_R1=$?
+VR_R2=0; vr integrate land >/dev/null 2>&1 || VR_R2=$?
+[ "$VR_R1" = 0 ] && [ "$VR_R2" = 0 ] && [ "$(git -C "$VR" rev-parse main)" = "$(git -C "$VR" rev-parse land)" ] \
+  && ok "verify fresh and integrate work when comms.sh is called by a relative path (self re-entry uses the absolute path)" \
+  || fail "relative-path self re-entry: verify fresh=$VR_R1 integrate=$VR_R2"
 # An INSTALLED comms.sh scaffolds from its installed sibling: verify.sh ships with the helpers.
 VU="$(vx_repo installed "$VX_IG" package.json="$VX_PJ" package-lock.json='{}')"
 (cd "$VU" && bash "$REPO/install.sh" --scope=local >/dev/null 2>&1)

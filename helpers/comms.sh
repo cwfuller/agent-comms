@@ -182,6 +182,9 @@ die() { echo "comms.sh: $*" >&2; exit 1; }
 
 # Absolute path to this script — emitted in wrapper-retry hints so the recovery
 # command carries a literal path, not a parent-shell variable the child can't see.
+# Every SELF-INVOCATION uses it too, never "$0": the verification routine re-enters this script
+# from inside the fresh checkout, where a relative "$0" (`.agent-comms/comms.sh integrate`, the
+# form AGENTS.md shows) no longer resolves and the suite died with 127. (field report, 2026-09-25.)
 case "$0" in
   /*) SELF="$0" ;;
   *)  SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")" ;;
@@ -3940,7 +3943,7 @@ cmd_presence() {
           sleep $((PRESENCE_TTL_SECS / 3))
           kill -0 "$parent" 2>/dev/null || exit 0   # orphan beater suicide (plan r5)
           brc=0
-          "$0" presence beat --name "$name" --instance "$instance" >/dev/null 2>&1 || brc=$?
+          "$SELF" presence beat --name "$name" --instance "$instance" >/dev/null 2>&1 || brc=$?
           if [ "$brc" -eq 5 ]; then
             : > "$healmark" 2>/dev/null || true
           fi
@@ -4343,7 +4346,7 @@ suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <
     local hb=""
     [ -f "$presence_record" ] || hb="--no-heartbeat"
     # shellcheck disable=SC2086
-    ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat $hb --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log" >&2
+    ( cd "$tw" && "${clean_env[@]}" "$SELF" presence with-beat $hb --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log" >&2
     rc=${PIPESTATUS[0]}
   else
     ( cd "$tw" && "${clean_env[@]}" "$@" ) 2>&1 | tee "$suite_log" >&2
@@ -4543,7 +4546,7 @@ cmd_integrate() {
   # and the beat; that heal is `presence beat`'s ordinary behaviour everywhere else in the
   # system, not a class this function introduces. (codex, integrate-beat r1-r4.)
   if [ -n "$name" ] && [ -n "$instance" ] && [ -f "$(presence_dir)/$name-$instance.json" ]; then
-    "$0" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1 || true
+    "$SELF" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1 || true
   fi
   expected="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: no refs/heads/main"
   cand="$(git -C "$root" rev-parse --verify "$branch^{commit}" 2>/dev/null)" || usage_err "integrate: cannot resolve '$(clip "$branch")'"
@@ -4656,7 +4659,7 @@ cmd_integrate() {
   fi
   # Same rule: only refresh a record that exists. Nothing here manufactures one.
   if [ -n "$name" ] && [ -n "$instance" ] && [ -f "$(presence_dir)/$name-$instance.json" ]; then
-    "$0" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
+    "$SELF" presence beat --name "$name" --instance "$instance" --state working >/dev/null 2>&1 || true
   fi
   trap - EXIT
   local suite_kind
@@ -6343,7 +6346,7 @@ cmd_send() {
   # Advisory: a beat failure never touches the send outcome; a HEAL warning
   # passes through on stderr for the driver to act on.
   if [ -n "${COMMS_PRESENCE_NAME:-}" ] && [ -n "${COMMS_PRESENCE_INSTANCE:-}" ]; then
-    "$0" presence beat --name "$COMMS_PRESENCE_NAME" --instance "$COMMS_PRESENCE_INSTANCE" || true
+    "$SELF" presence beat --name "$COMMS_PRESENCE_NAME" --instance "$COMMS_PRESENCE_INSTANCE" || true
   fi
   # Loud outcome — emitted LAST so `tail -1` of send is always the RESULT line
   # on every path, including --archive-inbound (the main autonomous path).
