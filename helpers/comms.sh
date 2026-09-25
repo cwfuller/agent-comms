@@ -6435,7 +6435,7 @@ state_days_arg() {  # <verb> <args...> — shared --days parsing; prints "days" 
   local -a rest=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --days) shift; days="$(state_idle_days "${1:-}")" || exit 2 ;;
+      --days) need_value "state $verb" $# "$1"; shift; days="$(state_idle_days "$1")" || exit 2 ;;
       --days=*) days="$(state_idle_days "${1#--days=}")" || exit 2 ;;
       -*) usage_err "state $verb: unknown option '$(clip "$1")'" ;;
       *) rest+=("$1") ;;

@@ -2117,6 +2117,7 @@ for o in --thread --phase --leg-dispatch --leg-agent; do
   vo_case comms "$o" review-route verify rd-0123456789abcdef0123456789abcdef "$o"
 done
 for o in --passed --expect; do vo_case comms "$o" attest-green "$o"; done
+for v in idle legacy; do vo_case comms --days state "$v" --days; done
 for o in --name --instance; do vo_case comms "$o" integrate some-branch "$o"; done
 for o in --message --agent --provider --sandbox --timeout-secs --via; do vo_case rp "$o" spawn "$o"; done
 for o in --message --dir --agent --provider --sandbox --timeout-secs --via; do vo_case rp "$o" run "$o"; done
