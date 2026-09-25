@@ -51,6 +51,8 @@
 #                               children of a finished shell command. Success is
 #                               RESULT: completed (never "NOT spawned"). A review
 #                               reply inherits the request's artifact_id/head_sha.
+#                               A review-request whose cwd:/branch: name another tree
+#                               is refused before anything is written (exit 1).
 #                               validate, deliver, update thread state, then archive inbound
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
 #   state idle [--days N]       report threads with no state change and no message for N days
@@ -185,8 +187,10 @@
 #   panel dispatch --to a,b <review-request> [--set ID]
 #                               fan ONE artifact out to N reviewers as N parallel 2-party
 #                               legs sharing a review_set. One snapshot for the whole set;
-#                               the first reviewer gates. The roster is validated before
-#                               anything is written. Compose with the set id it prints.
+#                               the first reviewer gates. The roster, and that the
+#                               request's cwd:/branch: name the tree it runs in, are
+#                               validated before anything is written. Compose with the
+#                               set id it prints.
 #   panel status [--set <id>]   with --set: which legs have answered, and with what
 #                               verdict. Bare: every recorded review set, newest first —
 #                               the recovery surface after an await dies with its session.
@@ -813,6 +817,15 @@ frontmatter_field() {
     !inFM || seen {next}
     $0=="---" {seen=1; if (one) exit; next}
     index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print; seen=1; if (one) exit}' "$@"
+}
+
+# fm_field_lines <file> <field> — every value line of <field> in the frontmatter,
+# blank values preserved as empty lines. Consumers must read this via PROCESS
+# SUBSTITUTION, never $() into a heredoc: command substitution strips trailing
+# newlines, which made a trailing blank duplicate line invisible to the
+# validation loops. (codex, stamped-authorities round 4.)
+fm_field_lines() {
+  LC_ALL=C awk -v f="$2" '{sub(/\r$/,"")} NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{exit} fm && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print}' "$1"
 }
 
 # resolve_message_path <path>
@@ -1979,6 +1992,117 @@ send_role_check() {
   esac
 }
 
+# live_tree_root — the work tree a send or panel dispatch acts on: the toplevel of the process
+# cwd, else the main checkout. The snapshot, the dirty-tree warning, the consult HEAD stamp and
+# request_tree_check all resolve through it, so the tree that is checked IS the tree that is pinned.
+live_tree_root() {
+  local t
+  t="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$t" ] || t="$(main_repo_root)"
+  printf '%s' "$t"
+}
+
+# tree_branch <dir> — the branch checked out in <dir>, spelled as `ask` records it: `HEAD` when
+# detached; an unborn branch still answers its name.
+tree_branch() {
+  git -C "$1" symbolic-ref -q --short HEAD 2>/dev/null \
+    || git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null || true
+}
+
+# abs_file <path> — <path> made absolute (physical directory), for a command printed to be re-run
+# from a different directory.
+abs_file() { printf '%s/%s' "$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" "$(basename "$1")"; }
+
+# request_tree_check <request> <verb> <rerun argv...> — THE ARTIFACT A REVIEWER JUDGES MUST BE THE TREE THE
+# REQUEST NAMES. A review-request's `cwd:` and `branch:` say which tree it is about; send and
+# panel dispatch pin whatever tree they RUN in. Run from the primary for a request written in a
+# lane worktree, they pinned main's HEAD and only warned about the workspace — a review of the
+# wrong tree that nothing downstream could detect. (field report 2026-09-25, severity 3.)
+#
+# Every value line is judged, not only the first: a duplicate that disagrees is a request naming
+# two trees. Blank values name nothing and are skipped; a request with neither field passes
+# untouched. A cwd: that is relative, missing, or outside any git work tree is refused, since
+# it cannot be shown to be this tree. Prints nothing and returns 0 when the request names this
+# tree; otherwise explains on stderr — both trees, and the command to run from the right place
+# (this script with <rerun argv>, which should carry the request's ABSOLUTE path) — and returns 1.
+# Reads only: callers run it before any durable write.
+request_tree_check() {
+  local req="$1" verb="$2" here here_phys here_branch v top phys want_branch="" want_top=""
+  local reasons="" where="" abs_req cand cand_ok rerun a
+  shift 2
+  here="$(live_tree_root)"
+  here_phys=""; [ -z "$here" ] || here_phys="$(cd "$here" 2>/dev/null && pwd -P)" || here_phys=""
+  here_branch=""; [ -z "$here" ] || here_branch="$(tree_branch "$here")"
+  while IFS= read -r v; do
+    v="$(printf '%s' "$v" | sed 's/[[:space:]]*$//')"
+    [ -n "$v" ] || continue
+    case "$v" in
+      /*) ;;
+      *) reasons="$reasons
+  cwd: '$(clip "$v" 512)' is not an absolute path — it names no tree unambiguously"; continue ;;
+    esac
+    top="$(git -C "$v" rev-parse --show-toplevel 2>/dev/null)" || top=""
+    phys=""; [ -z "$top" ] || phys="$(cd "$top" 2>/dev/null && pwd -P)" || phys=""
+    if [ -z "$phys" ]; then
+      reasons="$reasons
+  cwd: '$(clip "$v" 512)' is not inside a git work tree on this machine"
+    elif [ "$phys" != "$here_phys" ]; then
+      reasons="$reasons
+  cwd: '$(clip "$v" 512)' is in the tree $phys"
+      [ -n "$want_top" ] || want_top="$phys"
+    fi
+  done < <(fm_field_lines "$req" cwd)
+  while IFS= read -r v; do
+    v="$(printf '%s' "$v" | sed 's/[[:space:]]*$//')"
+    v="${v#refs/heads/}"
+    [ -n "$v" ] || continue
+    [ -n "$want_branch" ] || want_branch="$v"
+    if [ "$v" != "$want_branch" ]; then
+      reasons="$reasons
+  branch: '$(clip "$v")' disagrees with the request's other branch: line '$(clip "$want_branch")'"
+    elif [ "$v" != "$here_branch" ]; then
+      reasons="$reasons
+  branch: '$(clip "$v")' is not the branch checked out here"
+    fi
+  done < <(fm_field_lines "$req" branch)
+  [ -n "$reasons" ] || return 0
+
+  # WHERE TO RUN IT INSTEAD: the tree cwd: names, else the worktree holding branch:. Offered
+  # only when that tree satisfies EVERY field — a remedy that would be refused again is not one.
+  cand="$want_top"
+  if [ -z "$cand" ] && [ -n "$want_branch" ]; then
+    # awk reads the WHOLE listing: an early `exit` SIGPIPEs git under pipefail (main_repo_root).
+    cand="$(git worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$want_branch" '
+      /^worktree / { wt = substr($0, 10) } $0 == "branch " b && !n++ { print wt }')" || cand=""
+  fi
+  if [ -n "$cand" ]; then
+    cand_ok=1
+    [ -z "$want_branch" ] || [ "$(tree_branch "$cand")" = "$want_branch" ] || cand_ok=0
+    while IFS= read -r v; do
+      v="$(printf '%s' "$v" | sed 's/[[:space:]]*$//')"
+      [ -n "$v" ] || continue
+      top="$(git -C "$v" rev-parse --show-toplevel 2>/dev/null)" || top=""
+      phys=""; [ -z "$top" ] || phys="$(cd "$top" 2>/dev/null && pwd -P)" || phys=""
+      [ "$phys" = "$(cd "$cand" 2>/dev/null && pwd -P)" ] || cand_ok=0
+    done < <(fm_field_lines "$req" cwd)
+    [ "$cand_ok" = 1 ] && where="$(cd "$cand" 2>/dev/null && pwd -P)" || where=""
+  fi
+  abs_req="$(abs_file "$req")"
+  rerun="$(printf '%q' "$SELF")"
+  for a in "$@"; do rerun="$rerun $(printf '%q' "$a")"; done
+  {
+    echo "comms.sh: $verb: refused — this review-request names a different tree than the one $verb runs in; the snapshot would pin a tree the request does not name. Nothing was written."
+    printf '%s\n' "${reasons#?}"
+    echo "  running in: ${here_phys:-<not a git work tree>} on branch ${here_branch:-<none>}"
+    if [ -n "$where" ]; then
+      printf '  run it from the named tree:  (cd %q && %s)\n' "$where" "$rerun"
+    else
+      echo "  no tree here matches every cwd:/branch: line — correct them (or remove them) in $abs_req, then re-run $verb from the tree they name"
+    fi
+  } >&2
+  return 1
+}
+
 # THE PANEL'S OWN RECORD OF ITS ROUTED LEGS. When a routed panel is dispatched it writes, before
 # any leg is sent, exactly which decision it stamped, for which RAW base thread, and to which
 # agents. The leg exception is granted only against this record, compared byte for byte. The
@@ -2313,6 +2437,10 @@ $st_p	$ag"
     roster="$roster $ag"
   done
   roster="${roster# }"
+  # The request must name the tree this dispatch runs in — checked before the snapshot, so a
+  # refusal pins nothing and writes no leg, event or index row.
+  request_tree_check "$req" "panel dispatch" panel dispatch --to "$to" \
+    ${set_id:+--set "$set_id"} "$(abs_file "$req")" || exit 2
 
   local aid pver dispatch_pair dispatch_base synthetic_note=""
   dispatch_pair="$(cmd_snapshot create --with-base)" || die "panel dispatch: could not retain the artifact"
@@ -2340,9 +2468,9 @@ $st_p	$ag"
     # the main checkout's dirt instead, which is both wrong and reassuring in the worst case.
     # (codex + grok, staging-safety r2, corroborated blocking.)
     local dirty_root dirty_list
-    # Mirror cmd_snapshot's OWN resolution, including its fallback — re-querying blind is how the
-    # r2 wrong-tree bug happened. (codex + grok, r3, advisory.)
-    dirty_root="$(git rev-parse --show-toplevel 2>/dev/null || main_repo_root 2>/dev/null || true)"
+    # cmd_snapshot's OWN resolver (live_tree_root), fallback included — re-querying blind is how
+    # the r2 wrong-tree bug happened. (codex + grok, r3, advisory.)
+    dirty_root="$(live_tree_root)"
     # Captured in ONE read, not piped into `head`: under `set -euo pipefail` a `git status |
     # head -10` pipeline returns nonzero when head closes the pipe early, so a tree with more
     # than ten dirty files would have KILLED the dispatch it was meant to warn about.
@@ -5261,8 +5389,7 @@ cmd_snapshot() {
   # The reviewer's working directory IS the tree under review (runphase's review
   # prompt says so), and in a linked worktree that is NOT the main root — snapshotting
   # main_repo_root there would retain a tree nobody reviewed. (grok, live 2026-08-22.)
-  root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "$root" ] || root="$(main_repo_root)"
+  root="$(live_tree_root)"
   [ -n "$root" ] || usage_err "snapshot: not inside a git repository"
   case "$sub" in
     list)
@@ -6606,11 +6733,11 @@ cmd_send() {
   # written its attempt marker, roster events, leg files and index rows before delivery failed —
   # and its `cmd_send … || echo` swallowed the failure into "incomplete legs". (codex, r3, blocking.)
   require_known_transport
-  local to="" file="" archive_inbound="" as=""
+  local to="" file="" archive_inbound="" as="" wait_arg=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --to) shift; to="${1:-}" ;;
-      --wait) COMMS_WAIT=1; export COMMS_WAIT ;;
+      --wait) COMMS_WAIT=1; export COMMS_WAIT; wait_arg="--wait" ;;
       --archive-inbound) shift; archive_inbound="${1:-}" ;;
       *) file="$1" ;;
     esac
@@ -6620,6 +6747,15 @@ cmd_send() {
   require_agent "$to" "send"
   [ -n "$file" ] || die "send: outbound file argument required"
   send_role_check "$file" "$to"
+  # A review-request must name the tree this send runs in, BEFORE the snapshot and every stamp
+  # below: a refusal leaves the file, the refs and the state exactly as they were. A panel leg
+  # re-passes it trivially — same process, same tree its dispatch already checked.
+  if [ -f "$file" ] && [ "$(frontmatter_field "$file" type)" = "review-request" ]; then
+    local rerun=(send --to "$to")
+    [ -z "$wait_arg" ] || rerun+=("$wait_arg")
+    [ -z "$archive_inbound" ] || rerun+=(--archive-inbound "$(abs_file "$archive_inbound")")
+    request_tree_check "$file" send "${rerun[@]}" "$(abs_file "$file")" || exit 1
+  fi
 
   # RETAIN THE ARTIFACT THE REVIEWER WILL READ, before anyone reads it. Without this
   # the reviewer reads the LIVE tree, so what it reviewed is whatever the author was
@@ -6646,14 +6782,6 @@ cmd_send() {
       { print }
     ' "$sf" > "$stamped" && mv -f "$stamped" "$sf"
     rm -f "$stamped" 2>/dev/null || true
-  }
-  # fm_field_lines <file> <field> — every value line of <field> in the frontmatter,
-  # blank values preserved as empty lines. Consumers must read this via PROCESS
-  # SUBSTITUTION, never $() into a heredoc: command substitution strips trailing
-  # newlines, which made a trailing blank duplicate line invisible to the
-  # validation loops. (codex, stamped-authorities round 4.)
-  fm_field_lines() {
-    LC_ALL=C awk -v f="$2" '{sub(/\r$/,"")} NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{exit} fm && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print}' "$1"
   }
   # artifact_base <aid> — the commit the artifact's diff applies to, derived from
   # the OBJECT: a synthetic snapshot commit bases on its first parent; anything
@@ -6847,7 +6975,7 @@ cmd_send() {
     # inherited identity with live HEAD.
     if [ "$send_type" != "review-feedback" ]; then
       local live_sha
-      live_sha="$(git -C "$(git rev-parse --show-toplevel 2>/dev/null || main_repo_root)" rev-parse -q --verify HEAD 2>/dev/null || true)"
+      live_sha="$(git -C "$(live_tree_root)" rev-parse -q --verify HEAD 2>/dev/null || true)"
       [ -n "$live_sha" ] && stamp_head_sha "$file" "" "$live_sha"
     fi
   fi

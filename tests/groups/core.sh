@@ -1116,6 +1116,114 @@ printf '%s\n' "$SNAP_WT_E" | grep -q 'wt-only.txt' \
   && ok "a dispatch from a linked worktree reports THAT worktree's dirty paths" \
   || fail "worktree dispatch reported the wrong tree (got: $(printf '%s' "$SNAP_WT_E" | head -3 | tr '\n' ' '))"
 
+section "send/panel dispatch: the artifact is the tree the request names"
+# FIELD REPORT 2026-09-25 (severity 3): send run from the PRIMARY for a request whose cwd:/branch:
+# named a lane worktree pinned main's HEAD as the artifact and only warned about the workspace —
+# the review would have judged the wrong tree. Refused now, before any durable write; the same
+# request from the named worktree goes out and pins THAT worktree's HEAD; a request naming no
+# tree behaves as before.
+RT="$WORK/reqtree"; rm -rf "$RT" "$WORK/reqtree-lane"; mkdir -p "$RT"; RT="$(cd "$RT" && pwd -P)"
+git -C "$RT" init -q -b main
+printf '.comms/\n' > "$RT/.gitignore"; echo a > "$RT/a.txt"
+git -C "$RT" add -A >/dev/null 2>&1
+git -C "$RT" -c user.email=t@t -c user.name=t commit -q -m init
+mkdir -p "$RT/.comms/to-codex" "$RT/.comms/to-grok" "$RT/.comms/to-claude" "$RT/.comms/archive"
+printf 'agents = claude codex grok\ndefault-target = codex\n' > "$RT/.comms/config"
+git -C "$RT" worktree add -q -b rt-lane "$WORK/reqtree-lane" >/dev/null 2>&1
+RT_WT="$(cd "$WORK/reqtree-lane" && pwd -P)"
+echo lane > "$RT_WT/lane.txt"
+git -C "$RT_WT" add lane.txt >/dev/null 2>&1
+git -C "$RT_WT" -c user.email=t@t -c user.name=t commit -q -m lane
+RT_MAIN_HEAD="$(git -C "$RT" rev-parse HEAD)"; RT_WT_HEAD="$(git -C "$RT_WT" rev-parse HEAD)"
+[ "$RT_MAIN_HEAD" != "$RT_WT_HEAD" ] && ok "fixture: the primary and the lane worktree have different HEADs" \
+  || fail "fixture: the two trees share a HEAD, so no assertion below could tell them apart"
+RT_W="$(cd "$WORK" && pwd -P)"
+rt_fm() { awk -v k="$2:" 'NR > 1 && $0 == "---" { exit } index($0, k) == 1 { sub("^" k "[[:space:]]*", ""); print; exit }' "$1"; }
+rt_in() { local d="$1"; shift; (cd "$d" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE COMMS_DELIVERY=mailbox "$COMMS" "$@"); }
+# rt_req <file> <id> [frontmatter lines...] — a fresh loop review-request outside every tree.
+rt_req() {
+  local f="$1" id="$2"; shift 2
+  { printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-09-25T00:00:00Z\n'
+    printf 'message_id: rt_%s\nworkspace: reqtree\nthread: rt-%s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\n' "$id" "$id"
+    [ "$#" -eq 0 ] || printf '%s\n' "$@"
+    printf -- '---\n\n## Intent\nrequest-tree probe\n'
+  } > "$f"
+}
+# EVERYTHING a send or dispatch could write: the mailbox tree (entries, not only files — a
+# created state directory counts), every ref (the snapshot anchors under refs/agent-comms), both
+# trees' status, and the request file's own bytes (stamping edits it in place).
+rt_fp() { { find "$RT/.comms" | LC_ALL=C sort; find "$RT/.comms" -type f -exec cksum {} + | LC_ALL=C sort
+            git -C "$RT" for-each-ref; git -C "$RT" status --porcelain; git -C "$RT_WT" status --porcelain
+            cksum "$1"; } 2>&1; }
+RT_R1="$RT_W/rt-req-1.md"; rt_req "$RT_R1" one "branch: rt-lane" "cwd: $RT_WT"
+RT_FP0="$(rt_fp "$RT_R1")"
+RT_E1="$(rt_in "$RT" send --to codex "$RT_R1" 2>&1 >/dev/null)" && RT_RC1=0 || RT_RC1=$?
+[ "$RT_RC1" = 1 ] && ok "send from the primary for a request naming the lane worktree is refused (exit 1)" \
+  || fail "primary send was not refused (rc=$RT_RC1: $RT_E1)"
+[ "$(rt_fp "$RT_R1")" = "$RT_FP0" ] && ok "the refused send wrote nothing: no stamp, no snapshot ref, no mailbox or state entry" \
+  || fail "the refused send wrote something: $(diff <(printf '%s\n' "$RT_FP0") <(rt_fp "$RT_R1") | head -5 | tr '\n' ' ')"
+grep -qF "$RT_WT" <<<"$RT_E1" && grep -qF "running in: $RT on branch main" <<<"$RT_E1" \
+  && ok "the refusal names BOTH trees: the one the request names and the one send runs in" || fail "refusal does not name both trees: $RT_E1"
+RT_FIX="$(sed -n 's/^  run it from the named tree:  //p' <<<"$RT_E1")"
+[ -n "$RT_FIX" ] && grep -qF "cd $RT_WT" <<<"$RT_FIX" && grep -qF "send --to codex $RT_R1" <<<"$RT_FIX" \
+  && ok "the refusal prints the command to run from the named worktree" || fail "no usable remedy command: $RT_E1"
+RT_P1="$(rt_in "$RT" panel dispatch --to codex,grok "$RT_R1" 2>&1 >/dev/null)" && RT_PRC1=0 || RT_PRC1=$?
+[ "$RT_PRC1" = 2 ] && grep -qF "panel dispatch: refused" <<<"$RT_P1" \
+  && ok "panel dispatch from the primary for the same request is refused (exit 2)" || fail "primary dispatch not refused (rc=$RT_PRC1: $RT_P1)"
+[ "$(rt_fp "$RT_R1")" = "$RT_FP0" ] && ok "the refused dispatch wrote nothing: no leg, event, index row, attempt marker or ref" \
+  || fail "the refused dispatch wrote something: $(diff <(printf '%s\n' "$RT_FP0") <(rt_fp "$RT_R1") | head -5 | tr '\n' ' ')"
+
+# The printed remedy is the real thing: run verbatim, it sends and pins the LANE's HEAD.
+RT_FIX_OUT="$(env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE COMMS_DELIVERY=mailbox bash -c "$RT_FIX" 2>&1)" && RT_FRC=0 || RT_FRC=$?
+[ "$RT_FRC" = 0 ] && [ "$(rt_fm "$RT_R1" artifact_id)" = "$RT_WT_HEAD" ] && [ "$(rt_fm "$RT_R1" head_sha)" = "$RT_WT_HEAD" ] \
+  && ok "the printed command, run as printed, sends and stamps the lane worktree's HEAD" \
+  || fail "remedy run: rc=$RT_FRC aid=$(rt_fm "$RT_R1" artifact_id) want=$RT_WT_HEAD ($RT_FIX_OUT)"
+RT_R2="$RT_W/rt-req-2.md"; rt_req "$RT_R2" two "branch: rt-lane" "cwd: $RT_WT/"
+RT_P2="$(rt_in "$RT_WT" panel dispatch --to codex,grok "$RT_R2" 2>&1)" && RT_PRC2=0 || RT_PRC2=$?
+RT_LEG2="$(grep -l '^thread: rt-two-codex$' "$RT/.comms/to-codex/"*panel-codex* 2>/dev/null | head -1)"
+[ "$RT_PRC2" = 0 ] && [ -n "$RT_LEG2" ] && [ "$(rt_fm "$RT_LEG2" artifact_id)" = "$RT_WT_HEAD" ] \
+  && ok "panel dispatch from the named worktree fans out and every leg pins the worktree's HEAD" \
+  || fail "worktree dispatch: rc=$RT_PRC2 leg=${RT_LEG2:-none} aid=$( [ -z "$RT_LEG2" ] || rt_fm "$RT_LEG2" artifact_id) ($RT_P2)"
+RT_R3="$RT_W/rt-req-3.md"; rt_req "$RT_R3" three "cwd: $RT_WT/sub/dir"
+mkdir -p "$RT_WT/sub/dir"
+rt_in "$RT_WT/sub" send --to codex "$RT_R3" >/dev/null 2>&1 \
+  && [ "$(rt_fm "$RT_R3" artifact_id)" = "$RT_WT_HEAD" ] \
+  && ok "a cwd: inside the tree, sent from another directory of the SAME tree, is that tree" || fail "subdirectory cwd: was not matched to its tree"
+
+# NO cwd:/branch: — unchanged: sent from the primary it pins the primary, exactly as before.
+RT_R4="$RT_W/rt-req-4.md"; rt_req "$RT_R4" four
+rt_in "$RT" send --to codex "$RT_R4" >/dev/null 2>&1 && RT_RC4=0 || RT_RC4=$?
+[ "$RT_RC4" = 0 ] && [ "$(rt_fm "$RT_R4" artifact_id)" = "$RT_MAIN_HEAD" ] \
+  && ok "a request with no cwd:/branch: still sends and pins the tree send runs in" || fail "no-hint request changed behaviour (rc=$RT_RC4)"
+RT_R5="$RT_W/rt-req-5.md"; rt_req "$RT_R5" five "branch: main" "cwd: $RT"
+rt_in "$RT" send --to codex "$RT_R5" >/dev/null 2>&1 && [ "$(rt_fm "$RT_R5" artifact_id)" = "$RT_MAIN_HEAD" ] \
+  && ok "a request naming the primary, sent from the primary, is unchanged" || fail "agreeing request was refused"
+
+# branch: ALONE still names a tree, and the remedy finds the worktree that holds it.
+RT_R6="$RT_W/rt-req-6.md"; rt_req "$RT_R6" six "branch: rt-lane"
+RT_E6="$(rt_in "$RT" send --to codex "$RT_R6" 2>&1 >/dev/null)" && RT_RC6=0 || RT_RC6=$?
+[ "$RT_RC6" = 1 ] && grep -qF "cd $RT_WT &&" <<<"$RT_E6" && [ -z "$(rt_fm "$RT_R6" artifact_id)" ] \
+  && ok "branch: alone is enforced, and the remedy names the worktree holding that branch" || fail "branch-only request: rc=$RT_RC6 ($RT_E6)"
+# Unverifiable or contradictory hints fail CLOSED, with no remedy that would only be refused again.
+RT_R7="$RT_W/rt-req-7.md"; rt_req "$RT_R7" seven "cwd: $WORK/no-such-tree"
+RT_E7="$(rt_in "$RT" send --to codex "$RT_R7" 2>&1 >/dev/null)" && RT_RC7=0 || RT_RC7=$?
+[ "$RT_RC7" = 1 ] && grep -qF "not inside a git work tree" <<<"$RT_E7" \
+  && ok "a cwd: that names no git tree here is refused" || fail "missing cwd: rc=$RT_RC7 ($RT_E7)"
+RT_R8="$RT_W/rt-req-8.md"; rt_req "$RT_R8" eight "cwd: $RT_WT" "cwd: $RT"
+RT_E8="$(rt_in "$RT_WT" send --to codex "$RT_R8" 2>&1 >/dev/null)" && RT_RC8=0 || RT_RC8=$?
+[ "$RT_RC8" = 1 ] && grep -qF "no tree here matches every cwd:/branch: line" <<<"$RT_E8" \
+  && ok "a second cwd: line naming another tree is judged too — refused, with no false remedy" || fail "duplicate cwd: rc=$RT_RC8 ($RT_E8)"
+RT_R9="$RT_W/rt-req-9.md"; rt_req "$RT_R9" nine "branch: main" "cwd: $RT_WT"
+RT_E9="$(rt_in "$RT_WT" send --to codex "$RT_R9" 2>&1 >/dev/null)" && RT_RC9=0 || RT_RC9=$?
+[ "$RT_RC9" = 1 ] && grep -qF "no tree here matches" <<<"$RT_E9" \
+  && ok "cwd: and branch: that name different trees are refused from either one" || fail "self-contradictory request: rc=$RT_RC9 ($RT_E9)"
+# `.` sent from the primary WOULD resolve to the primary; refusing it proves relative paths are
+# never resolved against wherever send happens to run.
+RT_R10="$RT_W/rt-req-10.md"; rt_req "$RT_R10" ten "cwd: ."
+RT_E10="$(rt_in "$RT" send --to codex "$RT_R10" 2>&1 >/dev/null)" && RT_RC10=0 || RT_RC10=$?
+[ "$RT_RC10" = 1 ] && grep -qF "is not an absolute path" <<<"$RT_E10" \
+  && ok "a relative cwd: is refused rather than resolved against wherever send runs" || fail "relative cwd: rc=$RT_RC10 ($RT_E10)"
+
 section "compose: cross-severity corroboration"
 # THE DETECTOR HAD NEVER FIRED. `corroborated` filtered `$13=="blocking"` BEFORE clustering, so a
 # defect one reviewer filed blocking and another filed advisory at the SAME anchor contributed one

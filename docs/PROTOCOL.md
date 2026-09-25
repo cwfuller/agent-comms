@@ -258,6 +258,13 @@ that path or branch was repurposed before a delayed delivery. Readers enter `cwd
 the current HEAD when `head_sha` is present, and locate the recorded commit/worktree
 instead of silently reviewing unrelated contents.
 
+**The artifact is the tree the request names.** `send` and `panel dispatch` snapshot the tree
+they run in, so a `review-request` whose `cwd:` or `branch:` names a different tree is REFUSED
+before anything is written, with both trees named and the command to re-run from the right one.
+Send a request from the tree it was written in — for a lane worktree, from inside that worktree.
+A request with neither field is snapshotted from wherever it is sent, as before. The
+`workspace:` field is not a tree: a mismatch there still only warns.
+
 A `review-feedback` reply is the same artifact as the request it answers. The parent
 copies `artifact_id`/`head_sha` onto the stamped envelope; `send` inherits them from
 `--archive-inbound` or `in-reply-to` when the reply omitted them, and refuses a
