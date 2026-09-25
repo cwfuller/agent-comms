@@ -1551,7 +1551,7 @@ vx_stub() { # <name> [extra shell line] — records "<name> <argv>"; an install 
     printf 'case "$*" in *" fail"*) exit 7 ;; esac\nexit 0\n'; } > "$VX_BIN/$1"
   chmod +x "$VX_BIN/$1"
 }
-for t in pnpm yarn bun uv; do vx_stub "$t"; done
+for t in pnpm yarn bun uv cargo go mix corepack; do vx_stub "$t"; done
 # `npm run env` reports what a step sees: whether stdin is closed, and CI/TZ.
 vx_stub npm 'if [ "$1 $2" = "run env" ]; then if read -r _x; then echo "npm-stdin-open" >> "'"$VX_LOG"'"; else echo "npm-stdin-closed CI=${CI:-unset} TZ=${TZ:-unset}" >> "'"$VX_LOG"'"; fi; fi'
 # python3 -m venv makes a venv of stubs; anything else goes to the real python3 unrecorded, so a
@@ -1614,10 +1614,12 @@ D="$(vx_repo stepssemi "$VX_IG" package.json="$VX_PJ" package-lock.json='{}' ci/
 R="$(vx_run "$D")"
 [ "$R" != 0 ] && ok "\`false; true\` fails the step (errexit reaches the step's shell)" || fail "false; true passed"
 # Zero checks is a failure, never a pass.
-D="$(vx_repo stepsnone "$VX_IG" package.json="$VX_PJ" package-lock.json='{}' ci/verify.steps=$'# nothing here\n   \n')"
+# Indented comments count as comments: counted as steps they would run as empty shells and pass.
+D="$(vx_repo stepsnone "$VX_IG" package.json="$VX_PJ" package-lock.json='{}' ci/verify.steps=$'#@ provision: none\n# nothing here\n  # npm run test\n\t# tabbed\n   \n')"
 R="$(vx_run "$D")"
 [ "$R" != 0 ] && grep -q 'no checks found' "$VX/out" && [ ! -s "$VX_LOG" ] \
-  && ok "a comment-only steps file fails before installing: zero checks cannot verify" || fail "empty steps: rc=$R argv=$(vx_log)"
+  && ok "a steps file of comments (indented by spaces or tabs) fails before installing: zero checks cannot verify" \
+  || fail "empty steps: rc=$R argv=$(vx_log)"
 D="$(vx_repo noscripts "$VX_IG" package.json='{"name":"x"}' package-lock.json='{}')"; R="$(vx_run "$D")"
 [ "$R" != 0 ] && grep -q 'no checks found' "$VX/out" && ok "a repo with no detectable checks fails rather than passing empty" || fail "no scripts: rc=$R"
 # The ignore preflight is directory-aware and runs BEFORE any install.
@@ -1636,6 +1638,21 @@ mkdir -p "$D/ci"; printf '#@ provision: pnpm\npnpm run check\n' > "$D/ci/verify.
 D="$(vx_repo bunboth "$VX_IG" package.json="$VX_PJ" bun.lock='x' bun.lockb='x')"; R="$(vx_run "$D")"
 [ "$R" = 0 ] && [ "$(vx_log)" = "bun install --frozen-lockfile|bun run check|bun run test|" ] \
   && ok "bun.lock and bun.lockb are one stack, not a conflict" || fail "bun: rc=$R argv=$(vx_log)"
+# A directive cannot recreate the collisions detection refuses; a repeated name installs once.
+D="$(vx_repo dirboth "$VX_IG" package.json="$VX_PJ" ci/verify.steps=$'#@ provision: npm,pnpm\nnpm run check\n')"
+R1="$(vx_run "$D")"; VX_OK=""; grep -q 'more than one JavaScript manager' "$VX/out" && [ ! -s "$VX_LOG" ] && VX_OK=1
+printf '#@ provision: uv,pip\nnpm run check\n' > "$D/ci/verify.steps"
+R2="$(vx_run "$D")"; grep -q 'names both pip and uv' "$VX/out" && [ ! -s "$VX_LOG" ] || VX_OK=""
+printf '#@ provision: npm,npm\nnpm run check\n' > "$D/ci/verify.steps"; R3="$(vx_run "$D")"
+[ -n "$VX_OK" ] && [ "$R1" != 0 ] && [ "$R2" != 0 ] && [ "$R3" = 0 ] && [ "$(vx_log)" = "npm ci --no-audit --no-fund|npm run check|" ] \
+  && ok "a directive naming two JavaScript managers, or pip with uv, is refused; a repeated name installs once" \
+  || fail "directive collisions: npm,pnpm=$R1 uv,pip=$R2 npm,npm=$R3 argv=$(vx_log)"
+D="$(vx_repo native "$VX_IG"$'target/\ndeps/\n_build/\n' Cargo.lock='x' go.sum='x' mix.lock='x')"; R="$(vx_run "$D")"
+[ "$R" = 0 ] && [ "$(vx_log)" = "cargo fetch --locked|go mod download|mix deps.get --check-locked|cargo test --locked|go test -mod=readonly ./...|mix test|" ] \
+  && ok "Cargo, Go and mix: locked fetches, then each stack's own test command" || fail "native stacks: rc=$R argv=$(vx_log) $(head -2 "$VX/out")"
+D="$(vx_repo corepack1 "$VX_IG" package.json='{"packageManager":"pnpm@9.0.0","scripts":{"test":"t"}}' pnpm-lock.yaml='x')"; R="$(vx_run "$D")"
+[ "$R" = 0 ] && [ "$(vx_log)" = "corepack pnpm install --frozen-lockfile|corepack pnpm run test|" ] \
+  && ok "a packageManager pin runs the manager through corepack, install and steps alike" || fail "corepack: rc=$R argv=$(vx_log)"
 # uv.lock always wins over requirements.txt; requirements alone provisions its own venv.
 D="$(vx_repo pyboth "$VX_IG" uv.lock='x' requirements.txt='x' pytest.ini='[pytest]')"; R="$(vx_run "$D")"
 VX_OK=""; [ "$R" = 0 ] && [ "$(vx_log)" = "uv sync --frozen|uv run --frozen python -m pytest|" ] && VX_OK=1
@@ -1683,16 +1700,36 @@ VI_R=0; vi verify init --yes >"$VX/init.out" 2>&1 || VI_R=$?
   && ok "status reports ok once suite-cmd is a plain command" || fail "status after init: $(vi verify status 2>&1)"
 printf 'npm run lint\n' > "$VI/ci/verify.steps"; printf '# agent-comms verify v0\nold\n' > "$VI/ci/verify.sh"
 VI_R=0; vi verify init --yes >/dev/null 2>&1 || VI_R=$?
-VI_R2=0; vi verify init --update >/dev/null 2>&1 || VI_R2=$?
-[ "$VI_R" != 0 ] && [ "$VI_R2" = 0 ] && head -2 "$VI/ci/verify.sh" | grep -q 'verify v1' && [ "$(cat "$VI/ci/verify.steps")" = "npm run lint" ] \
-  && ok "init refuses to overwrite ci/verify.sh; --update refreshes the template and keeps the repo's steps" \
-  || fail "overwrite/update: init=$VI_R update=$VI_R2 steps=$(cat "$VI/ci/verify.steps")"
+VI_R2=0; vi verify init --update </dev/null >/dev/null 2>&1 || VI_R2=$?
+VI_V0="$(head -1 "$VI/ci/verify.sh")"
+VI_R3=0; vi verify init --update --yes >/dev/null 2>&1 || VI_R3=$?
+[ "$VI_R" != 0 ] && [ "$VI_R2" != 0 ] && [ "$VI_V0" = '# agent-comms verify v0' ] && [ "$VI_R3" = 0 ] \
+  && head -2 "$VI/ci/verify.sh" | grep -q 'verify v1' && [ "$(cat "$VI/ci/verify.steps")" = "npm run lint" ] \
+  && ok "init refuses to overwrite ci/verify.sh; --update needs --yes or a terminal, then refreshes only the template" \
+  || fail "overwrite/update: init=$VI_R update-unconfirmed=$VI_R2 ($VI_V0) update-yes=$VI_R3 steps=$(cat "$VI/ci/verify.steps")"
 printf 'agents = claude codex\nsuite-cmd = bash custom.sh\n' > "$VI/.comms/config"; rm -f "$VI/ci/verify.sh"
 VI_R=0; vi verify init --yes >/dev/null 2>&1 || VI_R=$?
 [ "$VI_R" = 0 ] && [ -f "$VI/ci/verify.sh" ] && grep -qx 'suite-cmd = bash custom.sh' "$VI/.comms/config" \
   && ok "init leaves a working single-command suite-cmd alone without --force" || fail "custom suite-cmd: rc=$VI_R $(grep suite-cmd "$VI/.comms/config")"
+# Judged per WORD of integrate's own split: `OK|PASS` is one working argument, not a pipe.
+printf 'suite-cmd = grep -Eq OK|PASS results.txt\n' > "$VI/.comms/config"; rm -f "$VI/ci/verify.sh"
+VI_S1="$(vi verify status 2>/dev/null)"; vi verify init --yes >/dev/null 2>&1
+VI_C1="$(grep suite-cmd "$VI/.comms/config")"
+printf 'suite-cmd = TZ=UTC npm test\n' > "$VI/.comms/config"; VI_S2="$(vi verify status 2>/dev/null)"
+[ "${VI_S1%%$'\t'*}" = ok ] && [ "$VI_C1" = 'suite-cmd = grep -Eq OK|PASS results.txt' ] && [ "${VI_S2%%$'\t'*}" = needs-shell ] \
+  && ok "an operator INSIDE an argument is not shell syntax (kept without --force); a leading VAR=value is" \
+  || fail "per-word classification: '$VI_S1' kept='$VI_C1' '$VI_S2'"
+# A config that cannot be READ is never rewritten: grep exit 2 used to publish only the new line.
+VG_BIN="$VX/grepfail"; mkdir -p "$VG_BIN"
+printf '#!/bin/bash\ncase "$1 $2" in "-v "*suite-cmd*) exit 2 ;; esac\nexec %s "$@"\n' "$(command -v grep)" > "$VG_BIN/grep"; chmod +x "$VG_BIN/grep"
+printf 'agents = claude codex\nsuite-cmd = npm run check && npm run test\n' > "$VI/.comms/config"; cp "$VI/.comms/config" "$VX/config.before"
+rm -f "$VI/ci/verify.sh"; VI_R=0
+(cd "$VI" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u CI PATH="$VG_BIN:$VX_BIN:$VX_TOOLS:$PATH" "$COMMS" verify init --yes) >/dev/null 2>&1 || VI_R=$?
+[ "$VI_R" != 0 ] && cmp -s "$VX/config.before" "$VI/.comms/config" && ! ls "$VI/.comms/config.tmp."* >/dev/null 2>&1 \
+  && ok "a config read error aborts the suite-cmd rewrite and leaves .comms/config byte-for-byte intact" \
+  || fail "config read error: rc=$VI_R config=$(tr '\n' '|' < "$VI/.comms/config")"
 printf 'agents = claude codex\nsuite-cmd = bash ci/verify.sh\n' > "$VI/.comms/config"
-printf 'npm run check\nnpm run test\n' > "$VI/ci/verify.steps"
+printf 'npm run check\nnpm run test\n' > "$VI/ci/verify.steps"; cp "$REPO/helpers/verify.sh" "$VI/ci/verify.sh"
 git -C "$VI" add ci >/dev/null 2>&1; git -C "$VI" -c user.email=t@t -c user.name=t commit -qm "chore: add verify suite"
 VI_MAIN="$(git -C "$VI" rev-parse main)"; VI_HEAD="$(git -C "$VI" rev-parse HEAD)"
 VI_R=0; VI_OUT="$(vi verify fresh 2>/dev/null)" || VI_R=$?
@@ -1708,6 +1745,23 @@ VI_R=0; VI_OUT="$(vi verify fresh 2>/dev/null)" || VI_R=$?
   && [ -z "$(git -C "$VI" worktree list --porcelain | grep '/\.verify-')" ] && ! ls -d "$VI/.claude/worktrees/".verify-* >/dev/null 2>&1 \
   && ok "a red suite under verify fresh exits 14 (integrate's class), prints no result line, and removes its tree" \
   || fail "verify fresh red: rc=$VI_R"
+# Two preflights of ONE commit never share completion evidence. A repo with a counts contract
+# takes the completion line as proof; here a silent run (exit 0, no line) is still running when a
+# proving run of the same commit writes its line. Sharing a per-commit log, the silent run read
+# that line and passed. Its own log gives it nothing, so it is unverified (15), and cleans up.
+VF="$(vx_repo proof "$VX_IG" tests/expected-counts.tsv=$'total\t1\n' ci/suite.sh=$'#!/bin/bash\nif [ "${VF_MODE:-}" = silent ]; then\n  : > "$VF_UP"; n=0\n  until [ -e "$VF_MARK" ] || [ "$n" -gt 300 ]; do sleep 0.1; n=$((n + 1)); done\n  exit 0\nfi\necho "passed: 1  failed: 0  skipped: 0"; : > "$VF_MARK"\n')"
+VF="$(cd "$VF" && pwd -P)"; git -C "$VF" checkout -q -b work
+mkdir -p "$VF/.comms"; printf 'suite-cmd = bash ci/suite.sh\n' > "$VF/.comms/config"
+vf() { (cd "$VF" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE VF_UP="$VX/vf-up" VF_MARK="$VX/vf-mark" "$COMMS" "$@"); }
+rm -f "$VX/vf-up" "$VX/vf-mark"
+(export VF_MODE=silent; vf verify fresh >/dev/null 2>&1) & VF_PID=$!
+n=0; until [ -e "$VX/vf-up" ] || [ "$n" -gt 300 ]; do sleep 0.1; n=$((n + 1)); done
+VF_R1=0; vf verify fresh >/dev/null 2>&1 || VF_R1=$?
+VF_R2=0; wait "$VF_PID" || VF_R2=$?
+[ "$VF_R1" = 0 ] && [ "$VF_R2" = 15 ] && [ "$(ls "$VF/.comms/logs/" | grep -c '^verify-.*\.suite\.log$')" = 2 ] \
+  && [ -z "$(git -C "$VF" worktree list --porcelain | grep '/\.verify-')" ] && ! ls -d "$VF/.claude/worktrees/".verify-* >/dev/null 2>&1 \
+  && ok "concurrent preflights of one commit keep separate logs: a silent run cannot borrow another's proof (15), and both clean up" \
+  || fail "concurrent verify fresh: proving=$VF_R1 silent=$VF_R2 logs=$(ls "$VF/.comms/logs/" 2>&1 | tr '\n' ' ')"
 # An INSTALLED comms.sh scaffolds from its installed sibling: verify.sh ships with the helpers.
 VU="$(vx_repo installed "$VX_IG" package.json="$VX_PJ" package-lock.json='{}')"
 (cd "$VU" && bash "$REPO/install.sh" --scope=local >/dev/null 2>&1)

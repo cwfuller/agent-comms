@@ -4691,9 +4691,28 @@ cmd_verify() {
   esac
 }
 
-verify_is_shell_cmd() {  # <suite-cmd> — 0 when it needs a shell the no-shell argv split cannot give it
-  case "$1" in *'&&'*|*'||'*|*'|'*|*';'*|*'>'*|*'<'*|*'`'*|*'$('*) return 0 ;; esac
-  return 1
+verify_is_shell_cmd() {  # <suite-cmd> — 0 only when it CERTAINLY needs a shell integrate does not use
+  # Judged per WORD of the same whitespace split integrate applies, never by substring:
+  # `grep -Eq OK|PASS results.txt` is a working argv (`OK|PASS` is one argument), and a substring
+  # match would call it broken and let init replace it without --force. A word that IS an
+  # operator or a redirection, or a leading VAR=value (argv[0] cannot be an assignment), is
+  # shell syntax. Anything else is left to the operator: a missed shell command only costs a
+  # --force, a false positive costs a working suite-cmd. (codex, generic-verify impl r1.)
+  local w nm first=1 rc=1
+  set -f
+  for w in $1; do
+    case "$w" in
+      '&&'|'||'|'|'|'|&'|';'|'&'|'>'*|'<'*|[0-9]'>'*|[0-9]'<'*|'&>'*) rc=0; break ;;
+    esac
+    if [ "$first" = 1 ]; then
+      first=0
+      case "$w" in
+        [A-Za-z_]*=*) nm="${w%%=*}"; case "$nm" in *[!A-Za-z0-9_]*) ;; *) rc=0; break ;; esac ;;
+      esac
+    fi
+  done
+  set +f
+  return "$rc"
 }
 
 verify_set_suite_cmd() {  # <root> <force> — point suite-cmd at ci/verify.sh, keeping every other line
@@ -4709,8 +4728,14 @@ verify_set_suite_cmd() {  # <root> <force> — point suite-cmd at ci/verify.sh, 
   if [ -f "$cfg" ]; then
     [ -r "$cfg" ] || die "verify init: $cfg is unreadable — refusing to rewrite it"
     tmp="$cfg.tmp.$$"
-    { grep -v "^[[:space:]]*suite-cmd[[:space:]]*=" "$cfg" || true; printf 'suite-cmd = %s\n' "$want"; } > "$tmp" \
-      && mv -f "$tmp" "$cfg" || { rm -f "$tmp"; die "verify init: could not rewrite $cfg"; }
+    # grep exits 1 when every line was a suite-cmd line (nothing to keep) and 2+ when it could not
+    # READ the file. Only 0 and 1 may proceed: `|| true` here once published a config reduced to
+    # the new suite-cmd after a read error. (codex, generic-verify impl r1, blocking.)
+    local grc=0
+    grep -v "^[[:space:]]*suite-cmd[[:space:]]*=" "$cfg" > "$tmp" || grc=$?
+    [ "$grc" -le 1 ] || { rm -f "$tmp"; die "verify init: could not read $cfg (grep exit $grc) — left it unchanged"; }
+    { printf 'suite-cmd = %s\n' "$want" >> "$tmp" && mv -f "$tmp" "$cfg"; } \
+      || { rm -f "$tmp"; die "verify init: could not rewrite $cfg — left it unchanged"; }
   else
     printf 'suite-cmd = %s\n' "$want" > "$cfg" || die "verify init: could not write $cfg"
   fi
@@ -4726,6 +4751,16 @@ verify_status() {  # prints ok|missing|needs-shell <TAB> the current suite-cmd; 
   if [ -z "$cur" ]; then printf 'missing\t\n'
   elif verify_is_shell_cmd "$cur"; then printf 'needs-shell\t%s\n' "$cur"
   else printf 'ok\t%s\n' "$cur"; fi
+}
+
+verify_confirm() {  # <yes> <question> — 0 to proceed: --yes, or a y answer on a terminal
+  [ -z "$1" ] || return 0
+  [ -t 0 ] && [ -t 1 ] || die "verify init: no terminal to confirm on — re-run with --yes"
+  local ans
+  printf '%s [y/N] ' "$2"
+  read -r ans || ans=""
+  case "$ans" in y|Y|yes|YES) return 0 ;; esac
+  echo "verify: nothing written"; return 1
 }
 
 verify_init() {
@@ -4750,6 +4785,8 @@ verify_init() {
     [ -f "$dst" ] || die "verify init --update: there is no ci/verify.sh to update"
     grep -q '^# agent-comms verify v' "$dst" \
       || die "verify init --update: ci/verify.sh carries no agent-comms version header — refusing to overwrite a hand-written suite (use --force)"
+    # Same authorization as a first write: this replaces a TRACKED file. (codex, impl r1.)
+    verify_confirm "$yes" "Replace ci/verify.sh ($(sed -n 's/^# agent-comms verify //p' "$dst" | head -1)) with the $(sed -n 's/^# agent-comms verify //p' "$src" | head -1) template?" || return 0
     tmp="$dst.tmp.$$"
     { cp "$src" "$tmp" && chmod +x "$tmp" && mv -f "$tmp" "$dst"; } || { rm -f "$tmp"; die "verify init --update: could not write $dst"; }
     echo "verify: updated ci/verify.sh to $(sed -n 's/^# agent-comms verify //p' "$src" | head -1); ci/verify.steps unchanged"
@@ -4764,16 +4801,7 @@ verify_init() {
   printf '%s\n' "$plan"
   [ "$prc" = 0 ] || die "verify init: this setup cannot verify anything as it stands (see above) — fix it, or write ci/verify.steps by hand"
   emitted="$(cd "$top" && bash "$src" --emit-steps)" || die "verify init: could not derive the steps (see above)"
-  if [ -z "$yes" ]; then
-    if [ -t 0 ] && [ -t 1 ]; then
-      local ans
-      printf 'Write ci/verify.sh%s and point suite-cmd at it? [y/N] ' "$([ -e "$steps" ] || printf ' + ci/verify.steps')"
-      read -r ans || ans=""
-      case "$ans" in y|Y|yes|YES) ;; *) echo "verify: nothing written"; return 0 ;; esac
-    else
-      die "verify init: no terminal to confirm on — re-run with --yes"
-    fi
-  fi
+  verify_confirm "$yes" "Write ci/verify.sh$([ -e "$steps" ] || printf ' + ci/verify.steps') and point suite-cmd at it?" || return 0
   mkdir -p "$top/ci" || die "verify init: cannot create $top/ci"
   tmp="$dst.tmp.$$"
   { cp "$src" "$tmp" && chmod +x "$tmp" && mv -f "$tmp" "$dst"; } || { rm -f "$tmp"; die "verify init: could not write $dst"; }
@@ -4817,9 +4845,11 @@ verify_fresh() {
   fi
   # Its OWN tree and log: a preflight must never share (and so never remove) a landing's
   # .integrate-* tree. (codex + grok, generic-verify plan r2.)
-  local tw log vrc=0
-  tw="$root/.claude/worktrees/.verify-$$-$RANDOM"
-  log="$root/.comms/logs/verify-${cand}.suite.log"
+  # The LOG is per invocation too, not per commit: positive proof reads it, and two preflights of
+  # one commit sharing a file could each take the other's completion line. (codex, impl r1.)
+  local tw log vrc=0 run_id="$$-$RANDOM"
+  tw="$root/.claude/worktrees/.verify-$run_id"
+  log="$root/.comms/logs/verify-${cand}-${run_id}.suite.log"
   mkdir -p "$root/.claude/worktrees" 2>/dev/null || true
   # shellcheck disable=SC2064
   trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true" EXIT

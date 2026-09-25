@@ -17,7 +17,8 @@
 #                   uv.lock                uv sync --frozen
 #                   requirements.txt       python3 -m venv .venv + .venv/bin/pip install -r
 #                                          (NEVER when there is a uv.lock, even if named in a
-#                                          directive: uv.lock wins, pip must not overwrite its .venv)
+#                                          directive: uv.lock wins, pip must not overwrite its .venv;
+#                                          an `-e .` line also writes *.egg-info: gitignore it)
 #                   Cargo.lock             cargo fetch --locked
 #                   go.sum                 go mod download
 #                   mix.lock               mix deps.get --check-locked
@@ -25,14 +26,16 @@
 #                 the run as dirt; that is checked BEFORE installing, with a message naming the line
 #                 to add. More than one JavaScript lockfile at the root is a conflict: choose one.
 #
-#   2. CHECK      run ci/verify.steps: one shell command per line, `#` comments and blank lines
-#                 ignored. Each step runs as `bash -euo pipefail -c "<line>"` with stdin closed, stops
+#   2. CHECK      run ci/verify.steps: one shell command per line; blank lines and `#` comments
+#                 (indented ones too) are ignored. Each step runs as `bash -euo pipefail -c "<line>"` with stdin closed, stops
 #                 the suite on failure, and is named in the error. Without a steps file, detected
 #                 defaults run (package.json `check`+`test`, else `lint`/`typecheck`/`test`; pytest;
 #                 cargo test --locked; go test -mod=readonly ./...; mix test).
 #
 # Directive, in ci/verify.steps:   #@ provision: none          skip provisioning entirely
 #                                  #@ provision: pnpm,uv        provision exactly these stacks
+#                                  (at most one JavaScript manager, and never pip together with uv:
+#                                  each pair would install into the same directory)
 #
 # KNOWN LIMIT: `false; true` and `false | cat` fail correctly, but a failure the line itself
 # handles (`false || true`), a failing member of a conditional list (`false && true; true`), and
@@ -68,12 +71,12 @@ fail() { printf 'verify: %s\n' "$*" >&2; exit 1; }
 # ---- which stacks -------------------------------------------------------------------------------
 PROVISION=auto
 if [ -f "$STEPS_FILE" ]; then
-  PROVISION_LINE="$(sed -n 's/^#@[[:space:]]*provision:[[:space:]]*//p' "$STEPS_FILE" | tail -1 | tr -d '\r')"
+  PROVISION_LINE="$(sed -n 's/^[[:space:]]*#@[[:space:]]*provision:[[:space:]]*//p' "$STEPS_FILE" | tail -1 | tr -d '\r')"
   [ -z "$PROVISION_LINE" ] || PROVISION="$PROVISION_LINE"
 fi
 
 STACKS=""
-add_stack() { STACKS="${STACKS:+$STACKS }$1"; }
+add_stack() { case " $STACKS " in *" $1 "*) ;; *) STACKS="${STACKS:+$STACKS }$1" ;; esac; }
 if [ "$PROVISION" = auto ]; then
   js="" js_n=0 js_files=""
   if [ -f package-lock.json ]; then js=npm; js_n=$((js_n + 1)); js_files="$js_files package-lock.json"; fi
@@ -96,6 +99,14 @@ elif [ "$PROVISION" != none ]; then
       *) fail "unknown stack '$s' in '#@ provision:' (known: npm pnpm yarn bun uv pip|requirements cargo go mix none)" ;;
     esac
   done
+  # A directive picks stacks by name, so it must not recreate the collisions auto-detection
+  # refuses: two JavaScript managers share node_modules, and pip and uv share .venv.
+  js_named=""
+  for s in $STACKS; do case "$s" in npm|pnpm|yarn|bun) js_named="$js_named $s" ;; esac; done
+  [ "$(printf '%s' "$js_named" | wc -w | tr -d ' ')" -le 1 ] \
+    || fail "'#@ provision:' names more than one JavaScript manager:$js_named — they would install into the same node_modules; name one"
+  case " $STACKS " in *" pip "*) case " $STACKS " in *" uv "*)
+    fail "'#@ provision:' names both pip and uv — they would install into the same .venv; name one" ;; esac ;; esac
 fi
 
 # ---- package manager invocations ----------------------------------------------------------------
@@ -212,8 +223,10 @@ STEPS=()
 if [ -f "$STEPS_FILE" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
+    # Leading blanks first: an INDENTED comment is still a comment. Counted as a step it would
+    # run as an empty shell, pass, and let a file of comments satisfy the zero-steps gate.
+    line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in ''|\#*) continue ;; esac
-    [ -n "$(printf '%s' "$line" | tr -d '[:space:]')" ] || continue
     STEPS+=("$line")
   done < "$STEPS_FILE"
 else
