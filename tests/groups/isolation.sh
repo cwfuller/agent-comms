@@ -13,7 +13,7 @@ ISO_RP="$REPO/helpers/runphase.sh"
 # Shipped on an explicit owner decision after measurement; the table is in docs/ROADMAP.md.
 # These pin the SHAPE. What they cannot do is re-measure the adapter, so the residuals below are
 # asserted as DOCUMENTED FACTS, which is the honest thing a source assertion can hold.
-sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -q 'acp_iso_mode="plan"' \
+sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep_full -q 'acp_iso_mode="plan"' \
   && ok "the claude arm pins claude's own read-only analogue (plan), not codex's mode id" || fail "claude arm does not pin plan"
 # The mode is DATA. Hardcoding read-only is what made claude look uncontainable, because
 # `set-mode read-only` returns `Internal error` for the claude adapter.
@@ -29,16 +29,16 @@ grep -q '"pre-canary"' "$ISO_RP" && ! grep -q '"post-canary"' "$ISO_RP" && grep 
 grep -q 'if \[ -n "$mount_dir" \] && \[ -n "$acp_iso_mode" \]' "$ISO_RP" \
   && ok "any backend carrying a mode is re-pinned, not just codex's" || fail "re-pin gate is still backend-specific"
 # A claude turn must no longer fall through to the no-backend refusal.
-sed -n '/^      case "$provider" in/,/^      esac/p' "$ISO_RP" | grep -q '^        claude)' \
+sed -n '/^      case "$provider" in/,/^      esac/p' "$ISO_RP" | grep_full -q '^        claude)' \
   && ok "claude has its own isolation arm and no longer hits the no-backend refusal" || fail "claude still falls through to *)"
 # The residual is RECORDED, not quietly dropped: this backend contains writes, not network.
-sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -qi 'NETWORK IS STILL OPEN' \
+sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep_full -qi 'NETWORK IS STILL OPEN' \
   && ok "the claude arm records that network is NOT contained" || fail "the network residual is undocumented"
-sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -qi 'KEYCHAIN' \
+sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep_full -qi 'KEYCHAIN' \
   && ok "the claude arm records why there is no credential isolation to add" || fail "the credential residual is undocumented"
 # CLAUDE_CONFIG_DIR is deliberately NOT set: it isolates settings only and breaks auth.
-sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -q 'CLAUDE_CONFIG_DIR' \
-  && ! sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep -q 'acp_iso=(env "CLAUDE_CONFIG_DIR' \
+sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep_full -q 'CLAUDE_CONFIG_DIR' \
+  && ! sed -n '/^        claude)/,/^          ;;/p' "$ISO_RP" | grep_full -q 'acp_iso=(env "CLAUDE_CONFIG_DIR' \
   && ok "the claude arm explains why it sets no config-home override rather than silently omitting it" || fail "CLAUDE_CONFIG_DIR omission is unexplained"
 
 # ---- the claude analogue of the .codex/config.toml refusal ----
@@ -98,13 +98,13 @@ awk '/acp_confirm_mode "\$workdir".*pre-canary/{m=NR} /acp_refuse containment-un
 # --approve-all the child was auto-approved out of `plan` via ExitPlanMode and its next write
 # LANDED ON DISK; under --approve-reads + non-interactive deny, a forced ExitPlanMode call is
 # rejected by the CLIENT while reads and `git log` still work.
-sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep -q 'non-interactive-permissions deny' \
+sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep_full -q 'non-interactive-permissions deny' \
   && ok "a mode-pinned backend narrows the permission shape instead of --approve-all" || fail "claude-plan still runs under --approve-all"
-sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep -q 'approve-reads' \
+sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep_full -q 'approve-reads' \
   && ok "the narrowed shape still approves reads, so the reviewer can do its job" || fail "narrowed shape blocks reads too"
 # ...and the DEFAULT must stay --approve-all, or a mistaken indent would silently narrow CODEX
 # too while every claude-plan grep above stayed green. (grok, implement r2, advisory.)
-awk '/if \[ -n "\$mount_dir" \]; then/{f=1} f&&/acp_perm=\(--approve-all\)/{print;exit}' "$ISO_RP" | grep -q 'approve-all' \
+awk '/if \[ -n "\$mount_dir" \]; then/{f=1} f&&/acp_perm=\(--approve-all\)/{print;exit}' "$ISO_RP" | grep_full -q 'approve-all' \
   && ok "the mounted default is still --approve-all, so codex's shape is unchanged" || fail "the mounted default no longer grants --approve-all"
 grep -qi 'ExitPlanMode' "$ISO_RP" \
   && ok "the escape that forced the narrowed shape is recorded at the site" || fail "the ExitPlanMode escape is undocumented"

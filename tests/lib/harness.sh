@@ -274,6 +274,27 @@ check_not() {
     *)     ok "$desc" ;;
   esac
 }
+# `producer | grep -q pat` is a flake under this file's `set -o pipefail`: grep exits at its
+# first match, a producer still writing takes SIGPIPE, and the pipeline fails — a passing
+# check fails at random once the output outgrows the pipe buffer (or the producer writes
+# again after the match), and a NEGATED check passes. grep_full is the drop-in for grep at the
+# end of such a pipe: it drains ALL of stdin into a file first, so the producer always runs to
+# completion and its own status still reaches pipefail. Buffering through a file (not `$(...)`)
+# keeps the bytes exact — NULs and trailing newlines included — so grep sees what it would have.
+# A captured variable needs no helper: `grep -q pat <<<"$out"`.
+grep_full() { # grep_full <grep args...> — grep that reads stdin to EOF before deciding
+  local _f _rc
+  _f="$(mktemp "${WORK:-${TMPDIR:-/tmp}}/grep_full.XXXXXX" 2>/dev/null)" || {
+    # Still drain before answering: an error status, or grep on the live pipe, would turn a
+    # negated `! … | grep_full` green. Memory keeps the bytes except NULs, so say so.
+    echo "grep_full: no buffer file; buffering in memory (NUL bytes are dropped)" >&2
+    local _in; _in="$(cat; printf x)"; _in="${_in%x}"
+    [ -n "$_in" ] || { grep "$@" </dev/null; return; }
+    grep "$@" <<<"${_in%$'\n'}"; return
+  }
+  cat > "$_f"; grep "$@" < "$_f"; _rc=$?
+  rm -f "$_f"; return "$_rc"
+}
 
 
 WORK="$(mktemp -d)"

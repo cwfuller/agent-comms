@@ -307,7 +307,7 @@ run_lf() { (cd "$REPO" && env -u COMMS_DELIVERY "$COMMS" "$@"); }
 LF_ROWS="$(run_lf findings "$LF/numbered.md" 2>/dev/null | tail -n +2)"
 [ "$(printf '%s\n' "$LF_ROWS" | grep -c .)" = "2" ] \
   && ok "numbered findings are extracted (1 blocking, 1 advisory)" || fail "numbered list yielded $(printf '%s' "$LF_ROWS" | grep -c .) findings"
-printf '%s\n' "$LF_ROWS" | awk -F'\t' '$13=="blocking"' | grep -q 'tuple comparison' \
+printf '%s\n' "$LF_ROWS" | awk -F'\t' '$13=="blocking"' | grep_full -q 'tuple comparison' \
   && ok "a numbered blocking finding lands in the blocking lane" || fail "numbered blocking lane"
 printf '%s\n' "$LF_ROWS" | grep -q 'narration above' && fail "prose above the findings was extracted" \
   || ok "narration and harness warnings are not mistaken for findings"
@@ -705,7 +705,7 @@ check_not "workspace set rejects an invalid name" run_sa workspace set 'Bad Name
 check_not "workspace set rejects a path-shaped name" run_sa workspace set '../evil'
 run_sa workspace set client-app >/dev/null
 [ "$(run_sa workspace)" = "client-app" ] && ok "explicit pin IS the identity" || fail "pin not authoritative"
-run_sa list --as claude 2>/dev/null | grep -q 'client-app_2026-08-26T14-10-00_reply-1' \
+run_sa list --as claude 2>/dev/null | grep_full -q 'client-app_2026-08-26T14-10-00_reply-1' \
   && ok "pin repairs the listing: hidden reply is now visible" || fail "pin listing repair"
 [ -f "$SA_MSG" ] || fail "diagnostics deleted mail (must never delete)"
 rm -f "$SA_FIX/.comms/workspace"
@@ -771,7 +771,7 @@ grep -q "^head_sha: $SA_NEWHEAD$" "$SA_Q2" \
   && [ "$(grep -c '^head_sha:' "$SA_Q2")" = "1" ] \
   && ok "consult head_sha is OVERWRITTEN with live HEAD (hand-typed values die)" || fail "consult overwrite"
 # cmd_ask no longer authors head_sha at compose (send is the boundary)
-awk '/^cmd_ask\(\)/,/^}/' "$REPO/helpers/comms.sh" | grep -q 'rev-parse HEAD' \
+awk '/^cmd_ask\(\)/,/^}/' "$REPO/helpers/comms.sh" | grep_full -q 'rev-parse HEAD' \
   && fail "cmd_ask still hand-derives head_sha at compose" || ok "cmd_ask leaves head_sha to send"
 # CRLF file: INSERTED lines carry CRLF too (no mixed endings)
 SA_CR="$SA_FIX/.comms/to-codex/${SA_WS}_2026-08-26T15-15-00_crlf-1.md"
@@ -971,9 +971,9 @@ git -C "$FR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 run_fr() { (cd "$FR" && env "$COMMS" "$@"); }
 run_fr friction --severity 5 --thread t-1 "compose reported a false all-clear" >/dev/null 2>&1
 [ -s "$FR/.comms/friction.tsv" ] && ok "friction writes a log" || fail "friction.tsv"
-awk -F'\t' 'NR>1 && $5=="5" && $4=="t-1"' "$FR/.comms/friction.tsv" | grep -q . \
+awk -F'\t' 'NR>1 && $5=="5" && $4=="t-1"' "$FR/.comms/friction.tsv" | grep_full -q . \
   && ok "severity and thread are recorded" || fail "friction fields"
-awk -F'\t' 'NR>1 && $6!=""' "$FR/.comms/friction.tsv" | grep -q . \
+awk -F'\t' 'NR>1 && $6!=""' "$FR/.comms/friction.tsv" | grep_full -q . \
   && ok "the commit it happened on is recorded" || fail "friction head_sha"
 run_fr friction "a second note" >/dev/null 2>&1
 [ "$(tail -n +2 "$FR/.comms/friction.tsv" | grep -c .)" = "2" ] && ok "friction appends" || fail "friction append"
@@ -997,7 +997,7 @@ run_fr_h() { (cd "$FR" && env AGENT_COMMS_HOME="$FRH" "$COMMS" "$@"); }
 run_fr_h friction --severity 4 "a note from a client repo" >/dev/null 2>&1
 [ -s "$FRH/friction.tsv" ] && ok "friction rolls up outside the project" || fail "no global rollup"
 grep -q 'a note from a client repo' "$FRH/friction.tsv" && ok "the rollup carries the note" || fail "rollup note"
-awk -F'\t' 'NR>1 && $2!=""' "$FRH/friction.tsv" | grep -q . \
+awk -F'\t' 'NR>1 && $2!=""' "$FRH/friction.tsv" | grep_full -q . \
   && ok "the rollup records WHICH project it came from" || fail "rollup project column"
 FRL="$(run_fr_h friction --list 2>&1)"
 printf '%s\n' "$FRL" | grep -q 'a note from a client repo' && ok "--list reads the rollup" || fail "friction --list"

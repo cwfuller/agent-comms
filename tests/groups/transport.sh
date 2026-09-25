@@ -314,12 +314,12 @@ mkdir -p "$(dirname "$RN_TSV")"
 printf 'timestamp\tthread\tphase\tround\treviewer\tverdict\tblocking\tadvisory\tprompt_version\tnote\n2026-08-01T00:00:00Z\told-thread\timplement\t1\tgrok\tAPPROVE\t0\t0\tpv-old\tan old row\n' > "$RN_TSV"
 run_tr round-note "$TR_RN" --note "caught the real one, missed nothing" >/dev/null 2>&1
 [ -s "$RN_TSV" ] && ok "round-note writes a rounds ledger" || fail "rounds.tsv"
-awk -F'\t' 'NR>1 && $7=="2" && $8=="1"' "$RN_TSV" | grep -q . \
+awk -F'\t' 'NR>1 && $7=="2" && $8=="1"' "$RN_TSV" | grep_full -q . \
   && ok "round-note DERIVES the counts (2 blocking, 1 advisory) rather than trusting input" || fail "derived counts"
-awk -F'\t' 'NR>1 && $5=="codex" && $6=="REQUEST_CHANGES" && $4=="3"' "$RN_TSV" | grep -q . \
+awk -F'\t' 'NR>1 && $5=="codex" && $6=="REQUEST_CHANGES" && $4=="3"' "$RN_TSV" | grep_full -q . \
   && ok "round-note carries reviewer, verdict and round from the reply" || fail "round-note provenance"
 grep -q 'process noise' "$RN_TSV" && fail "### Process leaked into the round ledger" || ok "### Process is not counted as a finding"
-awk -F'\t' 'NR>1 && $9!=""' "$RN_TSV" | grep -q . \
+awk -F'\t' 'NR>1 && $9!=""' "$RN_TSV" | grep_full -q . \
   && ok "round-note stamps prompt_version so rounds are comparable only within one" || fail "prompt_version missing"
 check_not "round-note requires an assessment" run_tr round-note "$TR_RN"
 # PER-LEG USAGE. The last column is the leg's `usage` from its result.json, found through the
@@ -328,7 +328,7 @@ check_not "round-note requires an assessment" run_tr round-note "$TR_RN"
   && ok "rounds.tsv gains a usage column as its last field" || fail "rounds.tsv header: $(head -1 "$RN_TSV")"
 grep -q "$(printf 'old-thread\timplement\t1\tgrok\tAPPROVE\t0\t0\tpv-old\tan old row$')" "$RN_TSV" \
   && ok "an existing ledger's older rows survive the header upgrade untouched" || fail "old rounds.tsv rows were rewritten or lost"
-awk -F'\t' 'NR>1 && $2=="rn-thread" && NF==11 && $11=="null"' "$RN_TSV" | grep -q . \
+awk -F'\t' 'NR>1 && $2=="rn-thread" && NF==11 && $11=="null"' "$RN_TSV" | grep_full -q . \
   && ok "a reply with no runner behind it records usage null" || fail "mailbox reply usage: $(grep rn-thread "$RN_TSV" | awk -F'\t' '{print NF": "$NF}')"
 # The JOIN identifies the producing ATTEMPT by its own output: the run dir under the request whose
 # reply.md carries this reply's message_id. Two attempts of one request (a retry) with the same

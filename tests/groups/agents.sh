@@ -10,7 +10,7 @@ MA_WS="$(run_ma workspace)"
 # Bare `agents` is every identity: the drivers, then each driver's built-in review twin.
 [ "$(run_ma agents)" = "claude codex grok claude-review codex-review grok-review" ] && ok "zero-config agents default includes grok" || fail "zero-config agents (got: $(run_ma agents))"
 [ "$(run_ma agents default)" = "codex" ] && ok "zero-config default target" || fail "zero-config default target"
-run_ma agents --supported | grep -q 'grok' && ok "supported table lists grok" || fail "supported table lists grok"
+run_ma agents --supported | grep_full -q 'grok' && ok "supported table lists grok" || fail "supported table lists grok"
 
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$MA_FIX/.comms/config"
 [ "$(run_ma agents)" = "claude codex grok claude-review codex-review grok-review" ] && ok "registry registers grok" || fail "registry registers grok (got: $(run_ma agents))"
@@ -149,7 +149,7 @@ sed -e 's/^from: claude$/from: codex/' -e 's/^thread: ma-arc-1$/thread: ma-arc-2
 [ -s "$MA_MSG3" ] || fail "leg-3 fixture construction produced an empty file"
 R3="$WORK/ma-leg3"; mkdir -p "$R3"
 GROK_STUB_VERDICT=APPROVE run_grok_leg "$MA_MSG3" "$R3" >/dev/null 2>&1
-find "$MA_FIX/.comms/to-codex" -name '*grok-reply*' -type f | grep -q . \
+find "$MA_FIX/.comms/to-codex" -name '*grok-reply*' -type f | grep_full -q . \
   && ok "pickup peer derives from inbound from: (reply to to-codex/)" || fail "peer-from-from derivation"
 
 # Broker failures under the parent-stamped envelope: the model cannot author
@@ -478,7 +478,7 @@ run_grok_leg "$MA_MSGQ" "$RQ" >/dev/null 2>&1
 QREPLY="$(find "$MA_FIX/.comms/to-claude" -name '*grok-reply*' -type f | sort | tail -1)"
 [ "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$RQ/result.json" | head -1)" = "completed" ] \
   && ok "question leg completes" || fail "question leg status"
-sed -n '2,/^---$/p' "$QREPLY" | grep -q '^type: response$' \
+sed -n '2,/^---$/p' "$QREPLY" | grep_full -q '^type: response$' \
   && ok "question reply stamped type: response" || fail "question reply type"
 [ "$(sed -n '2,/^---$/p' "$QREPLY" | grep -c '^verdict:')" = "0" ] \
   && ok "question reply carries NO verdict field" || fail "question verdict leak"
@@ -782,16 +782,16 @@ esac
 
 # Per-attempt broker state is cleared at BOTH entry points; the ACP path enters at
 # broker_stamp_and_deliver, which previously reset only BROKER_VALIDATED.
-sed -n '/^broker_stamp_and_deliver() {/,/^}/p' "$PB_RP" | grep -q 'GROK_BROKER_NOTE=""' \
+sed -n '/^broker_stamp_and_deliver() {/,/^}/p' "$PB_RP" | grep_full -q 'GROK_BROKER_NOTE=""' \
   && ok "the ACP broker entry point clears the stale note beside BROKER_VALIDATED" || fail "note not reset on the ACP path"
 ! grep -q 'GROK_BROKER_DERIVED' "$PB_RP" \
   && ok "the write-only GROK_BROKER_DERIVED is gone (the derivation is logged, not stored)" || fail "dead GROK_BROKER_DERIVED remains"
-sed -n '/^broker_stamp_and_deliver() {/,/^}/p' "$PB_RP" | grep -q 'BROKER_REFUSAL_LOGGED=0' \
+sed -n '/^broker_stamp_and_deliver() {/,/^}/p' "$PB_RP" | grep_full -q 'BROKER_REFUSAL_LOGGED=0' \
   && ok "the ACP broker entry clears all THREE per-attempt flags, not two" || fail "BROKER_REFUSAL_LOGGED not reset on the ACP path"
 PB_INITS="$(grep -cE '^(BROKER_VALIDATED=0|BROKER_REFUSAL_LOGGED=0|GROK_BROKER_NOTE="")$' "$PB_RP")"
 [ "$PB_INITS" = "3" ] \
   && ok "all three per-attempt broker flags are initialised at global scope" || fail "global broker-flag inits: $PB_INITS of 3"
-sed -n '/^broker_stamp() {/,/^}/p' "$PB_RP" | grep -q 'no usable agent identity was set' \
+sed -n '/^broker_stamp() {/,/^}/p' "$PB_RP" | grep_full -q 'no usable agent identity was set' \
   && ok "the from: stamp itself refuses without an identity, not just the prompt build" || fail "identity stamp has no fail-closed guard"
 # ONE predicate, both doors. Two guards that differ is the bug shape this repo keeps finding:
 # round 2 caught the prompt coercing whitespace while the stamp checked only -z.

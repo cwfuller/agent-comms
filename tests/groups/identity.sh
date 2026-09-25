@@ -47,7 +47,7 @@ wh_env PATH="$WHPS/empty:$PATH" "$COMMS" whoami >/dev/null 2>&1 \
   && fail "whoami defaulted when it had no signal" || ok "whoami fails closed with no signal"
 [ "$(wh_env PATH="$WHPS/grok:$PATH" "$COMMS" whoami 2>/dev/null)" = grok ] \
   && ok "whoami reads a grok ancestor executable" || fail "whoami ancestor grok"
-"$COMMS" help | grep -q whoami && ok "help lists whoami" || fail "help lists whoami"
+"$COMMS" help | grep_full -q whoami && ok "help lists whoami" || fail "help lists whoami"
 grep -qF '"$COMMS_SH" whoami' "$REPO/templates/claude-commands/auto.md" \
   && ok "auto.md calls whoami" || fail "auto.md calls whoami"
 grep -q 'SELF=claude' "$REPO/templates/claude-commands/auto.md" \
@@ -82,7 +82,7 @@ grep -qF '"$COMMS_SH" whoami' "$AA_G/skills/auto/SKILL.md" \
   && ok "Codex auto skill carries whoami" || fail "Codex auto skill carries whoami"
 [ -d "$AA/.comms/to-grok" ] && ok "project init creates to-grok" || fail "project init creates to-grok"
 grep -qF '$auto' "$AA_G/AGENTS.md" && ok "Codex protocol note names \$auto" || fail "Codex protocol note names \$auto"
-grep -A30 'done! installed:' "$REPO/install.sh" | grep -q 'Global Grok' \
+grep -A30 'done! installed:' "$REPO/install.sh" | grep_full -q 'Global Grok' \
   && ok "installer banner names Grok" || fail "installer banner names Grok"
 (cd "$AA" && aa_env bash "$REPO/install.sh" --scope=local >/dev/null 2>&1)
 [ -f "$AA/.grok/commands/auto.md" ] && ok "local pin installs grok /auto" || fail "local pin installs grok /auto"

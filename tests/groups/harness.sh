@@ -21,7 +21,7 @@ grep -q 'if \[ "$FAIL" -eq 0 \] && \[ "$COVERAGE_OK" -eq 1 \] && \[ -n "${TESTED
 # corpus did not shrink. It landed for real: 47 assertions merged into their predecessor, and
 # the vector showed one row of 91 where the golden had 44 + 47. Converting the 62 banners
 # ESTABLISHED the invariant; only this assertion enforces it for the next section to land.
-grep -nE '^[[:space:]]*echo "== .* =="' "${TEST_SOURCES[@]}" | grep -vF 'echo "== $1 =="' | grep -q . \
+grep -nE '^[[:space:]]*echo "== .* =="' "${TEST_SOURCES[@]}" | grep -vF 'echo "== $1 =="' | grep_full -q . \
   && fail "a section banner uses a raw echo — it will not be counted; call section() instead" \
   || ok "every section banner goes through section()"
 # STRUCTURAL. An edit landed the gate block ABOVE the shebang: the file stopped being a
@@ -194,7 +194,7 @@ printf '%s\n' "$WD" | grep -q 'poll_ds=10' \
   && ok "the watchdog graduates to a coarse poll" || fail "the watchdog has no coarse tier"
 printf '%s\n' "$WD" | grep -q 'date +%s' \
   && fail "the watchdog reads a truncated clock again" || ok "the watchdog does not read the clock per tick"
-awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep -qE '^ *sleep [0-9]+$' \
+awk '/while kill -0 "\$codex_pid"/,/^  done$/' "$REPO/helpers/runphase.sh" | grep_full -qE '^ *sleep [0-9]+$' \
   && fail "a whole-second sleep returned to the provider watchdog" || ok "no whole-second sleep in the provider watchdog"
 # The contract must come from the commit under test, not from a file on disk.
 grep -q 'git -C "\$REPO" show "\${TESTED_OID:-missing}:tests/expected-counts.tsv"' "$REPO/tests/lib/harness.sh" \
@@ -223,6 +223,158 @@ case "$TP_OUT" in
   *kept.md*)      ok "index enumeration lists tracked files and ignores untracked ones" ;;
   *)              fail "index enumeration listed nothing (got: $TP_OUT)" ;;
 esac
+
+section "harness: grep at the end of a pipe drains its producer (no SIGPIPE)"
+# This suite runs under pipefail. `producer | grep -q` lets grep exit at its first match while
+# the producer is still writing: the producer takes SIGPIPE, a passing check fails with 141,
+# and a NEGATED check passes. Seen for real at panel.sh dg4 (friction 2026-09-25T14:42). The
+# controls below run that old shape on purpose, so each carries the lint's control marker.
+# The failure is 141 where SIGPIPE is default, and 1 plus "write error: Broken pipe" where the
+# runner inherits it ignored (workers run under `presence with-beat`): non-zero either way.
+gq_producer() { awk 'BEGIN { for (i = 0; i < 4096; i++) printf "row %05d ................................................................\n", i }'; }
+shopt -qo pipefail && ok "the harness shell runs under pipefail (the controls below mean something)" \
+  || fail "pipefail is off in the harness shell — the SIGPIPE controls prove nothing"
+[ "$(gq_producer | wc -c)" -gt 65536 ] \
+  && ok "the producer fixture is past a 64 KB pipe buffer" || fail "producer fixture too small to exercise SIGPIPE"
+{ gq_producer | grep -q 'row 00000'; } 2>/dev/null; GQ_RC=$?  # grepq-lint: control
+[ "$GQ_RC" -ne 0 ] && ok "control: the old shape fails a check that matched" \
+  || fail "control: the old shape did not reproduce SIGPIPE (rc=$GQ_RC), so the fix is untested"
+{ ! gq_producer | grep -q 'row 00000'; } 2>/dev/null && GQ_NEG=passed || GQ_NEG=failed  # grepq-lint: control
+[ "$GQ_NEG" = passed ] && ok "control: the old shape PASSES a negated check whose text is present" \
+  || fail "control: a negated old-shape check was not vacuous (got $GQ_NEG)"
+gq_producer | grep_full -q 'row 00000' \
+  && ok "grep_full: the same pipe passes when the text is present" || fail "grep_full missed a present match (rc=$?)"
+! gq_producer | grep_full -q 'row 00000' && GQ_NEG=passed || GQ_NEG=failed
+[ "$GQ_NEG" = failed ] && ok "grep_full: a negated check fails when the text is present" \
+  || fail "grep_full: a negated check still passes vacuously"
+# With no buffer file (mktemp fails) grep_full must STILL drain: the >64 KB producer, positive and
+# negated, has to answer as it does above rather than falling back to the racy live pipe.
+GQ_FB="$( ( WORK="$WORK/no-such-dir/x"; gq_producer | grep_full -q 'row 00000' && echo pos=0 || echo pos=1
+  ! gq_producer | grep_full -q 'row 00000' && echo neg=passed || echo neg=failed ) 2>/dev/null | tr '\n' ' ')"
+[ "$GQ_FB" = "pos=0 neg=failed " ] && ok "grep_full still drains when it cannot make a buffer file" \
+  || fail "grep_full's no-buffer fallback answered '$GQ_FB' (want 'pos=0 neg=failed ')"
+# Why a drop-in at the pipe's end and not `grep -q pat <<<"$(producer)"` at each site: the
+# capture discards the producer's status, so a failing producer would start passing checks.
+# (This pair shows the difference between the two shapes; the controls above show the race.)
+{ echo 'row 00000'; exit 3; } | grep_full -q 'row 00000'; GQ_RC=$?
+GQ_CAP=failed; grep -q 'row 00000' <<<"$({ echo 'row 00000'; exit 3; })" && GQ_CAP=passed
+[ "$GQ_RC" = 3 ] && [ "$GQ_CAP" = passed ] \
+  && ok "grep_full keeps a failing producer failing (a here-string of its capture would pass it)" \
+  || fail "grep_full status (rc=$GQ_RC, want 3) or capture control ($GQ_CAP, want passed)"
+GQ_OUT="$(gq_producer)"
+{ printf '%s\n' "$GQ_OUT" | grep -q 'row 00000'; } 2>/dev/null; GQ_RC=$?  # grepq-lint: control
+[ "$GQ_RC" -ne 0 ] && ok "control: echoing a >64 KB variable into grep -q fails too" \
+  || fail "control: the variable shape did not reproduce SIGPIPE (rc=$GQ_RC)"
+grep -q 'row 00000' <<<"$GQ_OUT" \
+  && ok "a here-string feeds a captured value to grep -q with no pipe" || fail "here-string grep missed a present match"
+# grep_full has to be grep, byte for byte, on the edges a buffer could bend: empty input (a
+# here-string would invent one empty line and flip -v), trailing newlines, and NUL bytes
+# (which `$(...)` would silently drop).
+GQ_DIFF=""; GQ_IN="$WORK/grepq-in"
+for GQ_CASE in '' 'a' 'a\n' 'a\n\n' '\n' 'x\na\n' 'a\0b\n' '\0'; do
+  printf "$GQ_CASE" > "$GQ_IN"
+  for GQ_ARGS in '-qv x' '-c ^$' '-qx a' '-c a' '-v a' '-aqx ab' '-ac b'; do
+    # shellcheck disable=SC2086 # word-split the option list on purpose
+    GQ_WANT="$(grep $GQ_ARGS < "$GQ_IN"; echo "rc=$?")"; GQ_GOT="$(grep_full $GQ_ARGS < "$GQ_IN"; echo "rc=$?")"
+    [ "$GQ_WANT" = "$GQ_GOT" ] || GQ_DIFF="$GQ_DIFF [$GQ_CASE|$GQ_ARGS: $GQ_WANT vs $GQ_GOT]"
+  done
+done
+[ -z "$GQ_DIFF" ] && ok "grep_full answers exactly as grep on empty, unterminated, blank-line and NUL input" \
+  || fail "grep_full differs from grep:$GQ_DIFF"
+# The lint that keeps the class gone, and a control proving it is not vacuous.
+GQ_LINT="$(python3 "$REPO/tests/lib/grepq_lint.py" "${TEST_SOURCES[@]}" 2>&1)"; GQ_RC=$?
+[ "$GQ_RC" = 0 ] && [ -z "$GQ_LINT" ] && ok "no test pipes a command into grep -q" \
+  || fail "a command pipes into grep -q (use grep_full, or a here-string for a captured value): $GQ_LINT"
+GQ_FIX="$WORK/grepq-lint-fixture.sh"
+cat > "$GQ_FIX" <<'GQEOF'
+run_x list | grep -q foo && ok a || fail a
+! cat "$F" | grep -Fq x
+X="$(a)" && printf '%s\n' "$(b)" | grep -iq y
+if a; then b; elif c --flag | grep -q z; then d; fi
+cat f \
+  | grep -q x
+cat f |
+  grep -q x
+X="$(a
+b | grep -q c)"
+cmd | grep --quiet x
+cmd | LC_ALL=C grep -q x
+cmd | grep -e -pat -q
+cmd |& grep -q x
+echo "Use <<EOF here"
+# <<EOF example
+X=$((1<<3))
+cat f | grep -q after-false-heredoc-openers
+cat <<EOF-TEXT
+body | grep -q not-code
+EOF-TEXT
+cat f | grep -q after-a-punctuated-delimiter
+cat f | # a note between stages
+  grep -q x
+cat f | grep 2>/dev/null -q x
+cat f | grep 2>&1 -q x
+x="$(case $y in a) hidden | grep -q INSIDE ;; esac)"
+cmd | command -p grep -q x
+cmd | env -i LC_ALL=C grep -q x
+cmd | /usr/bin/grep -q x
+cat <<EOF
+$(cmd | grep -q in-an-expanding-body)
+EOF
+cat <<'EOF'
+$(cmd | grep -q in-a-quoted-body)
+EOF
+X=$(( $(cmd | grep -q x) + 1 ))
+printf '>\n' | grep -e '>' -q
+cmd | grep -e '<' -q
+cmd | builtin grep -q x
+cmd | stdbuf -o0 grep -q x
+cmd | timeout -s KILL 5 grep -q x
+x=$(( $(printf '(' >/dev/null; printf 1) + 1 ))
+cmd | grep -q after-a-quoted-paren-in-arithmetic
+cat <<EO\
+F
+$(cmd | grep -q in-a-continued-delimiter-body)
+EOF
+cmd | grep $(printf row) -q
+cmd | grep "$(printf '%s' "r)w")" -q
+cmd | grep $(printf row # )
+) -q
+cmd | grep $(printf $'\'' >/dev/null; printf row) -q
+cmd | (grep -q row)
+cmd | { grep -q row; }
+cmd | if grep -q row; then :; fi
+cmd | (grep -c row)
+cmd | grep "--qui\
+et" row
+cmd | "gr\
+ep" -q row
+cmd | grep $'--qui\x65t' row
+cmd | grep $"--quiet" row
+cmd | grep $'--quiet\0ignored' row
+python3 -c 'import x
+y' && printf '%s' "$P2" | grep -q ok
+printf '%s\n' "$OUT" | grep -q ok
+echo "$1" | grep -q ok
+a | grep_full -q ok
+a | grep -c ok
+a | grep -e -q x
+bash -c 'a | grep -q b'
+cat > stub <<'EOF'
+a | grep -q in-a-heredoc
+EOF
+a | grep -q ok  # grepq-lint: control
+GQEOF
+GQ_LINT="$(python3 "$REPO/tests/lib/grepq_lint.py" "$GQ_FIX" 2>&1)"; GQ_RC=$?
+[ "$GQ_RC" = 1 ] && [ "$(printf '%s\n' "$GQ_LINT" | cut -d: -f2 | tr '\n' ' ')" = '1 2 3 4 6 7 10 11 12 13 14 18 22 23 25 26 27 28 29 30 32 37 38 39 40 41 42 44 47 49 50 51 53 54 55 56 58 60 62 63 64 ' ] \
+  && ok "the lint flags command and substitution producers across lines, and only those" || fail "the lint control misread its fixture (rc=$GQ_RC): $GQ_LINT"
+# FAIL CLOSED: a heredoc that never closes, or a quote still open at EOF, means the scanner cannot
+# vouch for what follows. That must be a finding, never a silently clean file.
+printf 'cat <<NEVER\ncat f | grep -q x\n' > "$WORK/grepq-lint-heredoc.sh"
+printf 'echo "unterminated\ncat f | grep -q x\n' > "$WORK/grepq-lint-quote.sh"
+GQ_LINT="$(python3 "$REPO/tests/lib/grepq_lint.py" "$WORK/grepq-lint-heredoc.sh" "$WORK/grepq-lint-quote.sh" 2>&1)"; GQ_RC=$?
+[ "$GQ_RC" = 1 ] && [ "$(grep -c 'scanner lost its place' <<<"$GQ_LINT")" = 2 ] \
+  && ok "the lint reports an unclosed heredoc or quote instead of passing the rest of the file" \
+  || fail "the lint went quiet on an unparseable file (rc=$GQ_RC): $GQ_LINT"
 
 section "integrate: an exit status is not proof the suite ran"
 # Source greps proved the scrub EXISTS; these prove it WORKS. The attack: a shell-startup

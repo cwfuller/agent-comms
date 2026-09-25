@@ -80,7 +80,7 @@ PN_RT_MID="$(grep -m1 '^message_id:' "$PN_RT_LEG" | sed 's/^message_id: //')"
 # (codex + grok, implement r2, corroborated.)
 [ "$(awk -F'\t' -v s="$PN_RT_SET" 'NR>1 && $1==s && $10=="codex" {n[$14]++} END {for (k in n) if (n[k] != 1) dup=1; print (dup ? "dup" : "one-each")}' "$PN_FIX/.comms/grades/sets.tsv")" = "one-each" ] \
   && ok "a retried leg keeps exactly ONE row per dispatch attempt" || fail "retry left duplicate rows within one attempt"
-awk -F'\t' -v s="$PN_RT_SET" 'NR>1 && $1==s && $10=="codex" {print $2}' "$PN_FIX/.comms/grades/sets.tsv" | grep -qxF "$PN_RT_MID" \
+awk -F'\t' -v s="$PN_RT_SET" 'NR>1 && $1==s && $10=="codex" {print $2}' "$PN_FIX/.comms/grades/sets.tsv" | grep_full -qxF "$PN_RT_MID" \
   && ok "the retried row is REBOUND to the new dispatch's request id" \
   || fail "retry kept the stale request_message_id — new replies can never answer it"
 
@@ -112,7 +112,7 @@ mk_agree_reply grok  0 "$PN_AGR_MIDG" '## Findings
 ### Blocking
 - None.'
 PN_AGR_STATUS="$(run_pn panel status --set "$PN_AGR_SET" 2>&1)"
-printf '%s\n' "$PN_AGR_STATUS" | awk -F'\t' '$1=="codex" && $3=="yes"' | grep -q . \
+printf '%s\n' "$PN_AGR_STATUS" | awk -F'\t' '$1=="codex" && $3=="yes"' | grep_full -q . \
   && ok "status sees the older VALID reply past a newer invalid one" || fail "status stopped at the invalid candidate"
 PN_AGR_COMP="$(run_pn compose --set "$PN_AGR_SET" 2>&1)" && PN_AGR_RC=0 || PN_AGR_RC=$?
 [ "$PN_AGR_RC" = "0" ] && printf '%s\n' "$PN_AGR_COMP" | grep -q 'all answered' \
@@ -169,7 +169,7 @@ printf '%s\n' "$PN_DG_C4" | grep -q 'Reviewers present: codex' \
   && ok "a degraded composition names only the reviewers who actually answered" || fail "the degraded header misnames the roster"
 grep -qE "leg-unavailable.*$PN_DG_SET.*grok" "$PN_FIX/.comms/events.tsv" \
   && ok "the roster reduction is WRITTEN to the coordinator log, never inferred" || fail "no leg-unavailable event recorded"
-awk -F'\t' -v s="$PN_DG_SET" '$3=="composition-completed" && $4==s && $14=="composed-degraded"' "$PN_FIX/.comms/events.tsv" | grep -q . \
+awk -F'\t' -v s="$PN_DG_SET" '$3=="composition-completed" && $4==s && $14=="composed-degraded"' "$PN_FIX/.comms/events.tsv" | grep_full -q . \
   && ok "the set closes as composed-degraded, so it cannot be read as a full panel later" || fail "degraded composition closed as an ordinary one"
 # A turn that SUCCEEDED is never evidence its reviewer was unavailable, whatever it produced.
 # The first cut derived the marker from emptiness alone, so a clean empty result authorized
@@ -191,13 +191,13 @@ run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "$PN_
   --status completed --note "exit=0 via=acp reason=no-output" --run-dir /runs/dg3-A >/dev/null 2>&1
 run_pn events append --kind turn-finished --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok --role gating \
   --status completed --note "exit=0 session=acp:s" --run-dir /runs/dg3-A >/dev/null 2>&1
-printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
+grep -q 'no recorded evidence' <<<"$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" \
   && ok "a COMPLETED provider-result is never evidence of an unavailable reviewer" || fail "a successful empty turn authorized a drop"
 # Evidence from a DIFFERENT dispatch of the same set must not authorize this attempt: the
 # leg may have been redispatched and still be running. (codex, implement r1, blocking.)
 run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "stale-$PN_DG3_DSP" --agent grok --role gating \
   --status failed --note "exit=1 via=acp reason=no-output" --run-dir /runs/dg3-A >/dev/null 2>&1
-printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
+grep -q 'no recorded evidence' <<<"$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" \
   && ok "evidence from another dispatch does not authorize dropping this attempt's leg" || fail "stale cross-dispatch evidence was accepted"
 
 # A RE-SEND KEEPS THE DISPATCH, so binding to the dispatch alone still let a stale marker drop
@@ -205,14 +205,14 @@ printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)
 # (codex, implement r2, blocking.)
 run_pn events append --kind turn-started --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok \
   --role gating --status running --note "re-sent after the failure" --request-id "$(pn_grok_mid pn-dg3-thread)" --run-dir /runs/dg3-B >/dev/null 2>&1
-printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
+grep -q 'no recorded evidence' <<<"$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" \
   && ok "a leg re-sent under the same dispatch is not droppable while its new turn runs" || fail "a running re-send was dropped on a stale marker"
 # ...and once THAT turn also fails with no output, it becomes evidence again.
 run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok \
   --role gating --status failed --note "exit=1 via=acp reason=no-output" --run-dir /runs/dg3-B >/dev/null 2>&1
 run_pn events append --kind turn-finished --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok --role gating \
   --status failed --note "exit=1 reason=no-output session=acp:s" --run-dir /runs/dg3-B >/dev/null 2>&1
-printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'DEGRADED PANEL' \
+grep -q 'DEGRADED PANEL' <<<"$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" \
   && ok "the re-sent turn failing the same way restores droppability" || fail "a genuinely failed re-send stayed undroppable"
 
 # THE CONCURRENCY FORM: "latest turn" sampled once is a TOCTOU. Between accepting the drop and
@@ -235,7 +235,7 @@ run_pn events append --kind provider-result --set "$PN_DG4_SET" --dispatch "$PN_
 run_pn events append --kind turn-finished --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok --role gating \
   --status failed --note "exit=1 reason=no-output session=acp:s" --run-dir /runs/dg4-A >/dev/null 2>&1
 # Sanity: droppable right now.
-printf '%s\n' "$(run_pn compose --set "$PN_DG4_SET" --degrade grok 2>&1 || true)" | grep -q 'DEGRADED PANEL' \
+grep -q 'DEGRADED PANEL' <<<"$(run_pn compose --set "$PN_DG4_SET" --degrade grok 2>&1 || true)" \
   && ok "the concurrency fixture is droppable before anything moves" || fail "dg4 fixture is not droppable — the next assertion would be vacuous"
 # Now a re-send lands. The very same command must refuse instead of publishing.
 run_pn events append --kind turn-started --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
@@ -326,18 +326,18 @@ pn_dg_set dg7 12-57
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/7A
 pn_dg_ev provider-result completed "exit=0 elapsed=66s budget=3600s via=acp" /runs/7A
 pn_dg_ev turn-finished failed "exit=1 session=acp:s note=the provider said reason=policy-unapplied" /runs/7A
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a reason quoted inside a turn-finished note is not degrade evidence" || fail "a free-text reason token authorized a drop"
 # Other refusals are fix-and-retry conditions, not a roster decision.
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/7B
 pn_dg_ev turn-finished failed "exit=1 reason=containment-unconfirmed session=acp:s note=could not confirm the mode" /runs/7B
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a turn refused for another reason (containment-unconfirmed) is not droppable" || fail "a non-policy refusal authorized a drop"
 # Only a FAILED terminal row counts.
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/7C
 pn_dg_ev provider-result completed "exit=0 via=acp" /runs/7C
 pn_dg_ev turn-finished completed "exit=0 reason=policy-unapplied session=acp:s" /runs/7C
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a COMPLETED turn-finished is never evidence, whatever reason it carries" || fail "a completed turn authorized a drop"
 # The real shape: the runner's refusal row, exactly as write_result writes it.
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/7D
@@ -366,7 +366,7 @@ pn_dg_set dg8 12-58
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/8A
 pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/8A
 pn_dg_ev turn-finished failed "exit=1 session=acp:s" /runs/8A
-pn_dg_try | grep -q 'grok: produced no output at all (reason=no-output)' \
+pn_dg_try | grep_full -q 'grok: produced no output at all (reason=no-output)' \
   && ok "no-output evidence survives a reasonless (older) turn-finished row after it" || fail "a legacy turn-finished row cleared no-output evidence"
 
 # QUIESCENCE. A leg is droppable only when nothing about it can still be in motion: every send has
@@ -379,14 +379,14 @@ pn_dg_ev turn-started running "provider=grok via=acp" /runs/A
 pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/A
 pn_dg_ev request-persisted persisted "attempt=9b phase=implement workflow=auto"
 pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/A
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "run A's no-output terminal row cannot drop a leg whose re-send B is persisted" || fail "a superseded run's no-output row dropped a re-sent leg"
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/B
 pn_dg_ev request-dispatched spawned "attempt=9b type=review-request delivery=spawned" /runs/B
 pn_dg_ev provider-result completed "exit=0 via=acp" /runs/B
 pn_dg_ev request-persisted persisted "attempt=9c phase=implement workflow=auto"
 pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s" /runs/B
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "run B's policy-unapplied terminal row cannot drop a leg whose re-send C is persisted" || fail "a superseded run's policy row dropped a re-sent leg"
 # A LATE failure of an older run, while a newer run is still open, is no ground for a drop.
 pn_dg_ev request-dispatched spawned "attempt=9c type=review-request delivery=spawned" /runs/C
@@ -396,12 +396,12 @@ pn_dg_ev request-dispatched spawned "attempt=9d type=review-request delivery=spa
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/D
 pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/C
 pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/C
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a late failure from an older run cannot drop the leg while a newer run is open" || fail "an older run's failure dropped a leg with an open run"
 # Positive control: once every run has finished, the LAST one's refusal is the evidence.
 pn_dg_ev provider-result completed "exit=0 via=acp" /runs/D
 pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s" /runs/D
-pn_dg_try | grep -q 'grok: .*(reason=policy-unapplied)' \
+pn_dg_try | grep_full -q 'grok: .*(reason=policy-unapplied)' \
   && ok "the latest run's own policy-unapplied row authorizes the drop once every run has finished" || fail "quiescence refused a leg whose every run had finished"
 # SHADOW ROWS ARE NOT THE LEG. A shadow shares set and dispatch and may run under a gating agent's
 # name; its refusal must never stand in for the gating run's own, undroppable, failure.
@@ -413,7 +413,7 @@ pn_dg_ev turn-finished failed "exit=1 reason=containment-unconfirmed session=acp
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/S shadow
 pn_dg_ev provider-result completed "exit=0 via=acp" /runs/S shadow
 pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s" /runs/S shadow
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a shadow turn's policy refusal cannot drop the gating leg it shadows" || fail "a shadow row dropped a gating leg"
 
 # A DEDUPLICATED RE-SEND ("already running") adds a send, not a run: once its delivery is recorded,
@@ -422,11 +422,11 @@ pn_dg_set dg10 13-00
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/10A
 pn_dg_ev request-persisted persisted "attempt=10b phase=implement workflow=auto"
 pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/10A
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a re-send whose delivery is not yet recorded keeps the leg pending" || fail "a pending re-send let the leg drop"
 pn_dg_ev request-dispatched spawned "attempt=10b type=review-request delivery=spawned" /runs/10A
 pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/10A
-pn_dg_try | grep -q 'grok: produced no output at all (reason=no-output)' \
+pn_dg_try | grep_full -q 'grok: produced no output at all (reason=no-output)' \
   && ok "a re-send that attached to the still-running run leaves that run's evidence usable" || fail "a deduplicated re-send superseded its own run"
 # A run known only by its delivery row is still a run: open until its own terminal row.
 pn_dg_set dg11 13-01
@@ -436,7 +436,7 @@ pn_dg_ev request-persisted persisted "attempt=11b phase=implement workflow=auto"
 pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/11A
 pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/11A
 pn_dg_ev request-dispatched spawned "attempt=11b type=review-request delivery=spawned" /runs/11B
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "an older run with no turn-started of its own cannot pass as the re-send's run" || fail "first appearance let an older run's evidence drop the re-sent leg"
 # RUN IDENTITY SURVIVES THE COLUMN WIDTH: run dirs that differ only past 160 bytes stay two runs,
 # through the real encoder, so a finished run cannot close an open one. (codex + grok, r2.)
@@ -446,7 +446,7 @@ pn_dg_ev turn-started running "provider=grok via=acp" "$PN_LONG.1790300689.79122
 pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" "$PN_LONG.1790300689.79122"
 pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" "$PN_LONG.1790300689.79122"
 pn_dg_ev turn-started running "provider=grok via=acp" "$PN_LONG.1790300999.80001"
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && [ "$(awk -F'\t' -v s="$PN_DGX_SET" '$3=="turn-started" && $4==s {print $13}' "$PN_FIX/.comms/events.tsv" | sort -u | grep -c .)" = 2 ] \
   && ok "two run dirs that differ only past the column width stay two runs" || fail "clipped run dirs collided into one run"
 # A delayed delivery row from an older send completes THAT send only. (codex, r3, blocking.)
@@ -457,7 +457,7 @@ pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no
 pn_dg_ev request-persisted persisted "attempt=13b phase=implement workflow=auto"
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/13B
 pn_dg_ev request-dispatched spawned "attempt=13a type=review-request delivery=spawned" /runs/13A
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "an older send's delayed delivery row cannot re-select its dead run over the live one" || fail "a delayed delivery row dropped a live re-send"
 # A FOREGROUND turn (`send --wait`) records its delivery AFTER the runner's terminal rows, and a
 # delivery row that names no run completes its send without inventing one. (codex r3; grok r3.)
@@ -467,7 +467,7 @@ pn_dg_ev turn-started running "provider=grok via=acp" /runs/14F
 pn_dg_ev provider-result completed "exit=0 via=acp" /runs/14F
 pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s" /runs/14F
 pn_dg_ev request-dispatched failed "attempt=14a type=review-request delivery=failed"
-pn_dg_try | grep -q 'grok: .*(reason=policy-unapplied)' \
+pn_dg_try | grep_full -q 'grok: .*(reason=policy-unapplied)' \
   && ok "a foreground turn's refusal stays droppable after a delivery row that names no run" || fail "a run-less delivery row erased the foreground turn's evidence"
 # A delayed START of the same request cannot stand in for a newer send still being delivered.
 # (codex, r4, blocking.)
@@ -478,7 +478,7 @@ pn_dg_ev request-persisted persisted "attempt=15b phase=implement workflow=auto"
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/15A
 pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/15A
 pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/15A
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a delayed start of the same request cannot resolve a newer send still being delivered" || fail "a start of the same request resolved a pending send"
 # A foreground turn takes no spawn claim, so a detached run of the same message can be live beside
 # it: the foreground failure is no ground while that run is open. (grok, r4, blocking.)
@@ -491,7 +491,7 @@ pn_dg_ev turn-started running "provider=grok via=acp" /runs/16F
 pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/16F
 pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/16F
 pn_dg_ev request-dispatched spawned "attempt=16f type=review-request delivery=spawned" /runs/16F
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a foreground turn's failure cannot drop the leg while a detached run of it is open" || fail "a foreground failure dropped a leg with a live detached run"
 # A re-send whose delivery names a FINISHED run (a claim's pid and run dir from different runners)
 # cannot hide the live run, which stays open by its own rows. (codex, r4, blocking.)
@@ -506,7 +506,7 @@ pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no
 pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/17B
 pn_dg_ev request-persisted persisted "attempt=17c phase=implement workflow=auto"
 pn_dg_ev request-dispatched spawned "attempt=17c type=review-request delivery=spawned" /runs/17B
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a re-send that names a finished run cannot hide a live one" || fail "a mis-named attachment dropped a live run"
 # Attempt ids are COUNTED: two sends that minted the same id still need two delivery rows. (grok, r4.)
 pn_dg_set dg18 13-08
@@ -516,7 +516,7 @@ pn_dg_ev request-dispatched spawned "attempt=18x type=review-request delivery=sp
 pn_dg_ev turn-started running "provider=grok via=acp" /runs/18A
 pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/18A
 pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/18A
-pn_dg_try | grep -q 'no recorded evidence' \
+pn_dg_try | grep_full -q 'no recorded evidence' \
   && ok "a repeated attempt id still needs one delivery row per send" || fail "a repeated attempt id masked an undelivered send"
 PN_RDP="$( eval "$(sed -n '/^delivery_run_dir() {/,/^}/p' "$COMMS")"
            delivery_run_dir "running grok in the foreground (no detach) — run dir: /runs/fg.1.2"
@@ -571,12 +571,12 @@ printf '%s\n' "$PN_COMP" | grep -q '2 legs, all answered' && ok "compose reports
 # Range NARROWED to Gates -> the next heading. Mixed now sits between Gates and Uncorroborated,
 # so the old `/^## Gates/,/^## Uncorroborated/` span would also match a MIXED anchor and call it
 # gated. (codex, corroboration plan r3.)
-printf '%s\n' "$PN_COMP" | awk '/^## Gates/{f=1;next} /^## /{f=0} f' | grep -q 's.txt:1' \
+printf '%s\n' "$PN_COMP" | awk '/^## Gates/{f=1;next} /^## /{f=0} f' | grep_full -q 's.txt:1' \
   && ok "an anchor two reviewers independently flagged is a GATE" || fail "corroborated finding not gated"
 # Unique findings are PRESERVED, not dropped — grok's core objection to condensing.
 printf '%s\n' "$PN_COMP" | grep -q 's.txt:2' && printf '%s\n' "$PN_COMP" | grep -q 's.txt:3' \
   && ok "unique findings from BOTH reviewers survive composition" || fail "a unique finding was dropped"
-printf '%s\n' "$PN_COMP" | awk '/^## Uncorroborated/,/^## Unanchored/' | grep -q 's.txt:2' \
+printf '%s\n' "$PN_COMP" | awk '/^## Uncorroborated/,/^## Unanchored/' | grep_full -q 's.txt:2' \
   && ok "a lone blocking finding is flagged for cross-check, not silently obeyed" || fail "uncorroborated labelling"
 printf '%s\n' "$PN_COMP" | grep -q 's.txt:9' && ok "advisories are carried but never gate" || fail "advisory dropped"
 # Every finding stays ATTRIBUTED — a bundle that is nobody's review is the failure mode.
@@ -622,12 +622,12 @@ printf '%s\n' "$PN_R2" | grep -q 'all answered' \
 PN_STATUS="$(run_pn panel status --set "$PN_SC" 2>&1)"
 printf '%s\n' "$PN_STATUS" | grep -q 'codex' && printf '%s\n' "$PN_STATUS" | grep -q 'grok' \
   && ok "panel status lists every leg in the set" || fail "panel status (got: $PN_STATUS)"
-printf '%s\n' "$PN_STATUS" | awk -F'\t' 'NF>=4 && $1!="reviewer" && $3!="yes"' | grep -q . \
+printf '%s\n' "$PN_STATUS" | awk -F'\t' 'NF>=4 && $1!="reviewer" && $3!="yes"' | grep_full -q . \
   && fail "status missed a genuinely bound answer" || ok "panel status sees bound answers"
 # Status shares compose's binding: the pn-partial legs sit on the SAME threads with
 # valid same-round replies in the archive, and must still read unanswered.
 PN_STAT2="$(run_pn panel status --set "$PN_SET2" 2>&1)"
-printf '%s\n' "$PN_STAT2" | awk -F'\t' 'NR>1 && $3=="yes"' | grep -q . \
+printf '%s\n' "$PN_STAT2" | awk -F'\t' 'NR>1 && $3=="yes"' | grep_full -q . \
   && fail "panel status counted another request's reply as answered" \
   || ok "panel status never reports a stale or unbound reply as answered"
 
@@ -745,16 +745,16 @@ pn_ubth="$(grep -m1 '^thread:' "$pn_ubleg" | sed 's/^thread: //')"
     "$PN_WS" "$pn_ubth"
 } > "$PN_FIX/.comms/to-grok/${PN_WS}_2026-08-26T15-10-00_claude-ubreply.md"
 PN_UBSTAT="$(run_pn panel status --set "$PN_UBSET" 2>&1)"
-printf '%s\n' "$PN_UBSTAT" | awk -F'\t' 'NR>1 && $3=="yes"' | grep -q . \
+printf '%s\n' "$PN_UBSTAT" | awk -F'\t' 'NR>1 && $3=="yes"' | grep_full -q . \
   && fail "an unbound reply in another inbox counted as an answer" \
   || ok "the widened scan still refuses an unbound reply (binding, not directory)"
 
 # DISCOVERABILITY: an await dies with its session and takes the printed set id with it.
 # sets.tsv is durable, so bare `panel status` enumerates it instead of usage-erroring.
 PN_LIST="$(run_pn panel status 2>/dev/null)"
-printf '%s\n' "$PN_LIST" | head -1 | grep -q '^set' \
+printf '%s\n' "$PN_LIST" | head -1 | grep_full -q '^set' \
   && ok "bare panel status prints a set listing header" || fail "bare panel status header (got: $(printf '%s' "$PN_LIST" | head -1))"
-printf '%s\n' "$PN_LIST" | awk -F'\t' -v s="$PN_CXSET" 'NR>1 && $1==s' | grep -q . \
+printf '%s\n' "$PN_LIST" | awk -F'\t' -v s="$PN_CXSET" 'NR>1 && $1==s' | grep_full -q . \
   && ok "bare panel status lists a dispatched set by id" || fail "set $PN_CXSET missing from the listing"
 [ "$(printf '%s\n' "$PN_LIST" | awk -F'\t' -v s="$PN_CXSET" 'NR>1 && $1==s {print $4}')" = "2" ] \
   && ok "the listing counts both legs of the set" \
@@ -783,7 +783,7 @@ run_pn panel status --set "$PN_CXSET" >/dev/null 2>&1 \
 # A TRUNCATED sets.tsv row is not a leg. Counting it would make the listing report durable
 # state that is not there. (codex advisory r1.)
 printf 'truncated-set\tonly-two-fields\n' >> "$PN_FIX/.comms/grades/sets.tsv"
-run_pn panel status 2>/dev/null | awk -F'\t' 'NR>1 && $1=="truncated-set"' | grep -q . \
+run_pn panel status 2>/dev/null | awk -F'\t' 'NR>1 && $1=="truncated-set"' | grep_full -q . \
   && fail "the listing counted a truncated row as a set" || ok "the listing ignores a truncated sets.tsv row"
 
 section "templates: the loop closes its thread state on the terminal approval"
@@ -1004,7 +1004,7 @@ RP_SOLO_LEG="$RP_FIX/.comms/to-claude-review/$RP_SOLO_MID.md"
 [ "$(grep -c '^review_provider:' "$RP_SOLO_LEG" 2>/dev/null)" = "1" ] && grep -qx 'review_provider: claude' "$RP_SOLO_LEG" \
   && ok "the leg request carries exactly one review_provider: claude, bound at send" \
   || fail "claude-review leg provider stamp ($(grep '^review_provider' "$RP_SOLO_LEG" 2>/dev/null))"
-awk -F'\t' -v s="$RP_SOLO_SET" '$3=="panel-planned" && $4==s && $8=="claude-review"' "$RP_FIX/.comms/events.tsv" | grep -q . \
+awk -F'\t' -v s="$RP_SOLO_SET" '$3=="panel-planned" && $4==s && $8=="claude-review"' "$RP_FIX/.comms/events.tsv" | grep_full -q . \
   && ok "the plan records the leg under its IDENTITY, which is what its events and replies carry" \
   || fail "no panel-planned row names claude-review"
 check "the stamped claude-review leg validates" run_rp validate "$RP_SOLO_LEG"
@@ -1037,8 +1037,8 @@ RP_PC1="$(run_rp compose --set "$RP_PAIR_SET" 2>&1)" && RP_PC1_RC=0 || RP_PC1_RC
 RP_PAIR_R="$(rp_reply claude claude-review rp-pair-claude-review "$RP_PAIR_MID_R" 12 claude rp-pair-cr)"
 check "a claude-review reply stamped review_provider: claude validates" run_rp validate "$RP_PAIR_R"
 RP_PST="$(run_rp panel status --set "$RP_PAIR_SET" 2>&1)"
-printf '%s\n' "$RP_PST" | awk -F'\t' '$1=="claude-review" && $3=="yes"' | grep -q . \
-  && printf '%s\n' "$RP_PST" | awk -F'\t' '$1=="codex" && $3=="yes"' | grep -q . \
+printf '%s\n' "$RP_PST" | awk -F'\t' '$1=="claude-review" && $3=="yes"' | grep_full -q . \
+  && printf '%s\n' "$RP_PST" | awk -F'\t' '$1=="codex" && $3=="yes"' | grep_full -q . \
   && ok "panel status sees both legs answered, the review identity under its own name" \
   || fail "panel status on the claude-review,codex set (got: $RP_PST)"
 RP_PC2="$(run_rp compose --set "$RP_PAIR_SET" 2>&1)" && RP_PC2_RC=0 || RP_PC2_RC=$?
@@ -1127,7 +1127,7 @@ RP_CB_DSP="$(rp_dispatch_of "$RP_C_SET")"
   || fail "second attempt on the set (rc=$RP_CB_RC: $RP_CB_OUT)"
 # Non-vacuity: the carried leg must really count, or the refusal below could come from
 # anything else.
-run_rp panel status --set "$RP_C_SET" 2>&1 | awk -F'\t' '$1=="claude" && $3=="yes"' | grep -q . \
+run_rp panel status --set "$RP_C_SET" 2>&1 | awk -F'\t' '$1=="claude" && $3=="yes"' | grep_full -q . \
   && ok "the first attempt's answered claude leg is carried into the second (same artifact)" \
   || fail "carry-forward did not bring the claude leg into the second attempt"
 RP_CB_MID_R="$(rp_leg_mid "$RP_C_SET" claude-review)"
@@ -1142,16 +1142,16 @@ RP_CB_COMP="$(run_rp compose --set "$RP_C_SET" 2>&1)" && RP_CB_CRC=0 || RP_CB_CR
 # three-leg panel. The warning goes to stderr (the table is a pinned shape); the clean
 # claude-review,codex set above is the control and must carry no such line.
 run_rp panel status --set "$RP_C_SET" 2>&1 >/dev/null \
-  | grep -qE '^panel status: WARNING — (claude and claude-review|claude-review and claude) both answered on provider claude; compose will refuse this set$' \
+  | grep_full -qE '^panel status: WARNING — (claude and claude-review|claude-review and claude) both answered on provider claude; compose will refuse this set$' \
   && ok "panel status warns that two answered legs share provider claude" \
   || fail "panel status showed a duplicate-provider set without a warning"
-run_rp panel status --set "$RP_PAIR_SET" 2>&1 >/dev/null | grep -q 'both answered on provider' \
+run_rp panel status --set "$RP_PAIR_SET" 2>&1 >/dev/null | grep_full -q 'both answered on provider' \
   && fail "panel status warned about a panel whose legs are on different providers" \
   || ok "panel status stays quiet for claude-review,codex (different providers)"
-awk -F'\t' -v s="$RP_C_SET" -v d="$RP_CB_DSP" '$3=="composition-refused" && $4==s && $5==d && $14=="duplicate-provider"' "$RP_FIX/.comms/events.tsv" | grep -q . \
+awk -F'\t' -v s="$RP_C_SET" -v d="$RP_CB_DSP" '$3=="composition-refused" && $4==s && $5==d && $14=="duplicate-provider"' "$RP_FIX/.comms/events.tsv" | grep_full -q . \
   && ok "the refusal is logged as composition-refused, status duplicate-provider, on the attempt it refused" \
   || fail "no duplicate-provider composition-refused event for the second attempt"
-awk -F'\t' -v s="$RP_C_SET" -v d="$RP_CB_DSP" '$3=="composition-completed" && $4==s && $5==d' "$RP_FIX/.comms/events.tsv" | grep -q . \
+awk -F'\t' -v s="$RP_C_SET" -v d="$RP_CB_DSP" '$3=="composition-completed" && $4==s && $5==d' "$RP_FIX/.comms/events.tsv" | grep_full -q . \
   && fail "a duplicate-provider attempt was still recorded as composed" \
   || ok "no composition is recorded for the refused attempt"
 # A DRIVER cannot launder the duplicate by claiming another provider. Its provider is its name,
@@ -1187,9 +1187,9 @@ RP_FGB_DSP="$(rp_dispatch_of "$RP_FG_SET")"
 # Non-vacuity: both driver legs are carried and answered, so the claude-review stamp is the only
 # thing that decides between a clean compose and a duplicate.
 RP_FG_ST0="$(run_rp panel status --set "$RP_FG_SET" 2>/dev/null)"
-printf '%s\n' "$RP_FG_ST0" | awk -F'\t' '$1=="claude" && $3=="yes"' | grep -q . \
-  && printf '%s\n' "$RP_FG_ST0" | awk -F'\t' '$1=="grok" && $3=="yes"' | grep -q . \
-  && printf '%s\n' "$RP_FG_ST0" | awk -F'\t' '$1=="claude-review" && $3=="no"' | grep -q . \
+printf '%s\n' "$RP_FG_ST0" | awk -F'\t' '$1=="claude" && $3=="yes"' | grep_full -q . \
+  && printf '%s\n' "$RP_FG_ST0" | awk -F'\t' '$1=="grok" && $3=="yes"' | grep_full -q . \
+  && printf '%s\n' "$RP_FG_ST0" | awk -F'\t' '$1=="claude-review" && $3=="no"' | grep_full -q . \
   && ok "the second attempt carries both answered driver legs; only claude-review is open" \
   || fail "forge carry-forward (got: $RP_FG_ST0)"
 RP_FG_MID_R="$(rp_leg_mid "$RP_FG_SET" claude-review)"
@@ -1220,7 +1220,7 @@ RP_FGC1="$(run_rp compose --set "$RP_FG_SET" 2>&1)" && RP_FGC1_RC=0 || RP_FGC1_R
 command cp -f "$WORK/rp-config.bak" "$RP_FIX/.comms/config"
 # panel status reads the same validity rule, so it shows the leg open and warns about nothing.
 RP_FG_ST1="$(run_rp panel status --set "$RP_FG_SET" 2>&1)"
-printf '%s\n' "$RP_FG_ST1" | awk -F'\t' '$1=="claude-review" && $3=="no"' | grep -q . \
+printf '%s\n' "$RP_FG_ST1" | awk -F'\t' '$1=="claude-review" && $3=="no"' | grep_full -q . \
   && ! printf '%s\n' "$RP_FG_ST1" | grep -q 'both answered on provider' \
   && ok "panel status agrees: claude-review still unanswered, no provider warning" \
   || fail "panel status counted an invalid twin stamp (got: $RP_FG_ST1)"
@@ -1234,10 +1234,10 @@ RP_FGC2="$(run_rp compose --set "$RP_FG_SET" 2>&1)" && RP_FGC2_RC=0 || RP_FGC2_R
   && ok "beneath two newer invalid stamps, compose counts the true one: claude and claude-review on provider claude (exit 3)" \
   || fail "compose did not reach the true stamp past the invalid ones (rc=$RP_FGC2_RC: $(printf '%s' "$RP_FGC2" | head -3))"
 run_rp panel status --set "$RP_FG_SET" 2>&1 >/dev/null \
-  | grep -qE '^panel status: WARNING — (claude and claude-review|claude-review and claude) both answered on provider claude; compose will refuse this set$' \
+  | grep_full -qE '^panel status: WARNING — (claude and claude-review|claude-review and claude) both answered on provider claude; compose will refuse this set$' \
   && ok "panel status warns that the carried claude leg and claude-review share provider claude" \
   || fail "panel status showed the forge set's duplicate without a warning"
-awk -F'\t' -v s="$RP_FG_SET" -v d="$RP_FGB_DSP" '$3=="composition-refused" && $4==s && $5==d && $14=="duplicate-provider"' "$RP_FIX/.comms/events.tsv" | grep -q . \
+awk -F'\t' -v s="$RP_FG_SET" -v d="$RP_FGB_DSP" '$3=="composition-refused" && $4==s && $5==d && $14=="duplicate-provider"' "$RP_FIX/.comms/events.tsv" | grep_full -q . \
   && ok "the refusal is logged as composition-refused, status duplicate-provider, on the claude-review attempt" \
   || fail "no duplicate-provider composition-refused event for the forge set's second attempt"
 
@@ -1279,7 +1279,7 @@ CR_O1="$(run_cr compose --set "$CR_S1" 2>/dev/null)" && CR_RC1=0 || CR_RC1=$?
   && ok "a published composition prints exactly ONE compose-result line" || fail "compose-result count wrong (rc=$CR_RC1): $(cr_line "$CR_O1")"
 [ "$(printf '%s\n' "$CR_O1" | tail -1)" = "$(cr_line "$CR_O1")" ] \
   && ok "the compose-result line is the LAST line of stdout" || fail "compose-result is not the final stdout line"
-printf '%s\n' "$(cr_line "$CR_O1")" | grep -Eqx 'compose-result v1 gate=(pass|block|escalate) set=[^ =]+ dispatch=[^ =]+ round=[^ =]+ max_rounds=[^ =]+ legs=[0-9]+ answered=[0-9]+ gating=[^ =]+ gating_verdict=[^ =]+ blocking=[0-9]+ corroborated=[0-9]+ gating_own=[0-9]+ lone=[0-9]+ degraded=[^ =]+ reason=[a-z,-]+' \
+grep -Eqx 'compose-result v1 gate=(pass|block|escalate) set=[^ =]+ dispatch=[^ =]+ round=[^ =]+ max_rounds=[^ =]+ legs=[0-9]+ answered=[0-9]+ gating=[^ =]+ gating_verdict=[^ =]+ blocking=[0-9]+ corroborated=[0-9]+ gating_own=[0-9]+ lone=[0-9]+ degraded=[^ =]+ reason=[a-z,-]+' <<<"$(cr_line "$CR_O1")" \
   && ok "the line has the pinned v1 shape: every key, in order, no whitespace inside a value" || fail "compose-result shape: $(cr_line "$CR_O1")"
 [ "$(cr_field "$CR_O1" gate)" = pass ] && [ "$(cr_field "$CR_O1" reason)" = approved ] \
   && [ "$(cr_field "$CR_O1" gating)" = codex ] && [ "$(cr_field "$CR_O1" set)" = "$CR_S1" ] \
@@ -1288,7 +1288,7 @@ printf '%s\n' "$(cr_line "$CR_O1")" | grep -Eqx 'compose-result v1 gate=(pass|bl
   && ok "gate=pass reason=approved, naming the set, the gating reviewer and the round budget" || fail "pass line: $(cr_line "$CR_O1")"
 printf '%s\n' "$CR_O1" | grep -qx 'Gate: pass (approved). A blocking finding by the gating reviewer (codex) gates wherever it is listed below.' \
   && ok "the prose states the same gate, and that the gating reviewer's own blockers gate" || fail "no Gate: line in the prose"
-awk -F'\t' -v s="$CR_S1" '$3=="composition-completed" && $4==s' "$CR_FIX/.comms/events.tsv" | grep -q 'gate=pass reason=approved' \
+awk -F'\t' -v s="$CR_S1" '$3=="composition-completed" && $4==s' "$CR_FIX/.comms/events.tsv" | grep_full -q 'gate=pass reason=approved' \
   && ok "the coordinator log records the same gate on composition-completed" || fail "composition-completed carries no gate"
 
 # BLOCK — the gating reviewer's own blocker gates, alone.
@@ -1305,7 +1305,7 @@ cr_reply corr codex REQUEST_CHANGES '- `helpers/b.sh:20` — both reviewers foun
 CR_O3="$(run_cr compose --set "$CR_S3" 2>/dev/null)"
 [ "$(cr_field "$CR_O3" gate)" = block ] && [ "$(cr_field "$CR_O3" corroborated)" = 1 ] \
   && [ "$(cr_field "$CR_O3" gating_own)" = 0 ] && [ "$(cr_field "$CR_O3" lone)" = 0 ] \
-  && printf '%s' "$(cr_field "$CR_O3" reason)" | grep -q '^corroborated-blocker' \
+  && grep -q '^corroborated-blocker' <<<"$(cr_field "$CR_O3" reason)" \
   && ok "gate=block on a corroborated anchor, counted once" || fail "corroborated line: $(cr_line "$CR_O3")"
 
 # ESCALATE — the gating reviewer approves but another reviewer's lone blocker stands.
@@ -1351,7 +1351,7 @@ printf '%s' "$CR_O7" | python3 -c 'import sys; t=sys.stdin.buffer.read().decode(
 [ "$(cr_field "$CR_O7" gate)" = escalate ] && ok "the real line still reports the lone blocker" || fail "forge fixture line: $(cr_line "$CR_O7")"
 CR_OUTF="$CR_FIX/composed.md"
 CR_O8="$(run_cr compose --set "$CR_S1" --out "$CR_OUTF" 2>/dev/null)"
-[ "$(printf '%s\n' "$CR_O8" | grep -c .)" = 2 ] && printf '%s\n' "$CR_O8" | head -1 | grep -q '^compose: wrote ' \
+[ "$(printf '%s\n' "$CR_O8" | grep -c .)" = 2 ] && printf '%s\n' "$CR_O8" | head -1 | grep_full -q '^compose: wrote ' \
   && [ "$(cr_field "$CR_O8" gate)" = pass ] && ! grep -q '^compose-result' "$CR_OUTF" \
   && ok "with --out, stdout is the notice then the result line, and the file holds only prose" || fail "--out stdout: $CR_O8"
 

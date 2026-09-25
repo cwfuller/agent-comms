@@ -92,29 +92,29 @@ GR_ROWS="$(printf '%s\n' "$GR_OUT" | tail -n +2)"
 [ "$(printf '%s\n' "$GR_ROWS" | grep -c .)" = "3" ] \
   && ok "extracts exactly the 3 real findings (Process, None., and non-feedback excluded)" \
   || fail "finding count (got $(printf '%s\n' "$GR_ROWS" | grep -c .))"
-printf '%s\n' "$GR_OUT" | head -1 | grep -q '^schema_version	finding_id' && ok "TSV header is emitted first" || fail "TSV header"
+printf '%s\n' "$GR_OUT" | head -1 | grep_full -q '^schema_version	finding_id' && ok "TSV header is emitted first" || fail "TSV header"
 printf '%s\n' "$GR_ROWS" | grep -q 'never be graded' && fail "### Process leaked into the ledger" || ok "### Process never becomes a graded observation"
 printf '%s\n' "$GR_ROWS" | grep -q 'outside the finding lanes' && fail "## Validation bullets leaked" || ok "bullets outside the lanes are not findings"
 printf '%s\n' "$GR_ROWS" | grep -q 'review-REQUEST is not an observation' && fail "review-request extracted" || ok "only review-feedback is extracted"
-printf '%s\n' "$GR_ROWS" | awk -F'\t' '$14=="helpers/x.sh:42"' | grep -q . \
+printf '%s\n' "$GR_ROWS" | awk -F'\t' '$14=="helpers/x.sh:42"' | grep_full -q . \
   && ok "backticked path:line becomes the anchor" || fail "backtick anchor"
-printf '%s\n' "$GR_ROWS" | awk -F'\t' '$14=="lib/legacy.rb:7"' | grep -q . \
+printf '%s\n' "$GR_ROWS" | awk -F'\t' '$14=="lib/legacy.rb:7"' | grep_full -q . \
   && ok "bare path:line anchor recovered (pre-2026-07 corpus shape)" || fail "bare anchor fallback"
-printf '%s\n' "$GR_ROWS" | awk -F'\t' '$14=="" && $15 ~ /reads inconsistently/' | grep -q . \
+printf '%s\n' "$GR_ROWS" | awk -F'\t' '$14=="" && $15 ~ /reads inconsistently/' | grep_full -q . \
   && ok "unanchored prose finding is KEPT with an empty anchor, never dropped" || fail "prose finding dropped"
 printf '%s\n' "$GR_ROWS" | grep -q 'continuation line belongs to the same finding' \
   && ok "wrapped finding folds into one claim" || fail "continuation folding"
 [ "$(printf '%s\n' "$GR_ROWS" | awk -F'\t' '$15 ~ /guard is inverted/' | wc -l | tr -d ' ')" = "1" ] \
   && ok "a wrapped finding is ONE row, not two" || fail "continuation split the finding"
-printf '%s\n' "$GR_ROWS" | awk -F'\t' '$13=="blocking"' | grep -q 'guard is inverted' && ok "lane recorded" || fail "lane"
-printf '%s\n' "$GR_ROWS" | awk -F'\t' '$5=="deadbeefcafe" && $9=="codex" && $8=="1"' | grep -q . \
+printf '%s\n' "$GR_ROWS" | awk -F'\t' '$13=="blocking"' | grep_full -q 'guard is inverted' && ok "lane recorded" || fail "lane"
+printf '%s\n' "$GR_ROWS" | awk -F'\t' '$5=="deadbeefcafe" && $9=="codex" && $8=="1"' | grep_full -q . \
   && ok "frontmatter provenance (base_sha, reviewer, round) is carried" || fail "provenance"
-printf '%s\n' "$GR_ROWS" | awk -F'\t' '$4!="" || $10!="" || $11!=""' | grep -q . \
+printf '%s\n' "$GR_ROWS" | awk -F'\t' '$4!="" || $10!="" || $11!=""' | grep_full -q . \
   && fail "retro rows invented artifact/runtime/prompt identity" \
   || ok "unknown fields stay EMPTY on retro rows, never guessed"
 [ "$(printf '%s\n' "$GR_ROWS" | cut -f2 | sort -u | wc -l | tr -d ' ')" = "3" ] \
   && ok "finding_id is unique per finding" || fail "finding_id collision"
-printf '%s\n' "$GR_ROWS" | cut -f12 | sort -u | grep -qx gating && ok "role defaults to gating" || fail "role default"
+printf '%s\n' "$GR_ROWS" | cut -f12 | sort -u | grep_full -qx gating && ok "role defaults to gating" || fail "role default"
 
 section "grading pilot: --out ledger is append-only and idempotent"
 GR_LED="$GR_FIX/.comms/grades/findings.tsv"
@@ -146,7 +146,7 @@ section "grading pilot: shadow role + run identity are stamped, not inferred"
 GR_SHADOW="$(run_gr findings --role shadow --review-set rs-1 --artifact art-abc \
   --reviewer-version 'grok/1.0.5' --prompt-version 'pv-deadbeef' \
   "$GR_FIX/.comms/archive/gr_2026-08-04T10-00-00_fb-3.md" 2>/dev/null | tail -n +2)"
-printf '%s\n' "$GR_SHADOW" | awk -F'\t' '$12=="shadow" && $3=="rs-1" && $4=="art-abc" && $10=="grok/1.0.5" && $11=="pv-deadbeef"' | grep -q . \
+printf '%s\n' "$GR_SHADOW" | awk -F'\t' '$12=="shadow" && $3=="rs-1" && $4=="art-abc" && $10=="grok/1.0.5" && $11=="pv-deadbeef"' | grep_full -q . \
   && ok "shadow row carries role, review_set, artifact, runtime and prompt identity" || fail "shadow stamping"
 check_not "findings rejects an unknown role" run_gr findings --role primary
 check_not "findings rejects an unknown option" run_gr findings --bogus
@@ -158,11 +158,11 @@ echo "untracked too" > "$GR_FIX/loose.txt"
 GR_SNAP="$(run_gr snapshot)"
 printf '%s' "$GR_SNAP" | grep -qE '^[0-9a-f]{40}$' && ok "snapshot prints a git object id" || fail "snapshot id (got $GR_SNAP)"
 git -C "$GR_FIX" cat-file -e "$GR_SNAP^{commit}" 2>/dev/null && ok "snapshot id is a real commit object" || fail "snapshot object"
-git -C "$GR_FIX" ls-tree -r --name-only "$GR_SNAP" 2>/dev/null | grep -qx dirty.txt \
+git -C "$GR_FIX" ls-tree -r --name-only "$GR_SNAP" 2>/dev/null | grep_full -qx dirty.txt \
   && ok "snapshot contains the uncommitted change under review" || fail "snapshot missing staged change"
-git -C "$GR_FIX" ls-tree -r --name-only "$GR_SNAP" 2>/dev/null | grep -qx loose.txt \
+git -C "$GR_FIX" ls-tree -r --name-only "$GR_SNAP" 2>/dev/null | grep_full -qx loose.txt \
   && ok "snapshot contains untracked files (a reviewer reads those too)" || fail "snapshot missing untracked"
-run_gr snapshot list | grep -qx "$GR_SNAP" && ok "snapshot list reports the retained artifact" || fail "snapshot list"
+run_gr snapshot list | grep_full -qx "$GR_SNAP" && ok "snapshot list reports the retained artifact" || fail "snapshot list"
 # The whole point of anchoring: an unreferenced stash commit is gc bait, and a
 # garbage-collected artifact is exactly the failure this prerequisite exists to fix.
 git -C "$GR_FIX" reflog expire --expire=now --all >/dev/null 2>&1
@@ -268,19 +268,19 @@ SH_LED="$SH_FIX/.comms/grades/findings.tsv"
 [ -s "$SH_LED" ] && ok "shadow findings land in the ledger" || fail "ledger written"
 SH_ROW="$(tail -n +2 "$SH_LED" | awk -F'\t' '$12=="shadow"' | head -1)"
 [ -n "$SH_ROW" ] && ok "the row is stamped role=shadow" || fail "shadow role stamp"
-printf '%s\n' "$SH_ROW" | awk -F'\t' '$4!="" && $3!="" && $11!=""' | grep -q . \
+printf '%s\n' "$SH_ROW" | awk -F'\t' '$4!="" && $3!="" && $11!=""' | grep_full -q . \
   && ok "shadow row carries artifact_id, review_set and prompt_version" || fail "shadow row identity"
-printf '%s\n' "$SH_ROW" | awk -F'\t' '$10 ~ /9\.9\.9-stub/' | grep -q . \
+printf '%s\n' "$SH_ROW" | awk -F'\t' '$10 ~ /9\.9\.9-stub/' | grep_full -q . \
   && ok "reviewer CLI version is captured at run time (unreconstructable later)" || fail "reviewer_version capture"
-printf '%s\n' "$SH_ROW" | awk -F'\t' '$9=="grok"' | grep -q . && ok "reviewer identity recorded" || fail "reviewer identity"
+printf '%s\n' "$SH_ROW" | awk -F'\t' '$9=="grok"' | grep_full -q . && ok "reviewer identity recorded" || fail "reviewer identity"
 SH_ART="$(printf '%s\n' "$SH_ROW" | cut -f4)"
 git -C "$SH_FIX" cat-file -e "$SH_ART^{commit}" 2>/dev/null \
   && ok "the artifact the shadow read is retained and resolvable" || fail "artifact retained"
-git -C "$SH_FIX" show "$SH_ART:subject.txt" 2>/dev/null | grep -q 'code under review' \
+git -C "$SH_FIX" show "$SH_ART:subject.txt" 2>/dev/null | grep_full -q 'code under review' \
   && ok "the retained artifact really contains the reviewed content" || fail "artifact content"
 
 [ -s "$SH_FIX/.comms/grades/sets.tsv" ] && ok "the set index is written" || fail "sets.tsv"
-awk -F'\t' 'NR>1 && $3=="sh-thread-1" && $4=="1" && $10=="grok"' "$SH_FIX/.comms/grades/sets.tsv" | grep -q . \
+awk -F'\t' 'NR>1 && $3=="sh-thread-1" && $4=="1" && $10=="grok"' "$SH_FIX/.comms/grades/sets.tsv" | grep_full -q . \
   && ok "set index pairs thread+phase+round with the shadow agent" || fail "set index contents"
 
 # The join: the GATING reviewer replies later, through the normal loop, knowing
@@ -343,9 +343,9 @@ grep -q '^suppression_ok()' "$REPO/helpers/comms.sh" \
 SH_NODEOUT="$(PATH="$SH_NONODE:$PATH" "$REPO/helpers/acp.sh" supports codex 2>&1)" && SH_NODERC=0 || SH_NODERC=$?
 [ "$SH_NODERC" -ne 0 ] && [ -z "$SH_NODEOUT" ] \
   && ok "an unusable node is refused cleanly, with no integer-expression diagnostic" || fail "node probe noisy or accepting (rc=$SH_NODERC out=$SH_NODEOUT)"
-sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep -q 'suppression_ok' \
+sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep_full -q 'suppression_ok' \
   && ok "shadow gates on the shared accessor rather than the registry string" || fail "shadow still re-implements the rule"
-sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep -q -- '--via "$shadow_via"' \
+sed -n '/^cmd_shadow()/,/^}/p' "$REPO/helpers/comms.sh" | grep_full -q -- '--via "$shadow_via"' \
   && ok "shadow PASSES the transport that makes suppression honourable" || fail "shadow does not pass --via"
 # THE SUCCESS GATE, behaviourally. Everything above pins the REFUSAL and the source shape, so a
 # suppression_ok that always returned 1 would leave them all green — the same vacuity shape this
@@ -362,18 +362,18 @@ printf '%s\n' "$SH_PASTGATE" | grep -q 'parent-brokered' \
 # THE TRAP: relaxing the registry instead would let --no-deliver through on the NON-ACP path,
 # where the child sends its own reply and suppression is a lie. runphase reads the same string.
 cmd_agents_out="$(run_sh agents --supported)"
-printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="codex"{print $2}' | grep -qv 'reviewer-consult-only' \
+printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="codex"{print $2}' | grep_full -qv 'reviewer-consult-only' \
   && ok "codex was NOT given reviewer-consult-only (that would relax runphase's non-ACP guard)" || fail "registry relaxed for codex"
-printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="claude"{print $2}' | grep -qv 'reviewer-consult-only' \
+printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="claude"{print $2}' | grep_full -qv 'reviewer-consult-only' \
   && ok "claude was NOT given reviewer-consult-only either" || fail "registry relaxed for claude"
 # CAPABILITY DRIFT, caught independently of cmd_transport. The registry is a SECOND source of
 # routing truth: a caller reading it instead of the selector would infer a direct headless route
 # for claude/codex that headless_ok refuses and runphase rejects. grok must still advertise it.
 # (codex, S4-2 r3, blocking + process.)
-printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="claude"||$1=="codex"{print $2}' | grep -q 'headless' \
+printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="claude"||$1=="codex"{print $2}' | grep_full -q 'headless' \
   && fail "the registry still advertises a direct headless route for claude/codex" \
   || ok "claude and codex are not advertised as direct-headless-capable"
-printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="grok"{print $2}' | grep -q 'headless' \
+printf '%s' "$cmd_agents_out" | awk -F'\t' '$1=="grok"{print $2}' | grep_full -q 'headless' \
   && ok "grok still advertises headless (the one provider that keeps a non-ACP route)" \
   || fail "grok lost its headless capability"
 
@@ -452,7 +452,7 @@ grep -q '^verdict: REQUEST_CHANGES' "$SH_NOVERD_DIR/grok.md" 2>/dev/null \
   && ok "a blocking finding derives REQUEST_CHANGES" || fail "derived verdict wrong"
 grep -q 'must not be thrown away' "$SH_NOVERD_DIR/grok.md" 2>/dev/null \
   && ok "the reviewer's actual findings survive derivation" || fail "findings lost in derivation"
-tail -n +2 "$SH_LED" | grep -q 'must not be thrown away' \
+tail -n +2 "$SH_LED" | grep_full -q 'must not be thrown away' \
   && ok "a derived reply IS scored — it is a real review, not a failed turn" \
   || fail "derived reply was not scored"
 
@@ -674,23 +674,23 @@ check_not "shadow refuses a traversal review-set id" run_g2 shadow --to grok --r
 G2_LED="$GR2/.comms/grades/findings.tsv"
 G2_LONGEST="$(tail -n +2 "$G2_LED" | awk -F'\t' '{if(length($15)>m)m=length($15)}END{print m+0}')"
 [ "$G2_LONGEST" -gt 600 ] && ok "a >600-char finding is stored WHOLE (was clipped in v1)" || fail "claim still truncated (longest=$G2_LONGEST)"
-tail -n +2 "$G2_LED" | awk -F'\t' '$15 ~ /\.\.\.$/' | grep -q . && fail "claims still carry an injected ellipsis" || ok "no injected truncation marker survives"
+tail -n +2 "$G2_LED" | awk -F'\t' '$15 ~ /\.\.\.$/' | grep_full -q . && fail "claims still carry an injected ellipsis" || ok "no injected truncation marker survives"
 [ "$(awk -F'\t' 'NR==2{print $1}' "$G2_LED")" = "2" ] && ok "rows carry schema_version 2" || fail "schema version"
 sed -i.bak '2s/^2\t/1\t/' "$G2_LED" && rm -f "$G2_LED.bak"
 check_not "appending to a mixed-generation ledger is refused" run_g2 findings --out "$G2_LED"
 run_g2 findings --out "$G2_LED" --rebuild >/dev/null 2>&1
 [ "$(awk -F'\t' 'NR==2{print $1}' "$G2_LED")" = "2" ] && ok "--rebuild regenerates the ledger at the current schema" || fail "rebuild schema"
-tail -n +2 "$G2_LED" | awk -F'\t' '$12=="shadow"' | grep -q . \
+tail -n +2 "$G2_LED" | awk -F'\t' '$12=="shadow"' | grep_full -q . \
   && ok "--rebuild recovers shadow rows from the grade store, not just the archive" || fail "rebuild lost shadow rows"
 
 # B4 — the join must be one-to-one, and must record who it is pairing against.
 G2_IDX="$GR2/.comms/grades/sets.tsv"
-awk -F'\t' 'NR>1 && $9=="codex"' "$G2_IDX" | grep -q . \
+awk -F'\t' 'NR>1 && $9=="codex"' "$G2_IDX" | grep_full -q . \
   && ok "the set records the GATING agent (derived from the dispatch inbox)" || fail "gating_agent not recorded"
-awk -F'\t' 'NR>1 && $2=="shadow-repo2_2026-08-22T10-00-00_req-1"' "$G2_IDX" | grep -q . \
+awk -F'\t' 'NR>1 && $2=="shadow-repo2_2026-08-22T10-00-00_req-1"' "$G2_IDX" | grep_full -q . \
   && ok "the set records the originating request message_id" || fail "request_message_id not recorded"
-awk -F'\t' 'NR>1 && $8!=""' "$G2_IDX" | grep -q . && ok "the set records base_sha" || fail "base_sha not recorded"
-tail -n +2 "$G2_LED" | awk -F'\t' '$12=="shadow" && $5!=""' | grep -q . \
+awk -F'\t' 'NR>1 && $8!=""' "$G2_IDX" | grep_full -q . && ok "the set records base_sha" || fail "base_sha not recorded"
+tail -n +2 "$G2_LED" | awk -F'\t' '$12=="shadow" && $5!=""' | grep_full -q . \
   && ok "shadow rows carry base_sha (the brokered envelope has none of its own)" || fail "shadow base_sha empty"
 echo "DRIFTED" > "$GR2/subject.txt"
 G2_DUP="$(run_g2 shadow --to grok --review-set second-set "$G2_REQ" 2>&1)" && G2_DRC=0 || G2_DRC=$?
@@ -718,7 +718,7 @@ G2_LED2="$GR2/.comms/grades/findings.tsv"
 G2_RECORDED="$(cat "$(find "$GR2/.comms/grades/shadow" -name 'grok.version' | head -1)" 2>/dev/null)"
 [ -n "$G2_RECORDED" ] && ok "the reviewer CLI version is persisted at run time" || fail "reviewer version not persisted"
 GROK_STUB_VERSION="99.99.99-upgraded" run_g2 findings --out "$G2_LED2" --rebuild >/dev/null 2>&1
-tail -n +2 "$G2_LED2" | awk -F'\t' '$12=="shadow" && $10 ~ /99\.99\.99/' | grep -q . \
+tail -n +2 "$G2_LED2" | awk -F'\t' '$12=="shadow" && $10 ~ /99\.99\.99/' | grep_full -q . \
   && fail "rebuild stamped historical rows with today's CLI version" \
   || ok "rebuild preserves the recorded version instead of probing the CLI"
 
@@ -731,7 +731,7 @@ chmod 700 "$(dirname "$G2_LED2")" 2>/dev/null || true
   && ok "a failed rebuild leaves the original ledger untouched" || fail "failed rebuild destroyed the ledger"
 
 # Drift is a TRI-STATE: empty must never read as confirmed-identical.
-awk -F'\t' 'NR>1 && ($11=="same_endpoint" || $11=="changed" || $11=="unknown")' "$GR2/.comms/grades/sets.tsv" | grep -q . \
+awk -F'\t' 'NR>1 && ($11=="same_endpoint" || $11=="changed" || $11=="unknown")' "$GR2/.comms/grades/sets.tsv" | grep_full -q . \
   && ok "the set records an explicit drift_status, not an empty field" || fail "drift_status missing"
 
 # `/auto-full` keeps ONE thread across plan->implement and restarts at round 1, so
@@ -946,7 +946,7 @@ grep -q '"agent": "grok-review"' "$RI_STORE1/grok-review.result.json" 2>/dev/nul
   && grep -q '"status": "completed"' "$RI_STORE1/grok-review.result.json" 2>/dev/null \
   && ok "the stored result.json records a completed turn by agent grok-review on provider grok" \
   || fail "stored result.json identity"
-awk -F'\t' 'NR>1 && $3=="ri-thread-1" && $10=="grok-review"' "$RI_FIX/.comms/grades/sets.tsv" 2>/dev/null | grep -q . \
+awk -F'\t' 'NR>1 && $3=="ri-thread-1" && $10=="grok-review"' "$RI_FIX/.comms/grades/sets.tsv" 2>/dev/null | grep_full -q . \
   && ok "the set index records grok-review as the shadow agent" || fail "set index shadow_agent"
 [ -z "$(find "$RI_FIX/.comms/to-claude" "$RI_FIX/.comms/to-grok-review" -type f 2>/dev/null)" ] \
   && ok "a review-identity shadow still delivers NOTHING to any inbox" || fail "review-identity shadow leaked into an inbox"
@@ -961,7 +961,7 @@ awk -F'\t' 'NR>1 && $3=="ri-thread-1" && $10=="grok-review"' "$RI_FIX/.comms/gra
   && ok "the recorded reviewer version is the grok provider's CLI version" \
   || fail "recorded version ($(cat "$RI_STORE1/grok-review.version" 2>/dev/null || echo '<none>'))"
 tail -n +2 "$RI_FIX/.comms/grades/findings.tsv" 2>/dev/null \
-  | awk -F'\t' '$12=="shadow" && $9=="grok-review" && $10=="grok 7.7.7-ri-stub"' | grep -q . \
+  | awk -F'\t' '$12=="shadow" && $9=="grok-review" && $10=="grok 7.7.7-ri-stub"' | grep_full -q . \
   && ok "the ledger row pairs reviewer grok-review with the provider's version" || fail "ledger reviewer/version"
 
 # (2) A request addressed to ANOTHER review identity already carries a stamp — the one its send
@@ -1004,7 +1004,7 @@ RI_OUT2="$( (cd "$RI_FIX" && env PATH="$RI_BIN:$PATH" RI_PROMPT_COPY="$RI_PROMPT
 RI_STORE2="$(find "$RI_FIX/.comms/grades/shadow" -maxdepth 1 -mindepth 1 -type d -name 'ri-restamp-*' 2>/dev/null | head -1)"
 grep -qx 'review_provider: grok' "$RI_STORE2/grok-review.md" 2>/dev/null && grep -qx 'from: grok-review' "$RI_STORE2/grok-review.md" 2>/dev/null \
   && ok "its stored reply is from: grok-review with review_provider: grok" || fail "re-stamp stored reply envelope"
-awk -F'\t' 'NR>1 && $3=="ri-thread-2" && $9=="claude-review" && $10=="grok-review"' "$RI_FIX/.comms/grades/sets.tsv" 2>/dev/null | grep -q . \
+awk -F'\t' 'NR>1 && $3=="ri-thread-2" && $9=="claude-review" && $10=="grok-review"' "$RI_FIX/.comms/grades/sets.tsv" 2>/dev/null | grep_full -q . \
   && ok "the pair records claude-review (the inbox it was dispatched to) as the gating agent" || fail "gating identity for a review-identity inbox"
 # The other branch of the same writer: shadowed by the DRIVER grok, the copy's inherited stamp is
 # REMOVED rather than kept or re-written — a driver's provider is its own name, so its request

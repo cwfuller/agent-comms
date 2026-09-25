@@ -278,7 +278,7 @@ git -C "$MA_FIX" worktree add --detach --quiet "$WM_KDIR/.new.crash1" "$WM_HEAD"
 printf '%s\n' "$WM_KDIR/.new.crash1" > "$WM_KDIR/.state.pending"
 : > "$WM/cwd.log"; WM_D10="$(wm_turn wm-seq wm10 "$WM_A1")"
 if [ "$(wm_status "$WM_D10")" = "completed" ] && [ ! -e "$WM_KDIR/.new.crash1" ] \
-   && ! git -C "$MA_FIX" worktree list --porcelain | grep -qxF "worktree $WM_KDIR/.new.crash1"; then
+   && ! git -C "$MA_FIX" worktree list --porcelain | grep_full -qxF "worktree $WM_KDIR/.new.crash1"; then
   ok "a pending generation left by a crash is reclaimed, not leaked"
 else
   fail "a crashed pending generation survived the next restage (status=$(wm_status "$WM_D10") cwd=$(wm_prompt_cwds | sed -n 1p) leftover=$([ -e "$WM_KDIR/.new.crash1" ] && echo yes || echo no) reg=$(git -C "$MA_FIX" worktree list --porcelain | grep -cxF "worktree $WM_KDIR/.new.crash1") note=$(sed -n 's/.*"note": "\([^"]*\)".*/\1/p' "$WM_D10/result.json" 2>/dev/null | head -1 | cut -c1-90))"

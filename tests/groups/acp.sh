@@ -372,7 +372,7 @@ CN_UV="$(run_canary_turn uv pong PATH="$CN_NOPY:$AXB:$PATH" AX_CWD_LOG="$CN_UVLO
   && ok "a PONG canary whose reply-check cannot run refuses reply-unverifiable, never passes" || fail "unverifiable canary status=$(cn_status "$CN_UV") reason=$(cn_reason "$CN_UV")"
 # NO REAL PROMPT was sent: the canary ran (its bare prompt is logged) but the --file review prompt was
 # never reached. (codex, impl r2 advisory — assert the real prompt was not sent.)
-awk -F'\t' '$2 ~ / --file /' "$CN_UVLOG" 2>/dev/null | grep -q . \
+awk -F'\t' '$2 ~ / --file /' "$CN_UVLOG" 2>/dev/null | grep_full -q . \
   && fail "the real review prompt was sent after an unverifiable canary" || ok "no real review prompt was sent after an unverifiable canary"
 # The classifier proceeds ONLY on status 10, and EVERY other status hits an explicit reply-unverifiable
 # refusal — asserted on the catch-all arm itself, so deleting that arm fails this test. (codex r2.)
@@ -430,7 +430,7 @@ grep -q 'before the canary' "$CN_MODE_DIR/result.json" 2>/dev/null \
   && ok "the containment refusal names the pre-canary confirmation" || fail "refusal note does not say 'before the canary'"
 # INSPECT INVOCATION RECORDS, not the reply file: a blocked pin means NO prompt (canary or real) was
 # ever sent. (codex, impl r1 advisory — reply-raw.md cannot prove the canary never ran.)
-awk -F'\t' '$2 ~ /Reply with exactly/ || $2 ~ / --file /' "$CN_FLOG" 2>/dev/null | grep -q . \
+awk -F'\t' '$2 ~ /Reply with exactly/ || $2 ~ / --file /' "$CN_FLOG" 2>/dev/null | grep_full -q . \
   && fail "a prompt was sent despite the pre-canary pin failing" || ok "no prompt (canary or review) was sent after the pin was rejected"
 
 # POSITIVE SEQUENCING: a contained codex turn whose pin holds must pin ONCE, then send the canary,
@@ -782,7 +782,7 @@ RID_E2E_MSG="$(rid_msg claude-review e2e claude claude)"; RID_E2E_MID="$(basenam
 RID_E2E_OUT="$(rid_spawn claude-review "$RID_E2E_MSG" e2e)"
 RID_E2E_DIR="$(rundir_of "$RID_E2E_OUT")"
 [ -n "$RID_E2E_DIR" ] && rid_await "$RID_E2E_DIR"
-printf '%s\n' "$RID_E2E_OUT" | grep '^spawned runphase ' | grep -q ' provider=claude via=acp agent=claude-review$' \
+printf '%s\n' "$RID_E2E_OUT" | grep '^spawned runphase ' | grep_full -q ' provider=claude via=acp agent=claude-review$' \
   && ok "spawn names both the provider it resolved and the identity it runs as" \
   || fail "spawned line lacks provider=claude/agent=claude-review (got: $(printf '%s' "$RID_E2E_OUT" | head -3 | tr '\n' ' '))"
 [ "$(rid_json "$RID_E2E_DIR" status)" = completed ] && [ "$(rid_json "$RID_E2E_DIR" provider)" = claude ] \
@@ -809,7 +809,7 @@ grep -qx 'type: review-feedback' "$RID_E2E_REPLY" 2>/dev/null && grep -qx 'from:
 # session on the same thread and inherit its context.
 RID_E2E_SESS="agent-comms-ma-rid-e2e+as+claude-review"
 [ "$(rid_sessions "$WORK/rid-e2e.argv")" = "P claude S $RID_E2E_SESS " ] \
-  && awk -F'\t' '$2 ~ / --file /' "$WORK/rid-e2e.argv" 2>/dev/null | grep -q . \
+  && awk -F'\t' '$2 ~ / --file /' "$WORK/rid-e2e.argv" 2>/dev/null | grep_full -q . \
   && [ "$(rid_tv "$RID_E2E_DIR" acp_session)" = "$RID_E2E_SESS" ] \
   && ok "every acpx call used profile claude and the disjoint session $RID_E2E_SESS, and the prompt went out" \
   || fail "e2e acpx argv (tokens: $(rid_sessions "$WORK/rid-e2e.argv"); turn.tsv session: $(rid_tv "$RID_E2E_DIR" acp_session))"
@@ -819,10 +819,10 @@ rid_ident_all "$WORK/rid-e2e.ident" COMMS_REVIEW_TURN claude-review \
 # THE COORDINATOR LOG is identity-keyed: `--degrade`, the leg fingerprint and `events --set` find
 # a leg by the name its request was sent to. A row under `claude` would be a second, phantom leg.
 RID_EV="$( (cd "$MA_FIX" && "$COMMS" events --thread ma-rid-e2e --all) 2>/dev/null | tail -n +2 )"
-rid_ev_has() { printf '%s\n' "$RID_EV" | awk -F'\t' -v k="$1" '$3 == k' | grep -q .; }
+rid_ev_has() { printf '%s\n' "$RID_EV" | awk -F'\t' -v k="$1" '$3 == k' | grep_full -q .; }
 [ "$(printf '%s\n' "$RID_EV" | awk -F'\t' 'NF > 1 {print $8}' | sort -u | tr '\n' ' ')" = "claude-review " ] \
   && rid_ev_has turn-started && rid_ev_has reply-accepted && rid_ev_has turn-finished \
-  && printf '%s\n' "$RID_EV" | awk -F'\t' '$3 == "turn-started" {print $15}' | grep -q 'provider=claude agent=claude-review' \
+  && printf '%s\n' "$RID_EV" | awk -F'\t' '$3 == "turn-started" {print $15}' | grep_full -q 'provider=claude agent=claude-review' \
   && ok "every coordinator event for the turn carries agent claude-review, and turn-started names both" \
   || fail "e2e events (agents: $(printf '%s\n' "$RID_EV" | awk -F'\t' 'NF > 1 {print $3 "=" $8}' | tr '\n' ' '))"
 
@@ -873,8 +873,8 @@ done
 RID_STALE_MSG="$(rid_msg claude-review stale claude codex)"; RID_STALE_MID="$(basename "$RID_STALE_MSG" .md)"
 RID_STALE_DIR="$(rid_run claude-review "$RID_STALE_MSG" stale)"
 [ "$(rid_json "$RID_STALE_DIR" status)" = failed ] \
-  && rid_json "$RID_STALE_DIR" note | grep -qF "was bound to provider 'codex'" \
-  && rid_json "$RID_STALE_DIR" note | grep -qF "now resolves to 'claude'" \
+  && rid_json "$RID_STALE_DIR" note | grep_full -qF "was bound to provider 'codex'" \
+  && rid_json "$RID_STALE_DIR" note | grep_full -qF "now resolves to 'claude'" \
   && ok "a request to claude-review stamped review_provider: codex is refused (claude-review resolves to claude)" \
   || fail "stale stamp not refused: status=$(rid_json "$RID_STALE_DIR" status) note=$(rid_json "$RID_STALE_DIR" note | cut -c1-200)"
 [ "$(rid_answers_n "$RID_STALE_MID")" = 0 ] && [ -f "$RID_STALE_MSG" ] && [ ! -s "$WORK/rid-stale.argv" ] \
@@ -893,7 +893,7 @@ RID_REBIND_DIR="$(rid_run claude-review "$RID_STALE_MSG" rebind)"
 RID_NOBIND_MSG="$(rid_msg claude-review nobind claude -)"; RID_NOBIND_MID="$(basename "$RID_NOBIND_MSG" .md)"
 RID_NOBIND_DIR="$(rid_run claude-review "$RID_NOBIND_MSG" nobind)"
 [ "$(rid_json "$RID_NOBIND_DIR" status)" = failed ] \
-  && rid_json "$RID_NOBIND_DIR" note | grep -qF "was bound to provider '<none>'" \
+  && rid_json "$RID_NOBIND_DIR" note | grep_full -qF "was bound to provider '<none>'" \
   && [ "$(rid_answers_n "$RID_NOBIND_MID")" = 0 ] && [ ! -s "$WORK/rid-nobind.argv" ] \
   && ok "a request to a review identity with no review_provider is refused before acpx, unpublished" \
   || fail "unstamped request: status=$(rid_json "$RID_NOBIND_DIR" status) replies=$(rid_answers_n "$RID_NOBIND_MID") note=$(rid_json "$RID_NOBIND_DIR" note | cut -c1-200)"
@@ -904,7 +904,7 @@ RID_NOBIND_DIR="$(rid_run claude-review "$RID_NOBIND_MSG" nobind)"
 # A review identity never AUTHORS: answering one would route review-feedback into to-claude-review.
 RID_RA_MSG="$(rid_msg claude revauthor claude-review -)"; RID_RA_MID="$(basename "$RID_RA_MSG" .md)"
 RID_RA_DIR="$(rid_run claude "$RID_RA_MSG" revauthor)"
-[ "$(rid_json "$RID_RA_DIR" status)" = failed ] && rid_json "$RID_RA_DIR" note | grep -qF 'is a review-only identity' \
+[ "$(rid_json "$RID_RA_DIR" status)" = failed ] && rid_json "$RID_RA_DIR" note | grep_full -qF 'is a review-only identity' \
   && [ "$(rid_answers_n "$RID_RA_MID")" = 0 ] && [ -f "$RID_RA_MSG" ] && [ ! -s "$WORK/rid-revauthor.argv" ] \
   && ok "a request authored by a review identity is refused as review-only, before acpx, unpublished" \
   || fail "review-identity author: status=$(rid_json "$RID_RA_DIR" status) replies=$(rid_answers_n "$RID_RA_MID") note=$(rid_json "$RID_RA_DIR" note | cut -c1-200)"
@@ -912,7 +912,7 @@ RID_RA_DIR="$(rid_run claude "$RID_RA_MSG" revauthor)"
 # awaiting_from with itself. Same-model review is what claude-review is for.
 RID_SELF_MSG="$(rid_msg claude selfrev claude -)"; RID_SELF_MID="$(basename "$RID_SELF_MSG" .md)"
 RID_SELF_DIR="$(rid_run claude "$RID_SELF_MSG" selfrev)"
-[ "$(rid_json "$RID_SELF_DIR" status)" = failed ] && rid_json "$RID_SELF_DIR" note | grep -qF "this turn's own identity" \
+[ "$(rid_json "$RID_SELF_DIR" status)" = failed ] && rid_json "$RID_SELF_DIR" note | grep_full -qF "this turn's own identity" \
   && [ "$(rid_answers_n "$RID_SELF_MID")" = 0 ] && [ -f "$RID_SELF_MSG" ] && [ ! -s "$WORK/rid-selfrev.argv" ] \
   && ok "a claude turn answering claude's own request is refused (own identity), before acpx, unpublished" \
   || fail "self-review: status=$(rid_json "$RID_SELF_DIR" status) replies=$(rid_answers_n "$RID_SELF_MID") note=$(rid_json "$RID_SELF_DIR" note | cut -c1-200)"
@@ -921,7 +921,7 @@ RID_SELF_DIR="$(rid_run claude "$RID_SELF_MSG" selfrev)"
 # reads the reply.
 RID_NF_MSG="$(rid_msg claude-review nofrom - claude)"; RID_NF_MID="$(basename "$RID_NF_MSG" .md)"
 RID_NF_DIR="$(rid_run claude-review "$RID_NF_MSG" nofrom)"
-[ "$(rid_json "$RID_NF_DIR" status)" = failed ] && rid_json "$RID_NF_DIR" note | grep -qF 'inbound has no from:' \
+[ "$(rid_json "$RID_NF_DIR" status)" = failed ] && rid_json "$RID_NF_DIR" note | grep_full -qF 'inbound has no from:' \
   && [ "$(rid_answers_n "$RID_NF_MID")" = 0 ] && [ ! -s "$WORK/rid-nofrom.argv" ] \
   && ok "a review-identity turn whose inbound has no from: is refused rather than guessing a peer" \
   || fail "from-less review-identity inbound: status=$(rid_json "$RID_NF_DIR" status) note=$(rid_json "$RID_NF_DIR" note | cut -c1-200)"
@@ -933,7 +933,7 @@ RID_DRV_MSG="$(rid_msg claude drv codex -)"; RID_DRV_MID="$(basename "$RID_DRV_M
 RID_DRV_OUT="$(rid_spawn claude "$RID_DRV_MSG" drv)"
 RID_DRV_DIR="$(rundir_of "$RID_DRV_OUT")"
 [ -n "$RID_DRV_DIR" ] && rid_await "$RID_DRV_DIR"
-printf '%s\n' "$RID_DRV_OUT" | grep '^spawned runphase ' | grep -q ' provider=claude via=acp$' \
+printf '%s\n' "$RID_DRV_OUT" | grep '^spawned runphase ' | grep_full -q ' provider=claude via=acp$' \
   && [ "$(rid_json "$RID_DRV_DIR" status)" = completed ] && [ "$(rid_json "$RID_DRV_DIR" agent)" = claude ] \
   && ok "a driver turn's spawn line and result are unchanged (no separate agent=, agent == provider)" \
   || fail "driver turn: spawned=[$(printf '%s' "$RID_DRV_OUT" | head -3 | tr '\n' ' ')] status=$(rid_json "$RID_DRV_DIR" status) agent=$(rid_json "$RID_DRV_DIR" agent)"
@@ -1009,7 +1009,7 @@ printf '%s\n' "$PCFG" | grep -qx 'model = "gpt-6-astra"' \
 printf '%s\n' "$PCFG" | grep -qx 'sandbox_mode = "read-only"' \
   && ok "provider-config keeps approval/sandbox as literals beside the policy" || fail "provider-config literals"
 
-COMMS_ACP_CODEX_EFFORT=high "$AP" provider-config codex | grep -qx 'model_reasoning_effort = "high"' \
+COMMS_ACP_CODEX_EFFORT=high "$AP" provider-config codex | grep_full -qx 'model_reasoning_effort = "high"' \
   && ok "COMMS_ACP_CODEX_EFFORT overrides the written effort" || fail "effort env override"
 
 # TOML INJECTION. The values are interpolated into the file that governs the reviewer's
@@ -1057,7 +1057,7 @@ grep -q 'policy_verdict' "$AP" && [ "$(grep -c 'policy_verdict "\$' "$AP")" -ge 
 # CODE only: a model id inside a COMMENT is documentation, not a second source of truth that
 # can drift. Stripping comments keeps the check on the thing that matters. (Tripped by a
 # comment describing a live rollout, 2026-09-21.)
-sed 's/[[:space:]]*#.*$//' "$REPO/helpers/runphase.sh" | grep -qE 'gpt-6-astra|model_reasoning_effort' \
+sed 's/[[:space:]]*#.*$//' "$REPO/helpers/runphase.sh" | grep_full -qE 'gpt-6-astra|model_reasoning_effort' \
   && fail "runphase.sh carries a literal model or effort value in CODE" \
   || ok "runphase.sh holds no model or effort literal in code — it asks acp.sh"
 # B3 (codex, implement r1): BOTH keys are policy, so missing model evidence is undecidable.
@@ -1255,7 +1255,7 @@ R="$(res "$PM/acp.sh" resolve codex --tier fast --effort low --decision rd-a --r
 [ "$(rv "$R" capability)" = fixed ] && [ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" verify)" = "model,effort" ] \
   && [ "$(rv "$R" fallback)" = capability-fixed ] \
   && printf '%s\n' "$R" > "$PM/fixed.tsv" \
-  && res "$PM/acp.sh" provider-config codex --policy-file "$PM/fixed.tsv" | grep -qx 'model_reasoning_effort = "xhigh"' \
+  && res "$PM/acp.sh" provider-config codex --policy-file "$PM/fixed.tsv" | grep_full -qx 'model_reasoning_effort = "xhigh"' \
   && ok "a fixed combination still applies and attests its baseline, and ignores the route" || fail "fixed capability ($R)"
 # An explicit tier the map does not define is refused, not replaced.
 grep -v '^tier	codex	acp-mounted	fast	' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
@@ -1399,7 +1399,7 @@ POL_PRE="$WORK/pol-preflight"; POL_PRE_LOG="$WORK/pol-preflight.argv"
 pol_run pol-preflight "$POL_PRE" AX_EFFORT=medium AX_CWD_LOG="$POL_PRE_LOG"
 [ "$(cn_status "$POL_PRE")" = "failed" ] \
   && ok "a session that will not serve the policy is refused before the canary" || fail "preflight refusal: status=$(cn_status "$POL_PRE")"
-awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$POL_PRE_LOG" 2>/dev/null | grep -q . \
+awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$POL_PRE_LOG" 2>/dev/null | grep_full -q . \
   && fail "a prompt was sent after the preflight refusal" \
   || ok "no prompt — canary or review — is sent after a preflight policy refusal"
 [ "$(pol_inbox_n pol-preflight)" = 0 ] \
@@ -1410,7 +1410,7 @@ POL_DES="$WORK/pol-desired"; POL_DES_LOG="$WORK/pol-desired.argv"
 pol_run pol-desired "$POL_DES" AX_DESIRED_EFFORT=low AX_CWD_LOG="$POL_DES_LOG"
 [ "$(cn_status "$POL_DES")" = "failed" ] && [ "$(pol_inbox_n pol-desired)" = 0 ] \
   && ok "a saved effort preference that would be replayed refuses the turn, unpublished" || fail "saved-preference refusal: status=$(cn_status "$POL_DES") inbox=$(pol_inbox_n pol-desired)"
-awk -F'\t' '$2 ~ / --file /' "$POL_DES_LOG" 2>/dev/null | grep -q . \
+awk -F'\t' '$2 ~ / --file /' "$POL_DES_LOG" 2>/dev/null | grep_full -q . \
   && fail "the review prompt was sent despite a conflicting saved preference" \
   || ok "no review prompt is sent when a saved preference would be replayed"
 # THE CANARY NOW WRITES ROLLOUT EVIDENCE, so the snapshot has pre-prompt bytes to exclude.
@@ -1502,7 +1502,7 @@ RR_D3="$WORK/rr-3"; rr_run rr-arc "$RR2" "$RR_D3" COMMS_REVIEW_ROUTE=1
 # THE OLD ID after a replace is not the decision in force: refused before any prompt, unpublished.
 RR_D4="$WORK/rr-4"; RR_L4="$WORK/rr-4.argv"; rr_run rr-arc "$RR1" "$RR_D4" COMMS_REVIEW_ROUTE=1 AX_CWD_LOG="$RR_L4"
 [ "$(cn_status "$RR_D4")" = failed ] \
-  && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L4" 2>/dev/null | grep -q . \
+  && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L4" 2>/dev/null | grep_full -q . \
   && ok "a stale (replaced) routing id refuses the turn before any prompt" || fail "stale id: status=$(cn_status "$RR_D4")"
 # A PLANTED id for another thread refuses too.
 RRX="$(rr_decide rr-other fast low)"
@@ -1525,7 +1525,7 @@ RRZ="$(rr_decide rr-stale fast low)"
 RR_D8="$WORK/rr-8"; RR_L8="$WORK/rr-8.argv"
 rr_run rr-stale "$RRZ" "$RR_D8" COMMS_REVIEW_ROUTE=1 AX_MODEL=gpt-6-astra AX_EFFORT=xhigh AX_CWD_LOG="$RR_L8"
 [ "$(cn_status "$RR_D8")" = failed ] && [ "$(tv "$RR_D8" adapter_check)" = mismatch ] \
-  && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L8" 2>/dev/null | grep -q . \
+  && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L8" 2>/dev/null | grep_full -q . \
   && ok "a session reporting the baseline for a routed turn is refused before any prompt" || fail "stale session: status=$(cn_status "$RR_D8") adapter=$(tv "$RR_D8" adapter_check)"
 # A PANEL LEG (`<base>-codex`) routes on its base thread's decision ONLY when its panel recorded it
 # (dispatch, the stamped decision, raw base thread, agent). A lookalike thread

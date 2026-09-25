@@ -14,7 +14,7 @@ grep -q '### Scope additions' "$RFC" && grep -q 'Copy the ledger forward verbati
   && ok "reply spec carries the scope-additions ledger forward" || fail "read-from-codex scope ledger"
 grep -q 'copied forward VERBATIM' "$RFC" && grep -q 'amended round N' "$RFC" \
   && ok "reply spec copies acceptance criteria forward with explicit amendments" || fail "read-from-codex criteria lifecycle"
-grep -q 'amendment proposal alone' "$RFC" && grep -c 'amended round N' "$RFC" | grep -q '2' \
+grep -q 'amendment proposal alone' "$RFC" && grep -c 'amended round N' "$RFC" | grep_full -q '2' \
   && ok "amendment rule present in reply spec AND auto-full handoff" || fail "amendment rule in both handoff paths"
 # These two rules used to live ONLY in the deleted read-from-claude SKILL. Re-pointed at their
 # surviving homes rather than dropped: the pinned-criteria rule is in the prompt builder, and
@@ -41,7 +41,7 @@ printf '%s' "$AGB" | grep -q 'read-from-claude\|send-to-claude' \
 printf '%s' "$AGB" | grep -q 'parent-brokered' \
   && ok "the live AGENTS.md block describes the parent-brokered model" || fail "AGENTS.md block does not describe the surviving workflow"
 # The success banner is a second surface that advertised the skills; grep it too. (codex, r2.)
-grep -A24 'done! installed:' "$REPO/install.sh" | grep -q 'read-from-claude\|send-to-claude' \
+grep -A24 'done! installed:' "$REPO/install.sh" | grep_full -q 'read-from-claude\|send-to-claude' \
   && fail "the installer banner still claims it installed a deleted skill" \
   || ok "the installer banner claims no deleted skill"
 # THE BAR-BLINDNESS LOCK. prompt-version must move when the verdict discipline moves; without
@@ -161,7 +161,7 @@ for frag in $(tracked_paths 'docs/loopspec/fragments/*.md'); do
     _fn="$(awk -v L="$_l" 'NR<=L && /^[a-z_]+\(\) \{/{f=$1} END{print f}' "$_f")"
     [ -n "$_fn" ] || continue
     _fnname="${_fn%%(*}"
-    if grep -rn "\b$_fnname\b" "$REPO/helpers/" | grep -v "^$_f:$_l:" | grep -vE ':[0-9]+: *#' | grep -qv "$_fnname() {"; then
+    if grep -rn "\b$_fnname\b" "$REPO/helpers/" | grep -v "^$_f:$_l:" | grep -vE ':[0-9]+: *#' | grep_full -qv "$_fnname() {"; then
       FRAG_LIVE=true; break
     fi
   done <<< "$(grep -rn "fragment_text $n\|fragment_file $n" "$REPO/helpers/" | grep -vE ':[0-9]+: *#')"
@@ -325,7 +325,7 @@ grep -q '\.comms/archive/' "$WORK/a.out" \
   && ok "archive-search prints a repo-relative path so the follow-up read is actionable" || fail "archive-search path"
 ars widget --limit 1
 [ "$(grep -c 'thread' "$WORK/a.out")" -ge 1 ] && ok "archive-search honours --limit" || fail "archive-search --limit"
-head -1 "$WORK/a.out" | grep -q '^new-thread' \
+head -1 "$WORK/a.out" | grep_full -q '^new-thread' \
   && ok "archive-search applies --limit AFTER the global sort, not before" || fail "archive-search limit-after-sort"
 ars widget --bytes 600
 [ "$(( $(wc -c <"$WORK/a.out") + $(wc -c <"$WORK/a.err") ))" -le $((600 + DIAG_MAX)) ] \

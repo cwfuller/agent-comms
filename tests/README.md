@@ -33,3 +33,10 @@ Add tests to the group that owns their fixtures. New groups must be listed in
 `groups.tsv`. Keep group setup explicit: importing another group's test body
 reintroduces the duplicated work this split removes. Preserve existing section
 banners unless intentionally changing the coverage contract.
+
+The suite runs under `set -o pipefail`, so never pipe a command into `grep -q`:
+grep exits at its first match, a producer that is still writing fails the
+pipeline, and a negated check passes. End such a pipe with `grep_full`
+(`lib/harness.sh`), which reads all of its input before deciding, or grep a
+captured value through a here-string (`grep -q pat <<<"$out"`). The harness
+group runs `lib/grepq_lint.py` over every test source and fails on a new one.

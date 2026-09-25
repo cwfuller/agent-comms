@@ -40,7 +40,7 @@ wr_retired() {  # <desc> <slug> [env...]
 wr_wait_lsof() {  # <pid> <path-fragment> — until lsof shows the process holding the path (<=5s)
   local n=0
   while [ "$n" -lt 50 ]; do
-    lsof -n -P -w -p "$1" -Fn 2>/dev/null | grep -qF "$2" && return 0
+    lsof -n -P -w -p "$1" -Fn 2>/dev/null | grep_full -qF "$2" && return 0
     sleep 0.1; n=$((n + 1))
   done
   return 1
@@ -76,26 +76,26 @@ git -C "$WR" worktree add -q -b worktree-agent-a1b2c3d4 "$(wr_path agent-a1b2c3d
 WR_LIST="$(run_wr worktree list 2>/dev/null)"
 printf '%s\n' "$WR_LIST" | grep -q "^worktree-list v1 kind=primary branch=main .*retire=never path=$WR\$" \
   && ok "list: the primary checkout is kind=primary and never retirable" || fail "list primary row: $WR_LIST"
-printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-done1 " | grep -q "kind=managed branch=worktree-done1 on_main=ancestor .*retire=ok" \
+printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-done1 " | grep_full -q "kind=managed branch=worktree-done1 on_main=ancestor .*retire=ok" \
   && ok "list: a landed clean managed worktree is on_main=ancestor, retire=ok" || fail "list landed row: $(printf '%s\n' "$WR_LIST" | grep done1)"
-printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-open1 " | grep -q "on_main=no .*retire=blocked:landed" \
+printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-open1 " | grep_full -q "on_main=no .*retire=blocked:landed" \
   && ok "list: unlanded work is on_main=no and blocked" || fail "list unlanded row"
-printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-cp1 " | grep -q "on_main=cherry " \
+printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-cp1 " | grep_full -q "on_main=cherry " \
   && ok "list: a cherry-picked branch reads on_main=cherry" || fail "list cherry row: $(printf '%s\n' "$WR_LIST" | grep cp1)"
-printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-sq1 " | grep -q "on_main=squash " \
+printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-sq1 " | grep_full -q "on_main=squash " \
   && ok "list: a squash-merged branch reads on_main=squash" || fail "list squash row: $(printf '%s\n' "$WR_LIST" | grep sq1)"
-printf '%s\n' "$WR_LIST" | grep -F "path=$WR_MOUNT" | grep -q "kind=mount " \
+printf '%s\n' "$WR_LIST" | grep -F "path=$WR_MOUNT" | grep_full -q "kind=mount " \
   && ok "list: a review mount is kind=mount (store layout, not base path)" || fail "list mount row"
-printf '%s\n' "$WR_LIST" | grep -F " branch=side " | grep -q "kind=unmanaged " \
+printf '%s\n' "$WR_LIST" | grep -F " branch=side " | grep_full -q "kind=unmanaged " \
   && ok "list: a hand-made sibling worktree is kind=unmanaged" || fail "list unmanaged row"
-printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-agent-a1b2c3d4 " | grep -q "kind=subagent .*retire=ok" \
+printf '%s\n' "$WR_LIST" | grep -F " branch=worktree-agent-a1b2c3d4 " | grep_full -q "kind=subagent .*retire=ok" \
   && ok "list: an agent-<hex> managed-shape worktree is kind=subagent" || fail "list subagent row"
 wr_landed dirt1
 echo edit >> "$(wr_path dirt1)/a.txt"; echo new > "$(wr_path dirt1)/scratch.txt"
-wr_line worktree-dirt1 | grep -q "tracked=1 untracked=1 " \
+wr_line worktree-dirt1 | grep_full -q "tracked=1 untracked=1 " \
   && ok "list: tracked and untracked dirt are counted separately" || fail "list dirt: $(wr_line worktree-dirt1)"
 printf '#!/bin/sh\nexit 1\n' > "$WR_BIN/lsof"; chmod +x "$WR_BIN/lsof"
-(cd "$WR" && env PATH="$WR_BIN:$PATH" "$COMMS" worktree list 2>/dev/null) | grep -F " branch=worktree-done1 " | grep -q "procs=? .*retire=blocked:processes" \
+(cd "$WR" && env PATH="$WR_BIN:$PATH" "$COMMS" worktree list 2>/dev/null) | grep -F " branch=worktree-done1 " | grep_full -q "procs=? .*retire=blocked:processes" \
   && ok "list: a failing lsof reads procs=? and blocks (unknown is never clean)" || fail "list lsof unknown"
 rm -f "$WR_BIN/lsof"
 
@@ -181,7 +181,7 @@ WR_MAIN="$(run_wr worktree retire main --yes 2>&1)"; WR_MRC=$?
 mkdir -p "$WORK/elsewhere/sym1"; ln -s "$WORK/elsewhere/sym1" "$(wr_path sym1)"
 git -C "$WR" worktree add -q -b worktree-sym1 "$(wr_path sym1)" main >/dev/null 2>&1
 git -C "$WR" rev-parse -q --verify refs/heads/worktree-sym1 >/dev/null \
-  && ! run_wr worktree list 2>/dev/null | grep -F " branch=worktree-sym1 " | grep -q "kind=managed" \
+  && ! run_wr worktree list 2>/dev/null | grep -F " branch=worktree-sym1 " | grep_full -q "kind=managed" \
   && ! run_wr worktree retire worktree-sym1 --yes >/dev/null 2>&1 && [ -d "$WORK/elsewhere/sym1" ] \
   && ok "a symlinked managed-path component is not managed and is refused" || fail "symlinked slug accepted"
 
@@ -256,7 +256,7 @@ wr_landed cpk1
 [ -e "$(git -C "$(wr_path cpk1)" rev-parse --absolute-git-dir)/CHERRY_PICK_HEAD" ] \
   && wr_refused "a worktree with a stopped (empty) cherry-pick is refused" cpk1 "branch: held by an operation in progress" \
   || fail "fixture: cherry-pick did not stop"
-wr_line worktree-cpk1 | grep -q "retire=blocked:.*branch" \
+wr_line worktree-cpk1 | grep_full -q "retire=blocked:.*branch" \
   && ok "list runs the same operation gate as retire" || fail "list missed the stopped cherry-pick: $(wr_line worktree-cpk1)"
 # ---- round 3 (codex): notes merges, private refs, literal pathspecs ----
 wr_landed nm1
@@ -285,7 +285,7 @@ chmod 000 "$(wr_path acc1)"
 WR_AL="$(run_wr worktree list 2>/dev/null)"; WR_ALRC=$?
 WR_AR="$(run_wr worktree retire worktree-acc1 --yes 2>&1)"; WR_ARRC=$?
 chmod 755 "$(wr_path acc1)"
-[ "$WR_ALRC" = 0 ] && printf '%s\n' "$WR_AL" | grep -F " branch=worktree-acc1 " | grep -q "retire=blocked:.*unreadable" \
+[ "$WR_ALRC" = 0 ] && printf '%s\n' "$WR_AL" | grep -F " branch=worktree-acc1 " | grep_full -q "retire=blocked:.*unreadable" \
   && printf '%s\n' "$WR_AL" | grep -qF " branch=worktree-acc2 " \
   && ok "an unenterable worktree is a blocked row and list continues past it" || fail "list aborted on an unenterable tree rc=$WR_ALRC"
 [ "$WR_ARRC" = 3 ] && wr_kept acc1 && ok "retire refuses (exit 3) an unenterable worktree" || fail "unenterable retire rc=$WR_ARRC: $WR_AR"
@@ -422,7 +422,7 @@ run_wr integrate worktree-land1 >/dev/null 2>&1 && wr_kept land1 \
   && [ "$(git -C "$WR" rev-parse main)" = "$(git -C "$WR" rev-parse worktree-land1)" ] \
   && ok "integrate lands and leaves the source worktree and branch in place" || fail "integrate retired or did not land"
 # Code lines only: the comments explain WHY these primitives are banned, by naming them.
-! grep -vE '^[[:space:]]*#' "$REPO/helpers/worktree.sh" | grep -qE 'branch -[dD]|worktree remove.*(--force| -f)' \
+! grep -vE '^[[:space:]]*#' "$REPO/helpers/worktree.sh" | grep_full -qE 'branch -[dD]|worktree remove.*(--force| -f)' \
   && ok "worktree.sh never uses branch -d/-D or a forced worktree remove" || fail "unsafe removal primitive in worktree.sh"
 grep -qE '^HELPERS=".*worktree\.sh' "$REPO/install.sh" \
   && ok "install.sh ships worktree.sh" || fail "install.sh does not ship worktree.sh"

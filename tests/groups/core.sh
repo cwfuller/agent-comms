@@ -99,7 +99,7 @@ section "comms.sh: reply-check (completion-evidence contract: 10 answer / 11 err
 RC_D="$WORK/replycheck"; mkdir -p "$RC_D"
 printf 'Warning: x\n\n{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"needs a newer CLI"}}\n' > "$RC_D/err.txt"
 RC_OUT="$("$COMMS" reply-check "$RC_D/err.txt")"; RC_RC=$?
-[ "$RC_RC" -eq 11 ] && printf '%s' "$RC_OUT" | head -1 | grep -qx 'verdict: error' && printf '%s' "$RC_OUT" | grep -q 'needs a newer CLI' \
+[ "$RC_RC" -eq 11 ] && printf '%s' "$RC_OUT" | head -1 | grep_full -qx 'verdict: error' && printf '%s' "$RC_OUT" | grep -q 'needs a newer CLI' \
   && ok "a provider API error is exit 11 with a 'verdict: error' sentinel and the message" || fail "reply-check error contract (rc=$RC_RC)"
 printf 'a normal answer\n' | "$COMMS" reply-check - >/dev/null 2>&1; RC_RC=$?
 [ "$RC_RC" -eq 10 ] && ok "a plain answer is exit 10 (completion via exit status; no error message emitted)" || fail "reply-check answer contract (rc=$RC_RC)"
@@ -354,11 +354,11 @@ XINO2="$(command ls -di "$ICTL/dst" | awk '{print $1}')"
 # or command dir is install surface that nothing owns. This is deliberately not a claim
 # about every failure path — a hard kill between the copy and the rename leaves the
 # predictable dot-temp behind, and no trap can be relied on for that. (codex advisory r1.)
-ls -A "$GHOME/agent-comms" | grep -q '^\.agent-comms-install\.' \
+ls -A "$GHOME/agent-comms" | grep_full -q '^\.agent-comms-install\.' \
   && fail "install left a temp beside the helpers" || ok "install leaves no temp litter beside the helpers"
-ls -A "$GHOME/commands" | grep -q '^\.agent-comms-install\.' \
+ls -A "$GHOME/commands" | grep_full -q '^\.agent-comms-install\.' \
   && fail "install left a temp in the commands dir" || ok "install leaves no temp litter in the commands dir"
-ls -A "$INST_FIX/.agent-comms" | grep -q '^\.agent-comms-install\.' \
+ls -A "$INST_FIX/.agent-comms" | grep_full -q '^\.agent-comms-install\.' \
   && fail "local install left a temp beside the pinned helpers" || ok "local install leaves no temp litter"
 
 # Replacing a file by rename is not the same operation as writing through it, so the
@@ -544,7 +544,7 @@ printf '%s\n' "$CHOWN_OUT" | grep -q 'cannot restore owner/group' \
   && ok "an unrestorable owner/group refuses the replacement loudly" || fail "chown failure was not fatal (got: $(printf '%s' "$CHOWN_OUT" | tail -2))"
 [ "$CHOWN_INO1" = "$(command ls -di "$CHOWN_FIRST" | awk '{print $1}')" ] \
   && ok "the first destination is untouched when ownership cannot be restored" || fail "destination replaced despite a failed chown"
-ls -A "$GH_GRP/commands" | grep -q '^\.agent-comms-install\.' \
+ls -A "$GH_GRP/commands" | grep_full -q '^\.agent-comms-install\.' \
   && fail "the failed-chown path left its temp behind" || ok "the failed-chown path cleans up its temp"
 # ACL DETECTION must not rely on the mode column: Darwin prints `@` INSTEAD of `+` when
 # extended attributes are present, and they are routine here, so a file with BOTH shows
@@ -643,7 +643,7 @@ SF="$REPO_FIX/.comms/state/feature-helper-tests_loop-alpha.json"
 [ -f "$SF" ] && ok "send writes thread state file" || fail "send writes thread state file"
 grep -q '"awaiting_from": "codex"' "$SF" && ok "state records who owes the next message" || fail "state awaiting_from"
 grep -q '"last_delivery": "manual"' "$SF" && ok "state records delivery outcome (manual)" || fail "state last_delivery manual"
-run_comms state list | grep -q 'loop-alpha.*r2/10' && ok "state list summarizes thread" || fail "state list (got: $(run_comms state list))"
+run_comms state list | grep_full -q 'loop-alpha.*r2/10' && ok "state list summarizes thread" || fail "state list (got: $(run_comms state list))"
 # loop-rounds is the loop's REAL budget riding through the capped plan phase; state
 # must keep a NON-DEFAULT value durably or a restart falls back to the default —
 # the exact starvation the field exists to prevent. (codex, panel r1: the restore
@@ -661,11 +661,11 @@ grep -q '"max_rounds": "2"' "$SF_LR" \
   && ok "the plan cap and the loop budget are DISTINCT state fields" || fail "plan cap vs loop budget conflated"
 # stalled: backdate the awaiting epoch by an hour
 perl -pi -e 's/"awaiting_since_epoch": "\d+"/"awaiting_since_epoch": "'"$(( $(date +%s) - 3600 ))"'"/' "$SF"
-run_comms stalled 15 | grep -q 'STALLED.*loop-alpha' && ok "stalled flags threads awaiting too long" || fail "stalled detection (got: $(run_comms stalled 15))"
-run_comms stalled 15 | grep -q 'inbox=unread' && ok "stalled distinguishes an unread persisted message" || fail "stalled unread evidence (got: $(run_comms stalled 15))"
+run_comms stalled 15 | grep_full -q 'STALLED.*loop-alpha' && ok "stalled flags threads awaiting too long" || fail "stalled detection (got: $(run_comms stalled 15))"
+run_comms stalled 15 | grep_full -q 'inbox=unread' && ok "stalled distinguishes an unread persisted message" || fail "stalled unread evidence (got: $(run_comms stalled 15))"
 check "state complete marks thread done" run_comms state complete loop-alpha
 grep -q '"status": "complete"' "$SF" && ok "state complete persists" || fail "state complete persists"
-run_comms stalled 15 | grep -q 'no stalled' && ok "completed thread is not stalled" || fail "completed thread is not stalled"
+run_comms stalled 15 | grep_full -q 'no stalled' && ok "completed thread is not stalled" || fail "completed thread is not stalled"
 
 section "comms.sh v2: state hardening (slash thread, garbage epoch, quotes)"
 SLASH_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-10-00_slash-1.md"
@@ -808,7 +808,7 @@ echo "$HELD_OUT" | grep -q "spawned runphase" && fail "held send must not spawn"
 grep -q '"last_delivery": "held"' "$HRV_SF" && ok "state records held" || fail "state held (got: $(cat "$HRV_SF" 2>/dev/null | head -c 120))"
 ST_HELD="$(run_headless status)"
 echo "$ST_HELD" | grep -q "ACTION NEEDED" && fail "held thread must not shout ACTION NEEDED" || ok "a held thread is a deliberate pause, not an alarm"
-run_rp release loop-hold | grep -q "released" && ok "release lifts the hold" || fail "release output"
+run_rp release loop-hold | grep_full -q "released" && ok "release lifts the hold" || fail "release output"
 RES_OUT2="$(run_headless send --to grok "$HRV2" 2>/dev/null)"
 case "$(echo "$RES_OUT2" | tail -1)" in "RESULT: spawned"*) ok "released thread spawns again" ;; *) fail "post-release send (got: $(echo "$RES_OUT2" | tail -1))" ;; esac
 run_rp await "$(rundir_of "$RES_OUT2")" --timeout-secs 30 >/dev/null 2>&1 || true
@@ -860,12 +860,12 @@ cat > "$REPO_FIX/.comms/state/feature-helper-tests_loop-watchdog.json" <<JSON
   "last_delivery": "spawned"
 }
 JSON
-run_comms stalled 15 | grep -q "runner DEAD without a result" && ok "watchdog flags a dead runner with no result" || fail "watchdog dead (got: $(run_comms stalled 15))"
+run_comms stalled 15 | grep_full -q "runner DEAD without a result" && ok "watchdog flags a dead runner with no result" || fail "watchdog dead (got: $(run_comms stalled 15))"
 echo '{"status": "completed"}' > "$WD_RUN/result.json"
-run_comms stalled 15 | grep -q "turn finished: completed" && ok "watchdog reports a finished-but-unread turn" || fail "watchdog finished (got: $(run_comms stalled 15))"
+run_comms stalled 15 | grep_full -q "turn finished: completed" && ok "watchdog reports a finished-but-unread turn" || fail "watchdog finished (got: $(run_comms stalled 15))"
 rm -f "$WD_RUN/result.json"
 echo "$$" > "$WD_RUN/pid"
-run_comms stalled 15 | grep -q "runner alive" && ok "watchdog reports a live runner still working" || fail "watchdog alive (got: $(run_comms stalled 15))"
+run_comms stalled 15 | grep_full -q "runner alive" && ok "watchdog reports a live runner still working" || fail "watchdog alive (got: $(run_comms stalled 15))"
 rm -f "$REPO_FIX/.comms/state/feature-helper-tests_loop-watchdog.json"
 
 section "headless delivery: self-pickup suppression and a missing runner"
@@ -1085,17 +1085,17 @@ xs_reply codex 0 "mix.txt:1,gate.txt:1,solo.txt:1,$XS_FS,~c" "gate.txt:1,adv.txt
 xs_reply grok  1 "gate.txt:1,~g"                   "mix.txt:1,adv.txt:1"
 XSC="$(run_xs compose --set "$XS_SET" 2>&1 || true)"
 xs_sec() { printf '%s\n' "$XSC" | awk -v h="$1" 'index($0,h)==1{f=1;next} /^## /{f=0} f'; }
-xs_sec '## Gates'          | grep -q 'gate.txt:1' && ok "a gated anchor survives one reviewer also filing advisory there" || fail "the existing gate was lost"
-xs_sec '## Flagged by more' | grep -q 'mix.txt:1' && ok "blocking+advisory at one anchor is surfaced, not buried" || fail "cross-severity anchor still invisible"
-xs_sec '## Flagged by more' | grep -q 'gate.txt:1' && fail "a gated anchor also appears under mixed" || ok "classification is exclusive — a gated anchor is not also mixed"
-xs_sec '## Uncorroborated' | grep -q 'mix.txt:1' && fail "mixed anchor left under the suspicion heading" || ok "a mixed anchor leaves Uncorroborated"
-xs_sec '## Uncorroborated' | grep -q 'solo.txt:1' && ok "a lone blocker stays Uncorroborated" || fail "lone blocker misclassified"
-xs_sec '## Advisory'       | grep -q 'adv.txt:1' && ok "two advisories with no blocking vote stay Advisory" || fail "advisory-only anchor promoted"
-xs_sec '## Advisory'       | grep -q 'gate.txt:1' && fail "a gated anchor's advisory row leaked into Advisory, detached from its anchor" || ok "a gated anchor prints its dissent inside Gates only"
+xs_sec '## Gates'          | grep_full -q 'gate.txt:1' && ok "a gated anchor survives one reviewer also filing advisory there" || fail "the existing gate was lost"
+xs_sec '## Flagged by more' | grep_full -q 'mix.txt:1' && ok "blocking+advisory at one anchor is surfaced, not buried" || fail "cross-severity anchor still invisible"
+xs_sec '## Flagged by more' | grep_full -q 'gate.txt:1' && fail "a gated anchor also appears under mixed" || ok "classification is exclusive — a gated anchor is not also mixed"
+xs_sec '## Uncorroborated' | grep_full -q 'mix.txt:1' && fail "mixed anchor left under the suspicion heading" || ok "a mixed anchor leaves Uncorroborated"
+xs_sec '## Uncorroborated' | grep_full -q 'solo.txt:1' && ok "a lone blocker stays Uncorroborated" || fail "lone blocker misclassified"
+xs_sec '## Advisory'       | grep_full -q 'adv.txt:1' && ok "two advisories with no blocking vote stay Advisory" || fail "advisory-only anchor promoted"
+xs_sec '## Advisory'       | grep_full -q 'gate.txt:1' && fail "a gated anchor's advisory row leaked into Advisory, detached from its anchor" || ok "a gated anchor prints its dissent inside Gates only"
 printf '%s\n' "$XSC" | grep -q 'differing severity: 1' && ok "the dashboard counts mixed anchors" || fail "mixed count wrong (got: $(printf '%s\n' "$XSC" | grep -i 'differing severity' | head -1))"
 # Rendered ESCAPED: compose's prose passes through inert_lines, and 0x1C is a line boundary for a
 # splitlines() reader, so it prints as the text `\x1C`. Still whole, still under its class.
-xs_sec '## Uncorroborated' | grep -aqF 'sub\x1Cb.txt:1' && ok "an anchor containing SUBSEP is classified, not truncated" || fail "the SUBSEP anchor lost its class"
+xs_sec '## Uncorroborated' | grep_full -aqF 'sub\x1Cb.txt:1' && ok "an anchor containing SUBSEP is classified, not truncated" || fail "the SUBSEP anchor lost its class"
 # The general invariant the SUBSEP bug violated: composition MOVES findings between sections,
 # it never removes one. Counting rendered rows against the parsed finding count catches the
 # whole family, not just the one byte that exposed it.
@@ -1211,7 +1211,7 @@ st -- "$COMMS" setup --set NOT_A_SETTING=1 >/dev/null 2>&1; B=$?
   && grep -qx 'COMMS_REVIEW_ROUTE=1' "$ST_HOME/settings" && ! grep -q TIMEOUT "$ST_HOME/settings" && cmp -s "$WORK/st-before" "$ST_HOME/settings" \
   && ok "setup --set rewrites only the named keys, an empty value removes one, an unknown key is refused unchanged" || fail "setup --set ($A/$B)"
 st -- "$COMMS" setup --set TYPESAFE_API_KEY=k2 >/dev/null 2>&1
-ls -l "$ST_HOME/secrets" | grep -q '^-rw-------' \
+ls -l "$ST_HOME/secrets" | grep_full -q '^-rw-------' \
   && grep -qx 'TYPESAFE_API_KEY=k2' "$ST_HOME/secrets" && ! grep -q TYPESAFE "$ST_HOME/settings" \
   && ok "the API key goes only to the 0600 secrets file" || fail "secret written wrongly"
 # Replacement matches the loader's key grammar: an indented old assignment (live to the loader,
@@ -1692,7 +1692,7 @@ VI_S="$(vi verify status 2>/dev/null)"; VI_R=0; vi verify init </dev/null >/dev/
   && ok "status flags a shell-only suite-cmd; init with no terminal and no --yes writes nothing" \
   || fail "status/no-tty init: status=$VI_S rc=$VI_R"
 VI_R=0; vi verify init --yes --replace-suite-cmd >"$VX/init.out" 2>&1 || VI_R=$?
-[ "$VI_R" = 0 ] && head -2 "$VI/ci/verify.sh" | grep -q '^# agent-comms verify v1' && [ -x "$VI/ci/verify.sh" ] \
+[ "$VI_R" = 0 ] && head -2 "$VI/ci/verify.sh" | grep_full -q '^# agent-comms verify v1' && [ -x "$VI/ci/verify.sh" ] \
   && [ "$(grep -v '^#' "$VI/ci/verify.steps" | tr '\n' '|')" = "npm run check|npm run test|" ] \
   && [ "$(grep -c 'suite-cmd' "$VI/.comms/config")" = 1 ] && grep -qx 'suite-cmd = bash ci/verify.sh' "$VI/.comms/config" \
   && grep -qx 'agents = claude codex' "$VI/.comms/config" \
@@ -1706,7 +1706,7 @@ VI_R2=0; vi verify init --update </dev/null >/dev/null 2>&1 || VI_R2=$?
 VI_V0="$(head -1 "$VI/ci/verify.sh")"
 VI_R3=0; vi verify init --update --yes >/dev/null 2>&1 || VI_R3=$?
 [ "$VI_R" != 0 ] && [ "$VI_R2" != 0 ] && [ "$VI_V0" = '# agent-comms verify v0' ] && [ "$VI_R3" = 0 ] \
-  && head -2 "$VI/ci/verify.sh" | grep -q 'verify v1' && [ "$(cat "$VI/ci/verify.steps")" = "npm run lint" ] \
+  && head -2 "$VI/ci/verify.sh" | grep_full -q 'verify v1' && [ "$(cat "$VI/ci/verify.steps")" = "npm run lint" ] \
   && ok "init refuses to overwrite ci/verify.sh; --update needs --yes or a terminal, then refreshes only the template" \
   || fail "overwrite/update: init=$VI_R update-unconfirmed=$VI_R2 ($VI_V0) update-yes=$VI_R3 steps=$(cat "$VI/ci/verify.steps")"
 # An EXISTING suite-cmd is never replaced without --replace-suite-cmd, whatever the shell hint says:

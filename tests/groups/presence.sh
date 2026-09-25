@@ -329,7 +329,7 @@ PW_ST_BEFORE="$(cd "$PW" && git status --porcelain)"
 # Snapshot strips session worktrees MECHANICALLY, even without the ignore entry (AC6).
 printf '.comms/\n' > "$PW/.gitignore"    # remove the worktree ignore in the fixture
 PW_SNAP="$(run_pw snapshot create 2>/dev/null)"
-(cd "$PW" && git ls-tree -r --name-only "$PW_SNAP" 2>/dev/null) | grep -q 'claude/worktrees' \
+(cd "$PW" && git ls-tree -r --name-only "$PW_SNAP" 2>/dev/null) | grep_full -q 'claude/worktrees' \
   && fail "snapshot ingested a session worktree" || ok "snapshot strips session worktrees mechanically (ignore entry removed)"
 printf '.comms/\n.claude/worktrees/\n' > "$PW/.gitignore"
 
@@ -410,7 +410,7 @@ run_pw integrate worktree-nested >/dev/null 2>&1; PW_HEAL=$?
 (cd "$PW" && echo dirty >> a.txt)
 PW_MAIN_OCC="$(cd "$PW" && git rev-parse main)"
 check_not "a DIRTY main occupant refuses the landing (never-occupy-main)" run_pw integrate worktree-nested
-[ "$(cd "$PW" && git rev-parse main)" = "$PW_MAIN_OCC" ] && (cd "$PW" && git status --porcelain | grep -q 'a.txt') \
+[ "$(cd "$PW" && git rev-parse main)" = "$PW_MAIN_OCC" ] && (cd "$PW" && git status --porcelain | grep_full -q 'a.txt') \
   && ok "the dirty-occupant refusal touches neither main nor the dirt" || fail "dirty-occupant refusal mutated state"
 (cd "$PW" && git checkout -q -- a.txt)
 # Failed landing with a healed occupant: the trap re-attaches it to the UNMOVED main.
@@ -431,7 +431,7 @@ printf '#!/bin/bash\ncd "%s" || exit 1\necho moved > moved.txt\ngit add moved.tx
 printf 'suite-cmd = bash %s\n' "$WORK/racer.sh" > "$PW/.comms/config"
 run_pw integrate worktree-nested >/dev/null 2>&1
 [ "$(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null)" != "main" ] \
-  && (cd "$PW" && git log -1 --format=%s | grep -q racer) \
+  && (cd "$PW" && git log -1 --format=%s | grep_full -q racer) \
   && ok "an occupant that moved during the landing is left detached with its commit intact" \
   || fail "moved occupant was re-attached (commit abandoned): $(cd "$PW" && git symbolic-ref --short HEAD 2>/dev/null)"
 printf '%s\n' "$PW_OCC_CFG" > "$PW/.comms/config"
@@ -710,7 +710,7 @@ grep -q 'presence claim' "$REPO/templates/claude-commands/auto.md" \
   && ok "auto.md carries the presence gate and the post-wait re-check" || fail "auto.md presence wiring"
 # Step 0 runs before the helper-resolution step, so it must resolve COMMS_SH itself
 # (codex, impl r1: the gate invoked an unset variable on every fresh session).
-awk '/^0\. \*\*Presence gate/,/^1\. \*\*Parse/' "$REPO/templates/claude-commands/auto.md" | grep -q 'COMMS_SH="\$(git worktree list' \
+awk '/^0\. \*\*Presence gate/,/^1\. \*\*Parse/' "$REPO/templates/claude-commands/auto.md" | grep_full -q 'COMMS_SH="\$(git worktree list' \
   && ok "the gate resolves its own helper before claiming" || fail "gate uses unresolved COMMS_SH"
 grep -qi 'Presence re-check after the wait — single-reviewer and panel alike' "$REPO/templates/claude-commands/read-from-codex.md" \
   && ok "the reader re-checks presence on the COMMON autonomous path" || fail "reader presence wiring"
