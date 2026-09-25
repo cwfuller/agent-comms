@@ -307,18 +307,23 @@ done
 [ -z "$LU_BAD" ] && ok "a wrong verb, provider or argument count exits 2 with the usage line" || fail "leg_usage.py argv contract:$LU_BAD"
 LU_BAD=""
 printf 'garbage{' > "$LUW/garbage.snap"; printf '[]\n' > "$LUW/array.snap"; printf '{}\n' > "$LUW/empty.snap"
-# A real snapshot with one entry's inode made unreadable, so the path matches and the ENTRY is what fails.
-python3 "$LU" snapshot codex "$CX" /unused "$LUW/real.snap"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); f=d["files"]; k=sorted(f)[0]; f[k]=["not-an-inode", f[k][1]]; json.dump(d, open(sys.argv[2], "w"))' \
-  "$LUW/real.snap" "$LUW/badentry.snap"
-for LU_S in garbage array empty badentry; do
+for LU_S in garbage array empty; do
   for LU_P in codex claude grok; do
     LU_O="$(python3 "$LU" collect "$LU_P" "$CX" /unused "$LUW/$LU_S.snap" 2>/dev/null)"; LU_ORC=$?
     { [ "$LU_ORC" = 0 ] && [ "$LU_O" = "$(printf 'usage\tnull\nrate_limits\tnull')" ]; } \
       || LU_BAD="$LU_BAD [$LU_S/$LU_P rc=$LU_ORC: $(tr '\n' '|' <<<"$LU_O")]"
   done
 done
-[ -z "$LU_BAD" ] && ok "an unusable snapshot (garbage, not an object, empty, bad entry) is usage null and rate_limits null, exit 0" \
+# A real codex snapshot whose first entry is cut to one element, so the path matches and only the
+# entry's own parse can refuse it: without that guard the missing size is an uncaught IndexError
+# (a traceback and exit 1), not a null answer. The reason is checked, not just the null.
+python3 "$LU" snapshot codex "$CX" /unused "$LUW/real.snap"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); f=d["files"]; k=sorted(f)[0]; f[k]=f[k][:1]; json.dump(d, open(sys.argv[2], "w"))' \
+  "$LUW/real.snap" "$LUW/badentry.snap"
+LU_O="$(python3 "$LU" collect codex "$CX" /unused "$LUW/badentry.snap" 2>"$LUW/badentry.err")"; LU_ORC=$?
+{ [ "$LU_ORC" = 0 ] && [ "$LU_O" = "$(printf 'usage\tnull\nrate_limits\tnull')" ] && grep -q 'an unreadable snapshot entry' "$LUW/badentry.err"; } \
+  || LU_BAD="$LU_BAD [badentry/codex rc=$LU_ORC: $(tr '\n' '|' <<<"$LU_O") $(cat "$LUW/badentry.err")]"
+[ -z "$LU_BAD" ] && ok "an unusable snapshot (garbage, not an object, empty, a truncated entry) is usage null and rate_limits null, exit 0" \
   || fail "collect over an unusable snapshot:$LU_BAD"
 python3 "$LU" snapshot codex "$CX" /unused "$LUW/no-such-dir/s.snap" 2>"$LUW/unwritable.err"; LU_URC=$?
 [ "$LU_URC" = 1 ] && grep -q 'usage snapshot unwritable' "$LUW/unwritable.err" && [ ! -e "$LUW/no-such-dir" ] \
