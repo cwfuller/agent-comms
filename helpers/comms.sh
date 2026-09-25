@@ -773,18 +773,20 @@ cmd_list() {
   fi
 }
 
+# frontmatter_field <file> <field>          — the value, or nothing
+# frontmatter_field --each <field> <file>... — one answer per file that has the field, in order
 # The ONE frontmatter-field rule (CRLF-tolerant; the value keeps any trailing whitespace, which is
-# what the state writer keys on). Per file: the frontmatter opens on line 1 with `---`, the first
-# `<field>:` inside it wins. `one=1` stops at the first file's answer; without it every file on the
-# command line answers once (the idle scan's batch form), so the two can never drift apart.
-FRONTMATTER_FIELD_AWK='FNR==1 {inFM=0; seen=0} {sub(/\r$/, "")}
+# what the state writer keys on): the frontmatter opens on line 1 with `---`, and the first
+# `<field>:` inside it wins. The batch form is the idle scan's, so the two can never drift apart.
+# Self-contained on purpose: tests extract this function by name and eval it alone.
+frontmatter_field() {
+  local one=1 field
+  if [ "${1:-}" = --each ]; then one=0; field="$2"; shift 2; else field="$2"; set -- "$1"; fi
+  awk -v f="$field" -v one="$one" 'FNR==1 {inFM=0; seen=0} {sub(/\r$/, "")}
     FNR==1 && $0=="---" {inFM=1; next}
     !inFM || seen {next}
     $0=="---" {seen=1; if (one) exit; next}
-    index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print; seen=1; if (one) exit}'
-frontmatter_field() {
-  # frontmatter_field <file> <field> — prints the value or nothing
-  awk -v f="$2" -v one=1 "$FRONTMATTER_FIELD_AWK" "$1"
+    index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print; seen=1; if (one) exit}' "$@"
 }
 
 # resolve_message_path <path>
@@ -6170,12 +6172,12 @@ state_message_threads() {
 
 state_thread_lines() {  # <file>... — the safe_name'd frontmatter thread of each; non-zero on an unreadable file
   local out f
-  # The value is read by the SAME rule `send` used to name the state file (frontmatter_field's
-  # program), so trailing whitespace or a CRLF cannot make a message miss its own thread.
+  # The value is read by the SAME rule `send` used to name the state file (frontmatter_field),
+  # so trailing whitespace or a CRLF cannot make a message miss its own thread.
   # Readability is checked first: awk implementations differ on whether an unopenable input is
   # fatal, and an unread message must fail the scan everywhere.
   for f in "$@"; do [ -r "$f" ] || return 1; done
-  out="$(awk -v f=thread "$FRONTMATTER_FIELD_AWK" "$@" 2>/dev/null)" || return 1
+  out="$(frontmatter_field --each thread "$@" 2>/dev/null)" || return 1
   [ -z "$out" ] || printf '%s\n' "$out" | sed '/^$/d' | safe_name_lines
   return 0
 }
