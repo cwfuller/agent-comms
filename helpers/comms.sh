@@ -1980,7 +1980,9 @@ review_route_plan() {
   # The same gate the routing verbs take, in THIS shell: an unknown COMMS_DELIVERY is refused
   # here rather than inside a substitution below.
   require_known_transport
+  local roster
   panel_roster_check "$to" "" "review-route plan"
+  roster="$PANEL_ROSTER"   # a local copy, as dispatch keeps: nothing in the loop can clobber it
   acp="$(cd "$(dirname "$SELF")" && pwd)/acp.sh"
   [ -x "$acp" ] || die "review-route plan: acp.sh is not installed next to comms.sh — re-run install.sh"
 
@@ -2009,7 +2011,7 @@ review_route_plan() {
   fi
 
   local ag prov tr ptr rec view out=""
-  for ag in $PANEL_ROSTER; do
+  for ag in $roster; do
     prov="$(registry_provider "$ag")" || die "review-route plan: cannot resolve the provider of '$ag'"
     tr="$(cmd_transport "$ag" --loop)" || die "review-route plan: no transport for '$ag'"
     # A loop leg over ACP always runs MOUNTED: send and dispatch stamp the artifact, and runphase
