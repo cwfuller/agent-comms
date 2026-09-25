@@ -1093,7 +1093,9 @@ xs_sec '## Uncorroborated' | grep -q 'solo.txt:1' && ok "a lone blocker stays Un
 xs_sec '## Advisory'       | grep -q 'adv.txt:1' && ok "two advisories with no blocking vote stay Advisory" || fail "advisory-only anchor promoted"
 xs_sec '## Advisory'       | grep -q 'gate.txt:1' && fail "a gated anchor's advisory row leaked into Advisory, detached from its anchor" || ok "a gated anchor prints its dissent inside Gates only"
 printf '%s\n' "$XSC" | grep -q 'differing severity: 1' && ok "the dashboard counts mixed anchors" || fail "mixed count wrong (got: $(printf '%s\n' "$XSC" | grep -i 'differing severity' | head -1))"
-xs_sec '## Uncorroborated' | grep -aq "$XS_FS" && ok "an anchor containing SUBSEP is classified, not truncated" || fail "the SUBSEP anchor lost its class"
+# Rendered ESCAPED: compose's prose passes through inert_lines, and 0x1C is a line boundary for a
+# splitlines() reader, so it prints as the text `\x1C`. Still whole, still under its class.
+xs_sec '## Uncorroborated' | grep -aqF 'sub\x1Cb.txt:1' && ok "an anchor containing SUBSEP is classified, not truncated" || fail "the SUBSEP anchor lost its class"
 # The general invariant the SUBSEP bug violated: composition MOVES findings between sections,
 # it never removes one. Counting rendered rows against the parsed finding count catches the
 # whole family, not just the one byte that exposed it.

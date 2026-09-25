@@ -2869,6 +2869,33 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt ($
   mixed="$(awk -F'\t' '$2=="mixed"' "$cls" | grep -c . || true)"
   unique=$(( ${blocking:-0} - 0 ))
 
+  # THE GATE, from the SAME classification every section below is rendered from. Blocking
+  # findings split three ways, one count each:
+  #   corroborated — anchors classed `gates` (each anchor once, whoever filed it)
+  #   gating_own   — the gating reviewer's blocking findings that are not at such an anchor
+  #   lone         — every other reviewer's blocking findings not at such an anchor
+  # Anchored findings count once per reviewer and anchor, as the classifier does; unanchored
+  # ones count per finding, because nothing can say two of them are the same defect.
+  local gate_counts gc_corr gc_own gc_lone gating_verdict="" maxr=""
+  gate_counts="$(awk -F'\t' -v g="$gating_ag" -v clsf="$cls" '
+    BEGIN { while ((getline line < clsf) > 0) { split(line, c, "\t"); klass[c[1]] = c[2] } }
+    $13 != "blocking" { next }
+    $14 != "" && klass[$14] == "gates" { if (!($14 in cg)) { cg[$14] = 1; corr++ }; next }
+    $14 != "" { if (($14 SUBSEP $9) in seen) next; seen[$14 SUBSEP $9] = 1 }
+    $9 == g { own++; next }
+    { lone++ }
+    END { printf "%d %d %d", corr, own, lone }' "$tmp")"
+  read -r gc_corr gc_own gc_lone <<< "$gate_counts"
+  [ -z "$gating_reply" ] || gating_verdict="$(norm_verdict_value "$(frontmatter_field "$gating_reply" verdict)")"
+  # The round cap comes from the REQUEST the driver wrote (the gating leg's), and only when
+  # that is gone from the reply the broker stamped from it.
+  local gating_req_file; gating_req_file="$(find_message_by_id "$gating_req" 2>/dev/null)" || gating_req_file=""
+  [ -z "$gating_req_file" ] || maxr="$(frontmatter_field "$gating_req_file" max-rounds)"
+  [ -n "$maxr" ] || [ -z "$gating_reply" ] || maxr="$(frontmatter_field "$gating_reply" max-rounds)"
+  local compose_gate_out; compose_gate_out="$(compose_gate "${gc_corr:-0}" "${gc_own:-0}" "${gc_lone:-0}" \
+    "$gating_ag" "$gating_verdict" "$DEGRADED_AGENTS" "$gating_rnd" "$maxr")"
+  local gate="${compose_gate_out%% *}" gate_reasons="${compose_gate_out#* }"
+
   # <section> — every row for the anchors in that class, with reviewer AND severity, so a gated
   # anchor's advisory dissent prints INSIDE its own section and nowhere else. One section per
   # anchor. (codex + grok, plan r3, blocking: the earlier spec contradicted itself here.)
@@ -2906,7 +2933,11 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt ($
     # reader who takes the count without the caveat is the failure being prevented.
     [ -n "$unread" ] && printf '%s\n' "${unread# }"
     printf 'Anchored blocking findings supported by MORE THAN ONE reviewer: %s\n' "${corroborated:-0}"
-    printf 'Anchors flagged by 2+ reviewers with differing severity: %s\n\n' "${mixed:-0}"
+    printf 'Anchors flagged by 2+ reviewers with differing severity: %s\n' "${mixed:-0}"
+    # The sections below classify by SUPPORT; the gate also counts the gating reviewer's own
+    # blockers wherever they are listed, so say so beside the decision. (grok, r1 advisory.)
+    printf 'Gate: %s (%s). A blocking finding by the gating reviewer (%s) gates wherever it is listed below.\n\n' \
+      "$gate" "$gate_reasons" "${gating_ag:-unknown}"
     printf '## Gates (corroborated — an anchor two reviewers independently flagged)\n\n'
     _compose_rows gates
     # Deliberately contains neither "Gates" nor "corroborated": those words mean GATING
@@ -2935,31 +2966,6 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt ($
     # (codex, implement r8, blocking.)
     cat > "$compose_buf"
   }
-  # THE GATE, from the SAME classification every section above was rendered from. Blocking
-  # findings split three ways, one count each:
-  #   corroborated — anchors classed `gates` (each anchor once, whoever filed it)
-  #   gating_own   — the gating reviewer's blocking findings that are not at such an anchor
-  #   lone         — every other reviewer's blocking findings not at such an anchor
-  # Anchored findings count once per reviewer and anchor, as the classifier does; unanchored
-  # ones count per finding, because nothing can say two of them are the same defect.
-  local gate_counts gc_corr gc_own gc_lone gating_verdict="" maxr=""
-  gate_counts="$(awk -F'\t' -v g="$gating_ag" -v clsf="$cls" '
-    BEGIN { while ((getline line < clsf) > 0) { split(line, c, "\t"); klass[c[1]] = c[2] } }
-    $13 != "blocking" { next }
-    $14 != "" && klass[$14] == "gates" { if (!($14 in cg)) { cg[$14] = 1; corr++ }; next }
-    $14 != "" { if (($14 SUBSEP $9) in seen) next; seen[$14 SUBSEP $9] = 1 }
-    $9 == g { own++; next }
-    { lone++ }
-    END { printf "%d %d %d", corr, own, lone }' "$tmp")"
-  read -r gc_corr gc_own gc_lone <<< "$gate_counts"
-  [ -z "$gating_reply" ] || gating_verdict="$(norm_verdict_value "$(frontmatter_field "$gating_reply" verdict)")"
-  # The round cap comes from the REQUEST the driver wrote (the gating leg's), and only when
-  # that is gone from the reply the broker stamped from it.
-  local gating_req_file; gating_req_file="$(find_message_by_id "$gating_req" 2>/dev/null)" || gating_req_file=""
-  [ -z "$gating_req_file" ] || maxr="$(frontmatter_field "$gating_req_file" max-rounds)"
-  [ -n "$maxr" ] || [ -z "$gating_reply" ] || maxr="$(frontmatter_field "$gating_reply" max-rounds)"
-  local compose_gate_out; compose_gate_out="$(compose_gate "${gc_corr:-0}" "${gc_own:-0}" "${gc_lone:-0}" \
-    "$gating_ag" "$gating_verdict" "$DEGRADED_AGENTS" "$gating_rnd" "$maxr")"
   rm -f "$tmp" "$cls"
   # Composition is the last coordinator act of a round, so it closes the trace the roster
   # event opened: a set with a panel-planned and no composition-* is a round nobody gated.
@@ -3010,7 +3016,6 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt ($
   # Still current: publish, THEN record.
   if [ -n "$out" ]; then cat "$compose_buf" > "$out"; else cat "$compose_buf"; fi
   rm -f "$compose_buf" 2>/dev/null || true
-  local gate="${compose_gate_out%% *}" gate_reasons="${compose_gate_out#* }"
   cmd_events append --kind composition-completed --set "$set_id" --dispatch "$compose_dispatch" \
     --status "$([ -n "$DEGRADED_AGENTS" ] && echo composed-degraded || echo composed)" \
     --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0} mixed=${mixed:-0}${DEGRADED_AGENTS:+ degraded-without:$DEGRADED_AGENTS} gate=$gate reason=$gate_reasons" \
@@ -5267,9 +5272,11 @@ cmd_version() {
   dir="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd -P)" || dir=""
   if [ -n "$dir" ] && [ -f "$dir/install-stamp" ]; then
     source=install
-    v="$(version_stamp_field "$dir/install-stamp" kernel_commit)"
+    # A stamp that cannot be READ (permissions, removed between the test and the read) is an
+    # unknown value, never an aborted command: `version` always answers. (codex, r1, blocking.)
+    v="$(version_stamp_field "$dir/install-stamp" kernel_commit)" || v=""
     version_is_commit "$v" && kernel="$v"
-    v="$(version_stamp_field "$dir/install-stamp" template_version)"
+    v="$(version_stamp_field "$dir/install-stamp" template_version)" || v=""
     version_is_template "$v" && tmpl="$v"
   elif [ -n "$dir" ] && top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" \
        && [ "$(cd "$top" 2>/dev/null && pwd -P)/helpers" = "$dir" ] && [ -f "$top/install.sh" ]; then
@@ -5279,7 +5286,7 @@ cmd_version() {
     source=checkout
     v="$(git -C "$top" rev-parse --verify -q HEAD 2>/dev/null)" || v=""
     if [ -n "$v" ]; then
-      local dirt; dirt="$(git -C "$top" status --porcelain --untracked-files=no -- helpers 2>/dev/null)" || dirt="?"
+      local dirt; dirt="$(git -C "$top" status --porcelain --untracked-files=all -- helpers 2>/dev/null)" || dirt="?"
       [ -z "$dirt" ] || v="$v-dirty"
       version_is_commit "$v" && kernel="$v"
     fi

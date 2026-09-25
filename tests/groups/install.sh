@@ -446,3 +446,35 @@ VR_C="$("$VR_SRC/helpers/comms.sh" version 2>&1)"
   && ok "run from a source checkout: its commit (-dirty here), template version unknown" || fail "checkout version: $VR_C"
 "$VR/home/ac/comms.sh" version --bogus >/dev/null 2>&1 && fail "version accepted an unknown option" \
   || ok "version refuses an unknown option"
+# r1 (codex + grok): a stamp is never left beside a PARTIAL upgrade. verify.sh is the last helper
+# copied, so a directory in its place fails the install after every other helper was replaced.
+vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home4"
+[ -f "$VR/home4/ac/install-stamp" ] && rm -f "$VR/home4/ac/verify.sh" && mkdir "$VR/home4/ac/verify.sh"
+vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home4" && VR_PRC=0 || VR_PRC=$?
+[ "$VR_PRC" != 0 ] && [ ! -e "$VR/home4/ac/install-stamp" ] \
+  && [ "$(vr_field "$("$VR/home4/ac/comms.sh" version 2>&1)" source)" = none ] \
+  && ok "an install that fails midway leaves NO stamp, never the previous one" || fail "partial upgrade kept a stamp (rc=$VR_PRC)"
+# r1 (codex): an unreadable stamp still answers, exit 0, as unknown.
+vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home5"; chmod 000 "$VR/home5/ac/install-stamp"
+VR_U="$("$VR/home5/ac/comms.sh" version --json 2>/dev/null)" && VR_URC=0 || VR_URC=$?
+chmod 644 "$VR/home5/ac/install-stamp"
+[ "$VR_URC" = 0 ] && printf '%s' "$VR_U" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (sys.argv[1] == "0" or d["kernel_commit"] == "unknown") else 1)' "$(id -u)" \
+  && ok "an unreadable stamp reports unknown with exit 0, never an aborted command" || fail "unreadable stamp: rc=$VR_URC out=$VR_U"
+# r1 (codex + grok): a sha256 tool that consumes stdin and then fails is final, never a fallback
+# that hashes the empty remainder.
+VR_SB="$VR/shastub"; mkdir -p "$VR_SB"
+VR_REAL_SHASUM="$(command -v shasum || echo /nonexistent)"
+printf '#!/bin/sh\n[ "$#" -ge 3 ] && exec "%s" "$@"\ncat >/dev/null; exit 1\n' "$VR_REAL_SHASUM" > "$VR_SB/shasum"; chmod +x "$VR_SB/shasum"
+(cd "$VR_PROJ" && env PATH="$VR_SB:$PATH" CODEX_AGENTS_FILE="$VR/home6/AGENTS.md" CLAUDE_COMMANDS_DIR="$VR/home6/c" \
+  CODEX_SKILLS_DIR="$VR/home6/s" GROK_COMMANDS_DIR="$VR/home6/g" AGENT_COMMS_HOME="$VR/home6/ac" AGENT_COMMS_SETUP=0 \
+  bash "$VR_SRC/install.sh" --scope=global >/dev/null 2>&1)
+[ "$(vr_field "$("$VR/home6/ac/comms.sh" version 2>&1)" template_version)" = unknown ] \
+  && ok "a hash tool that fails after reading stdin yields template_version unknown, not the empty digest" || fail "failed hash fell back to an empty-input digest"
+# r1 (grok): a listed helper that is UNTRACKED at HEAD is bytes no commit holds.
+git -C "$VR_SRC" checkout -q -- helpers/verify.sh && git -C "$VR_SRC" rm -q --cached helpers/verify.sh \
+  && git -C "$VR_SRC" -c user.email=t@t -c user.name=t commit -q -m untrack
+VR_SHA2="$(git -C "$VR_SRC" rev-parse HEAD)"
+vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home7"
+[ "$(vr_field "$("$VR/home7/ac/comms.sh" version 2>&1)" kernel_commit)" = "$VR_SHA2-dirty" ] \
+  && [ "$(vr_field "$("$VR_SRC/helpers/comms.sh" version 2>&1)" kernel_commit)" = "$VR_SHA2-dirty" ] \
+  && ok "an untracked helper marks the kernel -dirty, installed and from the checkout" || fail "untracked helper stamped clean"

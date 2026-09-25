@@ -395,8 +395,8 @@ Parsing rules:
 
 - Fields are space-separated `key=value` pairs; a value never contains whitespace or `=`. String values are written the way `integrate`'s are: any byte outside `A-Z a-z 0-9 . _ / @ { } ~ ^ : + -` becomes `%XX`. `-` means "not applicable".
 - The line is printed only after the composition is published and recorded. Every refusal (incomplete, unreadable, duplicate provider, superseded, a degraded leg that moved) exits 3 and prints no result line: its absence means nothing was gated.
-- Split stdout on LF only. Reviewer-authored text in the prose above has CR, every other control byte but TAB, and the separators NEL, LS and PS escaped, so no finding can begin a line for any reader; the result line is also always the last line. With `--out F` the prose goes to `F` and stdout carries only the `compose: wrote` notice and the result line.
-- Parsers must ignore unknown keys; a breaking change bumps `v1`. The same `gate` and `reason` are recorded on the `composition-completed` event.
+- Split stdout on LF only. Reviewer-authored text in the prose above has CR, every other control byte but TAB and NUL, and the separators NEL, LS and PS escaped, so no finding can begin a line for any reader (NUL is not a line break for any of them); the result line is also always the last line. With `--out F` the prose goes to `F` and stdout carries only the `compose: wrote` notice and the result line.
+- Parsers must ignore unknown keys; a breaking change bumps `v1`. The same `gate` and `reason` are recorded on the `composition-completed` event, and stated for people in the prose's `Gate:` line. The prose sections classify by support only; a gating reviewer's blocker gates wherever it is listed.
 
 #### `version`
 
@@ -410,8 +410,8 @@ source: install|checkout|none
 
 `--json` prints the same three keys as one object: `{"kernel_commit":"…","template_version":"…","source":"…"}`. Exit 0 in every case; `unknown` is an answer.
 
-- `source: install` — read from `install-stamp`, which `install.sh` writes beside the helpers of every scope it installs (`~/.agent-comms/` for global, `.agent-comms/` for a local pin). It is written from the source the install copied, never recomputed later: a local pin sits inside the user's repository, whose `HEAD` is not the kernel's.
-- `kernel_commit` is the source checkout's `HEAD`, with `-dirty` when its `helpers/` differed from it. It is `unknown` for a non-git source: a piped `curl` install, a tarball, or a copy vendored inside another repository.
+- `source: install` — read from `install-stamp`, which `install.sh` writes beside the helpers of every scope it installs (`~/.agent-comms/` for global, `.agent-comms/` for a local pin). It is written from the source the install copied, never recomputed later: a local pin sits inside the user's repository, whose `HEAD` is not the kernel's. The old stamp is removed before any file in that scope is replaced and the new one written only after the last one landed, so an install that fails midway leaves no stamp (`source: none`), never a stale one.
+- `kernel_commit` is the source checkout's `HEAD`, with `-dirty` when any helper the install copies differed from it, including one untracked or ignored at `HEAD`. It is `unknown` for a non-git source: a piped `curl` install, a tarball, or a copy vendored inside another repository.
 - `template_version` is `sha256:` over one `<sha256 of the file>  <path>` line per installed template and loopspec fragment, in install order. It is a content hash, so it changes with any template edit and a `curl` install knows it too.
 - `source: checkout` — `helpers/comms.sh` run straight from an agent-comms checkout with no stamp: the kernel is that checkout's commit (`-dirty` as above). The template version is `unknown`, because nothing installs templates from there.
 - `source: none` — no stamp and not a checkout (an install that predates the stamp): both values are `unknown`. Re-run `install.sh`.

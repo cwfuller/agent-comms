@@ -428,6 +428,10 @@ install_driver_commands() { # <claude_dir> [grok_dir] [codex_skills_dir]
 }
 
 install_global_assets() {
+  # The stamp describes the WHOLE scope, so it goes before anything is replaced and comes back
+  # only after the last covered asset landed: a failure midway (set -e) leaves no stamp, never
+  # the previous install's stamp beside a mix of old and new files. (codex + grok, r1.)
+  invalidate_install_stamp "$AGENT_COMMS_HOME"
   echo ""
   echo "  installing global driver commands (Claude, Grok, Codex)..."
   install_driver_commands "$CLAUDE_COMMANDS_DIR" "$GROK_COMMANDS_DIR" "$CODEX_SKILLS_DIR"
@@ -448,18 +452,20 @@ install_global_assets() {
   for h in $RETIRED_HELPERS; do
     [ -f "$AGENT_COMMS_HOME/$h" ] && { rm -f "$AGENT_COMMS_HOME/$h"; echo "  removed retired helper $h"; }
   done
-  write_install_stamp "$AGENT_COMMS_HOME"
   echo "  installing loopspec fragments to $AGENT_COMMS_HOME/loopspec-fragments..."
   mkdir -p "$AGENT_COMMS_HOME/loopspec-fragments"
   for f in $LOOPSPEC_FRAGMENTS; do
     install_file "$FRAGMENT_SRC/$f" "$AGENT_COMMS_HOME/loopspec-fragments/$f"
   done
+  write_install_stamp "$AGENT_COMMS_HOME"
   echo "  installing the Codex protocol note to $CODEX_AGENTS_FILE..."
   install_agents_block "$CODEX_AGENTS_FILE"
   echo "  Loops run over ACP — no pane multiplexer required."
 }
 
 install_local_assets() {
+  # Same order as the global scope: no stamp while any covered file is being replaced.
+  invalidate_install_stamp "$PROJECT_ROOT/.agent-comms"
   echo ""
   echo "  installing project-local driver commands (Claude, Grok, Codex)..."
   install_driver_commands \
@@ -878,14 +884,26 @@ source_kernel_commit() {
   [ "$(cd "$top" 2>/dev/null && pwd -P)" = "$(cd "$SCRIPT_DIR" && pwd -P)" ] || { printf 'unknown'; return 0; }
   sha="$(git -C "$SCRIPT_DIR" rev-parse --verify -q HEAD 2>/dev/null)" || { printf 'unknown'; return 0; }
   # "Could not tell" is not "clean": a failed status stamps -dirty, never a bare commit.
-  dirt="$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=no -- helpers 2>/dev/null)" || dirt="?"
+  # Every helper this install COPIES, by exact path, including untracked and ignored ones: a
+  # listed helper git does not track at HEAD is bytes no commit holds. (grok, r1.)
+  local h paths=""
+  for h in $HELPERS; do paths="$paths helpers/$h"; done
+  # shellcheck disable=SC2086
+  dirt="$(git -C "$SCRIPT_DIR" status --porcelain --ignored --untracked-files=all -- $paths 2>/dev/null)" || dirt="?"
   [ -z "$dirt" ] || sha="$sha-dirty"
   printf '%s' "$sha"
 }
-sha256_of() {  # <file> or stdin -> hex digest; non-zero when no sha256 tool works
-  local h
-  h="$(shasum -a 256 ${1:+"$1"} 2>/dev/null | awk '{print $1}')" || h=""
-  [ -n "$h" ] || h="$(sha256sum ${1:+"$1"} 2>/dev/null | awk '{print $1}')" || h=""
+sha256_of() {  # <file> or stdin -> hex digest; non-zero when it could not be computed
+  # The tool is CHOSEN before anything is read, and a failure is final: a fallback after a tool
+  # that consumed stdin and then failed would hash the empty remainder and call it a version.
+  # (codex + grok, r1.)
+  local h tool
+  if command -v shasum >/dev/null 2>&1; then tool="shasum -a 256"
+  elif command -v sha256sum >/dev/null 2>&1; then tool="sha256sum"
+  else return 1
+  fi
+  # shellcheck disable=SC2086
+  h="$($tool ${1:+"$1"} 2>/dev/null | awk '{print $1}')" || return 1
   printf '%s' "$h" | grep -Eqx '[0-9a-f]{64}' || return 1
   printf '%s' "$h"
 }
@@ -903,6 +921,12 @@ source_template_version() {
   done
   sum="$(printf '%s' "$lines" | sha256_of)" || { printf 'unknown'; return 0; }
   printf 'sha256:%s' "$sum"
+}
+invalidate_install_stamp() {  # <helpers dir> — remove the stamp, or stop the install
+  rm -f "$1/install-stamp" 2>/dev/null || true
+  [ ! -e "$1/install-stamp" ] && [ ! -L "$1/install-stamp" ] && return 0
+  echo "error: cannot remove $1/install-stamp before replacing the files it describes — refusing to install" >&2
+  exit 1
 }
 write_install_stamp() {  # <helpers dir>
   # A stamp that could not be rewritten is REMOVED, never left behind: the previous install's

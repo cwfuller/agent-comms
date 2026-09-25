@@ -1286,6 +1286,8 @@ printf '%s\n' "$(cr_line "$CR_O1")" | grep -Eqx 'compose-result v1 gate=(pass|bl
   && [ "$(cr_field "$CR_O1" round)" = 1 ] && [ "$(cr_field "$CR_O1" max_rounds)" = 5 ] \
   && [ "$(cr_field "$CR_O1" legs)/$(cr_field "$CR_O1" answered)" = 2/2 ] && [ "$(cr_field "$CR_O1" degraded)" = - ] \
   && ok "gate=pass reason=approved, naming the set, the gating reviewer and the round budget" || fail "pass line: $(cr_line "$CR_O1")"
+printf '%s\n' "$CR_O1" | grep -qx 'Gate: pass (approved). A blocking finding by the gating reviewer (codex) gates wherever it is listed below.' \
+  && ok "the prose states the same gate, and that the gating reviewer's own blockers gate" || fail "no Gate: line in the prose"
 awk -F'\t' -v s="$CR_S1" '$3=="composition-completed" && $4==s' "$CR_FIX/.comms/events.tsv" | grep -q 'gate=pass reason=approved' \
   && ok "the coordinator log records the same gate on composition-completed" || fail "composition-completed carries no gate"
 
