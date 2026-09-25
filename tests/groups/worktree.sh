@@ -46,6 +46,21 @@ wr_wait_lsof() {  # <pid> <path-fragment> — until lsof shows the process holdi
   return 1
 }
 
+# ---- a bare `worktree` never creates (three friction reports of stray session worktrees) ----
+WR_WT_BEFORE="$(git -C "$WR" worktree list --porcelain | grep -c '^worktree ')"; WR_BR_BEFORE="$(git -C "$WR" branch --list | wc -l | tr -d ' ')"
+WR_BARE="$(run_wr worktree 2>&1)"; WR_BARERC=$?
+[ "$WR_BARERC" = 2 ] && printf '%s' "$WR_BARE" | grep -q 'usage: comms.sh worktree new' \
+  && [ "$(git -C "$WR" worktree list --porcelain | grep -c '^worktree ')" = "$WR_WT_BEFORE" ] \
+  && [ "$(git -C "$WR" branch --list | wc -l | tr -d ' ')" = "$WR_BR_BEFORE" ] \
+  && ok "bare 'worktree' prints usage, exits 2, and creates no worktree or branch" || fail "bare worktree rc=$WR_BARERC: $WR_BARE"
+WR_HELP="$(run_wr worktree help 2>/dev/null)"; WR_HELPRC=$?
+[ "$WR_HELPRC" = 0 ] && printf '%s' "$WR_HELP" | grep -q 'worktree retire <branch>' \
+  && ok "'worktree help' prints usage on stdout, exit 0" || fail "worktree help rc=$WR_HELPRC"
+WR_UNK="$(run_wr worktree lsit 2>&1)"; WR_UNKRC=$?
+[ "$WR_UNKRC" = 2 ] && printf '%s' "$WR_UNK" | grep -q "unknown subcommand 'lsit'" \
+  && [ "$(git -C "$WR" worktree list --porcelain | grep -c '^worktree ')" = "$WR_WT_BEFORE" ] \
+  && ok "an unknown subcommand is refused with usage and creates nothing" || fail "unknown subcommand rc=$WR_UNKRC: $WR_UNK"
+
 # ---- list: classification and on-main detection ----
 wr_landed done1
 wr_new open1

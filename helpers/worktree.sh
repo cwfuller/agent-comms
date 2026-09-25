@@ -771,12 +771,25 @@ wt_new() {
   return 0
 }
 
+wt_usage() {
+  cat <<'USAGE'
+usage: comms.sh worktree new [<slug>]             create a session worktree (auto-named without a slug)
+       comms.sh worktree list                     report every worktree (read-only)
+       comms.sh worktree retire <branch> [--yes]  remove one landed worktree and its branch (dry run without --yes)
+USAGE
+}
+
 cmd_worktree() {
-  local sub="${1:-new}"; shift 2>/dev/null || true
+  # No subcommand prints usage and exits 2. It used to default to `new`, so an agent probing
+  # for the verb list minted a stray worktree and branch — three friction reports (2026-09-02,
+  # 2026-09-25 x2). Creation is only ever explicit.
+  local sub="${1:-}"; shift 2>/dev/null || true
   case "$sub" in
     new)    wt_new "$@" ;;
     list)   wt_list "$@" ;;
     retire) wt_retire "$@" ;;
-    *) usage_err "worktree: expected new|list|retire" ;;
+    help|-h|--help) wt_usage ;;
+    "") wt_usage >&2; exit 2 ;;
+    *) echo "comms.sh: worktree: unknown subcommand '$(clip "$sub")'" >&2; wt_usage >&2; exit 2 ;;
   esac
 }

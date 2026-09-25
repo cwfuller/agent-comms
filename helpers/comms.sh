@@ -57,6 +57,7 @@
 #                               advisory multi-session coordination on .comms/sessions/
 #                               (claim-then-check: 0 direct-safe / 3 peers / 4 isolate;
 #                               beat exit 5 = healed, re-check before writing)
+#   worktree                    no subcommand: prints usage, exit 2 (never creates)
 #   worktree new [<slug>]       session worktree under the MAIN root, local-tip base;
 #                               stamps the creating session as owner when
 #                               COMMS_PRESENCE_NAME/INSTANCE are exported
