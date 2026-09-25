@@ -912,6 +912,86 @@ OUT="$(rt -- "use max to fix the parser" 2>/dev/null)"
 [ "$(rt_kv "$OUT" tier)" = strong ] && [ "$(rt_kv "$OUT" effort)" = xhigh ] && [ "$(rt_kv "$OUT" source)" = override ] \
   && ok "'use max' overrides the implementer hint to strong / xhigh" || fail "use max override ($OUT)"
 
+section "comms.sh: review-route plan (each leg's route before dispatch)"
+# READ-ONLY SPEND PLANNING. Every case runs the real verb in the routing fixture above, with the
+# delivery a live loop uses (acp), and reads the per-leg lines it prints. The expected lines are
+# spelled out whole: a planner parses them, so their shape is the contract.
+RP_MAPV="$(awk -F'\t' '$1=="version"{print $2; exit}' "$REPO/helpers/policy-map.tsv")"
+rpp() { rrc COMMS_DELIVERY=acp "$@"; }
+rp_line() { printf 'route-plan v1 agent=%s provider=%s transport=acp-mounted %s phase=%s map_version=%s' "$1" "$2" "$3" "$4" "$RP_MAPV"; }
+RP_UNSUP='capability=unsupported model=n/a effort=n/a limit_id=n/a model_source=unsupported effort_source=unsupported'
+RP_BASE='capability=eligible model=gpt-6-astra effort=xhigh limit_id=- model_source=baseline effort_source=baseline'
+# The whole repo, contents included, so any file the verb creates, removes or rewrites shows.
+rp_tree() { ( cd "$RR_REPO" && find . -print | LC_ALL=C sort; find . -type f -exec shasum {} + | LC_ALL=C sort; git status --porcelain ); }
+RP_B0="$(rp_tree)"
+
+# A MIXED ROSTER, routing off: one line per leg in roster order; only codex applies a policy.
+OUT="$(rpp "$COMMS" review-route plan --to codex,grok,claude-review 2>&1)"; A=$?
+RP_WANT="$(rp_line codex codex "$RP_BASE routing=off decision=none" implement)
+$(rp_line grok grok "$RP_UNSUP routing=off decision=none" implement)
+$(rp_line claude-review claude "$RP_UNSUP routing=off decision=none" implement)"
+[ "$A" = 0 ] && [ "$OUT" = "$RP_WANT" ] \
+  && ok "plan prints one route line per leg of a mixed roster, in roster order (routing off: baseline codex, nothing applied for grok or claude)" \
+  || fail "mixed roster plan (rc=$A): $OUT"
+
+# ROUTING ON, no decision in force yet: dispatch will classify, so the plan says `pending` and shows
+# the fail-open (baseline) values rather than guessing a classification.
+OUT="$(rpp COMMS_REVIEW_ROUTE=1 "$COMMS" review-route plan --to codex,grok 2>&1)"; A=$?
+RP_WANT="$(rp_line codex codex "$RP_BASE routing=on decision=pending" implement)
+$(rp_line grok grok "$RP_UNSUP routing=on decision=pending" implement)"
+[ "$A" = 0 ] && [ "$OUT" = "$RP_WANT" ] \
+  && ok "routing on with no decision in force plans decision=pending at the fail-open baseline" || fail "pending plan (rc=$A): $OUT"
+
+# ROUTING ON with --thread: the decision IN FORCE drives the codex leg exactly as runphase would;
+# routing off ignores it; an unrouted phase never carries one.
+RP_W0=changed; [ "$(rp_tree)" = "$RP_B0" ] && RP_W0=same   # the two plans above wrote nothing
+rrc "$COMMS" review-route decide --thread t-plan --phase implement --tier fast --effort low >/dev/null 2>&1
+RP_ID="$(rrv "$(rrc "$COMMS" review-route lookup --thread t-plan --phase implement 2>/dev/null)" decision)"
+RP_BEFORE="$(rp_tree)"   # the decision above is setup; everything after it must write nothing
+OUT="$(rpp COMMS_REVIEW_ROUTE=1 "$COMMS" review-route plan --to codex,grok --thread t-plan 2>&1)"; A=$?
+OFF="$(rpp "$COMMS" review-route plan --to codex --thread t-plan 2>&1)"
+PL="$(rpp COMMS_REVIEW_ROUTE=1 "$COMMS" review-route plan --to codex --thread t-plan --phase plan 2>&1)"
+RP_WANT="$(rp_line codex codex "capability=eligible model=gpt-5.6-luna effort=low limit_id=- model_source=route effort_source=route routing=on decision=$RP_ID" implement)
+$(rp_line grok grok "$RP_UNSUP routing=on decision=$RP_ID" implement)"
+[ -n "$RP_ID" ] && [ "$A" = 0 ] && [ "$OUT" = "$RP_WANT" ] \
+  && [ "$OFF" = "$(rp_line codex codex "$RP_BASE routing=off decision=none" implement)" ] \
+  && [ "$PL" = "$(rp_line codex codex "$RP_BASE routing=on decision=none" plan)" ] \
+  && ok "routing on reads the decision in force (fast/low -> the servable fast model); off ignores it; the plan phase is never routed" \
+  || fail "routed plan (rc=$A id=$RP_ID): $OUT / off: $OFF / plan: $PL"
+
+# A SPARK-ROUTED CODEX LEG. A model the provider meters under its own usage limit carries that
+# limit_id; the committed map has none yet, so a copy of the helpers with a synthetic map row
+# stands in for one. Reached by the routed tier AND by an operator pin.
+RP_H="$WORK/rp-helpers"; rm -rf "$RP_H"; mkdir -p "$RP_H"; cp -R "$REPO/helpers/." "$RP_H/"
+{ grep -v '^tier	codex	acp-mounted	fast	' "$REPO/helpers/policy-map.tsv"
+  printf 'tier\tcodex\tacp-mounted\tfast\tgpt-test-spark\n'
+  printf 'pair\tcodex\tacp-mounted\tgpt-test-spark\tlow,medium,high\n'
+  printf 'limit\tcodex\tacp-mounted\tgpt-test-spark\tcodex_test_spark\n'; } > "$RP_H/policy-map.tsv"
+OUT="$(rpp COMMS_REVIEW_ROUTE=1 "$RP_H/comms.sh" review-route plan --to codex,claude-review --thread t-plan 2>&1)"; A=$?
+PIN="$(rpp COMMS_ACP_CODEX_MODEL=gpt-test-spark COMMS_ACP_CODEX_EFFORT=medium "$RP_H/comms.sh" review-route plan --to codex 2>&1)"
+RP_WANT="$(rp_line codex codex "capability=eligible model=gpt-test-spark effort=low limit_id=codex_test_spark model_source=route effort_source=route routing=on decision=$RP_ID" implement)
+$(rp_line claude-review claude "$RP_UNSUP routing=on decision=$RP_ID" implement)"
+[ "$A" = 0 ] && [ "$OUT" = "$RP_WANT" ] \
+  && [ "$PIN" = "$(rp_line codex codex "capability=eligible model=gpt-test-spark effort=medium limit_id=codex_test_spark model_source=pin effort_source=pin routing=off decision=none" implement)" ] \
+  && ok "a Spark-routed (or Spark-pinned) codex leg names the usage limit of its own; the other legs are unchanged" \
+  || fail "spark plan (rc=$A): $OUT / pin: $PIN"
+
+# ALL OR NOTHING, and the dispatch roster rules: a leg whose policy would be refused at run time
+# refuses the whole plan before any line prints, and a roster dispatch would refuse is refused too.
+OUT="$(rpp COMMS_ACP_CODEX_MODEL=gpt-5.6-luna COMMS_ACP_CODEX_EFFORT=ultra "$COMMS" review-route plan --to grok,codex 2>/dev/null)"; A=$?
+OUT2="$(rpp "$COMMS" review-route plan --to codex,codex-review 2>/dev/null)"; B=$?
+OUT3="$(rpp "$COMMS" review-route plan --to codex --phase 'a b' 2>/dev/null)"; C=$?
+[ "$A" = 1 ] && [ -z "$OUT" ] && [ "$B" = 2 ] && [ -z "$OUT2" ] && [ "$C" = 2 ] && [ -z "$OUT3" ] \
+  && ok "a leg refused at resolution refuses the whole plan (exit 1, no lines); a two-legs-one-provider roster and a bad phase are usage errors" \
+  || fail "plan refusals ($A:$OUT / $B:$OUT2 / $C:$OUT3)"
+
+# NOTHING IS WRITTEN. Every plan above (routing on and off, a decision present and absent, a pin, a
+# refusal) left the repository — mailbox, decision store, events, working tree — byte-identical.
+rpp COMMS_REVIEW_ROUTE=1 "$COMMS" review-route plan --to codex --thread t-plan-absent >/dev/null 2>&1
+[ "$RP_W0" = same ] && [ "$(rp_tree)" = "$RP_BEFORE" ] \
+  && ok "review-route plan writes nothing: no decision, pointer, event or file appears or changes" \
+  || fail "plan wrote to the repository: $(diff <(printf '%s\n' "$RP_BEFORE") <(rp_tree) | head -5 | tr '\n' ' ')"
+
 section "route.sh: implementer decision records"
 # Every classification python makes is saved under the MAIN repo's .comms, and its id printed as
 # `route_id:` so /auto can stamp it on the loop's first request and the decision can be judged

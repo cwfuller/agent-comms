@@ -1304,6 +1304,37 @@ CAPS="$(res "$AP" capabilities)"
 printf '%s\n' "$CAPS" | grep -q "^map_version: $MAPV" && printf '%s\n' "$CAPS" | grep -q '^codex/acp-mounted: eligible' \
   && printf '%s\n' "$CAPS" | grep -q '^claude/acp-mounted: unsupported' \
   && ok "capabilities shows the map version and which combinations are routing-eligible" || fail "capabilities output"
+# THE USAGE LIMIT a leg spends. The committed map gives no model a limit of its own (`-` = the
+# provider's shared limit); a synthetic `limit` row names one for its model only, whether the model
+# was reached by the baseline or by a route; nothing that applies no model claims one.
+PM="$WORK/policy-map-probe"; rm -rf "$PM"; mkdir -p "$PM"; cp "$AP" "$PM/acp.sh"; chmod +x "$PM/acp.sh"
+{ cat "$REPO/helpers/policy-map.tsv"; printf 'limit\tcodex\tacp-mounted\tgpt-6-astra\tcodex_test_own\n'; } > "$PM/policy-map.tsv"
+R1="$(res "$AP" resolve codex)"; R2="$(res "$PM/acp.sh" resolve codex)"
+R3="$(res "$PM/acp.sh" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
+R4="$(res "$AP" resolve claude)"
+[ "$(rv "$R1" limit_id)" = - ] && [ "$(rv "$R2" limit_id)" = codex_test_own ] && [ "$(rv "$R3" limit_id)" = - ] \
+  && [ "$(rv "$R4" limit_id)" = n/a ] && [ "$(rv "$R2" model)" = gpt-6-astra ] \
+  && res "$PM/acp.sh" capabilities | grep_full -qx '  codex/acp-mounted gpt-6-astra spends its own usage limit: codex_test_own' \
+  && ok "the policy record names the usage limit the chosen model spends (its own limit_id, - for the shared one, n/a where nothing applies)" \
+  || fail "limit_id resolution (base=$(rv "$R1" limit_id) own=$(rv "$R2" limit_id) routed=$(rv "$R3" limit_id) claude=$(rv "$R4" limit_id))"
+{ cat "$REPO/helpers/policy-map.tsv"; printf 'limit\tcodex\tacp-mounted\tgpt-6-astra\n'; } > "$PM/policy-map.tsv"
+res "$PM/acp.sh" resolve codex >/dev/null 2>&1; A=$?
+{ cat "$REPO/helpers/policy-map.tsv"; printf 'limit\tcodex\tacp-mounted\tgpt-6-astra\ta\nlimit\tcodex\tacp-mounted\tgpt-6-astra\tb\n'; } > "$PM/policy-map.tsv"
+res "$PM/acp.sh" resolve codex >/dev/null 2>&1; B=$?
+{ cat "$REPO/helpers/policy-map.tsv"; printf 'limit\tcodex\tacp-mounted\tgpt-6-astra\tx"y\n'; } > "$PM/policy-map.tsv"
+res "$PM/acp.sh" resolve codex >/dev/null 2>&1; C=$?
+[ "$A$B$C" = 111 ] && ok "a malformed, duplicated or non-token limit row refuses the whole map" || fail "limit row validation ($A$B$C)"
+# THE ROUTE VIEW: one field list for the plan line and result.json, read with the record rules.
+res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement > "$PR/view.tsv"
+V1="$(res "$AP" route-view codex "$PR/view.tsv")"
+V2="$(res "$AP" route-view codex - --format json < "$PR/view.tsv")"
+[ "$V1" = "transport=acp-mounted capability=eligible model=gpt-5.6-luna effort=low limit_id=- model_source=route effort_source=route routing=on decision=rd-a phase=implement map_version=$MAPV" ] \
+  && python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d["model"]=="gpt-5.6-luna" and d["limit_id"]=="-" and d["decision"]=="rd-a" and "provider" not in d and len(d)==11 else 1)' "$V2" \
+  && ok "route-view renders a record as the plan line's fields and as one-line JSON (the same eleven fields)" || fail "route-view ($V1 / $V2)"
+res "$AP" route-view claude "$PR/view.tsv" >/dev/null 2>&1; A=$?
+sed 's/^model	gpt-5.6-luna$/model	gpt 5.6/' "$PR/view.tsv" > "$PR/view-bad.tsv"; res "$AP" route-view codex "$PR/view-bad.tsv" >/dev/null 2>&1; B=$?
+grep -v '^limit_id	' "$PR/view.tsv" > "$PR/view-old.tsv"; res "$AP" route-view codex "$PR/view-old.tsv" >/dev/null 2>&1; C=$?
+[ "$A$B$C" = 111 ] && ok "route-view refuses a foreign-provider record, a non-token value, or a record missing a field" || fail "route-view refusals ($A$B$C)"
 # THE MAP IS THE ONLY PLACE A VENDOR MODEL ID LIVES IN CODE. Comments may describe history.
 MID_HITS="$(for f in acp.sh comms.sh runphase.sh route.sh route_backend.py route_review.py route_shadow.py route_policy.py route_eval.py leg_usage.py; do
   sed 's/[[:space:]]*#.*$//' "$REPO/helpers/$f" | grep -nE 'gpt-[0-9]' | sed "s|^|$f:|"; done)"
@@ -1614,6 +1645,27 @@ LU_JG="$(for k in provider agent status reason exit_code session_id message_file
 [ "$LU_JG" = "1 " ] && [ "$(cn_status "$LU_CX")" = completed ] \
   && ok "every string field json_get reads still matches exactly one line beside the embedded objects" \
   || fail "json_get-style reads are ambiguous next to usage (match counts: $LU_JG)"
+# THE LEG'S RESOLVED ROUTE — the fields `review-route plan` prints — lands beside its usage, read
+# from the turn's own hash-checked policy record.
+[ "$(ru "$LU_CX" route transport)" = acp-mounted ] && [ "$(ru "$LU_CX" route capability)" = eligible ] \
+  && [ "$(ru "$LU_CX" route model)" = gpt-6-astra ] && [ "$(ru "$LU_CX" route effort)" = xhigh ] \
+  && [ "$(ru "$LU_CX" route limit_id)" = - ] && [ "$(ru "$LU_CX" route routing)" = off ] \
+  && [ "$(ru "$LU_CX" route decision)" = none ] \
+  && ok "a mounted codex leg's result.json carries its resolved route (transport, model, effort, limit_id, routing, decision)" \
+  || fail "codex leg route: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("route"))' "$LU_CX/result.json" 2>&1)"
+# The record is reported only while it still matches the hash taken at resolution; no record, or
+# no hash (a turn that failed before resolving), is null — never a guessed default.
+LR_FN="$(sed -n '/^leg_route_json() {/,/^}/p;/^leg_usage_json() {/,/^}/p;/^policy_record_sha() {/,/^}/p;/^policy_record_intact() {/,/^}/p' "$RP")"
+LR_D="$WORK/leg-route"; rm -rf "$LR_D"; mkdir -p "$LR_D"; cp "$PR/view.tsv" "$LR_D/policy.tsv"
+LR_OUT="$( eval "$LR_FN"; HELPER_DIR="$REPO/helpers"; RUN_PROVIDER=codex
+  RUN_POLICY_SHA=""; printf '%s\n' "$(leg_route_json "$LR_D")"
+  RUN_POLICY_SHA="$(policy_record_sha "$LR_D/policy.tsv")"; printf '%s\n' "$(leg_route_json "$LR_D")"
+  sed 's/^effort	low$/effort	xhigh/' "$LR_D/policy.tsv" > "$LR_D/p.t" && mv "$LR_D/p.t" "$LR_D/policy.tsv"
+  printf '%s\n' "$(leg_route_json "$LR_D")"; rm -f "$LR_D/policy.tsv"; printf '%s\n' "$(leg_route_json "$LR_D")" )"
+[ "$(sed -n 1p <<<"$LR_OUT")" = null ] && [ "$(sed -n 2p <<<"$LR_OUT")" = "$V2" ] \
+  && [ "$(sed -n 3p <<<"$LR_OUT")" = null ] && [ "$(sed -n 4p <<<"$LR_OUT")" = null ] \
+  && ok "result.json's route is the intact record's view; no hash, a rewritten record or a missing one reads null" \
+  || fail "leg_route_json: $(tr '\n' '|' <<<"$LR_OUT")"
 # A REFUSED turn was still paid for: the divergent-depth leg is withheld, but its spend is recorded.
 LU_DIV="$WORK/lu-codex-div"; pol_run lu-codex-div "$LU_DIV" AX_ROLLOUT_EFFORT=medium AX_ROLLOUT_APPEND="$LU_REC"
 [ "$(cn_status "$LU_DIV")" = failed ] && [ "$(ru "$LU_DIV" usage total_tokens)" = 660 ] \
@@ -1659,6 +1711,11 @@ LU_CL="$WORK/lu-claude"; lu_run claude codex lu-claude "$LU_CL" AX_CLAUDE_TRANSC
   && [ "$(ru "$LU_CL" usage responses)" = 2 ] && [ "$(ru "$LU_CL" usage source)" = claude-transcript ] \
   && ok "a mounted claude leg's result.json carries its transcript usage, deduplicated by (message.id, requestId)" \
   || fail "claude leg: status=$(cn_status "$LU_CL") out=$(ru "$LU_CL" usage output_tokens) responses=$(ru "$LU_CL" usage responses)"
+
+[ "$(ru "$LU_CL" route capability)" = unsupported ] && [ "$(ru "$LU_CL" route model)" = n/a ] \
+  && [ "$(ru "$LU_CL" route limit_id)" = n/a ] && [ "$(ru "$LU_CL" route transport)" = acp-mounted ] \
+  && ok "a mounted claude leg's route says honestly that no model or effort was applied" \
+  || fail "claude leg route: capability=$(ru "$LU_CL" route capability) model=$(ru "$LU_CL" route model)"
 
 # UNMOUNTED legs run in the repo root, which an interactive session or another thread's leg can
 # share: their records are not attributable, so the leg reads null even though the provider wrote

@@ -179,6 +179,13 @@
 #                               when COMMS_REVIEW_ROUTE=1 (and COMMS_ROUTE is not 0), and
 #                               strip any hand-typed value otherwise. runphase resolves it
 #                               per turn with `acp.sh resolve`. `enabled` exits 0 iff on.
+#   review-route plan --to <agent>[,<agent>...] [--phase P] [--thread T]
+#                               READ-ONLY: each leg's resolved route before dispatch, one
+#                               `route-plan v1 agent= provider= transport= capability= model=
+#                               effort= limit_id= model_source= effort_source= routing=
+#                               decision= phase= map_version=` line per leg. Decides, records
+#                               and sends nothing; `decision=pending` = dispatch will classify.
+#                               The same fields land in each leg's result.json "route".
 #   setup [--yes] [--show] [--set KEY=VALUE ...]
 #                               configure agent-comms: agents, reviewer containment, Jev
 #                               routing, codex reviewer runtime, timeouts. Re-runnable; writes
@@ -1922,8 +1929,9 @@ cmd_review_route() {
       fi
       python3 "$py" verify --root "$(cmd_root)" --thread "$_vt" --phase "$_vp" ${_vleg:+--leg-agents "$_vleg"} -- "$_vid"
       return ;;
+    plan) review_route_plan "$@"; return ;;
     decide|show|lookup) ;;
-    *) usage_err "review-route: expected decide|lookup|show|verify|enabled" ;;
+    *) usage_err "review-route: expected decide|lookup|show|verify|enabled|plan" ;;
   esac
   command -v python3 >/dev/null 2>&1 || die "review-route: python3 is required"
   [ -f "$py" ] || die "review-route: route_review.py is not installed next to comms.sh — re-run install.sh"
@@ -1938,6 +1946,88 @@ cmd_review_route() {
     printf '%s' "$_sid" | grep -qE '^rd-[0-9a-f]{32}$' || { echo "comms.sh: review-route show: '$(clip "$_sid")' is not a decision id" >&2; return 1; }
     python3 "$py" show --root "$(cmd_root)" "$@" -- "$_sid"
   fi
+}
+
+# review_route_plan --to <roster> [--phase P] [--thread T] — each leg's RESOLVED route before
+# dispatch: the provider, model, effort and usage limit a panel (or a single `send`) would spend,
+# so a planner can tell which usage limits it is about to draw on. READ-ONLY by construction: it
+# validates the roster with the rule dispatch uses, asks `transport` which way each leg would go,
+# reads (never makes) the routing decision in force, and resolves each leg with the same
+# `acp.sh resolve` call runphase makes — then prints. Nothing is decided, recorded, sent or
+# classified, and no request text leaves the machine.
+#
+# One line per leg, in roster order, all or nothing (a leg whose policy would be refused at run
+# time refuses the plan, exit 1, before any line is printed):
+#   route-plan v1 agent=<a> provider=<p> <acp.sh route-view fields>
+# `decision=pending` means routing is on for an implement phase but no decision is in force for
+# the thread yet: dispatch will classify, so the values shown are what a `none` candidate — the
+# fail-open answer — would run. Pass --thread (the BASE thread) to read the one in force.
+review_route_plan() {
+  local to="" phase=implement thread="" acp rc
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --to)     need_value "review-route plan" $# "$1"; to="$2"; shift 2 ;;
+      --phase)  need_value "review-route plan" $# "$1"; phase="$2"; shift 2 ;;
+      --thread) need_value "review-route plan" $# "$1"; thread="$2"; shift 2 ;;
+      *) usage_err "review-route plan: unknown option '$(clip "$1")'" ;;
+    esac
+  done
+  [ -n "$to" ] || usage_err "review-route plan: --to <agent>[,<agent>...] is required"
+  [[ "$phase" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || usage_err "review-route plan: phase '$(clip "$phase")' is not a bare token"
+  case "$thread" in *"$(printf '\t')"*|*"
+"*) usage_err "review-route plan: a thread may not contain a tab or newline" ;; esac
+  # The same gate the routing verbs take, in THIS shell: an unknown COMMS_DELIVERY is refused
+  # here rather than inside a substitution below.
+  require_known_transport
+  panel_roster_check "$to" "" "review-route plan"
+  acp="$(cd "$(dirname "$SELF")" && pwd)/acp.sh"
+  [ -x "$acp" ] || die "review-route plan: acp.sh is not installed next to comms.sh — re-run install.sh"
+
+  # THE DECISION, as the runner would see it. send/panel dispatch stamp one only when routing is
+  # on AND the phase is implement (route_decision_for); otherwise the leg carries none.
+  local routing=off did=none tier=none effort=none src=none cur root
+  review_routing_enabled && routing=on
+  if [ "$routing" = on ] && [ "$phase" = implement ]; then
+    did=pending
+    root="$(cmd_root)"
+    if [ -n "$thread" ] && [ -d "$root" ]; then
+      command -v python3 >/dev/null 2>&1 || die "review-route plan: python3 is required to read a routing decision"
+      cur="$(python3 "$(dirname "$acp")/route_review.py" lookup --root "$root" --workspace "$(cmd_workspace)" \
+               --thread "$thread" --phase "$phase" --absent-ok)" && rc=0 || rc=$?
+      case "$rc" in
+        0) did="$(sed -n 's/^decision: //p' <<<"$cur")"
+           tier="$(sed -n 's/^tier: //p' <<<"$cur")"
+           effort="$(sed -n 's/^effort: //p' <<<"$cur")"
+           src="$(sed -n 's/^source: //p' <<<"$cur")"
+           [[ "$did" =~ ^rd-[0-9a-f]{32}$ ]] && [ -n "$tier" ] && [ -n "$effort" ] && [ -n "$src" ] \
+             || die "review-route plan: the decision in force for thread '$(clip "$thread")' could not be read" ;;
+        3) ;;
+        *) die "review-route plan: the routing decision for thread '$(clip "$thread")' is unreadable — dispatch would refuse it too" ;;
+      esac
+    fi
+  fi
+
+  local ag prov tr ptr rec view out=""
+  for ag in $PANEL_ROSTER; do
+    prov="$(registry_provider "$ag")" || die "review-route plan: cannot resolve the provider of '$ag'"
+    tr="$(cmd_transport "$ag" --loop)" || die "review-route plan: no transport for '$ag'"
+    # A loop leg over ACP always runs MOUNTED: send and dispatch stamp the artifact, and runphase
+    # mounts every stamped review.
+    case "$tr" in
+      acp) ptr=acp-mounted ;;
+      headless|mailbox) ptr="$tr" ;;
+      *) die "review-route plan: '$ag' would use an unknown transport '$(clip "$tr")'" ;;
+    esac
+    rec="$("$acp" resolve "$prov" --transport "$ptr" --tier "$tier" --effort "$effort" --decision "$did" \
+             --routing "$routing" --phase "$phase" --candidate-source "$src")" \
+      || { echo "comms.sh: review-route plan: the reviewer policy for '$ag' would be refused at run time (above) — nothing was planned" >&2; exit 1; }
+    view="$("$acp" route-view "$prov" - <<<"$rec")" \
+      || { echo "comms.sh: review-route plan: could not read the resolved policy for '$ag'" >&2; exit 1; }
+    out="$out
+route-plan v1 agent=$ag provider=$prov $view"
+  done
+  printf '%s\n' "${out#?}"
 }
 
 # stamp_route_decision <file> <id-or-empty> — the ONLY writer of `route_decision:`. Drops every
@@ -2236,6 +2326,35 @@ cmd_ask() {
   cmd_send --to "$to" $wait_flag "$f"
 }
 
+# panel_roster_check <to> <author-or-empty> <verb> — the roster rules every panel shares, in the
+# CALLER's shell (it sets PANEL_ROSTER, space-separated, rather than printing it, so a usage_err
+# cannot be swallowed by a command substitution): every name registered, the author (when known)
+# never a leg, no name twice, and one leg per PROVIDER. `panel dispatch` refuses a roster with it
+# before anything is written; `review-route plan` refuses the same roster, so a plan can never
+# describe a panel that dispatch would not send.
+panel_roster_check() {
+  local to="$1" author="$2" verb="$3" ag roster="" prov provs=""
+  [ -n "$(printf '%s' "$to" | tr -d ', ')" ] || usage_err "$verb: --to names no reviewer"
+  for ag in $(printf '%s' "$to" | tr ',' ' '); do
+    require_agent "$ag" "$verb"
+    # IDENTITY compare, deliberately: a leg on the author's own PROVIDER under its own name
+    # (claude-review reviewing claude) is the point of review identities.
+    [ -z "$author" ] || [ "$ag" != "$author" ] || usage_err "$verb: '$ag' authored this request — it cannot review it"
+    case " $roster " in *" $ag "*) usage_err "$verb: '$ag' listed twice" ;; esac
+    # Two legs on one PROVIDER are one model reviewing twice: same routing decision, same
+    # provider-keyed policy, same prompt — compose would count their agreement as two
+    # independent reviewers. This is the early, friendly refusal; compose re-checks what it
+    # actually counts, from the replies' own provider stamps.
+    prov="$(registry_provider "$ag")" || usage_err "$verb: cannot resolve the provider of '$ag'"
+    case " $provs " in
+      *" $prov "*) usage_err "$verb: two legs on provider '$prov' ($(printf '%s' "$to" | tr ',' ' ')) — a panel's reviewers must be independent; keep one '$prov'-backed reviewer" ;;
+    esac
+    provs="$provs $prov"
+    roster="$roster $ag"
+  done
+  PANEL_ROSTER="${roster# }"
+}
+
 cmd_panel() {
   # panel dispatch --to a,b <review-request>   — fan one artifact out to N reviewers
   # panel status  --set <id>                   — which legs have answered
@@ -2432,25 +2551,9 @@ $st_p	$ag"
   # only per leg, after the plan events are written — too late to refuse cleanly).
   [ -n "$author" ] && registry_has "$author" && registry_is_review "$author" \
     && usage_err "panel dispatch: '$author' is a review-only identity — it cannot author a review request"
-  local ag roster="" prov provs=""
-  for ag in $(printf '%s' "$to" | tr ',' ' '); do
-    require_agent "$ag" "panel dispatch"
-    # IDENTITY compare, deliberately: a leg on the author's own PROVIDER under its own name
-    # (claude-review reviewing claude) is the point of review identities.
-    [ "$ag" != "$author" ] || usage_err "panel dispatch: '$ag' authored this request — it cannot review it"
-    case " $roster " in *" $ag "*) usage_err "panel dispatch: '$ag' listed twice" ;; esac
-    # Two legs on one PROVIDER are one model reviewing twice: same routing decision, same
-    # provider-keyed policy, same prompt — compose would count their agreement as two
-    # independent reviewers. This is the early, friendly refusal; compose re-checks what it
-    # actually counts, from the replies' own provider stamps.
-    prov="$(registry_provider "$ag")" || usage_err "panel dispatch: cannot resolve the provider of '$ag'"
-    case " $provs " in
-      *" $prov "*) usage_err "panel dispatch: two legs on provider '$prov' ($(printf '%s' "$to" | tr ',' ' ')) — a panel's reviewers must be independent; keep one '$prov'-backed reviewer" ;;
-    esac
-    provs="$provs $prov"
-    roster="$roster $ag"
-  done
-  roster="${roster# }"
+  local roster
+  panel_roster_check "$to" "$author" "panel dispatch"
+  roster="$PANEL_ROSTER"
   # The request must name the tree this dispatch runs in — checked before the snapshot, so a
   # refusal pins nothing and writes no leg, event or index row.
   request_tree_check "$req" "panel dispatch" panel dispatch --to "$to" \

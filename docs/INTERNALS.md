@@ -509,6 +509,11 @@ runphase: current decision == stamped id? ─▶ acp.sh resolve ─▶ run_dir/p
   path in code cannot be promoted by a map edit alone (`capability-unimplemented`). Claude and Grok expose model/effort
   controls in their adapters, but agent-comms neither applies them nor has isolated per-turn
   evidence, so their rows are `unsupported` and their turns record that rather than a policy.
+- **Planning is read-only and uses the same resolver.** `review-route plan` validates a roster
+  with the rule dispatch uses, reads the decision in force, and runs `acp.sh resolve` per leg exactly
+  as runphase will, printing `acp.sh route-view`'s fields; each turn records the same fields as
+  `result.json` `"route"`. A `limit` row in the map names a model's own usage limit (`limit_id`), so
+  a spend planner can tell a leg that draws on a separate limit (a Spark model) from the shared one.
 - **Collection is not activation.** `route --shadow --reviewer` uses the same builder and rubric
   as `review-route decide` but never writes a decision. Classification needs the same
   out-of-tree per-project permit as the shadow collector.

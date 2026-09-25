@@ -6,7 +6,8 @@
                             | --thread <t> --phase <p>)
                            [--tier fast|balanced|strong|none] [--effort low|medium|high|xhigh|none]
                            [--replace]
-    route_review.py lookup --root <.comms> --workspace <ws> --thread <t> --phase <p>
+    route_review.py lookup --root <.comms> --workspace <ws> --thread <t> --phase <p> [--absent-ok]
+                           (--absent-ok: no decision yet exits 3, silently; a defect still exits 1)
     route_review.py show   --root <.comms> <decision-id> [--thread <t>] [--phase <p>]
     route_review.py verify --root <.comms> <decision-id> --thread <t> --phase <p> [--leg-agents a,b]
 
@@ -385,6 +386,10 @@ def cmd_lookup(a):
     ddir = decisions_dir(a.root)
     did = read_pointer(pointer_path(ddir, a.workspace, a.thread, a.phase))
     if did is None:
+        if a.absent_ok:
+            # ABSENCE, told apart from a defect: a planner asking "is a decision in force yet?"
+            # must not read an unreadable or malformed record as "none yet" (those still exit 1).
+            raise SystemExit(3)
         die("no decision is recorded for thread %r phase %r" % (a.thread, a.phase))
     rec = load_record(ddir, did)
     check_pointer_target(rec, a.workspace, a.thread, a.phase)
@@ -452,6 +457,7 @@ def main(argv):
     lk.add_argument("--workspace", required=True)
     lk.add_argument("--thread", required=True)
     lk.add_argument("--phase", required=True)
+    lk.add_argument("--absent-ok", dest="absent_ok", action="store_true")
     v = sub.add_parser("verify")
     v.add_argument("--root", required=True)
     v.add_argument("decision")

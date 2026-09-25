@@ -22,6 +22,11 @@
 #               [<minimum codex runtime version that can serve it>]
 #   ceiling     <provider> <transport> <model> <effort>   the operator's "use max" pair
 #               (COMMS_REVIEW_MAX=1): the strongest model at its highest accepted effort
+#   limit       <provider> <transport> <model> <limit_id>   a model the provider meters under a
+#               usage limit of its OWN (codex's Spark models, for example), named by the limit_id
+#               its rate-limit records report. A model with no row spends the provider's shared
+#               limit. Read only to REPORT a leg's spend (policy record `limit_id`, `review-route
+#               plan`, result.json "route"); it never changes which model or effort runs.
 #
 # Transports: acp-mounted = a mounted review turn with an isolated provider home (the only
 # place a policy is both APPLIED and ATTESTED); acp = an unmounted ACP turn (the operator's own
@@ -50,7 +55,11 @@
 # - A resumed codex session adopted a changed config.toml (one observation); `acpx set` of
 #   model/reasoning_effort is honoured BEFORE the first prompt and fails ("Internal error") after
 #   one. Sessions are still keyed by policy digest, so no correctness rests on either.
-version	2026-09-22.4
+version	2026-09-25.1
+
+# No mapped model has a usage limit of its own yet, so there are no `limit` rows: every mapped codex
+# model spends the shared codex limit. A row is added with the evidence that the model is served
+# AND of the limit_id its rollouts report — never from a model's name alone.
 
 capability	codex	acp-mounted	eligible	isolated CODEX_HOME config.toml (model, model_reasoning_effort), read at thread start/resume, with CODEX_PATH naming the runtime; a changed policy or runtime is a new session	preflight: acpx config_options + saved preferences; gate: the provider's own rollout turn_context (model, effort) per turn, behind the canary and reply-check	codex-acp 1.12.0; codex 0.154.0 (bundled) and 0.155.1 (installed, via CODEX_PATH); acpx 0.13.1	the adapter floats under ^1.1.5; policy.tsv records the runtime resolved, turn.tsv the runtime that created the session
 capability	codex	acp	unsupported	none: an unmounted turn runs the operator's own ~/.codex config	none	-	nothing applies or attests a policy

@@ -37,6 +37,15 @@
 #       map's baseline. Exit 0 resolved (including an
 #       `unsupported` provider/transport), 1 refused (invalid pair, bad map),
 #       2 usage.
+#       The record carries `limit_id`: the usage limit the chosen model spends when the
+#       map gives it one of its own (a `limit` row), `-` for the provider's shared limit,
+#       `n/a` where no model is applied. --transport mailbox (a leg nobody drives)
+#       resolves to that `unsupported` answer.
+#   route-view <agent> <record-file|-> [--format line|json]
+#       the spend-planning view of a resolved record: transport, capability, model,
+#       effort, limit_id, model_source, effort_source, routing, decision, phase,
+#       map_version — as `key=value` words or a one-line JSON object. The ONE field list
+#       behind `comms.sh review-route plan` and result.json's "route".
 #   capabilities
 #       the map version and every provider/transport capability row, with the
 #       concrete controls of each routing-eligible combination.
@@ -201,6 +210,9 @@ policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic o
       if (NF == 6 && $6 !~ /^[0-9]+(\.[0-9]+)*$/) bad("malformed pair minimum runtime")
       n = split($5, a, ","); for (i = 1; i <= n; i++) if (a[i] !~ re) bad("malformed pair effort")
       once("p" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
+    $1 == "limit" {
+      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 !~ re) bad("malformed limit")
+      once("l" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
     { bad("unknown row kind \"" $1 "\"") }
     END {
       if (nv != 1) { printf "acp.sh: policy map: expected exactly one version row, found %d\n", nv > "/dev/stderr"; err = 1 }
@@ -211,7 +223,7 @@ policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic o
 # policy_map_get <kind> <provider> <transport> [key] — the value column(s) of ONE row, or nothing.
 #   capability -> <eligible|fixed|unsupported>   baseline -> <model>\t<effort>
 #   tier <t> -> <model>   effort <e> -> <provider-effort>   pair <model> -> <comma list>
-#   ceiling -> <model>\t<effort>
+#   ceiling -> <model>\t<effort>   limit <model> -> <limit_id>
 # Only ever called after policy_map_check has passed for this invocation.
 policy_map_get() {
   awk -F'\t' -v k="$1" -v p="$2" -v t="$3" -v key="${4:-}" '
@@ -366,7 +378,7 @@ resolve_policy() {
     # NOTHING IS APPLIED, so nothing may be claimed. The record says so in every field that would
     # otherwise look like a policy: no model, no effort, no verification requirement.
     R_MODEL=n/a; R_EFFORT=n/a; R_MSRC=unsupported; R_ESRC=unsupported
-    R_ETIER=n/a; R_EEFF=n/a; R_PAIR=n/a; R_VERIFY=none
+    R_ETIER=n/a; R_EEFF=n/a; R_PAIR=n/a; R_VERIFY=none; R_LIMIT=n/a
     policy_max_on && fb="${fb:+$fb;}max-unsupported"
     R_FALLBACK="${fb:+$fb;}capability-unsupported"
     return 0
@@ -486,6 +498,10 @@ resolve_policy() {
     echo "acp.sh: resolve: model '$R_MODEL' ($R_MSRC) needs codex >= $(policy_map_get pairmin "$agent" "$transport" "$R_MODEL"), but the reviewer runtime is $R_RUNTIME ($R_RUNTIME_VERSION) — install a newer codex or set COMMS_ACP_CODEX_PATH" >&2
     return 1
   fi
+  # THE USAGE LIMIT the chosen model spends, when the provider meters it apart from the rest (a
+  # `limit` row, keyed by the limit_id the provider's own rate-limit records report). `-` = no limit
+  # of its own: the provider's shared one. A pin names a model, so a pinned model gets its row too.
+  R_LIMIT="$(policy_map_get limit "$agent" "$transport" "$R_MODEL")"; R_LIMIT="${R_LIMIT:--}"
   R_ETIER="$(policy_map_reverse tier "$agent" "$transport" "$R_MODEL")"
   R_EEFF="$(policy_map_reverse effort "$agent" "$transport" "$R_EFFORT")"
   R_VERIFY="model,effort"
@@ -526,6 +542,7 @@ emit_policy_record() {  # the persisted per-turn expectation; key<TAB>value, fix
   printf 'effort\t%s\n'           "$R_EFFORT"
   printf 'model_source\t%s\n'     "$R_MSRC"
   printf 'effort_source\t%s\n'    "$R_ESRC"
+  printf 'limit_id\t%s\n'         "$R_LIMIT"
   printf 'effective_tier\t%s\n'   "$R_ETIER"
   printf 'effective_effort\t%s\n' "$R_EEFF"
   printf 'pair\t%s\n'             "$R_PAIR"
@@ -643,7 +660,9 @@ cmd_resolve() {
   done
   # Closed vocabularies. A value outside them is a CALLER defect, reported as usage — never
   # quietly read as `none`, which would turn a typo into a baseline turn nobody asked for.
-  case "$transport" in acp-mounted|acp|headless) ;; *) echo "acp.sh: resolve: unknown transport '$transport'" >&2; exit 2 ;; esac
+  # `mailbox` is a leg nobody drives: no turn runs, so nothing is applied (no capability row can
+  # exist for it). It is accepted so a PLANNED mailbox leg resolves to that honest answer.
+  case "$transport" in acp-mounted|acp|headless|mailbox) ;; *) echo "acp.sh: resolve: unknown transport '$transport'" >&2; exit 2 ;; esac
   case "$tier"      in fast|balanced|strong|none) ;; *) echo "acp.sh: resolve: unknown tier '$tier'" >&2; exit 2 ;; esac
   case "$effort"    in low|medium|high|xhigh|none) ;; *) echo "acp.sh: resolve: unknown effort '$effort'" >&2; exit 2 ;; esac
   case "$routing"   in on|off) ;; *) echo "acp.sh: resolve: --routing must be on or off" >&2; exit 2 ;; esac
@@ -654,6 +673,44 @@ cmd_resolve() {
   [[ "$csrc" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: resolve: candidate source '$csrc' is not a bare token" >&2; exit 2; }
   resolve_policy "$agent" "$transport" "$tier" "$effort" "$decision" "$routing" "$phase" "$csrc" || exit 1
   emit_policy_record
+}
+
+# THE ROUTE VIEW — what a spend planner needs from a resolved policy record, as ONE field list
+# shared by `comms.sh review-route plan` (one line per planned leg) and runphase (result.json
+# "route"), so the plan and the turn cannot describe a leg in different words. `provider` is not a
+# field: both consumers carry it (with the agent) beside the view, and result.json already has it.
+ACP_ROUTE_FIELDS="transport capability model effort limit_id model_source effort_source routing decision phase map_version"
+# Every value is a bare token (or `-`, `n/a`): it is printed unquoted in a key=value line and
+# embedded in JSON, so anything else refuses the view rather than being escaped into it.
+ACP_ROUTE_VALUE_RE='^([A-Za-z0-9][A-Za-z0-9._/-]*|-)$'
+cmd_route_view() {  # route-view <agent> <record-file|-> [--format line|json]
+  local agent="${1:-}" src="${2:-}" fmt=line
+  [ -n "$agent" ] && [ -n "$src" ] || { echo "acp.sh: route-view: usage: route-view <agent> <record-file|-> [--format line|json]" >&2; exit 2; }
+  shift 2
+  if [ "$#" -gt 0 ]; then
+    [ "$#" = 2 ] && [ "$1" = --format ] || { echo "acp.sh: route-view: unknown option '$1'" >&2; exit 2; }
+    case "$2" in line|json) fmt="$2" ;; *) echo "acp.sh: route-view: --format must be line or json" >&2; exit 2 ;; esac
+  fi
+  [ "$src" = - ] || [ -f "$src" ] || { echo "acp.sh: route-view: no such record '$src'" >&2; exit 1; }
+  # Same reading rule as policy_from_record: every key exactly once, or the record is refused.
+  awk -F'\t' -v fields="$ACP_ROUTE_FIELDS" -v agent="$agent" -v fmt="$fmt" -v vre="$ACP_ROUTE_VALUE_RE" \
+      -v want="$ACP_POLICY_RECORD_VERSION" '
+    { sub(/\r$/, "") }
+    NF != 2 || $1 == "" || $2 == "" { bad = 1; next }
+    { n[$1]++; v[$1] = $2 }
+    END {
+      for (k in n) if (n[k] != 1) bad = 1
+      if (bad || v["policy_record"] != want || v["provider"] != agent) exit 1
+      nf = split(fields, F, " ")
+      for (i = 1; i <= nf; i++) if (n[F[i]] != 1 || v[F[i]] !~ vre) exit 1
+      if (fmt == "json") printf "{"
+      for (i = 1; i <= nf; i++) {
+        if (fmt == "json") printf "%s\"%s\": \"%s\"", (i > 1 ? ", " : ""), F[i], v[F[i]]
+        else printf "%s%s=%s", (i > 1 ? " " : ""), F[i], v[F[i]]
+      }
+      printf (fmt == "json" ? "}\n" : "\n")
+    }' "$src" \
+    || { echo "acp.sh: route-view: the policy record is malformed or is not for '$agent'" >&2; exit 1; }
 }
 
 cmd_capabilities() {
@@ -672,7 +729,8 @@ cmd_capabilities() {
     $1 == "ceiling"  && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s ceiling (use max): model=%s effort=%s\n", $2, $3, $4, $5; next }
     $1 == "tier"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s tier %s -> first servable of %s\n", $2, $3, $4, $5; next }
     $1 == "effort"   && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s effort %s -> %s\n", $2, $3, $4, $5; next }
-    $1 == "pair"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s accepts: %s%s\n", $2, $3, $4, $5, (NF == 6 ? " (needs codex >= " $6 ")" : ""); next }' "$ACP_POLICY_MAP" "$ACP_POLICY_MAP"
+    $1 == "pair"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s accepts: %s%s\n", $2, $3, $4, $5, (NF == 6 ? " (needs codex >= " $6 ")" : ""); next }
+    $1 == "limit"    && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s spends its own usage limit: %s\n", $2, $3, $4, $5; next }' "$ACP_POLICY_MAP" "$ACP_POLICY_MAP"
 }
 
 cmd_doctor() {
@@ -852,6 +910,7 @@ case "${1:-}" in
     printf '%s\n' "$_rt"
     ;;
   capabilities) shift; cmd_capabilities ;;
+  route-view) shift; cmd_route_view "$@" ;;
   policy)
     shift; policy_args "$@"
     [ -n "${PA_POS[0]:-}" ] || die "policy: an agent name is required"

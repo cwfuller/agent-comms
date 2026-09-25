@@ -357,6 +357,22 @@ leg_usage_collect() {  # <run-dir> — once per turn; a second call is a no-op
   return 0
 }
 
+# ---------- the leg's resolved route (acp.sh route-view) ----------
+#
+# The same fields `comms.sh review-route plan` prints for a planned leg, read from THIS turn's
+# persisted policy record, so a planner can compare what it expected with what ran. Only a record
+# still matching the hash taken at resolution is reported: the reviewer runs in between, and a
+# record it rewrote must not become the leg's stated route. No record (a turn that failed before
+# resolution, or one that never resolves a policy: headless) is null, never a guessed default.
+RUN_POLICY_SHA=""
+leg_route_json() {  # <run-dir> -> one-line JSON object, or null
+  local v=""
+  if [ -n "$RUN_POLICY_SHA" ] && policy_record_intact "$1/policy.tsv" "$RUN_POLICY_SHA"; then
+    v="$("$HELPER_DIR/acp.sh" route-view "$RUN_PROVIDER" "$1/policy.tsv" --format json 2>/dev/null)" || v=""
+  fi
+  leg_usage_json "${v:-null}"
+}
+
 write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <message-file> <note> [reason]
   # `reason` is a NEW FIELD, deliberately not a new `status` value: every existing consumer
   # of `status` keeps its exact meaning, and nothing has to learn a third word to stay
@@ -372,15 +388,15 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
   local dir="$1" status="$2" rc="$3" sid="$4" mf="$5" note="$6" reason="${7:-}"
   [ "$RESULT_WRITTEN" = true ] && return 0
   local RESULT_COMPOSED=1
-  # usage / rate_limits are embedded RAW (leg_usage_json admitted only one-line JSON or null) and
-  # come LAST, each on its own line, so json_get's one-key-per-line reads of the string fields
-  # above cannot match a key inside them.
-  printf '{\n  "provider": "%s",\n  "agent": "%s",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s",\n  "usage": %s,\n  "rate_limits": %s\n}\n' \
+  # route / usage / rate_limits are embedded RAW (leg_usage_json admitted only one-line JSON or
+  # null) and come LAST, each on its own line, so json_get's one-key-per-line reads of the string
+  # fields above cannot match a key inside them (no route key shares a top-level name).
+  printf '{\n  "provider": "%s",\n  "agent": "%s",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s",\n  "route": %s,\n  "usage": %s,\n  "rate_limits": %s\n}\n' \
     "$(json_escape "$RUN_PROVIDER")" "$(json_escape "${RUN_AGENT:-$RUN_PROVIDER}")" \
     "$(json_escape "$status")" "$(json_escape "$reason")" "$(json_escape "$rc")" "$(json_escape "$sid")" \
     "$(json_escape "$mf")" "$(json_escape "$dir")" \
     "$(json_escape "${STARTED_AT:-}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    "$(json_escape "$note")" \
+    "$(json_escape "$note")" "$(leg_route_json "$dir")" \
     "$(leg_usage_json "$LEG_USAGE_JSON")" "$(leg_usage_json "$LEG_RATE_JSON")" \
     > "$dir/result.json.tmp" || RESULT_COMPOSED=0
   # THE TERMINAL EVENT IS DURABLE FIRST. result.json is the signal `await` unblocks on, so
@@ -3264,6 +3280,7 @@ cmd_run() {
       rm -f "$acp_policy" 2>/dev/null || true
     else
       acp_policy_sha="$(policy_record_sha "$acp_policy")" || acp_route_err="the resolved policy record could not be hashed"
+      RUN_POLICY_SHA="$acp_policy_sha"   # result.json "route" reports the record only while it is intact
       acp_policy_digest="$(awk -F'\t' '$1=="policy_digest"{print $2; exit}' "$acp_policy" 2>/dev/null)"
     fi
     turn_policy "$run_dir" "$acp_policy" "${acp_route_id:-none}"
