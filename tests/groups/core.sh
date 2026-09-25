@@ -1000,7 +1000,7 @@ printf '%s\n' "$SNAP_WT_E" | grep -q 'wt-only.txt' \
 section "compose: cross-severity corroboration"
 # THE DETECTOR HAD NEVER FIRED. `corroborated` filtered `$13=="blocking"` BEFORE clustering, so a
 # defect one reviewer filed blocking and another filed advisory at the SAME anchor contributed one
-# row and never reached m>1. Filed 2026-08-27, recurred 2026-09-03 (fwh-platform), confirmed here:
+# row and never reached m>1. Filed 2026-08-27, recurred 2026-09-03 (client-app), confirmed here:
 # 8 consecutive warm-acp-mount panels and every panel of 2026-09-02/03 reported 0.
 #
 # The fixture DISPATCHES A REAL PANEL rather than dropping replies in the archive. compose reads

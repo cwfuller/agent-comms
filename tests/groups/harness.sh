@@ -540,7 +540,7 @@ GK_NO="$( (FAIL=0; SKIP=0; SKIP_USED=" "; GRP_PRESERVE_OK=0; skip group-no-secon
 [ "$GK_NO" = 1 ] && ok "the group skip is permitted on a confirmed failed probe" || fail "a confirmed failed group probe refused its skip"
 
 section "integrate: the verification tree is a FRESH checkout"
-# THE 2026-09-03 FIELD REPORT (fwh-platform, sev 4) read as "integrate cannot verify a
+# THE 2026-09-03 FIELD REPORT (client-app, sev 4) read as "integrate cannot verify a
 # non-hoisted monorepo". Measured: it can. `git worktree add` materializes TRACKED CONTENT
 # ONLY, so a suite-cmd depending on a gitignored install passes in the operator's checkout and
 # fails in the verification tree — and the tool's own error (TS2307 there) gives no reason to

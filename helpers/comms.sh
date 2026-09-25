@@ -270,7 +270,7 @@ cmd_workspace() {
   # `workspace set <name>` writes the explicit repo-scoped pin — the mailbox
   # identity, shared by every session and worktree of this repo. Everything
   # below it (branch, dirname) is INFERENCE, and a valid-but-wrong
-  # inference (title "fwh-backup" in the fwh-platform repo) was cached as
+  # inference (title "client-backup" in the client-app repo) was cached as
   # authoritative forever and hid pending replies behind the filename glob.
   # a pin is a naming decision and outranks every inferred source
   # once a pin exists. (field report #3.)
@@ -674,7 +674,7 @@ cmd_list() {
     unmatched_count="$(find "$root/$inbox" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ' || true)"
     if [ "${unmatched_count:-0}" -gt 0 ]; then
       # Name the identities, never just count them: "N unmatched" is undiagnosable,
-      # and the fwh-backup incident sat invisible behind exactly that. Frontmatter
+      # and the client-backup incident sat invisible behind exactly that. Frontmatter
       # workspace: wins; filename prefix is the fallback for pre-v2 files.
       # Bounded inside awk (no head in the pipe: SIGPIPE under pipefail could kill
       # list before the warning prints — the exact inbox shape this diagnostic
@@ -2814,7 +2814,7 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt ($
   # reviewer filed blocking and another filed advisory AT THE SAME ANCHOR contributed a single
   # row and never reached m>1. Corroboration across DIFFERENT SEVERITIES was structurally
   # invisible, and no panel in the record ever scored a corroborated blocker. Filed 2026-08-27,
-  # recurred 2026-09-03 (fwh-platform), confirmed here.
+  # recurred 2026-09-03 (client-app), confirmed here.
   #
   # `$14!=""` is kept on BOTH passes. Without it every unanchored finding groups under the empty
   # key, so two reviewers with UNRELATED prose blockers would falsely corroborate — fixing a

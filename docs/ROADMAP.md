@@ -112,9 +112,9 @@ trusting this number if the corpus has moved.
 CORROBORATED or raised by the gating reviewer. Measured: **8 consecutive `warm-acp-mount` panels
 reported `Anchored blocking findings supported by MORE THAN ONE reviewer: 0`**, as did every panel
 composed on 2026-09-02/03 (staging-safety r2/r3, lifecycle plan r1/r2), as did all four rounds of
-an independent fwh-platform loop. **No panel in the record has ever scored a corroborated blocker.**
+an independent client-app loop. **No panel in the record has ever scored a corroborated blocker.**
 
-**The mechanism, diagnosed by the fwh-platform session:** corroboration across DIFFERENT SEVERITIES
+**The mechanism, diagnosed by the client-app session:** corroboration across DIFFERENT SEVERITIES
 never anchors. When one reviewer files a finding blocking and the other files the SAME finding
 advisory, they do not cluster — so the detector is blindest exactly when one reviewer rates
 something higher than the other, which is also when the finding is most likely to be real.
@@ -123,11 +123,11 @@ something higher than the other, which is also when the finding is most likely t
 symmetric-headless-Codex/Claude example as BLOCKING; grok filed the same defect as advisory in the
 same round. The driver's own summary said "both reviewers converge". `compose` scored it
 **0 corroborated** and routed it to *"Uncorroborated — cross-check before spending a round"* — the
-label that means treat this with suspicion. Two of the fwh loop's highest-value findings (an
+label that means treat this with suspicion. Two of the client loop's highest-value findings (an
 untrusted sender reaching the SheetJS parser; history rendering "0 missing" for a failed sweep)
 landed under that same label for the same reason, and were only caught by hand cross-reading.
 
-**History:** first filed 2026-08-27 (dot-lifecycle thread), recurred 2026-09-03 (fwh-platform),
+**History:** first filed 2026-08-27 (dot-lifecycle thread), recurred 2026-09-03 (client-app),
 independently confirmed 2026-09-03 (agent-comms). **Three sessions, three repos, never fixed.**
 
 **The defect:** `corroborated` filtered `$13=="blocking"` BEFORE clustering, so a finding one
@@ -157,8 +157,8 @@ Anchor identity is unchanged and deliberately not made weaker: clustering is sti
 
 ### RESOLVED 2026-09-04: "`integrate` cannot verify a non-hoisted monorepo" was MISDIAGNOSED
 
-**Filed 2026-09-03 (sev 4, fwh-platform).** `integrate` runs `suite-cmd` in a detached worktree
-under `.claude/worktrees/`, which has **no per-package `node_modules`**. In fwh-platform
+**Filed 2026-09-03 (sev 4, client-app).** `integrate` runs `suite-cmd` in a detached worktree
+under `.claude/worktrees/`, which has **no per-package `node_modules`**. In client-app
 `@aws-sdk/*` lives in `packages/functions/node_modules` and is not hoisted, so typecheck failed
 **TS2307 on every AWS SDK import in files the branch never touched**. `attest-green` could not
 cover for it either: it demands a clean tracked tree, and that session had work in flight. The
@@ -646,7 +646,7 @@ operator stops looking. The roadmap names this flag in four places, all as the w
 happened to spawn the turn. Whatever the fix, the refusal should say that the variable was not
 seen in the child's environment — that one line would have saved the misdiagnosis above.
 
-### OPEN: workspace identity follows the branch name (2026-09-03, sev 2, fwh-platform)
+### OPEN: workspace identity follows the branch name (2026-09-03, sev 2, client-app)
 
 Taking a session branch mints a NEW mailbox identity, so `list`/`archive` warn about messages
 pending under previous identities — 38 messages across three prior identities in that report.

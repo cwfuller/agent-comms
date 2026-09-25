@@ -141,7 +141,7 @@ One algorithm, one implementation (`comms.sh workspace`), with an explicit escap
 hatch at the top: a **repo-scoped pin** (`.comms/workspace`, written by
 `workspace set <name>`) IS the mailbox identity when present and beats every
 inferred source below — identity is a naming decision, and a valid-but-wrong inferred
-title otherwise becomes authoritative forever (the fwh-backup incident, field report #3).
+title otherwise becomes authoritative forever (the client-backup incident, field report #3).
 Below the pin the only remaining source is git: the branch name, or the repository
 directory name when there is no branch. The cmux title cache and its decorated-title
 guard were removed with the transport (S4-4). One rule from that design survives and is

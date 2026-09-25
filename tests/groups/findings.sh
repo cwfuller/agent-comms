@@ -674,18 +674,18 @@ SA_BARE2_AID="$(sed -n '2,/^---$/p' "$SA_BARE2" | grep -m1 '^artifact_id:' | sed
   && ok "a bare --archive-inbound filename still binds from archive" \
   || fail "bare archived inbound (got=$SA_BARE2_AID want=$SA_C_AID)"
 # These replies live in to-claude under THIS workspace; leave them and list --as claude
-# succeeds instead of diagnosing the fwh-platform fixture below.
+# succeeds instead of diagnosing the client-app fixture below.
 rm -f "$SA_REP" "$SA_MIS" "$SA_ORPH" "$SA_ORPH_HEAD" "$SA_XIN" "$SA_ARCH" "$SA_B" "$SA_SELF" "$SA_BARE" "$SA_BARE2" "$SA_D" "$SA_FIX/.comms/archive/$(basename "$SA_C")" "$SA_FIX/.comms/archive/$(basename "$SA_D")"
 
 # workspace pin: an explicit set beats every inferred identity and repairs listing
-SA_OTHER="$SA_FIX/.comms/to-claude/fwh-platform_2026-08-26T14-10-00_reply-1.md"
+SA_OTHER="$SA_FIX/.comms/to-claude/client-app_2026-08-26T14-10-00_reply-1.md"
 cat > "$SA_OTHER" <<SAEOF
 ---
 type: review-feedback
 from: codex
 timestamp: 2026-08-26T19:10:00Z
-workspace: fwh-platform
-message_id: fwh-platform_2026-08-26T14-10-00_reply-1
+workspace: client-app
+message_id: client-app_2026-08-26T14-10-00_reply-1
 thread: sa-arc-2
 workflow: auto
 phase: implement
@@ -698,14 +698,14 @@ verdict: APPROVE
 pinned-identity fixture
 SAEOF
 SA_LIST_OUT="$(run_sa list --as claude 2>&1)" && sa_rc=0 || sa_rc=$?
-[ "$sa_rc" -ne 0 ] && echo "$SA_LIST_OUT" | grep -q 'fwh-platform(1)' \
+[ "$sa_rc" -ne 0 ] && echo "$SA_LIST_OUT" | grep -q 'client-app(1)' \
   && echo "$SA_LIST_OUT" | grep -q 'workspace set' \
   && ok "empty listing NAMES the unmatched identities and the repair command" || fail "unmatched-identity diagnostics (got: $SA_LIST_OUT)"
 check_not "workspace set rejects an invalid name" run_sa workspace set 'Bad Name'
 check_not "workspace set rejects a path-shaped name" run_sa workspace set '../evil'
-run_sa workspace set fwh-platform >/dev/null
-[ "$(run_sa workspace)" = "fwh-platform" ] && ok "explicit pin IS the identity" || fail "pin not authoritative"
-run_sa list --as claude 2>/dev/null | grep -q 'fwh-platform_2026-08-26T14-10-00_reply-1' \
+run_sa workspace set client-app >/dev/null
+[ "$(run_sa workspace)" = "client-app" ] && ok "explicit pin IS the identity" || fail "pin not authoritative"
+run_sa list --as claude 2>/dev/null | grep -q 'client-app_2026-08-26T14-10-00_reply-1' \
   && ok "pin repairs the listing: hidden reply is now visible" || fail "pin listing repair"
 [ -f "$SA_MSG" ] || fail "diagnostics deleted mail (must never delete)"
 rm -f "$SA_FIX/.comms/workspace"
@@ -799,7 +799,7 @@ verdict: APPROVE
 ## Summary
 different thread
 SAEOF
-rm -f "$SA_FIX/.comms/to-claude/fwh-platform_2026-08-26T14-10-00_reply-1.md"
+rm -f "$SA_FIX/.comms/to-claude/client-app_2026-08-26T14-10-00_reply-1.md"
 SA_TH_OUT="$(run_sa list --as claude --thread sa-arc-nomatch 2>&1)" || true
 echo "$SA_TH_OUT" | grep -q 'outside the current filter' \
   && ok "thread-filter misses are reported as filter misses" || fail "thread-filter wording (got: $SA_TH_OUT)"
