@@ -379,6 +379,16 @@ WR_P4="$(run_wr worktree retire worktree-pr4 --yes 2>&1)"; WR_P4RC=$?
 chmod 755 "$WR_PR4G/refs"
 [ "$WR_P4RC" = 3 ] && printf '%s' "$WR_P4" | grep -q 'refused: private-ref: .*refs/worktree/saved' && wr_kept pr4 \
   && ok "a private ref git skips (unlistable refs/) is found on disk and refused" || fail "skipped private ref rc=$WR_P4RC: $WR_P4"
+# ---- round 9 (codex): a ref backend whose on-disk layout the gates cannot read ----
+RT="$WORK/reftable-repo"; mkdir -p "$RT"; RT="$(cd "$RT" && pwd -P)"
+git init -q --ref-format=reftable -b main "$RT"; printf '.comms/\n.claude/worktrees/\n' > "$RT/.gitignore"; git -C "$RT" add .gitignore; wr_commit "$RT" init
+(cd "$RT" && "$COMMS" worktree new rt1) >/dev/null 2>&1
+printf 'From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\nFrom: t <t@t>\nSubject: [PATCH] x\n\n---\n .gitignore | 2 +-\n\ndiff --git a/.gitignore b/.gitignore\n--- a/.gitignore\n+++ b/.gitignore\n@@ -1 +1 @@\n-nomatch\n+other\n' > "$WORK/rt1.patch"
+(cd "$RT/.claude/worktrees/rt1" && git -c user.email=t@t -c user.name=t am -q "$WORK/rt1.patch" >/dev/null 2>&1)
+WR_RT="$(cd "$RT" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$COMMS" worktree retire worktree-rt1 --yes 2>&1)"; WR_RTRC=$?
+[ "$WR_RTRC" = 3 ] && printf '%s' "$WR_RT" | grep -q "refused: backend: ref storage 'reftable'" && [ -d "$RT/.claude/worktrees/rt1" ] \
+  && [ -d "$(git -C "$RT/.claude/worktrees/rt1" rev-parse --absolute-git-dir)/rebase-apply" ] \
+  && ok "a reftable repository is refused and its paused am survives" || fail "reftable rc=$WR_RTRC: $WR_RT"
 git -C "$WR" branch -q bonly "$(git -C "$WR" rev-parse main)"
 run_wr worktree retire bonly --yes >/dev/null 2>&1 && ! git -C "$WR" rev-parse -q --verify refs/heads/bonly >/dev/null \
   && ok "a landed branch with no worktree is deleted" || fail "branch-only retire"

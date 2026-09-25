@@ -441,6 +441,7 @@ wt_assess() {  # <root> <root-phys> <main> <index> <caller cwd (physical)>
     *)  wt_reason "landed: could not determine whether the tip is on $main" ;;
   esac
   [ -n "${WT_LOCK[i]}" ] && wt_reason "lock: locked by its owner (${WT_LOCK[i]})"
+  [ "${WT_BACKEND:-?}" = files ] || wt_reason "backend: ref storage '${WT_BACKEND:-?}' is not supported (files only)"
   # In the shared evaluator so `list` and `retire` agree. (codex + grok, impl r3.)
   local busy
   if [ -n "$branch" ]; then
@@ -523,6 +524,20 @@ wt_context() {  # sets WT_ROOT, WT_RPHYS, WT_MAIN, WT_CWD; cd's to the root so t
   WT_RPHYS="$(wt_phys "$WT_ROOT")"; [ -n "$WT_RPHYS" ] || die "worktree: cannot resolve $WT_ROOT"
   WT_MAIN="$(wt_default_branch "$WT_ROOT")" || die "worktree: cannot determine the default branch (main unreadable, or neither main nor master exists)"
   cd "$WT_ROOT" || die "worktree: cannot cd to $WT_ROOT"
+  WT_BACKEND="$(wt_ref_backend "$WT_ROOT")"
+}
+
+# Every ref and operation gate here reads the FILES ref backend's on-disk layout (a gitdir's HEAD,
+# loose refs). Under reftable a gitdir's HEAD is the placeholder `ref: refs/heads/.invalid`, so a
+# paused operation would never match its branch. Anything but `files` is refused, not guessed at.
+# (codex, impl r9.)
+wt_ref_backend() {  # <root> -> files | <other> | ?
+  local v rc common
+  v="$(git -C "$1" config --get extensions.refStorage 2>/dev/null)" && rc=0 || rc=$?
+  case "$rc" in 0) ;; 1) v=files ;; *) printf '?'; return 0 ;; esac
+  common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || { printf '?'; return 0; }
+  case "$(wt_probe "$common/reftable")" in absent) ;; present) v=reftable ;; *) printf '?'; return 0 ;; esac
+  printf '%s' "$v"
 }
 
 wt_list() {
@@ -660,6 +675,7 @@ wt_retire() {
       *) wt_reason "landed: tip ${tip:0:12} is not on $WT_MAIN" ;;
     esac
     [ -z "$busy" ] || wt_reason "branch: held by $busy"
+    [ "${WT_BACKEND:-?}" = files ] || wt_reason "backend: ref storage '${WT_BACKEND:-?}' is not supported (files only)"
     echo "worktree retire: $target at ${tip:0:12} (no worktree) on_main=$on"
   else
     wt_proc_snapshot
