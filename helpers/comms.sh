@@ -781,7 +781,12 @@ cmd_list() {
 # Self-contained on purpose: tests extract this function by name and eval it alone.
 frontmatter_field() {
   local one=1 field
-  if [ "${1:-}" = --each ]; then one=0; field="$2"; shift 2; else field="$2"; set -- "$1"; fi
+  if [ "${1:-}" = --each ]; then
+    one=0; field="$2"; shift 2
+    [ "$#" -gt 0 ] || return 0   # no files: answer nothing, never read stdin
+  else
+    field="$2"; set -- "$1"
+  fi
   awk -v f="$field" -v one="$one" 'FNR==1 {inFM=0; seen=0} {sub(/\r$/, "")}
     FNR==1 && $0=="---" {inFM=1; next}
     !inFM || seen {next}
