@@ -50,6 +50,11 @@
 #                               reply inherits the request's artifact_id/head_sha.
 #                               validate, deliver, update thread state, then archive inbound
 #   state <get|list|complete> [thread]      .comms/state/ thread ground truth (JSON)
+#   state idle [--days N]       report threads with no state change and no message for N days
+#                               (default 14), every workspace; changes nothing
+#   state legacy [--days N] <id>...
+#                               mark ONLY the named ids legacy, each re-judged idle, with the
+#                               evidence written in; never by age alone. Exit 0 / 2 usage / 3 refused
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
 #   presence <claim|beat|others|release|expire|with-beat>
 #                               `others` re-pins self and so WRITES: 0 direct-safe /
@@ -60,7 +65,8 @@
 #   worktree                    no subcommand: prints usage, exit 2 (never creates)
 #   worktree new [<slug>]       session worktree under the MAIN root, local-tip base;
 #                               stamps the creating session as owner when
-#                               COMMS_PRESENCE_NAME/INSTANCE are exported
+#                               COMMS_PRESENCE_NAME/INSTANCE are exported, and pins
+#                               the tree's workspace name (a branch rename cannot re-key it)
 #   worktree list               one `worktree-list v1` line per worktree: kind (primary/
 #                               managed/subagent/mount/unmanaged), branch, on_main
 #                               (ancestor/cherry/squash/no), tracked/untracked dirt, ignored
@@ -252,6 +258,7 @@ cmd_root() {
 
 # Filesystem-safe name (defined early — cache paths below need it).
 safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+safe_name_lines() { tr -c 'A-Za-z0-9._-\n' '_'; }   # the same mapping over a stream, one name per line
 
 # Every token must be a COMPLETE non-negative decimal. Filtering by CHARACTER is not enough,
 # and the first version of this did exactly that: `1..2`, `1.2.3` and `.` are built entirely
@@ -280,6 +287,35 @@ repo_workspace_name() {
   printf '%s\n' "${ws:-$root_name}"
 }
 
+# The ONE workspace-name grammar, shared by every writer of a pin (`workspace set`, and
+# `worktree new` for the worktree it creates). The name becomes a filename prefix. 64 chars, not
+# 32: `worktree new` pins `worktree-<slug>` and a slug may be 41 chars, so a 32-char cap would
+# leave exactly the long-slug worktrees unpinned. Loosening only — every old name still fits.
+WORKSPACE_NAME_RE='^[a-z0-9][a-z0-9._-]{0,63}$'
+workspace_name_ok() {  # <name> — whole-scalar: grep validates LINES, a pin must be ONE line
+  case "$1" in ""|*$'\n'*|*$'\r'*) return 1 ;; esac
+  printf '%s' "$1" | grep -qE "$WORKSPACE_NAME_RE"
+}
+
+# The WORKTREE-scoped pin lives in the checkout's OWN git admin dir (`.git/worktrees/<name>/` for a
+# linked worktree): per-worktree by construction, invisible to `git status`, to review snapshots
+# and to retire's cleanliness gates, and deleted by `git worktree remove` with the rest of the
+# admin dir — so it needs no cleanup of its own and cannot outlive the tree it names.
+worktree_pin_file() {  # [dir] -> the pin path for that checkout (the file may not exist)
+  local gd
+  gd="$(git -C "${1:-.}" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  [ -n "$gd" ] || return 1
+  printf '%s/agent-comms-workspace\n' "$gd"
+}
+
+read_pin() {  # <file> — the first line, whitespace-stripped; empty (exit 1) when absent or blank
+  local v
+  [ -f "$1" ] || return 1
+  v="$(head -1 "$1" 2>/dev/null | tr -d ' \t\r')"
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+
 cmd_workspace() {
   # `workspace set <name>` writes the explicit repo-scoped pin — the mailbox
   # identity, shared by every session and worktree of this repo. Everything
@@ -288,11 +324,16 @@ cmd_workspace() {
   # authoritative forever and hid pending replies behind the filename glob.
   # a pin is a naming decision and outranks every inferred source
   # once a pin exists. (field report #3.)
+  #
+  # Order: repo pin > worktree pin > branch > directory. The worktree pin is what `worktree new`
+  # writes: the name the new tree resolved to at creation, frozen so a later `git branch -m`
+  # cannot re-key its threads under a second state file (basis slice 0b). The repo pin still
+  # outranks it, because `workspace set` promises to name EVERY session in the repo.
   if [ "${1:-}" = "set" ]; then
     local pname="${2:-}" wroot
     [ -n "$pname" ] || usage_err "workspace set: name required"
-    printf '%s' "$pname" | grep -qE '^[a-z0-9][a-z0-9._-]{0,31}$' \
-      || usage_err "workspace set: invalid name '$(clip "$pname")' — must match [a-z0-9][a-z0-9._-]{0,31} (it becomes a filename prefix)"
+    workspace_name_ok "$pname" \
+      || usage_err "workspace set: invalid name '$(clip "$pname")' — must match [a-z0-9][a-z0-9._-]{0,63} (it becomes a filename prefix)"
     wroot="$(main_repo_root)" || usage_err "workspace set: not inside a git repository"
     [ -n "$wroot" ] || usage_err "workspace set: not inside a git repository"
     mkdir -p "$wroot/.comms" 2>/dev/null || usage_err "workspace set: cannot create $wroot/.comms"
@@ -301,15 +342,11 @@ cmd_workspace() {
     echo "workspace pinned to '$pname' — this file ($wroot/.comms/workspace) is now the mailbox identity for every session in this repo"
     return 0
   fi
-  local pinf pinned
+  local pinf
   pinf="$(main_repo_root 2>/dev/null || true)"
-  if [ -n "$pinf" ] && [ -f "$pinf/.comms/workspace" ]; then
-    pinned="$(head -1 "$pinf/.comms/workspace" 2>/dev/null | tr -d ' \t\r')"
-    if [ -n "$pinned" ]; then
-      printf '%s\n' "$pinned"
-      return 0
-    fi
-  fi
+  [ -n "$pinf" ] && read_pin "$pinf/.comms/workspace" && return 0
+  pinf="$(worktree_pin_file 2>/dev/null || true)"
+  [ -n "$pinf" ] && read_pin "$pinf" && return 0
   # cmux DELETED (S4-4). This resolved a cmux workspace TITLE through a cache and a
   # decorated-title guard; with no cmux there is exactly one source left, and the explicit
   # `.comms/workspace` pin above still wins over it.
@@ -5955,13 +5992,13 @@ cmd_status() {
     # "delivered" means the keystroke sequence was accepted, not that the peer
     # consumed the file. An aged file still in the target inbox is stronger
     # evidence than the notification outcome and must remain visible.
-    if [ "$st" != "complete" ] && [ -n "$pending" ] && [ "$age_s" -gt 900 ]; then
+    if ! state_settled "$st" && [ -n "$pending" ] && [ "$age_s" -gt 900 ]; then
       echo "ACTION NEEDED: $(basename "$pending") is still unread after $(( age_s / 60 ))m (last_delivery=$deliv). Nudge $target directly, or re-send with 'comms.sh send'."
     # Live headless outcomes are not operator-action cases: spawned = turn in
     # flight, completed = reply is (or was) in the inbox for the driver to read,
     # held = the operator paused deliberately, pickup = designed reply-to-driver
     # no-op. failed/timeout from a headless turn DO shout, like a failed nudge.
-    elif [ "$st" != "complete" ] && [ -n "$deliv" ] \
+    elif ! state_settled "$st" && [ -n "$deliv" ] \
          && [ "$deliv" != "delivered" ] && [ "$deliv" != "spawned" ] \
          && [ "$deliv" != "completed" ] && [ "$deliv" != "held" ] && [ "$deliv" != "pickup" ]; then
       # NOT keyed on the CURRENT COMMS_DELIVERY. status reports a DURABLE fact from the state
@@ -6067,6 +6104,227 @@ state_update_from() {
 }
 
 
+# ---------- idle threads: listed with evidence, marked legacy only by name ----------
+# basis DESIGN "Nothing is closed by age": an idle thread is a question for the operator, never a
+# verdict. `state idle` only REPORTS; `state legacy <id>...` marks exactly the ids the operator
+# names, re-checking each one at marking time and writing the evidence into the state file. There
+# is no path from age to a mark — no flag, no "all" — and legacy is not `complete`: it only takes
+# the thread out of `stalled` and the status shout. A later send on the thread rewrites the state
+# as in-progress, so a legacy mark never blocks a thread from resuming.
+STATE_IDLE_DAYS_DEFAULT=14
+
+state_settled() { [ "$1" = complete ] || [ "$1" = legacy ]; }   # <status> — the ONE "not live" test
+
+state_idle_days() {  # <value> -> the day count, normalised (08 is eight, not a bad octal)
+  case "$1" in ''|*[!0-9]*) usage_err "state: --days needs a whole number of days (got '$(clip "$1")')" ;; esac
+  [ "${#1}" -le 5 ] || usage_err "state: --days $(clip "$1") is out of range (1..36500)"
+  local d=$((10#$1))
+  { [ "$d" -ge 1 ] && [ "$d" -le 36500 ]; } || usage_err "state: --days $d is out of range (1..36500)"
+  printf '%s' "$d"
+}
+
+epoch_touch_stamp() {  # <epoch> -> CCYYMMDDhhmm.SS in LOCAL time, the portable `touch -t` form
+  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S 2>/dev/null
+}
+
+# state_message_threads <dir> <maxdepth> [ref-file] — the safe_name'd `thread:` of every message
+# file under <dir> (only those modified after <ref-file> when one is given), one per line. FAILS
+# (non-zero) when the walk or a read cannot complete: a message that could not be read is activity
+# this cannot see, and an unseen reply must never make a thread look idle.
+state_message_threads() {
+  local dir="$1" depth="$2" ref="${3:-}" list f out rc
+  local -a files=() newer=()
+  [ -d "$dir" ] || return 0
+  [ -n "$ref" ] && newer=(-newer "$ref")
+  list="$(mktemp "${TMPDIR:-/tmp}/agent-comms-idle.XXXXXX")" || return 1
+  if ! find "$dir" -maxdepth "$depth" -type f -name '*.md' ${newer[@]+"${newer[@]}"} -print0 >"$list" 2>/dev/null; then
+    rm -f "$list"; return 1
+  fi
+  while IFS= read -r -d '' f; do files+=("$f"); done <"$list"
+  rm -f "$list"
+  [ "${#files[@]}" -gt 0 ] || return 0
+  # -m1 is per file, so each file answers with its frontmatter `thread:`. grep exit 1 is "no
+  # thread anywhere" (fine); 2 is a file it could not read (not fine).
+  out="$(grep -m1 -h '^thread:' "${files[@]}" 2>/dev/null)" && rc=0 || rc=$?
+  [ "$rc" -le 1 ] || return 1
+  printf '%s\n' "$out" | sed 's/^thread:[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | safe_name_lines
+  return 0
+}
+
+# state_idle_table <root> <cutoff-epoch> <id>... — "<id>\t<recent>\t<unread>" per id: whether any
+# message on that thread was written after the cutoff, and how many sit unread in an inbox. A
+# message's thread matches a state id when the id ENDS in "_<safe thread>": the id is
+# "<safe ws>_<safe thread>" and `_` may occur in either part, so this can over-match (a thread
+# looks active when it is not) but never under-match — the direction that can only withhold a
+# mark. Any workspace's message counts: activity is activity. Fails when a scan fails.
+state_idle_table() {
+  local root="$1" cutoff="$2" ref recent unread d stamp; shift 2
+  ref="$(mktemp "${TMPDIR:-/tmp}/agent-comms-idle-ref.XXXXXX")" || return 1
+  recent="$ref.recent"; unread="$ref.unread"
+  stamp="$(epoch_touch_stamp "$cutoff")" || stamp=""
+  if [ -z "$stamp" ] || ! touch -t "$stamp" "$ref" 2>/dev/null \
+      || ! state_message_threads "$root" 2 "$ref" >"$recent"; then
+    rm -f "$ref" "$recent" "$unread"; return 1
+  fi
+  : >"$unread"
+  for d in "$root"/to-*/; do
+    [ -d "$d" ] || continue
+    state_message_threads "${d%/}" 1 >>"$unread" || { rm -f "$ref" "$recent" "$unread"; return 1; }
+  done
+  printf '%s\n' "$@" | awk -v R="$recent" -v U="$unread" '
+    BEGIN { while ((getline t < R) > 0) if (t != "") r[t] = 1
+            while ((getline t < U) > 0) if (t != "") u[t]++ }
+    function ends(id, t) { return length(id) > length(t) + 1 && substr(id, length(id) - length(t)) == "_" t }
+    $0 != "" { rec = 0; un = 0
+      for (t in r) if (ends($0, t)) rec = 1
+      for (t in u) if (ends($0, t)) un += u[t]
+      printf "%s\t%s\t%s\n", $0, rec, un }'
+  rm -f "$ref" "$recent" "$unread"
+}
+
+# state_last_activity <state-file> — the later of the recorded send time and the file's mtime (a
+# runphase exit rewrite or a `complete` moves only the mtime). Non-zero when the mtime cannot be
+# read: file_mtime answers 0 then, which would read as "idle since 1970".
+state_last_activity() {
+  local mt since
+  mt="$(file_mtime "$1")"
+  case "$mt" in ''|0|*[!0-9]*) return 1 ;; esac
+  since="$(json_get "$1" awaiting_since_epoch)"
+  case "$since" in ''|*[!0-9]*) since=0 ;; esac
+  [ "${#since}" -le 12 ] && [ "$since" -gt "$mt" ] && mt="$since"
+  printf '%s' "$mt"
+}
+
+# state_idle_rows <days> <id>... — the ONE idleness judgement, shared by the report and the mark.
+# One tab-separated line per id: <kind> <id> <idle_days> <last_iso> <status> <awaiting> <unread>,
+# kind = idle | active | settled | unknown | missing. Idle = not settled, and neither a state change
+# nor a message on the thread for <days> days. A failed message scan fails the whole call: nothing
+# is judged idle on partial evidence.
+state_idle_rows() {
+  local days="$1"; shift
+  local root dir now cutoff table id f act st rec un row
+  root="$(cmd_root)"; dir="$root/state"; now="$(date +%s)"; cutoff=$(( now - days * 86400 ))
+  table="$(state_idle_table "$root" "$cutoff" "$@")" || return 1
+  # Every field is non-empty (`?` when unknown): tab is IFS WHITESPACE, so `read` would collapse
+  # an empty field and shift every later one into the wrong name.
+  while IFS=$'\t' read -r id rec un; do
+    [ -n "$id" ] || continue
+    f="$dir/$id.json"
+    [ -f "$f" ] || { printf 'missing\t%s\t?\t?\t?\t?\t?\n' "$id"; continue; }
+    st="$(json_get "$f" status)"
+    # Settled is decided by status alone and needs no clock: most state files are complete.
+    if state_settled "$st"; then printf 'settled\t%s\t?\t?\t%s\t?\t%s\n' "$id" "$st" "$un"; continue; fi
+    if act="$(state_last_activity "$f")"; then
+      if [ "$rec" != 0 ] || [ "$act" -gt "$cutoff" ]; then row=active; else row=idle; fi
+      printf '%s\t%s\t%s\t%s' "$row" "$id" "$(( (now - act) / 86400 ))" "$(mtime_iso "$act")"
+    else
+      printf 'unknown\t%s\t?\t?' "$id"
+    fi
+    act="$(json_get "$f" awaiting_from)"
+    printf '\t%s\t%s\t%s\n' "${st:-?}" "${act:-?}" "$un"
+  done <<<"$table"
+}
+
+state_all_ids() {  # every state id in the mailbox, across ALL workspaces (idle threads outlive branches)
+  local f
+  for f in "$(state_dir)"/*.json; do [ -f "$f" ] && basename "$f" .json; done
+  return 0
+}
+
+state_days_arg() {  # <verb> <args...> — shared --days parsing; prints "days" then each other arg
+  local verb="$1" days="$STATE_IDLE_DAYS_DEFAULT"; shift
+  local -a rest=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --days) shift; days="$(state_idle_days "${1:-}")" || exit 2 ;;
+      --days=*) days="$(state_idle_days "${1#--days=}")" || exit 2 ;;
+      -*) usage_err "state $verb: unknown option '$(clip "$1")'" ;;
+      *) rest+=("$1") ;;
+    esac
+    shift
+  done
+  printf '%s\n' "$days"
+  [ "${#rest[@]}" -eq 0 ] || printf '%s\n' "${rest[@]}"
+}
+
+cmd_state_idle() {  # state idle [--days N] — report only
+  local parsed days rows n=0 total kind id d iso st aw un
+  parsed="$(state_days_arg idle "$@")" || exit 2
+  days="${parsed%%$'\n'*}"
+  [ "$parsed" = "$days" ] || usage_err "state idle: takes no ids (usage: state idle [--days N]) — it only reports"
+  local -a ids=()
+  while IFS= read -r id; do [ -n "$id" ] && ids+=("$id"); done < <(state_all_ids)
+  total="${#ids[@]}"
+  if [ "$total" -gt 0 ]; then
+    rows="$(state_idle_rows "$days" "${ids[@]}")" \
+      || die "state idle: could not read every message file under $(cmd_root) — refusing to call anything idle on partial evidence"
+    while IFS=$'\t' read -r kind id d iso st aw un; do
+      case "$kind" in
+        idle) n=$((n + 1))
+          printf 'idle id=%s idle_days=%s last_activity=%s status=%s awaiting=%s unread=%s\n' \
+            "$id" "$d" "$iso" "${st:-?}" "${aw:-?}" "$un" ;;
+        unknown) echo "state idle: $id: last activity unreadable — not listed" >&2 ;;
+      esac
+    done <<<"$rows"
+  fi
+  echo "state idle: $n of $total thread(s) idle for ${days}+ days (no state change and no message on the thread since $(mtime_iso "$(( $(date +%s) - days * 86400 ))")). Nothing was changed; mark with 'comms.sh state legacy [--days $days] <id>...'"
+}
+
+cmd_state_legacy() {  # state legacy [--days N] <id>... — mark only what the operator names
+  local parsed days id f snap tmp mt refused=0 kind rid d iso st aw un ev now_iso
+  parsed="$(state_days_arg legacy "$@")" || exit 2
+  days="${parsed%%$'\n'*}"
+  local -a ids=()
+  while IFS= read -r id; do ids+=("$id"); done < <(printf '%s\n' "$parsed" | sed 1d)
+  [ "${#ids[@]}" -gt 0 ] && [ -n "${ids[0]}" ] \
+    || usage_err "state legacy: name at least one id from 'comms.sh state idle' — nothing is ever marked by age alone"
+  for id in "${ids[@]}"; do
+    # An id is a state FILE stem: one path component, never hidden, never a traversal.
+    case "$id" in ''|.*|*/*|*[!A-Za-z0-9._-]*) usage_err "state legacy: invalid id '$(clip "$id")' — use an id exactly as 'state idle' printed it" ;; esac
+  done
+  for id in "${ids[@]}"; do
+    f="$(state_dir)/$id.json"
+    # Snapshot, judge, then swap only if the file is still the one that was judged: a send
+    # landing in between rewrites the thread as in-progress, and that must win.
+    if [ ! -f "$f" ] || ! snap="$(cat "$f" 2>/dev/null)" || ! mt="$(file_mtime "$f")"; then
+      echo "refused: $id: no such thread state" >&2; refused=1; continue
+    fi
+    if ! IFS=$'\t' read -r kind rid d iso st aw un < <(state_idle_rows "$days" "$id" || echo fail); then
+      kind=fail
+    fi
+    case "$kind" in
+      idle) ;;
+      settled) echo "refused: $id: already $st" >&2; refused=1; continue ;;
+      active) echo "refused: $id: not idle for $days days (last state activity $iso, or a message on the thread since)" >&2; refused=1; continue ;;
+      unknown) echo "refused: $id: last activity unreadable — cannot show it is idle" >&2; refused=1; continue ;;
+      *) echo "refused: $id: could not read every message file — cannot show it is idle" >&2; refused=1; continue ;;
+    esac
+    now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    ev="idle ${d}d when marked: last state activity $iso, no message on the thread in the $days days before $now_iso, $un unread in inboxes; was status=${st:-?} awaiting=${aw:-?}"
+    tmp="$f.legacy.$$"
+    # The evidence goes right after the status line, never at the end: runphase's exit mirror
+    # rewrites the LAST field (last_delivery), so the tail must stay as send wrote it.
+    if ! printf '%s\n' "$snap" | awk -v ev="$(json_escape "$ev")" -v at="$now_iso" \
+          -v ps="$(json_escape "$st")" -v pa="$(json_escape "$aw")" '
+        !done && /"status": "[^"]*"/ { sub(/"status": "[^"]*"/, "\"status\": \"legacy\""); print
+          printf "  \"legacy_marked_at\": \"%s\",\n  \"legacy_prior_status\": \"%s\",\n  \"legacy_prior_awaiting\": \"%s\",\n  \"legacy_evidence\": \"%s\",\n", at, ps, pa, ev
+          done = 1; next }
+        { gsub(/"awaiting_from": "[^"]*"/, "\"awaiting_from\": \"none\""); print }' >"$tmp" 2>/dev/null \
+        || ! grep -q '"status": "legacy"' "$tmp" 2>/dev/null; then
+      rm -f "$tmp"; echo "refused: $id: could not write the mark" >&2; refused=1; continue
+    fi
+    # Keep the file's mtime: marking is not thread activity, and the evidence must stay stable.
+    touch -r "$f" "$tmp" 2>/dev/null || true
+    if [ "$(cat "$f" 2>/dev/null)" != "$snap" ] || [ "$(file_mtime "$f")" != "$mt" ]; then
+      rm -f "$tmp"; echo "refused: $id: the thread state changed while it was being marked — re-run 'state idle'" >&2; refused=1; continue
+    fi
+    mv "$tmp" "$f" || { rm -f "$tmp"; echo "refused: $id: could not write the mark" >&2; refused=1; continue; }
+    echo "marked legacy: $id ($ev)"
+  done
+  [ "$refused" = 0 ] || return 3
+  return 0
+}
+
 cmd_state() {
   local sub="${1:-list}"; shift || true
   local dir ws
@@ -6101,7 +6359,9 @@ cmd_state() {
         && mv "$f.tmp" "$f"
       echo "thread '$thread' marked complete"
       ;;
-    *) die "state: unknown subcommand '$sub' (get|list|complete)" ;;
+    idle) cmd_state_idle "$@" ;;
+    legacy) cmd_state_legacy "$@" ;;
+    *) die "state: unknown subcommand '$sub' (get|list|complete|idle|legacy)" ;;
   esac
 }
 
@@ -6112,7 +6372,7 @@ cmd_stalled() {
   for f in "$dir/${ws}_"*.json; do
     [ -f "$f" ] || continue
     [ "$(json_get "$f" awaiting_from)" = "none" ] && continue
-    [ "$(json_get "$f" status)" = "complete" ] && continue
+    state_settled "$(json_get "$f" status)" && continue   # complete, or marked legacy
     since="$(json_get "$f" awaiting_since_epoch)"
     case "$since" in ''|*[!0-9]*) since=$now ;; esac  # garbage epoch must not crash
     age_s=$(( now - since ))

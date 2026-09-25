@@ -142,8 +142,14 @@ hatch at the top: a **repo-scoped pin** (`.comms/workspace`, written by
 `workspace set <name>`) IS the mailbox identity when present and beats every
 inferred source below — identity is a naming decision, and a valid-but-wrong inferred
 title otherwise becomes authoritative forever (the client-backup incident, field report #3).
-Below the pin the only remaining source is git: the branch name, or the repository
-directory name when there is no branch. The cmux title cache and its decorated-title
+Below it sits the **worktree pin**, which `worktree new` writes into the new tree's own git
+admin dir (`<git-dir>/agent-comms-workspace`): the name the tree resolved to at creation, so a
+later branch rename cannot re-key its threads under a second state file. It is per worktree by
+construction (every linked worktree has its own admin dir), invisible to `git status` and review
+snapshots, and removed by `git worktree remove`. It is not written with `workspace set` because
+that would rename every unpinned session in the repo — including a peer mid-loop — which is
+the split it exists to prevent. Below the pins the only remaining source is git: the branch
+name, or the repository directory name when there is no branch. The cmux title cache and its decorated-title
 guard were removed with the transport (S4-4). One rule from that design survives and is
 load-bearing: a generic default branch resolves to the BRANCH name (`main` stays `main`),
 not the repository directory name — substituting the directory name there changes every

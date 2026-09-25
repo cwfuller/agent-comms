@@ -248,6 +248,11 @@ artifact's base commit (artifact_id and head_sha come out of one snapshot operat
 a concurrent commit in a shared checkout cannot desync them); for consults it is live
 HEAD at send. A hand-typed value is overwritten. Drivers never type a SHA.
 
+**A managed worktree's identity is pinned.** `worktree new` pins the workspace name the new
+tree resolves to at creation in that tree's own git admin dir, so a later `git branch -m` there
+cannot re-key its thread state under a second file. Only the repo pin (`workspace set`)
+outranks it. See [INTERNALS](INTERNALS.md#workspace-resolution).
+
 `cwd:` is the per-message "which tree" hint; `head_sha:` is the immutable fallback when
 that path or branch was repurposed before a delayed delivery. Readers enter `cwd`, compare
 the current HEAD when `head_sha` is present, and locate the recorded commit/worktree
@@ -428,8 +433,9 @@ workflow message (filename components sanitized to `[A-Za-z0-9._-]`; workspace i
   "phase": "implement",
   "round": "2",
   "max_rounds": "10",
-  "status": "in-progress",          // → "complete" via `state complete <thread>`
-  "awaiting_from": "codex",         // who owes the next message; "none" when complete
+  "status": "in-progress",          // → "complete" via `state complete <thread>`,
+                                    // or "legacy" via `state legacy <id>` (idle, named)
+  "awaiting_from": "codex",         // who owes the next message; "none" when complete/legacy
   "awaiting_since": "2026-06-04T18:30:14Z",
   "awaiting_since_epoch": "1780597814",
   "last_sent": "<message_id>",
@@ -461,6 +467,14 @@ Inspection: `comms.sh state list | get <thread> | complete <thread>`, and
 `comms.sh stalled [minutes]` lists threads awaiting a reply longer than the threshold
 (default 15m) and marks a matching file still in the target inbox as `inbox=unread`.
 That persisted-file evidence outranks a prior notification result.
+
+**Idle threads are marked, never closed by age.** `comms.sh state idle [--days N]` reports,
+across every workspace, the threads that are neither complete nor legacy and have had no state
+change and no message on the thread for N days (default 14); it changes nothing.
+`comms.sh state legacy [--days N] <id>...` marks only the ids the operator names, re-judging
+each at marking time and refusing any that is not idle, and writes the evidence and the prior
+status into the state file (`legacy_*` fields). A legacy thread leaves `stalled` and the status
+shout; it is not `complete`, and the next `send` on it resumes it as in-progress.
 
 ## Coordinator event log
 

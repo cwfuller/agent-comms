@@ -426,3 +426,56 @@ run_wr integrate worktree-land1 >/dev/null 2>&1 && wr_kept land1 \
   && ok "worktree.sh never uses branch -d/-D or a forced worktree remove" || fail "unsafe removal primitive in worktree.sh"
 grep -qE '^HELPERS=".*worktree\.sh' "$REPO/install.sh" \
   && ok "install.sh ships worktree.sh" || fail "install.sh does not ship worktree.sh"
+
+section "worktree new: pins the workspace name for the new worktree"
+# basis slice 0b: a branch rename must not split one thread into two state files. The pin is the
+# name the tree resolved to at creation, kept in the worktree's own git admin dir.
+WP="$WORK/pin-repo"; mkdir -p "$WP"; WP="$(cd "$WP" && pwd -P)"
+git -C "$WP" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$WP/.gitignore"; git -C "$WP" add .gitignore; wr_commit "$WP" init
+run_wp() { (cd "$WP" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$COMMS" "$@"); }
+ws_in() { (cd "$1" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$COMMS" workspace 2>/dev/null); }
+WP_NEW="$(run_wp worktree new pin1 2>&1)"; WP1="$WP/.claude/worktrees/pin1"
+printf '%s\n' "$WP_NEW" | grep -qx 'workspace: worktree-pin1 (pinned for this worktree)' && [ "$(ws_in "$WP1")" = worktree-pin1 ] \
+  && ok "worktree new pins the name the new tree resolves to, and says so" || fail "worktree new pin output: $WP_NEW"
+# The send happens BEFORE the rename; the state lookup AFTER it must still find the thread.
+WP_MSG="$WP/.comms/to-codex/worktree-pin1_2026-09-25T10-00-00_pin-1.md"; mkdir -p "$WP/.comms/to-codex"
+printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-09-25T10:00:00Z\nworkspace: worktree-pin1\nmessage_id: worktree-pin1_2026-09-25T10-00-00_pin-1\nthread: pin-thread\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 10\n---\n\n## What was done\nx\n' > "$WP_MSG"
+(cd "$WP1" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$COMMS" send --to codex "$WP_MSG") >/dev/null 2>&1
+git -C "$WP1" branch -m pin1-renamed
+[ "$(ws_in "$WP1")" = worktree-pin1 ] && (cd "$WP1" && "$COMMS" state get pin-thread >/dev/null 2>&1) \
+  && [ "$(ls "$WP/.comms/state" | grep -c 'pin-thread')" = 1 ] \
+  && ok "after a branch rename the identity holds and the thread keeps ONE state file" || fail "renamed pin: ws=$(ws_in "$WP1") state=$(ls "$WP/.comms/state" 2>&1 | tr '\n' ' ')"
+# Control: the same rename in a tree `worktree new` did not create DOES re-key it — the case above
+# is the pin's doing, not a resolver that ignores branches.
+git -C "$WP" worktree add -q -b ctl-a "$WORK/pin-ctl" main >/dev/null 2>&1
+WP_C1="$(ws_in "$WORK/pin-ctl")"; git -C "$WORK/pin-ctl" branch -m ctl-b; WP_C2="$(ws_in "$WORK/pin-ctl")"
+[ "$WP_C1" = ctl-a ] && [ "$WP_C2" = ctl-b ] \
+  && ok "control: an unpinned worktree's identity follows its branch" || fail "control ws: $WP_C1 -> $WP_C2"
+[ -z "$(git -C "$WP1" status --porcelain)" ] && [ -f "$(git -C "$WP1" rev-parse --absolute-git-dir)/agent-comms-workspace" ] \
+  && ok "the pin lives in the worktree's git admin dir, invisible to git status" || fail "pin location: $(git -C "$WP1" status --porcelain)"
+[ "$(ws_in "$WP")" = main ] \
+  && ok "the main checkout keeps its own identity (a worktree pin is per worktree)" || fail "main ws: $(ws_in "$WP")"
+run_wp workspace set repo-ident >/dev/null 2>&1
+[ "$(ws_in "$WP1")" = repo-ident ] \
+  && ok "the repo pin still outranks a worktree pin (workspace set names every session)" || fail "repo pin order: $(ws_in "$WP1")"
+WP_NEW="$(run_wp worktree new pin2 2>&1)"
+printf '%s\n' "$WP_NEW" | grep -qx 'workspace: repo-ident (pinned for this worktree)' \
+  && ok "under a repo pin, worktree new pins the repo's name, so removing the repo pin cannot re-key it" || fail "pin under repo pin: $WP_NEW"
+rm -f "$WP/.comms/workspace"
+[ "$(ws_in "$WP/.claude/worktrees/pin2")" = repo-ident ] \
+  && ok "with the repo pin gone, that worktree keeps the name it was created under" || fail "pin2 after repo unpin: $(ws_in "$WP/.claude/worktrees/pin2")"
+WP_LONG="abcdefghij-abcdefghij-abcdefghij-abcdefgh"   # 41 chars: the slug grammar's maximum
+WP_NEW="$(run_wp worktree new "$WP_LONG" 2>&1)"
+printf '%s\n' "$WP_NEW" | grep -qx "workspace: worktree-$WP_LONG (pinned for this worktree)" \
+  && ok "the longest slug still pins (the shared name grammar allows 64 chars)" || fail "long slug pin: $WP_NEW"
+WP_64="$(printf 'a%.0s' $(seq 1 64))"
+run_wp workspace set "$WP_64" >/dev/null 2>&1 && ! run_wp workspace set "${WP_64}a" >/dev/null 2>&1 \
+  && ok "workspace set shares that grammar: 64 chars accepted, 65 refused" || fail "workspace set 64/65"
+rm -f "$WP/.comms/workspace"
+# Retire removes the pin with the worktree's admin dir; it never blocks retirement.
+WP3="$WP/.claude/worktrees/pin3"; run_wp worktree new pin3 >/dev/null 2>&1
+WP3_ADMIN="$(git -C "$WP3" rev-parse --absolute-git-dir)"
+echo x > "$WP3/x.txt"; git -C "$WP3" add x.txt; wr_commit "$WP3" "feat: x"; git -C "$WP" merge -q --ff-only worktree-pin3
+run_wp worktree retire worktree-pin3 --yes >/dev/null 2>&1 && [ ! -e "$WP3" ] && [ ! -e "$WP3_ADMIN" ] \
+  && ok "retire removes a pinned worktree, and the pin goes with its admin dir" || fail "retire pinned: $(ls "$WP3_ADMIN" 2>&1)"

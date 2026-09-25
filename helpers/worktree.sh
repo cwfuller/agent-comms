@@ -730,6 +730,28 @@ wt_retire() {
   return 0
 }
 
+# Workspace pin (basis slice 0b): freeze the mailbox identity the new tree resolves to RIGHT NOW,
+# through the one resolver every reader uses, so nothing changes at creation — only a later
+# `git branch -m` stops re-keying its threads under a second state file. The name is what the
+# tree already answers (the repo pin when there is one, else its branch), so pinning it can never
+# move another session's identity; that is why this is a per-worktree pin and not `workspace set`,
+# which would rename every unpinned session in the repo mid-loop. A pin that cannot be written is
+# a loud warning, not a failure: the worktree exists, and without a pin it behaves as it always has.
+wt_pin_workspace() {  # <worktree path>
+  local ws pinf
+  ws="$(cd "$1" 2>/dev/null && cmd_workspace 2>/dev/null)" || ws=""
+  if ! workspace_name_ok "$ws"; then
+    echo "warning: worktree new: workspace not pinned — '$(clip "$ws")' is not a valid workspace name; a branch rename here will change this tree's identity" >&2
+    return 0
+  fi
+  if pinf="$(worktree_pin_file "$1")" && printf '%s\n' "$ws" >"$pinf" 2>/dev/null; then
+    echo "workspace: $ws (pinned for this worktree)"
+  else
+    echo "warning: worktree new: could not write the workspace pin${pinf:+ ($pinf)}; a branch rename here will change this tree's identity" >&2
+  fi
+  return 0
+}
+
 wt_new() {
   # worktree new [<slug>] — a session worktree under the MAIN root (never nested,
   # never cwd-relative: the two-resolver rule, third appearance — grok, plan r7),
@@ -759,6 +781,7 @@ wt_new() {
     || die "worktree new: git worktree add failed"
   echo "worktree: $path"
   echo "branch:   $branch (from $(git -C "$root" rev-parse --short "$tip"))"
+  wt_pin_workspace "$path"
   # Owner stamp: ties this worktree to the creating session's presence record, so `retire`
   # refuses while that session is live. Best effort — a missing stamp only means retire falls
   # back to the name match, never that it permits more.

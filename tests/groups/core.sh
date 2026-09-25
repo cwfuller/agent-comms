@@ -698,6 +698,100 @@ echo "$BLOCK_OUT" | grep -q "cannot create state dir" && ok "blocked state dir p
 rm -f "$REPO_FIX/.comms/state"
 mv "$REPO_FIX/.comms/state.bak" "$REPO_FIX/.comms/state"
 
+section "comms.sh: state idle/legacy (idle threads marked with evidence, never closed by age)"
+# basis slice 0b / DESIGN "Nothing is closed by age". `idle` reports, `legacy` marks only the ids
+# named, each re-judged at marking time, and a later send resumes the thread.
+IDL_NOW="$(date +%s)"; IDL_OLD=$(( IDL_NOW - 40 * 86400 ))
+IDL_SD="$REPO_FIX/.comms/state"
+idl_stamp() { date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S; }
+idl_state() {  # <thread> <status> <awaiting_since_epoch> <mtime-epoch>
+  local f="$IDL_SD/feature-helper-tests_$1.json"
+  printf '{\n  "workspace": "feature-helper-tests",\n  "thread": "%s",\n  "workflow": "auto",\n  "phase": "implement",\n  "round": "2",\n  "max_rounds": "10",\n  "loop_rounds": "",\n  "status": "%s",\n  "awaiting_from": "codex",\n  "awaiting_since": "then",\n  "awaiting_since_epoch": "%s",\n  "last_sent": "m-%s",\n  "last_run_dir": "",\n  "last_delivery": "manual"\n}\n' \
+    "$1" "$2" "$3" "$1" > "$f"
+  touch -t "$(idl_stamp "$4")" "$f"
+}
+idl_msg() {  # <dir> <thread> <mtime-epoch>
+  local f="$REPO_FIX/.comms/$1/feature-helper-tests_idl-$2-$3.md"
+  printf -- '---\ntype: review-request\nfrom: claude\nthread: %s\n---\n\nbody\n' "$2" > "$f"
+  touch -t "$(idl_stamp "$3")" "$f"
+}
+idl_status() { json_field_of "$IDL_SD/feature-helper-tests_$1.json" status; }
+file_mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"; }
+json_field_of() { sed -n 's/.*"'"$2"'": "\([^"]*\)".*/\1/p' "$1" | head -1; }
+idl_state idl-quiet in-progress "$IDL_OLD" "$IDL_OLD"
+idl_state idl-msg in-progress "$IDL_OLD" "$IDL_OLD"; idl_msg archive idl-msg "$IDL_NOW"
+idl_state idl-unread in-progress "$IDL_OLD" "$IDL_OLD"; idl_msg to-codex idl-unread "$IDL_OLD"
+idl_state idl-done complete "$IDL_OLD" "$IDL_OLD"
+idl_state idl-fresh in-progress "$IDL_NOW" "$IDL_NOW"
+idl_state idl-epoch in-progress "$IDL_NOW" "$IDL_OLD"
+IDL_BEFORE="$(cd "$IDL_SD" && ls -l *idl-* && cat *idl-*)"
+IDL_OUT="$(run_comms state idle --days 30 2>&1)"; IDL_RC=$?
+[ "$IDL_RC" = 0 ] && printf '%s\n' "$IDL_OUT" | grep -q '^idle id=feature-helper-tests_idl-quiet idle_days=40 .*status=in-progress awaiting=codex unread=0$' \
+  && ok "state idle lists a thread with no state change and no message past N days, with its evidence" || fail "state idle quiet (rc=$IDL_RC): $IDL_OUT"
+printf '%s\n' "$IDL_OUT" | grep -q '^idle id=feature-helper-tests_idl-unread .*unread=1$' \
+  && ok "an OLD unread message is not activity, and the unread count is part of the evidence" || fail "state idle unread: $IDL_OUT"
+! printf '%s\n' "$IDL_OUT" | grep -qE 'idl-(msg|done|fresh|epoch) ' \
+  && ok "a recent message, a complete thread, a recent send and a recent send epoch each keep a thread off the list" || fail "state idle over-listed: $IDL_OUT"
+[ "$(cd "$IDL_SD" && ls -l *idl-* && cat *idl-*)" = "$IDL_BEFORE" ] \
+  && ok "state idle changes nothing (content and mtimes identical)" || fail "state idle wrote something"
+IDL_OUT="$(run_comms state idle --days 60 2>&1)"
+# Captured first, never piped into grep -q: an early grep exit SIGPIPEs the writer, and under
+# pipefail that turns a match into a failure.
+! printf '%s\n' "$IDL_OUT" | grep -q 'idl-quiet' \
+  && ok "--days is the threshold: a 40-day-idle thread is not listed at 60" || fail "state idle --days 60 listed idl-quiet"
+run_comms state idle --days 0 >/dev/null 2>&1; IDL_RC=$?
+[ "$IDL_RC" = 2 ] && ok "--days 0 is a usage error" || fail "--days 0 rc=$IDL_RC"
+run_comms state legacy >/dev/null 2>&1; IDL_RC=$?
+[ "$IDL_RC" = 2 ] && [ "$(idl_status idl-quiet)" = in-progress ] \
+  && ok "state legacy with no ids is a usage error and marks nothing (no mark by age alone)" || fail "legacy no ids rc=$IDL_RC"
+run_comms state legacy '../state/feature-helper-tests_idl-quiet' >/dev/null 2>&1; IDL_RC=$?
+[ "$IDL_RC" = 2 ] && [ "$(idl_status idl-quiet)" = in-progress ] \
+  && ok "an id that is not one state file stem is refused before anything is read" || fail "legacy traversal id rc=$IDL_RC"
+IDL_OUT="$(run_comms stalled 15 2>&1)"
+printf '%s\n' "$IDL_OUT" | grep -q 'thread=idl-quiet ' && ok "before marking, the idle thread shows as stalled" || fail "stalled precondition: $IDL_OUT"
+IDL_MT="$(file_mtime_of "$IDL_SD/feature-helper-tests_idl-quiet.json")"
+IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-quiet 2>&1)"; IDL_RC=$?
+IDL_F="$IDL_SD/feature-helper-tests_idl-quiet.json"
+[ "$IDL_RC" = 0 ] && [ "$(idl_status idl-quiet)" = legacy ] && [ "$(json_field_of "$IDL_F" awaiting_from)" = none ] \
+  && [ "$(json_field_of "$IDL_F" legacy_prior_status)" = in-progress ] && [ "$(json_field_of "$IDL_F" legacy_prior_awaiting)" = codex ] \
+  && json_field_of "$IDL_F" legacy_evidence | grep -q '^idle 40d when marked: last state activity .*no message on the thread in the 30 days' \
+  && ok "state legacy marks a named idle thread and writes the evidence and the prior status into it" || fail "legacy mark (rc=$IDL_RC): $IDL_OUT | $(cat "$IDL_F")"
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$IDL_F" 2>/dev/null \
+  && ok "the marked state file is still valid JSON" || fail "legacy JSON invalid: $(cat "$IDL_F")"
+[ "$(file_mtime_of "$IDL_F")" = "$IDL_MT" ] && [ "$(sed -n '$p' "$IDL_F")" = '}' ] && sed -n 'x;$p' "$IDL_F" | grep -q '"last_delivery"' \
+  && ok "marking keeps the mtime (not activity) and keeps last_delivery as the final field" || fail "legacy mtime/tail: $(tail -3 "$IDL_F")"
+IDL_OUT="$(run_comms stalled 15 2>&1)"; IDL_OUT2="$(run_comms state idle --days 30 2>&1)"
+printf '%s\n' "$IDL_OUT" | grep -q 'STALLED' && ! printf '%s\n' "$IDL_OUT" | grep -q 'thread=idl-quiet ' \
+  && printf '%s\n' "$IDL_OUT2" | grep -q '^state idle: ' && ! printf '%s\n' "$IDL_OUT2" | grep -q 'idl-quiet' \
+  && ok "a legacy thread leaves stalled and the idle report" || fail "legacy still reported"
+IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-msg 2>&1)"; IDL_RC=$?
+[ "$IDL_RC" = 3 ] && [ "$(idl_status idl-msg)" = in-progress ] && printf '%s' "$IDL_OUT" | grep -q 'refused: feature-helper-tests_idl-msg: not idle' \
+  && ok "naming a thread with a recent message is refused at marking time and leaves it untouched" || fail "legacy active (rc=$IDL_RC): $IDL_OUT"
+IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-done 2>&1)"; IDL_RC=$?
+[ "$IDL_RC" = 3 ] && [ "$(idl_status idl-done)" = complete ] && printf '%s' "$IDL_OUT" | grep -q 'already complete' \
+  && ok "a complete thread is refused, never re-marked" || fail "legacy complete (rc=$IDL_RC): $IDL_OUT"
+IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-unread feature-helper-tests_idl-fresh 2>&1)"; IDL_RC=$?
+[ "$IDL_RC" = 3 ] && [ "$(idl_status idl-unread)" = legacy ] && [ "$(idl_status idl-fresh)" = in-progress ] \
+  && ok "per target: the idle id is marked, the active one refused, and the exit says something was refused" || fail "legacy mixed (rc=$IDL_RC): $IDL_OUT"
+IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-nosuch 2>&1)"; IDL_RC=$?
+[ "$IDL_RC" = 3 ] && printf '%s' "$IDL_OUT" | grep -q 'no such thread state' \
+  && ok "an unknown id is refused by name" || fail "legacy unknown (rc=$IDL_RC): $IDL_OUT"
+# Legacy is not closure: the next send on the thread resumes it as in-progress.
+IDL_WF="$REPO_FIX/.comms/to-codex/feature-helper-tests_2026-06-04T13-40-00_idl-resume.md"
+sed -e 's/^thread: .*/thread: idl-quiet/' -e 's/^message_id: .*/message_id: feature-helper-tests_2026-06-04T13-40-00_idl-resume/' "$OUT_WF" > "$IDL_WF"
+run_comms send --to codex "$IDL_WF" >/dev/null 2>&1
+[ "$(idl_status idl-quiet)" = in-progress ] && ! grep -q legacy "$IDL_F" \
+  && ok "a later send on a legacy thread resumes it (legacy never blocks a thread)" || fail "legacy resume: $(cat "$IDL_F")"
+# Fail closed: a message file that cannot be read is activity nobody can see.
+idl_state idl-blind in-progress "$IDL_OLD" "$IDL_OLD"; idl_msg to-codex idl-blind "$IDL_OLD"
+IDL_BLIND="$REPO_FIX/.comms/to-codex/feature-helper-tests_idl-idl-blind-$IDL_OLD.md"; chmod 000 "$IDL_BLIND"
+run_comms state idle --days 30 >/dev/null 2>&1; IDL_RC=$?
+IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-blind 2>&1)"; IDL_RC2=$?
+chmod 644 "$IDL_BLIND"
+[ "$IDL_RC" = 1 ] && [ "$IDL_RC2" = 3 ] && [ "$(idl_status idl-blind)" = in-progress ] \
+  && ok "an unreadable message file fails the report and refuses the mark (never idle on partial evidence)" || fail "unreadable msg (idle rc=$IDL_RC legacy rc=$IDL_RC2): $IDL_OUT"
+rm -f "$IDL_SD"/feature-helper-tests_idl-*.json "$REPO_FIX"/.comms/*/feature-helper-tests_idl-*.md "$IDL_WF"
+
 section "comms.sh v2.1.1: status shouts when a loop stalled undelivered"
 perl -pi -e 's/"last_delivery": "[^"]*"/"last_delivery": "manual"/; s/"status": "[^"]*"/"status": "in-progress"/' "$SF"
 ST_OUT="$(run_comms status)"
