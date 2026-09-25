@@ -56,6 +56,17 @@ OBSERVATION_FIELDS = ("answers", "inputs", "stored", "record", "thread", "outcom
 _COUNT_RE = re.compile(r"[0-9]{1,15}")   # ASCII digits only (str.isdigit accepts "²"), bounded length
 # Decision sources (and gates) that are not a classification the policy produced.
 NOT_A_DECISION = {"stub", "fail-open", "probe", "disabled", "not-permitted"}
+# Whole words on screen, one key to answer: "[m]echanical [s]tandard ...".
+LEVEL_PROMPT = " ".join("[%s]%s" % (k, v[1:]) for k, v in LEVEL_KEYS.items())
+EFFORT_PROMPT = " ".join("[%s]%s" % (k, v[1:]) for k, v in EFFORT_KEYS.items())
+# What each level means, shown once before labelling (the same rubric Jev is given).
+LEGEND = """What the levels mean (the same rubric Jev is given):
+  mechanical     typo, rename, reformat, one-file busywork | review: docs or a one-line fix visibly correct in the diff
+  standard       well-specified function/test, or a bug with a known cause | review: bounded change in one module, small blast radius
+  hard           unknown-cause debugging, concurrency, security, multi-module | review: defects hide in interactions the diff does not show
+  architectural  a wrong approach is expensive to undo (new contract, high blast radius, safety-critical)
+  effort         the cheapest reasoning that finishes the task, or reliably finds the blocking defects, in one pass
+  plan first     direction should be agreed before coding because a wrong first pass is costly to undo"""
 BANDS = ((0.0, 0.4), (0.4, 0.5), (0.5, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 1.01))
 
 # Named candidate policies. Each maps role -> parameter overrides for the production functions.
@@ -517,7 +528,8 @@ def cmd_label(args):
         return
     pr = Prompter(use_stdin)
     pr.say("Label what YOU would expect. Jev's answer and the outcome are shown only after you answer."
-           " '-' skips an item, 'q' saves and quits.")
+           " Type one letter; '-' skips an item, 'q' saves and quits.\n")
+    pr.say(LEGEND)
     for n, it in enumerate(todo, 1):
         text = it.get("text") or ""
         if len(text) > 2500:
@@ -527,17 +539,17 @@ def cmd_label(args):
         lab = {"id": it["id"], "role": it["role"], "labeler": labeler,
                "labeledAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         if it["role"] == "implementer":
-            a = pr.ask("  plan first? [y/n]", ("y", "n"))
+            a = pr.ask("  plan first?  [y]es [n]o", ("y", "n"))
             if a in ("-", "q"):
                 if a == "q":
                     break
                 continue
             lab["plan"] = "yes" if a == "y" else "no"
-            fields = (("complexity", "  complexity [m/s/h/a]", LEVEL_KEYS),
-                      ("effort", "  implementer effort [l/m/h/x]", EFFORT_KEYS))
+            fields = (("complexity", "  complexity:  " + LEVEL_PROMPT, LEVEL_KEYS),
+                      ("effort", "  implementer effort:  " + EFFORT_PROMPT, EFFORT_KEYS))
         else:
-            fields = (("depth", "  review depth [m/s/h/a]", LEVEL_KEYS),
-                      ("effort", "  review effort [l/m/h/x]", EFFORT_KEYS))
+            fields = (("depth", "  review depth:  " + LEVEL_PROMPT, LEVEL_KEYS),
+                      ("effort", "  review effort:  " + EFFORT_PROMPT, EFFORT_KEYS))
         stop = False
         for key, prompt, table in fields:
             a = pr.ask(prompt, tuple(table))
