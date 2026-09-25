@@ -344,8 +344,11 @@ leg_usage_collect() {  # <run-dir> — once per turn; a second call is a no-op
   out="$(python3 "$HELPER_DIR/leg_usage.py" collect "$LEG_USAGE_PROVIDER" "$LEG_USAGE_ROOT" \
            "$LEG_USAGE_CWD" "$1/usage-snapshot.json" 2>>"$1/runner.log")" || out=""
   LEG_USAGE_ROOT=""
-  LEG_USAGE_JSON="$(leg_usage_json "$(printf '%s\n' "$out" | sed -n 's/^usage	//p' | head -1)")"
-  LEG_RATE_JSON="$(leg_usage_json "$(printf '%s\n' "$out" | sed -n 's/^rate_limits	//p' | head -1)")"
+  # Here-strings, not `printf | sed | head`: an early-exiting reader under pipefail is the SIGPIPE
+  # shape this runner has banned. leg_usage.py prints each key once; leg_usage_json rejects a
+  # multi-line value anyway.
+  LEG_USAGE_JSON="$(leg_usage_json "$(sed -n 's/^usage	//p' <<<"$out")")"
+  LEG_RATE_JSON="$(leg_usage_json "$(sed -n 's/^rate_limits	//p' <<<"$out")")"
   return 0
 }
 
