@@ -2554,8 +2554,10 @@ and lossy rewriting of inter-agent instructions is the `$N`-corruption class). R
   `token_count.info`) plus the latest `rate_limits`; grok `usage.json` `turns[]`; claude's
   transcript deduped by `(message.id, requestId)`. Into `result.json` (`usage`, `rate_limits`)
   and the last column of `rounds.tsv`; missing data is null, never 0. Bounded to the leg's turn
-  (canary included), so warm rounds are comparable. Known gap: codex outside an isolated
-  `CODEX_HOME` (non-mounted) reads null — the shared home is not attributable.
+  (canary included), so warm rounds are comparable. Known gap: only MOUNTED legs are measured —
+  an unmounted leg shares the repo root (and codex the shared `~/.codex`) with other sessions, so
+  its records are not attributable and it reads null. Binding to the provider's session id would
+  close that; not done.
 - [ ] Tail-of-prompt verbosity steering, narrowly ("no preamble, findings are
   path:line + claim" — never "be brief": terseness that punishes reproduction buys
   cheaper, worse reviews). Error-only validation reporting (failures + counts, never

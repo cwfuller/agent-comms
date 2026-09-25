@@ -302,12 +302,17 @@ LEG_USAGE_JSON=null
 LEG_RATE_JSON=null
 LEG_USAGE_PROVIDER=""; LEG_USAGE_ROOT=""; LEG_USAGE_CWD=""
 
-# leg_usage_root <provider> [isolated-codex-home] — where this provider's records live. codex is
-# measured ONLY in an isolated home: the shared ~/.codex interleaves every other codex session on
-# the machine, so a window there could not be attributed to this leg.
+# leg_usage_root <provider> <mount-dir> [isolated-codex-home] — where this provider's records live,
+# or nothing when the leg's records cannot be told apart from anyone else's. ONLY A MOUNTED LEG IS
+# MEASURED: its cwd is unique to (thread, agent), so the grok sessions and claude transcripts keyed
+# by that cwd are this leg's alone. An unmounted leg runs in the repo root, which an interactive
+# session or another thread's leg can share, and summing their records would bill their spend to
+# this leg. codex additionally needs the mount's isolated home: the shared ~/.codex interleaves
+# every codex session on the machine.
 leg_usage_root() {
+  [ -n "${2:-}" ] || return 0
   case "$1" in
-    codex)  printf '%s' "${2:-}" ;;
+    codex)  printf '%s' "${3:-}" ;;
     claude) [ -n "${HOME:-}${CLAUDE_CONFIG_DIR:-}" ] && printf '%s/projects' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ;;
     grok)   [ -n "${HOME:-}" ] && printf '%s/.grok/sessions' "$HOME" ;;
   esac
@@ -3712,7 +3717,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # THE LEG'S USAGE WINDOW OPENS HERE, before the canary: the canary is a billed prompt in the
     # same session, so it is part of what this leg cost. (The attestation's rollout snapshot below
     # deliberately EXCLUDES it — a different question.) Nothing before this point bills.
-    leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$acp_iso_home")" "$(cd "$workdir" && pwd -P)" "$run_dir"
+    leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$mount_dir" "$acp_iso_home")" "$(cd "$workdir" && pwd -P)" "$run_dir"
     ACP_CANARY_OPTS=( "${acp_prompt_opts[@]}" )
     if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
       local canary_note="$ACP_CANARY_NOTE"
@@ -3928,7 +3933,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
   # the WHOLE tree (CLI + the shell commands it spawns) with one group signal.
   # codex here is `codex exec` under the SHARED ~/.codex, whose rollouts no window can attribute
   # to this leg, so leg_usage_root answers nothing and its usage is null.
-  leg_usage_snapshot "$provider" "$(leg_usage_root "$provider")" "$(cd "$workdir" && pwd -P)" "$run_dir"
+  leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "${mount_dir:-}")" "$(cd "$workdir" && pwd -P)" "$run_dir"
   set -m
   ( cd "$workdir" && exec ${child_env[@]+"${child_env[@]}"} "${cmd[@]}" ) \
     < "$run_dir/prompt.md" > "$run_dir/events.ndjson" 2>> "$run_dir/runner.log" &

@@ -3469,33 +3469,54 @@ cmd_friction_list() {
 # reply_leg_usage <reply-file> — the `usage` object of the leg turn that produced this reply, as
 # one line of compact JSON, or `null`.
 #
-# The reply does not name its run dir, but the coordinator log joins the two: the reply-accepted
-# row carries the reply's message id and its request id, and the SAME leg's next turn-finished row
-# for that request carries the run dir, whose result.json holds usage read from the provider's own
-# records (runphase.sh, leg_usage.py). Any gap — a mailbox reply with no runner, a pruned run dir,
-# a result.json from before usage existed — is null, never 0.
+# THE RUN IS IDENTIFIED BY ITS OWN OUTPUT, not inferred. Every runner writes the reply it stamped
+# to <run-dir>/reply.md before delivering it, and run dirs are named <request id>.<epoch>.<pid>, so
+# the one run dir under that request whose reply.md carries THIS reply's message_id is the attempt
+# that produced it — no timestamp ordering (retries can finish in the acceptance's second; clocks
+# step), and no path read back through the event log (which stores long values digest-encoded).
+# A shadow reply lives in its shadow store beside `<name>.result.json`. Any gap — a mailbox reply
+# with no runner, a pruned run dir, an ambiguous match, a result.json from before usage existed —
+# is null, never 0.
 reply_leg_usage() {
-  local mid agent acc req role ts rd=""
-  mid="$(frontmatter_field "$1" message_id 2>/dev/null || true)"
-  agent="$(frontmatter_field "$1" from 2>/dev/null || true)"
-  if [ -n "$mid" ] && [ -n "$agent" ]; then
-    acc="$(cmd_events --kind reply-accepted --message-id "$mid" --agent "$agent" --all 2>/dev/null | tail -n +2 | tail -1)" || acc=""
-    ts="$(printf '%s' "$acc" | cut -f1)"; role="$(printf '%s' "$acc" | cut -f9)"; req="$(printf '%s' "$acc" | cut -f11)"
-    # First turn-finished for that request by that leg AT OR AFTER the acceptance: the runner
-    # accepts the reply, then signs off. ISO-8601 UTC compares correctly as a string. The awk
-    # reads to EOF rather than `exit`ing: an early exit SIGPIPEs the reader, and pipefail would
-    # then discard the answer it had already printed.
-    [ -z "$req" ] || rd="$(cmd_events --kind turn-finished --request-id "$req" --agent "$agent" --role "$role" --all 2>/dev/null \
-      | tail -n +2 | awk -F'\t' -v ts="$ts" '$1 >= ts && !hit { print $13; hit = 1 }')" || rd=""
+  local f="$1" mid req d rj="" n=0
+  mid="$(frontmatter_field "$f" message_id 2>/dev/null || true)"
+  req="$(frontmatter_field "$f" in-reply-to 2>/dev/null || true)"
+  case "$f" in
+    */shadow/*.md) [ -f "${f%.md}.result.json" ] && rj="${f%.md}.result.json"; n=1 ;;
+  esac
+  if [ -z "$rj" ] && [ -n "$mid" ] && [ -n "$req" ]; then
+    for d in "$(cmd_root)/logs/$(safe_name "$req")".*; do
+      [ -f "$d/reply.md" ] && [ -f "$d/result.json" ] || continue
+      [ "$(frontmatter_field "$d/reply.md" message_id 2>/dev/null || true)" = "$mid" ] || continue
+      rj="$d/result.json"; n=$((n + 1))
+    done
   fi
-  if [ -n "$rd" ] && [ -f "$rd/result.json" ] && command -v python3 >/dev/null 2>&1; then
+  if [ "$n" = 1 ] && [ -n "$rj" ] && command -v python3 >/dev/null 2>&1; then
     python3 -c 'import json,sys
 u=json.load(open(sys.argv[1])).get("usage")
 if u is not None and not isinstance(u,dict): u=None
-sys.stdout.write(json.dumps(u,sort_keys=True,separators=(",",":")))' "$rd/result.json" 2>/dev/null && return 0
+sys.stdout.write(json.dumps(u,sort_keys=True,separators=(",",":")))' "$rj" 2>/dev/null && return 0
   fi
   printf 'null'
 }
+
+# rounds_lock <ledger> / rounds_unlock <ledger> — serialise every writer of one rounds.tsv. The
+# header upgrade REWRITES the file, so without this a writer that copied the old ledger could
+# publish its copy over a row another writer appended in between. mkdir is the atomic test-and-set;
+# a lock older than a minute is a dead writer's and is broken (a round-note takes well under one).
+rounds_lock() {
+  local l="$1.lock" i=0
+  until mkdir "$l" 2>/dev/null; do
+    if [ "$i" -ge 100 ]; then
+      if [ -n "$(find "$l" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+        rmdir "$l" 2>/dev/null || true; i=0; continue
+      fi
+      die "round-note: $(clip "$l") is held by another writer — retry, or remove it if no round-note is running"
+    fi
+    sleep 0.1; i=$((i + 1))
+  done
+}
+rounds_unlock() { rmdir "$1.lock" 2>/dev/null || true; }
 
 cmd_round_note() {
   # round-note <reply-file> --note "<one or two lines>" — record how a reviewer
@@ -3532,24 +3553,29 @@ cmd_round_note() {
   hdr_old="$(printf 'timestamp\tthread\tphase\tround\treviewer\tverdict\tblocking\tadvisory\tprompt_version\tnote')"
   hdr="$(printf '%s\tusage' "$hdr_old")"
   mkdir -p "$(dirname "$out")" 2>/dev/null || die "round-note: cannot create $(clip "$(dirname "$out")")"
+  local clean_note row
+  clean_note="$(printf '%s' "$note" | tr '\t\n' '  ')"
+  # usage LAST, after the free-text note: one line of compact JSON (the leg's `usage` from its
+  # result.json) or `null`. JSON never carries a raw tab or newline, so the row stays one TSV row.
+  # Composed BEFORE the lock, so the critical section is file writes only.
+  row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(frontmatter_field "$f" thread)" "$(frontmatter_field "$f" phase)" \
+    "$(frontmatter_field "$f" round)" "$(frontmatter_field "$f" from)" \
+    "$(cmd_verdict "$f" 2>/dev/null || true)" "${blocking:-0}" "${advisory:-0}" \
+    "$(cmd_prompt_version 2>/dev/null || true)" "$clean_note" \
+    "$(reply_leg_usage "$f" | tr '\t\n' '  ')")"
+  rounds_lock "$out"
   if [ ! -s "$out" ]; then
     printf '%s\n' "$hdr" > "$out"
   elif [ "$(head -1 "$out")" = "$hdr_old" ]; then
     # A ledger from before the usage column: extend its HEADER only. Older rows keep ten fields,
     # which a TSV reader sees as an empty (unknown) usage — never as a measured zero.
     { printf '%s\n' "$hdr"; tail -n +2 "$out"; } > "$out.tmp.$$" && mv "$out.tmp.$$" "$out" \
-      || { rm -f "$out.tmp.$$"; die "round-note: could not add the usage column to $(clip "$out")"; }
+      || { rm -f "$out.tmp.$$"; rounds_unlock "$out"; die "round-note: could not add the usage column to $(clip "$out")"; }
   fi
-  local clean_note; clean_note="$(printf '%s' "$note" | tr '\t\n' '  ')"
-  # usage LAST, after the free-text note: one line of compact JSON (the leg's `usage` from its
-  # result.json) or `null`. JSON never carries a raw tab or newline, so the row stays one TSV row.
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    "$(frontmatter_field "$f" thread)" "$(frontmatter_field "$f" phase)" \
-    "$(frontmatter_field "$f" round)" "$(frontmatter_field "$f" from)" \
-    "$(cmd_verdict "$f" 2>/dev/null || true)" "${blocking:-0}" "${advisory:-0}" \
-    "$(cmd_prompt_version 2>/dev/null || true)" "$clean_note" \
-    "$(reply_leg_usage "$f" | tr '\t\n' '  ')" >> "$out"
+  printf '%s\n' "$row" >> "$out" || { rounds_unlock "$out"; die "round-note: could not append to $(clip "$out")"; }
+  rounds_unlock "$out"
   printf 'round-note: %s r%s %s — %s blocking, %s advisory -> %s\n' \
     "$(frontmatter_field "$f" from)" "$(frontmatter_field "$f" round)" \
     "$(cmd_verdict "$f" 2>/dev/null || true)" "${blocking:-0}" "${advisory:-0}" "${out#"$root"/}"

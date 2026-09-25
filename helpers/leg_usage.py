@@ -36,6 +36,7 @@ Usage:
 collect prints exactly two lines, `usage\\t<json|null>` and `rate_limits\\t<json|null>`, and exits 0
 whenever it could print them; the reason for a null goes to stderr.
 """
+import hashlib
 import json
 import os
 import re
@@ -142,7 +143,8 @@ def grok_files(root, cwd):
 
 # ---------- snapshot ----------
 
-def read_grok_turns(f):
+def read_grok_doc(f):
+    """(sessionId, turns[]) of one usage.json."""
     try:
         with open(f) as fh:
             doc = json.load(fh)
@@ -151,7 +153,14 @@ def read_grok_turns(f):
     turns = doc.get("turns") if isinstance(doc, dict) else None
     if not isinstance(turns, list):
         raise Undecidable("a grok usage.json carries no turns[] list")
-    return turns
+    return doc.get("sessionId"), turns
+
+
+def grok_turn_print(t):
+    """A completed turn's identity: its whole record. grok REWRITES usage.json, so a file that
+    survived by name can still have had its history replaced or reset; only the content of each
+    snapshotted turn shows that the turns before the window are the ones we snapshotted."""
+    return hashlib.sha256(json.dumps(t, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def grok_turn_key(t):
@@ -161,10 +170,20 @@ def grok_turn_key(t):
     return n
 
 
+def grok_state(f):
+    sid, turns = read_grok_doc(f)
+    prints = {}
+    for t in turns:
+        n = str(grok_turn_key(t))
+        if n in prints:
+            raise Undecidable("a grok usage.json numbers two turns alike")
+        prints[n] = grok_turn_print(t)
+    return {"session": sid, "turns": prints}
+
+
 def snapshot(provider, root, cwd):
     if provider == "grok":
-        return {"grok": {f: sorted(grok_turn_key(t) for t in read_grok_turns(f))
-                         for f in grok_files(root, cwd)}}
+        return {"grok": {f: grok_state(f) for f in grok_files(root, cwd)}}
     files = {}
     for f in jsonl_files(provider, root, cwd):
         st = os.stat(f)
@@ -211,24 +230,28 @@ def window_records(provider, root, cwd, snap):
             raise Undecidable("a record file could not be read")
         if len(raw) != st.st_size - start:
             raise Undecidable("an incomplete read of a record file")
-        try:
-            blob = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            raise Undecidable("a record file is not valid UTF-8")
-        # JSONL ends records at "\n" and nowhere else: str.splitlines() would also break on
-        # U+2028/U+2029, which JSON allows raw inside a string (the rollout reader learned this).
-        if blob and not blob.endswith("\n"):
-            raise Undecidable("a record file ends mid-record")
-        recs = []
-        for line in blob.split("\n"):
-            if not line.strip():
-                continue
-            try:
-                recs.append(json.loads(line))
-            except ValueError:
-                raise Undecidable("a malformed record in the window")
-        out.append((f, start, recs))
+        out.append((f, start, parse_jsonl(raw)))
     return out
+
+
+def parse_jsonl(raw):
+    try:
+        blob = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Undecidable("a record file is not valid UTF-8")
+    # JSONL ends records at "\n" and nowhere else: str.splitlines() would also break on
+    # U+2028/U+2029, which JSON allows raw inside a string (the rollout reader learned this).
+    if blob and not blob.endswith("\n"):
+        raise Undecidable("a record file ends mid-record")
+    recs = []
+    for line in blob.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            recs.append(json.loads(line))
+        except ValueError:
+            raise Undecidable("a malformed record")
+    return recs
 
 
 # ---------- summing ----------
@@ -240,7 +263,7 @@ def add_usage(rows):
     total = {}
     for k in FIELDS:
         vals = [r.get(k) for r in rows]
-        if all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in vals):
+        if all(is_count(v) for v in vals):
             total[k] = sum(vals)
         else:
             total[k] = None
@@ -289,15 +312,13 @@ def codex_usage(windows):
         after = [a for a in after if a is not None]
         if not after:
             continue
-        before = [codex_norm(i.get("total_token_usage")) for i in token_count_infos(pre_records(f, start))]
-        before = [b for b in before if b is not None]
-        base = before[-1] if before else {k: 0 for k in FIELDS}
+        base = codex_baseline(pre_records(f, start))
         d = {}
         for k in FIELDS:
             a, b = after[-1].get(k), base.get(k)
-            if isinstance(a, int) and isinstance(b, int) and a >= b:
+            if is_count(a) and is_count(b) and a >= b:
                 d[k] = a - b
-            elif isinstance(a, int) and isinstance(b, int):
+            elif is_count(a) and is_count(b):
                 raise Undecidable("the codex running token total went backwards in the window")
             else:
                 d[k] = None
@@ -311,10 +332,30 @@ def codex_usage(windows):
     return total
 
 
+def is_count(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def codex_baseline(pre):
+    """The running total the window starts from. ZERO ONLY WHEN PROVEN: the bytes before the
+    window carry no token evidence at all (a file the leg itself created, or one holding only
+    session metadata). Earlier billed work with no usable running total cannot be subtracted, so
+    the window is unbounded — never a baseline of zero that bills that work to this leg."""
+    totals = [codex_norm(i.get("total_token_usage")) for i in token_count_infos(pre)]
+    totals = [t for t in totals if t is not None]
+    if totals:
+        return totals[-1]
+    for r in pre:
+        if isinstance(r, dict) and (r.get("type") == "token_usage_record"
+                                    or any(True for _ in token_count_events([r]))):
+            raise Undecidable("the codex rollout holds earlier billed work but no running total to subtract")
+    return {k: 0 for k in FIELDS}
+
+
 def pre_records(f, start):
     """Records written BEFORE the window, for the token_count baseline — read only on this
-    fallback path. Unparseable lines are skipped here: the baseline is only ever the last good
-    total, and the window itself was already held to the strict reader."""
+    fallback path, and held to the same strict reader as the window: a baseline read past a
+    malformed record could be an older total than the true one."""
     if not start:
         return []
     try:
@@ -324,14 +365,7 @@ def pre_records(f, start):
         raise Undecidable("a record file could not be re-read for its baseline")
     if len(pre) != start:
         raise Undecidable("an incomplete read of a record file's baseline")
-    out = []
-    for line in pre.decode("utf-8", "replace").split("\n"):
-        if line.strip():
-            try:
-                out.append(json.loads(line))
-            except ValueError:
-                pass
-    return out
+    return parse_jsonl(pre)
 
 
 def token_count_events(recs):
@@ -365,6 +399,12 @@ def codex_rate_limits(windows):
         "used_percent": prim.get("used_percent"),
         "resets_at": prim.get("resets_at"),
     }
+
+
+def thinking_tokens(u):
+    d = u.get("output_tokens_details")
+    v = d.get("thinking_tokens") if isinstance(d, dict) else None
+    return v if is_count(v) else None
 
 
 def claude_usage(windows, root, cwd):
@@ -403,7 +443,9 @@ def claude_usage(windows, root, cwd):
             "cached_input_tokens": cr if isinstance(cr, int) else None,
             "cache_write_input_tokens": cw if isinstance(cw, int) else None,
             "output_tokens": out if isinstance(out, int) else None,
-            "reasoning_output_tokens": None,   # not reported separately by this provider
+            # Reported as output_tokens_details.thinking_tokens (a subset of output_tokens) by
+            # runtimes that record it; absent elsewhere, and then null like any missing field.
+            "reasoning_output_tokens": thinking_tokens(u),
             "total_tokens": inp + cw + cr + out if ok else None,
         })
     total = add_usage(rows)
@@ -435,9 +477,26 @@ def grok_usage(root, cwd, snap):
             raise Undecidable("a grok usage.json present at snapshot time is gone")
     rows, calls = [], []
     for f in files:
-        before = set(prev.get(f, []))
-        for t in read_grok_turns(f):
-            if grok_turn_key(t) in before:
+        was = prev.get(f, {"session": None, "turns": {}})
+        if not isinstance(was, dict) or not isinstance(was.get("turns"), dict):
+            raise Undecidable("an unreadable grok snapshot entry")
+        sid, turns = read_grok_doc(f)
+        now = {}
+        for t in turns:
+            n = str(grok_turn_key(t))
+            if n in now:
+                raise Undecidable("a grok usage.json numbers two turns alike")
+            now[n] = t
+        # THE HISTORY MUST BE THE ONE WE SNAPSHOTTED: same session, and every earlier turn still
+        # present with the same content. A replaced or reset history (turn numbers reused, turns
+        # dropped) cannot be split into "before" and "this leg", so the window is unbounded.
+        if f in prev and sid != was.get("session"):
+            raise Undecidable("a grok usage.json now belongs to a different session")
+        for n, fp in was["turns"].items():
+            if n not in now or grok_turn_print(now[n]) != fp:
+                raise Undecidable("a grok usage.json's earlier turns were replaced during the leg")
+        for n, t in now.items():
+            if n in was["turns"]:
                 continue
             rows.append({k: t.get(v) for k, v in GROK_MAP.items()})
             calls.append(t.get("modelCalls"))

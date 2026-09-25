@@ -570,19 +570,24 @@ changed concrete policy is a fresh session and an unchanged one stays warm.
 `result.json` `usage` is what the leg cost, read by `helpers/leg_usage.py` from the
 PROVIDER'S OWN records — never acpx's `[acpx] tokens:` line or `runner.log`. The window opens
 immediately before the leg's first billable prompt (the ACP canary included) and closes when the
-provider exits, before unmount, so a warm leg is not re-billed for earlier rounds. codex: the
-isolated `CODEX_HOME` rollout's `token_usage_record`s summed by `turn_id`, a response recorded
-twice counted once, falling back to the `token_count.info` running-total delta; codex outside an
-isolated home (the shared `~/.codex`) is not attributable and reads null. grok: the
-`usage.json` `turns[]` this leg added. claude: the project transcript for the leg's cwd,
-deduplicated by `(message.id, requestId)`, last copy wins. Fields follow codex's convention —
+provider exits, before unmount, so a warm leg is not re-billed for earlier rounds. **Only a
+MOUNTED leg is measured**: its cwd is unique to (thread, agent), so the records a provider keys by
+cwd are that leg's alone; an unmounted leg shares the repo root with interactive sessions and
+other legs and reads null. codex: the isolated `CODEX_HOME` rollout's `token_usage_record`s
+summed by `turn_id`, a response recorded twice counted once, falling back to the
+`token_count.info` running-total delta (a zero baseline only when nothing before the window
+recorded tokens). grok: the `usage.json` `turns[]` this leg added — the session and every earlier
+turn must be unchanged, since grok rewrites the file. claude: the project transcript for the
+leg's cwd, deduplicated by `(message.id, requestId)`, last copy wins. Fields follow codex's convention —
 `input_tokens` (INCLUDING cache reads and writes), `cached_input_tokens`,
 `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens` — plus
 `turns`, `responses` and `source`. A codex leg also records `rate_limits`, its newest snapshot
 (`limit_id`, `window_minutes`, `used_percent`, `resets_at`). **Missing is null, never 0**: no
 records, an unbounded window (a file replaced, truncated or gone mid-turn), or a field some record
-lacks. `round-note` copies the leg's `usage` into the last column of `.comms/grades/rounds.tsv`,
-joining the reply to its run through the coordinator log.
+lacks. `round-note` copies the leg's `usage` into the last column of `.comms/grades/rounds.tsv`:
+the run is the one under `logs/<in-reply-to>.*` whose `reply.md` carries the reply's
+`message_id` (a shadow reply reads its store's `<name>.result.json`). Writers of one ledger are
+serialised by a `rounds.tsv.lock` directory, since upgrading an old ledger's header rewrites it.
 
 Thread state mirrors the outcome (`spawned` →
 `completed`/`failed`/`timeout`), records `last_run_dir` (the `stalled` watchdog's pid

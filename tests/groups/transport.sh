@@ -330,21 +330,38 @@ grep -q "$(printf 'old-thread\timplement\t1\tgrok\tAPPROVE\t0\t0\tpv-old\tan old
   && ok "an existing ledger's older rows survive the header upgrade untouched" || fail "old rounds.tsv rows were rewritten or lost"
 awk -F'\t' 'NR>1 && $2=="rn-thread" && NF==11 && $11=="null"' "$RN_TSV" | grep -q . \
   && ok "a reply with no runner behind it records usage null" || fail "mailbox reply usage: $(grep rn-thread "$RN_TSV" | awk -F'\t' '{print NF": "$NF}')"
-# The JOIN: reply message_id -> reply-accepted (request id) -> the leg's turn-finished -> run dir.
-# A decoy turn-finished for the same request by ANOTHER agent must not be the one read.
-RN_RD="$WORK/rn-run"; mkdir -p "$RN_RD"
-printf '{\n  "status": "completed",\n  "usage": {"input_tokens":600,"source":"codex-token-usage-record","total_tokens":660},\n  "rate_limits": null\n}\n' > "$RN_RD/result.json"
-RN_DECOY="$WORK/rn-decoy"; mkdir -p "$RN_DECOY"
-printf '{\n  "usage": {"total_tokens":999}\n}\n' > "$RN_DECOY/result.json"
-run_tr events append --kind reply-accepted --thread rn-join --agent codex --request-id rn-req-1 --message-id rn-reply-1 --status APPROVE >/dev/null 2>&1
-run_tr events append --kind turn-finished --thread rn-join --agent grok --request-id rn-req-1 --run-dir "$RN_DECOY" --status completed >/dev/null 2>&1
-run_tr events append --kind turn-finished --thread rn-join --agent codex --request-id rn-req-1 --run-dir "$RN_RD" --status completed >/dev/null 2>&1
+# The JOIN identifies the producing ATTEMPT by its own output: the run dir under the request whose
+# reply.md carries this reply's message_id. Two attempts of one request (a retry) with the same
+# timestamps: only the one that produced THIS reply may be read. (codex, implement r1, blocking:
+# the old timestamp join picked an earlier attempt finishing in the acceptance's second.)
+RN_LOGS="$TR_FIX/.comms/logs"; mkdir -p "$RN_LOGS/rn-req-1.1790000000.111" "$RN_LOGS/rn-req-1.1790000000.222"
+printf -- '---\nmessage_id: rn-reply-OTHER\n---\n' > "$RN_LOGS/rn-req-1.1790000000.111/reply.md"
+printf '{\n  "usage": {"total_tokens":999}\n}\n' > "$RN_LOGS/rn-req-1.1790000000.111/result.json"
+printf -- '---\nmessage_id: rn-reply-1\n---\n' > "$RN_LOGS/rn-req-1.1790000000.222/reply.md"
+printf '{\n  "status": "completed",\n  "usage": {"input_tokens":600,"source":"codex-token-usage-record","total_tokens":660},\n  "rate_limits": null\n}\n' \
+  > "$RN_LOGS/rn-req-1.1790000000.222/result.json"
 RN_J="$TR_FIX/.comms/archive/rn-join.md"
-awk '/^thread: rn-thread$/ { print "thread: rn-join"; print "message_id: rn-reply-1"; next } { print }' "$TR_RN" > "$RN_J"
+awk '/^thread: rn-thread$/ { print "thread: rn-join"; print "message_id: rn-reply-1"; print "in-reply-to: rn-req-1"; next } { print }' "$TR_RN" > "$RN_J"
 run_tr round-note "$RN_J" --note "joined" >/dev/null 2>&1
-awk -F'\t' 'NR>1 && $2=="rn-join"' "$RN_TSV" | awk -F'\t' '{print $11}' | grep -qx '{"input_tokens":600,"source":"codex-token-usage-record","total_tokens":660}' \
-  && ok "round-note records the usage of the leg turn that produced the reply" \
+[ "$(awk -F'\t' '$2=="rn-join"{print $11}' "$RN_TSV")" = '{"input_tokens":600,"source":"codex-token-usage-record","total_tokens":660}' ] \
+  && ok "round-note records the usage of the attempt whose reply.md is this reply, not a sibling retry" \
   || fail "joined usage: $(awk -F'\t' '$2=="rn-join"{print $11}' "$RN_TSV")"
+# CONCURRENT WRITERS over a ledger that still has the old header: the upgrade rewrites the file,
+# so an unserialised writer could publish its copy over a row another appended meanwhile.
+RN_C="$WORK/rn-concurrent"; mkdir -p "$RN_C/.comms/grades" "$RN_C/.comms/archive"
+git -C "$RN_C" init -q -b main
+printf 'timestamp\tthread\tphase\tround\treviewer\tverdict\tblocking\tadvisory\tprompt_version\tnote\n' > "$RN_C/.comms/grades/rounds.tsv"
+for n in 1 2 3 4 5 6 7 8; do
+  sed "s/^thread: rn-thread\$/thread: rn-par-$n/" "$TR_RN" > "$RN_C/.comms/archive/rn-par-$n.md"
+done
+for n in 1 2 3 4 5 6 7 8; do
+  (cd "$RN_C" && "$COMMS" round-note ".comms/archive/rn-par-$n.md" --note "par $n" >/dev/null 2>&1) &
+done
+wait
+[ "$(tail -n +2 "$RN_C/.comms/grades/rounds.tsv" | grep -c 'rn-par-')" = 8 ] && [ "$(head -1 "$RN_C/.comms/grades/rounds.tsv" | awk -F'\t' '{print $NF}')" = usage ] \
+  && [ ! -e "$RN_C/.comms/grades/rounds.tsv.lock" ] \
+  && ok "eight concurrent round-notes over an old ledger keep all eight rows, upgrade the header once, and leave no lock" \
+  || fail "concurrent round-note lost rows: $(tail -n +2 "$RN_C/.comms/grades/rounds.tsv" | grep -c 'rn-par-') of 8"
 check_not "round-note rejects a missing file" run_tr round-note "$TR_FIX/nope.md" --note x
 
 # SNAPSHOT ON SEND. Without a pinned artifact the reviewer reads whatever the author

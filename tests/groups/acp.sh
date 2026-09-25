@@ -1620,31 +1620,52 @@ LU_DIV="$WORK/lu-codex-div"; pol_run lu-codex-div "$LU_DIV" AX_ROLLOUT_EFFORT=me
   && ok "a leg refused after its prompt still records what the provider billed" \
   || fail "refused leg usage: status=$(cn_status "$LU_DIV") total=$(ru "$LU_DIV" usage total_tokens)"
 
-# grok: the window is the turns[] this leg ADDED. Two legs in one cwd, as a warm leg's rounds are:
-# the second must not re-bill the first.
-LU_H="$WORK/lu-home"; mkdir -p "$LU_H"; : > "$LU_H/.acpx-test-store"
-LU_G1="$(run_canary_turn lu-grok-1 pong HOME="$LU_H" AX_GROK_USAGE="$REPO/tests/fixtures/leg-usage/grok-usage-before.json")"
-LU_G2="$(run_canary_turn lu-grok-2 pong HOME="$LU_H" AX_GROK_USAGE="$REPO/tests/fixtures/leg-usage/grok-usage-after.json")"
+# MOUNTED grok and claude legs. Only a mount gives a leg a cwd of its own; the records a provider
+# keys by cwd are then this leg's alone. Built like pol_msg, addressed to the provider under test.
+lu_msg() {  # <provider> <from> <thread> -> writes a mounted review-request, echoes its path
+  local prov="$1" from="$2" thr="$3" m
+  mkdir -p "$MA_FIX/.comms/to-$prov"
+  m="$MA_FIX/.comms/to-$prov/${MA_WS}_2026-08-20T14-00-00_$thr.md"
+  { head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+    printf 'artifact_id: %s\nhead_sha: %s\n' "$CN_MHEAD" "$CN_MHEAD"
+    tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" \
+      | sed -e "s/^thread: ma-arc-1\$/thread: $thr/" -e "s/^from: claude\$/from: $from/"
+  } > "$m"; printf '%s' "$m"
+}
+lu_run() {  # <provider> <from> <thread> <dir> [extra env...]
+  local prov="$1" from="$2" thr="$3" dir="$4"; shift 4
+  mkdir -p "$dir"
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$CN_MHOME" COMMS_MOUNT_BASE="$CN_MBASE" \
+      ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=pong COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+      COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 "$@" "$RP" run --message "$(lu_msg "$prov" "$from" "$thr")" \
+      --dir "$dir" --provider "$prov" --via acp --timeout-secs 20 ) >/dev/null 2>&1
+}
+# grok: the window is the turns[] this leg ADDED. Two rounds of one thread share the mount, and so
+# the grok session, as a warm leg's rounds do: the second must not re-bill the first.
+LU_G1="$WORK/lu-grok-1"; lu_run grok claude lu-grok "$LU_G1" AX_GROK_USAGE="$REPO/tests/fixtures/leg-usage/grok-usage-before.json"
+LU_G2="$WORK/lu-grok-2"; lu_run grok claude lu-grok "$LU_G2" AX_GROK_USAGE="$REPO/tests/fixtures/leg-usage/grok-usage-after.json"
 [ "$(cn_status "$LU_G1")" = completed ] && [ "$(ru "$LU_G1" usage total_tokens)" = 24231 ] && [ "$(ru "$LU_G1" usage turns)" = 1 ] \
-  && ok "a grok leg's result.json carries the usage.json turn it added" \
+  && ok "a mounted grok leg's result.json carries the usage.json turn it added" \
   || fail "grok leg 1: status=$(cn_status "$LU_G1") total=$(ru "$LU_G1" usage total_tokens)"
 [ "$(cn_status "$LU_G2")" = completed ] && [ "$(ru "$LU_G2" usage total_tokens)" = 3060 ] && [ "$(ru "$LU_G2" usage turns)" = 2 ] \
-  && ok "the next grok leg in the same session counts only its own turns, not the session total" \
+  && ok "the next round in the same grok session counts only its own turns, not the session total" \
   || fail "grok leg 2: status=$(cn_status "$LU_G2") total=$(ru "$LU_G2" usage total_tokens)"
 [ "$(ru "$LU_G2" rate_limits x)" = "<none>" ] \
   && ok "a grok leg's rate_limits is null (only codex reports one)" || fail "grok rate_limits not null"
 
 # claude: the transcript's per-content-block duplicates collapse to one response each.
-mkdir -p "$MA_FIX/.comms/to-claude"
-LU_CM="$MA_FIX/.comms/to-claude/${MA_WS}_2026-08-20T14-00-00_lu-claude.md"
-sed -e "s/^thread: ma-arc-1\$/thread: lu-claude/" -e "s/^from: claude\$/from: codex/" \
-    -e "s/_review-req-1\$/_lu-claude/" "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$LU_CM"
-LU_CL="$WORK/lu-claude"; mkdir -p "$LU_CL"
-( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$LU_H" ACP_PARITY_PAYLOAD="$BRK_PAY" \
-    AX_CLAUDE_TRANSCRIPT="$REPO/tests/fixtures/leg-usage/claude-window.jsonl" \
-    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$LU_CM" --dir "$LU_CL" \
-    --provider claude --via acp --timeout-secs 20 ) >/dev/null 2>&1
+LU_CL="$WORK/lu-claude"; lu_run claude codex lu-claude "$LU_CL" AX_CLAUDE_TRANSCRIPT="$REPO/tests/fixtures/leg-usage/claude-window.jsonl"
 [ "$(cn_status "$LU_CL")" = completed ] && [ "$(ru "$LU_CL" usage output_tokens)" = 160 ] \
   && [ "$(ru "$LU_CL" usage responses)" = 2 ] && [ "$(ru "$LU_CL" usage source)" = claude-transcript ] \
-  && ok "a claude leg's result.json carries its transcript usage, deduplicated by (message.id, requestId)" \
+  && ok "a mounted claude leg's result.json carries its transcript usage, deduplicated by (message.id, requestId)" \
   || fail "claude leg: status=$(cn_status "$LU_CL") out=$(ru "$LU_CL" usage output_tokens) responses=$(ru "$LU_CL" usage responses)"
+
+# UNMOUNTED legs run in the repo root, which an interactive session or another thread's leg can
+# share: their records are not attributable, so the leg reads null even though the provider wrote
+# some. (codex, implement r1, blocking: two sessions on one cwd were billed together.)
+LU_H="$WORK/lu-home"; mkdir -p "$LU_H"; : > "$LU_H/.acpx-test-store"
+LU_GU="$(run_canary_turn lu-grok-unmounted pong HOME="$LU_H" AX_GROK_USAGE="$REPO/tests/fixtures/leg-usage/grok-usage-before.json")"
+[ "$(cn_status "$LU_GU")" = completed ] && [ "$(ru "$LU_GU" usage x)" = "<none>" ] \
+  && [ -n "$(find "$LU_H/.grok/sessions" -name usage.json 2>/dev/null)" ] \
+  && ok "an unmounted leg reads usage null although its provider wrote records — its cwd is shared" \
+  || fail "unmounted leg: status=$(cn_status "$LU_GU") total=$(ru "$LU_GU" usage total_tokens)"
