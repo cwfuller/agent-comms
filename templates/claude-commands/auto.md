@@ -407,9 +407,8 @@ verdict format. The cycle continues until APPROVE or max rounds.
    - **Retire keeps every gate.** `--yes` turns off the dry run; it does not bypass
      anything, and there is no force flag to reach for. Never remove the tree or delete the
      branch by hand to get past a refusal.
-   - **A refusal does not fail the loop.** Any non-zero `RETIRE_RC` (3 refused, 4 the
-     branch moved, 1 a remove or delete failed) comes with retire's own explanation on
-     stderr. Relay it to the user in one line, in retire's words — what it says was removed
+   - **A refusal does not fail the loop.** Any non-zero `RETIRE_RC` comes with retire's
+     own explanation on stderr. Relay it to the user in one line, in retire's words — what it says was removed
      or left (`the branch is untouched`, `worktree removed: yes|no`), never an assumption.
      The landing still succeeded, so the status line is still **Done.**; release presence
      anyway. Whatever remains is the human's: advice in the message such as "delete it by
