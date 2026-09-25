@@ -16,17 +16,39 @@
 # Ignored content a build or install recreates, matched against the BASENAME of each
 # collapsed ignored entry (`git ls-files --directory`). Everything else that is ignored blocks
 # retire: a worktree once held ~$22 of paid eval results in an ignored folder that existed
-# nowhere else. Content INSIDE a listed directory is not inspected, except for nested repos.
+# nowhere else. Content INSIDE a listed directory is not inspected, except for nested repos and
+# secret-named files git lists individually (the secret check runs first).
 # Directory names match only a DIRECTORY entry (`dist/`): an ignored FILE named `dist` is not
 # a build tree. (grok, impl r1.) WT_REGENERABLE_FILES are the file-shaped entries.
+# WT_REGENERABLE_PATHS are directories matched by their TRAILING PATH, for names too generic
+# to match as a bare basename: husky's `.husky/_/` must not make every ignored `_/` regenerable.
+# WT_REGENERABLE_SUFFIXES match file basenames by suffix (TypeScript's `tsconfig*.tsbuildinfo`).
 WT_REGENERABLE="node_modules .next .nuxt .svelte-kit .turbo .parcel-cache .cache dist build out target coverage .nyc_output __pycache__ .pytest_cache .mypy_cache .ruff_cache .tox .venv venv .gradle"
 WT_REGENERABLE_FILES=".DS_Store"
+WT_REGENERABLE_PATHS=".husky/_"
+WT_REGENERABLE_SUFFIXES=".tsbuildinfo"
+
+wt_is_regenerable_dir() {  # <directory path, no trailing slash>
+  local n base="${1##*/}"
+  for n in $WT_REGENERABLE; do [ "$base" = "$n" ] && return 0; done
+  for n in $WT_REGENERABLE_PATHS; do case "/$1" in */"$n") return 0 ;; esac; done
+  return 1
+}
 
 wt_is_regenerable() {  # <collapsed ignored entry, `dir/` for a directory>
-  local n base="${1%/}"; base="${base##*/}"
+  local n e="${1%/}" base anc
+  base="${e##*/}"
+  # A directory ignored by its OWN .gitignore (husky writes `*` into `.husky/_/.gitignore`) is
+  # not collapsed: git lists it AND each file inside. Its contents inherit the directory's verdict.
+  anc="$e"
+  while [ "${anc%/*}" != "$anc" ]; do
+    anc="${anc%/*}"
+    wt_is_regenerable_dir "$anc" && return 0
+  done
   case "$1" in
-    */) for n in $WT_REGENERABLE; do [ "$base" = "$n" ] && return 0; done ;;
-    *)  for n in $WT_REGENERABLE_FILES; do [ "$base" = "$n" ] && return 0; done ;;
+    */) wt_is_regenerable_dir "$e" && return 0 ;;
+    *)  for n in $WT_REGENERABLE_FILES; do [ "$base" = "$n" ] && return 0; done
+        for n in $WT_REGENERABLE_SUFFIXES; do case "$base" in ?*"$n") return 0 ;; esac; done ;;
   esac
   return 1
 }

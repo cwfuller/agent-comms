@@ -94,7 +94,7 @@ integrate: driver contract (classified exit codes + one result line)	24
 route.sh: decision reuse and probe mode	12
 verify: a landing suite for any repo (template, init, status, fresh)	34
 route-eval: labelled eval set for the classifiers	17
-worktree list/retire: hand-run session-lifecycle retirement	95
+worktree list/retire: hand-run session-lifecycle retirement	100
 route-eval: more than one labeller	5
 compose: exactly one machine-readable compose-result line	20
 comms.sh version: the installed kernel commit and template version	18

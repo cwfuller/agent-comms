@@ -137,6 +137,27 @@ wr_landed ddir1; mkdir -p "$(wr_path ddir1)/dist"; echo built > "$(wr_path ddir1
 wr_retired "an ignored dist/ directory is regenerable" ddir1
 wr_landed bare1; git init -q --bare "$(wr_path bare1)/node_modules/mirror.git"
 wr_refused "refuses a bare repository inside a regenerable directory" bare1 "nested-git: .*mirror.git"
+# ---- field report 2026-09-25: husky's hook dir and TypeScript build info ----
+# husky ignores `.husky/_/` through its own `*` .gitignore, so git lists the directory AND its
+# files. `.husky/`, `lib/` and `pkg/` are tracked, as in a real repo, so only the ignored parts list.
+wr_tracked() {  # <slug> <path...> — a landed managed worktree that also tracks these paths
+  local slug="$1" f; shift; wr_new "$slug"
+  for f in "$@"; do mkdir -p "$(dirname "$(wr_path "$slug")/$f")"; echo keep > "$(wr_path "$slug")/$f"; done
+  git -C "$(wr_path "$slug")" add -- "$@"; wr_commit "$(wr_path "$slug")" "chore: track $*"
+  git -C "$WR" merge -q --ff-only "worktree-$slug"
+}
+wr_selfignored() { mkdir -p "$1"; printf '*\n' > "$1/.gitignore"; echo gen > "$1/$2"; }
+wr_tracked hsk1 .husky/pre-commit; wr_selfignored "$(wr_path hsk1)/.husky/_" husky.sh
+wr_retired "husky's self-ignored .husky/_/ and the files git lists inside it are regenerable" hsk1
+wr_tracked hsk2 lib/keep; wr_selfignored "$(wr_path hsk2)/lib/_" results.json
+wr_refused "a self-ignored _/ outside .husky is not regenerable (no bare-basename match)" hsk2 "ignored: .*lib/_/"
+wr_tracked hsk3 .husky/pre-commit; wr_selfignored "$(wr_path hsk3)/.husky/_" .env
+wr_refused "a secret-named file inside a regenerable directory is still refused" hsk3 "secrets: .*\.husky/_/\.env"
+printf '*.tsbuildinfo\n' >> "$WR/.git/info/exclude"
+wr_tracked tsb1 pkg/keep; echo '{}' > "$(wr_path tsb1)/tsconfig.tsbuildinfo"; echo '{}' > "$(wr_path tsb1)/pkg/tsconfig.app.tsbuildinfo"
+wr_retired "*.tsbuildinfo files are regenerable" tsb1
+wr_landed tsb2; mkdir -p "$(wr_path tsb2)/cache.tsbuildinfo"; echo precious > "$(wr_path tsb2)/cache.tsbuildinfo/data"
+wr_refused "an ignored DIRECTORY named *.tsbuildinfo is not regenerable (the suffix is file-only)" tsb2 "ignored: .*cache\.tsbuildinfo/"
 # ---- round 2 (codex, grok): raw bytes and modes, newline-bearing repo paths ----
 wr_landed flt1
 printf 'flt1.txt filter=strip\n' >> "$WR/.git/info/attributes"; git -C "$WR" config filter.strip.clean "sed /LOCAL=/d"
