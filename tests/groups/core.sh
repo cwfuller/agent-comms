@@ -754,11 +754,11 @@ IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-quiet 2>&1)
 IDL_F="$IDL_SD/feature-helper-tests_idl-quiet.json"
 [ "$IDL_RC" = 0 ] && [ "$(idl_status idl-quiet)" = legacy ] && [ "$(json_field_of "$IDL_F" awaiting_from)" = none ] \
   && [ "$(json_field_of "$IDL_F" legacy_prior_status)" = in-progress ] && [ "$(json_field_of "$IDL_F" legacy_prior_awaiting)" = codex ] \
-  && json_field_of "$IDL_F" legacy_evidence | grep -q '^idle 40d when marked: last state activity .*no message on the thread in the 30 days' \
+  && grep -q '^idle 40d when marked: last state activity .*no message on the thread in the 30 days' <<<"$(json_field_of "$IDL_F" legacy_evidence)" \
   && ok "state legacy marks a named idle thread and writes the evidence and the prior status into it" || fail "legacy mark (rc=$IDL_RC): $IDL_OUT | $(cat "$IDL_F")"
 python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$IDL_F" 2>/dev/null \
   && ok "the marked state file is still valid JSON" || fail "legacy JSON invalid: $(cat "$IDL_F")"
-[ "$(file_mtime_of "$IDL_F")" = "$IDL_MT" ] && [ "$(sed -n '$p' "$IDL_F")" = '}' ] && sed -n 'x;$p' "$IDL_F" | grep -q '"last_delivery"' \
+[ "$(file_mtime_of "$IDL_F")" = "$IDL_MT" ] && [ "$(sed -n '$p' "$IDL_F")" = '}' ] && grep -q '"last_delivery"' <<<"$(sed -n 'x;$p' "$IDL_F")" \
   && ok "marking keeps the mtime (not activity) and keeps last_delivery as the final field" || fail "legacy mtime/tail: $(tail -3 "$IDL_F")"
 IDL_OUT="$(run_comms stalled 15 2>&1)"; IDL_OUT2="$(run_comms state idle --days 30 2>&1)"
 printf '%s\n' "$IDL_OUT" | grep -q 'STALLED' && ! printf '%s\n' "$IDL_OUT" | grep -q 'thread=idl-quiet ' \
