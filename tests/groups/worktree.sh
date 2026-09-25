@@ -216,6 +216,20 @@ WR_OI="$(printf '%s' "$WR_CL" | sed -n 's/.*instance: //p')"
 wr_refused "refuses while the owning session is live (owner stamp)" pres1 "presence: live:owner-sess"
 wr_retired "the owning session itself may retire it" pres1 COMMS_PRESENCE_NAME=owner-sess COMMS_PRESENCE_INSTANCE="$WR_OI"
 [ ! -f "$WR/.comms/worktrees/pres1.owner" ] && ok "a successful retire removes the owner stamp" || fail "owner stamp left behind"
+# "Self" is the exact (name, instance) pair. A caller carrying the owner's NAME with some other
+# instance — a same-name second session, or a copied export — is not the owner, and neither is the
+# owner's instance under another name. Only the exact pair above was exercised.
+WR_CL5="$(run_wr presence claim --name owner5 --role "owns pres5")"
+WR_OI5="$(printf '%s' "$WR_CL5" | sed -n 's/.*instance: //p')"
+(cd "$WR" && env COMMS_PRESENCE_NAME=owner5 COMMS_PRESENCE_INSTANCE="$WR_OI5" "$COMMS" worktree new pres5) >/dev/null 2>&1
+echo pres5 > "$(wr_path pres5)/pres5.txt"; git -C "$(wr_path pres5)" add pres5.txt; wr_commit "$(wr_path pres5)" "feat: pres5"
+git -C "$WR" merge -q --ff-only worktree-pres5
+wr_refused "the owner's name with a different instance is not the owner" pres5 "presence: live:owner5" \
+  COMMS_PRESENCE_NAME=owner5 COMMS_PRESENCE_INSTANCE=0123456789abcdef0123456789abcdef
+wr_refused "the owner's instance under a different name is not the owner" pres5 "presence: live:owner5" \
+  COMMS_PRESENCE_NAME=someone-else COMMS_PRESENCE_INSTANCE="$WR_OI5"
+wr_retired "control: the exact owner pair retires the same worktree" pres5 COMMS_PRESENCE_NAME=owner5 COMMS_PRESENCE_INSTANCE="$WR_OI5"
+run_wr presence release --name owner5 --instance "$WR_OI5" >/dev/null 2>&1
 wr_landed pres2
 WR_CL2="$(run_wr presence claim --name pres2 --role "name match")"
 wr_refused "refuses while a live session is named like the slug" pres2 "presence: live:pres2"

@@ -69,11 +69,11 @@ templates: the loop closes its thread state on the terminal approval	2
 ask: the driver-neutral consult verb	28
 review turns may read history, never publish or rewrite it	44
 runphase: warm ACP mounts live at a stable per-(thread,agent) path	47
-presence & worktrees: advisory coordination (plan presence-worktrees-15135)	117
+presence & worktrees: advisory coordination (plan presence-worktrees-15135)	118
 runphase: the state-file wait is DECLARED by the spawner, never guessed	22
 harness: a partial run is never a verdict	55
 harness: grep at the end of a pipe drains its producer (no SIGPIPE)	14
-integrate: an exit status is not proof the suite ran	30
+integrate: an exit status is not proof the suite ran	34
 integrate: the verification tree is a FRESH checkout	11
 integrate: docs-only skip	19
 the coordinator's event log: a durable record that is not the mailbox	169
@@ -90,14 +90,14 @@ review identities: a claude-review turn over ACP	26
 review identities: shadow and the direct grok arm	31
 review identities: await synthesizes a result for a runner that died before turn.tsv	8
 review twins: setup accepts one driver and asks about its provider	8
-integrate: driver contract (classified exit codes + one result line)	24
+integrate: driver contract (classified exit codes + one result line)	27
 route.sh: decision reuse and probe mode	12
 verify: a landing suite for any repo (template, init, status, fresh)	34
 route-eval: labelled eval set for the classifiers	17
-worktree list/retire: hand-run session-lifecycle retirement	101
+worktree list/retire: hand-run session-lifecycle retirement	104
 route-eval: more than one labeller	5
-compose: exactly one machine-readable compose-result line	20
+compose: exactly one machine-readable compose-result line	22
 comms.sh version: the installed kernel commit and template version	18
-leg_usage.py: a leg's tokens come from the provider's own records	43
+leg_usage.py: a leg's tokens come from the provider's own records	46
 comms.sh: state idle/legacy (idle threads marked with evidence, never closed by age)	22
 worktree new: pins the workspace name for the new worktree	11

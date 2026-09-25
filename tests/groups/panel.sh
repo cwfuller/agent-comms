@@ -1253,11 +1253,11 @@ mkdir -p "$CR_FIX/.comms/to-codex" "$CR_FIX/.comms/to-grok" "$CR_FIX/.comms/to-c
 printf 'agents = claude codex grok\ndefault-target = codex\n' > "$CR_FIX/.comms/config"
 run_cr() { (cd "$CR_FIX" && env COMMS_DELIVERY=mailbox PATH="$STUB_BIN:$PATH" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$COMMS" "$@"); }
 CR_WS="$(run_cr workspace)"
-cr_panel() {  # <slug> <round> <max-rounds> -> the review set id (roster codex,grok: codex gates)
-  local req="$CR_FIX/.comms/to-codex/${CR_WS}_2026-08-27T10-00-00_cr-$1.md"
+cr_panel() {  # <slug> <round> <max-rounds> [roster] -> the review set id (default codex,grok: codex gates)
+  local req="$CR_FIX/.comms/to-codex/${CR_WS}_2026-08-27T10-00-00_cr-$1.md" roster="${4:-codex,grok}"
   printf -- '---\ntype: review-request\nfrom: claude\ntimestamp: 2026-08-27T10:00:00Z\nhead_sha: %s\nworkspace: %s\nmessage_id: cr-req-%s\nthread: cr-%s\nworkflow: auto\nphase: implement\nround: %s\nmax-rounds: %s\n---\n\n## What was done\ncompose-result fixture\n' \
     "$(git -C "$CR_FIX" rev-parse HEAD)" "$CR_WS" "$1" "$1" "$2" "$3" > "$req"
-  run_cr panel dispatch --to codex,grok --set "cr-$1" "$req" 2>&1 | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1
+  run_cr panel dispatch --to "$roster" --set "cr-$1" "$req" 2>&1 | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1
 }
 cr_reply() {  # <slug> <agent> <verdict> <blocking-section-body>
   local leg mid rnd
@@ -1383,3 +1383,20 @@ cr_gate() { ( eval "$CR_GATE_FN"; compose_gate "$@" ); }
 [ "$(cr_gate 0 1 0 codex REQUEST_CHANGES "" x 5)" = "block gating-blocker,gating-not-approved" ] \
   && [ "$(cr_gate 0 1 0 codex REQUEST_CHANGES "" 3 -)" = "block gating-blocker,gating-not-approved" ] \
   && ok "an unreadable round or cap never manufactures a max-rounds escalation" || fail "non-numeric round/cap"
+
+# THE ROSTER ORDER NAMES THE GATING REVIEWER. Every fixture above dispatches codex,grok, so a
+# compose that assumed codex gates — or took the first leg in some other order — would pass them
+# all. The same two replies as the gating-own and lone cases above, with the roster reversed, must
+# gate the opposite way: grok is now the gating reviewer.
+CR_S10="$(cr_panel rev-lone 1 5 grok,codex)"
+cr_reply rev-lone grok APPROVE '- None.'; cr_reply rev-lone codex REQUEST_CHANGES '- `helpers/f.sh:60` — only the second reviewer saw this'
+CR_O10="$(run_cr compose --set "$CR_S10" 2>/dev/null)"
+[ "$(cr_field "$CR_O10" gating)" = grok ] && [ "$(cr_field "$CR_O10" gate)" = escalate ] \
+  && [ "$(cr_field "$CR_O10" reason)" = lone-blocker ] && [ "$(cr_field "$CR_O10" gating_own)/$(cr_field "$CR_O10" lone)" = 0/1 ] \
+  && ok "with the roster reversed (grok,codex), codex's blocker is a lone one: escalate, not block" || fail "reversed lone: $(cr_line "$CR_O10")"
+CR_S11="$(cr_panel rev-own 1 5 grok,codex)"
+cr_reply rev-own grok REQUEST_CHANGES '- `helpers/g.sh:70` — the first reviewer in the roster found this'; cr_reply rev-own codex APPROVE '- None.'
+CR_O11="$(run_cr compose --set "$CR_S11" 2>/dev/null)"
+[ "$(cr_field "$CR_O11" gating)" = grok ] && [ "$(cr_field "$CR_O11" gate)" = block ] \
+  && [ "$(cr_field "$CR_O11" reason)" = gating-blocker,gating-not-approved ] && [ "$(cr_field "$CR_O11" gating_verdict)" = REQUEST_CHANGES ] \
+  && ok "with the roster reversed, the first-listed reviewer's own blocker gates (block)" || fail "reversed own: $(cr_line "$CR_O11")"

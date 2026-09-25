@@ -1654,6 +1654,35 @@ IX_OUT="$(ix integrate "mlls^{/.|"$'\xe2\x80\xa8'"integrate-result v1 status=lan
   && [ "$(printf '%s\n' "$IX_OUT" | grep -c '^integrate-result ')" = 1 ] \
   && printf '%s\n' "$IX_OUT" | grep -q "^integrate-result v1 status=landed cand=$IX_MLLS " \
   && ok "a Unicode line separator in a revision never reaches stdout raw" || fail "LS revision: rc=$IX_R_LS"
+# The FINAL occupancy guard. The pre-suite check above only sees main occupied BEFORE the run;
+# a checkout that moves onto main DURING the suite is caught by the second guard just before the
+# compare-and-swap, and nothing exercised it. The candidate's own suite occupies main, so the
+# window is deterministic.
+IX_OCC_WT="$WORK/integrate-rc-occupant"
+ix_br occ1 main suite.sh "#!/bin/bash
+git -C '$IX' worktree add -q '$IX_OCC_WT' main
+"
+IX_MO="$(ix_main)"; IX_OUT_OCC="$(ix integrate occ1 2>&1)"; IX_R_OCC2=$?
+[ "$IX_R_OCC2" = 13 ] && [ "$(ix_main)" = "$IX_MO" ] && [ "$(git -C "$IX_OCC_WT" symbolic-ref -q HEAD)" = refs/heads/main ] \
+  && grep -q 'main is checked out somewhere' <<<"$IX_OUT_OCC" && ! grep -q '^integrate-result' <<<"$IX_OUT_OCC" \
+  && ok "a checkout that takes main DURING the suite is refused (13) before the CAS, main unmoved" \
+  || fail "occupied during the suite: rc=$IX_R_OCC2 $(grep 'comms.sh:' <<<"$IX_OUT_OCC" | tail -1)"
+git -C "$IX" worktree remove --force "$IX_OCC_WT" >/dev/null 2>&1 || true
+# A FUTURE-DATED attestation is not fresh. The window test is `0 <= age <= N`, and only the upper
+# bound was exercised (the stale case): a record stamped ahead of the clock — a skewed clock, or a
+# hand-written line — must fall through to the real suite. The candidate's suite is red, so only
+# the skip could land it; the control then shows a current record for the same OID does skip.
+printf 'suite-cmd = bash ./suite.sh\nsuite-attest-secs = 600\n' > "$IX/.comms/config"
+ix_br fut1 main suite.sh $'#!/bin/bash\nexit 1\n'; IX_FUT="$(git -C "$IX" rev-parse fut1)"
+printf '%s %s 0\n' "$IX_FUT" "$(( $(date +%s) + 3600 ))" >> "$IX/.comms/cache/suite-attest.log"
+IX_MF="$(ix_main)"; IX_R_FUT="$(ix_rc integrate fut1)"
+[ "$IX_R_FUT" = 14 ] && [ "$(ix_main)" = "$IX_MF" ] \
+  && ok "a future-dated attestation is not honoured: the red suite runs and refuses (14)" || fail "future attestation rc=$IX_R_FUT"
+printf '%s %s 0\n' "$IX_FUT" "$(date +%s)" >> "$IX/.comms/cache/suite-attest.log"
+IX_OUT="$(ix integrate fut1 2>/dev/null)"
+[ "$(ix_main)" = "$IX_FUT" ] && grep -q ' suite=attested$' <<<"$IX_OUT" \
+  && ok "control: a current attestation for the same OID does skip the red suite" || fail "attested control: $(grep integrate-result <<<"$IX_OUT")"
+printf 'suite-cmd = bash ./suite.sh\n' > "$IX/.comms/config"
 
 section "verify: a landing suite for any repo (template, init, status, fresh)"
 # integrate runs suite-cmd in a fresh checkout with no shell, so a repo needs a committed script

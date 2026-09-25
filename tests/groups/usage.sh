@@ -292,3 +292,35 @@ LU_UNR="$LUW/unreadable-projects"; mkdir -p "$LU_UNR/x"; chmod 000 "$LU_UNR"
 python3 "$LU" snapshot claude "$LU_UNR" "$CLC" "$LUW/unr.snap" 2>/dev/null \
   && fail "an unreadable records root was snapshotted as empty" || ok "an unreadable records root refuses the snapshot rather than reading as empty"
 chmod 755 "$LU_UNR"
+
+# ---- the command-line contract the runner depends on ----
+# runphase calls `snapshot` and `collect` and trusts two things: a refusal to SNAPSHOT is a
+# non-zero exit it can log, and COLLECT always answers both lines with exit 0 — an unreadable
+# snapshot is "no measurement", never a crash that loses the turn's result. Every case above used
+# well-formed argv and a snapshot this tool wrote itself; these do not.
+LU_BAD=""
+for LU_ARGV in "collect codex" "collect nosuch $LUW /x $LUW/x.snap" "frob codex $LUW /x $LUW/x.snap" "collect codex $LUW /x $LUW/x.snap extra"; do
+  # shellcheck disable=SC2086
+  python3 "$LU" $LU_ARGV >/dev/null 2>"$LUW/argv.err"; LU_ARC=$?
+  { [ "$LU_ARC" = 2 ] && grep -q '^usage: leg_usage.py' "$LUW/argv.err"; } || LU_BAD="$LU_BAD [argv '$LU_ARGV' rc=$LU_ARC]"
+done
+[ -z "$LU_BAD" ] && ok "a wrong verb, provider or argument count exits 2 with the usage line" || fail "leg_usage.py argv contract:$LU_BAD"
+LU_BAD=""
+printf 'garbage{' > "$LUW/garbage.snap"; printf '[]\n' > "$LUW/array.snap"; printf '{}\n' > "$LUW/empty.snap"
+# A real snapshot with one entry's inode made unreadable, so the path matches and the ENTRY is what fails.
+python3 "$LU" snapshot codex "$CX" /unused "$LUW/real.snap"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); f=d["files"]; k=sorted(f)[0]; f[k]=["not-an-inode", f[k][1]]; json.dump(d, open(sys.argv[2], "w"))' \
+  "$LUW/real.snap" "$LUW/badentry.snap"
+for LU_S in garbage array empty badentry; do
+  for LU_P in codex claude grok; do
+    LU_O="$(python3 "$LU" collect "$LU_P" "$CX" /unused "$LUW/$LU_S.snap" 2>/dev/null)"; LU_ORC=$?
+    { [ "$LU_ORC" = 0 ] && [ "$LU_O" = "$(printf 'usage\tnull\nrate_limits\tnull')" ]; } \
+      || LU_BAD="$LU_BAD [$LU_S/$LU_P rc=$LU_ORC: $(tr '\n' '|' <<<"$LU_O")]"
+  done
+done
+[ -z "$LU_BAD" ] && ok "an unusable snapshot (garbage, not an object, empty, bad entry) is usage null and rate_limits null, exit 0" \
+  || fail "collect over an unusable snapshot:$LU_BAD"
+python3 "$LU" snapshot codex "$CX" /unused "$LUW/no-such-dir/s.snap" 2>"$LUW/unwritable.err"; LU_URC=$?
+[ "$LU_URC" = 1 ] && grep -q 'usage snapshot unwritable' "$LUW/unwritable.err" && [ ! -e "$LUW/no-such-dir" ] \
+  && ok "a snapshot that cannot be written exits 1 and says so, rather than leaving the runner a missing file silently" \
+  || fail "unwritable snapshot rc=$LU_URC: $(cat "$LUW/unwritable.err")"

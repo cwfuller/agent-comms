@@ -438,6 +438,54 @@ IP_OUT2="$( (cd "$IP" && env BASH_ENV="$WORK/hostile-bashenv.sh" "$COMMS" integr
 grep -rq 'passed: 3  failed: 0  skipped: 0' "$IP/.comms/logs" 2>/dev/null \
   && ok "integrate kept the output of the run it judged" || fail "the kept log is not the run that landed"
 
+# THE COUNTS INSIDE THE PROOF. Everything above exercises a completion line that is absent or
+# forged; nothing exercised a REAL one that reports the wrong numbers. A suite can exit 0 having
+# printed a well-formed line that says it ran short, or that it failed — and `verify fresh` must
+# refuse exactly what `integrate` refuses, or the preflight promises a landing that cannot happen.
+# Its own fixture: each candidate below differs only in the suite-cmd it is judged under.
+IPC="$WORK/int-proof-counts"; mkdir -p "$IPC"; IPC="$(cd "$IPC" && pwd -P)"
+git -C "$IPC" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$IPC/.gitignore"
+mkdir -p "$IPC/tests" "$IPC/.comms"
+printf 'total\t3\n' > "$IPC/tests/expected-counts.tsv"
+printf '#!/bin/bash\nprintf "passed: 2  failed: 0  skipped: 0\\n"\n' > "$IPC/tests/short.sh"
+printf '#!/bin/bash\nprintf "passed: 3  failed: 1  skipped: 0\\n"\n' > "$IPC/tests/redcount.sh"
+printf '#!/bin/bash\nprintf "passed: 3  failed: 0  skipped: 0\\npassed: 2  failed: 0  skipped: 0\\n"\n' > "$IPC/tests/twolines.sh"
+printf '#!/bin/bash\nprintf "passed: 2  failed: 0  skipped: 1\\n"\n' > "$IPC/tests/skipped.sh"
+(cd "$IPC" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
+(cd "$IPC" && git checkout -q -b session-primary)
+(cd "$IPC" && env "$COMMS" worktree new countone) >/dev/null 2>&1
+(cd "$IPC/.claude/worktrees/countone" && echo n > n.txt && git add n.txt \
+  && git -c user.email=t@t -c user.name=t commit -qm "feat: n") >/dev/null 2>&1
+IPC_M0="$(git -C "$IPC" rev-parse main)"
+ipc_try() {  # <suite script> — sets IPC_R="<integrate rc> <verify fresh rc> <main moved: yes|no>" and IPC_WHY
+  local irc=0 vrc=0 iout vout
+  printf 'suite-cmd = bash tests/%s.sh\n' "$1" > "$IPC/.comms/config"
+  iout="$( (cd "$IPC" && env "$COMMS" integrate worktree-countone) 2>&1 )" || irc=$?
+  vout="$( (cd "$IPC/.claude/worktrees/countone" && env "$COMMS" verify fresh) 2>&1 )" || vrc=$?
+  IPC_WHY="$(grep '^comms.sh: ' <<<"$iout"$'\n'"$vout" | tr '\n' '|')"
+  IPC_R="$irc $vrc $([ "$(git -C "$IPC" rev-parse main)" = "$IPC_M0" ] && echo no || echo yes)"
+}
+ipc_try short
+[ "$IPC_R" = "15 15 no" ] && grep -q 'integrate: the suite ran 2 of 3 assertions' <<<"$IPC_WHY" \
+  && grep -q 'verify: the suite ran 2 of 3 assertions' <<<"$IPC_WHY" \
+  && ok "a completion line that ran short of the contract is refused (15) by integrate and verify fresh alike" \
+  || fail "short count: $IPC_R $IPC_WHY"
+ipc_try redcount
+[ "$IPC_R" = "15 15 no" ] && grep -q 'integrate: the suite reported 1 failures despite exit 0' <<<"$IPC_WHY" \
+  && ok "a completion line reporting failures under exit 0 is refused (15), not trusted for its status" \
+  || fail "failures under exit 0: $IPC_R $IPC_WHY"
+ipc_try twolines
+[ "$IPC_R" = "15 15 no" ] && grep -q 'integrate: the suite ran 2 of 3 assertions' <<<"$IPC_WHY" \
+  && ok "the LAST completion line is the proof: an earlier full-count line cannot vouch for a short run" \
+  || fail "two completion lines: $IPC_R $IPC_WHY"
+# CONTROL, last because it lands: the same fixture accepts a line whose passed + skipped meets the
+# contract, so the refusals above are about the counts and not about this fixture.
+ipc_try skipped
+[ "$IPC_R" = "0 0 yes" ] && [ "$(git -C "$IPC" rev-parse main)" = "$(git -C "$IPC" rev-parse worktree-countone)" ] \
+  && ok "passed + skipped meeting the contract is proof (control: the same fixture lands)" \
+  || fail "skip-inclusive count: $IPC_R $IPC_WHY"
+
 # An inherited presence identity whose record does not exist in THIS repo must not kill
 # the landing. `presence beat` exits 5 when it HEALS a vanished record, and under `set -e`
 # an unguarded advisory beat aborted integrate before its FIRST LINE of output — no

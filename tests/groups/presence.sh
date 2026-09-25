@@ -682,6 +682,15 @@ chmod 755 "$PW_SD" 2>/dev/null
 # Entry-point validation (codex advisory): a hostile instance is refused everywhere.
 check_not "beat refuses an invalid instance" run_pw presence beat --name alpha --instance '../../etc'
 check_not "release refuses an invalid instance" run_pw presence release --name alpha --instance '*'
+# `others` does NOT read its identity from the environment (AGENTS.md says so, unlike send/await/
+# integrate). A session that exported COMMS_PRESENCE_NAME/INSTANCE and ran a bare `others` must get
+# a usage error, never an answer: 0 would read as "the field is free" off a re-check that checked
+# nothing. The identity is the section's own claimed record (alpha), so an env fallback would answer.
+PW_OE="$( (cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=alpha COMMS_PRESENCE_INSTANCE="$PW_I1" "$COMMS" presence others) 2>"$WORK/pw-others-env.err")"; PW_OERC=$?
+PW_OH="$( (cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 COMMS_PRESENCE_NAME=alpha COMMS_PRESENCE_INSTANCE="$PW_I1" "$COMMS" presence others --name alpha) 2>/dev/null)"; PW_OHRC=$?
+[ "$PW_OERC" = 2 ] && [ "$PW_OHRC" = 2 ] && [ -z "$PW_OE$PW_OH" ] && grep -q -- '--name and --instance required' "$WORK/pw-others-env.err" \
+  && ok "others with its identity only in the environment (or half on the command line) is a usage error, never an answer" \
+  || fail "others read the environment: env-only rc=$PW_OERC half rc=$PW_OHRC out=$PW_OE$PW_OH"
 # ps-failure ambiguity (codex, impl r1: a sandboxed ps exits 126 and a live stale
 # session was read as dead and reaped).
 PW_PSBIN="$WORK/psfail"; mkdir -p "$PW_PSBIN"
