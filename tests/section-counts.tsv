@@ -37,7 +37,7 @@ transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	45
 acp.sh: the reviewer model+effort policy	25
 acp.sh: the reviewer policy resolver	43
-reviewer policy: a wrong-depth review is never published	16
+reviewer policy: a wrong-depth review is never published	18
 reviewer routing: a routed decision reaches the mounted codex turn	17
 runphase: the compatibility canary gates every ACP turn	24
 runphase: parent-brokered claude and codex legs over ACP	41
@@ -62,7 +62,7 @@ grading pilot: prompt-version partitions grades across an instruction edit	8
 grading pilot: shadow reviewer is a MEASUREMENT, structurally unable to gate	53
 grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims)	44
 comms.sh: transport selection (no pane must not strand a consult)	49
-panel: N parallel 2-party legs over ONE artifact	72
+panel: N parallel 2-party legs over ONE artifact	95
 templates: the loop closes its thread state on the terminal approval	2
 ask: the driver-neutral consult verb	28
 review turns may read history, never publish or rewrite it	44
@@ -74,7 +74,7 @@ integrate: an exit status is not proof the suite ran	30
 integrate: the verification tree is a FRESH checkout	11
 integrate: docs-only skip	19
 the coordinator's event log: a durable record that is not the mailbox	169
-reviewer isolation: a mounted turn is contained or it does not run	107
+reviewer isolation: a mounted turn is contained or it does not run	110
 reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)	21
 any-agent driver surface	40
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5

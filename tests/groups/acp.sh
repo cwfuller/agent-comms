@@ -1372,6 +1372,28 @@ POL_NONE="$WORK/pol-noevidence"; pol_run pol-noevidence "$POL_NONE" AX_ROLLOUT_N
 [ "$(cn_status "$POL_NONE")" = "failed" ] && [ "$(pol_inbox_n pol-noevidence)" = 0 ] \
   && ok "a turn whose depth cannot be attested is refused and unpublished" || fail "unattestable turn published or passed"
 
+# RAW UNICODE SEPARATORS in the turn's own message records (codex writes U+2028 etc. unescaped)
+# are part of an honest turn, not malformed evidence: the review must publish. The records come
+# from the hermetic fixture; its turn_context is left out so the stub's root is the only root.
+# (integrate-driver-contract r4, 2026-09-24: two APPROVE legs withheld as rc=21.)
+POL_SEP_REC="$WORK/pol-sep-records.jsonl"
+grep -v -e '"type":"turn_context"' -e '"type":"session_meta"' "$REPO/tests/fixtures/codex-rollout-raw-separators.jsonl" > "$POL_SEP_REC"
+POL_SEP="$WORK/pol-separators"; pol_run pol-separators "$POL_SEP" AX_ROLLOUT_APPEND="$POL_SEP_REC"
+[ "$(cn_status "$POL_SEP")" = "completed" ] && [ "$(pol_inbox_n pol-separators)" = 1 ] \
+  && ok "a mounted turn whose rollout carries raw U+2028/U+2029/U+0085 records attests and publishes" \
+  || fail "raw separators in the rollout refused an honest turn: status=$(cn_status "$POL_SEP") inbox=$(pol_inbox_n pol-separators)"
+
+# THE RUNNER'S OWN terminal row for a policy refusal is what `compose --degrade` accepts as
+# evidence. Read it through compose's single definition, so the writer and the reader are
+# proven to agree on the format rather than each matching a hand-written copy of it.
+POL_EVAWK="$(sed -n "/^DEGRADE_EVIDENCE_AWK='/,/^}'/p" "$REPO/helpers/comms.sh")"
+POL_WHY="$( eval "$POL_EVAWK"
+            awk -F'\t' "$DEGRADE_EVIDENCE_AWK"' $3=="turn-finished" && $6=="pol-divergent" { print degrade_reason() }' \
+              "$MA_FIX/.comms/events.tsv" 2>/dev/null )"
+[ -n "$POL_EVAWK" ] && [ "$POL_WHY" = "policy-unapplied" ] \
+  && ok "the runner's turn-finished row for a policy refusal reads as degrade evidence (reason=policy-unapplied)" \
+  || fail "the policy refusal's turn-finished row is not degrade evidence (got: '$POL_WHY')"
+
 # PRE-CANARY refusal: a conflicting saved preference stops the turn before any prompt is spent.
 POL_PRE="$WORK/pol-preflight"; POL_PRE_LOG="$WORK/pol-preflight.argv"
 pol_run pol-preflight "$POL_PRE" AX_EFFORT=medium AX_CWD_LOG="$POL_PRE_LOG"

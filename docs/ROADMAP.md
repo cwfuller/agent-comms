@@ -37,6 +37,30 @@ orchestration here, and do not revive Symphony for it.
 
 ## Contraction (2026-08-28) — current program
 
+### RESOLVED 2026-09-24: codex legs withheld as "a malformed record in the provider's rollout" (sev 3)
+
+Two consecutive codex legs (review set `integrate-driver-contract-5020-implement-r4`, codex-cli
+0.156.1 via codex-acp 1.12.0) answered APPROVE and were refused unpublished with attestation
+rc=21, so every codex-gated panel read INCOMPLETE. **The rollout format did not change.** The
+r4 review request quoted raw U+2028/U+2029 (its subject was escaping Unicode separators); codex
+writes those unescaped inside JSON strings, which is valid JSON, and `acp_rollout_observed`
+split the window with `str.splitlines()`, which also breaks on U+0085/U+2028/U+2029. One valid
+user-message record became unparseable fragments. Verified by replaying the retained rollout:
+the old reader returns 21, the fixed one attests `high`/`gpt-6-astra` for the r4 turn id.
+
+- The reader splits on `\n` only (JSONL's own boundary); a record that still does not parse is
+  still refused. Hermetic fixture: `tests/fixtures/codex-rollout-raw-separators.jsonl`.
+- `compose --degrade` now also accepts a leg whose TURN failed `reason=policy-unapplied`. That
+  evidence lives on `turn-finished` (the provider exited clean, so `provider-result` says
+  `completed`), which now carries `exit=N reason=R` at the head of its note; the match is
+  anchored there so free text later in the row cannot forge it. Other refusal reasons stay
+  undroppable. The drop needs QUIESCENCE: every send has recorded its delivery (a per-send
+  `attempt=` id pairs each persist with its delivery row), every run the log knows of has its own
+  terminal row, and the run that finished last recorded the failure; gating rows only. Four
+  review rounds showed that attributing rows to "the current run" rests on delayed, lost or
+  shared signals; quiescence needs none of them. `run_dir` is stored as an identity (head plus
+  digest) so runs cannot collide.
+
 ### Step 4 status and the S4-2 plan verdict (2026-09-01)
 
 **Step 3 is COMPLETE** — all five increments on main: the provider-neutral broker, brokered

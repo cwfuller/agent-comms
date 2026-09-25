@@ -316,9 +316,10 @@ verdict format. The cycle continues until APPROVE or max rounds.
    backend on this OS. Compose refuses such a panel, and that refusal is correct — a
    missing voice is not an approval. When it names a leg that cannot answer (the
    coordinator log records `reason=no-output` for a provider that exited having produced
-   nothing), put the choice to the human in one message: **continue with the reviewers who
-   did answer, or pause until the missing one is back.** Say who is missing and that the
-   reason is not knowable from here.
+   nothing, or `reason=policy-unapplied` for a review withheld because the model/effort it
+   ran could not be attested), put the choice to the human in one message: **continue with
+   the reviewers who did answer, or pause until the missing one is back.** Say who is
+   missing and what the log recorded; the underlying cause is not knowable from here.
 
    Only after they choose "continue" may you drop it:
    ```bash

@@ -2382,12 +2382,107 @@ $st_p	$ag"
   echo "panel: $set_id dispatched to $n reviewer(s)$synthetic_note; compose with 'comms.sh panel status --set $set_id'"
 }
 
+# ONE definition of "this event row proves the leg's review can never be published", as an awk
+# function the degrade walk concatenates into its program. degrade_reason() returns the reason
+# the row records, or "" when the row is not evidence. Only a FAILED row qualifies, and only for
+# a reason the runner itself wrote, in the position it writes it:
+#   provider-result  reason=no-output         — the provider exited non-zero having produced
+#                                               nothing (runphase.sh, where the provider exits)
+#   turn-finished    reason=no-output|policy-unapplied
+#                                             — the TURN's terminal row (runphase.sh write_result).
+#                                               policy-unapplied: the broker refused to publish a
+#                                               review whose model/effort could not be attested.
+# The turn-finished match is ANCHORED to the prefix write_result emits (`exit=N reason=R `), so a
+# free-text note or a provider-reported session id later in the row cannot forge the token.
+# Other refusal reasons (containment-unconfirmed, runtime-incompatible, canary-*) stay undroppable:
+# they are retry-and-fix conditions, not an operator's roster decision.
+DEGRADE_EVIDENCE_AWK='
+function degrade_reason(   s) {
+  if ($14 != "failed") return ""
+  if ($3 == "provider-result") return ($15 ~ /(^| )reason=no-output( |$)/) ? "no-output" : ""
+  if ($3 == "turn-finished" && match($15, /^exit=[0-9]+ reason=(no-output|policy-unapplied)( |$)/)) {
+    s = substr($15, 1, RLENGTH); sub(/^exit=[0-9]+ reason=/, "", s); sub(/ $/, "", s); return s
+  }
+  return ""
+}'
+
+degrade_reason_text() {  # <reason> — what a dropped leg's evidence means, for the log and the banner
+  case "$1" in
+    no-output)        printf 'produced no output at all' ;;
+    # Covers every policy-unapplied refusal, pre-prompt ones included (a preflight mismatch, a
+    # policy record that changed, a rollout snapshot that could not be taken) — not only a
+    # post-turn attestation, so it must not claim the review ran. (grok, r1 advisory.)
+    policy-unapplied) printf 'its review was refused publication: the reviewer model/effort policy could not be applied or attested' ;;
+    *)                printf 'recorded reason %s' "$1" ;;
+  esac
+}
+
+# degrade_why <agent> — the evidence reason compose recorded for a dropped leg. Reads
+# DEGRADED_WHY (`agent<TAB>reason` lines, a cmd_compose local) by dynamic scope.
+degrade_why() { printf '%s\n' "${DEGRADED_WHY:-}" | awk -F'\t' -v a="$1" '$1==a {r=$2} END {print r}'; }
+
+# degrade_leg_events <set> <dispatch> <agent> — the leg's GATING event rows, every one. The ONE
+# read both the evidence walk and the fingerprint are computed from, so eligibility and the
+# baseline it is re-checked against describe the same history: fingerprinting in a second read
+# let a boundary landing between the two become part of a baseline nobody judged. (codex, r1.)
+# `--role gating`, because `comms.sh shadow` runs the leg's request copy under the SAME set and
+# dispatch with its rows marked `role=shadow`, and the shadow target can be a gating agent of the
+# set: a shadow's failed attestation would otherwise drop a live gating reviewer. (grok, r1.)
+# `--all`, because this is a CORRECTNESS read: a capped window can cut a run's first row off and
+# make its late terminal row look like a fresh run. (See degrade_evidence.)
+degrade_leg_events() {
+  cmd_events --all --role gating --set "$1" --dispatch "$2" --agent "$3" 2>/dev/null
+}
+
+# degrade_evidence < events — print the reason the leg's attempts prove it cannot publish, exit 0;
+# or print why not, exit 1. The rule is QUIESCENCE, not attribution: a leg is droppable only when
+# nothing about it can still be in motion, judged from the leg's own gating rows.
+#   1. every send has finished delivering — each `request-persisted` is matched by a
+#      `request-dispatched` carrying the same per-send attempt id (`attempt=` at the head of both
+#      notes; counted, so a repeated id still needs a delivery row per send). A send between its
+#      persist and its delivery may yet spawn a runner.
+#   2. every run the log knows of has finished — any run named by a `request-dispatched`,
+#      `turn-started`, `provider-result` or `turn-finished` has a `turn-finished`.
+#   3. the run that finished LAST (by its first `turn-finished`) recorded qualifying evidence:
+#      degrade_reason, filed under that run. A non-qualifying provider-result clears it; a
+#      non-qualifying turn-finished (older rows had no reason; log-incomplete) adds nothing.
+# Attributing rows to "the current run" was tried first and every signal it rested on turned out
+# to be advisory, delayed or shared: row order (a dedupe looked like a replacement), a clipped
+# run path, a delayed delivery row, a dead predecessor named by `already running`, a late start of
+# the same request, a foreground `--wait` run racing a detached one. (codex + grok, r1–r4.) None of
+# them can make a live run look finished here: a run is open until its OWN terminal row. The cost
+# is availability, never safety — a run whose runner died without a terminal row keeps the leg
+# undroppable until `await` synthesizes one (or the leg is re-sent).
+# Run identity is the run_dir column, stored through event_identity (unique past its width).
+degrade_evidence() {
+  awk -F'\t' "$DEGRADE_EVIDENCE_AWK"'
+    function attempt_id(n) { return match(n, /^attempt=[A-Za-z0-9._-]+/) ? substr(n, 9, RLENGTH - 8) : "" }
+    function seen(r) { if (r != "" && !(r in open)) open[r] = 1 }
+    NR>1 && $3=="request-persisted"  { sent[attempt_id($15)]++; next }
+    NR>1 && $3=="request-dispatched" { a = attempt_id($15); if (sent[a] > done[a]) done[a]++; seen($13); next }
+    NR>1 && $3=="turn-started"       { seen($13); next }
+    NR>1 && $3=="provider-result"    { if ($13 == "") next; seen($13); ev[$13] = degrade_reason(); next }
+    NR>1 && $3=="turn-finished"      {
+      if ($13 == "") next
+      seen($13); if (open[$13]) { open[$13] = 0; last = $13 }
+      r = degrade_reason(); if (r != "") ev[$13] = r
+      next
+    }
+    END {
+      for (a in sent) if (sent[a] > done[a]) { print "a send of this leg has not recorded its delivery yet"; exit 1 }
+      for (r in open) if (open[r]) { print "a run of this leg has not finished: " r; exit 1 }
+      if (last == "") { print "no run of this leg has finished"; exit 1 }
+      if (ev[last] == "") { print "its last finished run recorded no reason=no-output or reason=policy-unapplied failure"; exit 1 }
+      print ev[last]; exit 0
+    }'
+}
+
 # The state of a leg's turn history, as one comparable string. Used to accept a degradation
 # and then to RE-CHECK it immediately before publishing: "latest turn" sampled once is a
 # TOCTOU, because another process can re-send the leg while the composition is being built and
 # the live reviewer would still be dropped. (codex, implement r3, blocking — the concurrency
 # form of the same stale-evidence defect, found after the dispatch and re-send forms.)
-degrade_boundary_state() {  # <set> <dispatch> <agent> -> a comparable state string
+degrade_boundary_state() {  # <set> <dispatch> <agent> [<events already read>] -> a comparable state string
   # `--all`, because this is a CORRECTNESS read. The default cap is 50 rows: once a leg had
   # that many boundary events, appending another dropped one from the window and left the
   # count pinned at 50, so history could move with every sampled field identical.
@@ -2404,9 +2499,13 @@ degrade_boundary_state() {  # <set> <dispatch> <agent> -> a comparable state str
   # appended FAIL-CLOSED before delivery, so a re-send cannot happen without one.
   # (codex, implement r5, blocking — and its own diagnosis of the whole arc: the recurring weak
   # point was never the comparison, it was which durable event marks an attempt beginning.)
-  cmd_events --all --set "$1" --dispatch "$2" --agent "$3" 2>/dev/null \
+  # `turn-finished` and `request-dispatched` are fingerprinted because the evidence walk reads
+  # them (the evidence row, and the run an attempt attached to); the fingerprint must cover every
+  # row the evidence walk reads — from the same read, when
+  # the caller has one (degrade_leg_events).
+  { if [ $# -ge 4 ]; then printf '%s\n' "$4"; else degrade_leg_events "$1" "$2" "$3"; fi; } \
     | awk -F'\t' '
-        NR>1 && ($3=="request-persisted" || $3=="turn-started" || $3=="provider-result") {
+        NR>1 && ($3=="request-persisted" || $3=="request-dispatched" || $3=="turn-started" || $3=="provider-result" || $3=="turn-finished") {
           n++; ts=$1; k=$3; st=$14; rd=$13; rq=$11; mid=$12; note=$15
         }
         END { printf "%d|%s|%s|%s|%s|%s|%s|%s", n+0, ts, k, st, rd, rq, mid, note }'
@@ -2433,7 +2532,7 @@ cmd_compose() {
   # never droppable — the first will still arrive and the second is a review, not an absence.
   # The reduction is written to the log before anything is composed, so a degraded verdict is
   # never reconstructible as a full-panel one.
-  local set_id="" out="" degrade="" DEGRADED_AGENTS="" DEGRADED_STATE=""
+  local set_id="" out="" degrade="" DEGRADED_AGENTS="" DEGRADED_STATE="" DEGRADED_WHY=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --degrade) shift; degrade="${1:-}" ;;
@@ -2594,7 +2693,7 @@ $(findings_extract "$reply" gating "$set_id" "" "" "" "")"
     # A DEGRADED composition is allowed only when the operator named the missing legs AND
     # the log proves each one could not review. Both halves matter: naming alone would let a
     # slow leg be discarded, and evidence alone would let silence lower the bar by itself.
-    local degraded_ok="" degrade_bad="" ag_d p_d
+    local degraded_ok="" degrade_bad="" ag_d p_d why_d ev_d
     if [ -n "$degrade" ]; then
       for ag_d in $(printf '%s' "$degrade" | tr ',' ' '); do
         case " $(printf '%s' "$pending" | tr -s ' ') " in
@@ -2607,22 +2706,18 @@ compose: '$ag_d' is not a missing leg in this set — refusing to drop a reviewe
         # dispatch identity — so the sequence "turn fails, marker recorded, operator re-sends,
         # new turn still running" let the stale marker drop a leg that was actively reviewing.
         # (codex, implement r2, blocking; the r1 fix closed only the cross-dispatch half.)
-        #
-        # The log is append-only, so its order IS chronological. Walk this leg's attempt
-        # boundaries and look at the LAST one: a provider-result that failed with the marker is
-        # evidence; a `request-persisted` or `turn-started` with no terminal row after it means
-        # an attempt is UNDERWAY and the leg is not droppable at all; anything else is not
-        # evidence. `request-persisted` counts because it is written fail-closed before
-        # delivery, whereas `turn-started` is advisory and its loss would hide a live re-send.
-        if cmd_events --set "$set_id" --dispatch "$compose_dispatch" --agent "$ag_d" 2>/dev/null \
-             | awk -F'\t' '
-                 NR>1 && ($3=="request-persisted" || $3=="turn-started") { last="running"; next }
-                 NR>1 && $3=="provider-result" { last=($14=="failed" && $15 ~ /(^| )reason=no-output( |$)/) ? "evidence" : "other"; next }
-                 END { exit (last=="evidence") ? 0 : 1 }'; then
+        # The walk itself, and why each row kind counts, is degrade_evidence. The fingerprint
+        # the drop is later re-checked against is taken from this SAME read.
+        ev_d="$(degrade_leg_events "$set_id" "$compose_dispatch" "$ag_d")"
+        if why_d="$(printf '%s\n' "$ev_d" | degrade_evidence)"; then
           degraded_ok="$degraded_ok $ag_d"
+          DEGRADED_WHY="$DEGRADED_WHY
+$ag_d	$why_d"
+          DEGRADED_STATE="$DEGRADED_STATE
+$ag_d	$(degrade_boundary_state "$set_id" "$compose_dispatch" "$ag_d" "$ev_d")"
         else
           degrade_bad="$degrade_bad
-compose: '$ag_d' has no recorded evidence it could not review in THIS attempt (no failed provider-result carrying reason=no-output under dispatch $compose_dispatch) — it may still answer, so it is not droppable"
+compose: '$ag_d' has no recorded evidence it could not review in THIS attempt (${why_d:-its events could not be read}, under dispatch $compose_dispatch) — it may still answer, so it is not droppable"
         fi
       done
     fi
@@ -2640,16 +2735,13 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt (n
     fi
     if [ -n "$degrade" ] && [ -z "$degrade_bad" ] && [ -z "$uncovered" ]; then
       for ag_d in $degraded_ok; do
+        why_d="$(degrade_why "$ag_d")"
         cmd_events append --kind leg-unavailable --set "$set_id" --dispatch "$compose_dispatch" \
           --agent "$ag_d" --role gating --status unavailable \
-          --note "produced no output at all; roster reduced by explicit operator decision before composing" \
+          --note "reason=$why_d: $(degrade_reason_text "$why_d"); roster reduced by explicit operator decision before composing" \
           || echo "warning: coordinator log not updated (leg-unavailable for $ag_d)" >&2
       done
       DEGRADED_AGENTS="$degraded_ok"
-      for ag_d in $degraded_ok; do
-        DEGRADED_STATE="$DEGRADED_STATE
-$ag_d	$(degrade_boundary_state "$set_id" "$compose_dispatch" "$ag_d")"
-      done
     else
       [ -n "$degrade_bad" ] && printf '%s\n' "$degrade_bad"
       echo "compose: INCOMPLETE — no reply yet from:$pending ($n_answered of $n_legs legs answered)"
@@ -2769,7 +2861,12 @@ $ag_d	$(degrade_boundary_state "$set_id" "$compose_dispatch" "$ag_d")"
     if [ -n "$DEGRADED_AGENTS" ]; then
       # Say it FIRST and say who. A degraded approval quoted later as "the panel approved"
       # is exactly the drift the archive exists to prevent.
-      printf 'DEGRADED PANEL — composed WITHOUT:%s (each produced no output; dropped by explicit operator decision).\n' "$DEGRADED_AGENTS"
+      printf 'DEGRADED PANEL — composed WITHOUT:%s (dropped by explicit operator decision).\n' "$DEGRADED_AGENTS"
+      local dg_ag dg_why
+      for dg_ag in $DEGRADED_AGENTS; do
+        dg_why="$(degrade_why "$dg_ag")"
+        printf -- '- %s: %s (reason=%s).\n' "$dg_ag" "$(degrade_reason_text "$dg_why")" "$dg_why"
+      done
       printf 'Reviewers present:%s. Read every verdict below as theirs alone, not the panel'"'"'s.\n' \
         "$answered_agents"
     fi
@@ -3192,7 +3289,7 @@ cmd_events() {
     "$(event_field "$round" "$EVENT_W_ROUND")" "$(event_field "$agent" "$EVENT_W_AGENT")" \
     "$role" \
     "$(event_field "$artifact" "$EVENT_W_ARTIFACT")" "$(event_identity "$reqid" "$EVENT_W_REQID")" \
-    "$(event_identity "$mid" "$EVENT_W_MID")" "$(event_field "$run_dir" "$EVENT_W_RUNDIR")" \
+    "$(event_identity "$mid" "$EVENT_W_MID")" "$(event_identity "$run_dir" "$EVENT_W_RUNDIR")" \
     "$(event_field "$status" "$EVENT_W_STATUS")")"
   # One `printf` of one small row: on a local filesystem that is one flushed write at the
   # append offset, which is what keeps concurrent runners from tearing each other's rows.
@@ -5902,6 +5999,14 @@ cmd_clean() {
   echo "deleted ${#targets[@]} file(s) (mode: $mode)"
 }
 
+# delivery_run_dir <deliver output> — the run a delivery went to, or empty when it named none.
+# Every shape deliver prints: a detached spawn and an "already running" re-send (`  run dir: P`),
+# and a foreground `send --wait` (`running … — run dir: P`). Reading only the first shape recorded
+# an empty run for every foreground turn. (codex, r3.)
+delivery_run_dir() {
+  printf '%s\n' "$1" | sed -n -e 's/^ *run dir: //p' -e 's/^running .* — run dir: //p' | head -1
+}
+
 cmd_send() {
   # Refuse BEFORE any durable write. `panel dispatch` calls this directly and had already
   # written its attempt marker, roster events, leg files and index rows before delivery failed —
@@ -6213,6 +6318,13 @@ cmd_send() {
   # reuses set+thread+round, so without it a stale acceptance reads as the new leg
   # answering. (codex + grok, plan r1.)
   local ev_type ev_thread ev_round ev_set ev_dispatch ev_aid ev_mid ev_agent ev_reqid ev_verdict=""
+  # THIS SEND'S attempt id, at the head of both its notes. A re-send of the same message keeps its
+  # message and request ids, so nothing else in the log pairs a `request-dispatched` with the
+  # persist it completes, and compose --degrade must know whether any send is still between the
+  # two (it may yet spawn a runner). 64 random bits; the degrade walk also counts, so even a
+  # repeated id needs one delivery row per send. (codex r3, grok r4.)
+  local ev_attempt; ev_attempt="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  [ -n "$ev_attempt" ] || ev_attempt="$(date +%s)-$$-$RANDOM$RANDOM$RANDOM"
   ev_type="$(frontmatter_field "$file" type)"
   ev_thread="$(frontmatter_field "$file" thread)"
   ev_round="$(frontmatter_field "$file" round)"
@@ -6235,7 +6347,7 @@ cmd_send() {
     cmd_events append --kind request-persisted --set "$ev_set" --dispatch "$ev_dispatch" --thread "$ev_thread" \
       --round "$ev_round" --agent "$ev_agent" --artifact "$ev_aid" --request-id "$ev_reqid" \
       --message-id "$ev_mid" --status persisted \
-      --note "phase=$(frontmatter_field "$file" phase) workflow=$(frontmatter_field "$file" workflow)${route_id:+ route=$route_id}" \
+      --note "attempt=$ev_attempt phase=$(frontmatter_field "$file" phase) workflow=$(frontmatter_field "$file" workflow)${route_id:+ route=$route_id}" \
       || die "send: could not record the request in the coordinator log — refusing to dispatch a leg nothing can recover"
   fi
   local root_send
@@ -6292,7 +6404,7 @@ cmd_send() {
   local del_out outcome=manual rundir=""
   del_out="$(cmd_deliver "$to" "$file")"
   echo "$del_out"
-  rundir="$(printf '%s\n' "$del_out" | sed -n 's/^ *run dir: //p' | head -1)"
+  rundir="$(delivery_run_dir "$del_out")"
   # The route the turn actually went out over, read back from the spawn line rather than
   # from COMMS_DELIVERY — the two disagree (cmd_deliver's acp arm spawns a runphase turn),
   # and reporting the intent instead of the outcome is the whole of field-report #4.
@@ -6345,7 +6457,7 @@ cmd_send() {
   if ! cmd_events append --kind "$ev_kind" --set "$ev_set" --dispatch "$ev_dispatch" --thread "$ev_thread" \
       --round "$ev_round" --agent "$ev_agent" --artifact "$ev_aid" --request-id "$ev_reqid" \
       --message-id "$ev_mid" --run-dir "$rundir" --status "${ev_status:-$outcome}" \
-      --note "type=$ev_type delivery=$outcome"; then
+      --note "${ev_attempt:+attempt=$ev_attempt }type=$ev_type delivery=$outcome"; then
     # `A || { test && die; }` would abort the whole send under errexit whenever the test is
     # false — the opposite of the advisory intent — so the branch is spelled out.
     echo "warning: coordinator log not updated ($ev_kind); the $ev_type WAS $outcome" >&2

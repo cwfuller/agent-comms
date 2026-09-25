@@ -340,6 +340,39 @@ iso_ctx t-good t-good gpt-6-astra xhigh >> "$ISO_RF2"; printf '{"type":"turn_con
 iso_observed2 "$WORK/snap-mal.txt" >/dev/null 2>&1 \
   && fail "malformed evidence was skipped" || ok "a malformed record in the window is undecidable, not skipped"
 
+# RAW UNICODE SEPARATORS ARE NOT RECORD BOUNDARIES. codex writes U+0085/U+2028/U+2029 unescaped
+# inside JSON strings (legal JSON), and the reader split with str.splitlines(), which breaks on
+# them — so a review request that merely QUOTED one cut its own user-message record in half and
+# two honest APPROVE legs were withheld as "a malformed record" (rc=21, codex-cli 0.156.1 via
+# codex-acp 1.12.0, 2026-09-24). The fixture is that record shape, trimmed and made synthetic.
+ISO_FX="$REPO/tests/fixtures/codex-rollout-raw-separators.jsonl"
+if python3 - "$ISO_FX" >/dev/null 2>&1 <<'PY'
+import json,sys
+b=open(sys.argv[1],"rb").read()
+assert all(c.encode() in b for c in ("\u0085"," "," "))
+recs=b.decode("utf-8").split("\n")
+assert recs[-1]=="" and all(json.loads(r) for r in recs[:-1])
+assert len(b.decode("utf-8").splitlines())>len(recs)-1
+PY
+then ok "the codex rollout fixture carries raw NEL/LS/PS inside strings, and each newline-delimited record parses"
+else fail "the rollout fixture lost its raw separators (re-saved escaped?) — the next assertions would be vacuous"; fi
+ISO_SEP="$WORK/rollout-separators"; rm -rf "$ISO_SEP"; mkdir -p "$ISO_SEP/sessions/2026/09/24"
+cp "$ISO_FX" "$ISO_SEP/sessions/2026/09/24/rollout-sep.jsonl"
+: > "$WORK/snap-sep.txt"
+ISO_SEP_OUT="$( ( eval "$ISO_RO"; acp_rollout_observed "$ISO_SEP" "$WORK/snap-sep.txt" ) 2>/dev/null )" && ISO_SEP_RC=0 || ISO_SEP_RC=$?
+[ "$ISO_SEP_RC" = 0 ] \
+  && [ "$(printf '%s' "$ISO_SEP_OUT" | cut -f1,2,3,6)" = "$(printf 'high\tgpt-6-astra\t01a0d5cb-7cca-70c3-9aee-ce8f701c7b59\t0.156.1')" ] \
+  && ok "a record carrying raw U+0085/U+2028/U+2029 in a string attests the turn's root context, not 'malformed'" \
+  || fail "raw Unicode separators still break the rollout attestation (rc=$ISO_SEP_RC out=$ISO_SEP_OUT)"
+# ...and newline-only splitting must not make a genuinely broken record parse: a record that
+# ends at a raw separator with its closing braces missing is still refused.
+iso_ctx t-sep t-sep gpt-6-astra high > "$ISO_SEP/sessions/2026/09/24/rollout-sep.jsonl"
+printf '{"type":"response_item","payload":{"text":"cut after \342\200\250\n' >> "$ISO_SEP/sessions/2026/09/24/rollout-sep.jsonl"
+( eval "$ISO_RO"; acp_rollout_observed "$ISO_SEP" "$WORK/snap-sep.txt" ) >/dev/null 2>&1 && ISO_SEP_RC=0 || ISO_SEP_RC=$?
+[ "$ISO_SEP_RC" = 21 ] \
+  && ok "a record genuinely broken at a raw separator is still undecidable (rc 21)" \
+  || fail "a broken record ending at a raw separator was not refused (rc=$ISO_SEP_RC)"
+
 # A record still being written is a write in flight, not evidence.
 iso_ctx t-ok2 t-ok2 gpt-6-astra xhigh > "$ISO_RF2"
 iso_snapshot "$ISO_RD2" "$WORK/snap-part.txt"

@@ -124,6 +124,12 @@ PN_AGR_COMP="$(run_pn compose --set "$PN_AGR_SET" 2>&1)" && PN_AGR_RC=0 || PN_AG
 # grok out of weekly quota exits non-zero having produced zero bytes, and says nothing about
 # why — only `RUNTIME QUEUE_RUNTIME_PROMPT_FAILED Internal error`. So the roster fact is
 # recorded as what was OBSERVED (`reason=no-output`), and the operator is asked, never told.
+# The grok leg's message id: the request id its runner's rows carry, which binds a started run
+# to the attempt it serves.
+pn_grok_mid() {  # <thread-base>
+  grep -m1 '^message_id:' "$(find "$PN_FIX/.comms/to-grok" -type f | xargs grep -l "^thread: $1-grok\$" 2>/dev/null | head -1)" \
+    | sed 's/^message_id: //'
+}
 PN_DG_REQ="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T12-03-00_req-dg.md"
 sed -e 's/^message_id: .*/message_id: pn-req-dg/' -e 's/^thread: .*/thread: pn-dg-thread/' "$PN_REQ" > "$PN_DG_REQ"
 PN_DG_OUT="$(run_pn panel dispatch --to codex,grok --set pn-dg "$PN_DG_REQ" 2>&1 || true)"
@@ -148,8 +154,13 @@ printf '%s\n' "$PN_DG_C3" | grep -q 'not a missing leg' \
   && ok "--degrade refuses to drop a reviewer that actually answered" || fail "an answering reviewer was droppable"
 # Now record the evidence the runner would have written, and the drop becomes available.
 PN_DG_DSP="$(awk -F'\t' -v s="$PN_DG_SET" '$3=="panel-planned" && $4==s {d=$5} END{print d}' "$PN_FIX/.comms/events.tsv")"
+# Evidence is filed under the RUN the attempt runs as; the run's start names it.
+run_pn events append --kind turn-started --set "$PN_DG_SET" --dispatch "$PN_DG_DSP" --agent grok --role gating \
+  --status running --note "provider=grok via=acp" --request-id "$(pn_grok_mid pn-dg-thread)" --run-dir /runs/dg-A >/dev/null 2>&1
 run_pn events append --kind provider-result --set "$PN_DG_SET" --dispatch "$PN_DG_DSP" --agent grok --role gating \
-  --status failed --note "exit=1 elapsed=6s budget=600s via=acp reason=no-output" >/dev/null 2>&1
+  --status failed --note "exit=1 elapsed=6s budget=600s via=acp reason=no-output" --run-dir /runs/dg-A >/dev/null 2>&1
+run_pn events append --kind turn-finished --set "$PN_DG_SET" --dispatch "$PN_DG_DSP" --agent grok --role gating \
+  --status failed --note "exit=1 reason=no-output session=acp:s" --run-dir /runs/dg-A >/dev/null 2>&1
 PN_DG_C4="$(run_pn compose --set "$PN_DG_SET" --degrade grok 2>&1 || true)"
 printf '%s\n' "$PN_DG_C4" | grep -q 'DEGRADED PANEL' \
   && printf '%s\n' "$PN_DG_C4" | grep -q 'WITHOUT: grok' \
@@ -174,14 +185,18 @@ PN_DG3_MC="$(find "$PN_FIX/.comms/to-codex" -type f | xargs grep -l '^thread: pn
 PN_DG3_MIDC="$(grep -m1 '^message_id:' "$PN_DG3_MC" | sed 's/^message_id: //')"
 { printf -- '---\ntype: review-feedback\nfrom: codex\ntimestamp: 2026-08-26T12:55:00Z\nworkspace: %s\nmessage_id: codex-dg3-reply\nthread: pn-dg3-thread-codex\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' \
     "$PN_WS" "$PN_DG3_MIDC"; } > "$PN_FIX/.comms/archive/${PN_WS}_2026-08-26T12-55-00_codex-dg3.md"
+run_pn events append --kind turn-started --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok --role gating \
+  --status running --note "provider=grok via=acp" --request-id "$(pn_grok_mid pn-dg3-thread)" --run-dir /runs/dg3-A >/dev/null 2>&1
 run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok --role gating \
-  --status completed --note "exit=0 via=acp reason=no-output" >/dev/null 2>&1
+  --status completed --note "exit=0 via=acp reason=no-output" --run-dir /runs/dg3-A >/dev/null 2>&1
+run_pn events append --kind turn-finished --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok --role gating \
+  --status completed --note "exit=0 session=acp:s" --run-dir /runs/dg3-A >/dev/null 2>&1
 printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
   && ok "a COMPLETED provider-result is never evidence of an unavailable reviewer" || fail "a successful empty turn authorized a drop"
 # Evidence from a DIFFERENT dispatch of the same set must not authorize this attempt: the
 # leg may have been redispatched and still be running. (codex, implement r1, blocking.)
 run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "stale-$PN_DG3_DSP" --agent grok --role gating \
-  --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
+  --status failed --note "exit=1 via=acp reason=no-output" --run-dir /runs/dg3-A >/dev/null 2>&1
 printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
   && ok "evidence from another dispatch does not authorize dropping this attempt's leg" || fail "stale cross-dispatch evidence was accepted"
 
@@ -189,12 +204,14 @@ printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)
 # a leg that was actively reviewing again. The leg's LATEST turn must be the failed one.
 # (codex, implement r2, blocking.)
 run_pn events append --kind turn-started --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok \
-  --role gating --status running --note "re-sent after the failure" >/dev/null 2>&1
+  --role gating --status running --note "re-sent after the failure" --request-id "$(pn_grok_mid pn-dg3-thread)" --run-dir /runs/dg3-B >/dev/null 2>&1
 printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'no recorded evidence' \
   && ok "a leg re-sent under the same dispatch is not droppable while its new turn runs" || fail "a running re-send was dropped on a stale marker"
 # ...and once THAT turn also fails with no output, it becomes evidence again.
 run_pn events append --kind provider-result --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok \
-  --role gating --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
+  --role gating --status failed --note "exit=1 via=acp reason=no-output" --run-dir /runs/dg3-B >/dev/null 2>&1
+run_pn events append --kind turn-finished --set "$PN_DG3_SET" --dispatch "$PN_DG3_DSP" --agent grok --role gating \
+  --status failed --note "exit=1 reason=no-output session=acp:s" --run-dir /runs/dg3-B >/dev/null 2>&1
 printf '%s\n' "$(run_pn compose --set "$PN_DG3_SET" --degrade grok 2>&1 || true)" | grep -q 'DEGRADED PANEL' \
   && ok "the re-sent turn failing the same way restores droppability" || fail "a genuinely failed re-send stayed undroppable"
 
@@ -211,14 +228,18 @@ PN_DG4_MC="$(find "$PN_FIX/.comms/to-codex" -type f | xargs grep -l '^thread: pn
 PN_DG4_MIDC="$(grep -m1 '^message_id:' "$PN_DG4_MC" | sed 's/^message_id: //')"
 { printf -- '---\ntype: review-feedback\nfrom: codex\ntimestamp: 2026-08-26T12:56:00Z\nworkspace: %s\nmessage_id: codex-dg4-reply\nthread: pn-dg4-thread-codex\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' \
     "$PN_WS" "$PN_DG4_MIDC"; } > "$PN_FIX/.comms/archive/${PN_WS}_2026-08-26T12-56-00_codex-dg4.md"
+run_pn events append --kind turn-started --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
+  --role gating --status running --note "provider=grok via=acp" --request-id "$(pn_grok_mid pn-dg4-thread)" --run-dir /runs/dg4-A >/dev/null 2>&1
 run_pn events append --kind provider-result --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
-  --role gating --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
+  --role gating --status failed --note "exit=1 via=acp reason=no-output" --run-dir /runs/dg4-A >/dev/null 2>&1
+run_pn events append --kind turn-finished --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok --role gating \
+  --status failed --note "exit=1 reason=no-output session=acp:s" --run-dir /runs/dg4-A >/dev/null 2>&1
 # Sanity: droppable right now.
 printf '%s\n' "$(run_pn compose --set "$PN_DG4_SET" --degrade grok 2>&1 || true)" | grep -q 'DEGRADED PANEL' \
   && ok "the concurrency fixture is droppable before anything moves" || fail "dg4 fixture is not droppable — the next assertion would be vacuous"
 # Now a re-send lands. The very same command must refuse instead of publishing.
 run_pn events append --kind turn-started --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
-  --role gating --status running --note "re-sent while composing" >/dev/null 2>&1
+  --role gating --status running --note "re-sent while composing" --request-id "$(pn_grok_mid pn-dg4-thread)" --run-dir /runs/dg4-B >/dev/null 2>&1
 PN_DG4_C="$(run_pn compose --set "$PN_DG4_SET" --degrade grok 2>&1 || true)"
 printf '%s\n' "$PN_DG4_C" | grep -qE 'no recorded evidence|turn history moved' \
   && ! printf '%s\n' "$PN_DG4_C" | grep -q 'DEGRADED PANEL' \
@@ -248,12 +269,12 @@ while [ "$PN_DG5_I" -lt 56 ]; do
   PN_DG5_I=$((PN_DG5_I + 1))
 done
 PN_DG5_A="$(run_pn compose --set "$PN_DG4_SET" --degrade grok >/dev/null 2>&1; echo done)"
-PN_DG5_S1="$( eval "$(sed -n '/^degrade_boundary_state() {/,/^}/p' "$COMMS")"
+PN_DG5_S1="$( eval "$(sed -n '/^degrade_leg_events() {/,/^}/p;/^degrade_boundary_state() {/,/^}/p' "$COMMS")"
               cmd_events() { (cd "$PN_FIX" && "$COMMS" events "$@"); }
               degrade_boundary_state "$PN_DG4_SET" "$PN_DG4_DSP" grok )"
 run_pn events append --kind provider-result --set "$PN_DG4_SET" --dispatch "$PN_DG4_DSP" --agent grok \
   --role gating --status failed --note "exit=1 via=acp reason=no-output churn final" >/dev/null 2>&1
-PN_DG5_S2="$( eval "$(sed -n '/^degrade_boundary_state() {/,/^}/p' "$COMMS")"
+PN_DG5_S2="$( eval "$(sed -n '/^degrade_leg_events() {/,/^}/p;/^degrade_boundary_state() {/,/^}/p' "$COMMS")"
               cmd_events() { (cd "$PN_FIX" && "$COMMS" events "$@"); }
               degrade_boundary_state "$PN_DG4_SET" "$PN_DG4_DSP" grok )"
 [ -n "$PN_DG5_S1" ] && [ "$PN_DG5_S1" != "$PN_DG5_S2" ] \
@@ -265,11 +286,246 @@ sed -e 's/^message_id: .*/message_id: pn-req-dg2/' -e 's/^thread: .*/thread: pn-
 PN_DG2_OUT="$(run_pn panel dispatch --to grok --set pn-dg2 "$PN_DG_REQ2" 2>&1 || true)"
 PN_DG2_SET="$(printf '%s\n' "$PN_DG2_OUT" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
 PN_DG2_DSP="$(awk -F'\t' -v s="$PN_DG2_SET" '$3=="panel-planned" && $4==s {d=$5} END{print d}' "$PN_FIX/.comms/events.tsv")"
+run_pn events append --kind turn-started --set "$PN_DG2_SET" --dispatch "$PN_DG2_DSP" --agent grok --role gating \
+  --status running --note "provider=grok via=acp" --request-id "$(pn_grok_mid pn-dg2-thread)" --run-dir /runs/dg2-A >/dev/null 2>&1
 run_pn events append --kind provider-result --set "$PN_DG2_SET" --dispatch "$PN_DG2_DSP" --agent grok --role gating \
-  --status failed --note "exit=1 via=acp reason=no-output" >/dev/null 2>&1
+  --status failed --note "exit=1 via=acp reason=no-output" --run-dir /runs/dg2-A >/dev/null 2>&1
+run_pn events append --kind turn-finished --set "$PN_DG2_SET" --dispatch "$PN_DG2_DSP" --agent grok --role gating \
+  --status failed --note "exit=1 reason=no-output session=acp:s" --run-dir /runs/dg2-A >/dev/null 2>&1
 PN_DG_C5="$(run_pn compose --set "$PN_DG2_SET" --degrade grok 2>&1 || true)"
 printf '%s\n' "$PN_DG_C5" | grep -q 'no reviewer at all' \
   && ok "dropping EVERY leg is refused — an empty roster is not a degraded panel" || fail "degrade emptied the roster"
+
+# A REVIEW THAT CAN NEVER BE PUBLISHED is the same roster fact as one never produced. When the
+# broker cannot attest the model/effort a turn ran it withholds the reply (reason=policy-unapplied):
+# the provider exited clean, so the evidence is the TURN's failed terminal row, not a
+# provider-result. (integrate-driver-contract r4, 2026-09-24: an operator who chose to continue
+# after two such legs could not record a degraded composition.)
+pn_dg_set() {  # <slug> <HH-MM> — dispatch codex,grok; codex answers. Sets PN_DGX_SET / PN_DGX_DSP.
+  local req="$PN_FIX/.comms/to-codex/$(basename "$PN_FIX")_2026-08-26T${2}-00_req-$1.md" out mc mid
+  sed -e "s/^message_id: .*/message_id: pn-req-$1/" -e "s/^thread: .*/thread: pn-$1-thread/" "$PN_REQ" > "$req"
+  out="$(run_pn panel dispatch --to codex,grok --set "pn-$1" "$req" 2>&1 || true)"
+  PN_DGX_SET="$(printf '%s\n' "$out" | sed -n 's/.*as review set \([^ ]*\) .*/\1/p' | head -1)"
+  PN_DGX_DSP="$(awk -F'\t' -v s="$PN_DGX_SET" '$3=="panel-planned" && $4==s {d=$5} END{print d}' "$PN_FIX/.comms/events.tsv")"
+  PN_DGX_MID="$(pn_grok_mid "pn-$1-thread")"
+  mc="$(find "$PN_FIX/.comms/to-codex" -type f | xargs grep -l "^thread: pn-$1-thread-codex" 2>/dev/null | head -1)"
+  mid="$(grep -m1 '^message_id:' "$mc" | sed 's/^message_id: //')"
+  { printf -- '---\ntype: review-feedback\nfrom: codex\ntimestamp: 2026-08-26T%s:00Z\nworkspace: %s\nmessage_id: codex-%s-reply\nthread: pn-%s-thread-codex\nin-reply-to: %s\nworkflow: auto\nphase: implement\nround: 1\nmax-rounds: 4\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n- None.\n' \
+      "${2/-/:}" "$PN_WS" "$1" "$1" "$mid"; } > "$PN_FIX/.comms/archive/${PN_WS}_2026-08-26T${2}-00_codex-$1.md"
+}
+pn_dg_ev() {  # <kind> <status> <note> [run-dir] [role] — one grok event under the current PN_DGX set/dispatch
+  # Every row carries the leg's request id, as send and the runner write it.
+  run_pn events append --kind "$1" --set "$PN_DGX_SET" --dispatch "$PN_DGX_DSP" --agent grok \
+    --role "${5:-gating}" --status "$2" --note "$3" --request-id "$PN_DGX_MID" ${4:+--run-dir "$4"} >/dev/null 2>&1
+}
+pn_dg_try() { run_pn compose --set "$PN_DGX_SET" --degrade grok 2>&1 || true; }
+pn_dg_set dg7 12-57
+# Each attempt below is its own run; a run's terminal rows are judged under that run.
+# The token must be the one the runner writes, where it writes it: a reason quoted inside the
+# free-text note (a refusal message, a provider's own words) forges nothing.
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/7A
+pn_dg_ev provider-result completed "exit=0 elapsed=66s budget=3600s via=acp" /runs/7A
+pn_dg_ev turn-finished failed "exit=1 session=acp:s note=the provider said reason=policy-unapplied" /runs/7A
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a reason quoted inside a turn-finished note is not degrade evidence" || fail "a free-text reason token authorized a drop"
+# Other refusals are fix-and-retry conditions, not a roster decision.
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/7B
+pn_dg_ev turn-finished failed "exit=1 reason=containment-unconfirmed session=acp:s note=could not confirm the mode" /runs/7B
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a turn refused for another reason (containment-unconfirmed) is not droppable" || fail "a non-policy refusal authorized a drop"
+# Only a FAILED terminal row counts.
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/7C
+pn_dg_ev provider-result completed "exit=0 via=acp" /runs/7C
+pn_dg_ev turn-finished completed "exit=0 reason=policy-unapplied session=acp:s" /runs/7C
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a COMPLETED turn-finished is never evidence, whatever reason it carries" || fail "a completed turn authorized a drop"
+# The real shape: the runner's refusal row, exactly as write_result writes it.
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/7D
+pn_dg_ev provider-result completed "exit=0 elapsed=66s budget=3600s via=acp" /runs/7D
+pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s note=could not attest the model/effort the review turn actually ran (status 21: a malformed record in the provider's rollout)" /runs/7D
+PN_DG7_C="$(pn_dg_try)"
+printf '%s\n' "$PN_DG7_C" | grep -q 'DEGRADED PANEL' \
+  && printf '%s\n' "$PN_DG7_C" | grep -q 'grok: .*(reason=policy-unapplied)' \
+  && ok "a leg whose review was withheld as policy-unapplied is droppable, and the banner says why" \
+  || fail "policy-unapplied evidence did not authorize the operator's drop: $PN_DG7_C"
+[ "$(awk -F'\t' -v s="$PN_DGX_SET" '$3=="leg-unavailable" && $4==s && $8=="grok" {n=$15} END{print n}' "$PN_FIX/.comms/events.tsv" | cut -d: -f1)" = "reason=policy-unapplied" ] \
+  && ok "the logged roster reduction records the evidence reason, not a blanket 'no output'" || fail "leg-unavailable note does not carry the reason"
+# The fingerprint covers turn-finished, because it can now BE the evidence row.
+PN_DG7_S1="$( eval "$(sed -n '/^degrade_leg_events() {/,/^}/p;/^degrade_boundary_state() {/,/^}/p' "$COMMS")"
+              cmd_events() { (cd "$PN_FIX" && "$COMMS" events "$@"); }
+              degrade_boundary_state "$PN_DGX_SET" "$PN_DGX_DSP" grok )"
+pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s note=a second terminal row" /runs/7D
+PN_DG7_S2="$( eval "$(sed -n '/^degrade_leg_events() {/,/^}/p;/^degrade_boundary_state() {/,/^}/p' "$COMMS")"
+              cmd_events() { (cd "$PN_FIX" && "$COMMS" events "$@"); }
+              degrade_boundary_state "$PN_DGX_SET" "$PN_DGX_DSP" grok )"
+[ -n "$PN_DG7_S1" ] && [ "$PN_DG7_S1" != "$PN_DG7_S2" ] \
+  && ok "the degrade fingerprint moves when a turn-finished row is appended" || fail "turn-finished is outside the fingerprint: '$PN_DG7_S1'"
+# A no-output leg logged BEFORE turn-finished carried a reason stays droppable: a terminal row
+# that proves nothing never clears the provider-result's evidence.
+pn_dg_set dg8 12-58
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/8A
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/8A
+pn_dg_ev turn-finished failed "exit=1 session=acp:s" /runs/8A
+pn_dg_try | grep -q 'grok: produced no output at all (reason=no-output)' \
+  && ok "no-output evidence survives a reasonless (older) turn-finished row after it" || fail "a legacy turn-finished row cleared no-output evidence"
+
+# QUIESCENCE. A leg is droppable only when nothing about it can still be in motion: every send has
+# recorded its delivery, every run the log knows of has its OWN terminal row, and the run that
+# finished last recorded the failure. Each attribution rule tried before this trusted a signal
+# that could be delayed, lost or shared. (codex + grok, r1-r4, blocking.)
+pn_dg_set dg9 12-59
+# Run A finishes after re-send 9b was persisted: 9b may yet spawn a runner.
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/A
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/A
+pn_dg_ev request-persisted persisted "attempt=9b phase=implement workflow=auto"
+pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/A
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "run A's no-output terminal row cannot drop a leg whose re-send B is persisted" || fail "a superseded run's no-output row dropped a re-sent leg"
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/B
+pn_dg_ev request-dispatched spawned "attempt=9b type=review-request delivery=spawned" /runs/B
+pn_dg_ev provider-result completed "exit=0 via=acp" /runs/B
+pn_dg_ev request-persisted persisted "attempt=9c phase=implement workflow=auto"
+pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s" /runs/B
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "run B's policy-unapplied terminal row cannot drop a leg whose re-send C is persisted" || fail "a superseded run's policy row dropped a re-sent leg"
+# A LATE failure of an older run, while a newer run is still open, is no ground for a drop.
+pn_dg_ev request-dispatched spawned "attempt=9c type=review-request delivery=spawned" /runs/C
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/C
+pn_dg_ev request-persisted persisted "attempt=9d phase=implement workflow=auto"
+pn_dg_ev request-dispatched spawned "attempt=9d type=review-request delivery=spawned" /runs/D
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/D
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/C
+pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/C
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a late failure from an older run cannot drop the leg while a newer run is open" || fail "an older run's failure dropped a leg with an open run"
+# Positive control: once every run has finished, the LAST one's refusal is the evidence.
+pn_dg_ev provider-result completed "exit=0 via=acp" /runs/D
+pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s" /runs/D
+pn_dg_try | grep -q 'grok: .*(reason=policy-unapplied)' \
+  && ok "the latest run's own policy-unapplied row authorizes the drop once every run has finished" || fail "quiescence refused a leg whose every run had finished"
+# SHADOW ROWS ARE NOT THE LEG. A shadow shares set and dispatch and may run under a gating agent's
+# name; its refusal must never stand in for the gating run's own, undroppable, failure.
+# (grok, r1, blocking.)
+pn_dg_ev request-persisted persisted "attempt=9e phase=implement workflow=auto"
+pn_dg_ev request-dispatched spawned "attempt=9e type=review-request delivery=spawned" /runs/E
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/E
+pn_dg_ev turn-finished failed "exit=1 reason=containment-unconfirmed session=acp:s" /runs/E
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/S shadow
+pn_dg_ev provider-result completed "exit=0 via=acp" /runs/S shadow
+pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s" /runs/S shadow
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a shadow turn's policy refusal cannot drop the gating leg it shadows" || fail "a shadow row dropped a gating leg"
+
+# A DEDUPLICATED RE-SEND ("already running") adds a send, not a run: once its delivery is recorded,
+# the live run's own later failure is the evidence. (codex + grok, r2, blocking.)
+pn_dg_set dg10 13-00
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/10A
+pn_dg_ev request-persisted persisted "attempt=10b phase=implement workflow=auto"
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/10A
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a re-send whose delivery is not yet recorded keeps the leg pending" || fail "a pending re-send let the leg drop"
+pn_dg_ev request-dispatched spawned "attempt=10b type=review-request delivery=spawned" /runs/10A
+pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/10A
+pn_dg_try | grep -q 'grok: produced no output at all (reason=no-output)' \
+  && ok "a re-send that attached to the still-running run leaves that run's evidence usable" || fail "a deduplicated re-send superseded its own run"
+# A run known only by its delivery row is still a run: open until its own terminal row.
+pn_dg_set dg11 13-01
+pn_dg_ev request-persisted persisted "attempt=11a phase=implement workflow=auto"
+pn_dg_ev request-dispatched spawned "attempt=11a type=review-request delivery=spawned" /runs/11A
+pn_dg_ev request-persisted persisted "attempt=11b phase=implement workflow=auto"
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/11A
+pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/11A
+pn_dg_ev request-dispatched spawned "attempt=11b type=review-request delivery=spawned" /runs/11B
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "an older run with no turn-started of its own cannot pass as the re-send's run" || fail "first appearance let an older run's evidence drop the re-sent leg"
+# RUN IDENTITY SURVIVES THE COLUMN WIDTH: run dirs that differ only past 160 bytes stay two runs,
+# through the real encoder, so a finished run cannot close an open one. (codex + grok, r2.)
+PN_LONG="/runs/$(awk 'BEGIN{while(i++<170)printf "p"}')"
+pn_dg_set dg12 13-02
+pn_dg_ev turn-started running "provider=grok via=acp" "$PN_LONG.1790300689.79122"
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" "$PN_LONG.1790300689.79122"
+pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" "$PN_LONG.1790300689.79122"
+pn_dg_ev turn-started running "provider=grok via=acp" "$PN_LONG.1790300999.80001"
+pn_dg_try | grep -q 'no recorded evidence' \
+  && [ "$(awk -F'\t' -v s="$PN_DGX_SET" '$3=="turn-started" && $4==s {print $13}' "$PN_FIX/.comms/events.tsv" | sort -u | grep -c .)" = 2 ] \
+  && ok "two run dirs that differ only past the column width stay two runs" || fail "clipped run dirs collided into one run"
+# A delayed delivery row from an older send completes THAT send only. (codex, r3, blocking.)
+pn_dg_set dg13 13-03
+pn_dg_ev request-persisted persisted "attempt=13a phase=implement workflow=auto"
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/13A
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/13A
+pn_dg_ev request-persisted persisted "attempt=13b phase=implement workflow=auto"
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/13B
+pn_dg_ev request-dispatched spawned "attempt=13a type=review-request delivery=spawned" /runs/13A
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "an older send's delayed delivery row cannot re-select its dead run over the live one" || fail "a delayed delivery row dropped a live re-send"
+# A FOREGROUND turn (`send --wait`) records its delivery AFTER the runner's terminal rows, and a
+# delivery row that names no run completes its send without inventing one. (codex r3; grok r3.)
+pn_dg_set dg14 13-04
+pn_dg_ev request-persisted persisted "attempt=14a phase=implement workflow=auto"
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/14F
+pn_dg_ev provider-result completed "exit=0 via=acp" /runs/14F
+pn_dg_ev turn-finished failed "exit=1 reason=policy-unapplied session=acp:s" /runs/14F
+pn_dg_ev request-dispatched failed "attempt=14a type=review-request delivery=failed"
+pn_dg_try | grep -q 'grok: .*(reason=policy-unapplied)' \
+  && ok "a foreground turn's refusal stays droppable after a delivery row that names no run" || fail "a run-less delivery row erased the foreground turn's evidence"
+# A delayed START of the same request cannot stand in for a newer send still being delivered.
+# (codex, r4, blocking.)
+pn_dg_set dg15 13-05
+pn_dg_ev request-persisted persisted "attempt=15a phase=implement workflow=auto"
+pn_dg_ev request-dispatched spawned "attempt=15a type=review-request delivery=spawned" /runs/15A
+pn_dg_ev request-persisted persisted "attempt=15b phase=implement workflow=auto"
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/15A
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/15A
+pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/15A
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a delayed start of the same request cannot resolve a newer send still being delivered" || fail "a start of the same request resolved a pending send"
+# A foreground turn takes no spawn claim, so a detached run of the same message can be live beside
+# it: the foreground failure is no ground while that run is open. (grok, r4, blocking.)
+pn_dg_set dg16 13-06
+pn_dg_ev request-persisted persisted "attempt=16d phase=implement workflow=auto"
+pn_dg_ev request-dispatched spawned "attempt=16d type=review-request delivery=spawned" /runs/16D
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/16D
+pn_dg_ev request-persisted persisted "attempt=16f phase=implement workflow=auto"
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/16F
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/16F
+pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/16F
+pn_dg_ev request-dispatched spawned "attempt=16f type=review-request delivery=spawned" /runs/16F
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a foreground turn's failure cannot drop the leg while a detached run of it is open" || fail "a foreground failure dropped a leg with a live detached run"
+# A re-send whose delivery names a FINISHED run (a claim's pid and run dir from different runners)
+# cannot hide the live run, which stays open by its own rows. (codex, r4, blocking.)
+pn_dg_set dg17 13-07
+pn_dg_ev request-persisted persisted "attempt=17a phase=implement workflow=auto"
+pn_dg_ev request-dispatched spawned "attempt=17a type=review-request delivery=spawned" /runs/17A
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/17A
+pn_dg_ev request-persisted persisted "attempt=17b phase=implement workflow=auto"
+pn_dg_ev request-dispatched spawned "attempt=17b type=review-request delivery=spawned" /runs/17B
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/17B
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/17B
+pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/17B
+pn_dg_ev request-persisted persisted "attempt=17c phase=implement workflow=auto"
+pn_dg_ev request-dispatched spawned "attempt=17c type=review-request delivery=spawned" /runs/17B
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a re-send that names a finished run cannot hide a live one" || fail "a mis-named attachment dropped a live run"
+# Attempt ids are COUNTED: two sends that minted the same id still need two delivery rows. (grok, r4.)
+pn_dg_set dg18 13-08
+pn_dg_ev request-persisted persisted "attempt=18x phase=implement workflow=auto"
+pn_dg_ev request-persisted persisted "attempt=18x phase=implement workflow=auto"
+pn_dg_ev request-dispatched spawned "attempt=18x type=review-request delivery=spawned" /runs/18A
+pn_dg_ev turn-started running "provider=grok via=acp" /runs/18A
+pn_dg_ev provider-result failed "exit=1 elapsed=6s budget=600s via=acp reason=no-output" /runs/18A
+pn_dg_ev turn-finished failed "exit=1 reason=no-output session=acp:s" /runs/18A
+pn_dg_try | grep -q 'no recorded evidence' \
+  && ok "a repeated attempt id still needs one delivery row per send" || fail "a repeated attempt id masked an undelivered send"
+PN_RDP="$( eval "$(sed -n '/^delivery_run_dir() {/,/^}/p' "$COMMS")"
+           delivery_run_dir "running grok in the foreground (no detach) — run dir: /runs/fg.1.2"
+           delivery_run_dir "spawned runphase pid=7 provider=grok via=acp
+  run dir: /runs/sp.3.4
+  events:  /runs/sp.3.4/events.ndjson"
+           delivery_run_dir "already running: runphase pid=9 for this message" )"
+[ "$PN_RDP" = "$(printf '/runs/fg.1.2\n/runs/sp.3.4')" ] \
+  && ok "the delivery parser reads the foreground, spawned and unattached shapes" || fail "delivery_run_dir misread a shape: $PN_RDP"
 
 grep -q "^review_set: $PN_ST_SET$" "$PN_ST_LEG" 2>/dev/null \
   && ok "dispatch REPLACES an inherited review_set with the set it actually dispatched" \

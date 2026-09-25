@@ -323,10 +323,14 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
   # The TURN's terminal status, not the provider's: they differ exactly when the provider
   # exited clean and the broker then refused. A turn whose own trace lost an event signs
   # off `log-incomplete` rather than claiming a clean run over a hole.
+  #
+  # The reason goes RIGHT AFTER exit=, before the session id and the free-text note: compose's
+  # degrade evidence (DEGRADE_EVIDENCE_AWK in comms.sh) matches it only at that anchored
+  # position, so nothing a provider or a refusal message puts later in the row can forge it.
   if [ "${LOG_INCOMPLETE:-0}" = 1 ]; then
-    log_event turn-finished log-incomplete "turn=$status exit=$rc session=$sid — an event this turn produced is MISSING from the log; do not read this trace as complete${note:+ (note=$note)}"
+    log_event turn-finished log-incomplete "turn=$status exit=$rc${reason:+ reason=$reason} session=$sid — an event this turn produced is MISSING from the log; do not read this trace as complete${note:+ (note=$note)}"
   else
-    log_event turn-finished "$status" "exit=$rc session=$sid${note:+ note=$note}"
+    log_event turn-finished "$status" "exit=$rc${reason:+ reason=$reason} session=$sid${note:+ note=$note}"
   fi
   # Publishing stays TOLERATED, as it always was. Splitting the original
   # `printf ... > tmp && mv ... || warn` to slip the terminal event between the two halves
@@ -2279,7 +2283,13 @@ for f in files:
     if len(raw)!=st.st_size-start: undecidable("an incomplete read of the provider's rollout")
     try: blob=raw.decode("utf-8")
     except UnicodeDecodeError: undecidable("the provider's rollout is not valid UTF-8")
-    lines=blob.splitlines()
+    # JSONL records end at "\n" and NOWHERE ELSE. str.splitlines() also breaks on U+0085,
+    # U+2028 and U+2029, which JSON allows unescaped inside a string and codex writes raw — so a
+    # review request that merely QUOTED one cut its own user-message record in half and read as
+    # "a malformed record" (rc=21 on two honest APPROVE legs, integrate-driver-contract r4,
+    # 2026-09-24). Splitting on "\n" alone keeps every refusal below: a record that still does
+    # not parse is still malformed.
+    lines=blob.split("\n")
     # A trailing partial line is a write in flight, not evidence.
     if blob and not blob.endswith("\n"): undecidable("the provider's rollout ends mid-record")
     for line in lines:

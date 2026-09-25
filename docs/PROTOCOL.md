@@ -557,7 +557,7 @@ The lifecycle, in the order it is written:
 | `reply-validated` | the broker | a stamped reply passed validation (`status` = verdict) |
 | `reply-refused` | the broker | it refused to STAMP, and why (`note`) |
 | `reply-accepted` | `send`, for a reply | the reply reached the driver's inbox (`status` = verdict) |
-| `turn-finished` | the runner (or `await`, for a runner that died) | the TURN's terminal status, which differs from the provider's; `log-incomplete` when an event this turn produced never reached the log |
+| `turn-finished` | the runner (or `await`, for a runner that died) | the TURN's terminal status, which differs from the provider's; `log-incomplete` when an event this turn produced never reached the log; the note opens `exit=N reason=R` when the turn recorded a reason |
 | `composition-completed` / `composition-refused` | `compose` | the gate ran, or refused a partial/unreadable panel or two answers from one provider (`duplicate-provider`) |
 
 Read it with
@@ -792,11 +792,26 @@ records what it OBSERVED, not a diagnosis: `reason: no-output` in `result.json` 
 `provider-result` event. That is a fact about the ROSTER, distinct from a reply that arrived
 and failed the verdict contract, which is a fact about the REVIEW.
 
+A reviewer whose review can never be PUBLISHED is the same roster fact. When the broker
+cannot attest the model/effort a turn actually ran, it withholds the reply unpublished
+(`reason: policy-unapplied`) — the provider exited clean, so the `provider-result` says
+`completed`, and the evidence lives on the turn's own terminal row instead:
+`turn-finished failed` with `exit=N reason=policy-unapplied` at the head of its note. A failed
+`turn-finished` written through `result.json` carries its `reason=` there, in that anchored
+position, so nothing later in the row (a session id, a free-text refusal message) can forge it.
+A `log-incomplete` row (`turn=<status> exit=N reason=R ...`) is never evidence: its own trace
+has a hole, so a leg whose refusal lost an event is re-sent, not dropped. This covers every
+`policy-unapplied` refusal, including the pre-prompt ones (a preflight mismatch, a policy
+record that changed, a rollout snapshot that failed), so the banner says the policy "could not
+be applied or attested", never that the review ran. The other refusal reasons — `containment-unconfirmed`, `runtime-incompatible`,
+`canary-*` — are conditions to fix and retry, and stay undroppable.
+
 `compose` still refuses such a panel by default, because a missing voice is not an approval.
 An operator — never the driver on its own judgement — may then drop the leg with
 `compose --set <id> --degrade <agent>`. It is gated on evidence, not on the flag: the named
-agent must actually be missing, the log must carry its `reason=no-output`, every missing leg
-must be named, and a reduction that would leave NO reviewer is refused outright, because
+agent must actually be missing, the log must carry its evidence — a failed `provider-result`
+with `reason=no-output`, or a failed `turn-finished` with `reason=no-output` or
+`reason=policy-unapplied` — every missing leg must be named, and a reduction that would leave NO reviewer is refused outright, because
 that is not a degraded panel but an unreviewed change. Accepting one writes `leg-unavailable`
 per dropped agent BEFORE composing, closes as `composed-degraded`, and labels the output
 DEGRADED with the reviewers who were actually present. A degraded approval must never be
@@ -810,9 +825,25 @@ leg KEEPS that dispatch, so the leg's LATEST turn must be the failed one. An att
 begun and not yet reported is a reviewer working right now, and is never droppable. "Begun"
 counts `request-persisted` as well as `turn-started`, and that choice is load-bearing:
 `turn-started` is advisory, so losing it would hide a live re-send, while the request event is
-written fail-closed before delivery and therefore cannot be missing from one. Because
-"latest" is a sample, each dropped leg's turn history is fingerprinted when the drop is accepted
-and re-verified immediately before the composition is published, beside the dispatch
+written fail-closed before delivery and therefore cannot be missing from one. The rule is
+QUIESCENCE, not attribution: a leg is droppable only when nothing about it can still be in
+motion. (1) Every send has recorded its delivery: each send mints an attempt id, written as
+`attempt=<id>` at the head of both its `request-persisted` and `request-dispatched` notes, and
+every persist needs its own delivery row (counted, so a repeated id still needs one per send) — a
+send between the two may yet spawn a runner. (2) Every run the log knows of has finished: a run
+named by any `request-dispatched`, `turn-started`, `provider-result` or `turn-finished` row stays
+open until its own `turn-finished`. (3) The run that finished last recorded the failure. Nothing
+here trusts WHICH run an attempt attached to — row order, a delayed delivery row, an "already
+running" line, a late start of the same request and a foreground `--wait` run racing a detached
+one each made an attribution rule unsafe in review — because none of them can make an open run
+look finished. The cost is availability: a runner that died without its terminal row keeps the
+leg undroppable until `await` synthesizes one, or the leg is re-sent. Run identity is the
+`run_dir` column, stored through the same head-plus-digest transform as the other identity
+columns, so two run dirs that differ only past its width stay distinct. Only `role=gating` rows are read: a
+`comms.sh shadow` turn runs under the same set and dispatch, possibly as an agent that is also a
+gating leg, and its failures say nothing about that leg. Because
+"latest" is a sample, each dropped leg's turn history is fingerprinted from the same read that
+judged it eligible and re-verified immediately before the composition is published, beside the dispatch
 supersession check. **A residual remains and is not closable in shell**: the gap between that
 final check and the write itself. Closing it would need locking; it is recorded here rather
 than chased. A turn killed at its budget (`rc=3`) is deliberately NOT marked: it was working

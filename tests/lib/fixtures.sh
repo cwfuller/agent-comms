@@ -356,6 +356,8 @@ fi
 #   AX_ROLLOUT_NEW_FILE — append to a NEW jsonl, as a replacement session does.
 #   AX_ROLLOUT_NONE     — write nothing (evidence missing -> undecidable).
 #   AX_ROLLOUT_DOUBLE   — two root contexts (ambiguous -> undecidable).
+#   AX_ROLLOUT_APPEND   — a file whose bytes are appended after the contexts, verbatim (e.g.
+#     message records carrying raw U+2028, as codex writes them).
 if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
   ax_rd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_rd" 2>/dev/null
   ax_rf="$ax_rd/rollout-stub.jsonl"
@@ -370,6 +372,7 @@ if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
     "$ax_rm" "$ax_re" >> "$ax_rf" 2>/dev/null || true
   [ -n "${AX_ROLLOUT_DOUBLE:-}" ] && printf '{"type":"turn_context","payload":{"turn_id":"t-root2","root_turn_id":"t-root2","model":"%s","effort":"%s"}}\n' \
     "$ax_rm" "$ax_re" >> "$ax_rf" 2>/dev/null
+  [ -n "${AX_ROLLOUT_APPEND:-}" ] && cat "$AX_ROLLOUT_APPEND" >> "$ax_rf" 2>/dev/null
 fi
 # A mounted --approve-all child can write. AX_CHILD_WRITE plants residue at an untracked
 # AND an ignored path, so a restage can be shown to clear both.
