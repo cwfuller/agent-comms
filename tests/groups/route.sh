@@ -1031,8 +1031,11 @@ F1="$(rt -- "dedup: no backend here" 2>/dev/null)"; F2="$(rt -- "dedup: no backe
 [ -n "$(rt_kv "$F1" route_id)" ] && [ "$(rt_kv "$F1" route_id)" != "$(rt_kv "$F2" route_id)" ] \
   && ok "a fail-open is never reused" || fail "fail-open reused"
 # A reuse is still a served decision: the optional JSONL log gets a line naming the reused id.
-rt COMMS_ROUTE_STUB="$ST/dd.json" COMMS_ROUTE_LOG="$WORK/dd.jsonl" -- "dedup: add a null check to the parser" >/dev/null 2>&1
-grep -q "\"reused\": \"$(rt_kv "$O6" route_id)\"" "$WORK/dd.jsonl" \
+# Its own task, so exactly one record can be reused and the logged id is the one that was printed.
+LG1="$(rt COMMS_ROUTE_STUB="$ST/dd.json" -- "dedup: log a reuse" 2>/dev/null)"
+LG2="$(rt COMMS_ROUTE_STUB="$ST/dd.json" COMMS_ROUTE_LOG="$WORK/dd.jsonl" -- "dedup: log a reuse" 2>/dev/null)"
+[ -n "$(rt_kv "$LG1" route_id)" ] && [ "$(rt_kv "$LG2" route_id)" = "$(rt_kv "$LG1" route_id)" ] \
+  && grep -q "\"reused\": \"$(rt_kv "$LG2" route_id)\"" "$WORK/dd.jsonl" \
   && ok "COMMS_ROUTE_LOG records a reuse with the reused route_id" || fail "reuse not logged"
 # PROBE: the whole path, no request. The record says probe, nothing sent, no answers.
 N0="$(dd_n)"
