@@ -2010,8 +2010,14 @@ tree_branch() {
 }
 
 # abs_file <path> — <path> made absolute (physical directory), for a command printed to be re-run
-# from a different directory.
-abs_file() { printf '%s/%s' "$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" "$(basename "$1")"; }
+# from a different directory. A directory that cannot be entered keeps the path as given, made
+# absolute against $PWD — never a bare `/<basename>`.
+abs_file() {
+  local d
+  if d="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)"; then printf '%s/%s' "$d" "$(basename "$1")"
+  else case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$PWD" "$1" ;; esac
+  fi
+}
 
 # request_tree_check <request> <verb> <rerun argv...> — THE ARTIFACT A REVIEWER JUDGES MUST BE THE TREE THE
 # REQUEST NAMES. A review-request's `cwd:` and `branch:` say which tree it is about; send and
