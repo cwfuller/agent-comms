@@ -1578,3 +1578,68 @@ rr_run rr-max "" "$RR_D13" COMMS_REVIEW_MAX=1 AX_CFG_LOG="$RR_CFG13"
 [ "$(cn_status "$RR_D13")" = completed ] && grep -q 'model_reasoning_effort = "ultra"' "$RR_CFG13" \
   && [ "$(tv "$RR_D13" policy_model_source)" = max ] && [ "$(tv "$RR_D13" observed_effort)" = ultra ] \
   && ok "a use-max turn runs and attests the ceiling pair" || fail "use-max turn: status=$(cn_status "$RR_D13")"
+
+section "per-leg usage: result.json carries the provider's own records"
+# THROUGH THE REAL RUNNER, not the reader alone: the window has to open before the billable
+# prompt and close before unmount (a throwaway mount deletes the isolated CODEX_HOME), and only a
+# real turn proves both. The stub prints acpx's own `[acpx] tokens: ... total=2` line on every
+# canary; a leg whose provider wrote no token records must still read null, never that 2.
+ru() {  # <run-dir> <usage|rate_limits> <key> -> value | null | <none> (object null) | <unreadable>
+  python3 -c '
+import json,sys
+o=json.load(open(sys.argv[1])).get(sys.argv[2])
+print("<none>" if o is None else ("null" if o.get(sys.argv[3]) is None else o.get(sys.argv[3])))' \
+    "$1/result.json" "$2" "$3" 2>/dev/null || echo "<unreadable>"
+}
+LU_REC="$WORK/lu-codex-records.jsonl"
+# The fixture's turn_context lines are dropped: the stub writes the turn's one root context, and
+# the attestation (rightly) refuses roots that disagree on model/effort.
+grep -v '"type":"turn_context"' "$REPO/tests/fixtures/leg-usage/codex-window.jsonl" > "$LU_REC"
+LU_CX="$WORK/lu-codex"; pol_run lu-codex "$LU_CX" AX_ROLLOUT_APPEND="$LU_REC"
+[ "$(cn_status "$LU_CX")" = completed ] && [ "$(ru "$LU_CX" usage total_tokens)" = 660 ] \
+  && [ "$(ru "$LU_CX" usage responses)" = 3 ] && [ "$(ru "$LU_CX" usage source)" = codex-token-usage-record ] \
+  && ok "a mounted codex leg's result.json carries usage summed from its isolated rollout (dedupe held)" \
+  || fail "codex leg usage: status=$(cn_status "$LU_CX") total=$(ru "$LU_CX" usage total_tokens) responses=$(ru "$LU_CX" usage responses)"
+[ "$(ru "$LU_CX" rate_limits used_percent)" = 31.5 ] && [ "$(ru "$LU_CX" rate_limits limit_id)" = codex ] \
+  && [ "$(ru "$LU_CX" rate_limits window_minutes)" = 10080 ] && [ "$(ru "$LU_CX" rate_limits resets_at)" = 1790000100 ] \
+  && ok "a codex leg's result.json carries its latest rate_limits snapshot" \
+  || fail "codex leg rate_limits: $(ru "$LU_CX" rate_limits used_percent)"
+[ "$(ru "$POL_OK" usage x)" = "<none>" ] && [ "$(ru "$POL_OK" rate_limits x)" = "<none>" ] \
+  && ok "a codex leg whose rollout holds no token records reads usage null — not 0, not acpx's printed total" \
+  || fail "no-record leg: usage=$(ru "$POL_OK" usage total_tokens) rate=$(ru "$POL_OK" rate_limits used_percent)"
+[ "$(json_get "$LU_CX/result.json" status)" = completed ] && [ "$(json_get "$LU_CX/result.json" provider)" = codex ] \
+  && ok "the string fields stay readable one-key-per-line beside the embedded objects" || fail "json_get broke on the usage lines"
+# A REFUSED turn was still paid for: the divergent-depth leg is withheld, but its spend is recorded.
+LU_DIV="$WORK/lu-codex-div"; pol_run lu-codex-div "$LU_DIV" AX_ROLLOUT_EFFORT=medium AX_ROLLOUT_APPEND="$LU_REC"
+[ "$(cn_status "$LU_DIV")" = failed ] && [ "$(ru "$LU_DIV" usage total_tokens)" = 660 ] \
+  && ok "a leg refused after its prompt still records what the provider billed" \
+  || fail "refused leg usage: status=$(cn_status "$LU_DIV") total=$(ru "$LU_DIV" usage total_tokens)"
+
+# grok: the window is the turns[] this leg ADDED. Two legs in one cwd, as a warm leg's rounds are:
+# the second must not re-bill the first.
+LU_H="$WORK/lu-home"; mkdir -p "$LU_H"; : > "$LU_H/.acpx-test-store"
+LU_G1="$(run_canary_turn lu-grok-1 pong HOME="$LU_H" AX_GROK_USAGE="$REPO/tests/fixtures/leg-usage/grok-usage-before.json")"
+LU_G2="$(run_canary_turn lu-grok-2 pong HOME="$LU_H" AX_GROK_USAGE="$REPO/tests/fixtures/leg-usage/grok-usage-after.json")"
+[ "$(cn_status "$LU_G1")" = completed ] && [ "$(ru "$LU_G1" usage total_tokens)" = 24231 ] && [ "$(ru "$LU_G1" usage turns)" = 1 ] \
+  && ok "a grok leg's result.json carries the usage.json turn it added" \
+  || fail "grok leg 1: status=$(cn_status "$LU_G1") total=$(ru "$LU_G1" usage total_tokens)"
+[ "$(cn_status "$LU_G2")" = completed ] && [ "$(ru "$LU_G2" usage total_tokens)" = 3060 ] && [ "$(ru "$LU_G2" usage turns)" = 2 ] \
+  && ok "the next grok leg in the same session counts only its own turns, not the session total" \
+  || fail "grok leg 2: status=$(cn_status "$LU_G2") total=$(ru "$LU_G2" usage total_tokens)"
+[ "$(ru "$LU_G2" rate_limits x)" = "<none>" ] \
+  && ok "a grok leg's rate_limits is null (only codex reports one)" || fail "grok rate_limits not null"
+
+# claude: the transcript's per-content-block duplicates collapse to one response each.
+mkdir -p "$MA_FIX/.comms/to-claude"
+LU_CM="$MA_FIX/.comms/to-claude/${MA_WS}_2026-08-20T14-00-00_lu-claude.md"
+sed -e "s/^thread: ma-arc-1\$/thread: lu-claude/" -e "s/^from: claude\$/from: codex/" \
+    -e "s/_review-req-1\$/_lu-claude/" "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$LU_CM"
+LU_CL="$WORK/lu-claude"; mkdir -p "$LU_CL"
+( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$LU_H" ACP_PARITY_PAYLOAD="$BRK_PAY" \
+    AX_CLAUDE_TRANSCRIPT="$REPO/tests/fixtures/leg-usage/claude-window.jsonl" \
+    COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$RP" run --message "$LU_CM" --dir "$LU_CL" \
+    --provider claude --via acp --timeout-secs 20 ) >/dev/null 2>&1
+[ "$(cn_status "$LU_CL")" = completed ] && [ "$(ru "$LU_CL" usage output_tokens)" = 160 ] \
+  && [ "$(ru "$LU_CL" usage responses)" = 2 ] && [ "$(ru "$LU_CL" usage source)" = claude-transcript ] \
+  && ok "a claude leg's result.json carries its transcript usage, deduplicated by (message.id, requestId)" \
+  || fail "claude leg: status=$(cn_status "$LU_CL") out=$(ru "$LU_CL" usage output_tokens) responses=$(ru "$LU_CL" usage responses)"

@@ -374,6 +374,22 @@ if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
     "$ax_rm" "$ax_re" >> "$ax_rf" 2>/dev/null
   [ -n "${AX_ROLLOUT_APPEND:-}" ] && cat "$AX_ROLLOUT_APPEND" >> "$ax_rf" 2>/dev/null
 fi
+# THE PROVIDER'S OWN USAGE RECORDS for grok and claude, written where each keeps them for this
+# cwd — only into a HOME the suite marked as its own, never the user's real ~/.grok or ~/.claude.
+#   AX_GROK_USAGE        — installed as <HOME>/.grok/sessions/<quoted cwd>/stub-session/usage.json
+#                          (grok REWRITES that file each turn, so this replaces it)
+#   AX_CLAUDE_TRANSCRIPT — appended to <HOME>/.claude/projects/<cwd slug>/stub-session.jsonl with
+#                          @CWD@ replaced by this cwd (claude appends, one record per content block)
+if [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx-test-store" ]; then
+  if [ -n "${AX_GROK_USAGE:-}" ]; then
+    ax_gd="$HOME/.grok/sessions/$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$(pwd -P)")/stub-session"
+    mkdir -p "$ax_gd" 2>/dev/null && cp "$AX_GROK_USAGE" "$ax_gd/usage.json" 2>/dev/null || true
+  fi
+  if [ -n "${AX_CLAUDE_TRANSCRIPT:-}" ]; then
+    ax_cd="$HOME/.claude/projects/$(pwd -P | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$ax_cd" 2>/dev/null && sed "s|@CWD@|$(pwd -P)|g" "$AX_CLAUDE_TRANSCRIPT" >> "$ax_cd/stub-session.jsonl" 2>/dev/null || true
+  fi
+fi
 # A mounted --approve-all child can write. AX_CHILD_WRITE plants residue at an untracked
 # AND an ignored path, so a restage can be shown to clear both.
 if [ -n "${AX_CHILD_WRITE:-}" ]; then
