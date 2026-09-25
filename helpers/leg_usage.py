@@ -60,6 +60,15 @@ def _boom(e):
     raise e
 
 
+def absent(path):
+    """True when path does not exist — an empty record set, which is a fact. A path that exists
+    but cannot be listed RAISES: that is not evidence of absence, and the window stays unbounded."""
+    if not os.path.lexists(path):
+        return True
+    os.listdir(path)
+    return False
+
+
 # ---------- where each provider's records live ----------
 
 def cwd_forms(cwd):
@@ -76,8 +85,7 @@ def claude_slug(path):
 
 def claude_dirs(root, cwd):
     """Candidate project directories for cwd, and which of them are EXACT (unsuffixed) names."""
-    if not os.path.isdir(root):
-        os.listdir(root)                     # absent is empty; unreadable raises
+    if absent(root):
         return [], set()
     names = os.listdir(root)
     out, exact = [], set()
@@ -101,8 +109,7 @@ def jsonl_files(provider, root, cwd):
     files = []
     if provider == "codex":
         base = os.path.join(root, "sessions")
-        if not os.path.isdir(base):
-            os.listdir(root)
+        if absent(root) or absent(base):
             return files
         for d, _, names in os.walk(base, onerror=_boom):
             for n in names:
@@ -120,8 +127,7 @@ def jsonl_files(provider, root, cwd):
 
 def grok_files(root, cwd):
     files = []
-    if not os.path.isdir(root):
-        os.listdir(root)
+    if absent(root):
         return files
     for form in cwd_forms(cwd):
         base = os.path.join(root, quote(form, safe=""))
@@ -169,7 +175,7 @@ def snapshot(provider, root, cwd):
 # ---------- the window ----------
 
 def window_records(provider, root, cwd, snap):
-    """Yield (file, pre_window_bytes, [records appended during the turn]) per file with growth."""
+    """(file, window_start_offset, [records appended during the turn]) per file with growth."""
     prev = snap.get("files")
     if not isinstance(prev, dict):
         raise Undecidable("the snapshot does not describe any record files")
@@ -199,11 +205,11 @@ def window_records(provider, root, cwd, snap):
             continue
         try:
             with open(f, "rb") as fh:
-                pre = fh.read(start)
+                fh.seek(start)
                 raw = fh.read()
         except OSError:
             raise Undecidable("a record file could not be read")
-        if len(pre) != start or len(raw) != st.st_size - start:
+        if len(raw) != st.st_size - start:
             raise Undecidable("an incomplete read of a record file")
         try:
             blob = raw.decode("utf-8")
@@ -221,7 +227,7 @@ def window_records(provider, root, cwd, snap):
                 recs.append(json.loads(line))
             except ValueError:
                 raise Undecidable("a malformed record in the window")
-        out.append((f, pre, recs))
+        out.append((f, start, recs))
     return out
 
 
@@ -251,7 +257,7 @@ def codex_usage(windows):
     # Primary: token_usage_record, one per model response. Summed by turn_id, and a response
     # recorded twice (same turn_id + response_id) counts once.
     per_turn, keys = {}, set()
-    for f, _pre, recs in windows:
+    for f, _start, recs in windows:
         for i, r in enumerate(recs):
             if not isinstance(r, dict) or r.get("type") != "token_usage_record":
                 continue
@@ -278,12 +284,12 @@ def codex_usage(windows):
     # in the window minus the last total before it — immune to a repeated token_count event,
     # which summing last_token_usage would double-count.
     deltas = []
-    for _f, pre, recs in windows:
+    for f, start, recs in windows:
         after = [codex_norm(i.get("total_token_usage")) for i in token_count_infos(recs)]
         after = [a for a in after if a is not None]
         if not after:
             continue
-        before = [codex_norm(i.get("total_token_usage")) for i in token_count_infos(pre_records(pre))]
+        before = [codex_norm(i.get("total_token_usage")) for i in token_count_infos(pre_records(f, start))]
         before = [b for b in before if b is not None]
         base = before[-1] if before else {k: 0 for k in FIELDS}
         d = {}
@@ -305,10 +311,19 @@ def codex_usage(windows):
     return total
 
 
-def pre_records(pre):
-    """Records written BEFORE the window, for the token_count baseline. Unparseable lines are
-    skipped here: the baseline is only ever the last good total, and the window itself was
-    already held to the strict reader."""
+def pre_records(f, start):
+    """Records written BEFORE the window, for the token_count baseline — read only on this
+    fallback path. Unparseable lines are skipped here: the baseline is only ever the last good
+    total, and the window itself was already held to the strict reader."""
+    if not start:
+        return []
+    try:
+        with open(f, "rb") as fh:
+            pre = fh.read(start)
+    except OSError:
+        raise Undecidable("a record file could not be re-read for its baseline")
+    if len(pre) != start:
+        raise Undecidable("an incomplete read of a record file's baseline")
     out = []
     for line in pre.decode("utf-8", "replace").split("\n"):
         if line.strip():
@@ -333,7 +348,7 @@ def token_count_infos(recs):
 
 def codex_rate_limits(windows):
     latest, latest_ts = None, None
-    for _f, _pre, recs in windows:
+    for _f, _start, recs in windows:
         for r, p in token_count_events(recs):
             rl = p.get("rate_limits")
             if not isinstance(rl, dict):
@@ -357,7 +372,7 @@ def claude_usage(windows, root, cwd):
     forms = set(cwd_forms(cwd))
     last = {}
     order = []
-    for f, _pre, recs in windows:
+    for f, _start, recs in windows:
         in_exact = any(f.startswith(d + os.sep) for d in exact)
         for i, r in enumerate(recs):
             if not isinstance(r, dict) or r.get("type") != "assistant":

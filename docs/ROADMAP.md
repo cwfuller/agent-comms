@@ -2547,9 +2547,15 @@ and lossy rewriting of inter-agent instructions is the `$N`-corruption class). R
 - [ ] **CCR as protocol norm**: terse summary + canonical path/ref instead of mandated
   copy-forward (prior-findings bundle, full plan text) on warm legs — the filesystem is
   already the reversible store. Copy-forward was designed for a reader with no session.
-- [ ] **Instrument per-leg spend** (ships WITH the two above, not as a gate): lift
-  acpx's token-usage line + events.ndjson usage into result.json and a rounds.tsv
-  column, so the delta is measured.
+- [x] **Instrument per-leg spend** (ships WITH the two above, not as a gate). LANDED
+  2026-09-25 with a changed source: NOT acpx's token-usage line or events.ndjson — a wrapper's
+  summary cannot be deduplicated or audited — but each provider's own records
+  (`helpers/leg_usage.py`): codex rollout `token_usage_record` by `turn_id` (fallback
+  `token_count.info`) plus the latest `rate_limits`; grok `usage.json` `turns[]`; claude's
+  transcript deduped by `(message.id, requestId)`. Into `result.json` (`usage`, `rate_limits`)
+  and the last column of `rounds.tsv`; missing data is null, never 0. Bounded to the leg's turn
+  (canary included), so warm rounds are comparable. Known gap: codex outside an isolated
+  `CODEX_HOME` (non-mounted) reads null — the shared home is not attributable.
 - [ ] Tail-of-prompt verbosity steering, narrowly ("no preamble, findings are
   path:line + claim" — never "be brief": terseness that punishes reproduction buys
   cheaper, worse reviews). Error-only validation reporting (failures + counts, never

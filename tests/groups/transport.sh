@@ -308,8 +308,11 @@ verdict: REQUEST_CHANGES
 ### Process
 - process noise that must not be counted
 RNEOF
-run_tr round-note "$TR_RN" --note "caught the real one, missed nothing" >/dev/null 2>&1
 RN_TSV="$TR_FIX/.comms/grades/rounds.tsv"
+# A LEDGER FROM BEFORE THE USAGE COLUMN. Its header is extended in place; its rows are kept.
+mkdir -p "$(dirname "$RN_TSV")"
+printf 'timestamp\tthread\tphase\tround\treviewer\tverdict\tblocking\tadvisory\tprompt_version\tnote\n2026-08-01T00:00:00Z\told-thread\timplement\t1\tgrok\tAPPROVE\t0\t0\tpv-old\tan old row\n' > "$RN_TSV"
+run_tr round-note "$TR_RN" --note "caught the real one, missed nothing" >/dev/null 2>&1
 [ -s "$RN_TSV" ] && ok "round-note writes a rounds ledger" || fail "rounds.tsv"
 awk -F'\t' 'NR>1 && $7=="2" && $8=="1"' "$RN_TSV" | grep -q . \
   && ok "round-note DERIVES the counts (2 blocking, 1 advisory) rather than trusting input" || fail "derived counts"
@@ -319,6 +322,29 @@ grep -q 'process noise' "$RN_TSV" && fail "### Process leaked into the round led
 awk -F'\t' 'NR>1 && $9!=""' "$RN_TSV" | grep -q . \
   && ok "round-note stamps prompt_version so rounds are comparable only within one" || fail "prompt_version missing"
 check_not "round-note requires an assessment" run_tr round-note "$TR_RN"
+# PER-LEG USAGE. The last column is the leg's `usage` from its result.json, found through the
+# coordinator log, or null. A mailbox reply has no runner, so its usage is null — never 0.
+[ "$(head -1 "$RN_TSV" | awk -F'\t' '{print $NF}')" = usage ] && [ "$(head -1 "$RN_TSV" | awk -F'\t' '{print NF}')" = 11 ] \
+  && ok "rounds.tsv gains a usage column as its last field" || fail "rounds.tsv header: $(head -1 "$RN_TSV")"
+grep -q "$(printf 'old-thread\timplement\t1\tgrok\tAPPROVE\t0\t0\tpv-old\tan old row$')" "$RN_TSV" \
+  && ok "an existing ledger's older rows survive the header upgrade untouched" || fail "old rounds.tsv rows were rewritten or lost"
+awk -F'\t' 'NR>1 && $2=="rn-thread" && NF==11 && $11=="null"' "$RN_TSV" | grep -q . \
+  && ok "a reply with no runner behind it records usage null" || fail "mailbox reply usage: $(grep rn-thread "$RN_TSV" | awk -F'\t' '{print NF": "$NF}')"
+# The JOIN: reply message_id -> reply-accepted (request id) -> the leg's turn-finished -> run dir.
+# A decoy turn-finished for the same request by ANOTHER agent must not be the one read.
+RN_RD="$WORK/rn-run"; mkdir -p "$RN_RD"
+printf '{\n  "status": "completed",\n  "usage": {"input_tokens":600,"source":"codex-token-usage-record","total_tokens":660},\n  "rate_limits": null\n}\n' > "$RN_RD/result.json"
+RN_DECOY="$WORK/rn-decoy"; mkdir -p "$RN_DECOY"
+printf '{\n  "usage": {"total_tokens":999}\n}\n' > "$RN_DECOY/result.json"
+run_tr events append --kind reply-accepted --thread rn-join --agent codex --request-id rn-req-1 --message-id rn-reply-1 --status APPROVE >/dev/null 2>&1
+run_tr events append --kind turn-finished --thread rn-join --agent grok --request-id rn-req-1 --run-dir "$RN_DECOY" --status completed >/dev/null 2>&1
+run_tr events append --kind turn-finished --thread rn-join --agent codex --request-id rn-req-1 --run-dir "$RN_RD" --status completed >/dev/null 2>&1
+RN_J="$TR_FIX/.comms/archive/rn-join.md"
+awk '/^thread: rn-thread$/ { print "thread: rn-join"; print "message_id: rn-reply-1"; next } { print }' "$TR_RN" > "$RN_J"
+run_tr round-note "$RN_J" --note "joined" >/dev/null 2>&1
+awk -F'\t' 'NR>1 && $2=="rn-join"' "$RN_TSV" | awk -F'\t' '{print $11}' | grep -qx '{"input_tokens":600,"source":"codex-token-usage-record","total_tokens":660}' \
+  && ok "round-note records the usage of the leg turn that produced the reply" \
+  || fail "joined usage: $(awk -F'\t' '$2=="rn-join"{print $11}' "$RN_TSV")"
 check_not "round-note rejects a missing file" run_tr round-note "$TR_FIX/nope.md" --note x
 
 # SNAPSHOT ON SEND. Without a pinned artifact the reviewer reads whatever the author

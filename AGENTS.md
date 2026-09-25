@@ -358,6 +358,7 @@ runtime, quote the assertion count with it or measure both sides yourself.
 | `helpers/settings.sh`, `helpers/setup.sh` | the settings loader every entry helper sources (env > project `.comms/settings` > `~/.agent-comms/settings` > `secrets`), and the `comms.sh setup` flow that writes them |
 | `helpers/worktree.sh` | `worktree new` / `list` / `retire`: session worktrees and their retirement gates (run by the driver after a landing, or by hand) |
 | `helpers/runphase.sh` | spawning and awaiting peer review turns over ACP |
+| `helpers/leg_usage.py` | a review leg's token usage and codex rate-limit snapshot, read from the provider's own records into `result.json` |
 | `helpers/acp.sh`, `helpers/policy-map.tsv` | ACP consults; the reviewer model/effort resolver and its versioned map — the only place vendor model ids live |
 | `helpers/route.sh`, `route_backend.py`, `route_review.py`, `route_shadow.py` | the /auto classifier, the reviewer routing decisions, and the shadow collector |
 | `helpers/route_policy.py`, `route_eval.py`, `route_eval_seed.json` | the implementer answer-to-decision policy (shared by `route.sh` and the eval replay), and the operator-labelled Jev eval set (`comms.sh route-eval`) |

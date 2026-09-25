@@ -163,3 +163,18 @@ printf 'not json' > "$GRD/usage.json"
 printf '%s\n' "$(lu_run grok "$GRR" "$GRC" "$LUW/gr.snap")" | grep -qx 'usage	null' \
   && ok "an unparseable grok usage.json is usage null" || fail "grok garbage not null"
 
+
+# ---- an ABSENT records root is empty; an UNREADABLE one is not evidence of anything ----
+# A leg's first turn on a machine (or in a fresh HOME) has no ~/.grok/sessions yet; the records
+# the turn creates must count. A root that exists but cannot be listed must refuse instead.
+GRA="$LUW/grok-absent/sessions"
+python3 "$LU" snapshot grok "$GRA" "$GRC" "$LUW/gra.snap" \
+  && ok "a snapshot over a records root that does not exist yet succeeds (empty)" || fail "absent root refused"
+GRAD="$GRA/$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$GRC")/g-2"; mkdir -p "$GRAD"
+cp "$LUF/grok-usage-before.json" "$GRAD/usage.json"
+[ "$(lu_field "$(lu_run grok "$GRA" "$GRC" "$LUW/gra.snap")" usage total_tokens)" = 24231 ] \
+  && ok "records created under a root that was absent at snapshot time are counted" || fail "absent-root turn not counted"
+LU_UNR="$LUW/unreadable-projects"; mkdir -p "$LU_UNR/x"; chmod 000 "$LU_UNR"
+python3 "$LU" snapshot claude "$LU_UNR" "$CLC" "$LUW/unr.snap" 2>/dev/null \
+  && fail "an unreadable records root was snapshotted as empty" || ok "an unreadable records root refuses the snapshot rather than reading as empty"
+chmod 755 "$LU_UNR"

@@ -554,8 +554,9 @@ the operator surface:
 | `release [thread]` | lift a hold |
 
 Each turn is recorded under `.comms/logs/<message_id>.<epoch>.<pid>/`: `prompt.md`
-(what the peer was told), `events.ndjson` (the full JSONL event stream — token usage
-lives here), `result.json` (provider, agent, status, exit code, session id), `pid`,
+(what the peer was told), `events.ndjson` (the full JSONL event stream), `result.json`
+(provider, agent, status, exit code, session id, and the leg's `usage` / `rate_limits` —
+below), `usage-snapshot.json` (the provider-record state the usage window opened on), `pid`,
 `runner.log`, `policy.tsv` (the per-turn policy record resolved BEFORE the session is
 launched; hash-checked before every consumer) and `turn.tsv` (identity, then
 `route_decision`, `policy_*`, `requested_model/effort` at resolution time,
@@ -564,7 +565,26 @@ launched; hash-checked before every consumer) and `turn.tsv` (identity, then
 `observed_runtime` (only when the session was created in this turn's window) and
 `session_created_runtime` from the provider's own rollout — requested, adapter-reported and observed are never conflated). A
 mounted codex session is named `agent-comms+mount+<ident>+p<policy_digest>`, so a
-changed concrete policy is a fresh session and an unchanged one stays warm. Thread state mirrors the outcome (`spawned` →
+changed concrete policy is a fresh session and an unchanged one stays warm.
+
+`result.json` `usage` is what the leg cost, read by `helpers/leg_usage.py` from the
+PROVIDER'S OWN records — never acpx's `[acpx] tokens:` line or `runner.log`. The window opens
+immediately before the leg's first billable prompt (the ACP canary included) and closes when the
+provider exits, before unmount, so a warm leg is not re-billed for earlier rounds. codex: the
+isolated `CODEX_HOME` rollout's `token_usage_record`s summed by `turn_id`, a response recorded
+twice counted once, falling back to the `token_count.info` running-total delta; codex outside an
+isolated home (the shared `~/.codex`) is not attributable and reads null. grok: the
+`usage.json` `turns[]` this leg added. claude: the project transcript for the leg's cwd,
+deduplicated by `(message.id, requestId)`, last copy wins. Fields follow codex's convention —
+`input_tokens` (INCLUDING cache reads and writes), `cached_input_tokens`,
+`cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens` — plus
+`turns`, `responses` and `source`. A codex leg also records `rate_limits`, its newest snapshot
+(`limit_id`, `window_minutes`, `used_percent`, `resets_at`). **Missing is null, never 0**: no
+records, an unbounded window (a file replaced, truncated or gone mid-turn), or a field some record
+lacks. `round-note` copies the leg's `usage` into the last column of `.comms/grades/rounds.tsv`,
+joining the reply to its run through the coordinator log.
+
+Thread state mirrors the outcome (`spawned` →
 `completed`/`failed`/`timeout`), records `last_run_dir` (the `stalled` watchdog's pid
 target), and records the provider session id (`codex_thread_id` /
 `claude_session_id`) for attach/resume. Env knobs: `COMMS_RUNPHASE_SANDBOX` (codex,

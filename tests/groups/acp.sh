@@ -1607,8 +1607,13 @@ LU_CX="$WORK/lu-codex"; pol_run lu-codex "$LU_CX" AX_ROLLOUT_APPEND="$LU_REC"
 [ "$(ru "$POL_OK" usage x)" = "<none>" ] && [ "$(ru "$POL_OK" rate_limits x)" = "<none>" ] \
   && ok "a codex leg whose rollout holds no token records reads usage null — not 0, not acpx's printed total" \
   || fail "no-record leg: usage=$(ru "$POL_OK" usage total_tokens) rate=$(ru "$POL_OK" rate_limits used_percent)"
-[ "$(json_get "$LU_CX/result.json" status)" = completed ] && [ "$(json_get "$LU_CX/result.json" provider)" = codex ] \
-  && ok "the string fields stay readable one-key-per-line beside the embedded objects" || fail "json_get broke on the usage lines"
+# json_get (runphase/comms) reads string fields with a per-line regex; the embedded objects must
+# not satisfy it for any key it is asked for. Same regex, applied here to every key it reads.
+LU_JG="$(for k in provider agent status reason exit_code session_id message_file run_dir started_at ended_at note; do
+  sed -n 's/.*"'"$k"'": "\([^"]*\)".*/\1/p' "$LU_CX/result.json" | wc -l | tr -d ' '; done | sort -u | tr '\n' ' ')"
+[ "$LU_JG" = "1 " ] && [ "$(cn_status "$LU_CX")" = completed ] \
+  && ok "every string field json_get reads still matches exactly one line beside the embedded objects" \
+  || fail "json_get-style reads are ambiguous next to usage (match counts: $LU_JG)"
 # A REFUSED turn was still paid for: the divergent-depth leg is withheld, but its spend is recorded.
 LU_DIV="$WORK/lu-codex-div"; pol_run lu-codex-div "$LU_DIV" AX_ROLLOUT_EFFORT=medium AX_ROLLOUT_APPEND="$LU_REC"
 [ "$(cn_status "$LU_DIV")" = failed ] && [ "$(ru "$LU_DIV" usage total_tokens)" = 660 ] \
