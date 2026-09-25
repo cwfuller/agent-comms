@@ -39,6 +39,7 @@ acp.sh: the reviewer model+effort policy	25
 acp.sh: the reviewer policy resolver	43
 reviewer policy: a wrong-depth review is never published	18
 reviewer routing: a routed decision reaches the mounted codex turn	17
+per-leg usage: result.json carries the provider's own records	9
 runphase: the compatibility canary gates every ACP turn	24
 runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15
@@ -62,7 +63,7 @@ grading pilot: snapshot RETAINS the reviewed tree (a hash alone cannot)	8
 grading pilot: prompt-version partitions grades across an instruction edit	8
 grading pilot: shadow reviewer is a MEASUREMENT, structurally unable to gate	53
 grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims)	44
-comms.sh: transport selection (no pane must not strand a consult)	49
+comms.sh: transport selection (no pane must not strand a consult)	53
 panel: N parallel 2-party legs over ONE artifact	95
 templates: the loop closes its thread state on the terminal approval	2
 ask: the driver-neutral consult verb	28
@@ -96,3 +97,4 @@ worktree list/retire: hand-run session-lifecycle retirement	95
 route-eval: more than one labeller	5
 compose: exactly one machine-readable compose-result line	20
 comms.sh version: the installed kernel commit and template version	18
+leg_usage.py: a leg's tokens come from the provider's own records	28
