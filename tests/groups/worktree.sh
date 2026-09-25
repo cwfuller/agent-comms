@@ -364,6 +364,21 @@ WR_SY="$(cd "$SY" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$COM
 [ "$WR_SYRC" = 3 ] && printf '%s' "$WR_SY" | grep -q 'symbolic ref refs/heads/main points at it' \
   && git -C "$SY" rev-parse -q --verify refs/heads/master >/dev/null && git -C "$SY" rev-parse -q --verify refs/heads/main >/dev/null \
   && ok "the target of a symbolic default branch is refused and main still resolves" || fail "symbolic default target rc=$WR_SYRC: $WR_SY"
+# ---- round 8 (codex): ref directories that can be entered but not listed ----
+chmod 333 "$SY/.git/refs"
+WR_SY2="$(cd "$SY" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$COMMS" worktree retire master --yes 2>&1)"; WR_SY2RC=$?
+chmod 755 "$SY/.git/refs"
+[ "$WR_SY2RC" = 3 ] && git -C "$SY" rev-parse -q --verify refs/heads/master >/dev/null \
+  && ok "an unlistable refs/ cannot hide that master is main's target" || fail "unlistable refs rc=$WR_SY2RC: $WR_SY2"
+wr_landed pr4
+WR_PR4="$(git -C "$(wr_path pr4)" commit-tree "HEAD^{tree}" -p HEAD -m saved)"
+git -C "$(wr_path pr4)" update-ref refs/worktree/saved "$WR_PR4"
+WR_PR4G="$(git -C "$(wr_path pr4)" rev-parse --absolute-git-dir)"
+chmod 333 "$WR_PR4G/refs"
+WR_P4="$(run_wr worktree retire worktree-pr4 --yes 2>&1)"; WR_P4RC=$?
+chmod 755 "$WR_PR4G/refs"
+[ "$WR_P4RC" = 3 ] && printf '%s' "$WR_P4" | grep -q 'refused: private-ref: .*refs/worktree/saved' && wr_kept pr4 \
+  && ok "a private ref git skips (unlistable refs/) is found on disk and refused" || fail "skipped private ref rc=$WR_P4RC: $WR_P4"
 git -C "$WR" branch -q bonly "$(git -C "$WR" rev-parse main)"
 run_wr worktree retire bonly --yes >/dev/null 2>&1 && ! git -C "$WR" rev-parse -q --verify refs/heads/bonly >/dev/null \
   && ok "a landed branch with no worktree is deleted" || fail "branch-only retire"

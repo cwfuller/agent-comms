@@ -41,13 +41,31 @@ wt_is_secret() {  # <basename> — checked BEFORE the regenerable list, so a sec
 
 # Symbolic refs under refs/heads that name <branch> as their target: deleting it would leave them
 # dangling — fatal when one of them is the default branch (`main -> master`). (codex, impl r7.)
+# Git's loose-ref walk silently skips a directory it cannot LIST (opendir fails, no warning, exit 0),
+# so completeness is proven on disk: every directory under refs/ must be listable. The default
+# branch's own target is also checked directly, by resolution rather than enumeration. (codex r8.)
 wt_symref_holders() {  # <root> <branch> -> space-separated names, or `?` when refs cannot be listed
-  local out err
+  local out err common raw d
+  common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || { printf '?'; return 0; }
+  case "$(wt_probe "$common/refs")" in present) ;; *) printf '?'; return 0 ;; esac
+  raw="$(mktemp)" || { printf '?'; return 0; }
+  find "$common/refs" -type d -print0 >"$raw" 2>/dev/null || { rm -f "$raw"; printf '?'; return 0; }
+  while IFS= read -r -d '' d; do
+    { [ -r "$d" ] && [ -x "$d" ]; } || { rm -f "$raw"; printf '?'; return 0; }
+  done <"$raw"
+  rm -f "$raw"
   err="$(mktemp)" || { printf '?'; return 0; }
-  out="$(git -C "$1" for-each-ref --format='%(refname) %(symref)' refs/heads 2>"$err")" || { rm -f "$err"; printf '?'; return 0; }
+  out="$(git -C "$1" for-each-ref --format='%(refname) %(symref)' 2>"$err")" || { rm -f "$err"; printf '?'; return 0; }
   [ -s "$err" ] && { rm -f "$err"; printf '?'; return 0; }
   rm -f "$err"
   awk -v t="refs/heads/$2" '$2 == t {printf "%s ", $1}' <<<"$out"
+}
+
+wt_protected() {  # <root> <main> <branch> — the default branch, or what a symbolic default resolves to
+  local target
+  [ "$3" = "$2" ] && return 0
+  target="$(git -C "$1" rev-parse --symbolic-full-name "refs/heads/$2" 2>/dev/null)" || return 0   # unresolvable: fail closed
+  [ "$target" = "refs/heads/$3" ]
 }
 
 wt_default_branch() {  # <root> -> main|master, the local default branch; non-zero when neither
@@ -250,9 +268,15 @@ wt_content() {  # <worktree path> <main branch>
     case "$(wt_probe "$gd/$d")" in absent) continue ;; unknown) WT_CONTENT_OK=0; return 0 ;; esac
     raw="$(mktemp)" || { WT_CONTENT_OK=0; return 0; }
     find "$gd/$d" -print0 >"$raw" 2>/dev/null || { rm -f "$raw"; WT_CONTENT_OK=0; return 0; }
+    # Every loose ref found ON DISK is resolved and checked itself, whether or not for-each-ref
+    # listed it: git skips namespaces it cannot list, silently. (codex, impl r8.)
     while IFS= read -r -d '' f; do
       if [ -d "$f" ]; then { [ -r "$f" ] && [ -x "$f" ]; } || { rm -f "$raw"; WT_CONTENT_OK=0; return 0; }
-      else [ -r "$f" ] || { rm -f "$raw"; WT_CONTENT_OK=0; return 0; }
+      else
+        [ -r "$f" ] || { rm -f "$raw"; WT_CONTENT_OK=0; return 0; }
+        ref="${f#"$gd"/}"
+        oid="$(git -C "$p" rev-parse -q --verify "$ref" 2>/dev/null)" || { rm -f "$raw"; WT_CONTENT_OK=0; return 0; }
+        refs="$refs"$'\n'"$oid $ref"
       fi
     done <"$raw"
     rm -f "$raw"
@@ -405,7 +429,7 @@ wt_assess() {  # <root> <root-phys> <main> <index> <caller cwd (physical)>
     unmanaged) wt_reason "kind: not a managed worktree (branch worktree-<slug> at .claude/worktrees/<slug>, no symlinked component)" ;;
   esac
   [ -n "$branch" ] || wt_reason "branch: detached HEAD — retire takes a branch"
-  [ "$branch" = "$main" ] && wt_reason "branch: $main is the default branch"
+  wt_protected "$root" "$main" "$branch" && [ -n "$branch" ] && wt_reason "branch: $branch is the default branch (or its target)"
   if [ -n "$branch" ]; then
     local holders; holders="$(wt_symref_holders "$root" "$branch")"
     case "$holders" in '') ;; '?') wt_reason "branch: could not list symbolic refs" ;; *) wt_reason "branch: symbolic ref ${holders% } points at it" ;; esac
@@ -627,7 +651,7 @@ wt_retire() {
     # A branch with no worktree: only the ref is at stake.
     local on; on="$(wt_on_main "$WT_ROOT" "$WT_MAIN" "$tip")"
     WT_REASONS=""
-    [ "$target" = "$WT_MAIN" ] && wt_reason "branch: $WT_MAIN is the default branch"
+    wt_protected "$WT_ROOT" "$WT_MAIN" "$target" && wt_reason "branch: $target is the default branch (or its target)"
     local holders; holders="$(wt_symref_holders "$WT_ROOT" "$target")"
     case "$holders" in '') ;; '?') wt_reason "branch: could not list symbolic refs" ;; *) wt_reason "branch: symbolic ref ${holders% } points at it" ;; esac
     case "$on" in
