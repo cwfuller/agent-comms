@@ -2451,8 +2451,9 @@ degrade_leg_events() {
 # run path, a delayed delivery row, a dead predecessor named by `already running`, a late start of
 # the same request, a foreground `--wait` run racing a detached one. (codex + grok, r1–r4.) None of
 # them can make a live run look finished here: a run is open until its OWN terminal row. The cost
-# is availability, never safety — a run whose runner died without a terminal row keeps the leg
-# undroppable until `await` synthesizes one (or the leg is re-sent).
+# is availability, never safety: a gap does not heal by re-sending (the old persist or run stays in
+# this dispatch's history). `await` fills only a runner that died before its result.json; any other
+# gap needs a fresh `panel dispatch`. (codex, r5 advisory.)
 # Run identity is the run_dir column, stored through event_identity (unique past its width).
 degrade_evidence() {
   awk -F'\t' "$DEGRADE_EVIDENCE_AWK"'

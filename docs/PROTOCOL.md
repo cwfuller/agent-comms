@@ -799,8 +799,9 @@ cannot attest the model/effort a turn actually ran, it withholds the reply unpub
 `turn-finished failed` with `exit=N reason=policy-unapplied` at the head of its note. A failed
 `turn-finished` written through `result.json` carries its `reason=` there, in that anchored
 position, so nothing later in the row (a session id, a free-text refusal message) can forge it.
-A `log-incomplete` row (`turn=<status> exit=N reason=R ...`) is never evidence: its own trace
-has a hole, so a leg whose refusal lost an event is re-sent, not dropped. This covers every
+A `log-incomplete` row (`turn=<status> exit=N reason=R ...`) never ADDS evidence, because its
+own trace has a hole: a policy refusal whose trace lost an event is not droppable. It does close
+its run, so a `reason=no-output` that run's `provider-result` already recorded still stands. This covers every
 `policy-unapplied` refusal, including the pre-prompt ones (a preflight mismatch, a policy
 record that changed, a rollout snapshot that failed), so the banner says the policy "could not
 be applied or attested", never that the review ran. The other refusal reasons — `containment-unconfirmed`, `runtime-incompatible`,
@@ -836,8 +837,11 @@ open until its own `turn-finished`. (3) The run that finished last recorded the 
 here trusts WHICH run an attempt attached to — row order, a delayed delivery row, an "already
 running" line, a late start of the same request and a foreground `--wait` run racing a detached
 one each made an attribution rule unsafe in review — because none of them can make an open run
-look finished. The cost is availability: a runner that died without its terminal row keeps the
-leg undroppable until `await` synthesizes one, or the leg is re-sent. Run identity is the
+look finished. The cost is availability, and re-sending the leg does not heal a gap: an unmatched
+persist or an open run stays in the leg's history under that dispatch. `await` synthesizes a
+terminal row only for a runner that died before publishing `result.json`; any other gap (a lost
+delivery row, a lost `turn-finished` beside a published result) needs a fresh `panel dispatch`,
+whose new dispatch id starts a clean history. Run identity is the
 `run_dir` column, stored through the same head-plus-digest transform as the other identity
 columns, so two run dirs that differ only past its width stay distinct. Only `role=gating` rows are read: a
 `comms.sh shadow` turn runs under the same set and dispatch, possibly as an agent that is also a
