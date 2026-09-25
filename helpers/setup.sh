@@ -315,7 +315,15 @@ flush_user || { echo "setup: could not write $SETTINGS" >&2; exit 1; }
 # and one whose suite-cmd needs a shell (`&&`, a pipe) can never pass. `verify init` scaffolds a
 # committed ci/verify.sh that provisions and runs the checks; it writes TRACKED files, so --yes only
 # prints the suggestion and leaves the tree alone.
-VS="$("$HERE/comms.sh" verify status 2>/dev/null)" && {
+# Outside a git repository there is no project to report on. Inside one, a status that FAILS is
+# reported, never skipped: an unreadable .comms/config makes integrate refuse too. (grok, r3.)
+VS_RC=0; VS="$("$HERE/comms.sh" verify status 2>/dev/null)" || VS_RC=$?
+if [ "$VS_RC" != 0 ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
+  say ""
+  say "Project: landing suite (suite-cmd, used by comms.sh integrate)"
+  say "  could not read it (comms.sh verify status exited $VS_RC) — check .comms/config; integrate will refuse until it reads"
+fi
+[ "$VS_RC" = 0 ] && {
   VS_STATE="${VS%%$'\t'*}"; VS_CUR="${VS#*$'\t'}"
   say ""
   say "Project: landing suite (suite-cmd, used by comms.sh integrate)"

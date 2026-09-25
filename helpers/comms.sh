@@ -4809,7 +4809,15 @@ verify_init() {
     grep -q '^# agent-comms verify v' "$dst" \
       || die "verify init --update: ci/verify.sh carries no agent-comms version header — refusing to overwrite a hand-written suite (verify init --force replaces it)"
     # Same authorization as a first write: this replaces a TRACKED file. (codex, impl r1.)
-    verify_confirm "$yes" "Replace ci/verify.sh ($(sed -n 's/^# agent-comms verify //p' "$dst" | head -1)) with the $(sed -n 's/^# agent-comms verify //p' "$src" | head -1) template?" || return 0
+    local upd_q
+    upd_q="Replace ci/verify.sh ($(sed -n 's/^# agent-comms verify //p' "$dst" | head -1)) with the $(sed -n 's/^# agent-comms verify //p' "$src" | head -1) template"
+    # The question names EVERYTHING the yes authorizes: with --replace-suite-cmd that includes the
+    # config line, and the operator must see which command is about to go. (grok, r3.)
+    if [ -n "$replace" ] && [ "$cur_cmd" != "bash ci/verify.sh" ]; then
+      if [ -n "$cur_cmd" ]; then upd_q="$upd_q, and REPLACE suite-cmd '$cur_cmd' with 'bash ci/verify.sh'"
+      else upd_q="$upd_q, and set suite-cmd = bash ci/verify.sh"; fi
+    fi
+    verify_confirm "$yes" "$upd_q?" || return 0
     tmp="$dst.tmp.$$"
     { cp "$src" "$tmp" && chmod +x "$tmp" && mv -f "$tmp" "$dst"; } || { rm -f "$tmp"; die "verify init --update: could not write $dst"; }
     echo "verify: updated ci/verify.sh to $(sed -n 's/^# agent-comms verify //p' "$src" | head -1); ci/verify.steps unchanged"
