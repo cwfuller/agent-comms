@@ -92,3 +92,4 @@ route.sh: decision reuse and probe mode	12
 verify: a landing suite for any repo (template, init, status, fresh)	34
 route-eval: labelled eval set for the classifiers	17
 worktree list/retire: hand-run session-lifecycle retirement	92
+route-eval: more than one labeller	5

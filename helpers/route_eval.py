@@ -2,9 +2,12 @@
 """route-eval — a small, operator-labelled eval set for the Jev routing classifiers.
 
   comms.sh route-eval pool  [--project DIR ...]   build/extend the pool from saved decisions
-  comms.sh route-eval label [--stdin] [--relabel] [--no-reveal]   blind labelling, one item at a time
+  comms.sh route-eval label [--labeler NAME] [--stdin] [--relabel] [--no-reveal]   blind labelling
+  comms.sh route-eval label --labeler NAME --import FILE           add a labeller's labels from JSON
+  comms.sh route-eval items --blind                                 id/role/text only, for a second labeller
   comms.sh route-eval run --live [--missing] [--limit N]           re-ask Jev (paid calls)
-  comms.sh route-eval score [--source stored|live] [--policy P,...] [--param role.key=value ...] [--json]
+  comms.sh route-eval score [--labeler NAME] [--source stored|live] [--policy P,...] [--param role.key=value ...] [--json]
+  comms.sh route-eval score --agreement A,B [--json]             where two labellers agree and differ
   comms.sh route-eval status
 
 THE POOL HOLDS CLIENT TASK TEXT, so it and the labels live OUTSIDE any repository, under
@@ -15,6 +18,11 @@ Items come from records the helpers already keep: implementer decisions
 (.comms/route-decisions/implementer/*.json) and reviewer decisions (.comms/route-decisions/rd-*.json).
 Only answered, non-probe, non-stub (the stub is the test seam) records are pooled; an item's id is a hash of the exact state that was sent,
 so re-pooling is idempotent and a duplicate classification is one item.
+
+LABELLERS: each has its own label file (`operator` -> labels.json, any other NAME ->
+labels-NAME.json), so a second opinion (another person, or a model labelling from `items --blind`)
+never overwrites or anchors yours. `score --agreement A,B` lists where two labellers differ: those
+are the items where "the right answer" is itself uncertain, and the ceiling to expect from Jev.
 
 LABELLING IS BLIND: an item is shown without Jev's answer or the loop's outcome; those are revealed
 only after the label is saved (--no-reveal suppresses even that).
@@ -154,17 +162,64 @@ def save_pool(items):
                   "".join(json.dumps(i, ensure_ascii=False, sort_keys=True) + "\n" for i in items))
 
 
-def load_labels():
-    p = os.path.join(eval_dir(), "labels.json")
+LABELER_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+
+
+def labels_path(labeler="operator"):
+    return os.path.join(eval_dir(), "labels.json" if labeler == "operator" else "labels-%s.json" % labeler)
+
+
+def load_labels(labeler="operator"):
+    p = labels_path(labeler)
     if not os.path.exists(p):
         return {}
     with open(p, encoding="utf-8") as fh:
         return {lab["id"]: lab for lab in json.load(fh).get("labels", [])}
 
 
-def save_labels(labels):
-    write_private(os.path.join(eval_dir(), "labels.json"),
+def save_labels(labels, labeler="operator"):
+    write_private(labels_path(labeler),
                   json.dumps({"labels": list(labels.values())}, indent=1, ensure_ascii=False) + "\n")
+
+
+def take_labeler(args):
+    """Remove `--labeler NAME` from args (in place) and return NAME, default operator."""
+    if "--labeler" not in args:
+        return "operator"
+    i = args.index("--labeler")
+    if i + 1 >= len(args) or not LABELER_RE.fullmatch(args[i + 1]):
+        die("--labeler wants a lowercase name (letters, digits, dashes)")
+    name = args[i + 1]
+    del args[i:i + 2]
+    return name
+
+
+def all_labelers():
+    out = []
+    for n in sorted(os.listdir(eval_dir())):
+        if n == "labels.json":
+            out.append("operator")
+        else:
+            m = re.fullmatch(r"labels-([a-z][a-z0-9-]{0,31})\.json", n)
+            if m:
+                out.append(m.group(1))
+    return out
+
+
+LABEL_FIELDS = {"implementer": {"plan": ("yes", "no"), "complexity": None, "effort": None},
+                "reviewer": {"depth": None, "effort": None}}
+
+
+def label_problem(item, lab):
+    """Why a label cannot be used for this item, or None."""
+    want = LABEL_FIELDS.get(item.get("role"))
+    if want is None:
+        return "unknown role"
+    for k in want:
+        allowed = want[k] or (LEVELS if k in ("complexity", "depth") else EFFORTS)
+        if lab.get(k) not in allowed:
+            return "label %s=%r is not one of %s" % (k, lab.get(k), "/".join(allowed))
+    return None
 
 
 def load_live():
@@ -442,13 +497,20 @@ def jev_view(item):
 
 
 def cmd_label(args):
+    args = list(args)
+    labeler = take_labeler(args)
+    if "--import" in args:
+        i = args.index("--import")
+        if i + 1 >= len(args) or len(args) != 2:
+            die("label: --import FILE takes no other options (besides --labeler)")
+        return import_labels(args[i + 1], labeler)
     use_stdin = "--stdin" in args
     relabel = "--relabel" in args
     reveal = "--no-reveal" not in args
     for a in args:
         if a not in ("--stdin", "--relabel", "--no-reveal"):
             die("label: unknown argument '%s'" % a)
-    pool, labels = load_pool(), load_labels()
+    pool, labels = load_pool(), load_labels(labeler)
     todo = [it for it in pool if relabel or it["id"] not in labels]
     if not todo:
         print("label: nothing to label (%d items, %d labelled)" % (len(pool), len(labels)))
@@ -462,7 +524,7 @@ def cmd_label(args):
             text = text[:2500] + "\n[... %d more chars]" % (len(it["text"]) - 2500)
         pr.say("\n[%d/%d] %s  %s  %s" % (n, len(todo), it["role"], it.get("project", ""), it["id"]))
         pr.say(text)
-        lab = {"id": it["id"], "role": it["role"], "labeler": "operator",
+        lab = {"id": it["id"], "role": it["role"], "labeler": labeler,
                "labeledAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         if it["role"] == "implementer":
             a = pr.ask("  plan first? [y/n]", ("y", "n"))
@@ -489,14 +551,58 @@ def cmd_label(args):
                 break
             continue
         labels[it["id"]] = lab
-        save_labels(labels)
+        save_labels(labels, labeler)
         if reveal:
             pr.say("  " + jev_view(it) if it.get("answers") else "  jev: (no stored answer; run --live)")
             if it.get("outcome"):
                 o = it["outcome"]
                 pr.say("  outcome: %d round(s), %d blocking finding(s), verdicts %s"
                        % (o["rounds"], o["blockers"], ",".join(o["verdicts"])))
-    pr.say("\nlabels: %d saved -> %s" % (len(labels), os.path.join(eval_dir(), "labels.json")))
+    pr.say("\nlabels: %d saved -> %s" % (len(labels), labels_path(labeler)))
+
+
+def import_labels(path, labeler):
+    """Add labels from {"labels": [{id, ...fields}]}. All-or-nothing: one bad row refuses the file."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rows = json.load(fh).get("labels")
+    except (OSError, ValueError, AttributeError) as e:
+        die("label: cannot read %s: %s" % (path, e))
+    if not isinstance(rows, list):
+        die("label: %s has no \"labels\" list" % path)
+    pool = {it["id"]: it for it in load_pool()}
+    labels = load_labels(labeler)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    new = {}
+    for n, r in enumerate(rows):
+        if not isinstance(r, dict) or r.get("id") not in pool:
+            die("label: row %d: unknown item id %r" % (n, r.get("id") if isinstance(r, dict) else r))
+        it = pool[r["id"]]
+        why = label_problem(it, r)
+        if why:
+            die("label: row %d (%s): %s" % (n, r["id"], why))
+        lab = {"id": it["id"], "role": it["role"], "labeler": labeler, "labeledAt": now}
+        lab.update({k: r[k] for k in LABEL_FIELDS[it["role"]]})
+        if isinstance(r.get("note"), str):
+            lab["note"] = r["note"][:500]
+        new[it["id"]] = lab
+    labels.update(new)
+    save_labels(labels, labeler)
+    print("label: imported %d label(s) for %s -> %s" % (len(new), labeler, labels_path(labeler)))
+
+
+def cmd_items(args):
+    """The pool as a second labeller may see it: id, role, project and task text ONLY — never Jev's
+    answers, the stored decision or the loop outcome, so labels made from it stay blind."""
+    if args != ["--blind"]:
+        die("items: pass --blind (the only view this command prints)")
+    out = "".join(json.dumps({"id": it["id"], "role": it["role"], "project": it.get("project", ""),
+                              "text": it.get("text") or ""}, ensure_ascii=False) + "\n" for it in load_pool())
+    try:
+        sys.stdout.write(out)
+        sys.stdout.flush()
+    except BrokenPipeError:   # a reader that stopped early (| head) is not an error
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 
 # ---- live --------------------------------------------------------------------------------------
@@ -595,13 +701,9 @@ def parse_param(key, raw):
 
 def row_problem(item, lab, answers):
     """Why a labelled row cannot be scored, or None. The production mapping is the validator."""
-    want = {"implementer": {"plan": ("yes", "no"), "complexity": LEVELS, "effort": EFFORTS},
-            "reviewer": {"depth": LEVELS, "effort": EFFORTS}}.get(item.get("role"))
-    if want is None:
-        return "unknown role"
-    for k, allowed in want.items():
-        if lab.get(k) not in allowed:
-            return "label %s=%r is not one of %s" % (k, lab.get(k), "/".join(allowed))
+    why = label_problem(item, lab)
+    if why:
+        return why
     if not isinstance(answers, dict):
         return "answers are not an object"
     return mapping_problem(item, answers)
@@ -653,6 +755,10 @@ def apply_policy(item, answers, params):
 
 
 def cmd_score(args):
+    args = list(args)
+    labeler = take_labeler(args)
+    if "--agreement" in args:
+        return cmd_agreement(args)
     source, names, custom, as_json = "stored", ["current"], {}, False
     i = 0
     while i < len(args):
@@ -677,7 +783,7 @@ def cmd_score(args):
             die("score: unknown argument '%s'" % a)
     if source not in ("stored", "live"):
         die("score: --source is stored or live")
-    pool, labels = load_pool(), load_labels()
+    pool, labels = load_pool(), load_labels(labeler)
     live = load_live() if source == "live" else {}
     rows, unusable = [], []
     for it in pool:
@@ -692,7 +798,7 @@ def cmd_score(args):
             unusable.append({"id": it["id"], "why": why})   # reported, never a traceback
             continue
         rows.append((it, lab, answers))
-    report = {"source": source, "labelled": len(labels), "scored": len(rows), "unusable": unusable,
+    report = {"source": source, "labeler": labeler, "labelled": len(labels), "scored": len(rows), "unusable": unusable,
               "roles": {}, "policies": {}}
     for role, lvl_key, depth_key, eff_key in (("implementer", "complexity", "complexity", "effort"),
                                                ("reviewer", "depth", "review_depth", "review_effort")):
@@ -753,8 +859,8 @@ def cmd_score(args):
     if as_json:
         print(json.dumps(report, indent=1, sort_keys=True))
         return
-    print("route-eval score — source=%s, %d labelled, %d scored, %d unusable"
-          % (source, len(labels), len(rows), len(unusable)))
+    print("route-eval score — labeler=%s, source=%s, %d labelled, %d scored, %d unusable"
+          % (labeler, source, len(labels), len(rows), len(unusable)))
     for u in unusable:
         print("  unusable %s: %s" % (u["id"], u["why"]))
     for role, acc in report["roles"].items():
@@ -781,8 +887,52 @@ def cmd_score(args):
                 ", %d unusable answers" % o["errors"] if o["errors"] else ""))
 
 
+def cmd_agreement(args):
+    i = args.index("--agreement")
+    if i + 1 >= len(args):
+        die("score: --agreement wants A,B")
+    names = args[i + 1].split(",")
+    rest = args[:i] + args[i + 2:]
+    as_json = rest == ["--json"]
+    if rest and not as_json:
+        die("score: --agreement takes only --json besides the pair")
+    if len(names) != 2 or names[0] == names[1] or not all(LABELER_RE.fullmatch(n) for n in names):
+        die("score: --agreement wants two different labeller names, e.g. operator,claude")
+    a_name, b_name = names
+    A, B = load_labels(a_name), load_labels(b_name)
+    pool = {it["id"]: it for it in load_pool()}
+    report = {"pair": names, "both": 0, "fields": {}, "disagreements": []}
+    for iid in sorted(set(A) & set(B)):
+        it = pool.get(iid)
+        if not it or label_problem(it, A[iid]) or label_problem(it, B[iid]):
+            continue
+        report["both"] += 1
+        for k in LABEL_FIELDS[it["role"]]:
+            key = "%s.%s" % (it["role"], k)
+            f = report["fields"].setdefault(key, {"n": 0, "exact": 0, "within1": 0})
+            va, vb = A[iid][k], B[iid][k]
+            f["n"] += 1
+            f["exact"] += va == vb
+            scale = LEVELS if k in ("complexity", "depth") else EFFORTS if k == "effort" else None
+            f["within1"] += va == vb if scale is None else abs(scale.index(va) - scale.index(vb)) <= 1
+            if va != vb:
+                report["disagreements"].append({"id": iid, "role": it["role"], "field": k, a_name: va, b_name: vb,
+                                                "text": " ".join((it.get("text") or "").split())[:100]})
+    if as_json:
+        print(json.dumps(report, indent=1, ensure_ascii=False))
+        return
+    print("route-eval agreement — %s vs %s, %d item(s) labelled by both" % (a_name, b_name, report["both"]))
+    for key, f in sorted(report["fields"].items()):
+        print("  %-22s exact %d/%d, within one %d/%d" % (key, f["exact"], f["n"], f["within1"], f["n"]))
+    if report["disagreements"]:
+        print("\ndisagreements:")
+        for d in report["disagreements"]:
+            print("  %s %-10s %s=%s %s=%s  %s" % (d["id"], d["field"], a_name, d[a_name], b_name, d[b_name], d["text"]))
+
+
 def cmd_status(_args):
     pool, labels, live = load_pool(), load_labels(), load_live()
+    others = {n: load_labels(n) for n in all_labelers() if n != "operator"}
     roles = {}
     for it in pool:
         r = roles.setdefault(it["role"], [0, 0, 0])
@@ -792,15 +942,18 @@ def cmd_status(_args):
     print("route-eval: %s" % eval_dir())
     for role, (n, lab, lv) in sorted(roles.items()):
         print("  %-11s %d items, %d labelled, %d with live answers" % (role, n, lab, lv))
+    for name, labs in sorted(others.items()):
+        print("  labeller %s: %d label(s)" % (name, len(labs)))
 
 
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip())
         return
-    cmds = {"pool": cmd_pool, "label": cmd_label, "run": cmd_run, "score": cmd_score, "status": cmd_status}
+    cmds = {"pool": cmd_pool, "label": cmd_label, "items": cmd_items, "run": cmd_run, "score": cmd_score,
+            "status": cmd_status}
     if argv[0] not in cmds:
-        die("unknown command '%s' (pool, label, run, score, status)" % argv[0])
+        die("unknown command '%s' (pool, label, items, run, score, status)" % argv[0])
     cmds[argv[0]](argv[1:])
 
 

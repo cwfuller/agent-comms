@@ -1346,3 +1346,50 @@ NP="$(cd "$REPO_FIX" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE
 # Shipped with the helpers.
 grep -q '^HELPERS=.*route_policy\.py.*route_eval\.py.*route_eval_seed\.json' "$REPO/install.sh" \
   && ok "install.sh ships route_policy.py, route_eval.py and the seed set" || fail "helpers manifest"
+
+section "route-eval: more than one labeller"
+# A second labeller (another person, or a model) keeps its own file, labels from a BLIND export,
+# and is compared with the operator item by item.
+LB_OUT="$(ev items --blind 2>&1)"
+python3 - "$LB_OUT" <<'EVPY' && ok "items --blind prints id, role, project and text only (no answers, decision or outcome)" || fail "blind export: $LB_OUT"
+import json, sys
+rows = [json.loads(l) for l in sys.argv[1].splitlines() if l.strip()]
+assert rows and all(set(r) == {"id", "role", "project", "text"} for r in rows)
+EVPY
+A=0; ev items >/dev/null 2>&1 || A=$?
+python3 - "$EV_DIR" "$WORK/lb-good.json" "$WORK/lb-bad.json" <<'EVPY'
+import json, os, sys
+d, good, bad = sys.argv[1:4]
+op = json.load(open(os.path.join(d, "labels.json")))["labels"]
+rows = []
+for lab in op:
+    r = {k: v for k, v in lab.items() if k in ("id", "plan", "complexity", "effort", "depth")}
+    if r.get("effort") not in ("low", "medium", "high", "xhigh"):
+        r["effort"] = "medium"   # an earlier case corrupts one operator label on purpose
+    if lab["role"] == "implementer" and len(rows) == 0:
+        r["effort"] = "xhigh" if r.get("effort") != "xhigh" else "low"   # one deliberate disagreement
+    rows.append(r)
+json.dump({"labels": rows}, open(good, "w"))
+json.dump({"labels": rows + [{"id": rows[0]["id"], "plan": "maybe", "complexity": "hard", "effort": "low"}]}, open(bad, "w"))
+EVPY
+B=0; ev label --labeler claude --import "$WORK/lb-bad.json" >/dev/null 2>&1 || B=$?
+[ "$A" = 2 ] && [ "$B" = 2 ] && [ ! -e "$EV_DIR/labels-claude.json" ] \
+  && ok "items needs --blind, and an import with any invalid row is refused whole, writing nothing" || fail "import refusal ($A/$B)"
+IM="$(ev label --labeler claude --import "$WORK/lb-good.json" 2>&1)"
+OPN="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["labels"]))' "$EV_DIR/labels.json")"
+printf '%s' "$IM" | grep -q "imported $OPN label(s) for claude" \
+  && [ "$(stat -f '%Lp' "$EV_DIR/labels-claude.json" 2>/dev/null || stat -c '%a' "$EV_DIR/labels-claude.json")" = 600 ] \
+  && [ "$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["labels"]))' "$EV_DIR/labels.json")" = "$OPN" ] \
+  && ok "a second labeller's labels land in their own 0600 file and leave the operator's untouched" || fail "import: $IM"
+AG="$(ev score --agreement operator,claude --json 2>&1)"
+python3 - "$AG" <<'EVPY' && ok "--agreement counts per field and lists exactly the disagreement" || fail "agreement: $AG"
+import json, sys
+r = json.loads(sys.argv[1])
+assert r["both"] >= 2 and len(r["disagreements"]) == 1
+d = r["disagreements"][0]
+assert d["field"] == "effort" and d["operator"] != d["claude"]
+assert r["fields"]["implementer.effort"]["exact"] == r["fields"]["implementer.effort"]["n"] - 1
+EVPY
+SC="$(ev score --labeler claude 2>&1)"; ST="$(ev status 2>&1)"
+printf '%s' "$SC" | grep -q 'labeler=claude' && printf '%s' "$ST" | grep -q "labeller claude: $OPN label" \
+  && ok "score and status work per labeller" || fail "per-labeller score/status: $SC / $ST"
