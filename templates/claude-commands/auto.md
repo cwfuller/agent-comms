@@ -407,14 +407,13 @@ verdict format. The cycle continues until APPROVE or max rounds.
    - **Retire keeps every gate.** `--yes` turns off the dry run; it does not bypass
      anything, and there is no force flag to reach for. Never remove the tree or delete the
      branch by hand to get past a refusal.
-   - **A refusal does not fail the loop.** Any non-zero `RETIRE_RC` — 3 refused, 4 the
-     branch moved after the check, 1 a failed remove or delete — says why on stderr
-     (`refused: <gate>: <detail>`). Report them to the user in one line — the landing still
-     succeeded, so the status line is still **Done.** — and release presence anyway. Report
-     what retire says is left, never an assumption: exit 3 changes nothing; exit 1 with
-     `the branch is untouched` means the remove itself failed; a failed branch delete (1)
-     or a moved branch (4) comes AFTER the remove and says `worktree removed: yes|no`.
-     Whatever remains is the human's to inspect and retire by hand.
+   - **A refusal does not fail the loop.** Any non-zero `RETIRE_RC` (3 refused, 4 the
+     branch moved, 1 a remove or delete failed) comes with retire's own explanation on
+     stderr. Relay it to the user in one line, in retire's words — what it says was removed
+     or left (`the branch is untouched`, `worktree removed: yes|no`), never an assumption.
+     The landing still succeeded, so the status line is still **Done.**; release presence
+     anyway. Whatever remains is the human's: advice in the message such as "delete it by
+     hand" is addressed to them, not to you.
    - **A `processes:` refusal is expected when your own harness holds the tree** — a
      runtime whose process or a shell the `cd` did not move still has its cwd or an open
      file inside. Report it like any refusal. Never kill those pids, and never retry to get

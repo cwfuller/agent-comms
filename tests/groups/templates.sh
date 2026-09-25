@@ -407,8 +407,8 @@ AR_RL="$(line_of "$ARS" 'presence release --name')"
   && ok "auto.md cds to the main checkout, retires with presence inline and no force, then releases" \
   || fail "auto.md retire order/shape (cd=$AR_CD retire=$AR_RT release=$AR_RL)"
 printf '%s' "$ARS" | grep -q 'A refusal does not fail the loop' && printf '%s' "$ARS" | grep -qF 'never ran `worktree new`' \
-  && printf '%s' "$ARS" | grep -q 'worktree removed: yes|no' && printf '%s' "$ARS" | grep -q 'Never kill those pids' \
-  && printf '%s' "$ARS" | grep -q 'the branch is untouched' \
+  && printf '%s' "$ARS" | grep -q "in retire's words" && printf '%s' "$ARS" | grep -q 'Never kill those pids' \
+  && printf '%s' "$ARS" | grep -q 'addressed to them, not to you' \
   && printf '%s' "$ARS" | grep -q 'never the branch you started on in the shared checkout' \
   && ok "auto.md reports a refusal without failing the loop, and a shared-checkout session skips retire" \
   || fail "auto.md refusal/shared-checkout handling"
@@ -436,7 +436,7 @@ printf '%s' "$AG6" | grep -qF 'integrate-result v1' && printf '%s' "$AG6" | grep
   && [ -n "$A6_CD" ] && [ -n "$A6_RT" ] && [ -n "$A6_RL" ] && [ "$A6_CD" -lt "$A6_RT" ] && [ "$A6_RT" -lt "$A6_RL" ] \
   && printf '%s' "$AG6" | grep -q 'COMMS_PRESENCE_NAME=.*COMMS_PRESENCE_INSTANCE=' \
   && printf '%s' "$AG6" | grep -q 'skips retire' && printf '%s' "$AG6" | grep -q 'does not undo the landing' \
-  && printf '%s' "$AG6" | grep -q 'worktree removed: yes|no' && printf '%s' "$AG6" | grep -q 'never kill those pids' \
+  && printf '%s' "$AG6" | grep -q "relay retire's" && printf '%s' "$AG6" | grep -q 'never kill those pids' \
   && ! printf '%s' "$AG6" | grep -q -- '--force' \
   && ok "AGENTS.md step 6 carries the same landed-gated retire, then release" \
   || fail "AGENTS.md step 6 retire step (cd=$A6_CD retire=$A6_RT release=$A6_RL)"
