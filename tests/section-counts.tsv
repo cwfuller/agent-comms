@@ -99,5 +99,5 @@ route-eval: more than one labeller	5
 compose: exactly one machine-readable compose-result line	20
 comms.sh version: the installed kernel commit and template version	18
 leg_usage.py: a leg's tokens come from the provider's own records	43
-comms.sh: state idle/legacy (idle threads marked with evidence, never closed by age)	19
+comms.sh: state idle/legacy (idle threads marked with evidence, never closed by age)	20
 worktree new: pins the workspace name for the new worktree	11

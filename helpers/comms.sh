@@ -258,7 +258,9 @@ cmd_root() {
 
 # Filesystem-safe name (defined early — cache paths below need it).
 safe_name() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
-safe_name_lines() { tr -c 'A-Za-z0-9._-\n' '_'; }   # the same mapping over a stream, one name per line
+# The same mapping over a stream, one name per line. `-` stays LAST in the set: GNU tr reads
+# `_-\n` as a reverse range and aborts. (claude-review, slice0b r1.)
+safe_name_lines() { tr -c 'A-Za-z0-9._\n-' '_'; }
 
 # Every token must be a COMPLETE non-negative decimal. Filtering by CHARACTER is not enough,
 # and the first version of this did exactly that: `1..2`, `1.2.3` and `.` are built entirely
@@ -6123,31 +6125,50 @@ state_idle_days() {  # <value> -> the day count, normalised (08 is eight, not a 
   printf '%s' "$d"
 }
 
-epoch_touch_stamp() {  # <epoch> -> CCYYMMDDhhmm.SS in LOCAL time, the portable `touch -t` form
-  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S 2>/dev/null
+# <epoch> -> CCYYMMDDhhmm.SS in UTC, the portable `touch -t` form. The caller runs `touch` under the
+# same TZ=UTC0: local time has an hour that happens twice at a DST fall-back, and `touch -t` would
+# have to guess which one the cutoff meant.
+epoch_touch_stamp() {
+  TZ=UTC0 date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || TZ=UTC0 date -d "@$1" +%Y%m%d%H%M.%S 2>/dev/null
 }
 
 # state_message_threads <dir> <maxdepth> [ref-file] — the safe_name'd `thread:` of every message
 # file under <dir> (only those modified after <ref-file> when one is given), one per line. FAILS
 # (non-zero) when the walk or a read cannot complete: a message that could not be read is activity
 # this cannot see, and an unseen reply must never make a thread look idle.
+# Depth 2 from .comms covers the mailbox proper: root drafts, the to-*/ inboxes and the flat
+# archive/. Deeper copies (a reply kept in a .comms/logs/<run>/ dir) are deliberately out of scope:
+# every delivery of that reply also lands in an inbox, and the state file's mtime moves with it.
 state_message_threads() {
-  local dir="$1" depth="$2" ref="${3:-}" list f out rc
-  local -a files=() newer=()
+  local dir="$1" depth="$2" ref="${3:-}" list f
+  local -a batch=() newer=()
   [ -d "$dir" ] || return 0
   [ -n "$ref" ] && newer=(-newer "$ref")
   list="$(mktemp "${TMPDIR:-/tmp}/agent-comms-idle.XXXXXX")" || return 1
   if ! find "$dir" -maxdepth "$depth" -type f -name '*.md' ${newer[@]+"${newer[@]}"} -print0 >"$list" 2>/dev/null; then
     rm -f "$list"; return 1
   fi
-  while IFS= read -r -d '' f; do files+=("$f"); done <"$list"
+  # Batched so a large archive cannot overflow one argv (an exec failure would read as a scan
+  # failure). Plain "${batch[@]}", never a "${a[@]:i:n}" slice: bash 3.2 joins a quoted slice into
+  # ONE word when IFS lacks a space.
+  while IFS= read -r -d '' f; do
+    batch+=("$f")
+    [ "${#batch[@]}" -lt 200 ] && continue
+    state_thread_lines "${batch[@]}" || { rm -f "$list"; return 1; }
+    batch=()
+  done <"$list"
   rm -f "$list"
-  [ "${#files[@]}" -gt 0 ] || return 0
+  [ "${#batch[@]}" -eq 0 ] || state_thread_lines "${batch[@]}" || return 1
+  return 0
+}
+
+state_thread_lines() {  # <file>... — the safe_name'd frontmatter thread of each; non-zero on an unreadable file
+  local out rc
   # -m1 is per file, so each file answers with its frontmatter `thread:`. grep exit 1 is "no
-  # thread anywhere" (fine); 2 is a file it could not read (not fine).
-  out="$(grep -m1 -h '^thread:' "${files[@]}" 2>/dev/null)" && rc=0 || rc=$?
+  # thread in these files" (fine); 2 is a file it could not read (not fine).
+  out="$(grep -m1 -h '^thread:' "$@" 2>/dev/null)" && rc=0 || rc=$?
   [ "$rc" -le 1 ] || return 1
-  printf '%s\n' "$out" | sed 's/^thread:[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | safe_name_lines
+  [ -z "$out" ] || printf '%s\n' "$out" | sed 's/^thread:[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | safe_name_lines
   return 0
 }
 
@@ -6162,7 +6183,7 @@ state_idle_table() {
   ref="$(mktemp "${TMPDIR:-/tmp}/agent-comms-idle-ref.XXXXXX")" || return 1
   recent="$ref.recent"; unread="$ref.unread"
   stamp="$(epoch_touch_stamp "$cutoff")" || stamp=""
-  if [ -z "$stamp" ] || ! touch -t "$stamp" "$ref" 2>/dev/null \
+  if [ -z "$stamp" ] || ! TZ=UTC0 touch -t "$stamp" "$ref" 2>/dev/null \
       || ! state_message_threads "$root" 2 "$ref" >"$recent"; then
     rm -f "$ref" "$recent" "$unread"; return 1
   fi
@@ -6289,9 +6310,10 @@ cmd_state_legacy() {  # state legacy [--days N] <id>... — mark only what the o
     if [ ! -f "$f" ] || ! snap="$(cat "$f" 2>/dev/null)" || ! mt="$(file_mtime "$f")"; then
       echo "refused: $id: no such thread state" >&2; refused=1; continue
     fi
-    if ! IFS=$'\t' read -r kind rid d iso st aw un < <(state_idle_rows "$days" "$id" || echo fail); then
-      kind=fail
-    fi
+    # Judged into a variable first, then split: an `IFS=... read < <(cmd)` prefix leaks the tab-only
+    # IFS into the process substitution under bash 3.2.
+    ev="$(state_idle_rows "$days" "$id")" || ev=fail
+    IFS=$'\t' read -r kind rid d iso st aw un <<<"$ev" || kind=fail
     case "$kind" in
       idle) ;;
       settled) echo "refused: $id: already $st" >&2; refused=1; continue ;;
@@ -6304,10 +6326,12 @@ cmd_state_legacy() {  # state legacy [--days N] <id>... — mark only what the o
     tmp="$f.legacy.$$"
     # The evidence goes right after the status line, never at the end: runphase's exit mirror
     # rewrites the LAST field (last_delivery), so the tail must stay as send wrote it.
-    if ! printf '%s\n' "$snap" | awk -v ev="$(json_escape "$ev")" -v at="$now_iso" \
-          -v ps="$(json_escape "$st")" -v pa="$(json_escape "$aw")" '
+    # Values reach awk through ENVIRON, never `-v`: `-v` re-interprets backslash escapes, which
+    # would undo json_escape. (claude-review, slice0b r1.)
+    if ! printf '%s\n' "$snap" | LEG_EV="$(json_escape "$ev")" LEG_AT="$now_iso" \
+          LEG_PS="$(json_escape "$st")" LEG_PA="$(json_escape "$aw")" awk '
         !done && /"status": "[^"]*"/ { sub(/"status": "[^"]*"/, "\"status\": \"legacy\""); print
-          printf "  \"legacy_marked_at\": \"%s\",\n  \"legacy_prior_status\": \"%s\",\n  \"legacy_prior_awaiting\": \"%s\",\n  \"legacy_evidence\": \"%s\",\n", at, ps, pa, ev
+          printf "  \"legacy_marked_at\": \"%s\",\n  \"legacy_prior_status\": \"%s\",\n  \"legacy_prior_awaiting\": \"%s\",\n  \"legacy_evidence\": \"%s\",\n", ENVIRON["LEG_AT"], ENVIRON["LEG_PS"], ENVIRON["LEG_PA"], ENVIRON["LEG_EV"]
           done = 1; next }
         { gsub(/"awaiting_from": "[^"]*"/, "\"awaiting_from\": \"none\""); print }' >"$tmp" 2>/dev/null \
         || ! grep -q '"status": "legacy"' "$tmp" 2>/dev/null; then

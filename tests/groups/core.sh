@@ -773,6 +773,14 @@ IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-done 2>&1)"
 IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-unread feature-helper-tests_idl-fresh 2>&1)"; IDL_RC=$?
 [ "$IDL_RC" = 3 ] && [ "$(idl_status idl-unread)" = legacy ] && [ "$(idl_status idl-fresh)" = in-progress ] \
   && ok "per target: the idle id is marked, the active one refused, and the exit says something was refused" || fail "legacy mixed (rc=$IDL_RC): $IDL_OUT"
+# More message files than one grep batch (200): the scan must batch without losing a file, and
+# the legacy path must judge it too (an IFS-joined batch once read as "could not read").
+idl_state idl-many in-progress "$IDL_OLD" "$IDL_OLD"
+for IDL_I in $(seq 1 450); do printf -- '---\nthread: idl-many\n---\n' > "$REPO_FIX/.comms/archive/feature-helper-tests_idl-bulk-$IDL_I.md"; done
+IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-many 2>&1)"; IDL_RC=$?
+[ "$IDL_RC" = 3 ] && [ "$(idl_status idl-many)" = in-progress ] && printf '%s' "$IDL_OUT" | grep -q 'refused: feature-helper-tests_idl-many: not idle' \
+  && ok "with more message files than one scan batch, recent activity is still seen and judged (not a read failure)" || fail "legacy many (rc=$IDL_RC): $IDL_OUT"
+rm -f "$REPO_FIX"/.comms/archive/feature-helper-tests_idl-bulk-*.md
 IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-nosuch 2>&1)"; IDL_RC=$?
 [ "$IDL_RC" = 3 ] && printf '%s' "$IDL_OUT" | grep -q 'no such thread state' \
   && ok "an unknown id is refused by name" || fail "legacy unknown (rc=$IDL_RC): $IDL_OUT"
