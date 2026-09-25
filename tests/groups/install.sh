@@ -478,3 +478,11 @@ vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home7"
 [ "$(vr_field "$("$VR/home7/ac/comms.sh" version 2>&1)" kernel_commit)" = "$VR_SHA2-dirty" ] \
   && [ "$(vr_field "$("$VR_SRC/helpers/comms.sh" version 2>&1)" kernel_commit)" = "$VR_SHA2-dirty" ] \
   && ok "an untracked helper marks the kernel -dirty, installed and from the checkout" || fail "untracked helper stamped clean"
+# r2 (codex): an unsearchable helpers dir hides the stamp from `-e`, so only rm's status can prove
+# removal. The install must stop BEFORE any asset (the driver commands come first) is replaced.
+vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home8"
+printf 'SENTINEL\n' >> "$VR/home8/c/auto.md"; chmod 600 "$VR/home8/ac"
+vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home8" && VR_NRC=0 || VR_NRC=$?
+chmod 700 "$VR/home8/ac"
+{ [ "$(id -u)" = 0 ] || { [ "$VR_NRC" != 0 ] && grep -q SENTINEL "$VR/home8/c/auto.md"; }; } \
+  && ok "a stamp that cannot be removed stops the install before any asset is replaced" || fail "unremovable stamp: rc=$VR_NRC, commands replaced anyway"

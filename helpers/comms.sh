@@ -2886,12 +2886,14 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt ($
     { lone++ }
     END { printf "%d %d %d", corr, own, lone }' "$tmp")"
   read -r gc_corr gc_own gc_lone <<< "$gate_counts"
-  [ -z "$gating_reply" ] || gating_verdict="$(norm_verdict_value "$(frontmatter_field "$gating_reply" verdict)")"
+  [ -z "$gating_reply" ] || gating_verdict="$(norm_verdict_value "$(frontmatter_field "$gating_reply" verdict 2>/dev/null)")" || gating_verdict=""
   # The round cap comes from the REQUEST the driver wrote (the gating leg's), and only when
-  # that is gone from the reply the broker stamped from it.
+  # that is gone from the reply the broker stamped from it. Every read is GUARDED: a request
+  # found by name but unreadable, or archived between the lookup and the read, falls through to
+  # the next source and finally to `-` — it never aborts a composition. (codex, r2, blocking.)
   local gating_req_file; gating_req_file="$(find_message_by_id "$gating_req" 2>/dev/null)" || gating_req_file=""
-  [ -z "$gating_req_file" ] || maxr="$(frontmatter_field "$gating_req_file" max-rounds)"
-  [ -n "$maxr" ] || [ -z "$gating_reply" ] || maxr="$(frontmatter_field "$gating_reply" max-rounds)"
+  [ -z "$gating_req_file" ] || maxr="$(frontmatter_field "$gating_req_file" max-rounds 2>/dev/null)" || maxr=""
+  [ -n "$maxr" ] || [ -z "$gating_reply" ] || maxr="$(frontmatter_field "$gating_reply" max-rounds 2>/dev/null)" || maxr=""
   local compose_gate_out; compose_gate_out="$(compose_gate "${gc_corr:-0}" "${gc_own:-0}" "${gc_lone:-0}" \
     "$gating_ag" "$gating_verdict" "$DEGRADED_AGENTS" "$gating_rnd" "$maxr")"
   local gate="${compose_gate_out%% *}" gate_reasons="${compose_gate_out#* }"

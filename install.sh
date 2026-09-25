@@ -923,8 +923,10 @@ source_template_version() {
   printf 'sha256:%s' "$sum"
 }
 invalidate_install_stamp() {  # <helpers dir> — remove the stamp, or stop the install
-  rm -f "$1/install-stamp" 2>/dev/null || true
-  [ ! -e "$1/install-stamp" ] && [ ! -L "$1/install-stamp" ] && return 0
+  # rm's STATUS is the evidence, not a later existence test: in a directory without search
+  # permission `-e` cannot see the stamp either, so "absent" would read as removed. `rm -f`
+  # already succeeds for a stamp (or a whole directory) that does not exist yet. (codex, r2.)
+  rm -f "$1/install-stamp" 2>/dev/null && [ ! -e "$1/install-stamp" ] && [ ! -L "$1/install-stamp" ] && return 0
   echo "error: cannot remove $1/install-stamp before replacing the files it describes — refusing to install" >&2
   exit 1
 }

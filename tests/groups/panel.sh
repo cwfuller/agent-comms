@@ -1355,6 +1355,17 @@ CR_O8="$(run_cr compose --set "$CR_S1" --out "$CR_OUTF" 2>/dev/null)"
   && [ "$(cr_field "$CR_O8" gate)" = pass ] && ! grep -q '^compose-result' "$CR_OUTF" \
   && ok "with --out, stdout is the notice then the result line, and the file holds only prose" || fail "--out stdout: $CR_O8"
 
+# r2 (codex): a request found by name but unreadable falls back to the reply's cap; it never
+# aborts the composition.
+CR_S9="$(cr_panel unreadable 1 5)"
+cr_reply unreadable codex APPROVE '- None.'; cr_reply unreadable grok APPROVE '- None.'
+CR_REQ9="$(find "$CR_FIX/.comms/to-codex" -type f -name '*.md' | xargs grep -l '^thread: cr-unreadable-codex$' | head -1)"
+chmod 000 "$CR_REQ9"
+CR_O9="$(run_cr compose --set "$CR_S9" 2>/dev/null)" && CR_RC9=0 || CR_RC9=$?
+chmod 644 "$CR_REQ9"
+[ "$CR_RC9" = 0 ] && [ "$(cr_field "$CR_O9" max_rounds)" = 5 ] && [ "$(cr_field "$CR_O9" gate)" = pass ] \
+  && ok "an unreadable request falls back to the reply's cap instead of aborting compose" || fail "unreadable request: rc=$CR_RC9 $(cr_line "$CR_O9")"
+
 # The rule itself, for the cases a live panel cannot cheaply reach.
 CR_GATE_FN="$(sed -n '/^compose_gate() {/,/^}/p' "$REPO/helpers/comms.sh")"
 cr_gate() { ( eval "$CR_GATE_FN"; compose_gate "$@" ); }
