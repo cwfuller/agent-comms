@@ -33,7 +33,8 @@ orchestration here, and do not revive Symphony for it.
   codes plus one machine-readable landing line; `worktree list` and an explicit, hand-run
   `worktree retire` (the 2026-09-03 retirement design, with one added gate: ignored files that
   cannot be regenerated block removal); a `gate=pass|block|escalate` line in composition output;
-  `comms.sh version`.
+  `comms.sh version`. **Built 2026-09-25:** the last two — `compose-result v1` and
+  `version [--json]` over an install stamp (docs/COMMANDS.md defines both).
 
 ## Contraction (2026-08-28) — current program
 

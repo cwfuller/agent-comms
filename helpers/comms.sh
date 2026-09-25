@@ -172,6 +172,13 @@
 #                               per DISTINCT REVIEWER at an anchor, across severities: a
 #                               blocking and an advisory report of one defect are two
 #                               reviewers, not one. Drops nothing; no model arbitrates.
+#                               A published composition ends stdout with ONE line
+#                               `compose-result v1 gate=pass|block|escalate set= dispatch=
+#                               round= max_rounds= legs= answered= gating= gating_verdict=
+#                               blocking= corroborated= gating_own= lone= degraded= reason=`
+#                               (block: a corroborated or gating-reviewer blocker; escalate:
+#                               a lone blocker, a degraded or unapproving gate, or any
+#                               non-pass at the round cap). A refusal (exit 3) prints none.
 #   events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R]
 #          [--request-id Q] [--message-id M] [--limit N]
 #           events append --kind <kind> [--set|--thread|--round|--agent|--role|--artifact|
@@ -196,6 +203,10 @@
 #                               (a real commit object anchored under refs/agent-comms/)
 #   prompt-version [--list]     content hash of the reviewer instruction surface; grades
 #                               are partitioned on it, never pooled across an edit
+#   version [--json]            the installed kernel commit (<sha>, <sha>-dirty, or unknown
+#                               for a non-git install) and template version (sha256:<hex>),
+#                               read from the install-stamp install.sh writes beside the
+#                               helpers; `source: install|checkout|none`. Always exit 0
 #
 # Environment:
 #   COMMS_DELIVERY              acp | headless (grok only) | mailbox. Unset picks the ladder.
@@ -2616,9 +2627,18 @@ cmd_compose() {
   [ -n "$legs" ] || usage_err "compose: review set '$(clip "$set_id")' has no legs"
 
   local rows="" ag th rnd req_mid reply cand n_legs=0 n_answered=0 pending="" unread="" blind="" answered_agents="" leg_providers=""
+  # The GATING reviewer is the one the bound attempt recorded (sets.tsv column 9, written by
+  # dispatch as the roster's first name). A leg carried forward from an earlier attempt does not
+  # get to redefine it, so the row is read for THIS dispatch only; the roster order is the
+  # fallback for an index row that predates the column.
+  local gating_ag gating_rnd="" gating_req="" gating_reply=""
+  gating_ag="$(awk -F'\t' -v s="$set_id" -v d="$compose_dispatch" 'NR>1 && $1==s && $14==d && $9!="" {print $9; exit}' "$idx")"
+  [ -n "$gating_ag" ] || gating_ag="$(printf '%s' "$planned_now" | awk '{print $1}')"
+  [ -n "$gating_ag" ] || gating_ag="$(printf '%s\n' "$legs" | awk -F'\t' 'NF {print $1; exit}')"
   while IFS=$'\t' read -r ag th rnd req_mid; do
     [ -n "$ag" ] || continue
     n_legs=$((n_legs + 1))
+    [ "$ag" = "$gating_ag" ] && { gating_rnd="$rnd"; gating_req="$req_mid"; }
     reply=""
     for cand in $(leg_reply_candidates "$root" "$ws" "$ag" "$th" "$reg"); do
       [ -f "$cand" ] || continue
@@ -2646,6 +2666,7 @@ cmd_compose() {
     done
     if [ -z "$reply" ]; then pending="$pending $ag"; continue; fi
     n_answered=$((n_answered + 1)); answered_agents="$answered_agents $ag"
+    [ "$ag" = "$gating_ag" ] && gating_reply="$reply"
     leg_providers="$leg_providers
 $ag	$(reply_provider "$reply")"
     # A panel must never print a finding count over content it could not read. The broker
@@ -2902,7 +2923,7 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt ($
       BEGIN{ while ((getline line < clsf) > 0){ split(line,c,"\t"); klass[c[1]]=c[2] } }
       $13=="advisory" && ($14=="" || klass[$14]=="advisory") {
         printf "- [%s] %s%s\n", $9, ($14!="" ? "`" $14 "` — " : ""), $15 }' "$tmp"
-  } | {
+  } | inert_lines | {
     # No /dev/stdout reopen: managed sandboxes deny it, failing ordinary
     # composition even with every leg answered. Plain cat IS stdout; a file
     # target gets a real redirect. (codex, stamped-authorities round 3 —
@@ -2914,6 +2935,31 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt ($
     # (codex, implement r8, blocking.)
     cat > "$compose_buf"
   }
+  # THE GATE, from the SAME classification every section above was rendered from. Blocking
+  # findings split three ways, one count each:
+  #   corroborated — anchors classed `gates` (each anchor once, whoever filed it)
+  #   gating_own   — the gating reviewer's blocking findings that are not at such an anchor
+  #   lone         — every other reviewer's blocking findings not at such an anchor
+  # Anchored findings count once per reviewer and anchor, as the classifier does; unanchored
+  # ones count per finding, because nothing can say two of them are the same defect.
+  local gate_counts gc_corr gc_own gc_lone gating_verdict="" maxr=""
+  gate_counts="$(awk -F'\t' -v g="$gating_ag" -v clsf="$cls" '
+    BEGIN { while ((getline line < clsf) > 0) { split(line, c, "\t"); klass[c[1]] = c[2] } }
+    $13 != "blocking" { next }
+    $14 != "" && klass[$14] == "gates" { if (!($14 in cg)) { cg[$14] = 1; corr++ }; next }
+    $14 != "" { if (($14 SUBSEP $9) in seen) next; seen[$14 SUBSEP $9] = 1 }
+    $9 == g { own++; next }
+    { lone++ }
+    END { printf "%d %d %d", corr, own, lone }' "$tmp")"
+  read -r gc_corr gc_own gc_lone <<< "$gate_counts"
+  [ -z "$gating_reply" ] || gating_verdict="$(norm_verdict_value "$(frontmatter_field "$gating_reply" verdict)")"
+  # The round cap comes from the REQUEST the driver wrote (the gating leg's), and only when
+  # that is gone from the reply the broker stamped from it.
+  local gating_req_file; gating_req_file="$(find_message_by_id "$gating_req" 2>/dev/null)" || gating_req_file=""
+  [ -z "$gating_req_file" ] || maxr="$(frontmatter_field "$gating_req_file" max-rounds)"
+  [ -n "$maxr" ] || [ -z "$gating_reply" ] || maxr="$(frontmatter_field "$gating_reply" max-rounds)"
+  local compose_gate_out; compose_gate_out="$(compose_gate "${gc_corr:-0}" "${gc_own:-0}" "${gc_lone:-0}" \
+    "$gating_ag" "$gating_verdict" "$DEGRADED_AGENTS" "$gating_rnd" "$maxr")"
   rm -f "$tmp" "$cls"
   # Composition is the last coordinator act of a round, so it closes the trace the roster
   # event opened: a set with a panel-planned and no composition-* is a round nobody gated.
@@ -2964,11 +3010,55 @@ compose: '$ag_d' has no recorded evidence it could not review in THIS attempt ($
   # Still current: publish, THEN record.
   if [ -n "$out" ]; then cat "$compose_buf" > "$out"; else cat "$compose_buf"; fi
   rm -f "$compose_buf" 2>/dev/null || true
+  local gate="${compose_gate_out%% *}" gate_reasons="${compose_gate_out#* }"
   cmd_events append --kind composition-completed --set "$set_id" --dispatch "$compose_dispatch" \
     --status "$([ -n "$DEGRADED_AGENTS" ] && echo composed-degraded || echo composed)" \
-    --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0} mixed=${mixed:-0}${DEGRADED_AGENTS:+ degraded-without:$DEGRADED_AGENTS}" \
+    --note "legs=$n_legs findings=${total:-0} blocking=${blocking:-0} corroborated=${corroborated:-0} mixed=${mixed:-0}${DEGRADED_AGENTS:+ degraded-without:$DEGRADED_AGENTS} gate=$gate reason=$gate_reasons" \
     || echo "warning: coordinator log not updated (composition-completed)" >&2
-  [ -z "$out" ] || echo "compose: wrote ${out#"$root"/}"
+  [ -z "$out" ] || printf 'compose: wrote %s\n' "$(integrate_oneline "${out#"$root"/}")"
+  # THE MACHINE-READABLE RESULT: exactly one line, always the LAST line of stdout, printed only
+  # once the composition is published. Every refusal above returns before it, so its absence
+  # is itself the answer "nothing was gated". Defined in docs/COMMANDS.md.
+  local dg_list; dg_list="$(printf '%s' "$DEGRADED_AGENTS" | tr -s ' ' | sed 's/^ //; s/ $//' | tr ' ' ',')"
+  printf 'compose-result v1 gate=%s set=%s dispatch=%s round=%s max_rounds=%s legs=%s answered=%s gating=%s gating_verdict=%s blocking=%s corroborated=%s gating_own=%s lone=%s degraded=%s reason=%s\n' \
+    "$gate" "$(integrate_kv "$set_id")" "$(integrate_kv "${compose_dispatch:--}")" \
+    "$(integrate_kv "${gating_rnd:--}")" "$(integrate_kv "${maxr:--}")" "$n_legs" "$n_answered" \
+    "$(integrate_kv "${gating_ag:--}")" "$(integrate_kv "${gating_verdict:--}")" "${blocking:-0}" \
+    "${gc_corr:-0}" "${gc_own:-0}" "${gc_lone:-0}" "$(integrate_kv "${dg_list:--}")" "$gate_reasons"
+}
+
+# compose_gate <corroborated> <gating_own> <lone> <gating-agent> <gating-verdict> <degraded agents>
+#              <round> <max-rounds>  ->  "<gate> <reason[,reason...]>"
+#
+# THE ONE DEFINITION of what a composition means for the driver, kept apart from rendering so
+# the rule reads in one place (docs/COMMANDS.md, "compose result line", is its contract):
+#   block    — a GATING blocker stands: a corroborated anchor, or the gating reviewer's own.
+#   escalate — a split the driver may not settle alone: a lone blocker from another reviewer,
+#              a degraded panel, a gating reviewer that was dropped or did not APPROVE, or any
+#              non-pass outcome at the round cap (a block there has no round left to fix it in).
+#   pass     — every leg answered, the gating reviewer approved, and no blocker of any kind.
+# Reasons are every condition that held, in a fixed order, so a caller never has to re-derive
+# them from counts. A pass carries exactly `approved`.
+compose_gate() {
+  local corr="$1" own="$2" lone="$3" g="$4" gv="$5" dg="$6" rnd="$7" maxr="$8" reasons="" gate at_cap=0 absent=0
+  case " $dg " in *" $g "*) absent=1 ;; esac
+  case "$rnd" in ''|*[!0-9]*) ;; *)
+    case "$maxr" in ''|*[!0-9]*) ;; *) [ "$((10#$maxr))" -gt 0 ] && [ "$((10#$rnd))" -ge "$((10#$maxr))" ] && at_cap=1 ;; esac ;;
+  esac
+  [ "$corr" -gt 0 ] && reasons="$reasons,corroborated-blocker"
+  [ "$own" -gt 0 ] && reasons="$reasons,gating-blocker"
+  [ "$lone" -gt 0 ] && reasons="$reasons,lone-blocker"
+  [ -n "$(printf '%s' "$dg" | tr -d ' ')" ] && reasons="$reasons,degraded"
+  if [ "$absent" = 1 ]; then reasons="$reasons,gating-absent"
+  elif [ "$gv" != "APPROVE" ]; then reasons="$reasons,gating-not-approved"
+  fi
+  if [ $((corr + own)) -gt 0 ]; then gate=block
+  elif [ -n "$reasons" ]; then gate=escalate
+  else gate=pass
+  fi
+  if [ "$gate" != pass ] && [ "$at_cap" = 1 ]; then gate=escalate; reasons="$reasons,max-rounds"; fi
+  [ "$gate" = pass ] && reasons=",approved"
+  printf '%s %s' "$gate" "${reasons#,}"
 }
 
 # ---------- the coordinator's event log ----------
@@ -4353,6 +4443,24 @@ integrate_oneline() {  # <string> — one inert line: no byte in it can start a 
   printf '%s' "$out"
 }
 
+# inert_lines — stdin to stdout, the streaming sibling of integrate_oneline for multi-line PROSE
+# that shares stdout with a parsed result line (compose). LF-delimited lines are kept; inside a
+# line, CR and every other control byte but TAB become `\xNN`, and NEL, LS and PS become
+# `\u0085` / ` ` / ` `, so no reviewer-authored byte can begin a line for a reader that
+# splits on more than LF. Backslashes are left alone: this is prose, and the promise is only that
+# it cannot forge a line. One sed pass over bytes (LC_ALL=C), not a per-character shell loop.
+INERT_LINES_SED=""
+inert_lines() {
+  if [ -z "$INERT_LINES_SED" ]; then
+    local i
+    for i in 1 2 3 4 5 6 7 8 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 127; do
+      INERT_LINES_SED="${INERT_LINES_SED}s/$(printf "\\$(printf '%03o' "$i")")/\\\\x$(printf '%02X' "$i")/g;"
+    done
+    INERT_LINES_SED="${INERT_LINES_SED}s/$(printf '\302\205')/\\\\u0085/g;s/$(printf '\342\200\250')/\\\\u2028/g;s/$(printf '\342\200\251')/\\\\u2029/g"
+  fi
+  LC_ALL=C sed "$INERT_LINES_SED"
+}
+
 suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <name> <instance> <presence_record>
   # THE ONE VERIFICATION ROUTINE. `integrate` and `verify fresh` both call it, so the check that
   # guards a landing and the preflight that promises "this will land" can never drift apart.
@@ -5129,6 +5237,59 @@ cmd_prompt_version() {
       esac
     done <<< "$(prompt_surface_files "$root")"
   } | hash_stdin
+}
+
+# ---------- version: which kernel and which templates are installed ----------
+#
+# READ, never recomputed from the installed tree: an installed copy cannot say which commit it
+# came from, and a project-local pin sits inside the USER'S repository, whose HEAD is not the
+# kernel's. install.sh writes `install-stamp` beside the helpers of every scope it installs, from
+# the source it copied. A value that is absent, duplicated or malformed reads as `unknown`.
+version_stamp_field() {  # <stamp> <key> -> the key's value when it appears exactly once
+  awk -v k="$2" 'index($0, k "=") == 1 { n++; v = substr($0, length(k) + 2) } END { if (n == 1) print v }' "$1" 2>/dev/null
+}
+version_is_commit() {  # a full sha-1 or sha-256 object id, optionally `-dirty`
+  printf '%s' "$1" | grep -Eqx '([0-9a-f]{40}|[0-9a-f]{64})(-dirty)?'
+}
+version_is_template() { printf '%s' "$1" | grep -Eqx 'sha256:[0-9a-f]{64}'; }
+
+cmd_version() {
+  local json=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=true ;;
+      -?*)    usage_err "version: unknown option '$(clip "$1")'" ;;
+      *)      usage_err "version: unexpected argument '$(clip "$1")'" ;;
+    esac
+    shift
+  done
+  local dir top v kernel=unknown tmpl=unknown source=none
+  dir="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd -P)" || dir=""
+  if [ -n "$dir" ] && [ -f "$dir/install-stamp" ]; then
+    source=install
+    v="$(version_stamp_field "$dir/install-stamp" kernel_commit)"
+    version_is_commit "$v" && kernel="$v"
+    v="$(version_stamp_field "$dir/install-stamp" template_version)"
+    version_is_template "$v" && tmpl="$v"
+  elif [ -n "$dir" ] && top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" \
+       && [ "$(cd "$top" 2>/dev/null && pwd -P)/helpers" = "$dir" ] && [ -f "$top/install.sh" ]; then
+    # Run straight from an agent-comms SOURCE checkout: the kernel is that checkout's commit,
+    # `-dirty` when its helpers differ from it. Nothing installs templates from here, so the
+    # template version stays unknown rather than naming files no driver is reading.
+    source=checkout
+    v="$(git -C "$top" rev-parse --verify -q HEAD 2>/dev/null)" || v=""
+    if [ -n "$v" ]; then
+      local dirt; dirt="$(git -C "$top" status --porcelain --untracked-files=no -- helpers 2>/dev/null)" || dirt="?"
+      [ -z "$dirt" ] || v="$v-dirty"
+      version_is_commit "$v" && kernel="$v"
+    fi
+  fi
+  # Every value is validated to a fixed alphabet above, so neither form needs escaping.
+  if [ "$json" = true ]; then
+    printf '{"kernel_commit":"%s","template_version":"%s","source":"%s"}\n' "$kernel" "$tmpl" "$source"
+  else
+    printf 'kernel_commit: %s\ntemplate_version: %s\nsource: %s\n' "$kernel" "$tmpl" "$source"
+  fi
 }
 
 # reply-check <file|-> — classify a reply body, with a completion contract callers can trust.
@@ -6583,6 +6744,7 @@ case "${1:-}" in
   shadow)         shift; cmd_shadow "$@" ;;
   snapshot)       shift; cmd_snapshot "$@" ;;
   prompt-version) shift; cmd_prompt_version "$@" ;;
+  version)        shift; cmd_version "$@" ;;
   ""|help|-h|--help)
     # Print the whole header comment block rather than a hardcoded line range —
     # a fixed range silently truncates its own last entry as the block grows.

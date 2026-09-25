@@ -187,6 +187,8 @@ agnostic.
 | `snapshot [create\|list] [--with-base]` | retain the tree under review as a durable git object under `refs/agent-comms/artifacts/`; `--with-base` prints `artifact_id<TAB>base_sha` from the one operation |
 | `workspace set <name>` | pin the repo's mailbox identity explicitly (`.comms/workspace`) — beats every inferred source |
 | `prompt-version [--list]` | content hash of the reviewer instruction surface |
+| `compose --set <id> [--out F] [--degrade <agent>[,<agent>]]` | compose a panel's answered legs: every finding kept, labelled by support (corroborated, flagged at differing severities, uncorroborated, unanchored, advisory). Refuses (exit 3) a partial, unreadable, same-provider or superseded panel. A published composition ends stdout with one `compose-result v1` line (see [compose result line](#compose-result-line)) |
+| `version [--json]` | the installed kernel commit and template version, read from the `install-stamp` install.sh writes beside the helpers (see [version](#version)) |
 
 #### The grading pilot — `findings`, `shadow`, `snapshot`, `prompt-version`
 
@@ -360,6 +362,60 @@ integrate-result v1 status=landed cand=<oid> main_before=<oid> main_after=<oid> 
 - A refusal prints no result line. Parsers must ignore unknown keys; a breaking change bumps `v1`.
 - The suite's own output goes to stderr (and is kept whole under `.comms/logs/`), so nothing the suite prints can appear on stdout as a result line.
 - Split stdout on LF only. The result line is printable ASCII. On every stdout line, a caller-supplied or path value has backslashes, CR, LF, other control bytes and the Unicode separators NEL, LS and PS escaped, so no value can begin a line for any reader.
+
+#### `compose` result line
+
+`compose` is how a driver learns what a panel decided, so a program must not have to read the prose. When a composition is published (exit 0), the LAST line of stdout is exactly one:
+
+```
+compose-result v1 gate=pass|block|escalate set=<id> dispatch=<id> round=<n> max_rounds=<n> legs=<n> answered=<n> gating=<agent> gating_verdict=<verdict> blocking=<n> corroborated=<n> gating_own=<n> lone=<n> degraded=<a,b> reason=<r>[,<r>...]
+```
+
+The gate:
+
+| `gate` | when | what a driver does |
+| --- | --- | --- |
+| `pass` | every leg answered (none degraded), the gating reviewer's verdict is `APPROVE`, and there is no blocking finding at all | close the loop and land |
+| `block` | a GATING blocker stands: a corroborated anchor, or a blocking finding by the gating reviewer — and the round cap has not been reached | fix the gating blockers, run the next round |
+| `escalate` | anything else: a lone blocker from a non-gating reviewer, a degraded panel, a gating reviewer that was dropped or did not `APPROVE`, or any non-pass outcome on the last round | take the split to the human |
+
+`block` outranks `escalate`: a gating blocker on a degraded panel, or beside a lone blocker, is still `block`, and its `reason` lists every condition. At the round cap (`round >= max_rounds`) nothing but `pass` survives: `block` becomes `escalate`, with `max-rounds` appended.
+
+The fields:
+
+- `set` is the review set; `dispatch` is the attempt composed (`-` for a set recorded before attempts existed).
+- `round` is the gating leg's round from the set index. `max_rounds` is read from the request the driver wrote (the gating leg's), else from the gating reply's stamp; `-` when neither is readable, and then no `max-rounds` escalation is made — the driver's own cap applies.
+- `legs` is the roster size; `answered` counts the legs whose replies were composed.
+- `gating` is the gating reviewer the dispatch recorded (the roster's first). `gating_verdict` is its normalized verdict (`APPROVE`, `REQUEST_CHANGES`, `COMMENT`, …), `-` when it was dropped.
+- `blocking` is every blocking finding, as the prose counts them. The gate reads three counts beside it: `corroborated` (anchors two or more reviewers filed blocking; each anchor once), `gating_own` (the gating reviewer's other blocking findings) and `lone` (every other reviewer's). Those three count anchored findings once per reviewer and anchor, and unanchored ones per finding, so they need not sum to `blocking`.
+- `degraded` lists the legs dropped with `--degrade`, comma-separated; `-` when none.
+- `reason` lists every condition that held, in this order: `corroborated-blocker`, `gating-blocker`, `lone-blocker`, `degraded`, `gating-absent` (the gating leg was dropped) or `gating-not-approved`, then `max-rounds`. A `pass` carries exactly `approved`.
+
+Parsing rules:
+
+- Fields are space-separated `key=value` pairs; a value never contains whitespace or `=`. String values are written the way `integrate`'s are: any byte outside `A-Z a-z 0-9 . _ / @ { } ~ ^ : + -` becomes `%XX`. `-` means "not applicable".
+- The line is printed only after the composition is published and recorded. Every refusal (incomplete, unreadable, duplicate provider, superseded, a degraded leg that moved) exits 3 and prints no result line: its absence means nothing was gated.
+- Split stdout on LF only. Reviewer-authored text in the prose above has CR, every other control byte but TAB, and the separators NEL, LS and PS escaped, so no finding can begin a line for any reader; the result line is also always the last line. With `--out F` the prose goes to `F` and stdout carries only the `compose: wrote` notice and the result line.
+- Parsers must ignore unknown keys; a breaking change bumps `v1`. The same `gate` and `reason` are recorded on the `composition-completed` event.
+
+#### `version`
+
+`comms.sh version` answers which kernel and which templates are installed, so a driver can stamp both on every attempt.
+
+```
+kernel_commit: <sha>|<sha>-dirty|unknown
+template_version: sha256:<64 hex>|unknown
+source: install|checkout|none
+```
+
+`--json` prints the same three keys as one object: `{"kernel_commit":"…","template_version":"…","source":"…"}`. Exit 0 in every case; `unknown` is an answer.
+
+- `source: install` — read from `install-stamp`, which `install.sh` writes beside the helpers of every scope it installs (`~/.agent-comms/` for global, `.agent-comms/` for a local pin). It is written from the source the install copied, never recomputed later: a local pin sits inside the user's repository, whose `HEAD` is not the kernel's.
+- `kernel_commit` is the source checkout's `HEAD`, with `-dirty` when its `helpers/` differed from it. It is `unknown` for a non-git source: a piped `curl` install, a tarball, or a copy vendored inside another repository.
+- `template_version` is `sha256:` over one `<sha256 of the file>  <path>` line per installed template and loopspec fragment, in install order. It is a content hash, so it changes with any template edit and a `curl` install knows it too.
+- `source: checkout` — `helpers/comms.sh` run straight from an agent-comms checkout with no stamp: the kernel is that checkout's commit (`-dirty` as above). The template version is `unknown`, because nothing installs templates from there.
+- `source: none` — no stamp and not a checkout (an install that predates the stamp): both values are `unknown`. Re-run `install.sh`.
+- A stamp value that is missing, duplicated or malformed reads as `unknown`, never echoed.
 
 #### verify: a landing suite for any repo
 

@@ -448,6 +448,7 @@ install_global_assets() {
   for h in $RETIRED_HELPERS; do
     [ -f "$AGENT_COMMS_HOME/$h" ] && { rm -f "$AGENT_COMMS_HOME/$h"; echo "  removed retired helper $h"; }
   done
+  write_install_stamp "$AGENT_COMMS_HOME"
   echo "  installing loopspec fragments to $AGENT_COMMS_HOME/loopspec-fragments..."
   mkdir -p "$AGENT_COMMS_HOME/loopspec-fragments"
   for f in $LOOPSPEC_FRAGMENTS; do
@@ -496,6 +497,7 @@ install_local_assets() {
   for h in $RETIRED_HELPERS; do
     [ -f "$PROJECT_ROOT/.agent-comms/$h" ] && { rm -f "$PROJECT_ROOT/.agent-comms/$h"; echo "  removed retired helper $h"; }
   done
+  write_install_stamp "$PROJECT_ROOT/.agent-comms"
   return 0
 }
 
@@ -856,6 +858,70 @@ else
   else
     echo "  source: templates not needed for project init"
   fi
+fi
+
+# THE INSTALL STAMP — what `comms.sh version` reports. Computed ONCE, from the source this run
+# copies, and written beside the helpers of every scope that installs them. Never derived from the
+# installed tree afterwards: a local pin sits inside the user's repository, whose HEAD says nothing
+# about the kernel.
+#   kernel_commit     the source checkout's HEAD, `-dirty` when its helpers/ differ from it, or
+#                     `unknown` for a non-git source (curl, a tarball, a copy inside another repo).
+#   template_version  sha256 over "<sha256 of the file>  <path>" lines for every template and
+#                     loopspec fragment this install copies, in install order. Content, not a
+#                     counter, so it can never go stale and a curl install knows it too.
+source_kernel_commit() {
+  local top sha dirt
+  [ "$SOURCE" = "local" ] && [ -n "$SCRIPT_DIR" ] || { printf 'unknown'; return 0; }
+  top="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || { printf 'unknown'; return 0; }
+  # The installer must BE the checkout's root: a copy vendored inside some other repository
+  # would otherwise stamp that repository's commit as the kernel's.
+  [ "$(cd "$top" 2>/dev/null && pwd -P)" = "$(cd "$SCRIPT_DIR" && pwd -P)" ] || { printf 'unknown'; return 0; }
+  sha="$(git -C "$SCRIPT_DIR" rev-parse --verify -q HEAD 2>/dev/null)" || { printf 'unknown'; return 0; }
+  # "Could not tell" is not "clean": a failed status stamps -dirty, never a bare commit.
+  dirt="$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=no -- helpers 2>/dev/null)" || dirt="?"
+  [ -z "$dirt" ] || sha="$sha-dirty"
+  printf '%s' "$sha"
+}
+sha256_of() {  # <file> or stdin -> hex digest; non-zero when no sha256 tool works
+  local h
+  h="$(shasum -a 256 ${1:+"$1"} 2>/dev/null | awk '{print $1}')" || h=""
+  [ -n "$h" ] || h="$(sha256sum ${1:+"$1"} 2>/dev/null | awk '{print $1}')" || h=""
+  printf '%s' "$h" | grep -Eqx '[0-9a-f]{64}' || return 1
+  printf '%s' "$h"
+}
+source_template_version() {
+  local f h lines="" sum
+  for f in $CLAUDE_COMMANDS; do
+    h="$(sha256_of "$TEMPLATE_DIR/claude-commands/$f")" || { printf 'unknown'; return 0; }
+    lines="${lines}${h}  claude-commands/$f
+"
+  done
+  for f in $LOOPSPEC_FRAGMENTS; do
+    h="$(sha256_of "$FRAGMENT_SRC/$f")" || { printf 'unknown'; return 0; }
+    lines="${lines}${h}  loopspec-fragments/$f
+"
+  done
+  sum="$(printf '%s' "$lines" | sha256_of)" || { printf 'unknown'; return 0; }
+  printf 'sha256:%s' "$sum"
+}
+write_install_stamp() {  # <helpers dir>
+  # A stamp that could not be rewritten is REMOVED, never left behind: the previous install's
+  # stamp beside these new helpers would name a kernel they are not. Absent reads as unknown.
+  local tmp
+  if tmp="$(mktemp "${TMPDIR:-/tmp}/agent-comms-stamp.XXXXXX")" \
+     && printf '# written by install.sh; read by `comms.sh version`\nkernel_commit=%s\ntemplate_version=%s\n' \
+          "$INSTALL_KERNEL_COMMIT" "$INSTALL_TEMPLATE_VERSION" > "$tmp" \
+     && install_file "$tmp" "$1/install-stamp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "${tmp:-}" "$1/install-stamp" 2>/dev/null || true
+  echo "  warning: could not write $1/install-stamp — \`comms.sh version\` will report unknown" >&2
+  return 0
+}
+if needs_templates; then
+  INSTALL_KERNEL_COMMIT="$(source_kernel_commit)"
+  INSTALL_TEMPLATE_VERSION="$(source_template_version)"
 fi
 
 note_local_pin() {

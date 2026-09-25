@@ -371,3 +371,78 @@ if grep -q 'House rules' "$AG/mixed/.codex/AGENTS.md" \
 else
   fail "migration lost unrelated AGENTS.md content"
 fi
+
+section "comms.sh version: the installed kernel commit and template version"
+# basis stamps both on every attempt, so each is pinned against a source whose commit the test
+# controls: a throwaway clone-shaped copy of the installer, helpers, templates and fragments.
+VR="$WORK/version"; mkdir -p "$VR"; VR="$(cd "$VR" && pwd -P)"
+vr_copy() {  # <dest> — the files install.sh reads from a local source
+  mkdir -p "$1/docs/loopspec"
+  cp "$REPO/install.sh" "$1/"
+  cp -R "$REPO/helpers" "$REPO/templates" "$1/"
+  cp -R "$REPO/docs/loopspec/fragments" "$1/docs/loopspec/"
+}
+vr_install() {  # <source dir> <scope> <project dir> <global home>
+  (cd "$3" && env CODEX_AGENTS_FILE="$4/AGENTS.md" CLAUDE_COMMANDS_DIR="$4/c" CODEX_SKILLS_DIR="$4/s" \
+    GROK_COMMANDS_DIR="$4/g" AGENT_COMMS_HOME="$4/ac" AGENT_COMMS_SETUP=0 \
+    bash "$1/install.sh" --scope="$2" >"$WORK/vr.out" 2>&1)
+}
+vr_field() { printf '%s\n' "$1" | sed -n "s/^$2: //p"; }
+VR_SRC="$VR/src"; vr_copy "$VR_SRC"
+git -C "$VR_SRC" init -q -b main && git -C "$VR_SRC" add -A >/dev/null 2>&1 \
+  && git -C "$VR_SRC" -c user.email=t@t -c user.name=t commit -q -m src
+VR_SHA="$(git -C "$VR_SRC" rev-parse HEAD)"
+VR_PROJ="$VR/proj"; mkdir -p "$VR_PROJ"; git -C "$VR_PROJ" init -q -b main
+vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home" && vr_install "$VR_SRC" local "$VR_PROJ" "$VR/home" \
+  && ok "global and local installs from a git source succeed" || fail "version fixture install failed: $(tail -3 "$WORK/vr.out")"
+VR_G="$("$VR/home/ac/comms.sh" version 2>&1)"
+VR_L="$(cd "$VR_PROJ" && .agent-comms/comms.sh version 2>&1)"
+[ "$(vr_field "$VR_G" kernel_commit)" = "$VR_SHA" ] && [ "$(vr_field "$VR_G" source)" = install ] \
+  && ok "a GLOBAL install reports the source checkout's exact commit" || fail "global version: $VR_G"
+[ "$(vr_field "$VR_L" kernel_commit)" = "$VR_SHA" ] && [ "$(vr_field "$VR_L" source)" = install ] \
+  && ok "a LOCAL pin reports the kernel's commit, not the host project's HEAD" || fail "local version: $VR_L"
+VR_T="$(vr_field "$VR_G" template_version)"
+printf '%s' "$VR_T" | grep -Eqx 'sha256:[0-9a-f]{64}' && [ "$(vr_field "$VR_L" template_version)" = "$VR_T" ] \
+  && ok "both scopes report the same sha256 template version" || fail "template versions: $VR_T vs $(vr_field "$VR_L" template_version)"
+VR_J="$("$VR/home/ac/comms.sh" version --json 2>&1)"
+printf '%s' "$VR_J" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if sorted(d)==["kernel_commit","source","template_version"] and d["kernel_commit"]==sys.argv[1] and d["template_version"]==sys.argv[2] and d["source"]=="install" else 1)' "$VR_SHA" "$VR_T" \
+  && ok "--json carries the same three values as one JSON object" || fail "version --json: $VR_J"
+
+# A template edit changes the template version; a helper edit marks the kernel -dirty.
+printf '\n<!-- edited -->\n' >> "$VR_SRC/templates/claude-commands/auto.md"
+vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home"
+VR_G2="$("$VR/home/ac/comms.sh" version 2>&1)"
+[ "$(vr_field "$VR_G2" template_version)" != "$VR_T" ] && [ "$(vr_field "$VR_G2" kernel_commit)" = "$VR_SHA" ] \
+  && ok "editing a template changes the template version and leaves a clean kernel commit" || fail "template edit: $VR_G2"
+printf '\n# edited\n' >> "$VR_SRC/helpers/verify.sh"
+vr_install "$VR_SRC" global "$VR_PROJ" "$VR/home"
+[ "$(vr_field "$("$VR/home/ac/comms.sh" version 2>&1)" kernel_commit)" = "$VR_SHA-dirty" ] \
+  && ok "installing from a source whose helpers differ from HEAD stamps <sha>-dirty" || fail "dirty source was stamped clean"
+
+# A NON-GIT source (a tarball, or a copy vendored inside another repository) knows no commit.
+VR_NG="$VR/nogit"; vr_copy "$VR_NG"
+vr_install "$VR_NG" global "$VR_PROJ" "$VR/home2"
+VR_G3="$("$VR/home2/ac/comms.sh" version 2>&1)"
+[ "$(vr_field "$VR_G3" kernel_commit)" = unknown ] && [ "$(vr_field "$VR_G3" template_version)" = "$VR_T" ] \
+  && ok "a non-git source reports kernel_commit unknown and still knows its templates" || fail "non-git version: $VR_G3"
+VR_VEND="$VR_PROJ/vendor/agent-comms"; vr_copy "$VR_VEND"
+vr_install "$VR_VEND" global "$VR_PROJ" "$VR/home3"
+[ "$(vr_field "$("$VR/home3/ac/comms.sh" version 2>&1)" kernel_commit)" = unknown ] \
+  && ok "a source vendored inside another repository never stamps that repository's commit" || fail "vendored source took the host repo's commit"
+
+# The stamp is read strictly: malformed, duplicated or missing values are unknown, never echoed.
+printf 'kernel_commit=%s\nkernel_commit=%s\ntemplate_version=sha256:xyz\n' "$VR_SHA" "$VR_SHA" > "$VR/home2/ac/install-stamp"
+VR_G4="$("$VR/home2/ac/comms.sh" version 2>&1)"
+[ "$(vr_field "$VR_G4" kernel_commit)/$(vr_field "$VR_G4" template_version)" = unknown/unknown ] \
+  && ok "a duplicated or malformed stamp value reads as unknown" || fail "strict stamp read: $VR_G4"
+rm -f "$VR/home2/ac/install-stamp"
+VR_G5="$("$VR/home2/ac/comms.sh" version --json 2>&1)"
+[ "$VR_G5" = '{"kernel_commit":"unknown","template_version":"unknown","source":"none"}' ] \
+  && ok "an install that predates the stamp reports unknown for both, source none" || fail "pre-stamp install: $VR_G5"
+# Straight from a source checkout: the checkout IS the kernel; nothing installs templates from it.
+VR_C="$("$VR_SRC/helpers/comms.sh" version 2>&1)"
+[ "$(vr_field "$VR_C" source)" = checkout ] && [ "$(vr_field "$VR_C" kernel_commit)" = "$VR_SHA-dirty" ] \
+  && [ "$(vr_field "$VR_C" template_version)" = unknown ] \
+  && ok "run from a source checkout: its commit (-dirty here), template version unknown" || fail "checkout version: $VR_C"
+"$VR/home/ac/comms.sh" version --bogus >/dev/null 2>&1 && fail "version accepted an unknown option" \
+  || ok "version refuses an unknown option"
