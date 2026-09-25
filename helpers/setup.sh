@@ -322,12 +322,15 @@ VS="$("$HERE/comms.sh" verify status 2>/dev/null)" && {
   case "$VS_STATE" in
     ok) say "  suite-cmd = $VS_CUR" ;;
     *)
+      # Replacing an existing suite-cmd is its own decision, so it is asked for by name and only
+      # then passed on as --replace-suite-cmd; verify init never infers it.
+      VS_REPL=""
       if [ "$VS_STATE" = missing ]; then say "  no suite-cmd — integrate refuses to land without one"
-      else say "  suite-cmd '$VS_CUR' needs a shell integrate does not use, so it can never pass"; fi
+      else say "  suite-cmd '$VS_CUR' looks like it needs a shell integrate does not use"; VS_REPL=" and replace that suite-cmd"; fi
       if [ "$YES" = 1 ] || [ "$TTY" != 1 ]; then
-        say "  to fix: comms.sh verify init   (detects the stack, previews, then scaffolds ci/verify.sh)"
-      elif ask_yn "  scaffold ci/verify.sh + ci/verify.steps now? (a preview follows)" n; then
-        "$HERE/comms.sh" verify init </dev/tty || say "  verify init did not complete — run it again any time"
+        say "  to fix: comms.sh verify init${VS_REPL:+ --replace-suite-cmd}   (detects the stack, previews, then scaffolds ci/verify.sh)"
+      elif ask_yn "  scaffold ci/verify.sh + ci/verify.steps now${VS_REPL}? (a preview follows)" n; then
+        "$HERE/comms.sh" verify init ${VS_REPL:+--replace-suite-cmd} </dev/tty || say "  verify init did not complete — run it again any time"
       fi ;;
   esac
 }

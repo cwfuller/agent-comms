@@ -4142,11 +4142,17 @@ config_scalar() {  # <root> <key> — the ONE way any consumer reads a config sc
   # calls it, so an appended `suite-attest-secs = 0` meant to DISABLE the skip
   # still lost to the earlier enabling value on the one command where safety
   # matters. Every consumer now fails the same way. (codex, ergonomics r2.)
-  local f="$1/.comms/config" key="$2" ct
+  # A READ ERROR IS NOT AN ABSENT KEY. Both reads used to swallow errors and answer "", which
+  # every caller takes to mean "not configured" — and `verify init` treats "not configured" as
+  # permission to write one. A missing FILE is still "not configured". (codex, generic-verify r2.)
+  local f="$1/.comms/config" key="$2" ct="" rc=0 val=""
   [ -f "$f" ] || return 0
-  ct="$(grep -c "^[[:space:]]*$key[[:space:]]*=" "$f" 2>/dev/null || true)"
+  ct="$(grep -c "^[[:space:]]*$key[[:space:]]*=" "$f" 2>/dev/null)" || rc=$?
+  [ "$rc" -le 1 ] || die "config: cannot read $f (grep exit $rc) — refusing to treat it as empty"
   [ "${ct:-0}" -le 1 ] || die "config: duplicate '$key' key in $f — refusing to guess which value is authoritative"
-  { sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*//p" "$f" 2>/dev/null || true; } | head -1
+  val="$(sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*//p" "$f" 2>/dev/null)" \
+    || die "config: cannot read $f — refusing to treat it as empty"
+  [ -z "$val" ] || printf '%s\n' "$val" | head -1
 }
 
 cmd_attest_green() {
@@ -4519,7 +4525,7 @@ cmd_integrate() {
   [ -n "$name" ] && [ -n "$instance" ] && presence_record="$(presence_dir)/$name-$instance.json"
   tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
   # shellcheck disable=SC2064
-  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
+  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$SELF' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
   # HISTORY, past tense on purpose: the guard is load-bearing, and its absence WAS a
   # silent-death bug. `presence beat` exits 5 when it heals a vanished record, which USED
   # TO happen on every integrate run whose
@@ -4580,7 +4586,7 @@ cmd_integrate() {
     # tip this run never verified is not the promise "unmoved main" made.
     # (codex, r1.) Leaving it detached is the safe residual; the message says so.
     # shellcheck disable=SC2064
-    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$0' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
+    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$SELF' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
     printf '%s\n' "integrate: healed — detached clean main occupant $(integrate_oneline "$occ") for the landing"
   fi
   # DOCS-ONLY SKIP. A tree diff that is only README.md, LICENSE, or top-level
@@ -4694,18 +4700,19 @@ cmd_verify() {
   esac
 }
 
-verify_is_shell_cmd() {  # <suite-cmd> — 0 only when it CERTAINLY needs a shell integrate does not use
-  # Judged per WORD of the same whitespace split integrate applies, never by substring:
-  # `grep -Eq OK|PASS results.txt` is a working argv (`OK|PASS` is one argument), and a substring
-  # match would call it broken and let init replace it without --force. A word that IS an
-  # operator or a redirection, or a leading VAR=value (argv[0] cannot be an assignment), is
-  # shell syntax. Anything else is left to the operator: a missed shell command only costs a
-  # --force, a false positive costs a working suite-cmd. (codex, generic-verify impl r1.)
+verify_is_shell_cmd() {  # <suite-cmd> — 0 when it LOOKS LIKE it needs a shell integrate does not use
+  # A HINT for `verify status` and setup, never an authorization: no classifier can know an
+  # executable's argument grammar (`grep -q > file` and `find … -exec test -x {} ;` are working
+  # argv), so replacing an existing suite-cmd takes --replace-suite-cmd whatever this says.
+  # (codex, generic-verify r1 then r2.) Judged per WORD of integrate's own whitespace split:
+  # `grep -Eq OK|PASS results.txt` passes `OK|PASS` as one argument. A word that is an operator or
+  # a redirection, a word with `&&`/`||` glued in (`npm test&&npm run lint`, grok r2), or a
+  # leading VAR=value (argv[0] cannot be an assignment) looks like shell syntax.
   local w nm first=1 rc=1
   set -f
   for w in $1; do
     case "$w" in
-      '&&'|'||'|'|'|'|&'|';'|'&'|'>'*|'<'*|[0-9]'>'*|[0-9]'<'*|'&>'*) rc=0; break ;;
+      *'&&'*|*'||'*|'|'|'|&'|';'|'&'|'>'*|'<'*|[0-9]'>'*|[0-9]'<'*|'&>'*) rc=0; break ;;
     esac
     if [ "$first" = 1 ]; then
       first=0
@@ -4718,13 +4725,22 @@ verify_is_shell_cmd() {  # <suite-cmd> — 0 only when it CERTAINLY needs a shel
   return "$rc"
 }
 
-verify_set_suite_cmd() {  # <root> <force> — point suite-cmd at ci/verify.sh, keeping every other line
-  local root="$1" force="$2" cfg="$1/.comms/config" want="bash ci/verify.sh" cur tmp
-  # config_scalar refuses a duplicate key, which is exactly the case a blind append would create.
+verify_set_suite_cmd() {  # <root> <replace> — point suite-cmd at ci/verify.sh, keeping every other line
+  # A MISSING suite-cmd is filled in; an EXISTING one is replaced only when the operator said so
+  # (--replace-suite-cmd). Whether the current command "works" is not decidable here, so no
+  # heuristic may stand in for that decision. (codex, generic-verify r2, blocking.)
+  local root="$1" replace="$2" cfg="$1/.comms/config" want="bash ci/verify.sh" cur tmp
+  # config_scalar refuses a duplicate key and a read error, the two cases a blind rewrite would
+  # turn into a lost line.
   cur="$(config_scalar "$root" suite-cmd)" || die "verify init: cannot read suite-cmd from $cfg (see above)"
   if [ "$cur" = "$want" ]; then echo "verify: suite-cmd already = $want"; return 0; fi
-  if [ -n "$cur" ] && ! verify_is_shell_cmd "$cur" && [ -z "$force" ]; then
-    echo "verify: left suite-cmd = $cur (a working single command); use --force to point it at ci/verify.sh"
+  if [ -n "$cur" ] && [ -z "$replace" ]; then
+    if verify_is_shell_cmd "$cur"; then
+      echo "verify: left suite-cmd = $cur — it looks like it needs a shell, which integrate does not use"
+    else
+      echo "verify: left suite-cmd = $cur"
+    fi
+    echo "verify: to point it at ci/verify.sh: comms.sh verify init --update --yes --replace-suite-cmd  (or edit .comms/config)"
     return 0
   fi
   mkdir -p "$root/.comms" || die "verify init: cannot create $root/.comms"
@@ -4767,10 +4783,10 @@ verify_confirm() {  # <yes> <question> — 0 to proceed: --yes, or a y answer on
 }
 
 verify_init() {
-  local yes="" force="" update=""
+  local yes="" force="" update="" replace=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --yes) yes=1 ;; --force) force=1 ;; --update) update=1 ;;
+      --yes) yes=1 ;; --force) force=1 ;; --update) update=1 ;; --replace-suite-cmd) replace=1 ;;
       -?*) usage_err "verify init: unknown option '$(clip "$1")'" ;;
       *) usage_err "verify init: unexpected argument '$(clip "$1")'" ;;
     esac; shift
@@ -4782,17 +4798,22 @@ verify_init() {
   root="$(main_repo_root)" || die "verify init: no main repo root"
   [ -n "$root" ] || die "verify init: no main repo root"
   dst="$top/ci/verify.sh"; steps="$top/ci/verify.steps"
+  # Read the config BEFORE writing anything: a config that cannot be read must stop init with no
+  # tracked file half-written. verify_set_suite_cmd re-reads it at the write.
+  local cur_cmd
+  cur_cmd="$(config_scalar "$root" suite-cmd)" || die "verify init: cannot read .comms/config (see above) — nothing written"
   if [ -n "$update" ]; then
     # Refresh the TEMPLATE only. The steps are the repo's own, and a hand-written ci/verify.sh
     # that happens to share the name is not ours to overwrite.
     [ -f "$dst" ] || die "verify init --update: there is no ci/verify.sh to update"
     grep -q '^# agent-comms verify v' "$dst" \
-      || die "verify init --update: ci/verify.sh carries no agent-comms version header — refusing to overwrite a hand-written suite (use --force)"
+      || die "verify init --update: ci/verify.sh carries no agent-comms version header — refusing to overwrite a hand-written suite (verify init --force replaces it)"
     # Same authorization as a first write: this replaces a TRACKED file. (codex, impl r1.)
     verify_confirm "$yes" "Replace ci/verify.sh ($(sed -n 's/^# agent-comms verify //p' "$dst" | head -1)) with the $(sed -n 's/^# agent-comms verify //p' "$src" | head -1) template?" || return 0
     tmp="$dst.tmp.$$"
     { cp "$src" "$tmp" && chmod +x "$tmp" && mv -f "$tmp" "$dst"; } || { rm -f "$tmp"; die "verify init --update: could not write $dst"; }
     echo "verify: updated ci/verify.sh to $(sed -n 's/^# agent-comms verify //p' "$src" | head -1); ci/verify.steps unchanged"
+    [ -z "$replace" ] || verify_set_suite_cmd "$root" "$replace"
     return 0
   fi
   [ -z "$force" ] && [ -e "$dst" ] \
@@ -4804,7 +4825,12 @@ verify_init() {
   printf '%s\n' "$plan"
   [ "$prc" = 0 ] || die "verify init: this setup cannot verify anything as it stands (see above) — fix it, or write ci/verify.steps by hand"
   emitted="$(cd "$top" && bash "$src" --emit-steps)" || die "verify init: could not derive the steps (see above)"
-  verify_confirm "$yes" "Write ci/verify.sh$([ -e "$steps" ] || printf ' + ci/verify.steps') and point suite-cmd at it?" || return 0
+  local what="point suite-cmd at it"
+  if [ -n "$cur_cmd" ] && [ "$cur_cmd" != "bash ci/verify.sh" ]; then
+    if [ -n "$replace" ]; then what="REPLACE suite-cmd '$cur_cmd' with 'bash ci/verify.sh'"
+    else what="leave suite-cmd '$cur_cmd' as it is (--replace-suite-cmd changes it)"; fi
+  fi
+  verify_confirm "$yes" "Write ci/verify.sh$([ -e "$steps" ] || printf ' + ci/verify.steps') and $what?" || return 0
   mkdir -p "$top/ci" || die "verify init: cannot create $top/ci"
   tmp="$dst.tmp.$$"
   { cp "$src" "$tmp" && chmod +x "$tmp" && mv -f "$tmp" "$dst"; } || { rm -f "$tmp"; die "verify init: could not write $dst"; }
@@ -4820,7 +4846,7 @@ verify_init() {
       printf '%s\n' "$emitted"; } > "$tmp" && mv -f "$tmp" "$steps" || { rm -f "$tmp"; die "verify init: could not write $steps"; }
     wrote_steps=1
   fi
-  verify_set_suite_cmd "$root" "$force"
+  verify_set_suite_cmd "$root" "$replace"
   echo "verify: wrote ci/verify.sh${wrote_steps:+ and ci/verify.steps}"
   echo "verify: next — commit them, then prove the suite the way integrate will run it:"
   echo "verify:   git add ci/verify.sh ci/verify.steps && git commit -m 'chore: add verify suite' && comms.sh verify fresh"

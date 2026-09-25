@@ -1689,12 +1689,12 @@ VI_S="$(vi verify status 2>/dev/null)"; VI_R=0; vi verify init </dev/null >/dev/
 [ "$VI_S" = "$(printf 'needs-shell\tnpm run check && npm run test')" ] && [ "$VI_R" != 0 ] && [ ! -e "$VI/ci" ] \
   && ok "status flags a shell-only suite-cmd; init with no terminal and no --yes writes nothing" \
   || fail "status/no-tty init: status=$VI_S rc=$VI_R"
-VI_R=0; vi verify init --yes >"$VX/init.out" 2>&1 || VI_R=$?
+VI_R=0; vi verify init --yes --replace-suite-cmd >"$VX/init.out" 2>&1 || VI_R=$?
 [ "$VI_R" = 0 ] && head -2 "$VI/ci/verify.sh" | grep -q '^# agent-comms verify v1' && [ -x "$VI/ci/verify.sh" ] \
   && [ "$(grep -v '^#' "$VI/ci/verify.steps" | tr '\n' '|')" = "npm run check|npm run test|" ] \
   && [ "$(grep -c 'suite-cmd' "$VI/.comms/config")" = 1 ] && grep -qx 'suite-cmd = bash ci/verify.sh' "$VI/.comms/config" \
   && grep -qx 'agents = claude codex' "$VI/.comms/config" \
-  && ok "init writes the template and explicit steps, and repoints a shell-only suite-cmd keeping every other line" \
+  && ok "init writes the template and explicit steps; --replace-suite-cmd repoints suite-cmd keeping every other line" \
   || fail "init: rc=$VI_R $(tail -3 "$VX/init.out")"
 [ "$(vi verify status 2>/dev/null)" = "$(printf 'ok\tbash ci/verify.sh')" ] \
   && ok "status reports ok once suite-cmd is a plain command" || fail "status after init: $(vi verify status 2>&1)"
@@ -1707,24 +1707,39 @@ VI_R3=0; vi verify init --update --yes >/dev/null 2>&1 || VI_R3=$?
   && head -2 "$VI/ci/verify.sh" | grep -q 'verify v1' && [ "$(cat "$VI/ci/verify.steps")" = "npm run lint" ] \
   && ok "init refuses to overwrite ci/verify.sh; --update needs --yes or a terminal, then refreshes only the template" \
   || fail "overwrite/update: init=$VI_R update-unconfirmed=$VI_R2 ($VI_V0) update-yes=$VI_R3 steps=$(cat "$VI/ci/verify.steps")"
-printf 'agents = claude codex\nsuite-cmd = bash custom.sh\n' > "$VI/.comms/config"; rm -f "$VI/ci/verify.sh"
-VI_R=0; vi verify init --yes >/dev/null 2>&1 || VI_R=$?
-[ "$VI_R" = 0 ] && [ -f "$VI/ci/verify.sh" ] && grep -qx 'suite-cmd = bash custom.sh' "$VI/.comms/config" \
-  && ok "init leaves a working single-command suite-cmd alone without --force" || fail "custom suite-cmd: rc=$VI_R $(grep suite-cmd "$VI/.comms/config")"
-# Judged per WORD of integrate's own split: `OK|PASS` is one working argument, not a pipe.
-printf 'suite-cmd = grep -Eq OK|PASS results.txt\n' > "$VI/.comms/config"; rm -f "$VI/ci/verify.sh"
-VI_S1="$(vi verify status 2>/dev/null)"; vi verify init --yes >/dev/null 2>&1
-VI_C1="$(grep suite-cmd "$VI/.comms/config")"
-printf 'suite-cmd = TZ=UTC npm test\n' > "$VI/.comms/config"; VI_S2="$(vi verify status 2>/dev/null)"
-[ "${VI_S1%%$'\t'*}" = ok ] && [ "$VI_C1" = 'suite-cmd = grep -Eq OK|PASS results.txt' ] && [ "${VI_S2%%$'\t'*}" = needs-shell ] \
-  && ok "an operator INSIDE an argument is not shell syntax (kept without --force); a leading VAR=value is" \
-  || fail "per-word classification: '$VI_S1' kept='$VI_C1' '$VI_S2'"
+# An EXISTING suite-cmd is never replaced without --replace-suite-cmd, whatever the shell hint says:
+# `>` and `;` are ordinary argv to grep and find -exec, and no classifier knows that grammar.
+VI_KEPT=1
+for VI_CMD in 'bash custom.sh' 'grep -q > helpers/verify.sh' 'find helpers -name verify.sh -exec test -x {} ;' 'npm run check && npm run test'; do
+  printf 'agents = claude codex\nsuite-cmd = %s\n' "$VI_CMD" > "$VI/.comms/config"; cp "$VI/.comms/config" "$VX/config.before"; rm -f "$VI/ci/verify.sh"
+  VI_R=0; vi verify init --yes >/dev/null 2>&1 || VI_R=$?
+  { [ "$VI_R" = 0 ] && [ -f "$VI/ci/verify.sh" ] && cmp -s "$VX/config.before" "$VI/.comms/config"; } || { VI_KEPT=""; echo "  replaced or failed ($VI_R): $VI_CMD" >&2; }
+done
+[ -n "$VI_KEPT" ] && ok "init never replaces an existing suite-cmd without --replace-suite-cmd, even one the shell hint flags" \
+  || fail "an existing suite-cmd was replaced without --replace-suite-cmd"
+# `status` is a per-word HINT over integrate's own split: `OK|PASS` is one argument; a glued `&&`
+# or a leading VAR=value is not something the no-shell split can run.
+VI_HINT=""
+for VI_CASE in 'ok|grep -Eq OK|PASS results.txt' 'needs-shell|TZ=UTC npm test' 'needs-shell|npm test&&npm run lint' 'ok|make test CFLAGS=-O2'; do
+  printf 'suite-cmd = %s\n' "${VI_CASE#*|}" > "$VI/.comms/config"; VI_S="$(vi verify status 2>/dev/null)"
+  [ "${VI_S%%$'\t'*}" = "${VI_CASE%%|*}" ] || VI_HINT="$VI_HINT [${VI_CASE#*|} -> ${VI_S%%$'\t'*}]"
+done
+[ -z "$VI_HINT" ] && ok "status judges per word: an operator inside an argument is not shell syntax; a glued && or a leading VAR=value is" \
+  || fail "status hints:$VI_HINT"
+# A config that cannot be READ is not an empty one: init stops before writing anything.
+VS_BIN="$VX/sedfail"; mkdir -p "$VS_BIN"
+printf '#!/bin/bash\nfor a; do l="$a"; done\ncase "$l" in */.comms/config) exit 2 ;; esac\nexec %s "$@"\n' "$(command -v sed)" > "$VS_BIN/sed"; chmod +x "$VS_BIN/sed"
+printf 'agents = claude codex\nsuite-cmd = bash custom.sh\n' > "$VI/.comms/config"; cp "$VI/.comms/config" "$VX/config.before"; rm -f "$VI/ci/verify.sh"
+VI_R=0; (cd "$VI" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u CI PATH="$VS_BIN:$VX_BIN:$VX_TOOLS:$PATH" "$COMMS" verify init --yes) >/dev/null 2>"$VX/sedfail.err" || VI_R=$?
+[ "$VI_R" != 0 ] && grep -q 'refusing to treat it as empty' "$VX/sedfail.err" && [ ! -e "$VI/ci/verify.sh" ] && cmp -s "$VX/config.before" "$VI/.comms/config" \
+  && ok "a config read error is not an absent suite-cmd: init stops before writing, and the config is untouched" \
+  || fail "config scalar read error: rc=$VI_R $(head -2 "$VX/sedfail.err")"
 # A config that cannot be READ is never rewritten: grep exit 2 used to publish only the new line.
 VG_BIN="$VX/grepfail"; mkdir -p "$VG_BIN"
 printf '#!/bin/bash\ncase "$1 $2" in "-v "*suite-cmd*) exit 2 ;; esac\nexec %s "$@"\n' "$(command -v grep)" > "$VG_BIN/grep"; chmod +x "$VG_BIN/grep"
 printf 'agents = claude codex\nsuite-cmd = npm run check && npm run test\n' > "$VI/.comms/config"; cp "$VI/.comms/config" "$VX/config.before"
 rm -f "$VI/ci/verify.sh"; VI_R=0
-(cd "$VI" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u CI PATH="$VG_BIN:$VX_BIN:$VX_TOOLS:$PATH" "$COMMS" verify init --yes) >/dev/null 2>&1 || VI_R=$?
+(cd "$VI" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u CI PATH="$VG_BIN:$VX_BIN:$VX_TOOLS:$PATH" "$COMMS" verify init --yes --replace-suite-cmd) >/dev/null 2>&1 || VI_R=$?
 [ "$VI_R" != 0 ] && cmp -s "$VX/config.before" "$VI/.comms/config" && ! ls "$VI/.comms/config.tmp."* >/dev/null 2>&1 \
   && ok "a config read error aborts the suite-cmd rewrite and leaves .comms/config byte-for-byte intact" \
   || fail "config read error: rc=$VI_R config=$(tr '\n' '|' < "$VI/.comms/config")"
