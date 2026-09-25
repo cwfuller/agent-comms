@@ -277,6 +277,37 @@ to track/push to `main`). When creating a worktree for a loop:
   branch to a same-named remote branch and sets its upstream). Never
   `git push origin <x>:main`, and never push while the worktree is checked out on `main`.
 
+**Retirement is explicit and hand-run.** Nothing removes a session worktree automatically:
+`integrate` lands the branch and leaves the worktree and branch in place. `comms.sh worktree
+list` reports every registered worktree on one `worktree-list v1` line — kind, branch, whether
+the tip is on `main` (by ancestry, `git cherry`, or squash patch-id), tracked and untracked
+dirt, ignored content off the regenerable list, secret-named files, nested repositories,
+processes with a cwd or open file inside (one `lsof` snapshot), presence and lock — and the
+retire verdict. `comms.sh worktree retire <branch>` acts on ONE target, re-enumerated from git
+at that moment, and is a dry run unless `--yes`. It refuses unless every gate holds:
+
+| Gate | Refuses when |
+|---|---|
+| kind | the tree is the primary checkout, a review mount (use `clean mounts`), or not managed (`worktree-<slug>` at `.claude/worktrees/<slug>`, no symlinked component) |
+| landed | the tip is not on `main` by ANCESTRY; cherry- and squash-equivalence are reported, never accepted |
+| clean | any tracked change or untracked path, including edits hidden by skip-worktree or assume-unchanged (raw bytes, exact link text and mode compared to `HEAD`; a clean filter or autocrlf difference refuses rather than hides) |
+| ignored | ignored content not on the regenerable list (`node_modules/`, build output, caches — directory names match directories only), a secret-named file (`.env*`, keys, credentials), or a nested repository anywhere (a `.git`, or a bare repo's `HEAD` beside `objects/` and `refs/`) |
+| private refs | a per-worktree ref (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`) names history not on `main` — removal deletes it |
+| unused | a process has its cwd or an open file inside, or processes cannot be listed; or the caller stands in it |
+| unclaimed | a live or ambiguous presence record owns it (the owner stamp `worktree new` writes, or a record named like the slug — matched by filename, so an unreadable record still blocks) and is not the caller's own; or git has it locked |
+| ref | the branch is a symbolic ref; a paused rebase, bisect or `rebase --update-refs` reservation in any worktree holds it; an am, cherry-pick, revert, merge, sequencer or notes merge is in progress on it; or that operation state exists but cannot be read |
+
+Removal is `git worktree remove` without `--force`, then `update-ref -d` with the checked tip
+as the old value and `--no-deref` — a compare-and-swap, never `git branch -d`, which asks "merged into HEAD?"
+rather than "on main?". A branch advanced after the worktree was removed is left in place
+(exit 4); any other delete failure exits 1, and both say whether the worktree was removed. A
+branch with no worktree is retired by the landed and ref gates alone. The ref gate is
+re-checked immediately before removal. Residuals, stated rather than hidden: an ignored file or
+an operation started between that last check and `git worktree remove` is lost, and the
+worktree's HEAD reflog is deleted with it (gating on the reflog would block every tree that ever
+amended a commit). Every probe that
+cannot answer is a refusal.
+
 ## Filenames
 
 ```

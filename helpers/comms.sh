@@ -57,7 +57,25 @@
 #                               advisory multi-session coordination on .comms/sessions/
 #                               (claim-then-check: 0 direct-safe / 3 peers / 4 isolate;
 #                               beat exit 5 = healed, re-check before writing)
-#   worktree new [<slug>]       session worktree under the MAIN root, local-tip base
+#   worktree new [<slug>]       session worktree under the MAIN root, local-tip base;
+#                               stamps the creating session as owner when
+#                               COMMS_PRESENCE_NAME/INSTANCE are exported
+#   worktree list               one `worktree-list v1` line per worktree: kind (primary/
+#                               managed/subagent/mount/unmanaged), branch, on_main
+#                               (ancestor/cherry/squash/no), tracked/untracked dirt, ignored
+#                               content off the regenerable list, secrets, nested repos,
+#                               processes (lsof cwd + open files), presence, lock, and the
+#                               retire verdict. Report only; `?` = could not tell
+#   worktree retire <branch> [--yes]
+#                               hand-run, ONE target, re-enumerated first; dry run unless
+#                               --yes. Refuses unless the tip is on main by ANCESTRY, the
+#                               tree is managed, clean, holds no unknown ignored files,
+#                               secrets or nested repos, no process uses it, no live
+#                               presence owns it, it is unlocked and not your cwd. Then
+#                               `git worktree remove` (never --force) and a CAS branch
+#                               delete (never branch -d). Exit 0 / 2 usage / 3 refused /
+#                               4 the branch moved after the check (left in place).
+#                               integrate never retires anything.
 #   integrate <branch>          land on main: lease + ff + suite at the candidate OID
 #                               in a detached worktree + CAS update-ref (suite-cmd
 #                               config required). A prose-only tree diff (README.md,
@@ -4107,40 +4125,6 @@ presence_expire() {  # <dir> [force-name] — the ONLY verb that deletes OTHERS'
   return 0
 }
 
-cmd_worktree() {
-  # worktree new [<slug>] — a session worktree under the MAIN root (never nested,
-  # never cwd-relative: the two-resolver rule, third appearance — grok, plan r7),
-  # branched from the LOCAL default-branch tip (origin can lag a full unpushed day).
-  local sub="${1:-new}"; shift 2>/dev/null || true
-  [ "$sub" = "new" ] || usage_err "worktree: expected 'new'"
-  local slug="${1:-session-$$-$RANDOM}"
-  # Whole-scalar check before grep, same rule as presence_validate_ids: grep
-  # validates LINES, and the slug becomes a path and a branch name. Git happens
-  # to refuse newline-bearing refs today, but the validator must not lean on it.
-  # (codex, impl r8 advisory.)
-  case "$slug" in *$'\n'*|*$'\r'*) usage_err "worktree new: invalid slug '$(clip "$slug")'" ;; esac
-  printf '%s' "$slug" | grep -qE '^[a-z0-9][a-z0-9._-]{0,40}$' \
-    || usage_err "worktree new: invalid slug '$(clip "$slug")'"
-  local root tip path branch
-  root="$(main_repo_root)"; [ -n "$root" ] || die "worktree new: cannot resolve the main repo root"
-  tip="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null \
-      || git -C "$root" rev-parse --verify refs/heads/master 2>/dev/null)" \
-    || die "worktree new: no local main/master tip to branch from"
-  path="$root/.claude/worktrees/$slug"; branch="worktree-$slug"
-  [ -e "$path" ] && die "worktree new: $path already exists"
-  git -C "$root" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
-    && die "worktree new: branch $branch already exists"
-  # The ignore coverage is load-bearing: an unignored in-checkout worktree walks a
-  # full second repo copy into every review artifact. Verified, not assumed.
-  mkdir -p "$root/.claude/worktrees" 2>/dev/null || true
-  git -C "$root" check-ignore -q ".claude/worktrees/$slug" \
-    || die "worktree new: .claude/worktrees/ is not ignore-covered — refusing (re-run install.sh or restore the .gitignore entry)"
-  git -C "$root" worktree add -b "$branch" "$path" "$tip" >/dev/null 2>&1 \
-    || die "worktree new: git worktree add failed"
-  echo "worktree: $path"
-  echo "branch:   $branch (from $(git -C "$root" rev-parse --short "$tip"))"
-}
-
 config_scalar() {  # <root> <key> — the ONE way any consumer reads a config scalar.
   # Duplicate rejection has to live at the READ, not in a validator the caller
   # may never invoke: `registry_parse` refused duplicates but `integrate` never
@@ -6458,7 +6442,12 @@ case "${1:-}" in
   send)      shift; cmd_send "$@" ;;
   state)     shift; cmd_state "$@" ;;
   presence)  shift; cmd_presence "$@" ;;
-  worktree)  shift; cmd_worktree "$@" ;;
+  worktree)  shift
+             # The worktree verbs live in their own file, sourced so they share the presence
+             # readers. An install that predates it is missing the verb, not broken silently.
+             [ -f "$(dirname "$SELF")/worktree.sh" ] || die "worktree: worktree.sh not found next to comms.sh — re-run install.sh"
+             . "$(dirname "$SELF")/worktree.sh"
+             cmd_worktree "$@" ;;
   integrate) shift; cmd_integrate "$@" ;;
   attest-green) shift; cmd_attest_green "$@" ;;
   verify)    shift; cmd_verify "$@" ;;

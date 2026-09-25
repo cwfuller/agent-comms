@@ -49,7 +49,7 @@ AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
 # here rather than in a separate data manifest because every helper resolves its peers beside itself:
 # the map must land in exactly the directories acp.sh does, in every scope. It is made executable like
 # the rest, which is harmless for a table nothing executes.
-HELPERS="comms.sh runphase.sh acp.sh settings.sh setup.sh route.sh route_backend.py route_shadow.py route_review.py route_policy.py route_eval.py route_eval_seed.json policy-map.tsv verify.sh"
+HELPERS="comms.sh runphase.sh acp.sh settings.sh setup.sh worktree.sh route.sh route_backend.py route_shadow.py route_review.py route_policy.py route_eval.py route_eval_seed.json policy-map.tsv verify.sh"
 # The reviewer's REVIEW BAR, installed as data. It used to be read out of the codex self-send
 # skills at runtime, which made "delete the self-send templates" silently equal to "delete the
 # reviewer's standard". Installed from docs/loopspec/fragments/ — their canonical home, and what

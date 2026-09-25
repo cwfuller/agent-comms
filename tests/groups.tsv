@@ -17,3 +17,4 @@ events	parallel
 isolation	parallel
 identity	parallel
 route	parallel
+worktree	parallel

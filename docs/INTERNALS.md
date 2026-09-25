@@ -19,6 +19,8 @@ helpers/
   route_shadow.py              the shadow collector (observes; never decides)
   acp.sh                       ACP consults + the reviewer policy resolver/accessors
   policy-map.tsv               THE versioned reviewer model/effort map (the only vendor model ids)
+  worktree.sh                  worktree new/list/retire, sourced by comms.sh; the ONE retire
+                               gate evaluator both list and retire use
   runphase.sh                  peer-turn runner — ACP for every provider, direct headless for grok
                                only (COMMS_DELIVERY=headless): spawn → observe → record
 docs/loopspec/                 the portable review-loop kernel (spec, schemas, fixtures,

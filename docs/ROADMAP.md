@@ -631,7 +631,14 @@ might matter.** There IS a documented workaround (`workspace set <name>` BEFORE 
 branches, which pins identity so a branch switch cannot flap the prefix) but `worktree new` mints
 a branch, so the default path defeats the guidance.
 
-### DESIGNED, NOT BUILT: session-lifecycle retirement (2026-09-03, plan r1+r2)
+### PARTLY BUILT: session-lifecycle retirement (2026-09-03, plan r1+r2)
+
+**Built 2026-09-24 as basis slice 0b, hand-run only:** `worktree list` and `worktree retire
+<branch>` (`helpers/worktree.sh`; gates in PROTOCOL "Worktrees & branches"). Added beyond this
+design: ignored files off a regenerable list, secrets and nested repos block; processes with a
+cwd or open file inside block (lsof); an owner stamp from `worktree new` ties a worktree to its
+presence record. Still NOT built: the automatic retire after `integrate` below (basis: only after
+explicit retire has run cleanly for a while), and per-thread mount reaping.
 
 **Why it exists.** A cleanup pass removed **29 session worktrees, 49 mount worktrees and 39
 branches**, oldest dating to 2026-08-28. Every creation verb has no retirement counterpart:
