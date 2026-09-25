@@ -6350,12 +6350,20 @@ state_mark_legacy() {
   fi
   mv "$tmp" "$f" || { rm -f "$held" "$tmp"; echo "refused: $id: could not write the mark" >&2; return 1; }
   # Post-check: a send that wrote the held inode in the window between the pre-check and the rename
-  # is put back — the newer state wins over the mark. What remains is a writer that opened the old
-  # inode before the rename and wrote only after this check: state writers take no lock, so that
-  # last instant cannot be closed from here.
+  # is put back — the newer state wins over the mark. The guarantee is "an IN-PLACE writer (send's
+  # state_update_from) is caught", not "every writer is": a temp-file-plus-rename writer (`state
+  # complete`, runphase's exit mirror) landing in the same window swaps in a new inode this check
+  # never sees, and a writer that opened the old inode before the rename but writes only after this
+  # check is also missed. State writers take no lock, so neither can be closed from here; both need
+  # a thread that was active moments ago, which the re-judge above already refuses. (claude-review r3.)
   if [ "$(cat "$held" 2>/dev/null)" != "$snap" ] || [ "$(file_mtime "$held")" != "$mt" ]; then
-    mv "$held" "$f" 2>/dev/null || rm -f "$held"
-    echo "refused: $id: a send wrote the thread state while it was being marked — its state was kept" >&2; return 1
+    if mv "$held" "$f" 2>/dev/null; then
+      echo "refused: $id: a send wrote the thread state while it was being marked — its state was kept" >&2
+    else
+      rm -f "$held"
+      echo "refused: $id: a send wrote the thread state while it was being marked, and restoring it failed — the legacy mark is in place; check 'state get'" >&2
+    fi
+    return 1
   fi
   rm -f "$held"
   echo "marked legacy: $id ($ev)"
