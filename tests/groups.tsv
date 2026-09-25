@@ -18,3 +18,4 @@ isolation	parallel
 identity	parallel
 route	parallel
 worktree	parallel
+usage	parallel

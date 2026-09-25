@@ -198,7 +198,9 @@
 #   round-note <reply> --note "<text>"
 #                               record how a reviewer performed on ONE round: counts are
 #                               derived from the reply, the prose is your assessment.
-#                               Appends .comms/grades/rounds.tsv. Never shown to reviewers.
+#                               Appends .comms/grades/rounds.tsv, whose last column is the
+#                               leg's token usage from its result.json (or null).
+#                               Never shown to reviewers.
 #   snapshot [create|list] [--with-base]   retain the tree under review as a durable git
 #                               object; --with-base prints "artifact_id<TAB>base_sha"
 #                               (a real commit object anchored under refs/agent-comms/)
@@ -3464,6 +3466,37 @@ cmd_friction_list() {
   { head -1 "$roll"; tail -n +2 "$roll" | sort -t"$(printf '\t')" -k5,5r -k1,1r; }
 }
 
+# reply_leg_usage <reply-file> — the `usage` object of the leg turn that produced this reply, as
+# one line of compact JSON, or `null`.
+#
+# The reply does not name its run dir, but the coordinator log joins the two: the reply-accepted
+# row carries the reply's message id and its request id, and the SAME leg's next turn-finished row
+# for that request carries the run dir, whose result.json holds usage read from the provider's own
+# records (runphase.sh, leg_usage.py). Any gap — a mailbox reply with no runner, a pruned run dir,
+# a result.json from before usage existed — is null, never 0.
+reply_leg_usage() {
+  local mid agent acc req role ts rd=""
+  mid="$(frontmatter_field "$1" message_id 2>/dev/null || true)"
+  agent="$(frontmatter_field "$1" from 2>/dev/null || true)"
+  if [ -n "$mid" ] && [ -n "$agent" ]; then
+    acc="$(cmd_events --kind reply-accepted --message-id "$mid" --agent "$agent" --all 2>/dev/null | tail -n +2 | tail -1)" || acc=""
+    ts="$(printf '%s' "$acc" | cut -f1)"; role="$(printf '%s' "$acc" | cut -f9)"; req="$(printf '%s' "$acc" | cut -f11)"
+    # First turn-finished for that request by that leg AT OR AFTER the acceptance: the runner
+    # accepts the reply, then signs off. ISO-8601 UTC compares correctly as a string. The awk
+    # reads to EOF rather than `exit`ing: an early exit SIGPIPEs the reader, and pipefail would
+    # then discard the answer it had already printed.
+    [ -z "$req" ] || rd="$(cmd_events --kind turn-finished --request-id "$req" --agent "$agent" --role "$role" --all 2>/dev/null \
+      | tail -n +2 | awk -F'\t' -v ts="$ts" '$1 >= ts && !hit { print $13; hit = 1 }')" || rd=""
+  fi
+  if [ -n "$rd" ] && [ -f "$rd/result.json" ] && command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys
+u=json.load(open(sys.argv[1])).get("usage")
+if u is not None and not isinstance(u,dict): u=None
+sys.stdout.write(json.dumps(u,sort_keys=True,separators=(",",":")))' "$rd/result.json" 2>/dev/null && return 0
+  fi
+  printf 'null'
+}
+
 cmd_round_note() {
   # round-note <reply-file> --note "<one or two lines>" — record how a reviewer
   # performed on ONE round.
@@ -3495,15 +3528,28 @@ cmd_round_note() {
   advisory="$(printf '%s\n' "$rows" | awk -F'\t' '$13=="advisory"' | grep -c . || true)"
 
   local out="$root/.comms/grades/rounds.tsv"
+  local hdr_old hdr
+  hdr_old="$(printf 'timestamp\tthread\tphase\tround\treviewer\tverdict\tblocking\tadvisory\tprompt_version\tnote')"
+  hdr="$(printf '%s\tusage' "$hdr_old")"
   mkdir -p "$(dirname "$out")" 2>/dev/null || die "round-note: cannot create $(clip "$(dirname "$out")")"
-  [ -s "$out" ] || printf 'timestamp\tthread\tphase\tround\treviewer\tverdict\tblocking\tadvisory\tprompt_version\tnote\n' > "$out"
+  if [ ! -s "$out" ]; then
+    printf '%s\n' "$hdr" > "$out"
+  elif [ "$(head -1 "$out")" = "$hdr_old" ]; then
+    # A ledger from before the usage column: extend its HEADER only. Older rows keep ten fields,
+    # which a TSV reader sees as an empty (unknown) usage — never as a measured zero.
+    { printf '%s\n' "$hdr"; tail -n +2 "$out"; } > "$out.tmp.$$" && mv "$out.tmp.$$" "$out" \
+      || { rm -f "$out.tmp.$$"; die "round-note: could not add the usage column to $(clip "$out")"; }
+  fi
   local clean_note; clean_note="$(printf '%s' "$note" | tr '\t\n' '  ')"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  # usage LAST, after the free-text note: one line of compact JSON (the leg's `usage` from its
+  # result.json) or `null`. JSON never carries a raw tab or newline, so the row stays one TSV row.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(frontmatter_field "$f" thread)" "$(frontmatter_field "$f" phase)" \
     "$(frontmatter_field "$f" round)" "$(frontmatter_field "$f" from)" \
     "$(cmd_verdict "$f" 2>/dev/null || true)" "${blocking:-0}" "${advisory:-0}" \
-    "$(cmd_prompt_version 2>/dev/null || true)" "$clean_note" >> "$out"
+    "$(cmd_prompt_version 2>/dev/null || true)" "$clean_note" \
+    "$(reply_leg_usage "$f" | tr '\t\n' '  ')" >> "$out"
   printf 'round-note: %s r%s %s — %s blocking, %s advisory -> %s\n' \
     "$(frontmatter_field "$f" from)" "$(frontmatter_field "$f" round)" \
     "$(cmd_verdict "$f" 2>/dev/null || true)" "${blocking:-0}" "${advisory:-0}" "${out#"$root"/}"

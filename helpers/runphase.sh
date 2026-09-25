@@ -290,6 +290,60 @@ log_event() {
   [ -n "$RUN_DIR" ] && echo "warning: coordinator log not updated ($kind)" >> "$RUN_DIR/runner.log" 2>/dev/null
   return 0
 }
+# ---------- per-leg usage (the provider's OWN records; see leg_usage.py) ----------
+#
+# What this leg cost, as the provider recorded it — never acpx's `[acpx] tokens:` line or anything
+# in runner.log, which are a wrapper's summaries and cannot be deduplicated or audited. Bounded to
+# the billable turn: snapshot immediately before the prompt, collect immediately after the provider
+# exits and BEFORE unmount (a throwaway mount deletes the isolated CODEX_HOME). Both halves are
+# advisory — a turn is never failed over its own measurement, and a measurement that could not be
+# made is recorded as null, never as 0.
+LEG_USAGE_JSON=null
+LEG_RATE_JSON=null
+LEG_USAGE_PROVIDER=""; LEG_USAGE_ROOT=""; LEG_USAGE_CWD=""
+
+# leg_usage_root <provider> [isolated-codex-home] — where this provider's records live. codex is
+# measured ONLY in an isolated home: the shared ~/.codex interleaves every other codex session on
+# the machine, so a window there could not be attributed to this leg.
+leg_usage_root() {
+  case "$1" in
+    codex)  printf '%s' "${2:-}" ;;
+    claude) [ -n "${HOME:-}${CLAUDE_CONFIG_DIR:-}" ] && printf '%s/projects' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ;;
+    grok)   [ -n "${HOME:-}" ] && printf '%s/.grok/sessions' "$HOME" ;;
+  esac
+  return 0
+}
+
+leg_usage_snapshot() {  # <provider> <records-root> <cwd> <run-dir>
+  LEG_USAGE_ROOT=""
+  [ -n "$2" ] && [ -n "$3" ] && command -v python3 >/dev/null 2>&1 || return 0
+  if python3 "$HELPER_DIR/leg_usage.py" snapshot "$1" "$2" "$3" "$4/usage-snapshot.json" 2>>"$4/runner.log"; then
+    LEG_USAGE_PROVIDER="$1"; LEG_USAGE_ROOT="$2"; LEG_USAGE_CWD="$3"
+  fi
+  return 0
+}
+
+# leg_usage_json <value> — the value if it is one line of JSON object or null, else null. It is
+# embedded RAW in result.json, so nothing else may pass.
+leg_usage_json() {
+  case "$1" in
+    *$'\n'*|*$'\r'*) printf 'null' ;;
+    null|'{'*'}')    printf '%s' "$1" ;;
+    *)               printf 'null' ;;
+  esac
+}
+
+leg_usage_collect() {  # <run-dir> — once per turn; a second call is a no-op
+  [ -n "$LEG_USAGE_ROOT" ] || return 0
+  local out=""
+  out="$(python3 "$HELPER_DIR/leg_usage.py" collect "$LEG_USAGE_PROVIDER" "$LEG_USAGE_ROOT" \
+           "$LEG_USAGE_CWD" "$1/usage-snapshot.json" 2>>"$1/runner.log")" || out=""
+  LEG_USAGE_ROOT=""
+  LEG_USAGE_JSON="$(leg_usage_json "$(printf '%s\n' "$out" | sed -n 's/^usage	//p' | head -1)")"
+  LEG_RATE_JSON="$(leg_usage_json "$(printf '%s\n' "$out" | sed -n 's/^rate_limits	//p' | head -1)")"
+  return 0
+}
+
 write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <message-file> <note> [reason]
   # `reason` is a NEW FIELD, deliberately not a new `status` value: every existing consumer
   # of `status` keeps its exact meaning, and nothing has to learn a third word to stay
@@ -305,12 +359,16 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
   local dir="$1" status="$2" rc="$3" sid="$4" mf="$5" note="$6" reason="${7:-}"
   [ "$RESULT_WRITTEN" = true ] && return 0
   local RESULT_COMPOSED=1
-  printf '{\n  "provider": "%s",\n  "agent": "%s",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s"\n}\n' \
+  # usage / rate_limits are embedded RAW (leg_usage_json admitted only one-line JSON or null) and
+  # come LAST, each on its own line, so json_get's one-key-per-line reads of the string fields
+  # above cannot match a key inside them.
+  printf '{\n  "provider": "%s",\n  "agent": "%s",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s",\n  "usage": %s,\n  "rate_limits": %s\n}\n' \
     "$(json_escape "$RUN_PROVIDER")" "$(json_escape "${RUN_AGENT:-$RUN_PROVIDER}")" \
     "$(json_escape "$status")" "$(json_escape "$reason")" "$(json_escape "$rc")" "$(json_escape "$sid")" \
     "$(json_escape "$mf")" "$(json_escape "$dir")" \
     "$(json_escape "${STARTED_AT:-}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(json_escape "$note")" \
+    "$(leg_usage_json "$LEG_USAGE_JSON")" "$(leg_usage_json "$LEG_RATE_JSON")" \
     > "$dir/result.json.tmp" || RESULT_COMPOSED=0
   # THE TERMINAL EVENT IS DURABLE FIRST. result.json is the signal `await` unblocks on, so
   # a runner that died between publishing it and appending this row left await with a
@@ -3594,6 +3652,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # finding, 2026-09-08.)
     acp_refuse() {  # <reason> <note> — write the failed result with a reason, unmount, unwind
       acp_status=failed
+      leg_usage_collect "$run_dir"
       ABORT_NOTE="refused: $2"
       update_thread_state "$msg_thread" failed "acp:$acp_session" "$sfield" || true
       write_result "$run_dir" failed 1 "acp:$acp_session" "$msg" "$2" "$1"
@@ -3650,6 +3709,10 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # each round anyway, and a cache needs storage/atomicity/invalidation this slice deliberately
     # avoids. (codex, acp-compat-gate plan r2/r3.)
     local canary_secs; canary_secs="$(sane_secs "${COMMS_ACP_CANARY_SECS:-60}")"; [ -n "$canary_secs" ] || canary_secs=60
+    # THE LEG'S USAGE WINDOW OPENS HERE, before the canary: the canary is a billed prompt in the
+    # same session, so it is part of what this leg cost. (The attestation's rollout snapshot below
+    # deliberately EXCLUDES it — a different question.) Nothing before this point bills.
+    leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$acp_iso_home")" "$(cd "$workdir" && pwd -P)" "$run_dir"
     ACP_CANARY_OPTS=( "${acp_prompt_opts[@]}" )
     if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
       local canary_note="$ACP_CANARY_NOTE"
@@ -3705,6 +3768,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" || acp_rc=$?
     acp_elapsed=$(( $(date +%s) - acp_t0 ))
     echo "acp turn finished after ${acp_elapsed}s (budget ${timeout}s)" >>"$run_dir/runner.log"
+    leg_usage_collect "$run_dir"
     # THE PROVIDER'S OWN RESULT, recorded where the provider actually exits — before the
     # broker runs. Emitting it from write_result put it AFTER every reply event on this
     # path and relabelled a broker refusal as a provider failure. (codex, plan r1.)
@@ -3862,6 +3926,9 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
   local rc=0
   # set -m: give the provider its own process group so a timeout/abort can reap
   # the WHOLE tree (CLI + the shell commands it spawns) with one group signal.
+  # codex here is `codex exec` under the SHARED ~/.codex, whose rollouts no window can attribute
+  # to this leg, so leg_usage_root answers nothing and its usage is null.
+  leg_usage_snapshot "$provider" "$(leg_usage_root "$provider")" "$(cd "$workdir" && pwd -P)" "$run_dir"
   set -m
   ( cd "$workdir" && exec ${child_env[@]+"${child_env[@]}"} "${cmd[@]}" ) \
     < "$run_dir/prompt.md" > "$run_dir/events.ndjson" 2>> "$run_dir/runner.log" &
@@ -3885,6 +3952,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     if [ "$waited_ds" -ge "$budget_ds" ]; then
       kill_codex
       wait "$codex_pid" 2>/dev/null || true
+      leg_usage_collect "$run_dir"
       local sid_t
       sid_t="$(session_id_from_events "$run_dir" "$provider")"
       log_event provider-result timeout "killed at the ${timeout}s budget"
@@ -3899,6 +3967,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     waited_ds=$(( waited_ds + poll_ds ))
   done
   wait "$codex_pid" || rc=$?
+  leg_usage_collect "$run_dir"
 
   local sid status note=""
   sid="$(session_id_from_events "$run_dir" "$provider")"

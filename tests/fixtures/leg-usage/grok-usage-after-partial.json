@@ -1,0 +1,5 @@
+{"sessionId":"g-1","turns":[
+ {"turnNumber":1,"inputTokens":24190,"outputTokens":41,"cachedReadTokens":6144,"cacheCreationTokens":0,"reasoningTokens":35,"totalTokens":24231,"modelCalls":1},
+ {"turnNumber":2,"inputTokens":1000,"outputTokens":50,"cachedReadTokens":800,"cacheCreationTokens":0,"reasoningTokens":30,"totalTokens":1050,"modelCalls":3},
+ {"turnNumber":3,"inputTokens":2000,"outputTokens":10,"cachedReadTokens":1900,"cacheCreationTokens":0,"totalTokens":2010,"modelCalls":1}
+]}

@@ -1,0 +1,5 @@
+{"type":"user","cwd":"@CWD@","sessionId":"sess-1","uuid":"u-1","message":{"role":"user","content":"review this"}}
+{"type":"assistant","cwd":"@CWD@","sessionId":"sess-1","uuid":"a-1","requestId":"req_A","message":{"id":"msg_A","role":"assistant","usage":{"input_tokens":3,"cache_creation_input_tokens":1000,"cache_read_input_tokens":0,"output_tokens":5}}}
+{"type":"assistant","cwd":"@CWD@","sessionId":"sess-1","uuid":"a-2","requestId":"req_A","message":{"id":"msg_A","role":"assistant","usage":{"input_tokens":3,"cache_creation_input_tokens":1000,"cache_read_input_tokens":0,"output_tokens":120}}}
+{"type":"assistant","cwd":"@CWD@","sessionId":"sess-1","uuid":"a-3","requestId":"req_B","message":{"id":"msg_B","role":"assistant","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":40}}}
+{"type":"assistant","cwd":"/some/other/mount/view/tree","sessionId":"sess-9","uuid":"a-9","requestId":"req_Z","message":{"id":"msg_Z","role":"assistant","usage":{"input_tokens":999999,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":999999}}}

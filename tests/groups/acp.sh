@@ -1305,7 +1305,7 @@ printf '%s\n' "$CAPS" | grep -q "^map_version: $MAPV" && printf '%s\n' "$CAPS" |
   && printf '%s\n' "$CAPS" | grep -q '^claude/acp-mounted: unsupported' \
   && ok "capabilities shows the map version and which combinations are routing-eligible" || fail "capabilities output"
 # THE MAP IS THE ONLY PLACE A VENDOR MODEL ID LIVES IN CODE. Comments may describe history.
-MID_HITS="$(for f in acp.sh comms.sh runphase.sh route.sh route_backend.py route_review.py route_shadow.py route_policy.py route_eval.py; do
+MID_HITS="$(for f in acp.sh comms.sh runphase.sh route.sh route_backend.py route_review.py route_shadow.py route_policy.py route_eval.py leg_usage.py; do
   sed 's/[[:space:]]*#.*$//' "$REPO/helpers/$f" | grep -nE 'gpt-[0-9]' | sed "s|^|$f:|"; done)"
 [ -z "$MID_HITS" ] \
   && ok "no helper carries a vendor model id in code — the versioned map is the one table" || fail "model ids outside the map: $MID_HITS"

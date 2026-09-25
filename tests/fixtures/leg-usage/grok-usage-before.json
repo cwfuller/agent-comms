@@ -1,0 +1,3 @@
+{"sessionId":"g-1","session":{"inputTokens":24190,"totalTokens":24231},"turns":[
+ {"turnNumber":1,"inputTokens":24190,"outputTokens":41,"cachedReadTokens":6144,"cacheCreationTokens":0,"reasoningTokens":35,"totalTokens":24231,"modelCalls":1}
+]}
