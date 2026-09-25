@@ -145,24 +145,36 @@ def complete_distribution(probs, keys, what):
     return vals
 
 
-def cheapest_covering(vals):
-    """Index of the cheapest level L with P(level > L) <= TAIL_MAX. Ties and splits go deeper."""
+def cheapest_covering(vals, tail_max=TAIL_MAX):
+    """Index of the cheapest level L with P(level > L) <= tail_max. Ties and splits go deeper."""
     for i in range(len(vals)):
-        if sum(vals[i + 1:]) <= TAIL_MAX:
+        if sum(vals[i + 1:]) <= tail_max:
             return i
     return len(vals) - 1
 
 
-def map_answers(answers):
+# The knobs of reviewer-v1, overridable ONLY by the offline eval replay (route_eval.py), so a
+# candidate policy is scored by this exact function rather than a copy. Production passes none.
+REVIEWER_DEFAULTS = {
+    "depth_conf_min": DEPTH_CONFIDENCE_MIN,
+    "effort_conf_min": EFFORT_CONFIDENCE_MIN,
+    "tail_max": TAIL_MAX,          # depth: the covering rule's allowed deeper-probability tail
+    "effort_tail_max": TAIL_MAX,   # effort distribution: the same rule, tunable on its own
+}
+
+
+def map_answers(answers, params=None):
     """reviewer-v1: raw answers -> (tier, effort, gate, reason). Raises ValueError on a malformed
     answer. Floors and fallbacks are recorded as a GATE beside the raw answers, never blended in."""
+    p = dict(REVIEWER_DEFAULTS)
+    p.update(params or {})
     depth, eff = answers.get("review_depth"), answers.get("review_effort")
     if not isinstance(depth, dict) or not isinstance(eff, dict):
         raise ValueError("response is missing review_depth or review_effort")
     dvals = complete_distribution(depth.get("probabilities"), ("0", "1", "2", "3"),
                                   "review_depth.probabilities")
     dconf = unit(depth.get("confidence"), "review_depth.confidence")
-    level = cheapest_covering(dvals)
+    level = cheapest_covering(dvals, p["tail_max"])
     # levels 0 mechanical, 1 standard, 2 hard, 3 architectural -> fast, balanced, strong, strong
     tier = ("fast", "balanced", "strong", "strong")[level]
     choice = eff.get("choice")
@@ -174,11 +186,11 @@ def map_answers(answers):
     if eprobs is not None:
         # When the distribution is supplied it must be whole, and it can only DEEPEN the choice.
         evals = complete_distribution(eprobs, EFFORTS, "review_effort.probabilities")
-        effort = EFFORTS[max(EFFORTS.index(choice), cheapest_covering(evals))]
+        effort = EFFORTS[max(EFFORTS.index(choice), cheapest_covering(evals, p["effort_tail_max"]))]
     gates = []
-    if dconf < DEPTH_CONFIDENCE_MIN:
+    if dconf < p["depth_conf_min"]:
         gates.append("low-depth-confidence")
-    if econf < EFFORT_CONFIDENCE_MIN:
+    if econf < p["effort_conf_min"]:
         gates.append("low-effort-confidence")
     if gates:
         # EITHER gate keeps the WHOLE baseline. Clearing only the doubtful dimension let the other

@@ -115,6 +115,11 @@
 #                               Fail-open with no backend, on timeout, or on a
 #                               malformed answer. Prompt overrides win. Never
 #                               selects a reviewer or a vendor model id.
+#   route-eval pool|label|run --live|score|status
+#                               operator-labelled eval set for the Jev classifiers
+#                               (route_eval.py): pool saved decisions, label them
+#                               blind, re-score stored answers under candidate
+#                               policies offline; data in ~/.agent-comms/evals/jev.
 #   review-route decide (--request <review-request> | --thread T --phase P) [--tier T] [--effort E] [--replace]
 #   review-route lookup --thread T --phase P
 #   review-route verify <decision-id> --thread <message thread> --phase P [--leg-dispatch D [--leg-agent A]]
@@ -6464,6 +6469,7 @@ case "${1:-}" in
   findings)       shift; cmd_findings "$@" ;;
   ask)            shift; cmd_ask "$@" ;;
   route)          shift; cmd_route "$@" ;;
+  route-eval)     shift; exec python3 "$(dirname "$SELF")/route_eval.py" "$@" ;;
   review-route)   shift; cmd_review_route "$@" ;;
   setup)          shift; exec bash "$(dirname "$SELF")/setup.sh" "$@" ;;
   panel)          shift; cmd_panel "$@" ;;

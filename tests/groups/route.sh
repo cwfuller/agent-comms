@@ -1090,3 +1090,259 @@ PY
     && [ "$(printf '%s\n' "$M2" | grep -c '^plan:')" = 1 ] && N=$((N+1))
 done
 [ "$N" = 3 ] && ok "non-object, wrong-typed or unprintable records fall through to a fresh classification" || fail "malformed records ($N/3)"
+
+section "route-eval: labelled eval set for the classifiers"
+# A fixture project with hand-written decision records of every kind the pool must include or
+# refuse, an isolated eval home, and no network anywhere (the live case uses the stub backend).
+EV_HOME="$WORK/ev-home"; EV_PROJ="$WORK/ev-proj"; mkdir -p "$EV_HOME" "$EV_PROJ"
+git -C "$EV_PROJ" init -q; printf '.comms/\n' > "$EV_PROJ/.gitignore"
+git -C "$EV_PROJ" add .gitignore; git -C "$EV_PROJ" -c user.email=t@t -c user.name=t commit -q -m i
+EV_PROJ="$(cd "$EV_PROJ" && pwd -P)"
+python3 - "$EV_PROJ" "$REPO/helpers" <<'PY'
+import json, os, sys
+proj, helpers = sys.argv[1], sys.argv[2]; sys.path.insert(0, helpers)
+import route_backend, route_policy
+rd = os.path.join(proj, ".comms", "route-decisions"); os.makedirs(os.path.join(rd, "implementer"))
+def imp(name, task, answers, **kw):
+    state = route_backend.build_state(task)
+    dec = route_policy.map_implementer(answers, policy_variant="implementer-bump-v1", backend_name=kw.get("source", "typesafe")) if answers else {"source": "fail-open"}
+    rec = {"route_id": name, "at": "2026-09-24T10:00:00Z", "state": state, "sent": kw.get("sent", True),
+           "probe": kw.get("probe", False), "answers": answers, "decision": dec}
+    json.dump(rec, open(os.path.join(rd, "implementer", name + ".json"), "w"))
+easy = {"needs_plan": {"noul": 0.1}, "complexity": {"probabilities": {"0": 0.9, "1": 0.1, "2": 0, "3": 0}, "confidence": 0.9},
+        "effort": {"choice": "low", "confidence": 0.9}}
+imp("aaaaaaaa-0001", "fix typo in the docs", easy)
+imp("aaaaaaaa-0002", "fix typo in the docs", easy)                      # same state: one item
+imp("aaaaaaaa-0003", "probe me", easy, probe=True)                      # probe: never pooled
+imp("aaaaaaaa-0004", "backend down", None, sent=False)                  # fail-open: never pooled
+imp("aaaaaaaa-0005", "stub seam", easy, source="stub")                  # test seam: never pooled
+# A fail-open that still holds the (unmappable) answers it received: not a decision, never pooled.
+bad = json.loads(json.dumps(easy)); bad["complexity"]["probabilities"]["0"] = "bad"
+json.dump({"route_id": "aaaaaaaa-0006", "at": "2026-09-24T10:00:00Z", "state": route_backend.build_state("malformed answer"),
+           "sent": True, "probe": False, "answers": bad, "decision": {"source": "fail-open", "gate": "fail-open"}},
+          open(os.path.join(rd, "implementer", "aaaaaaaa-0006.json"), "w"))
+# Cache-sticky: production ran strong because the session was already strong with a big context.
+st = route_backend.build_state("sticky: small follow-up in a long session")
+dec = route_policy.map_implementer(easy, policy_variant="implementer-bump-v1", backend_name="typesafe",
+                                   current_tier="strong", context_tokens=25000)
+assert dec["tier"] == "strong" and dec["gate"] == "cache-sticky"
+json.dump({"route_id": "aaaaaaaa-0007", "at": "2026-09-24T10:00:00Z", "state": st, "sent": True, "probe": False,
+           "answers": easy, "decision": dec, "current_tier": "strong", "context_tokens": "25000", "overrides": {}},
+          open(os.path.join(rd, "implementer", "aaaaaaaa-0007.json"), "w"))
+rev = {"record_version": 1, "role": "reviewer", "at": "2026-09-24T10:05:00Z", "thread": "ev-thread-1",
+       "source": "typesafe", "gate": "low-effort-confidence", "candidate": {"tier": "none", "effort": "none"},
+       "project_key": "k" * 64,
+       "sent": {"role": "reviewer", "request": {"intent": "EV-SECRET-INTENT tighten a regex"}, "risk_signals": {"files_changed": 1}},
+       "answers": {"review_depth": {"probabilities": {"0": 0, "1": 0.7, "2": 0.3, "3": 0}, "confidence": 0.8},
+                   "review_effort": {"choice": "medium", "confidence": 0.55}}}
+json.dump(rev, open(os.path.join(rd, "rd-" + "1" * 32 + ".json"), "w"))
+# Valid answers with an unknown recorded override, and an answer with an overflowing number: the
+# production mapping cannot turn either into a known decision, so neither is pooled.
+json.dump({"route_id": "aaaaaaaa-0008", "at": "2026-09-24T10:00:00Z", "state": route_backend.build_state("odd override"),
+           "sent": True, "probe": False, "answers": easy, "decision": dict(dec, source="typesafe"),
+           "overrides": {"tier": "unknown"}},
+          open(os.path.join(rd, "implementer", "aaaaaaaa-0008.json"), "w"))
+huge = json.loads(json.dumps(easy))
+open(os.path.join(rd, "implementer", "aaaaaaaa-0009.json"), "w").write(json.dumps(
+    {"route_id": "aaaaaaaa-0009", "at": "2026-09-24T10:00:00Z", "state": route_backend.build_state("huge number"),
+     "sent": True, "probe": False, "answers": huge, "decision": dict(dec, source="typesafe")}).replace(
+    '"noul": 0.1', '"noul": 1' + "0" * 400))
+# An unhashable override value and an overflowing context size: skipped, never a crash.
+json.dump({"route_id": "aaaaaaaa-0010", "at": "2026-09-24T10:00:00Z", "state": route_backend.build_state("list override"),
+           "sent": True, "probe": False, "answers": easy, "decision": dict(dec, source="typesafe"),
+           "overrides": {"tier": []}}, open(os.path.join(rd, "implementer", "aaaaaaaa-0010.json"), "w"))
+open(os.path.join(rd, "implementer", "aaaaaaaa-0011.json"), "w").write(json.dumps(
+    {"route_id": "aaaaaaaa-0011", "at": "2026-09-24T10:00:00Z", "state": route_backend.build_state("huge context"),
+     "sent": True, "probe": False, "answers": easy, "decision": dict(dec, source="typesafe"),
+     "context_tokens": "CTX"}).replace('"CTX"', "1e400"))
+# A context that only str.isdigit() would accept: excluded, not coerced.
+json.dump({"route_id": "aaaaaaaa-0014", "at": "2026-09-24T10:00:00Z", "state": route_backend.build_state("superscript context"),
+           "sent": True, "probe": False, "answers": easy, "decision": dict(dec, source="typesafe"),
+           "context_tokens": "\u00b2"}, open(os.path.join(rd, "implementer", "aaaaaaaa-0014.json"), "w"))
+# The SAME sent state observed twice with different answers: the item is the NEWER observation,
+# whole (answers, inputs and decision together).
+hard = {"needs_plan": {"noul": 0.9}, "complexity": {"probabilities": {"0": 0, "1": 0, "2": 0.9, "3": 0.1}, "confidence": 0.9},
+        "effort": {"choice": "xhigh", "confidence": 0.9}}
+twice = route_backend.build_state("observed twice")
+for rid, at, ans in (("aaaaaaaa-0012", "2026-09-24T09:00:00Z", easy), ("aaaaaaaa-0013", "2026-09-24T11:00:00Z", hard)):
+    json.dump({"route_id": rid, "at": at, "state": twice, "sent": True, "probe": False, "answers": ans,
+               "decision": route_policy.map_implementer(ans, policy_variant="implementer-bump-v1", backend_name="typesafe")},
+              open(os.path.join(rd, "implementer", rid + ".json"), "w"))
+# A panel whose BASE thread itself ends in an agent name; its leg reply is <base>-codex.
+rev2 = json.loads(json.dumps(rev)); rev2["thread"] = "ev-panel-grok"; rev2["sent"]["request"]["intent"] = "second request"
+json.dump(rev2, open(os.path.join(rd, "rd-" + "2" * 32 + ".json"), "w"))
+# A reviewer fail-open that kept its answers: never pooled.
+rev3 = json.loads(json.dumps(rev)); rev3["source"] = "fail-open"; rev3["gate"] = "fail-open"; rev3["sent"]["request"]["intent"] = "third"
+json.dump(rev3, open(os.path.join(rd, "rd-" + "3" * 32 + ".json"), "w"))
+arch = os.path.join(proj, ".comms", "archive"); os.makedirs(arch)
+open(os.path.join(arch, "w_2026-09-24T10-10-00_codex-reply-1.md"), "w").write(
+    "---\ntype: review-feedback\nthread: ev-thread-1\nround: 1\nverdict: REQUEST_CHANGES\n---\n\n## Findings\n\n### Blocking\n\n- one\n\n### Advisory\n\nNone.\n")
+open(os.path.join(arch, "w_2026-09-24T10-11-00_codex-reply-2.md"), "w").write(
+    "---\ntype: review-feedback\nfrom: codex\nthread: ev-panel-grok-codex\nround: 2\nverdict: APPROVE\n---\n\n## Findings\n\n### Blocking\n\nNone.\n")
+PY
+ev() { (cd "$EV_PROJ" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_STUB AGENT_COMMS_HOME="$EV_HOME" "$COMMS" route-eval "$@"); }
+EV_SEEDS="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["tasks"]))' "$REPO/helpers/route_eval_seed.json")"
+P1="$(ev pool 2>&1)"; P2="$(ev pool 2>&1)"
+EV_DIR="$EV_HOME/evals/jev"
+printf '%s' "$P1" | grep -q "+3 implementer, +2 reviewer, +$EV_SEEDS seed" \
+  && python3 -c 'import json,sys
+it=[json.loads(l) for l in open(sys.argv[1]) if "observed twice" in l][0]
+sys.exit(0 if it["answers"]["effort"]["choice"]=="xhigh" and it["stored"]["plan"]=="yes" and it["at"].startswith("2026-09-24T11") else 1)' "$EV_HOME/evals/jev/pool.jsonl" && printf '%s' "$P2" | grep -q '+0 implementer, +0 reviewer, +0 seed' \
+  && ok "pool takes answered decisions once each (dedup by sent state) and skips probes, stubs and fail-opens even when they kept answers; re-pooling adds nothing" || fail "pool contents: $P1 / $P2"
+[ "$(stat -f '%Lp' "$EV_DIR" 2>/dev/null || stat -c '%a' "$EV_DIR")" = 700 ] \
+  && [ "$(stat -f '%Lp' "$EV_DIR/pool.jsonl" 2>/dev/null || stat -c '%a' "$EV_DIR/pool.jsonl")" = 600 ] \
+  && [ -z "$(git -C "$EV_PROJ" status --porcelain)" ] && ! grep -rq EV-SECRET-INTENT "$EV_PROJ" --include='*.jsonl' \
+  && ok "the pool (client text) lives in the private eval home, 0700/0600, never inside the repository" || fail "pool location or mode"
+# BLIND LABELLING: Jev's answer is printed only after the label is saved.
+LOUT="$(printf 'n\nm\nl\nn\nm\nl\n-\ns\nm\nq\n' | ev label --stdin 2>&1)"
+NLAB="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["labels"]))' "$EV_DIR/labels.json" 2>/dev/null)"
+# Character positions, not lines: prompts share a line with the answer that follows them.
+BLIND="$(python3 -c 'import sys;t=sys.argv[1];j=t.find("jev:");q=t.find("implementer effort");r=t.find("review depth");print(0<=q<j<r)' "$LOUT")"
+[ "$NLAB" = 3 ] && [ "$BLIND" = True ] \
+  && printf '%s' "$LOUT" | grep -q 'outcome: 1 round(s), 1 blocking' \
+  && ok "labels are taken blind: Jev's answer and the loop outcome appear only after the answer is saved" || fail "labelling ($NLAB, blind=$BLIND)"
+# OFFLINE REPLAY through the production functions, under named and ad-hoc candidate policies.
+SJ="$(ev score --json --policy current,gate-0.5,cover-0.35,no-bump --param reviewer.effort_conf_min=0.5 --param reviewer.tail_max=0.35 2>&1)"
+python3 - "$SJ" <<'PY' && ok "replay scores stored answers per policy: the gate, the covering rule and the bump each move the outcome" || fail "policy replay: $SJ"
+import json, sys
+r = json.loads(sys.argv[1]); P = r["policies"]
+assert r["scored"] == 3 and not r["unusable"]
+assert P["current"]["reviewer"]["over"] == 1          # gated to the full baseline; you said standard/medium
+assert P["gate-0.5"]["reviewer"]["over"] == 1         # ungated, but the 0.3 hard tail still covers to strong
+assert P["cover-0.35"]["reviewer"]["over"] == 1       # looser cover alone is still gated at 0.6
+assert P["custom"]["reviewer"]["match"] == 1          # both: balanced / medium, exactly your label
+assert P["current"]["implementer"]["over"] == 2       # the bump, and the cache-sticky hold the record carried
+assert P["no-bump"]["implementer"]["match"] == 1 and P["no-bump"]["implementer"]["over"] == 1   # sticky stays strong
+assert P["current"]["implementer"]["plan_hit"] == 2
+assert r["roles"]["reviewer"]["level_exact"] == 1 and r["roles"]["implementer"]["effort_exact"] == 2
+PY
+N=0
+for BADP in reviewer.nonsense=1 reviewer.tail_max=nan reviewer.tail_max=1e9999 implementer.effort_conf_min=-0.1 implementer.bump=maybe implementer.plan_levels=4; do
+  A=0; ev score --param "$BADP" >/dev/null 2>&1 || A=$?; [ "$A" = 2 ] && N=$((N+1)); done
+B=0; ev score --policy made-up >/dev/null 2>&1 || B=$?
+C=0; ev score --param implementer.plan_levels=2 >/dev/null 2>&1 || C=$?
+[ "$N" = 6 ] && [ "$B" = 2 ] && [ "$C" = 0 ] && ok "unknown policies and malformed or out-of-range parameters are refused; valid ones parse" || fail "score arg validation ($N/6 $B $C)"
+# Every pooled item replays under `current` to exactly the decision production recorded, including
+# a cache-sticky hold (the record's current tier and context are replay inputs).
+python3 - "$EV_DIR/pool.jsonl" "$REPO/helpers" <<'EVPY' && ok "current replays every pooled decision exactly as production recorded it" || fail "replay parity with stored decisions"
+import json, sys; sys.path.insert(0, sys.argv[2]); import route_eval
+for line in open(sys.argv[1]):
+    it = json.loads(line)
+    if not it.get("answers"):
+        continue
+    tier, effort, plan = route_eval.apply_policy(it, it["answers"], {})
+    st = it["stored"]
+    if it["role"] == "reviewer":
+        want = ("strong", "xhigh") if st["tier"] == "none" else (st["tier"], st["effort"])
+        assert (tier, effort) == want, (it["id"], tier, effort, st)
+    else:
+        assert (tier, effort, plan) == (st["tier"], st["effort"], st["plan"]), (it["id"], tier, effort, plan, st)
+EVPY
+# The outcome join finds a panel leg's reply even when the base thread ends in an agent name.
+python3 -c 'import json,sys
+o=[json.loads(l) for l in open(sys.argv[1])]; it=[i for i in o if i.get("thread")=="ev-panel-grok"][0]
+sys.exit(0 if it["outcome"] and it["outcome"]["rounds"]==2 else 1)' "$EV_DIR/pool.jsonl" \
+  && ok "the outcome join maps <base>-<agent> legs to their base, even a base ending in an agent name" || fail "outcome join"
+# Unusable live answers or labels are REPORTED, never a traceback.
+python3 - "$EV_DIR" <<'EVPY'
+import json, os, sys
+d = sys.argv[1]; pool = [json.loads(l) for l in open(os.path.join(d, "pool.jsonl"))]
+labs = json.load(open(os.path.join(d, "labels.json")))
+ids = [l["id"] for l in labs["labels"]]
+with open(os.path.join(d, "live.jsonl"), "a") as fh:
+    fh.write(json.dumps({"id": ids[0], "answers": {"complexity": {"probabilities": ["bad"]}}}) + "\n")
+    ok_ans = [p for p in pool if p["id"] == ids[1]][0]["answers"]
+    fh.write(json.dumps({"id": ids[1], "answers": ok_ans}).replace('"noul": 0.1', '"noul": 1' + "0" * 400) + "\n")
+    for i in ids[2:]:
+        it = [p for p in pool if p["id"] == i][0]
+        fh.write(json.dumps({"id": i, "answers": it["answers"]}) + "\n")
+labs["labels"][2]["effort"] = "enormous"
+json.dump(labs, open(os.path.join(d, "labels.json"), "w"))
+EVPY
+SL="$(ev score --source live 2>&1)"; A=$?
+[ "$A" = 0 ] && printf '%s' "$SL" | grep -q '3 unusable' && printf '%s' "$SL" | grep -q 'OverflowError' && printf '%s' "$SL" | grep -q 'unusable answer' \
+  && printf '%s' "$SL" | grep -q "label effort='enormous'" && ! printf '%s' "$SL" | grep -q Traceback \
+  && ok "a malformed answer or label is reported as unusable and the report still completes" || fail "score robustness (rc=$A): $SL"
+rm -f "$EV_DIR/live.jsonl"
+# The replay IS production: route.sh's printed decision equals route_policy on the same answers.
+rt_stub 0.8 2 0.7 high 0.65 "$ST/ev.json"
+EO="$(rt COMMS_ROUTE_STUB="$ST/ev.json" -- "route-eval parity check" 2>/dev/null)"
+PY_OUT="$(python3 - "$ST/ev.json" "$REPO/helpers" <<'PY'
+import json, sys; sys.path.insert(0, sys.argv[2]); import route_policy
+d = route_policy.map_implementer(json.load(open(sys.argv[1]))["answers"], policy_variant="x", backend_name="stub")
+print(d["plan"], d["effort"], d["tier"], d["gate"])
+PY
+)"
+[ "$PY_OUT" = "$(rt_kv "$EO" plan) $(rt_kv "$EO" effort) $(rt_kv "$EO" tier) $(rt_kv "$EO" gate)" ] \
+  && ok "route.sh and the eval replay share one mapping (route_policy): same answers, same decision" || fail "parity: $PY_OUT vs $EO"
+# LIVE is refused without the flag, and re-sends client text only for permitted projects.
+A=0; ev run >/dev/null 2>&1 || A=$?
+[ "$A" = 2 ] && [ ! -e "$EV_DIR/live.jsonl" ] && ok "run refuses without --live and contacts nothing" || fail "run without --live (rc=$A)"
+printf '%s\n' "$(printf k%.0s $(seq 64))" > "$WORK/ev-allow"   # the key the reviewer FILES claim, not this project's
+RO="$(cd "$EV_PROJ" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND AGENT_COMMS_HOME="$EV_HOME" COMMS_ROUTE_SHADOW_ALLOW="$WORK/ev-allow" \
+      COMMS_ROUTE_STUB="$ST/ev.json" "$COMMS" route-eval run --live 2>&1)"
+printf '%s' "$RO" | grep -q "run: $EV_SEEDS answered, 5 skipped (not permitted)" && [ "$(stat -f '%Lp' "$EV_DIR/live.jsonl" 2>/dev/null || stat -c '%a' "$EV_DIR/live.jsonl")" = 600 ] \
+  && ok "run --live sends seeds and skips a project's items even when its records claim a permitted key" || fail "run --live: $RO"
+python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$EV_PROJ" > "$WORK/ev-allow"
+RO2="$(cd "$EV_PROJ" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND AGENT_COMMS_HOME="$EV_HOME" COMMS_ROUTE_SHADOW_ALLOW="$WORK/ev-allow" \
+      COMMS_ROUTE_STUB="$ST/ev.json" "$COMMS" route-eval run --live --missing 2>&1)"
+printf '%s' "$RO2" | grep -q "run: 5 answered, 0 skipped" \
+  && ok "once the project itself is permitted, its items are sent (and --missing skips answered ones)" || fail "run --live permitted: $RO2"
+# A real decision for a task the pool first saw as a SEED replaces that row: no longer a seed, so it
+# scores on the real answers and is live-sent only under its project's permit.
+python3 - "$EV_PROJ" "$REPO/helpers" "$REPO/helpers/route_eval_seed.json" <<'EVPY'
+import json, os, sys
+proj, helpers, seed = sys.argv[1:4]; sys.path.insert(0, helpers)
+import route_backend, route_policy
+task = json.load(open(seed))["tasks"][0]["text"]
+ans = {"needs_plan": {"noul": 0.1}, "complexity": {"probabilities": {"0": 0.9, "1": 0.1, "2": 0, "3": 0}, "confidence": 0.9},
+       "effort": {"choice": "low", "confidence": 0.9}}
+json.dump({"route_id": "aaaaaaaa-0099", "at": "2026-09-24T12:00:00Z", "state": route_backend.build_state(task), "sent": True,
+           "probe": False, "answers": ans, "decision": route_policy.map_implementer(ans, policy_variant="p", backend_name="typesafe")},
+          open(os.path.join(proj, ".comms", "route-decisions", "implementer", "aaaaaaaa-0099.json"), "w"))
+EVPY
+ev pool >/dev/null 2>&1
+python3 -c 'import json,sys
+task=json.load(open(sys.argv[2]))["tasks"][0]["text"]
+it=[json.loads(l) for l in open(sys.argv[1]) if json.loads(l)["text"]==task]
+sys.exit(0 if len(it)==1 and not it[0].get("seed") and it[0]["answers"] and it[0]["project"]!="seed" else 1)' "$EV_DIR/pool.jsonl" "$REPO/helpers/route_eval_seed.json" \
+  && ok "a real decision replaces a seed row of the same task (no longer a seed, real answers, real project)" || fail "seed replacement"
+# Re-pooling refreshes derived fields of items it already has (e.g. replay inputs).
+python3 - "$EV_DIR/pool.jsonl" <<'EVPY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+for r in rows:
+    if r.get("inputs"):
+        r["inputs"] = {}
+open(sys.argv[1], "w").write("".join(json.dumps(r) + "\n" for r in rows))
+EVPY
+ev pool >/dev/null 2>&1
+python3 -c 'import json,sys
+rows=[json.loads(l) for l in open(sys.argv[1])]
+sys.exit(0 if any((r.get("inputs") or {}).get("current_tier")=="strong" for r in rows) else 1)' "$EV_DIR/pool.jsonl" \
+  && ok "re-pooling refreshes an existing item's replay inputs" || fail "pool refresh"
+# Storage that would resolve into a repository (directly or through a symlink) is refused.
+ln -s "$EV_PROJ/inside" "$WORK/ev-link"
+A=0; (cd "$WORK" && AGENT_COMMS_HOME="$EV_PROJ/x" "$COMMS" route-eval status >/dev/null 2>&1) || A=$?
+B=0; (cd "$WORK" && AGENT_COMMS_HOME="$WORK/ev-link" "$COMMS" route-eval status >/dev/null 2>&1) || B=$?
+git init -q --bare "$WORK/ev-bare.git"
+C=0; (cd "$WORK" && AGENT_COMMS_HOME="$WORK/ev-bare.git/h" "$COMMS" route-eval status >/dev/null 2>&1) || C=$?
+D=0; (cd "$WORK" && AGENT_COMMS_HOME="$EV_PROJ/.git/h" "$COMMS" route-eval status >/dev/null 2>&1) || D=$?
+mkdir -p "$WORK/ev-badgit"; printf '#!/bin/sh\necho "fatal: detected dubious ownership in repository" >&2\nexit 128\n' > "$WORK/ev-badgit/git"; chmod +x "$WORK/ev-badgit/git"
+E=0; (cd "$WORK" && PATH="$WORK/ev-badgit:$PATH" AGENT_COMMS_HOME="$WORK/ev-elsewhere" "$COMMS" route-eval status >/dev/null 2>&1) || E=$?
+# A broken nested .git (a gitdir pointer to nothing) makes git say "not a git repository" from
+# INSIDE the enclosing work tree; the filesystem walk still refuses it.
+mkdir -p "$EV_PROJ/nested"; printf 'gitdir: /nonexistent/gitdir\n' > "$EV_PROJ/nested/.git"
+F=0; (cd "$WORK" && AGENT_COMMS_HOME="$EV_PROJ/nested/h" "$COMMS" route-eval status >/dev/null 2>&1) || F=$?
+rm -rf "$EV_PROJ/nested"
+[ "$A" = 2 ] && [ "$B" = 2 ] && [ "$C" = 2 ] && [ "$D" = 2 ] && [ "$E" = 2 ] && [ "$F" = 2 ] \
+  && [ ! -e "$EV_PROJ/x" ] && [ ! -e "$EV_PROJ/inside" ] && [ ! -e "$WORK/ev-bare.git/h" ] && [ ! -e "$WORK/ev-elsewhere" ] \
+  && ok "the eval home is refused inside a work tree, via a symlink, in a bare repo or .git, under a broken nested .git, or when git cannot inspect it" || fail "eval home guard ($A/$B/$C/$D/$E/$F)"
+# A missing route_policy.py still honours the prompt overrides (they are read before the import).
+mkdir -p "$WORK/ev-nopolicy"; cp "$REPO/helpers/route.sh" "$REPO/helpers/route_backend.py" "$REPO/helpers/settings.sh" "$WORK/ev-nopolicy/"
+NP="$(cd "$REPO_FIX" && env -u COMMS_ROUTE -u COMMS_ROUTE_BACKEND -u COMMS_ROUTE_STUB bash "$WORK/ev-nopolicy/route.sh" -- "use max and plan first" 2>/dev/null)"
+[ "$(rt_kv "$NP" tier)" = strong ] && [ "$(rt_kv "$NP" effort)" = xhigh ] && [ "$(rt_kv "$NP" plan)" = yes ] \
+  && ok "without route_policy.py the prompt overrides still decide" || fail "overrides lost without route_policy: $NP"
+# Shipped with the helpers.
+grep -q '^HELPERS=.*route_policy\.py.*route_eval\.py.*route_eval_seed\.json' "$REPO/install.sh" \
+  && ok "install.sh ships route_policy.py, route_eval.py and the seed set" || fail "helpers manifest"

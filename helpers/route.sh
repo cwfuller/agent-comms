@@ -454,21 +454,6 @@ try:
 except ImportError:
     fail_open("route_backend.py is not installed next to route.sh")
 
-LEVELS = ("mechanical", "standard", "hard", "architectural")
-EFFORTS = ("low", "medium", "high", "xhigh")
-TIERS = ("fast", "balanced", "strong")
-TIER_OF = {
-    "mechanical": "fast",
-    "standard": "balanced",
-    "hard": "strong",
-    "architectural": "strong",
-}
-RANK = {"fast": 0, "balanced": 1, "strong": 2}
-PLAN_NOUL_MIN = 0.7
-PLAN_COMPLEXITY = {"2", "3"}
-COMPLEXITY_CONFIDENCE_MIN = 0.5
-EFFORT_CONFIDENCE_MIN = 0.6
-DOWNGRADE_MAX_CONTEXT = 20000
 
 # Prompt overrides — jev-router's "the human already decided" patterns, adapted
 # to abstract tiers (not vendor model names). More-specific "no plan" beats "plan".
@@ -510,19 +495,20 @@ def detect_overrides(text):
         ov["effort"] = "xhigh"
     return ov
 
-def unit_float(value, what):
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        fail_open(f"{what} is missing or not a number")
-    if v != v or v < 0.0 or v > 1.0:
-        fail_open(f"{what} is out of range")
-    return v
-
 task = os.environ.get("COMMS_ROUTE_TASK", "")
 if len(task) > 8000:
     task = task[:8000]
 overrides = detect_overrides(task)
+
+# The mapping from Jev's answers to the ten keys lives in route_policy.py, shared with the offline
+# eval replay (route_eval.py) so what the eval scores is exactly what production runs. Imported
+# AFTER the prompt overrides are read, so a missing module still honours "use max" / "plan
+# first" through fail_open. (codex, implement r1.)
+try:
+    import route_policy
+    from route_policy import LEVELS, EFFORTS, TIERS
+except ImportError:
+    fail_open("route_policy.py is not installed next to route.sh")
 
 timeout_raw = os.environ.get("COMMS_ROUTE_TIMEOUT_SECS", "8")
 try:
@@ -659,107 +645,15 @@ if answers is None:
         "(set COMMS_ROUTE_BACKEND=typesafe or COMMS_ROUTE=1)"
     )
 
-noul_ans = answers.get("needs_plan")
-score_ans = answers.get("complexity")
-choice_ans = answers.get("effort")
-if not isinstance(noul_ans, dict) or not isinstance(score_ans, dict) or not isinstance(choice_ans, dict):
-    fail_open("response is missing needs_plan, complexity, or effort")
-
-plan_p = unit_float(noul_ans.get("noul"), "needs_plan.noul")
-probs = score_ans.get("probabilities")
-if not isinstance(probs, dict) or not probs:
-    fail_open("complexity.probabilities is missing")
-cconf = unit_float(score_ans.get("confidence"), "complexity.confidence")
-
-best_p = -1.0
-best_level = "0"
-for idx in ("0", "1", "2", "3"):
-    raw = 0 if idx not in probs else probs[idx]
-    p = unit_float(raw, f"complexity.probabilities[{idx}]")
-    if p > best_p:
-        best_p = p
-        best_level = idx
-complexity = LEVELS[int(best_level)]
-
-choice = choice_ans.get("choice")
-econf = unit_float(choice_ans.get("confidence"), "effort.confidence")
-if choice not in EFFORTS:
-    fail_open("effort.choice is not a known effort")
-effort_p = None
-eprobs = choice_ans.get("probabilities")
-if isinstance(eprobs, dict) and choice in eprobs:
-    effort_p = unit_float(eprobs[choice], f"effort.probabilities[{choice}]")
-
-plan = "no"
-if (
-    plan_p >= PLAN_NOUL_MIN
-    and best_level in PLAN_COMPLEXITY
-    and cconf >= COMPLEXITY_CONFIDENCE_MIN
-):
-    plan = "yes"
-
-effort = choice
-if econf < EFFORT_CONFIDENCE_MIN:
-    effort = "medium"
-    effort_p = None
-
-# Abstract tier is composed HERE, not asked of Jev — same shape as jev-router
-# mapping a Choice onto concrete models, but we emit the abstract name so this
-# helper never names a vendor model id (claude/codex/grok each map it).
-tier = TIER_OF[complexity]
-gate = "classify"
-# Low confidence refuses fast (and plan). The later one-step bump then
-# raises this middle pick to strong. Gate name records the refuse-fast
-# choice, not the post-bump tier.
-if cconf < COMPLEXITY_CONFIDENCE_MIN:
-    tier = "balanced"
-    gate = "low-confidence-middle"
-
-def _step_up(seq, value):
-    try:
-        i = seq.index(value)
-    except ValueError:
-        return value
-    return seq[min(i + 1, len(seq) - 1)]
-
-# Prefer slightly more reasoning / a stronger model than the raw classification.
-# Fail-open and prompt overrides skip this. Cache-sticky still refuses a
-# downgrade after the bump.
-effort = _step_up(EFFORTS, effort)
-if effort != choice:
-    effort_p = None
-tier = _step_up(TIERS, tier)
-
-current = os.environ.get("COMMS_ROUTE_CURRENT_TIER") or ""
 try:
     ctx = int(os.environ.get("COMMS_ROUTE_CONTEXT_TOKENS") or "0")
 except ValueError:
     ctx = 0
-if current in RANK and ctx > DOWNGRADE_MAX_CONTEXT and RANK[tier] < RANK[current]:
-    tier = current
-    gate = "cache-sticky"
-
-if overrides:
-    if "plan" in overrides:
-        plan = overrides["plan"]
-    if "effort" in overrides:
-        effort = overrides["effort"]
-        effort_p = None
-    if "tier" in overrides:
-        tier = overrides["tier"]
-    gate = "override"
-
-plan_p_s = f"{plan_p:.3f}"
-effort_p_s = f"{effort_p:.3f}" if effort_p is not None else "-"
-cconf_s = f"{cconf:.3f}"
-reason = (
-    f"policy={POLICY_VARIANT} needs_plan={plan_p_s} complexity={complexity} "
-    f"(level {best_level}, conf {cconf_s}) effort={effort} "
-    f"(classified {choice}, conf {econf:.3f}) tier={tier} gate={gate}"
-)
-emit(
-    plan=plan, effort=effort, complexity=complexity, tier=tier, gate=gate,
-    plan_p=plan_p_s, effort_p=effort_p_s, complexity_confidence=cconf_s,
-    source=backend_name, reason=reason,
-)
+try:
+    decision = route_policy.map_implementer(
+        answers, policy_variant=POLICY_VARIANT, backend_name=backend_name, overrides=overrides,
+        current_tier=os.environ.get("COMMS_ROUTE_CURRENT_TIER") or "", context_tokens=ctx)
+except route_policy.PolicyError as e:
+    fail_open(str(e))
+emit(**decision)
 PY

@@ -1,0 +1,17 @@
+{
+  "note": "Hand-written, project-neutral /auto tasks that widen the eval pool beyond the complex work real loops produced. Label them like any other item; they carry no stored Jev answer until `route-eval run --live`.",
+  "tasks": [
+    {"text": "fix typo in README", "note": "mechanical"},
+    {"text": "bump the package version to 2.4.1 and update the changelog", "note": "mechanical"},
+    {"text": "rename the helper function parse_cfg to parse_config everywhere it is used", "note": "mechanical"},
+    {"text": "add a missing newline at the end of the three config files the linter flagged", "note": "mechanical"},
+    {"text": "update the copyright year in the LICENSE file", "note": "mechanical"},
+    {"text": "add a --verbose flag to the export command that prints each file as it is written", "note": "standard"},
+    {"text": "add a unit test for the date formatter covering leap years and the end of the month", "note": "standard"},
+    {"text": "make the retry count for the webhook sender configurable through an environment variable, default 3", "note": "standard"},
+    {"text": "show a friendly error message instead of a stack trace when the config file is missing", "note": "standard"},
+    {"text": "replace the per-request database connection with a pooled connection shared across workers, keeping transactions isolated", "note": "hard"},
+    {"text": "make the job queue safe to run from several processes at once without double-processing a job", "note": "hard"},
+    {"text": "design the permission model for sharing documents between organizations, including revocation and audit", "note": "architectural"}
+  ]
+}

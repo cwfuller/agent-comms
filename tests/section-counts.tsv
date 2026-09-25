@@ -90,3 +90,4 @@ review twins: setup accepts one driver and asks about its provider	8
 integrate: driver contract (classified exit codes + one result line)	24
 route.sh: decision reuse and probe mode	12
 verify: a landing suite for any repo (template, init, status, fresh)	34
+route-eval: labelled eval set for the classifiers	17
