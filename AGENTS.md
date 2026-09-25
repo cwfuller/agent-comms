@@ -202,19 +202,23 @@ were live.)
 6. Repeat until the **gating reviewer** (first in the roster) approves *and* the panel is
    composed. Then `round-note` each reply, archive them, mark threads complete, and
    `integrate`. **Only when `integrate` exits 0 and prints `integrate-result v1
-   status=landed`**, clean up: if you took a worktree, `cd` to the main checkout (retire
+   status=landed`**, clean up: if you took a worktree (at the claim or at a later
+   re-check), `cd` to the main checkout (retire
    refuses the tree you stand in) and retire your own branch with your presence inline —
    retire accepts a live owner only when it is you:
    ```bash
-   cd "$(git worktree list --porcelain | head -1 | sed 's/^worktree //')"
+   cd "$(git worktree list --porcelain | sed -n '1s/^worktree //p')"     # no head: it SIGPIPEs git
    COMMS_PRESENCE_NAME=<presence-name> COMMS_PRESENCE_INSTANCE=<instance> \
-     helpers/comms.sh worktree retire <branch> --yes      # worktree sessions only
+     helpers/comms.sh worktree retire <branch> --yes      # the worktree-<slug> branch only
    helpers/comms.sh presence release --name <presence-name> --instance <instance>
    ```
    `--yes` ends the dry run; it bypasses no gate, and there is no force. A refusal
    (any non-zero exit; the reasons are on stderr) does not undo the landing: report it and
-   release anyway, leaving the worktree for a human. A session that worked in the shared
-   checkout skips retire and only releases. Any other `integrate` outcome leaves the
+   what retire says is left (exit 1 and 4 can follow the tree's removal; the message says
+   `worktree removed: yes|no`), release anyway, and leave the rest for a human. A
+   `processes:` refusal naming your own harness or shell is expected: never kill those pids
+   or retry past it. A session that never left the shared checkout skips retire and only
+   releases. Any other `integrate` outcome leaves the
    worktree and branch alone — they hold the unlanded work.
 
 Write the review ask adversarially. "Confirm this looks right" wastes a round; "here is

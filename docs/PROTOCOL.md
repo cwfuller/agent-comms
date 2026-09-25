@@ -281,8 +281,8 @@ to track/push to `main`). When creating a worktree for a loop:
 worktree and branch in place. The `/auto` driver's last step (and AGENTS.md review-loop step
 6) retires its OWN worktree once `integrate` exits 0 with `integrate-result v1 status=landed`:
 from the main checkout, with its presence inline so retire recognises it as the owner, then
-releases presence. Every gate below still applies; a refusal is reported and leaves the tree
-for a human, and does not fail the loop. A session that worked in the shared checkout has
+releases presence. Every gate below still applies; a refusal is reported with what retire says
+is left (exit 1 and 4 can follow the tree's removal) and does not fail the loop. A session that worked in the shared checkout has
 nothing to retire. `comms.sh worktree
 list` reports every registered worktree on one `worktree-list v1` line — kind, branch, whether
 the tip is on `main` (by ancestry, `git cherry`, or squash patch-id), tracked and untracked

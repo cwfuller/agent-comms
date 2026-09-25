@@ -398,7 +398,7 @@ ARS="$(auto_retire_step "$AIF")"
 printf '%s' "$ARS" | grep -qF 'integrate-result v1 status=landed' && printf '%s' "$ARS" | grep -q 'exited 0' \
   && printf '%s' "$ARS" | grep -q 'Any other outcome leaves the worktree and branch' \
   && ok "auto.md retires only after integrate exits 0 with status=landed" || fail "auto.md retire is not gated on a landing"
-AR_CD="$(line_of "$ARS" 'cd "$(git worktree list --porcelain | head -1')"
+AR_CD="$(line_of "$ARS" "cd \"\$(git worktree list --porcelain | sed -n '1s/^worktree //p')\"")"
 AR_RT="$(line_of "$ARS" 'worktree retire "<branch>" --yes')"
 AR_RL="$(line_of "$ARS" 'presence release --name')"
 [ -n "$AR_CD" ] && [ -n "$AR_RT" ] && [ -n "$AR_RL" ] && [ "$AR_CD" -lt "$AR_RT" ] && [ "$AR_RT" -lt "$AR_RL" ] \
@@ -406,7 +406,9 @@ AR_RL="$(line_of "$ARS" 'presence release --name')"
   && ! printf '%s' "$ARS" | grep -q -- '--force' \
   && ok "auto.md cds to the main checkout, retires with presence inline and no force, then releases" \
   || fail "auto.md retire order/shape (cd=$AR_CD retire=$AR_RT release=$AR_RL)"
-printf '%s' "$ARS" | grep -q 'A refusal does not fail the loop' && printf '%s' "$ARS" | grep -q 'Skip retire' \
+printf '%s' "$ARS" | grep -q 'A refusal does not fail the loop' && printf '%s' "$ARS" | grep -qF 'never ran `worktree new`' \
+  && printf '%s' "$ARS" | grep -q 'worktree removed: yes|no' && printf '%s' "$ARS" | grep -q 'Never kill those pids' \
+  && printf '%s' "$ARS" | grep -q 'never the branch you started on in the shared checkout' \
   && ok "auto.md reports a refusal without failing the loop, and a shared-checkout session skips retire" \
   || fail "auto.md refusal/shared-checkout handling"
 # Every runtime's copy is the SAME step: Claude and Grok get the template verbatim, Codex gets it
@@ -421,14 +423,18 @@ for ar_copy in "claude:$ARI/claude/auto.md" "grok:$ARI/grok/auto.md" "codex:$ARI
     && ok "$ar_rt's installed /auto carries the retire-after-landing step verbatim" \
     || fail "$ar_rt's installed /auto is missing or differs in the retire step ($ar_f)"
 done
+# The continuation command closes an approved loop too, so it must hand off to the same step.
+grep -q 'finish with `/auto` step 9: retire your own worktree' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "read-from-codex hands an approved, landed loop to /auto step 9" || fail "read-from-codex does not hand off to the retire step"
 AG6="$(awk '/^6\. Repeat until the \*\*gating reviewer\*\*/{p=1} p&&/^Write the review ask adversarially/{exit} p' "$REPO/AGENTS.md")"
-A6_CD="$(line_of "$AG6" 'cd "$(git worktree list --porcelain | head -1')"
+A6_CD="$(line_of "$AG6" "cd \"\$(git worktree list --porcelain | sed -n '1s/^worktree //p')\"")"
 A6_RT="$(line_of "$AG6" 'worktree retire <branch> --yes')"
 A6_RL="$(line_of "$AG6" 'presence release --name')"
 printf '%s' "$AG6" | grep -qF 'integrate-result v1' && printf '%s' "$AG6" | grep -qF 'status=landed' \
   && [ -n "$A6_CD" ] && [ -n "$A6_RT" ] && [ -n "$A6_RL" ] && [ "$A6_CD" -lt "$A6_RT" ] && [ "$A6_RT" -lt "$A6_RL" ] \
   && printf '%s' "$AG6" | grep -q 'COMMS_PRESENCE_NAME=.*COMMS_PRESENCE_INSTANCE=' \
   && printf '%s' "$AG6" | grep -q 'skips retire' && printf '%s' "$AG6" | grep -q 'does not undo the landing' \
+  && printf '%s' "$AG6" | grep -q 'worktree removed: yes|no' && printf '%s' "$AG6" | grep -q 'never kill those pids' \
   && ! printf '%s' "$AG6" | grep -q -- '--force' \
   && ok "AGENTS.md step 6 carries the same landed-gated retire, then release" \
   || fail "AGENTS.md step 6 retire step (cd=$A6_CD retire=$A6_RT release=$A6_RL)"

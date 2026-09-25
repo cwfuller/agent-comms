@@ -276,7 +276,9 @@ Direct is a state you re-earn at every checkpoint, never tenure.
    - Otherwise → **Stop. Notify user** with status line first: "Done. Approved after N
      rounds." Then any advisory worth keeping. Record the reviewer performance note
      (see above), archive: `"$COMMS_SH" archive --as "$SELF" "<file>"`, then close the
-     thread's state: `"$COMMS_SH" state complete "<thread>"`
+     thread's state: `"$COMMS_SH" state complete "<thread>"`. If the loop then lands
+     through `integrate`, finish with `/auto` step 9: retire your own worktree, then
+     release presence.
 
 2. **If `round >= max-rounds`:**
    - **Stop. Escalate to user** with status line first: "Stopped — I need you. Max

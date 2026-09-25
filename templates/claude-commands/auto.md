@@ -388,16 +388,18 @@ verdict format. The cycle continues until APPROVE or max rounds.
    ONLY when `"$COMMS_SH" integrate <branch>` exited 0 AND printed
    `integrate-result v1 status=landed`. Any other outcome leaves the worktree and branch in
    place — they are the only copy of unlanded work. `integrate` itself retires nothing.
-   - **Worked in the shared checkout (step 0 exit 0, no `worktree new`)?** Skip retire;
-     only release presence.
-   - **Took a worktree in step 0?** Retire ITS branch (`worktree-<slug>`, the branch you
-     just landed) from the main checkout, never from inside the worktree — retire refuses
+   - **Worked in the shared checkout the whole loop (never ran `worktree new`)?** Skip
+     retire; only release presence.
+   - **Took a worktree — in step 0, or later when a re-check exited non-zero?** Retire the
+     managed branch `worktree new` created (`worktree-<slug>`, the branch you just landed),
+     never the branch you started on in the shared checkout: that one is still checked out
+     in the primary. Run it from the main checkout, never from inside the worktree — retire refuses
      the tree you stand in. `cd` for real, not in a subshell: the worktree is about to
      disappear, and a session left standing in it has no working directory. Put the
      presence variables INLINE: retire accepts a live owner only when it is YOU, and an
      `export` from an earlier tool call is gone by now.
    ```bash
-   cd "$(git worktree list --porcelain | head -1 | sed 's/^worktree //')"   # the main checkout
+   cd "$(git worktree list --porcelain | sed -n '1s/^worktree //p')"   # the main checkout; no head: it SIGPIPEs git
    COMMS_PRESENCE_NAME="<session-name>" COMMS_PRESENCE_INSTANCE="<instance>" \
      "$COMMS_SH" worktree retire "<branch>" --yes; RETIRE_RC=$?      # worktree sessions only
    "$COMMS_SH" presence release --name "<session-name>" --instance "<instance>"
@@ -407,9 +409,14 @@ verdict format. The cycle continues until APPROVE or max rounds.
      branch by hand to get past a refusal.
    - **A refusal does not fail the loop.** Any non-zero `RETIRE_RC` — 3 refused, 4 the
      branch moved after the check, 1 a failed remove or delete — says why on stderr
-     (`refused: <gate>: <detail>`). Report them to
-     the user in one line — the landing still succeeded, so the status line is still
-     **Done.** — and release presence anyway. The worktree stays for the human to inspect
-     and retire by hand.
+     (`refused: <gate>: <detail>`). Report them to the user in one line — the landing still
+     succeeded, so the status line is still **Done.** — and release presence anyway. Report
+     what retire says is left, never an assumption: exit 3 changes nothing, but 1 and 4 can
+     come AFTER the tree was removed, and their message says `worktree removed: yes|no`.
+     Whatever remains is the human's to inspect and retire by hand.
+   - **A `processes:` refusal is expected when your own harness holds the tree** — a
+     runtime whose process or a shell the `cd` did not move still has its cwd or an open
+     file inside. Report it like any refusal. Never kill those pids, and never retry to get
+     past it.
    - Release comes AFTER retire: until retire finishes the tree is still yours, and your
      presence record is what tells peers so. Release is the last thing the loop does.
