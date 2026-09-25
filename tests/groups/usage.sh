@@ -78,6 +78,32 @@ python3 "$LU" snapshot codex "$CX7" /unused "$LUW/cx7.snap"
 grep -v token_usage_record "$LUF/codex-tokencount-window.jsonl" >> "$CX7/sessions/rollout-g.jsonl"
 lu_is "$(lu_run codex "$CX7" /unused "$LUW/cx7.snap")" usage null \
   && ok "a malformed record before the window makes the fallback null rather than skipped" || fail "malformed baseline record was skipped"
+# A STALE BASELINE: a total, then spend reported WITHOUT a total (last_token_usage only). The last
+# total no longer describes the start of the window; subtracting it would bill the earlier 50 to
+# this leg (codex, implement r2, blocking: read 70 where the leg spent 20). Same rule at the END:
+# spend recorded after the window's last total means that total is not where the leg ended.
+lu_tc() { printf '%s\n' '{"timestamp":"2026-09-25T10:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":'"$1"',"rate_limits":null}}'; }
+lu_tot() { printf '{"total_token_usage":{"input_tokens":%s,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":%s}}' "$1" "$1"; }
+lu_last() { printf '{"last_token_usage":{"input_tokens":%s,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":%s}}' "$1" "$1"; }
+CX9="$LUW/codex-home-9"; mkdir -p "$CX9/sessions"
+{ lu_tc "$(lu_tot 100)"; lu_tc "$(lu_last 50)"; } > "$CX9/sessions/rollout-i.jsonl"
+python3 "$LU" snapshot codex "$CX9" /unused "$LUW/cx9.snap"
+lu_tc "$(lu_tot 170)" >> "$CX9/sessions/rollout-i.jsonl"
+lu_is "$(lu_run codex "$CX9" /unused "$LUW/cx9.snap")" usage null \
+  && ok "spend recorded after the last pre-window total makes the fallback null, not a stale baseline" || fail "stale codex baseline was subtracted"
+CX10="$LUW/codex-home-10"; mkdir -p "$CX10/sessions"
+lu_tc "$(lu_tot 100)" > "$CX10/sessions/rollout-j.jsonl"
+python3 "$LU" snapshot codex "$CX10" /unused "$LUW/cx10.snap"
+{ lu_tc "$(lu_tot 150)"; lu_tc "$(lu_last 20)"; } >> "$CX10/sessions/rollout-j.jsonl"
+lu_is "$(lu_run codex "$CX10" /unused "$LUW/cx10.snap")" usage null \
+  && ok "spend recorded after the window's last total makes the fallback null, not an early endpoint" || fail "early codex endpoint was used"
+# CONTROL for both: a rate-limit-only token_count (info null) after a total is not spend.
+CX11="$LUW/codex-home-11"; mkdir -p "$CX11/sessions"
+{ lu_tc "$(lu_tot 100)"; lu_tc null; } > "$CX11/sessions/rollout-k.jsonl"
+python3 "$LU" snapshot codex "$CX11" /unused "$LUW/cx11.snap"
+{ lu_tc "$(lu_tot 170)"; lu_tc null; } >> "$CX11/sessions/rollout-k.jsonl"
+[ "$(lu_field "$(lu_run codex "$CX11" /unused "$LUW/cx11.snap")" usage total_tokens)" = 70 ] \
+  && ok "a rate-limit-only token_count does not unseat a total (control: 170 - 100 = 70)" || fail "info-null token_count treated as spend"
 # Proven zero: the leg created the file itself (nothing before the window) — its first total is its own.
 CX8="$LUW/codex-home-8"; mkdir -p "$CX8/sessions"
 python3 "$LU" snapshot codex "$CX8" /unused "$LUW/cx8.snap"
@@ -155,6 +181,23 @@ sed -e "s|@CWD@|$CLT|g" -e 's/"output_tokens":\([0-9]*\)}/"output_tokens":\1,"ou
   && ok "claude thinking tokens are the reasoning count when every response reports them" || fail "claude thinking tokens not summed"
 [ "$(lu_field "$CLO" rate_limits x)" = "<none>" ] \
   && ok "a claude leg carries no rate_limits snapshot" || fail "claude rate_limits (got: $CLO)"
+# A RESPONSE WITH NO USAGE is unknown spend, not no spend: every field goes null for the leg
+# (codex, implement r2, blocking: 110 tokens over 1 response was reported as the total). Claude
+# Code's own "<synthetic>" messages made no API call and are not responses.
+CLM="$LUW/mounts/missing-usage-claude/view/tree"; mkdir -p "$CLM"
+CLMD="$CLR/$(printf '%s' "$CLM" | sed 's/[^a-zA-Z0-9]/-/g')"; mkdir -p "$CLMD"
+python3 "$LU" snapshot claude "$CLR" "$CLM" "$LUW/clm.snap"
+{ sed "s|@CWD@|$CLM|g" "$LUF/claude-window.jsonl"
+  printf '%s\n' '{"type":"assistant","cwd":"'"$CLM"'","requestId":"req_S","message":{"id":"msg_S","model":"<synthetic>","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}'
+} > "$CLMD/sess-4.jsonl"
+CLMO="$(lu_run claude "$CLR" "$CLM" "$LUW/clm.snap")"
+[ "$(lu_field "$CLMO" usage output_tokens)" = 160 ] && [ "$(lu_field "$CLMO" usage responses)" = 2 ] \
+  && ok "a <synthetic> claude message is not counted as a response" || fail "synthetic message counted (got: $CLMO)"
+printf '%s\n' '{"type":"assistant","cwd":"'"$CLM"'","requestId":"req_C","message":{"id":"msg_C","model":"m"}}' >> "$CLMD/sess-4.jsonl"
+CLMO="$(lu_run claude "$CLR" "$CLM" "$LUW/clm.snap")"
+[ "$(lu_field "$CLMO" usage output_tokens)" = null ] && [ "$(lu_field "$CLMO" usage total_tokens)" = null ] \
+  && [ "$(lu_field "$CLMO" usage responses)" = 3 ] \
+  && ok "a claude response with no usage makes the leg's token fields null rather than a partial sum" || fail "missing claude usage dropped (got: $CLMO)"
 # A LONG cwd is truncated in the directory name; the neighbour sharing that prefix contributes nothing.
 CLL="$LUW/mounts/$(printf 'x%.0s' $(seq 1 200))-claude/view/tree"; mkdir -p "$CLL"
 CLS="$(printf '%s' "$CLL" | sed 's/[^a-zA-Z0-9]/-/g')"

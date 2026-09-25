@@ -308,14 +308,13 @@ def codex_usage(windows):
     # which summing last_token_usage would double-count.
     deltas = []
     for f, start, recs in windows:
-        after = [codex_norm(i.get("total_token_usage")) for i in token_count_infos(recs)]
-        after = [a for a in after if a is not None]
-        if not after:
+        end = last_running_total(recs)
+        if end is None:
             continue
         base = codex_baseline(pre_records(f, start))
         d = {}
         for k in FIELDS:
-            a, b = after[-1].get(k), base.get(k)
+            a, b = end.get(k), base.get(k)
             if is_count(a) and is_count(b) and a >= b:
                 d[k] = a - b
             elif is_count(a) and is_count(b):
@@ -336,20 +335,49 @@ def is_count(v):
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
 
 
+def is_billing(r):
+    """A record that says tokens were spent: a token_usage_record, or a token_count whose info
+    is present (a token_count with info null carries only a rate-limit update)."""
+    if not isinstance(r, dict):
+        return False
+    if r.get("type") == "token_usage_record":
+        return True
+    p = r.get("payload")
+    return (r.get("type") == "event_msg" and isinstance(p, dict)
+            and p.get("type") == "token_count" and p.get("info") is not None)
+
+
+def running_total(r):
+    """The token_count running total a record carries, or None."""
+    if not is_billing(r) or r.get("type") != "event_msg":
+        return None
+    info = r["payload"]["info"]
+    t = codex_norm(info.get("total_token_usage")) if isinstance(info, dict) else None
+    return t if t is not None and all(is_count(t[k]) for k in FIELDS) else None
+
+
+def last_running_total(recs):
+    """The running total as of the END of recs: the last billing record must itself carry a
+    complete total. Billing evidence after the last total (a token_count reporting only
+    last_token_usage, a token_usage_record) means spend the total does not include, so the
+    total is not the endpoint — unbounded, never a stale value. None when recs hold no billing
+    evidence at all."""
+    billing = [r for r in recs if is_billing(r)]
+    if not billing:
+        return None
+    t = running_total(billing[-1])
+    if t is None:
+        raise Undecidable("codex recorded spend after its last running token total")
+    return t
+
+
 def codex_baseline(pre):
     """The running total the window starts from. ZERO ONLY WHEN PROVEN: the bytes before the
-    window carry no token evidence at all (a file the leg itself created, or one holding only
-    session metadata). Earlier billed work with no usable running total cannot be subtracted, so
-    the window is unbounded — never a baseline of zero that bills that work to this leg."""
-    totals = [codex_norm(i.get("total_token_usage")) for i in token_count_infos(pre)]
-    totals = [t for t in totals if t is not None]
-    if totals:
-        return totals[-1]
-    for r in pre:
-        if isinstance(r, dict) and (r.get("type") == "token_usage_record"
-                                    or any(True for _ in token_count_events([r]))):
-            raise Undecidable("the codex rollout holds earlier billed work but no running total to subtract")
-    return {k: 0 for k in FIELDS}
+    window carry no billing evidence at all (a file the leg itself created, or one holding only
+    session metadata). Otherwise the last billing record must carry the total (see
+    last_running_total) — earlier work that cannot be subtracted is never billed to this leg."""
+    t = last_running_total(pre)
+    return t if t is not None else {k: 0 for k in FIELDS}
 
 
 def pre_records(f, start):
@@ -374,10 +402,6 @@ def token_count_events(recs):
             p = r.get("payload")
             if isinstance(p, dict) and p.get("type") == "token_count":
                 yield r, p
-
-
-def token_count_infos(recs):
-    return [p["info"] for _r, p in token_count_events(recs) if isinstance(p.get("info"), dict)]
 
 
 def codex_rate_limits(windows):
@@ -425,24 +449,31 @@ def claude_usage(windows, root, cwd):
             if rc is None and not in_exact:
                 continue
             m = r.get("message")
-            if not isinstance(m, dict) or not isinstance(m.get("usage"), dict):
+            m = m if isinstance(m, dict) else {}
+            # Claude Code's own synthetic messages (an interrupted or failed request) name the
+            # model "<synthetic>" and made no API call — not a response to bill.
+            if m.get("model") == "<synthetic>":
                 continue
             mid, req = m.get("id"), r.get("requestId")
             key = (mid, req) if (mid or req) else (f, r.get("uuid") or "line%d" % i)
             if key not in last:
                 order.append(key)
-            last[key] = m["usage"]          # the LAST copy carries the final output count
+            # The LAST copy carries the final output count. A response with NO usage object is
+            # unknown spend: it stays a row, and every field it cannot supply goes null for the
+            # leg — dropping it would present a partial sum as the total.
+            u = m.get("usage")
+            last[key] = u if isinstance(u, dict) else {}
     rows = []
     for key in order:
         u = last[key]
         inp, cw, cr, out = (u.get("input_tokens"), u.get("cache_creation_input_tokens"),
                             u.get("cache_read_input_tokens"), u.get("output_tokens"))
-        ok = all(isinstance(v, int) and not isinstance(v, bool) for v in (inp, cw, cr, out))
+        ok = all(is_count(v) for v in (inp, cw, cr, out))
         rows.append({
             "input_tokens": inp + cw + cr if ok else None,
-            "cached_input_tokens": cr if isinstance(cr, int) else None,
-            "cache_write_input_tokens": cw if isinstance(cw, int) else None,
-            "output_tokens": out if isinstance(out, int) else None,
+            "cached_input_tokens": cr if is_count(cr) else None,
+            "cache_write_input_tokens": cw if is_count(cw) else None,
+            "output_tokens": out if is_count(out) else None,
             # Reported as output_tokens_details.thinking_tokens (a subset of output_tokens) by
             # runtimes that record it; absent elsewhere, and then null like any missing field.
             "reasoning_output_tokens": thinking_tokens(u),

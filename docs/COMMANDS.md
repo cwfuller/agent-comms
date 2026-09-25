@@ -576,7 +576,7 @@ cwd are that leg's alone; an unmounted leg shares the repo root with interactive
 other legs and reads null. codex: the isolated `CODEX_HOME` rollout's `token_usage_record`s
 summed by `turn_id`, a response recorded twice counted once, falling back to the
 `token_count.info` running-total delta (a zero baseline only when nothing before the window
-recorded tokens). grok: the `usage.json` `turns[]` this leg added — the session and every earlier
+recorded tokens; at both ends the last spend record must itself carry the total, or null). grok: the `usage.json` `turns[]` this leg added — the session and every earlier
 turn must be unchanged, since grok rewrites the file. claude: the project transcript for the
 leg's cwd, deduplicated by `(message.id, requestId)`, last copy wins. Fields follow codex's convention —
 `input_tokens` (INCLUDING cache reads and writes), `cached_input_tokens`,
@@ -587,7 +587,9 @@ records, an unbounded window (a file replaced, truncated or gone mid-turn), or a
 lacks. `round-note` copies the leg's `usage` into the last column of `.comms/grades/rounds.tsv`:
 the run is the one under `logs/<in-reply-to>.*` whose `reply.md` carries the reply's
 `message_id` (a shadow reply reads its store's `<name>.result.json`). Writers of one ledger are
-serialised by a `rounds.tsv.lock` directory, since upgrading an old ledger's header rewrites it.
+serialised by a `rounds.tsv.lock` directory, since upgrading an old ledger's header rewrites it. A
+held lock is never broken automatically — its age cannot prove the holder died — so after ~10s
+`round-note` refuses and names it; remove it by hand only when no `round-note` is running.
 
 Thread state mirrors the outcome (`spawned` →
 `completed`/`failed`/`timeout`), records `last_run_dir` (the `stalled` watchdog's pid

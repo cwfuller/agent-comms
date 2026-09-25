@@ -346,6 +346,14 @@ run_tr round-note "$RN_J" --note "joined" >/dev/null 2>&1
 [ "$(awk -F'\t' '$2=="rn-join"{print $11}' "$RN_TSV")" = '{"input_tokens":600,"source":"codex-token-usage-record","total_tokens":660}' ] \
   && ok "round-note records the usage of the attempt whose reply.md is this reply, not a sibling retry" \
   || fail "joined usage: $(awk -F'\t' '$2=="rn-join"{print $11}' "$RN_TSV")"
+# A HELD LOCK IS NEVER BROKEN: its age cannot prove the holder died, and two writers that both
+# judged it stale could each remove the other's. round-note refuses, writes nothing, and leaves
+# the lock for a human. (codex, implement r2, blocking.)
+RN_ROWS="$(grep -c . "$RN_TSV")"; mkdir "$RN_TSV.lock"; touch -t 202601010000 "$RN_TSV.lock"
+check_not "round-note refuses while the ledger lock is held, however old" run_tr round-note "$TR_RN" --note "blocked"
+[ -d "$RN_TSV.lock" ] && [ "$(grep -c . "$RN_TSV")" = "$RN_ROWS" ] \
+  && ok "a refused round-note leaves the held lock and the ledger untouched" || fail "held lock was broken or a row written"
+rmdir "$RN_TSV.lock"
 # CONCURRENT WRITERS over a ledger that still has the old header: the upgrade rewrites the file,
 # so an unserialised writer could publish its copy over a row another appended meanwhile.
 RN_C="$WORK/rn-concurrent"; mkdir -p "$RN_C/.comms/grades" "$RN_C/.comms/archive"

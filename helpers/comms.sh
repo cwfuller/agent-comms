@@ -3502,17 +3502,14 @@ sys.stdout.write(json.dumps(u,sort_keys=True,separators=(",",":")))' "$rj" 2>/de
 
 # rounds_lock <ledger> / rounds_unlock <ledger> — serialise every writer of one rounds.tsv. The
 # header upgrade REWRITES the file, so without this a writer that copied the old ledger could
-# publish its copy over a row another writer appended in between. mkdir is the atomic test-and-set;
-# a lock older than a minute is a dead writer's and is broken (a round-note takes well under one).
+# publish its copy over a row another writer appended in between. mkdir is the atomic test-and-set.
+# A held lock is NEVER broken automatically: its age cannot prove the holder died (a paused writer
+# is indistinguishable), and two contenders that both judge it stale can each remove the other's
+# fresh lock. After ~10s the writer refuses and names the lock for a human to clear.
 rounds_lock() {
   local l="$1.lock" i=0
   until mkdir "$l" 2>/dev/null; do
-    if [ "$i" -ge 100 ]; then
-      if [ -n "$(find "$l" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-        rmdir "$l" 2>/dev/null || true; i=0; continue
-      fi
-      die "round-note: $(clip "$l") is held by another writer — retry, or remove it if no round-note is running"
-    fi
+    [ "$i" -lt 100 ] || die "round-note: $(clip "$l") is held — another round-note is writing, or one died holding it; if none is running, remove that directory and retry"
     sleep 0.1; i=$((i + 1))
   done
 }
@@ -3567,7 +3564,7 @@ cmd_round_note() {
     "$(reply_leg_usage "$f" | tr '\t\n' '  ')")"
   rounds_lock "$out"
   if [ ! -s "$out" ]; then
-    printf '%s\n' "$hdr" > "$out"
+    printf '%s\n' "$hdr" > "$out" || { rounds_unlock "$out"; die "round-note: could not write $(clip "$out")"; }
   elif [ "$(head -1 "$out")" = "$hdr_old" ]; then
     # A ledger from before the usage column: extend its HEADER only. Older rows keep ten fields,
     # which a TSV reader sees as an empty (unknown) usage — never as a measured zero.
