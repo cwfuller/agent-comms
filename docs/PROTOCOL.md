@@ -293,6 +293,7 @@ at that moment, and is a dry run unless `--yes`. It refuses unless every gate ho
 | clean | any tracked change or untracked path, including edits hidden by skip-worktree or assume-unchanged (raw bytes, exact link text and mode compared to `HEAD`; a clean filter or autocrlf difference refuses rather than hides) |
 | ignored | ignored content not on the regenerable list (`node_modules/`, build output, caches — directory names match directories only), a secret-named file (`.env*`, keys, credentials), or a nested repository anywhere (a `.git`, or a bare repo's `HEAD` beside `objects/` and `refs/`) |
 | private refs | a per-worktree ref (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`) names history not on `main` — removal deletes it |
+| backend | the repository's ref storage is not `files` (e.g. reftable): the gates read the files layout and are not guessed elsewhere |
 | unused | a process has its cwd or an open file inside, or processes cannot be listed; or the caller stands in it |
 | unclaimed | a live or ambiguous presence record owns it (the owner stamp `worktree new` writes, or a record named like the slug — matched by filename, so an unreadable record still blocks) and is not the caller's own; or git has it locked |
 | ref | the branch is a symbolic ref; a paused rebase, bisect or `rebase --update-refs` reservation in any worktree holds it; an am, cherry-pick, revert, merge, sequencer or notes merge is in progress on it; or that operation state exists but cannot be read |
