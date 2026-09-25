@@ -68,7 +68,7 @@
 #                               processes (lsof cwd + open files), presence, lock, and the
 #                               retire verdict. Report only; `?` = could not tell
 #   worktree retire <branch> [--yes]
-#                               hand-run, ONE target, re-enumerated first; dry run unless
+#                               ONE target, re-enumerated first; dry run unless
 #                               --yes. Refuses unless the tip is on main by ANCESTRY, the
 #                               tree is managed, clean, holds no unknown ignored files,
 #                               secrets or nested repos, no process uses it, no live
@@ -76,7 +76,8 @@
 #                               `git worktree remove` (never --force) and a CAS branch
 #                               delete (never branch -d). Exit 0 / 2 usage / 3 refused /
 #                               4 the branch moved after the check (left in place).
-#                               integrate never retires anything.
+#                               integrate never retires anything; the /auto driver
+#                               retires its own worktree after a landing.
 #   integrate <branch>          land on main: lease + ff + suite at the candidate OID
 #                               in a detached worktree + CAS update-ref (suite-cmd
 #                               config required). A prose-only tree diff (README.md,

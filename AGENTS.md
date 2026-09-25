@@ -201,7 +201,21 @@ were live.)
    round's request and argue it.
 6. Repeat until the **gating reviewer** (first in the roster) approves *and* the panel is
    composed. Then `round-note` each reply, archive them, mark threads complete, and
-   `integrate`.
+   `integrate`. **Only when `integrate` exits 0 and prints `integrate-result v1
+   status=landed`**, clean up: if you took a worktree, `cd` to the main checkout (retire
+   refuses the tree you stand in) and retire your own branch with your presence inline —
+   retire accepts a live owner only when it is you:
+   ```bash
+   cd "$(git worktree list --porcelain | head -1 | sed 's/^worktree //')"
+   COMMS_PRESENCE_NAME=<presence-name> COMMS_PRESENCE_INSTANCE=<instance> \
+     helpers/comms.sh worktree retire <branch> --yes      # worktree sessions only
+   helpers/comms.sh presence release --name <presence-name> --instance <instance>
+   ```
+   `--yes` ends the dry run; it bypasses no gate, and there is no force. A refusal
+   (any non-zero exit; the reasons are on stderr) does not undo the landing: report it and
+   release anyway, leaving the worktree for a human. A session that worked in the shared
+   checkout skips retire and only releases. Any other `integrate` outcome leaves the
+   worktree and branch alone — they hold the unlanded work.
 
 Write the review ask adversarially. "Confirm this looks right" wastes a round; "here is
 the interleaving I think is safe — find one where it isn't" earns its tokens.
@@ -338,7 +352,7 @@ runtime, quote the assertion count with it or measure both sides yourself.
 |---|---|
 | `helpers/comms.sh` | the command router: messaging, presence, worktrees, panels, integrate |
 | `helpers/settings.sh`, `helpers/setup.sh` | the settings loader every entry helper sources (env > project `.comms/settings` > `~/.agent-comms/settings` > `secrets`), and the `comms.sh setup` flow that writes them |
-| `helpers/worktree.sh` | `worktree new` / `list` / `retire`: session worktrees and their hand-run retirement gates |
+| `helpers/worktree.sh` | `worktree new` / `list` / `retire`: session worktrees and their retirement gates (run by the driver after a landing, or by hand) |
 | `helpers/runphase.sh` | spawning and awaiting peer review turns over ACP |
 | `helpers/acp.sh`, `helpers/policy-map.tsv` | ACP consults; the reviewer model/effort resolver and its versioned map — the only place vendor model ids live |
 | `helpers/route.sh`, `route_backend.py`, `route_review.py`, `route_shadow.py` | the /auto classifier, the reviewer routing decisions, and the shadow collector |

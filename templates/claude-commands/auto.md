@@ -71,7 +71,8 @@ asked. Do not narrate every dispatch.
      to the shared checkout — starting direct-safe is not tenure. A `beat` that
      exits 5 healed a vanished record: same rule, re-check before writing.
    - Long runs beat via `"$COMMS_SH" presence with-beat ... -- <cmd>`; `send` and
-     `await` beat automatically when the env vars are set. `release` on clean exit.
+     `await` beat automatically when the env vars are set. `release` on clean exit
+     (after a landing, step 9 retires your worktree first).
    - Landing goes through `"$COMMS_SH" integrate <branch>` — never a manual merge
      while sessions are live.
 
@@ -382,3 +383,33 @@ verdict format. The cycle continues until APPROVE or max rounds.
    Do this ONLY on the terminal approval. A `--plan` approval continues on the same
    thread (step 3), and a max-rounds stop or a split is genuinely unfinished — leave those
    awaiting so `stalled` keeps showing them to the human.
+
+9. **After a successful landing, retire your worktree, then release presence.** This runs
+   ONLY when `"$COMMS_SH" integrate <branch>` exited 0 AND printed
+   `integrate-result v1 status=landed`. Any other outcome leaves the worktree and branch in
+   place — they are the only copy of unlanded work. `integrate` itself retires nothing.
+   - **Worked in the shared checkout (step 0 exit 0, no `worktree new`)?** Skip retire;
+     only release presence.
+   - **Took a worktree in step 0?** Retire ITS branch (`worktree-<slug>`, the branch you
+     just landed) from the main checkout, never from inside the worktree — retire refuses
+     the tree you stand in. `cd` for real, not in a subshell: the worktree is about to
+     disappear, and a session left standing in it has no working directory. Put the
+     presence variables INLINE: retire accepts a live owner only when it is YOU, and an
+     `export` from an earlier tool call is gone by now.
+   ```bash
+   cd "$(git worktree list --porcelain | head -1 | sed 's/^worktree //')"   # the main checkout
+   COMMS_PRESENCE_NAME="<session-name>" COMMS_PRESENCE_INSTANCE="<instance>" \
+     "$COMMS_SH" worktree retire "<branch>" --yes; RETIRE_RC=$?      # worktree sessions only
+   "$COMMS_SH" presence release --name "<session-name>" --instance "<instance>"
+   ```
+   - **Retire keeps every gate.** `--yes` turns off the dry run; it does not bypass
+     anything, and there is no force flag to reach for. Never remove the tree or delete the
+     branch by hand to get past a refusal.
+   - **A refusal does not fail the loop.** Any non-zero `RETIRE_RC` — 3 refused, 4 the
+     branch moved after the check, 1 a failed remove or delete — says why on stderr
+     (`refused: <gate>: <detail>`). Report them to
+     the user in one line — the landing still succeeded, so the status line is still
+     **Done.** — and release presence anyway. The worktree stays for the human to inspect
+     and retire by hand.
+   - Release comes AFTER retire: until retire finishes the tree is still yours, and your
+     presence record is what tells peers so. Release is the last thing the loop does.

@@ -385,3 +385,50 @@ grep -q 'ALSO turns reviewer routing off' "$AIF" && grep -q 'do NOT affect revie
   && ok "auto.md defines how --no-route and --plan/--no-plan interact with reviewer routing, inline so it persists" || fail "auto.md routing flag interaction"
 grep -q -- '--max' "$AIF" && grep -q 'use max' "$AIF" && grep -q 'COMMS_REVIEW_MAX=1' "$AIF" && grep -q 'only ever raises depth' "$AIF" \
   && ok "auto.md maps --max / 'use max' to the reviewer ceiling override" || fail "auto.md use-max override"
+
+section "templates: /auto retires its own worktree after a landing"
+# The last step of the loop: after `integrate` lands, the driver retires ITS worktree from the
+# main checkout (retire refuses the tree you stand in), with its presence inline (retire accepts
+# a live owner only when it is the caller), then releases presence. Pinned in the source, in
+# every runtime copy install.sh deploys, and in AGENTS.md review-loop step 6.
+AIF="$REPO/templates/claude-commands/auto.md"
+auto_retire_step() { awk '/^9\. \*\*After a successful landing, retire your worktree/{p=1} p' "$1"; }
+line_of() { printf '%s\n' "$1" | grep -nF -- "$2" | head -1 | cut -d: -f1; }
+ARS="$(auto_retire_step "$AIF")"
+printf '%s' "$ARS" | grep -qF 'integrate-result v1 status=landed' && printf '%s' "$ARS" | grep -q 'exited 0' \
+  && printf '%s' "$ARS" | grep -q 'Any other outcome leaves the worktree and branch' \
+  && ok "auto.md retires only after integrate exits 0 with status=landed" || fail "auto.md retire is not gated on a landing"
+AR_CD="$(line_of "$ARS" 'cd "$(git worktree list --porcelain | head -1')"
+AR_RT="$(line_of "$ARS" 'worktree retire "<branch>" --yes')"
+AR_RL="$(line_of "$ARS" 'presence release --name')"
+[ -n "$AR_CD" ] && [ -n "$AR_RT" ] && [ -n "$AR_RL" ] && [ "$AR_CD" -lt "$AR_RT" ] && [ "$AR_RT" -lt "$AR_RL" ] \
+  && printf '%s' "$ARS" | grep -q 'COMMS_PRESENCE_NAME=.*COMMS_PRESENCE_INSTANCE=.*\\$' \
+  && ! printf '%s' "$ARS" | grep -q -- '--force' \
+  && ok "auto.md cds to the main checkout, retires with presence inline and no force, then releases" \
+  || fail "auto.md retire order/shape (cd=$AR_CD retire=$AR_RT release=$AR_RL)"
+printf '%s' "$ARS" | grep -q 'A refusal does not fail the loop' && printf '%s' "$ARS" | grep -q 'Skip retire' \
+  && ok "auto.md reports a refusal without failing the loop, and a shared-checkout session skips retire" \
+  || fail "auto.md refusal/shared-checkout handling"
+# Every runtime's copy is the SAME step: Claude and Grok get the template verbatim, Codex gets it
+# wrapped as SKILL.md. Installed into a sandbox so the developer's real homes are never touched.
+ARI="$WORK/auto-retire-install"; mkdir -p "$ARI/proj"; git -C "$ARI/proj" init -q -b main
+(cd "$ARI/proj" && env CODEX_AGENTS_FILE="$ARI/codex-AGENTS.md" CLAUDE_COMMANDS_DIR="$ARI/claude" \
+  CODEX_SKILLS_DIR="$ARI/codex" GROK_COMMANDS_DIR="$ARI/grok" AGENT_COMMS_HOME="$ARI/ac" \
+  bash "$REPO/install.sh" --scope=global >"$ARI/out" 2>&1) || true
+for ar_copy in "claude:$ARI/claude/auto.md" "grok:$ARI/grok/auto.md" "codex:$ARI/codex/auto/SKILL.md"; do
+  ar_rt="${ar_copy%%:*}"; ar_f="${ar_copy#*:}"
+  [ -f "$ar_f" ] && [ -n "$ARS" ] && [ "$(auto_retire_step "$ar_f")" = "$ARS" ] \
+    && ok "$ar_rt's installed /auto carries the retire-after-landing step verbatim" \
+    || fail "$ar_rt's installed /auto is missing or differs in the retire step ($ar_f)"
+done
+AG6="$(awk '/^6\. Repeat until the \*\*gating reviewer\*\*/{p=1} p&&/^Write the review ask adversarially/{exit} p' "$REPO/AGENTS.md")"
+A6_CD="$(line_of "$AG6" 'cd "$(git worktree list --porcelain | head -1')"
+A6_RT="$(line_of "$AG6" 'worktree retire <branch> --yes')"
+A6_RL="$(line_of "$AG6" 'presence release --name')"
+printf '%s' "$AG6" | grep -qF 'integrate-result v1' && printf '%s' "$AG6" | grep -qF 'status=landed' \
+  && [ -n "$A6_CD" ] && [ -n "$A6_RT" ] && [ -n "$A6_RL" ] && [ "$A6_CD" -lt "$A6_RT" ] && [ "$A6_RT" -lt "$A6_RL" ] \
+  && printf '%s' "$AG6" | grep -q 'COMMS_PRESENCE_NAME=.*COMMS_PRESENCE_INSTANCE=' \
+  && printf '%s' "$AG6" | grep -q 'skips retire' && printf '%s' "$AG6" | grep -q 'does not undo the landing' \
+  && ! printf '%s' "$AG6" | grep -q -- '--force' \
+  && ok "AGENTS.md step 6 carries the same landed-gated retire, then release" \
+  || fail "AGENTS.md step 6 retire step (cd=$A6_CD retire=$A6_RT release=$A6_RL)"

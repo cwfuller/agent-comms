@@ -49,6 +49,7 @@ comms.sh: bounded reads (lessons)	20
 comms.sh: bounded reads (archive-search)	10
 comms.sh: help prints its whole header	2
 templates: /auto query route	11
+templates: /auto retires its own worktree after a landing	7
 comms.sh: route fail-open	11
 comms.sh: route policy	34
 route.sh: the shadow collector cannot reach /auto	31

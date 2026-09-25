@@ -5,9 +5,10 @@
 # `set -euo pipefail`.
 #
 # Design: docs/ROADMAP.md "session-lifecycle retirement" (2026-09-03) plus the basis retire
-# gates. `list` only reports. `retire` is HAND-RUN: one target per invocation, re-enumerated
-# from git at invocation time, dry-run unless --yes. Nothing calls it automatically —
-# `integrate` retires nothing.
+# gates. `list` only reports. `retire` is one target per invocation, re-enumerated from git at
+# invocation time, dry-run unless --yes. No helper calls it: `integrate` retires nothing. The
+# /auto driver runs it for its own worktree after a landing (AGENTS.md step 6); otherwise a
+# human runs it.
 #
 # Every unknown is fail-closed: a probe that cannot answer prints `?` in `list` and is a
 # refusal in `retire`. An empty field must never read as a clean result.
