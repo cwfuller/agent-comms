@@ -1360,10 +1360,15 @@ CR_O8="$(run_cr compose --set "$CR_S1" --out "$CR_OUTF" 2>/dev/null)"
 CR_S9="$(cr_panel unreadable 1 5)"
 cr_reply unreadable codex APPROVE '- None.'; cr_reply unreadable grok APPROVE '- None.'
 CR_REQ9="$(find "$CR_FIX/.comms/to-codex" -type f -name '*.md' | xargs grep -l '^thread: cr-unreadable-codex$' | head -1)"
+# The reply carries a DIFFERENT cap (7), so only the fallback can produce it. As root the mode
+# cannot hide the request and its own cap (5) is read instead. (grok, r3 advisory.)
+CR_REP9="$(grep -l '^thread: cr-unreadable-codex$' "$CR_FIX/.comms/archive/"*.md | head -1)"
+sed 's/^max-rounds: 5$/max-rounds: 7/' "$CR_REP9" > "$CR_REP9.tmp" && mv "$CR_REP9.tmp" "$CR_REP9"
+CR_WANT9=7; [ "$(id -u)" = 0 ] && CR_WANT9=5
 chmod 000 "$CR_REQ9"
 CR_O9="$(run_cr compose --set "$CR_S9" 2>/dev/null)" && CR_RC9=0 || CR_RC9=$?
 chmod 644 "$CR_REQ9"
-[ "$CR_RC9" = 0 ] && [ "$(cr_field "$CR_O9" max_rounds)" = 5 ] && [ "$(cr_field "$CR_O9" gate)" = pass ] \
+[ "$CR_RC9" = 0 ] && [ "$(cr_field "$CR_O9" max_rounds)" = "$CR_WANT9" ] && [ "$(cr_field "$CR_O9" gate)" = pass ] \
   && ok "an unreadable request falls back to the reply's cap instead of aborting compose" || fail "unreadable request: rc=$CR_RC9 $(cr_line "$CR_O9")"
 
 # The rule itself, for the cases a live panel cannot cheaply reach.
