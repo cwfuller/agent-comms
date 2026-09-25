@@ -773,12 +773,18 @@ cmd_list() {
   fi
 }
 
+# The ONE frontmatter-field rule (CRLF-tolerant; the value keeps any trailing whitespace, which is
+# what the state writer keys on). Per file: the frontmatter opens on line 1 with `---`, the first
+# `<field>:` inside it wins. `one=1` stops at the first file's answer; without it every file on the
+# command line answers once (the idle scan's batch form), so the two can never drift apart.
+FRONTMATTER_FIELD_AWK='FNR==1 {inFM=0; seen=0} {sub(/\r$/, "")}
+    FNR==1 && $0=="---" {inFM=1; next}
+    !inFM || seen {next}
+    $0=="---" {seen=1; if (one) exit; next}
+    index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print; seen=1; if (one) exit}'
 frontmatter_field() {
-  # frontmatter_field <file> <field> — prints the value or nothing (CRLF-tolerant)
-  awk -v f="$2" '{sub(/\r$/, "")}
-    NR==1 && $0=="---" {inFM=1; next}
-    inFM && $0=="---" {exit}
-    inFM && index($0, f ":")==1 {sub("^" f ":[[:space:]]*", ""); print; exit}' "$1"
+  # frontmatter_field <file> <field> — prints the value or nothing
+  awk -v f="$2" -v one=1 "$FRONTMATTER_FIELD_AWK" "$1"
 }
 
 # resolve_message_path <path>
@@ -6163,12 +6169,14 @@ state_message_threads() {
 }
 
 state_thread_lines() {  # <file>... — the safe_name'd frontmatter thread of each; non-zero on an unreadable file
-  local out rc
-  # -m1 is per file, so each file answers with its frontmatter `thread:`. grep exit 1 is "no
-  # thread in these files" (fine); 2 is a file it could not read (not fine).
-  out="$(grep -m1 -h '^thread:' "$@" 2>/dev/null)" && rc=0 || rc=$?
-  [ "$rc" -le 1 ] || return 1
-  [ -z "$out" ] || printf '%s\n' "$out" | sed 's/^thread:[[:space:]]*//; s/[[:space:]]*$//; /^$/d' | safe_name_lines
+  local out f
+  # The value is read by the SAME rule `send` used to name the state file (frontmatter_field's
+  # program), so trailing whitespace or a CRLF cannot make a message miss its own thread.
+  # Readability is checked first: awk implementations differ on whether an unopenable input is
+  # fatal, and an unread message must fail the scan everywhere.
+  for f in "$@"; do [ -r "$f" ] || return 1; done
+  out="$(awk -v f=thread "$FRONTMATTER_FIELD_AWK" "$@" 2>/dev/null)" || return 1
+  [ -z "$out" ] || printf '%s\n' "$out" | sed '/^$/d' | safe_name_lines
   return 0
 }
 
@@ -6232,7 +6240,11 @@ state_idle_rows() {
     [ -n "$id" ] || continue
     f="$dir/$id.json"
     [ -f "$f" ] || { printf 'missing\t%s\t?\t?\t?\t?\t?\n' "$id"; continue; }
-    st="$(json_get "$f" status)"
+    # A state file that cannot be read, or carries no status, is UNKNOWN: its send time and status
+    # are part of the evidence, and a missing piece must never default toward idle.
+    if [ ! -r "$f" ] || ! st="$(json_get "$f" status)" || [ -z "$st" ]; then
+      printf 'unknown\t%s\t?\t?\t?\t?\t%s\n' "$id" "$un"; continue
+    fi
     # Settled is decided by status alone and needs no clock: most state files are complete.
     if state_settled "$st"; then printf 'settled\t%s\t?\t?\t%s\t?\t%s\n' "$id" "$st" "$un"; continue; fi
     if act="$(state_last_activity "$f")"; then
@@ -6291,8 +6303,67 @@ cmd_state_idle() {  # state idle [--days N] — report only
   echo "state idle: $n of $total thread(s) idle for ${days}+ days (no state change and no message on the thread since $(mtime_iso "$(( $(date +%s) - days * 86400 ))")). Nothing was changed; mark with 'comms.sh state legacy [--days $days] <id>...'"
 }
 
+# state_mark_legacy <days> <id> — judge ONE named id and mark it; prints the outcome, non-zero
+# when refused. The hold (a hard link to the judged inode) is released on every path.
+state_mark_legacy() {
+  local days="$1" id="$2" f held tmp snap mt row kind rid d iso st aw un ev now_iso
+  f="$(state_dir)/$id.json"
+  [ -f "$f" ] || { echo "refused: $id: no such thread state" >&2; return 1; }
+  # HOLD the inode being judged, snapshot it, judge, and swap only if nothing moved. `send`
+  # rewrites a state file IN PLACE (`>`), so a send landing between the last check and the rename
+  # writes the HELD inode — which the post-rename check sees, and undoes.
+  held="$f.held.$$"; tmp="$f.legacy.$$"
+  if ! ln "$f" "$held" 2>/dev/null || ! snap="$(cat "$held" 2>/dev/null)" || ! mt="$(file_mtime "$held")"; then
+    rm -f "$held"; echo "refused: $id: cannot read or hold the thread state" >&2; return 1
+  fi
+  # Judged into a variable first, then split: an `IFS=... read < <(cmd)` prefix leaks the tab-only
+  # IFS into the process substitution under bash 3.2.
+  row="$(state_idle_rows "$days" "$id")" || row=fail
+  IFS=$'\t' read -r kind rid d iso st aw un <<<"$row" || kind=fail
+  case "$kind" in
+    idle) ;;
+    settled) rm -f "$held"; echo "refused: $id: already $st" >&2; return 1 ;;
+    active) rm -f "$held"; echo "refused: $id: not idle for $days days (last state activity $iso, or a message on the thread since)" >&2; return 1 ;;
+    unknown) rm -f "$held"; echo "refused: $id: state or activity unreadable — cannot show it is idle" >&2; return 1 ;;
+    *) rm -f "$held"; echo "refused: $id: could not read every message file — cannot show it is idle" >&2; return 1 ;;
+  esac
+  now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  ev="idle ${d}d when marked: last state activity $iso, no message on the thread in the $days days before $now_iso, $un unread in inboxes; was status=${st:-?} awaiting=${aw:-?}"
+  # The evidence goes right after the status line, never at the end: runphase's exit mirror
+  # rewrites the LAST field (last_delivery), so the tail must stay as send wrote it.
+  # Values reach awk through ENVIRON, never `-v`: `-v` re-interprets backslash escapes, which
+  # would undo json_escape. (claude-review, slice0b r1.)
+  if ! printf '%s\n' "$snap" | LEG_EV="$(json_escape "$ev")" LEG_AT="$now_iso" \
+        LEG_PS="$(json_escape "$st")" LEG_PA="$(json_escape "$aw")" awk '
+      !done && /"status": "[^"]*"/ { sub(/"status": "[^"]*"/, "\"status\": \"legacy\""); print
+        printf "  \"legacy_marked_at\": \"%s\",\n  \"legacy_prior_status\": \"%s\",\n  \"legacy_prior_awaiting\": \"%s\",\n  \"legacy_evidence\": \"%s\",\n", ENVIRON["LEG_AT"], ENVIRON["LEG_PS"], ENVIRON["LEG_PA"], ENVIRON["LEG_EV"]
+        done = 1; next }
+      { gsub(/"awaiting_from": "[^"]*"/, "\"awaiting_from\": \"none\""); print }' >"$tmp" 2>/dev/null \
+      || ! grep -q '"status": "legacy"' "$tmp" 2>/dev/null; then
+    rm -f "$held" "$tmp"; echo "refused: $id: could not write the mark" >&2; return 1
+  fi
+  # Keep the file's mtime: marking is not thread activity, and the evidence must stay stable.
+  touch -r "$held" "$tmp" 2>/dev/null || true
+  # Pre-check: the path still names the held inode, unchanged since it was judged.
+  if [ ! "$f" -ef "$held" ] || [ "$(cat "$held" 2>/dev/null)" != "$snap" ] || [ "$(file_mtime "$held")" != "$mt" ]; then
+    rm -f "$held" "$tmp"; echo "refused: $id: the thread state changed while it was being marked — re-run 'state idle'" >&2; return 1
+  fi
+  mv "$tmp" "$f" || { rm -f "$held" "$tmp"; echo "refused: $id: could not write the mark" >&2; return 1; }
+  # Post-check: a send that wrote the held inode in the window between the pre-check and the rename
+  # is put back — the newer state wins over the mark. What remains is a writer that opened the old
+  # inode before the rename and wrote only after this check: state writers take no lock, so that
+  # last instant cannot be closed from here.
+  if [ "$(cat "$held" 2>/dev/null)" != "$snap" ] || [ "$(file_mtime "$held")" != "$mt" ]; then
+    mv "$held" "$f" 2>/dev/null || rm -f "$held"
+    echo "refused: $id: a send wrote the thread state while it was being marked — its state was kept" >&2; return 1
+  fi
+  rm -f "$held"
+  echo "marked legacy: $id ($ev)"
+  return 0
+}
+
 cmd_state_legacy() {  # state legacy [--days N] <id>... — mark only what the operator names
-  local parsed days id f snap tmp mt refused=0 kind rid d iso st aw un ev now_iso
+  local parsed days id refused=0
   parsed="$(state_days_arg legacy "$@")" || exit 2
   days="${parsed%%$'\n'*}"
   local -a ids=()
@@ -6304,46 +6375,7 @@ cmd_state_legacy() {  # state legacy [--days N] <id>... — mark only what the o
     case "$id" in ''|.*|*/*|*[!A-Za-z0-9._-]*) usage_err "state legacy: invalid id '$(clip "$id")' — use an id exactly as 'state idle' printed it" ;; esac
   done
   for id in "${ids[@]}"; do
-    f="$(state_dir)/$id.json"
-    # Snapshot, judge, then swap only if the file is still the one that was judged: a send
-    # landing in between rewrites the thread as in-progress, and that must win.
-    if [ ! -f "$f" ] || ! snap="$(cat "$f" 2>/dev/null)" || ! mt="$(file_mtime "$f")"; then
-      echo "refused: $id: no such thread state" >&2; refused=1; continue
-    fi
-    # Judged into a variable first, then split: an `IFS=... read < <(cmd)` prefix leaks the tab-only
-    # IFS into the process substitution under bash 3.2.
-    ev="$(state_idle_rows "$days" "$id")" || ev=fail
-    IFS=$'\t' read -r kind rid d iso st aw un <<<"$ev" || kind=fail
-    case "$kind" in
-      idle) ;;
-      settled) echo "refused: $id: already $st" >&2; refused=1; continue ;;
-      active) echo "refused: $id: not idle for $days days (last state activity $iso, or a message on the thread since)" >&2; refused=1; continue ;;
-      unknown) echo "refused: $id: last activity unreadable — cannot show it is idle" >&2; refused=1; continue ;;
-      *) echo "refused: $id: could not read every message file — cannot show it is idle" >&2; refused=1; continue ;;
-    esac
-    now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    ev="idle ${d}d when marked: last state activity $iso, no message on the thread in the $days days before $now_iso, $un unread in inboxes; was status=${st:-?} awaiting=${aw:-?}"
-    tmp="$f.legacy.$$"
-    # The evidence goes right after the status line, never at the end: runphase's exit mirror
-    # rewrites the LAST field (last_delivery), so the tail must stay as send wrote it.
-    # Values reach awk through ENVIRON, never `-v`: `-v` re-interprets backslash escapes, which
-    # would undo json_escape. (claude-review, slice0b r1.)
-    if ! printf '%s\n' "$snap" | LEG_EV="$(json_escape "$ev")" LEG_AT="$now_iso" \
-          LEG_PS="$(json_escape "$st")" LEG_PA="$(json_escape "$aw")" awk '
-        !done && /"status": "[^"]*"/ { sub(/"status": "[^"]*"/, "\"status\": \"legacy\""); print
-          printf "  \"legacy_marked_at\": \"%s\",\n  \"legacy_prior_status\": \"%s\",\n  \"legacy_prior_awaiting\": \"%s\",\n  \"legacy_evidence\": \"%s\",\n", ENVIRON["LEG_AT"], ENVIRON["LEG_PS"], ENVIRON["LEG_PA"], ENVIRON["LEG_EV"]
-          done = 1; next }
-        { gsub(/"awaiting_from": "[^"]*"/, "\"awaiting_from\": \"none\""); print }' >"$tmp" 2>/dev/null \
-        || ! grep -q '"status": "legacy"' "$tmp" 2>/dev/null; then
-      rm -f "$tmp"; echo "refused: $id: could not write the mark" >&2; refused=1; continue
-    fi
-    # Keep the file's mtime: marking is not thread activity, and the evidence must stay stable.
-    touch -r "$f" "$tmp" 2>/dev/null || true
-    if [ "$(cat "$f" 2>/dev/null)" != "$snap" ] || [ "$(file_mtime "$f")" != "$mt" ]; then
-      rm -f "$tmp"; echo "refused: $id: the thread state changed while it was being marked — re-run 'state idle'" >&2; refused=1; continue
-    fi
-    mv "$tmp" "$f" || { rm -f "$tmp"; echo "refused: $id: could not write the mark" >&2; refused=1; continue; }
-    echo "marked legacy: $id ($ev)"
+    if state_mark_legacy "$days" "$id"; then :; else refused=1; fi
   done
   [ "$refused" = 0 ] || return 3
   return 0

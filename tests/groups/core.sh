@@ -781,6 +781,23 @@ IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-many 2>&1)"
 [ "$IDL_RC" = 3 ] && [ "$(idl_status idl-many)" = in-progress ] && printf '%s' "$IDL_OUT" | grep -q 'refused: feature-helper-tests_idl-many: not idle' \
   && ok "with more message files than one scan batch, recent activity is still seen and judged (not a read failure)" || fail "legacy many (rc=$IDL_RC): $IDL_OUT"
 rm -f "$REPO_FIX"/.comms/archive/feature-helper-tests_idl-bulk-*.md
+# A thread value with trailing whitespace: `send` keys the state on it verbatim (`idl-sp_`), so the
+# scan must read it by the same frontmatter rule or a fresh message goes unseen. (codex, slice0b.)
+printf '{\n  "workspace": "feature-helper-tests",\n  "thread": "idl-sp ",\n  "status": "in-progress",\n  "awaiting_from": "codex",\n  "awaiting_since_epoch": "%s",\n  "last_delivery": "manual"\n}\n' "$IDL_OLD" > "$IDL_SD/feature-helper-tests_idl-sp_.json"
+touch -t "$(idl_stamp "$IDL_OLD")" "$IDL_SD/feature-helper-tests_idl-sp_.json"
+printf -- '---\r\nthread: idl-sp \r\n---\r\n' > "$REPO_FIX/.comms/archive/feature-helper-tests_idl-sp-now.md"
+IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-sp_ 2>&1)"; IDL_RC=$?
+[ "$IDL_RC" = 3 ] && printf '%s' "$IDL_OUT" | grep -q 'refused: feature-helper-tests_idl-sp_: not idle' \
+  && grep -q '"status": "in-progress"' "$IDL_SD/feature-helper-tests_idl-sp_.json" \
+  && ok "a thread with trailing whitespace (and a CRLF message) still sees its own recent message" || fail "legacy trailing-space (rc=$IDL_RC): $IDL_OUT"
+# An unreadable state file is UNKNOWN: its status and send time are evidence nobody can see.
+idl_state idl-locked in-progress "$IDL_OLD" "$IDL_OLD"; chmod 000 "$IDL_SD/feature-helper-tests_idl-locked.json"
+IDL_OUT2="$(run_comms state idle --days 30 2>&1)"
+IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-locked 2>&1)"; IDL_RC=$?
+chmod 644 "$IDL_SD/feature-helper-tests_idl-locked.json"
+[ "$IDL_RC" = 3 ] && ! printf '%s\n' "$IDL_OUT2" | grep -q '^idle id=feature-helper-tests_idl-locked ' \
+  && printf '%s\n' "$IDL_OUT2" | grep -q 'feature-helper-tests_idl-locked: last activity unreadable' && [ "$(idl_status idl-locked)" = in-progress ] \
+  && ok "an unreadable state file is never listed idle and never marked" || fail "unreadable state (rc=$IDL_RC): $IDL_OUT | $IDL_OUT2"
 IDL_OUT="$(run_comms state legacy --days 30 feature-helper-tests_idl-nosuch 2>&1)"; IDL_RC=$?
 [ "$IDL_RC" = 3 ] && printf '%s' "$IDL_OUT" | grep -q 'no such thread state' \
   && ok "an unknown id is refused by name" || fail "legacy unknown (rc=$IDL_RC): $IDL_OUT"
