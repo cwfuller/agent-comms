@@ -62,6 +62,11 @@ set -euo pipefail
 RP_EXPECT_STATE="${COMMS_RUNPHASE_EXPECT_STATE:-}"
 
 die() { echo "runphase.sh: $*" >&2; exit 1; }
+usage_err() { echo "runphase.sh: $*" >&2; exit 2; }
+# need_value <context> <argc> <option> — a value-taking option given LAST refuses as usage (exit 2)
+# naming it, instead of the loop's trailing shift failing silently under errexit (exit 1, no
+# message). Same contract as comms.sh's need_value; call it before the consuming shift.
+need_value() { [ "$2" -ge 2 ] || usage_err "$1: $3 needs a value"; }
 
 # sane_secs <value> <default> — a usable whole number of seconds, or the default.
 #
@@ -1293,13 +1298,13 @@ cmd_spawn() {
   local msg="" sandbox="" timeout="" agent="codex" provider="" via="${COMMS_RUNPHASE_VIA:-}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --message) shift; msg="${1:-}" ;;
+      --message) need_value "spawn" $# "$1"; shift; msg="$1" ;;
       # --provider is the pre-identity spelling of --agent: its VALUE is the identity, and it
       # never sets $provider — only the registry does.
-      --agent|--provider) shift; agent="${1:-}" ;;
-      --sandbox) shift; sandbox="${1:-}" ;;
-      --timeout-secs) shift; timeout="${1:-}" ;;
-      --via) shift; via="${1:-}" ;;
+      --agent|--provider) need_value "spawn" $# "$1"; shift; agent="$1" ;;
+      --sandbox) need_value "spawn" $# "$1"; shift; sandbox="$1" ;;
+      --timeout-secs) need_value "spawn" $# "$1"; shift; timeout="$1" ;;
+      --via) need_value "spawn" $# "$1"; shift; via="$1" ;;
       *) die "spawn: unknown argument '$1'" ;;
     esac
     shift
@@ -2589,13 +2594,13 @@ cmd_run() {
   local via="${COMMS_RUNPHASE_VIA:-}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --message) shift; msg="${1:-}" ;;
-      --dir) shift; run_dir="${1:-}" ;;
-      --agent|--provider) shift; agent="${1:-}" ;;   # --provider: the pre-identity spelling
-      --sandbox) shift; sandbox="${1:-}" ;;
-      --timeout-secs) shift; timeout="${1:-}" ;;
+      --message) need_value "run" $# "$1"; shift; msg="$1" ;;
+      --dir) need_value "run" $# "$1"; shift; run_dir="$1" ;;
+      --agent|--provider) need_value "run" $# "$1"; shift; agent="$1" ;;   # --provider: the pre-identity spelling
+      --sandbox) need_value "run" $# "$1"; shift; sandbox="$1" ;;
+      --timeout-secs) need_value "run" $# "$1"; shift; timeout="$1" ;;
       --no-deliver) RUNPHASE_NO_DELIVER=1; export RUNPHASE_NO_DELIVER ;;
-      --via) shift; via="${1:-}" ;;
+      --via) need_value "run" $# "$1"; shift; via="$1" ;;
       *) die "run: unknown argument '$1'" ;;
     esac
     shift
@@ -4038,7 +4043,7 @@ cmd_await() {
   local run_dir="" timeout=7200
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --timeout-secs) shift; timeout="${1:-}" ;;
+      --timeout-secs) need_value "await" $# "$1"; shift; timeout="$1" ;;
       *) [ -z "$run_dir" ] && run_dir="$1" || die "await: unexpected argument '$1'" ;;
     esac
     shift

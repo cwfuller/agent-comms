@@ -150,7 +150,10 @@ summary kept in the script's header banner, and this table is its long form.
 missing required argument) from the verbs that classify one; `1` any other failure, with a
 `comms.sh: …` line on stderr. Older verbs (`list`, `archive`, `send`, `deliver`, `state`,
 `verdict`, `clean`, `whoami`) report a missing or unknown argument as `1`, and every verb reports
-an unregistered agent name as `1`. Verbs that a program drives classify further — `integrate`,
+an unregistered agent name as `1`. The exception, in every verb including those older ones and
+`runphase.sh spawn`/`run`/`await`: a value-taking option with nothing after it (`presence claim
+--name`) is always `2`, `<verb>: <option> needs a value`, refused before anything is written.
+Verbs that a program drives classify further — `integrate`,
 `verify`, `compose`, `presence`, `worktree retire`, `lessons`, `archive-search`,
 `error-envelope`, `reply-check` — and their rows or sections below give the full codes.
 

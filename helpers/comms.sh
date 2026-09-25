@@ -733,8 +733,8 @@ cmd_list() {
   local as="" thread=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --as) shift; as="${1:-}" ;;
-      --thread) shift; thread="${1:-}" ;;
+      --as) need_value "list" $# "$1"; shift; as="$1" ;;
+      --thread) need_value "list" $# "$1"; shift; thread="$1" ;;
       *) die "list: unknown argument '$1'" ;;
     esac
     shift
@@ -1005,6 +1005,14 @@ LESSONS_MIN_BYTES=512   # below this a bounded summary cannot be guaranteed
 
 usage_err() { echo "comms.sh: $*" >&2; exit 2; }
 
+# need_value <context> <argc> <option> — THE guard for a value-taking option, called BEFORE the
+# shift that consumes the value, with the parse loop's own $#:
+#     --name) need_value "presence $sub" $# "$1"; shift; name="$1" ;;
+# Without it the bare `shift; name="${1:-}"` shape, given the option LAST, leaves $# at 0, and the
+# loop's trailing shift then fails under errexit: exit 1, nothing on stderr, nothing done — a usage
+# mistake that reads as a crash. Refuses as usage (exit 2), naming the option as it was spelled.
+need_value() { [ "$2" -ge 2 ] || usage_err "$1: $3 needs a value"; }
+
 clip() {  # clip <string> [max-total-bytes] — fixed width, visibly marked
   local LC_ALL=C s="$1" w="${2:-$CLIP_WIDTH}"
   if [ "${#s}" -le "$w" ]; then printf '%s' "$s"; else printf '%s...' "${s:0:$((w - 3))}"; fi
@@ -1049,9 +1057,9 @@ cmd_lessons() {
   local bytes=4000 surface="" surface_set=false file="" top=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --bytes)   shift; bytes="${1:-}" ;;
-      --surface) shift; surface="${1:-}"; surface_set=true ;;
-      --file)    shift; file="${1:-}" ;;
+      --bytes)   need_value "lessons" $# "$1"; shift; bytes="$1" ;;
+      --surface) need_value "lessons" $# "$1"; shift; surface="$1"; surface_set=true ;;
+      --file)    need_value "lessons" $# "$1"; shift; file="$1" ;;
       *) usage_err "lessons: unknown argument '$(clip "$1")'" ;;
     esac
     shift || true
@@ -1146,8 +1154,8 @@ cmd_archive_search() {
     if [ "$opts" = true ]; then
       case "$1" in
         --)      opts=false; shift; continue ;;
-        --bytes) shift; bytes="${1:-}"; shift; continue ;;
-        --limit) shift; limit="${1:-}"; shift; continue ;;
+        --bytes) need_value "archive-search" $# "$1"; shift; bytes="$1"; shift; continue ;;
+        --limit) need_value "archive-search" $# "$1"; shift; limit="$1"; shift; continue ;;
         -?*)     usage_err "archive-search: unknown option '$(clip "$1")' (use -- before a literal pattern starting with '-')" ;;
       esac
     fi
@@ -1517,13 +1525,13 @@ cmd_findings() {
   local out="" role="gating" rsid="" aid="" rver="" pver="" bsha="" files="" header_only=false rebuild=false
   while [ $# -gt 0 ]; do
     case "$1" in
-      --out)              shift; out="${1:-}" ;;
-      --role)             shift; role="${1:-}" ;;
-      --review-set)       shift; rsid="${1:-}" ;;
-      --artifact)         shift; aid="${1:-}" ;;
-      --reviewer-version) shift; rver="${1:-}" ;;
-      --prompt-version)   shift; pver="${1:-}" ;;
-      --base-sha)         shift; bsha="${1:-}" ;;
+      --out)              need_value "findings" $# "$1"; shift; out="$1" ;;
+      --role)             need_value "findings" $# "$1"; shift; role="$1" ;;
+      --review-set)       need_value "findings" $# "$1"; shift; rsid="$1" ;;
+      --artifact)         need_value "findings" $# "$1"; shift; aid="$1" ;;
+      --reviewer-version) need_value "findings" $# "$1"; shift; rver="$1" ;;
+      --prompt-version)   need_value "findings" $# "$1"; shift; pver="$1" ;;
+      --base-sha)         need_value "findings" $# "$1"; shift; bsha="$1" ;;
       --raw)              FINDINGS_RAW=1; export FINDINGS_RAW ;;
       --probe)            FINDINGS_PROBE=1; export FINDINGS_PROBE ;;
       --header)           header_only=true ;;
@@ -1891,10 +1899,10 @@ cmd_review_route() {
       local _vid="${1:-}" _vt="" _vp="" _vd="" _va="" _vbase="" _vleg=""; [ "$#" -gt 0 ] && shift
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --thread)       _vt="${2:-}"; shift 2 || shift ;;
-          --phase)        _vp="${2:-}"; shift 2 || shift ;;
-          --leg-dispatch) _vd="${2:-}"; shift 2 || shift ;;
-          --leg-agent)    _va="${2:-}"; shift 2 || shift ;;
+          --thread)       need_value "review-route verify" $# "$1"; _vt="$2"; shift 2 ;;
+          --phase)        need_value "review-route verify" $# "$1"; _vp="$2"; shift 2 ;;
+          --leg-dispatch) need_value "review-route verify" $# "$1"; _vd="$2"; shift 2 ;;
+          --leg-agent)    need_value "review-route verify" $# "$1"; _va="$2"; shift 2 ;;
           *) usage_err "review-route verify: unknown option '$(clip "$1")'" ;;
         esac
       done
@@ -2184,9 +2192,9 @@ cmd_ask() {
   local from="" to="" qfile="" wait_flag="" words=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --from) shift; from="${1:-}" ;;
-      --to)   shift; to="${1:-}" ;;
-      --file) shift; qfile="${1:-}" ;;
+      --from) need_value "ask" $# "$1"; shift; from="$1" ;;
+      --to)   need_value "ask" $# "$1"; shift; to="$1" ;;
+      --file) need_value "ask" $# "$1"; shift; qfile="$1" ;;
       --wait) wait_flag="--wait" ;;
       -?*)    usage_err "ask: unknown option '$(clip "$1")'" ;;
       *)      words="${words:+$words }$1" ;;
@@ -2249,7 +2257,7 @@ cmd_panel() {
   if [ "$sub" = "status" ]; then
     local set_id=""
     while [ $# -gt 0 ]; do
-      case "$1" in --set) shift; set_id="${1:-}" ;; -?*) usage_err "panel status: unknown option '$(clip "$1")'" ;; esac
+      case "$1" in --set) need_value "panel status" $# "$1"; shift; set_id="$1" ;; -?*) usage_err "panel status: unknown option '$(clip "$1")'" ;; esac
       shift
     done
     local idx; idx="$(findings_set_index "$root")"
@@ -2398,8 +2406,8 @@ $st_p	$ag"
   local to="" req="" set_id=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --to)  shift; to="${1:-}" ;;
-      --set) shift; set_id="${1:-}" ;;
+      --to)  need_value "panel dispatch" $# "$1"; shift; to="$1" ;;
+      --set) need_value "panel dispatch" $# "$1"; shift; set_id="$1" ;;
       -?*)   usage_err "panel dispatch: unknown option '$(clip "$1")'" ;;
       *)     [ -z "$req" ] || usage_err "panel dispatch: one review-request only"; req="$1" ;;
     esac
@@ -2758,9 +2766,9 @@ cmd_compose() {
   local set_id="" out="" degrade="" DEGRADED_AGENTS="" DEGRADED_STATE="" DEGRADED_WHY=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --degrade) shift; degrade="${1:-}" ;;
-      --set) shift; set_id="${1:-}" ;;
-      --out) shift; out="${1:-}" ;;
+      --degrade) need_value "compose" $# "$1"; shift; degrade="$1" ;;
+      --set) need_value "compose" $# "$1"; shift; set_id="$1" ;;
+      --out) need_value "compose" $# "$1"; shift; out="$1" ;;
       -?*)   usage_err "compose: unknown option '$(clip "$1")'" ;;
       *)     usage_err "compose: unexpected argument '$(clip "$1")'" ;;
     esac
@@ -3420,20 +3428,20 @@ cmd_events() {
         reqid="" mid="" run_dir="" status="" note="" limit=50
   while [ $# -gt 0 ]; do
     case "$1" in
-      --kind)       shift; kind="${1:-}" ;;
-      --set)        shift; set_id="${1:-}" ;;
-      --dispatch)   shift; dispatch="${1:-}" ;;
-      --thread)     shift; thread="${1:-}" ;;
-      --round)      shift; round="${1:-}" ;;
-      --agent)      shift; agent="${1:-}" ;;
-      --role)       shift; role="${1:-}" ;;
-      --artifact)   shift; artifact="${1:-}" ;;
-      --request-id) shift; reqid="${1:-}" ;;
-      --message-id) shift; mid="${1:-}" ;;
-      --run-dir)    shift; run_dir="${1:-}" ;;
-      --status)     shift; status="${1:-}" ;;
-      --note)       shift; note="${1:-}" ;;
-      --limit)      shift; limit="${1:-}" ;;
+      --kind)       need_value "events $sub" $# "$1"; shift; kind="$1" ;;
+      --set)        need_value "events $sub" $# "$1"; shift; set_id="$1" ;;
+      --dispatch)   need_value "events $sub" $# "$1"; shift; dispatch="$1" ;;
+      --thread)     need_value "events $sub" $# "$1"; shift; thread="$1" ;;
+      --round)      need_value "events $sub" $# "$1"; shift; round="$1" ;;
+      --agent)      need_value "events $sub" $# "$1"; shift; agent="$1" ;;
+      --role)       need_value "events $sub" $# "$1"; shift; role="$1" ;;
+      --artifact)   need_value "events $sub" $# "$1"; shift; artifact="$1" ;;
+      --request-id) need_value "events $sub" $# "$1"; shift; reqid="$1" ;;
+      --message-id) need_value "events $sub" $# "$1"; shift; mid="$1" ;;
+      --run-dir)    need_value "events $sub" $# "$1"; shift; run_dir="$1" ;;
+      --status)     need_value "events $sub" $# "$1"; shift; status="$1" ;;
+      --note)       need_value "events $sub" $# "$1"; shift; note="$1" ;;
+      --limit)      need_value "events $sub" $# "$1"; shift; limit="$1" ;;
       --all)        limit=0 ;;
       -?*)          usage_err "events: unknown option '$(clip "$1")'" ;;
       *)            usage_err "events: unexpected argument '$(clip "$1")'" ;;
@@ -3627,8 +3635,8 @@ cmd_friction() {
   local note="" thread="" sev=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --thread)   shift; thread="${1:-}" ;;
-      --severity) shift; sev="${1:-}" ;;
+      --thread)   need_value "friction" $# "$1"; shift; thread="$1" ;;
+      --severity) need_value "friction" $# "$1"; shift; sev="$1" ;;
       --list)     cmd_friction_list; return 0 ;;
       -?*)        usage_err "friction: unknown option '$(clip "$1")'" ;;
       *)          note="${note:+$note }$1" ;;
@@ -3736,7 +3744,7 @@ cmd_round_note() {
   local f="" note=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --note) shift; note="${1:-}" ;;
+      --note) need_value "round-note" $# "$1"; shift; note="$1" ;;
       -?*)    usage_err "round-note: unknown option '$(clip "$1")'" ;;
       *)      [ -z "$f" ] || usage_err "round-note: one reply file only"; f="$1" ;;
     esac
@@ -3797,10 +3805,10 @@ cmd_shadow() {
   local to="" req="" rsid="" out="" timeout=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --to)           shift; to="${1:-}" ;;
-      --review-set)   shift; rsid="${1:-}" ;;
-      --out)          shift; out="${1:-}" ;;
-      --timeout-secs) shift; timeout="${1:-}" ;;
+      --to)           need_value "shadow" $# "$1"; shift; to="$1" ;;
+      --review-set)   need_value "shadow" $# "$1"; shift; rsid="$1" ;;
+      --out)          need_value "shadow" $# "$1"; shift; out="$1" ;;
+      --timeout-secs) need_value "shadow" $# "$1"; shift; timeout="$1" ;;
       -?*)            usage_err "shadow: unknown option '$(clip "$1")'" ;;
       *)              [ -z "$req" ] || usage_err "shadow: one review-request only"; req="$1" ;;
     esac
@@ -4237,12 +4245,12 @@ cmd_presence() {
   local name="" instance="" role="" state="" pid="" force="" presence_no_heartbeat=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --name)     shift; name="${1:-}" ;;
-      --instance) shift; instance="${1:-}" ;;
-      --role)     shift; role="${1:-}" ;;
-      --state)    shift; state="${1:-}" ;;
-      --pid)      shift; pid="${1:-}" ;;
-      --force)    shift; force="${1:-}" ;;
+      --name)     need_value "presence $sub" $# "$1"; shift; name="$1" ;;
+      --instance) need_value "presence $sub" $# "$1"; shift; instance="$1" ;;
+      --role)     need_value "presence $sub" $# "$1"; shift; role="$1" ;;
+      --state)    need_value "presence $sub" $# "$1"; shift; state="$1" ;;
+      --pid)      need_value "presence $sub" $# "$1"; shift; pid="$1" ;;
+      --force)    need_value "presence $sub" $# "$1"; shift; force="$1" ;;
       --no-heartbeat) presence_no_heartbeat=1 ;;
       --) shift; break ;;
       -?*) usage_err "presence $sub: unknown option '$(clip "$1")'" ;;
@@ -4625,14 +4633,12 @@ cmd_attest_green() {
   # (user, 2026-08-27: ~24 minutes to merge a branch). Consumption is opt-in
   # (suite-attest-secs in .comms/config) and time-bounded; the paranoid re-run
   # stays the default.
-  # A value-taking flag REQUIRES its value: the bare `shift; var="${1:-}"` shape
-  # leaves $# at 0 and the loop's trailing shift then exits 1 under errexit with
-  # no diagnostic — a usage error that reads as a crash. (grok, r1.)
+  # A value-taking flag REQUIRES its value — need_value, the one guard. (grok, r1.)
   local passed="" expect=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --passed) [ $# -ge 2 ] || usage_err "attest-green: --passed needs a value"; shift; passed="$1" ;;
-      --expect) [ $# -ge 2 ] || usage_err "attest-green: --expect needs a value"; shift; expect="$1" ;;
+      --passed) need_value "attest-green" $# "$1"; shift; passed="$1" ;;
+      --expect) need_value "attest-green" $# "$1"; shift; expect="$1" ;;
       -?*) usage_err "attest-green: unknown option '$(clip "$1")'" ;;
       *)  usage_err "attest-green: unexpected argument '$(clip "$1")'" ;;
     esac; shift
@@ -4950,11 +4956,10 @@ cmd_integrate() {
   local name="${COMMS_PRESENCE_NAME:-}" instance="${COMMS_PRESENCE_INSTANCE:-}"
   while [ $# -gt 0 ]; do
     case "$1" in
-      # A value-taking flag REQUIRES its value: the bare `shift; name="${1:-}"` shape left
-      # $# at 0 and the loop's trailing shift then exited 1 under errexit with no message,
-      # which a driver reads as "unclassified" instead of usage. (codex, driver-contract r1.)
-      --name) [ $# -ge 2 ] || usage_err "integrate: --name needs a value"; shift; name="$1" ;;
-      --instance) [ $# -ge 2 ] || usage_err "integrate: --instance needs a value"; shift; instance="$1" ;;
+      # A value-taking flag REQUIRES its value (need_value): an exit 1 with no message reads to a
+      # driver as "unclassified" instead of usage. (codex, driver-contract r1.)
+      --name) need_value "integrate" $# "$1"; shift; name="$1" ;;
+      --instance) need_value "integrate" $# "$1"; shift; instance="$1" ;;
       -?*) usage_err "integrate: unknown option '$(clip "$1")'" ;;
       *) usage_err "integrate: unexpected argument '$(clip "$1")'" ;;
     esac; shift
@@ -5809,7 +5814,7 @@ cmd_archive() {
   local as="" files=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --as) shift; as="${1:-}" ;;
+      --as) need_value "archive" $# "$1"; shift; as="$1" ;;
       *) files+=("$1") ;;
     esac
     shift
@@ -6661,7 +6666,7 @@ cmd_clean() {
   local as="" yes=false orphans=false mode="" targets=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --as) shift; as="${1:-}" ;;
+      --as) need_value "clean" $# "$1"; shift; as="$1" ;;
       --yes) yes=true ;;
       --orphans) orphans=true ;;
       *) [ -z "$mode" ] && mode="$1" || die "clean: unexpected argument '$1'" ;;
@@ -6742,9 +6747,9 @@ cmd_send() {
   local to="" file="" archive_inbound="" as="" wait_arg=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --to) shift; to="${1:-}" ;;
+      --to) need_value "send" $# "$1"; shift; to="$1" ;;
       --wait) COMMS_WAIT=1; export COMMS_WAIT; wait_arg="--wait" ;;
-      --archive-inbound) shift; archive_inbound="${1:-}" ;;
+      --archive-inbound) need_value "send" $# "$1"; shift; archive_inbound="$1" ;;
       *) file="$1" ;;
     esac
     shift

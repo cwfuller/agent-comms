@@ -2055,3 +2055,69 @@ VU="$(vx_repo installed "$VX_IG" package.json="$VX_PJ" package-lock.json='{}')"
 VU_R=0; (cd "$VU" && env -u CI PATH="$VX_BIN:$VX_TOOLS:$PATH" "$VU/.agent-comms/comms.sh" verify init --yes) >/dev/null 2>&1 || VU_R=$?
 [ "$VU_R" = 0 ] && cmp -s "$REPO/helpers/verify.sh" "$VU/.agent-comms/verify.sh" && cmp -s "$REPO/helpers/verify.sh" "$VU/ci/verify.sh" \
   && ok "an installed comms.sh scaffolds ci/verify.sh from the template installed beside it" || fail "installed init: rc=$VU_R"
+
+section "value-taking options: given last with no value, exit 2 naming the option, and write nothing"
+# The bare `--name) shift; name="${1:-}"` shape, with the option LAST, left $# at 0 and the loop's
+# trailing shift then failed under errexit: exit 1, nothing on stderr, nothing done (friction
+# 2026-09-25, `presence claim --name`). Every value-taking option now goes through need_value.
+# Each case below is the verb's own words with the option last; it must exit 2, name the option,
+# and leave the fixture byte-identical — mailbox, presence records, global home, refs, worktrees.
+VO_MARK="$WORK/vo-mark"
+vo_state() {
+  { (cd "$REPO_FIX" && find .comms -print && find .comms -type f -exec cksum {} + \
+       && git status --porcelain --ignored && git for-each-ref && git worktree list --porcelain)
+    (cd "$AGENT_COMMS_HOME" && find . -print && find . -type f -exec cksum {} +)
+  } 2>&1 | LC_ALL=C sort | cksum
+}
+vo_run() { # vo_run <comms|rp> <args...> — stderr only; the exit status is the command's
+  local bin="$COMMS"; [ "$1" = rp ] && bin="$RUNPHASE"; shift
+  (cd "$REPO_FIX" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$bin" "$@") 2>&1 >/dev/null
+}
+vo_case() { # vo_case <comms|rp> <option> <args...>
+  local tool="$1" opt="$2" before err rc newer; shift 2
+  before="$(vo_state)"; : > "$VO_MARK"
+  err="$(vo_run "$tool" "$@")"; rc=$?
+  newer="$( { find "$REPO_FIX/.comms" "$AGENT_COMMS_HOME" -newer "$VO_MARK" -print; } 2>&1)"
+  if [ "$rc" = 2 ] && grep -qF -- "$opt needs a value" <<<"$err" && [ "$(vo_state)" = "$before" ] && [ -z "$newer" ]; then
+    ok "$tool $* — refused as usage (exit 2), names $opt, writes nothing"
+  else
+    fail "$tool $* — rc=$rc stderr=[$err] newer=[$newer]"
+  fi
+}
+# CONTROL: the probe must see a write, or "writes nothing" above is vacuous.
+VO_BEFORE="$(vo_state)"
+VO_CLAIM="$(cd "$REPO_FIX" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$COMMS" presence claim --name vo-control --role probe 2>/dev/null)"
+VO_INST="$(printf '%s\n' "$VO_CLAIM" | sed -n 's/.*instance: //p' | head -1)"
+[ -n "$VO_INST" ] && [ "$(vo_state)" != "$VO_BEFORE" ] \
+  && ok "control: the state probe sees a real presence claim" || fail "control: probe blind to a claim (claim=[$VO_CLAIM])"
+(cd "$REPO_FIX" && "$COMMS" presence release --name vo-control --instance "$VO_INST") >/dev/null 2>&1
+
+# The filed repros, verbatim.
+vo_case comms --name presence claim --name
+vo_case comms --instance presence others --name x --instance
+for o in --name --instance --role --state --pid --force; do vo_case comms "$o" presence claim "$o"; done
+for o in --as --thread; do vo_case comms "$o" list "$o"; done
+for o in --bytes --surface --file; do vo_case comms "$o" lessons "$o"; done
+for o in --bytes --limit; do vo_case comms "$o" archive-search "$o"; done
+for o in --out --role --review-set --artifact --reviewer-version --prompt-version --base-sha; do vo_case comms "$o" findings "$o"; done
+for o in --from --to --file; do vo_case comms "$o" ask "$o"; done
+vo_case comms --set panel status --set
+for o in --to --set; do vo_case comms "$o" panel dispatch "$o"; done
+for o in --degrade --set --out; do vo_case comms "$o" compose "$o"; done
+for o in --kind --set --dispatch --thread --round --agent --role --artifact --request-id --message-id --run-dir --status --note --limit; do
+  vo_case comms "$o" events append "$o"
+done
+for o in --thread --severity; do vo_case comms "$o" friction "$o"; done
+vo_case comms --note round-note --note
+for o in --to --review-set --out --timeout-secs; do vo_case comms "$o" shadow "$o"; done
+vo_case comms --as archive --as
+vo_case comms --as clean --as
+for o in --to --archive-inbound; do vo_case comms "$o" send "$o"; done
+for o in --thread --phase --leg-dispatch --leg-agent; do
+  vo_case comms "$o" review-route verify rd-0123456789abcdef0123456789abcdef "$o"
+done
+for o in --passed --expect; do vo_case comms "$o" attest-green "$o"; done
+for o in --name --instance; do vo_case comms "$o" integrate some-branch "$o"; done
+for o in --message --agent --provider --sandbox --timeout-secs --via; do vo_case rp "$o" spawn "$o"; done
+for o in --message --dir --agent --provider --sandbox --timeout-secs --via; do vo_case rp "$o" run "$o"; done
+vo_case rp --timeout-secs await --timeout-secs
