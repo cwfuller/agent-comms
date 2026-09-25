@@ -16,8 +16,7 @@
 # Ignored content a build or install recreates, matched against the BASENAME of each
 # collapsed ignored entry (`git ls-files --directory`). Everything else that is ignored blocks
 # retire: a worktree once held ~$22 of paid eval results in an ignored folder that existed
-# nowhere else. Content INSIDE a listed directory is not inspected, except for nested repos and
-# secret-named files git lists individually (the secret check runs first).
+# nowhere else. Content INSIDE a collapsed directory is not inspected, except for nested repos.
 # Directory names match only a DIRECTORY entry (`dist/`): an ignored FILE named `dist` is not
 # a build tree. (grok, impl r1.) WT_REGENERABLE_FILES are the file-shaped entries.
 # WT_REGENERABLE_PATHS are directories matched by their TRAILING PATH, for names too generic
@@ -28,22 +27,30 @@ WT_REGENERABLE_FILES=".DS_Store"
 WT_REGENERABLE_PATHS=".husky/_"
 WT_REGENERABLE_SUFFIXES=".tsbuildinfo"
 
+wt_is_regenerable_path() {  # <directory path, no trailing slash> — WT_REGENERABLE_PATHS only
+  local n
+  for n in $WT_REGENERABLE_PATHS; do case "/$1" in */"$n") return 0 ;; esac; done
+  return 1
+}
+
 wt_is_regenerable_dir() {  # <directory path, no trailing slash>
   local n base="${1##*/}"
   for n in $WT_REGENERABLE; do [ "$base" = "$n" ] && return 0; done
-  for n in $WT_REGENERABLE_PATHS; do case "/$1" in */"$n") return 0 ;; esac; done
-  return 1
+  wt_is_regenerable_path "$1"
 }
 
 wt_is_regenerable() {  # <collapsed ignored entry, `dir/` for a directory>
   local n e="${1%/}" base anc
   base="${e##*/}"
   # A directory ignored by its OWN .gitignore (husky writes `*` into `.husky/_/.gitignore`) is
-  # not collapsed: git lists it AND each file inside. Its contents inherit the directory's verdict.
+  # not collapsed: git lists it AND each file inside. Those files inherit the verdict of a
+  # WT_REGENERABLE_PATHS ancestor only. A generic-named ancestor (`build`, `coverage`) proves
+  # nothing: a directory that tracks a `.gitkeep` is not collapsed either, and an ignored file
+  # listed inside it may be the only copy. (claude-review, impl r1.)
   anc="$e"
   while [ "${anc%/*}" != "$anc" ]; do
     anc="${anc%/*}"
-    wt_is_regenerable_dir "$anc" && return 0
+    wt_is_regenerable_path "$anc" && return 0
   done
   case "$1" in
     */) wt_is_regenerable_dir "$e" && return 0 ;;

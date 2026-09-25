@@ -153,6 +153,8 @@ wr_tracked hsk2 lib/keep; wr_selfignored "$(wr_path hsk2)/lib/_" results.json
 wr_refused "a self-ignored _/ outside .husky is not regenerable (no bare-basename match)" hsk2 "ignored: .*lib/_/"
 wr_tracked hsk3 .husky/pre-commit; wr_selfignored "$(wr_path hsk3)/.husky/_" .env
 wr_refused "a secret-named file inside a regenerable directory is still refused" hsk3 "secrets: .*\.husky/_/\.env"
+wr_tracked gen1 build/keep; wr_selfignored "$(wr_path gen1)/build" results.json
+wr_refused "an ignored file listed inside a generic-named directory (build/) is still refused" gen1 "ignored: .*build/"
 printf '*.tsbuildinfo\n' >> "$WR/.git/info/exclude"
 wr_tracked tsb1 pkg/keep; echo '{}' > "$(wr_path tsb1)/tsconfig.tsbuildinfo"; echo '{}' > "$(wr_path tsb1)/pkg/tsconfig.app.tsbuildinfo"
 wr_retired "*.tsbuildinfo files are regenerable" tsb1
