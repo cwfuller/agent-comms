@@ -1533,3 +1533,184 @@ IX_OUT="$(ix integrate "mlls^{/.|"$'\xe2\x80\xa8'"integrate-result v1 status=lan
   && [ "$(printf '%s\n' "$IX_OUT" | grep -c '^integrate-result ')" = 1 ] \
   && printf '%s\n' "$IX_OUT" | grep -q "^integrate-result v1 status=landed cand=$IX_MLLS " \
   && ok "a Unicode line separator in a revision never reaches stdout raw" || fail "LS revision: rc=$IX_R_LS"
+
+section "verify: a landing suite for any repo (template, init, status, fresh)"
+# integrate runs suite-cmd in a fresh checkout with no shell, so a repo needs a committed script
+# that provisions its own dependencies and runs its checks. Every package manager here is a PATH
+# stub that records its argv and creates the directory a real install would; nothing touches the
+# network. Real node (or python3) reads package.json scripts, as it does in the template itself.
+VX="$WORK/verify"; VX_BIN="$VX/bin"; VX_TOOLS="$VX/tools"; VX_LOG="$VX/argv.log"
+mkdir -p "$VX_BIN" "$VX_TOOLS" "$VX/nobin"; : > "$VX/all.out"
+# Only node and git are linked in, so no package manager the host has installed can shadow a stub
+# or satisfy the missing-tool case below.
+for t in node git; do command -v "$t" >/dev/null 2>&1 && ln -sf "$(command -v "$t")" "$VX_TOOLS/$t"; done
+vx_stub() { # <name> [extra shell line] — records "<name> <argv>"; an install makes its outputs
+  { printf '#!/bin/bash\nprintf "%%s %%s\\n" "%s" "$*" >> "%s"\n' "$1" "$VX_LOG"
+    printf 'case "$1" in ci|install|sync) mkdir -p node_modules .venv ;; esac\n'
+    printf '%s\n' "${2:-}"
+    printf 'case "$*" in *" fail"*) exit 7 ;; esac\nexit 0\n'; } > "$VX_BIN/$1"
+  chmod +x "$VX_BIN/$1"
+}
+for t in pnpm yarn bun uv; do vx_stub "$t"; done
+# `npm run env` reports what a step sees: whether stdin is closed, and CI/TZ.
+vx_stub npm 'if [ "$1 $2" = "run env" ]; then if read -r _x; then echo "npm-stdin-open" >> "'"$VX_LOG"'"; else echo "npm-stdin-closed CI=${CI:-unset} TZ=${TZ:-unset}" >> "'"$VX_LOG"'"; fi; fi'
+# python3 -m venv makes a venv of stubs; anything else goes to the real python3 unrecorded, so a
+# host without node still reads package.json and comms.sh keeps its own python3.
+VX_PY="$(command -v python3 || echo python3)"
+cat > "$VX_BIN/python3" <<STUB
+#!/bin/bash
+if [ "\$1 \$2" = "-m venv" ]; then
+  printf 'python3 %s\n' "\$*" >> "$VX_LOG"; mkdir -p "\$3/bin"
+  printf '#!/bin/bash\nprintf "venv-pip %%s\\\\n" "\$*" >> "$VX_LOG"\n' > "\$3/bin/pip"
+  printf '#!/bin/bash\nprintf "venv-python %%s\\\\n" "\$*" >> "$VX_LOG"\n' > "\$3/bin/python"
+  chmod +x "\$3/bin/pip" "\$3/bin/python"; exit 0
+fi
+exec "$VX_PY" "\$@"
+STUB
+chmod +x "$VX_BIN/python3"
+vx_repo() { # <name> <gitignore> <path=content>... — a committed fixture repo
+  local d="$VX/$1" ig="$2" kv; shift 2
+  rm -rf "$d"; mkdir -p "$d"; git -C "$d" init -q -b main
+  printf '%s' "$ig" > "$d/.gitignore"
+  for kv in "$@"; do mkdir -p "$d/$(dirname "${kv%%=*}")"; printf '%s' "${kv#*=}" > "$d/${kv%%=*}"; done
+  git -C "$d" add -A >/dev/null 2>&1; git -C "$d" -c user.email=t@t -c user.name=t commit -qm init
+  printf '%s' "$d"
+}
+vx_run() { # <repo> [PATH] — run the template there; output to $VX/out (and all.out), argv to $VX_LOG
+  : > "$VX_LOG"; local rc=0
+  # stdin carries data, so a step that could read it would see "leak" rather than end-of-file.
+  (cd "$1" && env -u CI PATH="${2:-$VX_BIN:$VX_TOOLS:/usr/bin:/bin}" bash "$REPO/helpers/verify.sh") <<<leak > "$VX/out" 2>&1 || rc=$?
+  cat "$VX/out" >> "$VX/all.out"; echo "$rc"
+}
+vx_log() { tr '\n' '|' < "$VX_LOG"; }
+VX_IG=$'node_modules/\n.venv/\n.comms/\n.claude/worktrees/\n'
+VX_PJ='{"name":"x","scripts":{"check":"c","test":"t","lint":"l"}}'
+
+# Detected Node defaults: the lockfile's own package manager, and only scripts that exist.
+D="$(vx_repo npm1 "$VX_IG" package.json="$VX_PJ" package-lock.json='{}')"; R="$(vx_run "$D")"
+[ "$R" = 0 ] && [ "$(vx_log)" = "npm ci --no-audit --no-fund|npm run check|npm run test|" ] \
+  && [ -z "$(git -C "$D" status --porcelain)" ] \
+  && ok "npm: a frozen install, then check+test (check subsumes lint), leaving no git-visible dirt" \
+  || fail "npm defaults: rc=$R argv=$(vx_log) dirt=$(git -C "$D" status --porcelain | head -2)"
+D="$(vx_repo pnpm1 "$VX_IG" package.json='{"scripts":{"lint":"l","test":"t"}}' pnpm-lock.yaml='x')"; R="$(vx_run "$D")"
+[ "$R" = 0 ] && [ "$(vx_log)" = "pnpm install --frozen-lockfile|pnpm run lint|pnpm run test|" ] \
+  && ok "pnpm: lint then test through pnpm, and no step for a script that does not exist" \
+  || fail "pnpm defaults: rc=$R argv=$(vx_log)"
+# A steps-file line runs through a real shell, with stdin closed and CI exported.
+D="$(vx_repo steps1 "$VX_IG" package.json="$VX_PJ" package-lock.json='{}' ci/verify.steps=$'# checks\n\nTZ=UTC npm run env\n')"
+R="$(vx_run "$D")"
+[ "$R" = 0 ] && grep -qx 'npm-stdin-closed CI=true TZ=UTC' "$VX_LOG" \
+  && ok "a step line runs in a shell (an env prefix works) with stdin closed and CI=true" \
+  || fail "step shell: rc=$R argv=$(vx_log)"
+# Failures stop the suite, carry the step's code, and cannot hide in a pipeline or behind a `;`.
+D="$(vx_repo stepsfail "$VX_IG" package.json="$VX_PJ" package-lock.json='{}' ci/verify.steps=$'npm run check\nnpm run fail\nnpm run never\n')"
+R="$(vx_run "$D")"
+[ "$R" = 7 ] && grep -q 'step 2/3 failed (exit 7): npm run fail' "$VX/out" && ! grep -q 'npm run never' "$VX_LOG" \
+  && ok "a failing step stops the suite with its own exit code, and is named" || fail "step failure: rc=$R $(tail -1 "$VX/out")"
+D="$(vx_repo stepspipe "$VX_IG" package.json="$VX_PJ" package-lock.json='{}' ci/verify.steps=$'npm run fail | cat\n')"
+R="$(vx_run "$D")"
+[ "$R" = 7 ] && ok "a failure inside a pipeline fails the step (pipefail reaches the step's shell)" || fail "pipeline failure: rc=$R"
+D="$(vx_repo stepssemi "$VX_IG" package.json="$VX_PJ" package-lock.json='{}' ci/verify.steps=$'false; true\n')"
+R="$(vx_run "$D")"
+[ "$R" != 0 ] && ok "\`false; true\` fails the step (errexit reaches the step's shell)" || fail "false; true passed"
+# Zero checks is a failure, never a pass.
+D="$(vx_repo stepsnone "$VX_IG" package.json="$VX_PJ" package-lock.json='{}' ci/verify.steps=$'# nothing here\n   \n')"
+R="$(vx_run "$D")"
+[ "$R" != 0 ] && grep -q 'no checks found' "$VX/out" && [ ! -s "$VX_LOG" ] \
+  && ok "a comment-only steps file fails before installing: zero checks cannot verify" || fail "empty steps: rc=$R argv=$(vx_log)"
+D="$(vx_repo noscripts "$VX_IG" package.json='{"name":"x"}' package-lock.json='{}')"; R="$(vx_run "$D")"
+[ "$R" != 0 ] && grep -q 'no checks found' "$VX/out" && ok "a repo with no detectable checks fails rather than passing empty" || fail "no scripts: rc=$R"
+# The ignore preflight is directory-aware and runs BEFORE any install.
+D="$(vx_repo unignored $'.comms/\n' package.json="$VX_PJ" package-lock.json='{}')"; R="$(vx_run "$D")"
+[ "$R" != 0 ] && grep -q "'node_modules/' is not gitignored" "$VX/out" && [ ! -s "$VX_LOG" ] \
+  && ok "an unignored install output is refused before installing, naming the .gitignore line" || fail "unignored: rc=$R argv=$(vx_log)"
+D="$(vx_repo anchored $'/node_modules\n.comms/\n' package.json="$VX_PJ" package-lock.json='{}')"; R="$(vx_run "$D")"
+[ "$R" = 0 ] && ok "an absent node_modules under a root-anchored /node_modules rule counts as ignored" || fail "anchored rule: rc=$R $(head -3 "$VX/out")"
+# Two JavaScript lockfiles refuse until a directive picks one; bun's two lockfiles are one stack.
+D="$(vx_repo jsboth "$VX_IG" package.json="$VX_PJ" package-lock.json='{}' pnpm-lock.yaml='x')"; R="$(vx_run "$D")"
+VX_OK=""; [ "$R" != 0 ] && grep -q 'more than one JavaScript lockfile' "$VX/out" && [ ! -s "$VX_LOG" ] && VX_OK=1
+mkdir -p "$D/ci"; printf '#@ provision: pnpm\npnpm run check\n' > "$D/ci/verify.steps"; R="$(vx_run "$D")"
+[ -n "$VX_OK" ] && [ "$R" = 0 ] && [ "$(vx_log)" = "pnpm install --frozen-lockfile|pnpm run check|" ] \
+  && ok "two JavaScript lockfiles refuse until '#@ provision:' picks one; then only that one installs" \
+  || fail "js conflict: first-refused=${VX_OK:-no} directive-rc=$R argv=$(vx_log)"
+D="$(vx_repo bunboth "$VX_IG" package.json="$VX_PJ" bun.lock='x' bun.lockb='x')"; R="$(vx_run "$D")"
+[ "$R" = 0 ] && [ "$(vx_log)" = "bun install --frozen-lockfile|bun run check|bun run test|" ] \
+  && ok "bun.lock and bun.lockb are one stack, not a conflict" || fail "bun: rc=$R argv=$(vx_log)"
+# uv.lock always wins over requirements.txt; requirements alone provisions its own venv.
+D="$(vx_repo pyboth "$VX_IG" uv.lock='x' requirements.txt='x' pytest.ini='[pytest]')"; R="$(vx_run "$D")"
+VX_OK=""; [ "$R" = 0 ] && [ "$(vx_log)" = "uv sync --frozen|uv run --frozen python -m pytest|" ] && VX_OK=1
+mkdir -p "$D/ci"; printf '#@ provision: uv,requirements\nuv run --frozen python -m pytest\n' > "$D/ci/verify.steps"; R="$(vx_run "$D")"
+[ -n "$VX_OK" ] && [ "$R" != 0 ] && grep -q 'refused while uv.lock exists' "$VX/out" && [ ! -s "$VX_LOG" ] \
+  && ok "uv.lock wins: pip never runs over uv's .venv, even when a directive names requirements" \
+  || fail "uv+requirements: uv-only=${VX_OK:-no} directive-rc=$R argv=$(vx_log)"
+D="$(vx_repo pyreq "$VX_IG" requirements.txt='x' pytest.ini='[pytest]')"; R="$(vx_run "$D")"
+[ "$R" = 0 ] && [ "$(vx_log)" = "python3 -m venv .venv|venv-pip install -r requirements.txt|venv-python -m pytest|" ] \
+  && ok "requirements.txt alone: a .venv, pip install -r, and pytest from that interpreter" || fail "pip stack: rc=$R argv=$(vx_log)"
+# A detected stack whose tool is missing fails; `provision: none` installs and probes nothing.
+D="$(vx_repo uvmissing "$VX_IG" uv.lock='x' pytest.ini='[pytest]')"; R="$(vx_run "$D" "$VX/nobin:$VX_TOOLS:/usr/bin:/bin")"
+[ "$R" != 0 ] && grep -q "stack 'uv' needs 'uv' on PATH" "$VX/out" \
+  && ok "a detected stack whose tool is missing fails, naming the tool" || fail "missing tool: rc=$R $(head -2 "$VX/out")"
+D="$(vx_repo provnone $'.comms/\n' package.json="$VX_PJ" package-lock.json='{}' ci/verify.steps=$'#@ provision: none\nnpm run check\n')"
+R="$(vx_run "$D")"
+[ "$R" = 0 ] && [ "$(vx_log)" = "npm run check|" ] \
+  && ok "'#@ provision: none' installs nothing and skips the ignore preflight" || fail "provision none: rc=$R argv=$(vx_log)"
+# Yarn berry PnP: a TRACKED zero-install loader is allowed, and the install is --immutable.
+D="$(vx_repo yarnpnp $'.yarn/*\n.comms/\n' package.json="$VX_PJ" yarn.lock='x' .yarnrc.yml='nodeLinker: pnp' .pnp.cjs='//')"
+R="$(vx_run "$D")"
+[ "$R" = 0 ] && [ "$(vx_log)" = "yarn install --immutable|yarn run check|yarn run test|" ] \
+  && ok "Yarn PnP: a tracked .pnp.cjs is allowed and the install is --immutable" || fail "yarn pnp: rc=$R argv=$(vx_log) $(head -2 "$VX/out")"
+# Nothing any run above printed can be mistaken for integrate's completion-line proof.
+if grep -Eq '^passed: [0-9]+ +failed: [0-9]+ +skipped: [0-9]+' "$VX/all.out"; then fail "a template line takes the completion-line shape"
+else ok "template output never takes the completion-line shape integrate reads as proof"; fi
+
+# verify status / init / fresh, through comms.sh, in a repo whose primary sits off main.
+VI="$(vx_repo init1 "$VX_IG" package.json="$VX_PJ" package-lock.json='{}')"; VI="$(cd "$VI" && pwd -P)"
+git -C "$VI" checkout -q -b work
+mkdir -p "$VI/.comms"; printf 'agents = claude codex\nsuite-cmd = npm run check && npm run test\n' > "$VI/.comms/config"
+vi() { (cd "$VI" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u CI PATH="$VX_BIN:$VX_TOOLS:$PATH" "$COMMS" "$@"); }
+VI_S="$(vi verify status 2>/dev/null)"; VI_R=0; vi verify init </dev/null >/dev/null 2>&1 || VI_R=$?
+[ "$VI_S" = "$(printf 'needs-shell\tnpm run check && npm run test')" ] && [ "$VI_R" != 0 ] && [ ! -e "$VI/ci" ] \
+  && ok "status flags a shell-only suite-cmd; init with no terminal and no --yes writes nothing" \
+  || fail "status/no-tty init: status=$VI_S rc=$VI_R"
+VI_R=0; vi verify init --yes >"$VX/init.out" 2>&1 || VI_R=$?
+[ "$VI_R" = 0 ] && head -2 "$VI/ci/verify.sh" | grep -q '^# agent-comms verify v1' && [ -x "$VI/ci/verify.sh" ] \
+  && [ "$(grep -v '^#' "$VI/ci/verify.steps" | tr '\n' '|')" = "npm run check|npm run test|" ] \
+  && [ "$(grep -c 'suite-cmd' "$VI/.comms/config")" = 1 ] && grep -qx 'suite-cmd = bash ci/verify.sh' "$VI/.comms/config" \
+  && grep -qx 'agents = claude codex' "$VI/.comms/config" \
+  && ok "init writes the template and explicit steps, and repoints a shell-only suite-cmd keeping every other line" \
+  || fail "init: rc=$VI_R $(tail -3 "$VX/init.out")"
+[ "$(vi verify status 2>/dev/null)" = "$(printf 'ok\tbash ci/verify.sh')" ] \
+  && ok "status reports ok once suite-cmd is a plain command" || fail "status after init: $(vi verify status 2>&1)"
+printf 'npm run lint\n' > "$VI/ci/verify.steps"; printf '# agent-comms verify v0\nold\n' > "$VI/ci/verify.sh"
+VI_R=0; vi verify init --yes >/dev/null 2>&1 || VI_R=$?
+VI_R2=0; vi verify init --update >/dev/null 2>&1 || VI_R2=$?
+[ "$VI_R" != 0 ] && [ "$VI_R2" = 0 ] && head -2 "$VI/ci/verify.sh" | grep -q 'verify v1' && [ "$(cat "$VI/ci/verify.steps")" = "npm run lint" ] \
+  && ok "init refuses to overwrite ci/verify.sh; --update refreshes the template and keeps the repo's steps" \
+  || fail "overwrite/update: init=$VI_R update=$VI_R2 steps=$(cat "$VI/ci/verify.steps")"
+printf 'agents = claude codex\nsuite-cmd = bash custom.sh\n' > "$VI/.comms/config"; rm -f "$VI/ci/verify.sh"
+VI_R=0; vi verify init --yes >/dev/null 2>&1 || VI_R=$?
+[ "$VI_R" = 0 ] && [ -f "$VI/ci/verify.sh" ] && grep -qx 'suite-cmd = bash custom.sh' "$VI/.comms/config" \
+  && ok "init leaves a working single-command suite-cmd alone without --force" || fail "custom suite-cmd: rc=$VI_R $(grep suite-cmd "$VI/.comms/config")"
+printf 'agents = claude codex\nsuite-cmd = bash ci/verify.sh\n' > "$VI/.comms/config"
+printf 'npm run check\nnpm run test\n' > "$VI/ci/verify.steps"
+git -C "$VI" add ci >/dev/null 2>&1; git -C "$VI" -c user.email=t@t -c user.name=t commit -qm "chore: add verify suite"
+VI_MAIN="$(git -C "$VI" rev-parse main)"; VI_HEAD="$(git -C "$VI" rev-parse HEAD)"
+VI_R=0; VI_OUT="$(vi verify fresh 2>/dev/null)" || VI_R=$?
+[ "$VI_R" = 0 ] && [ "$(printf '%s\n' "$VI_OUT" | tail -1)" = "verify-result v1 status=verified cand=$VI_HEAD" ] \
+  && ! printf '%s\n' "$VI_OUT" | grep -q '^integrate-result' && [ "$(git -C "$VI" rev-parse main)" = "$VI_MAIN" ] \
+  && [ -z "$(git -C "$VI" worktree list --porcelain | grep '/\.verify-')" ] && ! ls -d "$VI/.claude/worktrees/".verify-* >/dev/null 2>&1 \
+  && ok "verify fresh proves the committed suite in its own throwaway tree, lands nothing, prints verify-result" \
+  || fail "verify fresh: rc=$VI_R out=$(printf '%s' "$VI_OUT" | tail -2)"
+printf 'npm run check\nnpm run fail\n' > "$VI/ci/verify.steps"
+git -C "$VI" add ci >/dev/null 2>&1; git -C "$VI" -c user.email=t@t -c user.name=t commit -qm break
+VI_R=0; VI_OUT="$(vi verify fresh 2>/dev/null)" || VI_R=$?
+[ "$VI_R" = 14 ] && ! printf '%s\n' "$VI_OUT" | grep -q 'result v1' \
+  && [ -z "$(git -C "$VI" worktree list --porcelain | grep '/\.verify-')" ] && ! ls -d "$VI/.claude/worktrees/".verify-* >/dev/null 2>&1 \
+  && ok "a red suite under verify fresh exits 14 (integrate's class), prints no result line, and removes its tree" \
+  || fail "verify fresh red: rc=$VI_R"
+# An INSTALLED comms.sh scaffolds from its installed sibling: verify.sh ships with the helpers.
+VU="$(vx_repo installed "$VX_IG" package.json="$VX_PJ" package-lock.json='{}')"
+(cd "$VU" && bash "$REPO/install.sh" --scope=local >/dev/null 2>&1)
+VU_R=0; (cd "$VU" && env -u CI PATH="$VX_BIN:$VX_TOOLS:$PATH" "$VU/.agent-comms/comms.sh" verify init --yes) >/dev/null 2>&1 || VU_R=$?
+[ "$VU_R" = 0 ] && cmp -s "$REPO/helpers/verify.sh" "$VU/.agent-comms/verify.sh" && cmp -s "$REPO/helpers/verify.sh" "$VU/ci/verify.sh" \
+  && ok "an installed comms.sh scaffolds ci/verify.sh from the template installed beside it" || fail "installed init: rc=$VU_R"

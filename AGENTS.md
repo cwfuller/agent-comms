@@ -128,9 +128,10 @@ Task size is not the criterion. Peer presence is.
   package manager that rewrites a tracked lockfile.
 - **`suite-cmd` is split on whitespace into argv with NO shell**, so `npm ci && tsc` does not
   work: `&&` is passed as an argument. Commit a script and point at it (`suite-cmd = bash
-  ci/verify.sh`). Provisioning need not be a cold install every time — a cache OUTSIDE the
-  worktree is the intended cost lever, since the suite runs once pre-flight and again inside
-  `integrate` unless `suite-attest-secs` covers the second.
+  ci/verify.sh`); `comms.sh verify init` scaffolds one for any repo, and `comms.sh verify
+  fresh` proves it the way `integrate` will run it. Provisioning need not be a cold install every
+  time — a cache OUTSIDE the worktree is the intended cost lever, since the suite runs once
+  pre-flight and again inside `integrate` unless `suite-attest-secs` covers the second.
 
 ## The review loop (required for code changes)
 

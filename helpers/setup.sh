@@ -309,6 +309,28 @@ case "$TO" in ''|*[!0-9]*) say "  not a number — keeping ${COMMS_RUNPHASE_TIME
 
 flush_user || { echo "setup: could not write $SETTINGS" >&2; exit 1; }
 [ "${FAILED:-0}" = 0 ] || exit 1
+
+# ---- project: landing suite (this repo only; never touched by --yes) --------------------------
+# integrate runs suite-cmd in a fresh checkout with no shell. A repo with no suite-cmd cannot land,
+# and one whose suite-cmd needs a shell (`&&`, a pipe) can never pass. `verify init` scaffolds a
+# committed ci/verify.sh that provisions and runs the checks; it writes TRACKED files, so --yes only
+# prints the suggestion and leaves the tree alone.
+VS="$("$HERE/comms.sh" verify status 2>/dev/null)" && {
+  VS_STATE="${VS%%$'\t'*}"; VS_CUR="${VS#*$'\t'}"
+  say ""
+  say "Project: landing suite (suite-cmd, used by comms.sh integrate)"
+  case "$VS_STATE" in
+    ok) say "  suite-cmd = $VS_CUR" ;;
+    *)
+      if [ "$VS_STATE" = missing ]; then say "  no suite-cmd — integrate refuses to land without one"
+      else say "  suite-cmd '$VS_CUR' needs a shell integrate does not use, so it can never pass"; fi
+      if [ "$YES" = 1 ] || [ "$TTY" != 1 ]; then
+        say "  to fix: comms.sh verify init   (detects the stack, previews, then scaffolds ci/verify.sh)"
+      elif ask_yn "  scaffold ci/verify.sh + ci/verify.steps now? (a preview follows)" n; then
+        "$HERE/comms.sh" verify init </dev/tty || say "  verify init did not complete — run it again any time"
+      fi ;;
+  esac
+}
 say ""
 say "Saved. Settings: $SETTINGS   (show them: comms.sh setup --show)"
 say "Environment variables still override these for a single command, e.g. COMMS_ROUTE=0."

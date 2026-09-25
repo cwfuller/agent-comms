@@ -162,6 +162,9 @@ agnostic.
 | `presence claim\|beat\|others\|release\|expire\|with-beat` | advisory multi-session coordination on `.comms/sessions/` — claim-then-check (exit 0 direct-safe / 3 peers / 4 fail-closed ambiguity), whole-file heartbeats (exit 5 = healed, re-check before writing), exact-self release, two-pass byte-identical reap with nonce tombstone covers (which `claim` itself runs, so dead records are collected without anyone invoking `expire`), an auto-adopted session pid that `claim` and `beat` both verify by `ps` (explicit `--pid` first, then `COMMS_PRESENCE_PID`, then `CLAUDE_PID`, each TRIED in turn so a stale override cannot shadow a good handle; an auto-adopted value that does not verify falls back to pid-less, while an explicit `--pid` is taken as given). `beat` AND `others` both re-pin the handle, so a RESUMED session — which runs under a new harness process — is not collected while alive, including in the window before its first heartbeat, since `others` is the re-check a resumed session runs first. `others` therefore WRITES (a successful re-check beats self) and fails closed: exit 5 when this session's own record is gone or carries a reap tombstone, exit 4 when the re-pin cannot be written, and a beat-wrapper for long-running children. See PROTOCOL "Presence & worktrees" |
 | `worktree new [<slug>]` | session worktree under the MAIN root's `.claude/worktrees/` on branch `worktree-<slug>`, from the LOCAL default-branch tip; refuses without ignore coverage |
 | `integrate <branch>` | land on `main`: advisory lease, ff-only, suite (config `suite-cmd = ...`) at the candidate OID in a detached worktree — a FRESH checkout with no untracked or ignored files, so `suite-cmd` must provision its own prerequisites and may leave ignored files but no git-visible changes; it is whitespace-split into argv with no shell, so point it at a committed script — then CAS `update-ref` — a race loses cleanly, main only ever advances to suite-verified commits. A prose-only tree diff (`README.md`, `LICENSE`, top-level `docs/*.md`; not `docs/loopspec/`, not `AGENTS.md`) skips the suite and does not mint an attestation. A single clean checkout idling on `main` at the expected tip is self-healed through the landing; `suite-attest-secs = N` config accepts a fresh same-OID `attest-green` record in place of the re-run. Every refusal exits with a classified code, and a landing prints one `integrate-result v1` line (see [integrate exit codes and result line](#integrate-exit-codes-and-result-line)) |
+| `verify init [--yes] [--force] [--update]` | scaffold a landing suite: detects the stack by lockfile, previews the provisioning, steps and ignore status, then writes `ci/verify.sh` (the committed template) and `ci/verify.steps` (the detected checks, written out explicitly) and points `suite-cmd` at `bash ci/verify.sh`, keeping every other `.comms/config` line. Refuses to overwrite an existing `ci/verify.sh` without `--force`; an existing `ci/verify.steps` is always kept. `--update` refreshes only a `ci/verify.sh` carrying the agent-comms version header. Never commits. See [verify: a landing suite for any repo](#verify-a-landing-suite-for-any-repo) |
+| `verify fresh [<rev>]` | run `suite-cmd` against `<rev>` (default `HEAD`, committed content only) exactly as `integrate` would, in its own throwaway checkout, without landing: same scrub, supervision, positive proof and cleanliness check, same exit classes (14 red, 15 unverified, 17 unreadable, 10 config). Always runs the suite (the docs-only and attestation skips are `integrate`'s). Success prints `verify-result v1 status=verified cand=<oid>` |
+| `verify status` | `ok`, `missing` or `needs-shell`, a tab, then the current `suite-cmd` (`needs-shell`: it contains `&&`, a pipe or similar, which the no-shell argv split cannot run) |
 | `attest-green [--passed N] [--expect <oid>]` | record "suite green at this checkout's exact HEAD" (clean tracked tree required) into the main root's `.comms/cache/suite-attest.log`; a green `tests/run.sh` records itself automatically, passing `--expect` with the commit it started on so a HEAD that moved mid-run refuses instead of inheriting the result |
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |
@@ -354,6 +357,42 @@ integrate-result v1 status=landed cand=<oid> main_before=<oid> main_after=<oid> 
 - A refusal prints no result line. Parsers must ignore unknown keys; a breaking change bumps `v1`.
 - The suite's own output goes to stderr (and is kept whole under `.comms/logs/`), so nothing the suite prints can appear on stdout as a result line.
 - Split stdout on LF only. The result line is printable ASCII. On every stdout line, a caller-supplied or path value has backslashes, CR, LF, other control bytes and the Unicode separators NEL, LS and PS escaped, so no value can begin a line for any reader.
+
+#### verify: a landing suite for any repo
+
+`integrate` runs `suite-cmd` in a fresh checkout (tracked files only) with no shell, so a repo needs a committed script that installs its own dependencies and then runs its checks. `comms.sh verify init` scaffolds one; `comms.sh verify fresh` proves it before `integrate` relies on it.
+
+```
+comms.sh verify init          # preview, confirm, write ci/verify.sh + ci/verify.steps, set suite-cmd
+git add ci/verify.sh ci/verify.steps && git commit -m "chore: add verify suite"
+comms.sh verify fresh         # run it exactly as integrate will; nothing lands
+```
+
+`ci/verify.sh` provisions every stack it detects at the repo root with a frozen install, which never rewrites a lockfile. It checks first that each install output is gitignored.
+
+| Lockfile | Install | Default check (no steps file) |
+| --- | --- | --- |
+| `package-lock.json` | `npm ci --no-audit --no-fund` | `npm run check` + `test`, else `lint` / `typecheck` / `test` (only scripts that exist) |
+| `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` (corepack when pinned) | same, with `pnpm run` |
+| `yarn.lock` | `yarn install --immutable` (berry) / `--frozen-lockfile` | same, with `yarn run` |
+| `bun.lock` / `bun.lockb` | `bun install --frozen-lockfile` | same, with `bun run` |
+| `uv.lock` | `uv sync --frozen` | `uv run --frozen python -m pytest` (when pytest config or a tests dir exists) |
+| `requirements.txt`, no `uv.lock` | `python3 -m venv .venv` + `.venv/bin/pip install -r` | `.venv/bin/python -m pytest` (same condition) |
+| `Cargo.lock` | `cargo fetch --locked` | `cargo test --locked` |
+| `go.sum` | `go mod download` | `go test -mod=readonly ./...` |
+| `mix.lock` | `mix deps.get --check-locked` | `mix test` |
+
+- **Rules the script enforces:**
+  - More than one JavaScript lockfile is a conflict: pick one with a directive.
+  - `uv.lock` always wins over `requirements.txt`, even when a directive names pip.
+  - A detected stack whose tool is missing fails.
+  - Zero checks fails. A suite that checks nothing cannot verify a landing.
+- **`ci/verify.steps`:** one shell command per line, run in order as `bash -euo pipefail -c "<line>"` with stdin closed, stopping at the first failure. `#` lines are comments.
+- **Directives:** `#@ provision: none` and `#@ provision: npm,uv` override detection.
+- **Keep each line one simple command or a repo script.** A failure the line itself handles (`false || true`) or one inside a nested shell cannot be seen.
+- **`CI=true` is exported** for the whole run.
+- **Refreshing the template:** `comms.sh verify init --update` updates `ci/verify.sh` from a newer agent-comms and leaves the steps alone.
+- **`comms.sh setup`** reports the repo's landing suite and offers `verify init`. `setup --yes` only prints the suggestion, because it never writes tracked files.
 
 ### `docs/loopspec/check.sh`
 

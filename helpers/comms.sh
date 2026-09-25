@@ -74,6 +74,10 @@
 #                               1 other. A landing prints one line
 #                               `integrate-result v1 status=landed cand= main_before=
 #                               main_after= branch= suite=ran|skipped-docs|attested`
+#   verify init|fresh|status    landing suite for any repo: `init` scaffolds a committed
+#                               ci/verify.sh + ci/verify.steps (stack detection, frozen
+#                               installs) and sets suite-cmd; `fresh [<rev>]` runs suite-cmd
+#                               exactly as integrate would, without landing
 #   attest-green [--passed N] [--expect <oid>]
 #                               record "suite green at this exact HEAD" (clean
 #                               tracked tree required) for integrate's opt-in skip.
@@ -4252,6 +4256,159 @@ integrate_oneline() {  # <string> — one inert line: no byte in it can start a 
   printf '%s' "$out"
 }
 
+suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <name> <instance> <presence_record>
+  # THE ONE VERIFICATION ROUTINE. `integrate` and `verify fresh` both call it, so the check that
+  # guards a landing and the preflight that promises "this will land" can never drift apart.
+  # It materializes <cand> at <tw>, runs suite-cmd there with the shell-startup scrub and the
+  # same supervision integrate always used, and then demands positive proof, HEAD binding and a
+  # clean tree. It RETURNS a classified status (0 ok, or an INTEGRATE_RC_* class) with the reason
+  # in SUITE_VERIFY_REASON. It never exits, never installs or clears a trap, and writes nothing to
+  # stdout: the caller owns its lifecycle (integrate's EXIT trap re-attaches a healed occupant and
+  # restores presence) and its stdout contract. The worktree and log paths are the CALLER's, so a
+  # preflight can never remove an in-flight landing's tree. (codex + grok, generic-verify plan r2/r3.)
+  local who="$1" root="$2" cand="$3" tw="$4" suite_log="$5" suite_cmd="$6" name="$7" instance="$8" presence_record="$9"
+  local rc=0
+  SUITE_VERIFY_REASON=""
+  # Recover any prior crash's stale registration before adding: remove the entry
+  # if git still knows it, prune dangling metadata, then clear the directory.
+  git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
+  git -C "$root" worktree prune >/dev/null 2>&1 || true
+  rm -rf "$tw" 2>/dev/null || true
+  git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || { SUITE_VERIFY_REASON="$who: could not materialize $cand"; return "$INTEGRATE_RC_UNVERIFIED"; }
+  # Structured argv: whitespace split only, nothing shell-interpreted. An
+  # empty/whitespace-only suite-cmd expanded to zero argv and SUCCEEDED as a
+  # no-op — the exact unverified landing the config gate exists to refuse.
+  # (codex, impl r1.)
+  set -f; set -- $suite_cmd; set +f
+  [ $# -gt 0 ] || { SUITE_VERIFY_REASON="$who: suite-cmd is empty after splitting — refusing to land unverified"; return "$INTEGRATE_RC_CONFIG"; }
+  # SHELL-STARTUP SCRUB. Non-interactive bash sources $BASH_ENV *before* the script
+  # runs, so a suite's own guards are installed too late to matter: `BASH_ENV` naming
+  # a file that says `exit 0` makes `bash tests/run.sh` return 0 with no output and no
+  # assertions, and integrate would land on it. ENV/SHELLOPTS/BASHOPTS are the same
+  # class. (codex, panel r4, blocking — demonstrated with BASH_ENV=/dev/stdin.)
+  # `command` PREFIX, and no fallback. `BASH_ENV` is sourced by THIS helper before the
+  # scrub runs, so a hook can define a function that prints a well-formed
+  # `passed: N  failed: 0  skipped: 0` line and returns 0 -- tee records the forgery,
+  # PIPESTATUS[0] is 0, the positive proof passes, and a candidate lands with the suite
+  # never having run.
+  #
+  # An absolute path is NOT enough: bash 3.2 accepts `function /usr/bin/env { ...; }`
+  # and dispatches it ahead of the executable (verified on this runtime -- an earlier
+  # version of this comment claimed otherwise and was wrong). `command` suppresses
+  # function lookup, which is what actually forces the executable to run.
+  # (codex, panel r6 then r7, blocking twice.)
+  #
+  # The fallback that used to sit here reassigned the scrub command to a bare, lookup-
+  # dispatched name whenever the absolute path was not executable -- which undid the pin
+  # on every host, not just an unusual layout. It is gone: a missing /usr/bin/env now
+  # REFUSES rather than silently running unpinned. (grok, panel r7.)
+  # (Deliberately worded without the literal assignment, because the regression that
+  # forbids it greps this file and would otherwise match its own description.)
+  #
+  # HONEST LIMIT, stated rather than implied: this defeats the demonstrated forgeries.
+  # It is not a containment boundary. Anything that can inject BASH_ENV into this helper
+  # already runs code as the user -- it could shadow `command` itself, or replace `bash`
+  # or `git` on PATH. The proof is a tripwire against silent pre-emption and cheap
+  # impersonation, and a shell whose function table is attacker-controlled is out of
+  # scope for any in-process check.
+  command test -x /usr/bin/env \
+    || { SUITE_VERIFY_REASON="$who: /usr/bin/env is missing — refusing to run the suite unpinned"; return "$INTEGRATE_RC_ENV"; }
+  local -a clean_env
+  clean_env=(command /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD)
+  # Keep the output of the run we are judging. A refusal whose evidence was discarded
+  # cannot be diagnosed, which cost a full investigation earlier in this arc.
+  mkdir -p "$(dirname "$suite_log")" 2>/dev/null || true
+  # errexit is suspended ACROSS the pipeline: with `set -e -o pipefail` a red suite
+  # terminates the helper AT the pipeline, so `rc=${PIPESTATUS[0]}` never runs and the
+  # "suite FAILED ... output kept at ..." diagnostic below is unreachable on exactly the
+  # path it describes. Landing stayed fail-closed, but the operator lost the message.
+  # (codex, panel r5, advisory — the same errexit class as the assignment above.)
+  set +e
+  # SUITE OUTPUT GOES TO STDERR. stdout is reserved for integrate's own lines, above all the
+  # `integrate-result` line a driver parses: a forwarded suite line of that shape would forge
+  # a second result on success, or a result on a refusal. A nested integrate inside the suite
+  # does exactly that without any malice. The raw output is still kept whole in $suite_log.
+  # (codex, driver-contract r1, blocking.)
+  # THIRD SITE, and the one no short test could reach: `with-beat`'s beater sleeps TTL/3
+  # (default 900s) and then beats, which HEALS an absent record — manufacturing the same
+  # pid-less, unreapable record the two explicit gates prevent, fifteen minutes in, long
+  # after every fixture had finished. (codex + grok, integrate-beat r5.)
+  if [ -n "$name" ] && [ -n "$instance" ]; then
+    # SUPERVISION ALWAYS; heartbeat only when there is a record to refresh. Running the
+    # suite unwrapped to avoid the healing beat gave up whole-process-group quiescence,
+    # and that is load-bearing: a suite can print its completion line, launch a
+    # stdio-detached descendant and exit 0, leaving it alive to mutate the verification
+    # tree after integrate validates and advances main. `--no-heartbeat` keeps the
+    # supervision and drops only the beater. (codex, integrate-beat r6, blocking.)
+    local hb=""
+    [ -f "$presence_record" ] || hb="--no-heartbeat"
+    # shellcheck disable=SC2086
+    ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat $hb --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log" >&2
+    rc=${PIPESTATUS[0]}
+  else
+    ( cd "$tw" && "${clean_env[@]}" "$@" ) 2>&1 | tee "$suite_log" >&2
+    rc=${PIPESTATUS[0]}
+  fi
+  set -e
+  # THE FRESH-CHECKOUT HINT. The verification tree is materialized by `git worktree add`,
+  # so it carries TRACKED CONTENT ONLY — no untracked and no ignored files. A suite-cmd that
+  # passes in the operator's checkout and fails here is usually depending on something that
+  # checkout has and this one does not, and the tool's own error (a missing-module code, say)
+  # gives no reason to suspect the TREE. Deliberately generic: naming any one ecosystem's
+  # directory would teach this tool what `node_modules` is, and the same shape covers an
+  # ignored `.npmrc`, a `.env`, or a build cache. Worded as a LIKELY cause, not a verdict —
+  # most suite failures really are just failures. (codex + grok, plan r1.)
+  [ "$rc" = 0 ] || { SUITE_VERIFY_REASON="$who: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log
+$who: note — the verification tree is a FRESH checkout of the candidate: untracked and
+$who: ignored files are absent. If this suite passes in your working checkout, the likely
+$who: cause is suite-cmd depending on something only that checkout has; suite-cmd must
+$who: provision its own prerequisites. Read $suite_log for the underlying failure."; return "$INTEGRATE_RC_SUITE_RED"; }
+  # POSITIVE PROOF, not merely an absence of failure. A scrub is a blocklist and the
+  # next startup hook will not be on it, so require evidence the suite actually RAN:
+  # its completion line, with counts matching the contract committed AT THE CANDIDATE.
+  # Only enforced when the candidate carries a contract, so other projects' suite-cmds
+  # are unaffected. (codex, panel r4.)
+  local exp_total proof_pass proof_fail proof_skip
+  # `|| exp_total=""` is load-bearing: under `set -e` + `pipefail`, a candidate with no
+  # contract makes `git show` exit 128 and the ASSIGNMENT takes the whole function down
+  # -- the var=$(cmd) errexit trap this repo has hit before. A project without a
+  # contract must simply skip the proof, not fail its landing.
+  exp_total="$(git -C "$root" show "$cand:tests/expected-counts.tsv" 2>/dev/null \
+               | awk -F'\t' '$1=="total"{print $2}')" || exp_total=""
+  case "$exp_total" in ''|*[!0-9]*) exp_total="" ;; esac
+  if [ -n "$exp_total" ]; then
+    proof_pass="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\1/p' "$suite_log" | tail -1)" || proof_pass=""
+    proof_fail="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\2/p' "$suite_log" | tail -1)" || proof_fail=""
+    proof_skip="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\3/p' "$suite_log" | tail -1)" || proof_skip=""
+    [ -n "$proof_pass" ] \
+      || { SUITE_VERIFY_REASON="$who: the suite exited 0 but emitted no completion line — it did not run to the end (a shell-startup hook can pre-empt it); refusing. Output: $suite_log"; return "$INTEGRATE_RC_UNVERIFIED"; }
+    [ "$proof_fail" = 0 ] \
+      || { SUITE_VERIFY_REASON="$who: the suite reported $proof_fail failures despite exit 0 — refusing. Output: $suite_log"; return "$INTEGRATE_RC_UNVERIFIED"; }
+    [ "$((proof_pass + proof_skip))" = "$exp_total" ] \
+      || { SUITE_VERIFY_REASON="$who: the suite ran $((proof_pass + proof_skip)) of $exp_total assertions the candidate declares — refusing a partial run. Output: $suite_log"; return "$INTEGRATE_RC_UNVERIFIED"; }
+  fi
+  # BIND the result to the candidate: a suite that checked out another OID and
+  # passed there proves nothing about $cand. Every verification below fails
+  # CLOSED — a command that cannot answer refuses the landing. (codex, impl r1.)
+  local tw_head tw_status
+  tw_head="$(git -C "$tw" rev-parse HEAD 2>/dev/null)" || { SUITE_VERIFY_REASON="$who: cannot read the verification tree's HEAD — refusing"; return "$INTEGRATE_RC_UNVERIFIED"; }
+  [ "$tw_head" = "$cand" ] || { SUITE_VERIFY_REASON="$who: the verification tree is at $tw_head, not the candidate $cand — the suite result is not about this landing; refusing"; return "$INTEGRATE_RC_UNVERIFIED"; }
+  tw_status="$(git -C "$tw" status --porcelain 2>/dev/null)" || { SUITE_VERIFY_REASON="$who: cannot read the verification tree's status — refusing"; return "$INTEGRATE_RC_UNVERIFIED"; }
+  # SIBLING OF THE HINT ABOVE, and the one an operator acting on that hint hits next: told to
+  # provision prerequisites, they write a wrapper, and it lands here if its output is
+  # git-VISIBLE. Ignored output is fine — an installed dependency tree is the intended shape.
+  # Untracked-but-unignored files and modified tracked files are not, and a package manager
+  # that rewrites a tracked lockfile produces exactly the latter. Print the dirt: "refusing to
+  # trust the result" without saying WHAT dirtied it is a refusal nobody can act on.
+  # (grok, plan r1 — worth more here than on the suite-FAILED path.)
+  [ -z "$tw_status" ] || { SUITE_VERIFY_REASON="$who: the suite dirtied the verification tree — refusing to trust the result
+$who: note — suite-cmd MAY create IGNORED files (an installed dependency tree is fine); it
+$who: may NOT leave git-visible changes. Modified tracked files and untracked-but-unignored
+$who: output both land here. Dirt:
+$tw_status"; return "$INTEGRATE_RC_UNVERIFIED"; }
+  return 0
+}
+
 integrate_is_docs_only() {  # <root> <base-oid> <cand-oid> — 0 iff every changed path is prose
   # Prose = README.md, LICENSE, or a top-level docs/*.md file. Nested docs
   # (docs/loopspec — the installed review bar) and AGENTS.md (the onboarding
@@ -4453,144 +4610,9 @@ cmd_integrate() {
     fi
   fi
   if [ -z "$skip_suite" ]; then
-    # Recover any prior crash's stale registration before adding: remove the entry
-    # if git still knows it, prune dangling metadata, then clear the directory.
-    git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
-    git -C "$root" worktree prune >/dev/null 2>&1 || true
-    rm -rf "$tw" 2>/dev/null || true
-    git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: could not materialize $cand"
-    # Structured argv: whitespace split only, nothing shell-interpreted. An
-    # empty/whitespace-only suite-cmd expanded to zero argv and SUCCEEDED as a
-    # no-op — the exact unverified landing the config gate exists to refuse.
-    # (codex, impl r1.)
-    set -f; set -- $suite_cmd; set +f
-    [ $# -gt 0 ] || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: suite-cmd is empty after splitting — refusing to land unverified"
-    # SHELL-STARTUP SCRUB. Non-interactive bash sources $BASH_ENV *before* the script
-    # runs, so a suite's own guards are installed too late to matter: `BASH_ENV` naming
-    # a file that says `exit 0` makes `bash tests/run.sh` return 0 with no output and no
-    # assertions, and integrate would land on it. ENV/SHELLOPTS/BASHOPTS are the same
-    # class. (codex, panel r4, blocking — demonstrated with BASH_ENV=/dev/stdin.)
-    # `command` PREFIX, and no fallback. `BASH_ENV` is sourced by THIS helper before the
-    # scrub runs, so a hook can define a function that prints a well-formed
-    # `passed: N  failed: 0  skipped: 0` line and returns 0 -- tee records the forgery,
-    # PIPESTATUS[0] is 0, the positive proof passes, and a candidate lands with the suite
-    # never having run.
-    #
-    # An absolute path is NOT enough: bash 3.2 accepts `function /usr/bin/env { ...; }`
-    # and dispatches it ahead of the executable (verified on this runtime -- an earlier
-    # version of this comment claimed otherwise and was wrong). `command` suppresses
-    # function lookup, which is what actually forces the executable to run.
-    # (codex, panel r6 then r7, blocking twice.)
-    #
-    # The fallback that used to sit here reassigned the scrub command to a bare, lookup-
-    # dispatched name whenever the absolute path was not executable -- which undid the pin
-    # on every host, not just an unusual layout. It is gone: a missing /usr/bin/env now
-    # REFUSES rather than silently running unpinned. (grok, panel r7.)
-    # (Deliberately worded without the literal assignment, because the regression that
-    # forbids it greps this file and would otherwise match its own description.)
-    #
-    # HONEST LIMIT, stated rather than implied: this defeats the demonstrated forgeries.
-    # It is not a containment boundary. Anything that can inject BASH_ENV into this helper
-    # already runs code as the user -- it could shadow `command` itself, or replace `bash`
-    # or `git` on PATH. The proof is a tripwire against silent pre-emption and cheap
-    # impersonation, and a shell whose function table is attacker-controlled is out of
-    # scope for any in-process check.
-    command test -x /usr/bin/env \
-      || integrate_fail "$INTEGRATE_RC_ENV" "integrate: /usr/bin/env is missing — refusing to run the suite unpinned"
-    local -a clean_env
-    clean_env=(command /usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD)
-    # Keep the output of the run we are judging. A refusal whose evidence was discarded
-    # cannot be diagnosed, which cost a full investigation earlier in this arc.
-    local suite_log; suite_log="$root/.comms/logs/integrate-${cand}.suite.log"
-    mkdir -p "$root/.comms/logs" 2>/dev/null || true
-    # errexit is suspended ACROSS the pipeline: with `set -e -o pipefail` a red suite
-    # terminates the helper AT the pipeline, so `rc=${PIPESTATUS[0]}` never runs and the
-    # "suite FAILED ... output kept at ..." diagnostic below is unreachable on exactly the
-    # path it describes. Landing stayed fail-closed, but the operator lost the message.
-    # (codex, panel r5, advisory — the same errexit class as the assignment above.)
-    set +e
-    # SUITE OUTPUT GOES TO STDERR. stdout is reserved for integrate's own lines, above all the
-    # `integrate-result` line a driver parses: a forwarded suite line of that shape would forge
-    # a second result on success, or a result on a refusal. A nested integrate inside the suite
-    # does exactly that without any malice. The raw output is still kept whole in $suite_log.
-    # (codex, driver-contract r1, blocking.)
-    # THIRD SITE, and the one no short test could reach: `with-beat`'s beater sleeps TTL/3
-    # (default 900s) and then beats, which HEALS an absent record — manufacturing the same
-    # pid-less, unreapable record the two explicit gates prevent, fifteen minutes in, long
-    # after every fixture had finished. (codex + grok, integrate-beat r5.)
-    if [ -n "$name" ] && [ -n "$instance" ]; then
-      # SUPERVISION ALWAYS; heartbeat only when there is a record to refresh. Running the
-      # suite unwrapped to avoid the healing beat gave up whole-process-group quiescence,
-      # and that is load-bearing: a suite can print its completion line, launch a
-      # stdio-detached descendant and exit 0, leaving it alive to mutate the verification
-      # tree after integrate validates and advances main. `--no-heartbeat` keeps the
-      # supervision and drops only the beater. (codex, integrate-beat r6, blocking.)
-      local hb=""
-      [ -f "$presence_record" ] || hb="--no-heartbeat"
-      # shellcheck disable=SC2086
-      ( cd "$tw" && "${clean_env[@]}" "$0" presence with-beat $hb --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log" >&2
-      rc=${PIPESTATUS[0]}
-    else
-      ( cd "$tw" && "${clean_env[@]}" "$@" ) 2>&1 | tee "$suite_log" >&2
-      rc=${PIPESTATUS[0]}
-    fi
-    set -e
-    # THE FRESH-CHECKOUT HINT. The verification tree is materialized by `git worktree add`,
-    # so it carries TRACKED CONTENT ONLY — no untracked and no ignored files. A suite-cmd that
-    # passes in the operator's checkout and fails here is usually depending on something that
-    # checkout has and this one does not, and the tool's own error (a missing-module code, say)
-    # gives no reason to suspect the TREE. Deliberately generic: naming any one ecosystem's
-    # directory would teach this tool what `node_modules` is, and the same shape covers an
-    # ignored `.npmrc`, a `.env`, or a build cache. Worded as a LIKELY cause, not a verdict —
-    # most suite failures really are just failures. (codex + grok, plan r1.)
-    [ "$rc" = 0 ] || integrate_fail "$INTEGRATE_RC_SUITE_RED" "integrate: suite FAILED ($rc) at $cand — main untouched; full output kept at $suite_log
-integrate: note — the verification tree is a FRESH checkout of the candidate: untracked and
-integrate: ignored files are absent. If this suite passes in your working checkout, the likely
-integrate: cause is suite-cmd depending on something only that checkout has; suite-cmd must
-integrate: provision its own prerequisites. Read $suite_log for the underlying failure."
-    # POSITIVE PROOF, not merely an absence of failure. A scrub is a blocklist and the
-    # next startup hook will not be on it, so require evidence the suite actually RAN:
-    # its completion line, with counts matching the contract committed AT THE CANDIDATE.
-    # Only enforced when the candidate carries a contract, so other projects' suite-cmds
-    # are unaffected. (codex, panel r4.)
-    local exp_total proof_pass proof_fail proof_skip
-    # `|| exp_total=""` is load-bearing: under `set -e` + `pipefail`, a candidate with no
-    # contract makes `git show` exit 128 and the ASSIGNMENT takes the whole function down
-    # -- the var=$(cmd) errexit trap this repo has hit before. A project without a
-    # contract must simply skip the proof, not fail its landing.
-    exp_total="$(git -C "$root" show "$cand:tests/expected-counts.tsv" 2>/dev/null \
-                 | awk -F'\t' '$1=="total"{print $2}')" || exp_total=""
-    case "$exp_total" in ''|*[!0-9]*) exp_total="" ;; esac
-    if [ -n "$exp_total" ]; then
-      proof_pass="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\1/p' "$suite_log" | tail -1)" || proof_pass=""
-      proof_fail="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\2/p' "$suite_log" | tail -1)" || proof_fail=""
-      proof_skip="$(sed -n 's/^passed: \([0-9][0-9]*\)  *failed: \([0-9][0-9]*\)  *skipped: \([0-9][0-9]*\) *$/\3/p' "$suite_log" | tail -1)" || proof_skip=""
-      [ -n "$proof_pass" ] \
-        || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the suite exited 0 but emitted no completion line — it did not run to the end (a shell-startup hook can pre-empt it); refusing. Output: $suite_log"
-      [ "$proof_fail" = 0 ] \
-        || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the suite reported $proof_fail failures despite exit 0 — refusing. Output: $suite_log"
-      [ "$((proof_pass + proof_skip))" = "$exp_total" ] \
-        || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the suite ran $((proof_pass + proof_skip)) of $exp_total assertions the candidate declares — refusing a partial run. Output: $suite_log"
-    fi
-    # BIND the result to the candidate: a suite that checked out another OID and
-    # passed there proves nothing about $cand. Every verification below fails
-    # CLOSED — a command that cannot answer refuses the landing. (codex, impl r1.)
-    local tw_head tw_status
-    tw_head="$(git -C "$tw" rev-parse HEAD 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: cannot read the verification tree's HEAD — refusing"
-    [ "$tw_head" = "$cand" ] || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the verification tree is at $tw_head, not the candidate $cand — the suite result is not about this landing; refusing"
-    tw_status="$(git -C "$tw" status --porcelain 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: cannot read the verification tree's status — refusing"
-    # SIBLING OF THE HINT ABOVE, and the one an operator acting on that hint hits next: told to
-    # provision prerequisites, they write a wrapper, and it lands here if its output is
-    # git-VISIBLE. Ignored output is fine — an installed dependency tree is the intended shape.
-    # Untracked-but-unignored files and modified tracked files are not, and a package manager
-    # that rewrites a tracked lockfile produces exactly the latter. Print the dirt: "refusing to
-    # trust the result" without saying WHAT dirtied it is a refusal nobody can act on.
-    # (grok, plan r1 — worth more here than on the suite-FAILED path.)
-    [ -z "$tw_status" ] || integrate_fail "$INTEGRATE_RC_UNVERIFIED" "integrate: the suite dirtied the verification tree — refusing to trust the result
-integrate: note — suite-cmd MAY create IGNORED files (an installed dependency tree is fine); it
-integrate: may NOT leave git-visible changes. Modified tracked files and untracked-but-unignored
-integrate: output both land here. Dirt:
-$tw_status"
+    local vrc=0 suite_log="$root/.comms/logs/integrate-${cand}.suite.log"
+    suite_verify_candidate integrate "$root" "$cand" "$tw" "$suite_log" "$suite_cmd" "$name" "$instance" "$presence_record" || vrc=$?
+    [ "$vrc" = 0 ] || integrate_fail "$vrc" "$SUITE_VERIFY_REASON"
   fi
   # Final occupancy guard — a checkout could have moved onto main DURING the
   # suite; the CAS must still never move a ref under a live working tree.
@@ -4654,6 +4676,161 @@ $tw_status"
   # grow without breaking a parser that reads v1. Format: docs/COMMANDS.md.
   printf 'integrate-result v1 status=landed cand=%s main_before=%s main_after=%s branch=%s suite=%s\n' \
     "$cand" "$expected" "$cand" "$(integrate_kv "$branch")" "$suite_kind"
+}
+
+cmd_verify() {
+  # verify init [--yes] [--force] [--update] — scaffold ci/verify.sh + ci/verify.steps and point
+  #   suite-cmd at it. verify fresh [<rev>] — run suite-cmd against <rev> exactly as integrate
+  #   would, in a throwaway checkout, without landing. (basis plan slice 0, generic-verify.)
+  local sub="${1:-}"; shift 2>/dev/null || true
+  case "$sub" in
+    init) verify_init "$@" ;;
+    fresh) verify_fresh "$@" ;;
+    status) verify_status "$@" ;;
+    *) usage_err "verify: expected 'init', 'fresh' or 'status'" ;;
+  esac
+}
+
+verify_is_shell_cmd() {  # <suite-cmd> — 0 when it needs a shell the no-shell argv split cannot give it
+  case "$1" in *'&&'*|*'||'*|*'|'*|*';'*|*'>'*|*'<'*|*'`'*|*'$('*) return 0 ;; esac
+  return 1
+}
+
+verify_set_suite_cmd() {  # <root> <force> — point suite-cmd at ci/verify.sh, keeping every other line
+  local root="$1" force="$2" cfg="$1/.comms/config" want="bash ci/verify.sh" cur tmp
+  # config_scalar refuses a duplicate key, which is exactly the case a blind append would create.
+  cur="$(config_scalar "$root" suite-cmd)" || die "verify init: cannot read suite-cmd from $cfg (see above)"
+  if [ "$cur" = "$want" ]; then echo "verify: suite-cmd already = $want"; return 0; fi
+  if [ -n "$cur" ] && ! verify_is_shell_cmd "$cur" && [ -z "$force" ]; then
+    echo "verify: left suite-cmd = $cur (a working single command); use --force to point it at ci/verify.sh"
+    return 0
+  fi
+  mkdir -p "$root/.comms" || die "verify init: cannot create $root/.comms"
+  if [ -f "$cfg" ]; then
+    [ -r "$cfg" ] || die "verify init: $cfg is unreadable — refusing to rewrite it"
+    tmp="$cfg.tmp.$$"
+    { grep -v "^[[:space:]]*suite-cmd[[:space:]]*=" "$cfg" || true; printf 'suite-cmd = %s\n' "$want"; } > "$tmp" \
+      && mv -f "$tmp" "$cfg" || { rm -f "$tmp"; die "verify init: could not rewrite $cfg"; }
+  else
+    printf 'suite-cmd = %s\n' "$want" > "$cfg" || die "verify init: could not write $cfg"
+  fi
+  if [ -n "$cur" ]; then echo "verify: suite-cmd: '$cur' -> '$want'"; else echo "verify: suite-cmd = $want"; fi
+}
+
+verify_status() {  # prints ok|missing|needs-shell <TAB> the current suite-cmd; setup reads this
+  [ $# -eq 0 ] || usage_err "verify status: takes no arguments"
+  local root cur
+  root="$(main_repo_root)" || die "verify status: not inside a git repository"
+  [ -n "$root" ] || die "verify status: not inside a git repository"
+  cur="$(config_scalar "$root" suite-cmd)" || die "verify status: cannot read .comms/config (see above)"
+  if [ -z "$cur" ]; then printf 'missing\t\n'
+  elif verify_is_shell_cmd "$cur"; then printf 'needs-shell\t%s\n' "$cur"
+  else printf 'ok\t%s\n' "$cur"; fi
+}
+
+verify_init() {
+  local yes="" force="" update=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes) yes=1 ;; --force) force=1 ;; --update) update=1 ;;
+      -?*) usage_err "verify init: unknown option '$(clip "$1")'" ;;
+      *) usage_err "verify init: unexpected argument '$(clip "$1")'" ;;
+    esac; shift
+  done
+  local src top root dst steps tmp
+  src="$(dirname "$SELF")/verify.sh"
+  [ -f "$src" ] || die "verify init: the template is missing at $src — re-run install.sh"
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || die "verify init: not inside a git repository"
+  root="$(main_repo_root)" || die "verify init: no main repo root"
+  [ -n "$root" ] || die "verify init: no main repo root"
+  dst="$top/ci/verify.sh"; steps="$top/ci/verify.steps"
+  if [ -n "$update" ]; then
+    # Refresh the TEMPLATE only. The steps are the repo's own, and a hand-written ci/verify.sh
+    # that happens to share the name is not ours to overwrite.
+    [ -f "$dst" ] || die "verify init --update: there is no ci/verify.sh to update"
+    grep -q '^# agent-comms verify v' "$dst" \
+      || die "verify init --update: ci/verify.sh carries no agent-comms version header — refusing to overwrite a hand-written suite (use --force)"
+    tmp="$dst.tmp.$$"
+    { cp "$src" "$tmp" && chmod +x "$tmp" && mv -f "$tmp" "$dst"; } || { rm -f "$tmp"; die "verify init --update: could not write $dst"; }
+    echo "verify: updated ci/verify.sh to $(sed -n 's/^# agent-comms verify //p' "$src" | head -1); ci/verify.steps unchanged"
+    return 0
+  fi
+  [ -z "$force" ] && [ -e "$dst" ] \
+    && die "verify init: ci/verify.sh already exists — use --update to refresh the template, or --force to replace it"
+  # The PREVIEW, the generated steps and the runtime all come from the template itself: one
+  # detector, so what init shows is what the suite will do.
+  local plan prc=0 emitted
+  plan="$( (cd "$top" && bash "$src" --plan) 2>&1)" || prc=$?
+  printf '%s\n' "$plan"
+  [ "$prc" = 0 ] || die "verify init: this setup cannot verify anything as it stands (see above) — fix it, or write ci/verify.steps by hand"
+  emitted="$(cd "$top" && bash "$src" --emit-steps)" || die "verify init: could not derive the steps (see above)"
+  if [ -z "$yes" ]; then
+    if [ -t 0 ] && [ -t 1 ]; then
+      local ans
+      printf 'Write ci/verify.sh%s and point suite-cmd at it? [y/N] ' "$([ -e "$steps" ] || printf ' + ci/verify.steps')"
+      read -r ans || ans=""
+      case "$ans" in y|Y|yes|YES) ;; *) echo "verify: nothing written"; return 0 ;; esac
+    else
+      die "verify init: no terminal to confirm on — re-run with --yes"
+    fi
+  fi
+  mkdir -p "$top/ci" || die "verify init: cannot create $top/ci"
+  tmp="$dst.tmp.$$"
+  { cp "$src" "$tmp" && chmod +x "$tmp" && mv -f "$tmp" "$dst"; } || { rm -f "$tmp"; die "verify init: could not write $dst"; }
+  local wrote_steps=""
+  # An existing steps file is the repo's own list: kept, even under --force.
+  if [ ! -e "$steps" ]; then
+    tmp="$steps.tmp.$$"
+    { printf '%s\n' \
+        '# ci/verify.steps — the checks ci/verify.sh runs, one shell command per line, in order.' \
+        '# Each line runs as: bash -euo pipefail -c "<line>" with stdin closed. Keep each line one' \
+        '# simple command (or a repo script): pipefail cannot see inside nested shells.' \
+        '# Directive: "#@ provision: none" or "#@ provision: npm,uv" overrides lockfile detection.'
+      printf '%s\n' "$emitted"; } > "$tmp" && mv -f "$tmp" "$steps" || { rm -f "$tmp"; die "verify init: could not write $steps"; }
+    wrote_steps=1
+  fi
+  verify_set_suite_cmd "$root" "$force"
+  echo "verify: wrote ci/verify.sh${wrote_steps:+ and ci/verify.steps}"
+  echo "verify: next — commit them, then prove the suite the way integrate will run it:"
+  echo "verify:   git add ci/verify.sh ci/verify.steps && git commit -m 'chore: add verify suite' && comms.sh verify fresh"
+  echo "verify: note — .comms/config is local; the suite-cmd line does not travel with the commit"
+}
+
+verify_fresh() {
+  [ $# -le 1 ] || usage_err "verify fresh: expected at most one revision"
+  local rev="${1:-HEAD}"
+  case "$rev" in -?*) usage_err "verify fresh: unknown option '$(clip "$rev")'" ;; esac
+  local root suite_cmd cand
+  root="$(main_repo_root)" || integrate_fail "$INTEGRATE_RC_CONFIG" "verify: no main repo root (not inside a git repository, or it cannot be read)"
+  [ -n "$root" ] || integrate_fail "$INTEGRATE_RC_CONFIG" "verify: no main repo root"
+  suite_cmd="$(config_scalar "$root" suite-cmd)" \
+    || integrate_fail "$INTEGRATE_RC_CONFIG" "verify: cannot read suite-cmd from .comms/config (see above)"
+  [ -n "$suite_cmd" ] || integrate_fail "$INTEGRATE_RC_CONFIG" "verify: no 'suite-cmd = ...' in .comms/config — run: comms.sh verify init"
+  cand="$(git rev-parse --verify "$rev^{commit}" 2>/dev/null)" || usage_err "verify fresh: cannot resolve '$(clip "$rev")'"
+  if [ "$rev" = HEAD ] && [ -n "$(git status --porcelain -uno 2>/dev/null)" ]; then
+    echo "verify: note — uncommitted changes are NOT verified; only the committed $cand is" >&2
+  fi
+  local name="${COMMS_PRESENCE_NAME:-}" instance="${COMMS_PRESENCE_INSTANCE:-}" rec=""
+  if [ -n "$name" ] || [ -n "$instance" ]; then
+    presence_validate_ids "$name" "$instance" || usage_err "verify fresh: invalid presence name/instance"
+    rec="$(presence_dir)/$name-$instance.json"
+  fi
+  # Its OWN tree and log: a preflight must never share (and so never remove) a landing's
+  # .integrate-* tree. (codex + grok, generic-verify plan r2.)
+  local tw log vrc=0
+  tw="$root/.claude/worktrees/.verify-$$-$RANDOM"
+  log="$root/.comms/logs/verify-${cand}.suite.log"
+  mkdir -p "$root/.claude/worktrees" 2>/dev/null || true
+  # shellcheck disable=SC2064
+  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true" EXIT
+  echo "verify: running suite-cmd against $cand in a fresh checkout (nothing will land)"
+  suite_verify_candidate verify "$root" "$cand" "$tw" "$log" "$suite_cmd" "$name" "$instance" "$rec" || vrc=$?
+  git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
+  rm -rf "$tw" 2>/dev/null || true
+  trap - EXIT
+  [ "$vrc" = 0 ] || integrate_fail "$vrc" "$SUITE_VERIFY_REASON"
+  echo "verify: suite green at $cand in a fresh checkout — integrate would accept this suite (nothing landed)"
+  printf 'verify-result v1 status=verified cand=%s\n' "$cand"
 }
 
 cmd_snapshot() {
@@ -6212,6 +6389,7 @@ case "${1:-}" in
   worktree)  shift; cmd_worktree "$@" ;;
   integrate) shift; cmd_integrate "$@" ;;
   attest-green) shift; cmd_attest_green "$@" ;;
+  verify)    shift; cmd_verify "$@" ;;
   stalled)   shift; cmd_stalled "$@" ;;
   clean)     shift; cmd_clean "$@" ;;
   lessons)        shift; cmd_lessons "$@" ;;
