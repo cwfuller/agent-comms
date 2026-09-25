@@ -214,8 +214,8 @@ were live.)
    ```
    `--yes` ends the dry run; it bypasses no gate, and there is no force. A refusal
    (any non-zero exit; the reasons are on stderr) does not undo the landing: report it and
-   what retire says is left (exit 1 and 4 can follow the tree's removal; the message says
-   `worktree removed: yes|no`), release anyway, and leave the rest for a human. A
+   what retire says is left (a failed remove says `the branch is untouched`; a failed or
+   raced branch delete after it says `worktree removed: yes|no`), release anyway, and leave the rest for a human. A
    `processes:` refusal naming your own harness or shell is expected: never kill those pids
    or retry past it. A session that never left the shared checkout skips retire and only
    releases. Any other `integrate` outcome leaves the

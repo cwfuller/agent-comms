@@ -408,6 +408,7 @@ AR_RL="$(line_of "$ARS" 'presence release --name')"
   || fail "auto.md retire order/shape (cd=$AR_CD retire=$AR_RT release=$AR_RL)"
 printf '%s' "$ARS" | grep -q 'A refusal does not fail the loop' && printf '%s' "$ARS" | grep -qF 'never ran `worktree new`' \
   && printf '%s' "$ARS" | grep -q 'worktree removed: yes|no' && printf '%s' "$ARS" | grep -q 'Never kill those pids' \
+  && printf '%s' "$ARS" | grep -q 'the branch is untouched' \
   && printf '%s' "$ARS" | grep -q 'never the branch you started on in the shared checkout' \
   && ok "auto.md reports a refusal without failing the loop, and a shared-checkout session skips retire" \
   || fail "auto.md refusal/shared-checkout handling"
@@ -424,8 +425,9 @@ for ar_copy in "claude:$ARI/claude/auto.md" "grok:$ARI/grok/auto.md" "codex:$ARI
     || fail "$ar_rt's installed /auto is missing or differs in the retire step ($ar_f)"
 done
 # The continuation command closes an approved loop too, so it must hand off to the same step.
-grep -q 'finish with `/auto` step 9: retire your own worktree' "$REPO/templates/claude-commands/read-from-codex.md" \
-  && ok "read-from-codex hands an approved, landed loop to /auto step 9" || fail "read-from-codex does not hand off to the retire step"
+[ "$(grep -c 'open step 9 ("After a successful landing") of' "$REPO/templates/claude-commands/read-from-codex.md")" = 2 ] \
+  && grep -qF '`$auto` (Codex), `/user:auto` or `/local:auto`' "$REPO/templates/claude-commands/read-from-codex.md" \
+  && ok "read-from-codex hands an approved, landed loop (single-reviewer AND panel) to step 9 of each runtime's loop command" || fail "read-from-codex does not hand off to the retire step"
 AG6="$(awk '/^6\. Repeat until the \*\*gating reviewer\*\*/{p=1} p&&/^Write the review ask adversarially/{exit} p' "$REPO/AGENTS.md")"
 A6_CD="$(line_of "$AG6" "cd \"\$(git worktree list --porcelain | sed -n '1s/^worktree //p')\"")"
 A6_RT="$(line_of "$AG6" 'worktree retire <branch> --yes')"

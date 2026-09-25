@@ -189,6 +189,9 @@ never a re-derived one.
   the legs are the threads that carry state (the base thread has none), and a leg left
   awaiting is reported by `stalled` until someone closes it by hand (field report
   2026-09-08). Same rule as the single-reviewer approval below; never on max-rounds or a split.
+  If the loop then lands through `integrate`, open step 9 ("After a successful landing") of
+  the loop command you are running (`/auto`, `$auto`, `/user:auto` or `/local:auto`) and
+  follow it as written.
 
 ### Autonomous flow — `workflow` field present
 
@@ -277,8 +280,9 @@ Direct is a state you re-earn at every checkpoint, never tenure.
      rounds." Then any advisory worth keeping. Record the reviewer performance note
      (see above), archive: `"$COMMS_SH" archive --as "$SELF" "<file>"`, then close the
      thread's state: `"$COMMS_SH" state complete "<thread>"`. If the loop then lands
-     through `integrate`, finish with `/auto` step 9: retire your own worktree, then
-     release presence.
+     through `integrate`, open step 9 ("After a successful landing") of the loop command
+     you are running — `/auto` (Claude), `$auto` (Codex), `/user:auto` or `/local:auto`
+     (Grok) — and follow it as written: it carries the gates, the `cd` and the order.
 
 2. **If `round >= max-rounds`:**
    - **Stop. Escalate to user** with status line first: "Stopped — I need you. Max

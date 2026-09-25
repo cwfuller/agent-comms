@@ -411,8 +411,9 @@ verdict format. The cycle continues until APPROVE or max rounds.
      branch moved after the check, 1 a failed remove or delete — says why on stderr
      (`refused: <gate>: <detail>`). Report them to the user in one line — the landing still
      succeeded, so the status line is still **Done.** — and release presence anyway. Report
-     what retire says is left, never an assumption: exit 3 changes nothing, but 1 and 4 can
-     come AFTER the tree was removed, and their message says `worktree removed: yes|no`.
+     what retire says is left, never an assumption: exit 3 changes nothing; exit 1 with
+     `the branch is untouched` means the remove itself failed; a failed branch delete (1)
+     or a moved branch (4) comes AFTER the remove and says `worktree removed: yes|no`.
      Whatever remains is the human's to inspect and retire by hand.
    - **A `processes:` refusal is expected when your own harness holds the tree** — a
      runtime whose process or a shell the `cd` did not move still has its cwd or an open
