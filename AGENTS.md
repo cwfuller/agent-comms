@@ -368,7 +368,7 @@ runtime, quote the assertion count with it or measure both sides yourself.
 | `tests/dispatch.py` | bounded worker scheduling and complete-report aggregation |
 | `.comms/` | live mailboxes, thread state, presence records, archive — runtime, not source |
 | `docs/PROTOCOL.md` | message format, loop semantics, presence & worktree rules |
-| `docs/COMMANDS.md` | the command reference (not exhaustive — `panel`, `compose`, `friction`, `round-note` currently live only in `helpers/comms.sh`'s header banner, which is the real catalog) |
+| `docs/COMMANDS.md` | the command reference: every `comms.sh` subcommand with its flags, exit codes and machine-readable lines; `comms.sh help` prints the short form from `helpers/comms.sh`'s header banner — change both together |
 | `docs/INTERNALS.md` | architecture and the rationale behind the load-bearing choices |
 | `docs/ROADMAP.md` | decisions, field reports, and what's next — read before proposing work |
 | `docs/advisories.md` | lessons carried out of finished loops |

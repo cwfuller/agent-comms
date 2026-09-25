@@ -5,10 +5,11 @@
 # Always executed (never sourced), always bash — the caller's shell (zsh, etc.)
 # and Claude Code's slash-command $N argument substitution cannot affect it.
 #
-# Subcommands:
+# Subcommands (docs/COMMANDS.md is the long form, with every flag and exit code):
+#   help | -h | --help          print this banner (also with no subcommand)
 #   root                        print the main repo's .comms path (worktree-safe)
-#   workspace [set <name>]      print the mailbox identity (pin > branch > repo
-#                               dir); `set` pins it repo-scoped in .comms/workspace
+#   workspace [set <name>]      print the mailbox identity (repo pin > worktree pin >
+#                               branch > repo dir); `set` pins it repo-scoped in .comms/workspace
 #   agents [default|--drivers|--review|--provider <id>|--others <driver>|
 #           --roster <driver> [a,b,...]|--supported]
 #                                  registered identities: every identity (bare), the
@@ -24,7 +25,7 @@
 #                               ancestor executable). Fails closed on no signal, on
 #                               conflicting signals, on a review-only identity, and
 #                               inside a review turn; never defaults to claude.
-#   list --as <agent> [--thread <t>]   pending inbox messages, newest first
+#   list --as <agent> [--thread <t>]   pending inbox messages, newest first; exit 1 when none
 #   status                      one-screen loop state: latest archive, verdict, pending counts
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
 #   error-envelope <file|->     exit 0 (printing the provider's message) iff the body is a provider
@@ -34,14 +35,16 @@
 #                               (cause on stderr). The one decoder broker/consult/canary share.
 #   verdict <file>              normalized (trimmed, uppercased) verdict from frontmatter
 #   archive --as <agent> <file...>   idempotent move to archive/; own inbox only
-#   deliver <agent> [file]   hand the message to a runner (ACP, or headless for grok); reports delivered/
-#                               manual-pickup/FAILED explicitly (never hard-fails).
-#                               COMMS_DELIVERY=headless routes to runphase.sh instead
-#                               (detached turn; grok only since step 4 — claude and
-#                               codex review turns are ACP-only and refuse headless)
-#   transport <agent> [--loop]  which transport would actually be used right now:
-#                               headless | acp | mailbox. One decision point, so
-#                               templates never re-implement surface detection.
+#   deliver <agent> [file]      hand the message to a runner (ACP, or headless for grok); reports
+#                               spawned/completed/manual pickup/FAILED explicitly — a failed
+#                               delivery is reported, never an error exit (a bad agent or
+#                               COMMS_DELIVERY still is). COMMS_DELIVERY=headless routes to
+#                               runphase.sh instead (detached turn; grok only since step 4 —
+#                               claude and codex review turns are ACP-only and refuse headless)
+#   transport <agent> [--loop|--consult]
+#                               which transport would actually be used right now:
+#                               headless | acp | mailbox (default --consult). One decision
+#                               point, so templates never re-implement surface detection.
 #   send --to <agent> <file> [--wait] [--archive-inbound <file>]
 #                               --wait runs the peer turn in the FOREGROUND instead of
 #                               detaching — required inside sandboxes that reap the
@@ -56,12 +59,14 @@
 #                               mark ONLY the named ids legacy, each re-judged idle, with the
 #                               evidence written in; never by age alone. Exit 0 / 2 usage / 3 refused
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
-#   presence <claim|beat|others|release|expire|with-beat>
-#                               `others` re-pins self and so WRITES: 0 direct-safe /
-#                               3 peers / 4 isolate / 5 tenure lost (own record gone)
-#                               advisory multi-session coordination on .comms/sessions/
-#                               (claim-then-check: 0 direct-safe / 3 peers / 4 isolate;
-#                               beat exit 5 = healed, re-check before writing)
+#   presence <claim|beat|others|release|expire|with-beat> [--name N] [--instance I]
+#            [--role R] [--state S] [--pid P] [--force <name>] [--no-heartbeat] [-- <cmd>]
+#                               advisory multi-session coordination on .comms/sessions/.
+#                               claim-then-check: 0 direct-safe / 3 peers / 4 isolate.
+#                               `others` re-pins self and so WRITES: 0 / 3 / 4 as claim,
+#                               5 tenure lost (own record gone). beat exit 5 = healed a
+#                               vanished record; re-check before writing. Every verb but
+#                               claim and expire needs --name AND --instance as flags.
 #   worktree                    no subcommand: prints usage, exit 2 (never creates)
 #   worktree new [<slug>]       session worktree under the MAIN root, local-tip base;
 #                               stamps the creating session as owner when
@@ -100,10 +105,14 @@
 #                               1 other. A landing prints one line
 #                               `integrate-result v1 status=landed cand= main_before=
 #                               main_after= branch= suite=ran|skipped-docs|attested`
-#   verify init|fresh|status    landing suite for any repo: `init` scaffolds a committed
+#   verify init [--yes] [--force] [--update] [--replace-suite-cmd] | fresh [<rev>] | status
+#                               landing suite for any repo: `init` scaffolds a committed
 #                               ci/verify.sh + ci/verify.steps (stack detection, frozen
-#                               installs) and sets suite-cmd; `fresh [<rev>]` runs suite-cmd
-#                               exactly as integrate would, without landing
+#                               installs) and sets a missing suite-cmd; `fresh [<rev>]` runs
+#                               suite-cmd exactly as integrate would, without landing
+#                               (integrate's exit classes; success prints one line
+#                               `verify-result v1 status=verified cand=`); `status` prints
+#                               ok|missing|needs-shell<TAB>suite-cmd
 #   attest-green [--passed N] [--expect <oid>]
 #                               record "suite green at this exact HEAD" (clean
 #                               tracked tree required) for integrate's opt-in skip.
@@ -111,36 +120,44 @@
 #                               verified: HEAD moving mid-run refuses instead of
 #                               attesting a commit the run was not about
 #   clean --as <agent> [workspace|all|archive|<file>] [--yes]
-#   clean mounts [--yes] [--orphans]   GC this repo's EXTERNAL mount store (dry-run default;
-#                              refuses the whole repo-key on any live owner; --orphans reports
-#                              moved-checkout keys without deleting). No --as; needs no mailbox.
 #                               guarded delete; dry-run without --yes; own-inbox default
+#   clean mounts [--yes] [--orphans]
+#                               GC this repo's EXTERNAL mount store (dry-run default;
+#                               refuses the whole repo-key on any live owner; --orphans reports
+#                               moved-checkout keys without deleting). No --as; needs no mailbox.
 #   lessons [--bytes N] [--surface P] [--file F]
 #                               bounded newest-first tail of docs/advisories.md (whole
 #                               "## " sections, never a byte slice). Exit 3 = truncated.
 #   archive-search <pattern> [--bytes N] [--limit K]
 #                               bounded newest-first search of archive/ across workspaces;
 #                               metadata + clipped context, not whole messages. Exit 3 = truncated.
-#   findings [--out F] [--role gating|shadow] [--review-set ID] [--artifact ID]
-#            [--reviewer-version V] [--prompt-version V] [--header] [<message>...]
+#   findings [--out F [--rebuild]] [--role gating|shadow] [--review-set ID] [--artifact ID]
+#            [--base-sha S] [--reviewer-version V] [--prompt-version V] [--header] [<message>...]
 #                               extract review findings to TSV (default: the whole archive,
-#                               oldest first). --out appends, idempotent by finding_id.
+#                               oldest first). --out appends, idempotent by finding_id;
+#                               --rebuild regenerates it from the archive + shadow store.
 #                               Observations only — no dispositions, no scores.
 #   shadow --to <agent> <review-request> [--review-set ID] [--out F] [--timeout-secs N]
 #                               have a SECOND reviewer read the same artifact. The reply is
 #                               produced and stored but NEVER delivered and never written to
 #                               thread state — a shadow verdict cannot gate the loop.
-#   ask --from <agent> --to <agent> [--wait] (--file F | words...)
+#   ask --from <driver> --to <agent> [--wait] (--file F | words...)
 #                               one-off consult, driver-neutral: composes the question,
-#                               validates it, sends it. Any agent can ask any other.
-#   route [--task T|--file F|--current-tier T|--context-tokens N|--] <task>
+#                               validates it, sends it. Any driver can ask any other
+#                               agent; a review twin is never a consult target.
+#   route [--probe] [--task T|--file F|--current-tier T|--context-tokens N|--] <task>
 #                               classify an /auto query: plan yes/no, implementer
 #                               effort, and abstract tier (fast|balanced|strong).
 #                               Decision backends are opt-in (COMMS_ROUTE_BACKEND
 #                               or COMMS_ROUTE=1); TypeSafe/Jev is one backend.
 #                               Fail-open with no backend, on timeout, or on a
 #                               malformed answer. Prompt overrides win. Never
-#                               selects a reviewer or a vendor model id.
+#                               selects a reviewer or a vendor model id. --probe
+#                               runs the path without contacting any backend.
+#   route --shadow [--thread T] [--current-tier T] [--context-tokens N] -- <task>
+#   route --shadow --reviewer --file <review-request> [--thread T]
+#                               OBSERVE what the classifier would decide (permitted
+#                               projects only); prints only `shadow-decision <id>`.
 #   route-eval pool|label|run --live|score|status
 #                               operator-labelled eval set for the Jev classifiers
 #                               (route_eval.py): pool saved decisions, label them
@@ -151,11 +168,6 @@
 #   review-route verify <decision-id> --thread <message thread> --phase P [--leg-dispatch D [--leg-agent A]]
 #   review-route show <decision-id> [--thread T] [--phase P]
 #   review-route enabled
-#   setup [--yes|--show|--set KEY=VALUE]
-#                               configure agent-comms: agents, reviewer containment, Jev
-#                               routing, codex reviewer runtime, timeouts. Re-runnable; writes
-#                               ~/.agent-comms/settings (+ 0600 secrets), which every helper
-#                               reads. Env vars override. See docs/INSTALL.md "Settings".
 #                               the REVIEWER routing decision for a (thread, phase): an
 #                               abstract tier/effort candidate (or `none` = baseline), made ONCE
 #                               and reused every round; --replace mints a new one. Only phase
@@ -165,9 +177,16 @@
 #                               when COMMS_REVIEW_ROUTE=1 (and COMMS_ROUTE is not 0), and
 #                               strip any hand-typed value otherwise. runphase resolves it
 #                               per turn with `acp.sh resolve`. `enabled` exits 0 iff on.
+#   setup [--yes] [--show] [--set KEY=VALUE ...]
+#                               configure agent-comms: agents, reviewer containment, Jev
+#                               routing, codex reviewer runtime, timeouts. Re-runnable; writes
+#                               ~/.agent-comms/settings (+ 0600 secrets), which every helper
+#                               reads. Env vars override. See docs/INSTALL.md "Settings".
 #   panel dispatch --to a,b <review-request> [--set ID]
 #                               fan ONE artifact out to N reviewers as N parallel 2-party
-#                               legs sharing a review_set. One snapshot for the whole set.
+#                               legs sharing a review_set. One snapshot for the whole set;
+#                               the first reviewer gates. The roster is validated before
+#                               anything is written. Compose with the set id it prints.
 #   panel status [--set <id>]   with --set: which legs have answered, and with what
 #                               verdict. Bare: every recorded review set, newest first —
 #                               the recovery surface after an await dies with its session.
@@ -186,10 +205,10 @@
 #                               (block: a corroborated or gating-reviewer blocker; escalate:
 #                               a lone blocker, a degraded or unapproving gate, or any
 #                               non-pass at the round cap). A refusal (exit 3) prints none.
-#   events [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R]
-#          [--request-id Q] [--message-id M] [--limit N]
-#           events append --kind <kind> [--set|--thread|--round|--agent|--role|--artifact|
-#                                        --request-id|--message-id|--run-dir|--status|--note]
+#   events [list] [--set S] [--dispatch D] [--thread T] [--kind K] [--agent A] [--role R]
+#          [--request-id Q] [--message-id M] [--limit N (default 50) | --all]
+#   events append --kind <kind> [--set|--dispatch|--thread|--round|--agent|--role|--artifact|
+#                               --request-id|--message-id|--run-dir|--status|--note]
 #                               the coordinator's append-only log of what IT did: roster
 #                               planned -> request persisted -> dispatched -> turn started
 #                               -> provider result -> reply validated/refused -> reply
@@ -197,19 +216,21 @@
 #                               mailbox, not ACP. The durable answer to "what happened to
 #                               leg X" after an await dies with its session.
 #   friction [--thread T] [--severity 1-5] "<note>"  |  friction --list
+#                               record harness friction the moment you hit it. Appends
+#                               .comms/friction.tsv AND the global rollup
+#                               ~/.agent-comms/friction.tsv. Never shown to reviewers.
 #                               --list reads the GLOBAL rollup across every project: the
 #                               maintainer's inbox for what actually broke in the field.
-#                               record harness friction the moment you hit it. Appends
-#                               .comms/friction.tsv. Never shown to reviewers.
 #   round-note <reply> --note "<text>"
 #                               record how a reviewer performed on ONE round: counts are
 #                               derived from the reply, the prose is your assessment.
 #                               Appends .comms/grades/rounds.tsv, whose last column is the
 #                               leg's token usage from its result.json (or null).
 #                               Never shown to reviewers.
-#   snapshot [create|list] [--with-base]   retain the tree under review as a durable git
-#                               object; --with-base prints "artifact_id<TAB>base_sha"
-#                               (a real commit object anchored under refs/agent-comms/)
+#   snapshot [create [--with-base] | list]
+#                               retain the tree under review as a durable git object
+#                               (a real commit object anchored under refs/agent-comms/);
+#                               create --with-base prints "artifact_id<TAB>base_sha"
 #   prompt-version [--list]     content hash of the reviewer instruction surface; grades
 #                               are partitioned on it, never pooled across an edit
 #   version [--json]            the installed kernel commit (<sha>, <sha>-dirty, or unknown
