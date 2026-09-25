@@ -104,6 +104,23 @@ python3 "$LU" snapshot codex "$CX11" /unused "$LUW/cx11.snap"
 { lu_tc "$(lu_tot 170)"; lu_tc null; } >> "$CX11/sessions/rollout-k.jsonl"
 [ "$(lu_field "$(lu_run codex "$CX11" /unused "$LUW/cx11.snap")" usage total_tokens)" = 70 ] \
   && ok "a rate-limit-only token_count does not unseat a total (control: 170 - 100 = 70)" || fail "info-null token_count treated as spend"
+# A FIELD THE RUNTIME OMITS nulls only that field — at both endpoints — and the rest still measure
+# (codex, implement r3, blocking: one omitted field had nulled the whole leg and its rate limits).
+CX12="$LUW/codex-home-12"; mkdir -p "$CX12/sessions"
+sed 's/"cache_write_input_tokens":[0-9]*,//g' "$LUF/codex-prewindow.jsonl" > "$CX12/sessions/rollout-l.jsonl"
+python3 "$LU" snapshot codex "$CX12" /unused "$LUW/cx12.snap"
+grep -v token_usage_record "$LUF/codex-tokencount-window.jsonl" | sed 's/"cache_write_input_tokens":[0-9]*,//g' >> "$CX12/sessions/rollout-l.jsonl"
+CX12O="$(lu_run codex "$CX12" /unused "$LUW/cx12.snap")"
+[ "$(lu_field "$CX12O" usage total_tokens)" = 660 ] && [ "$(lu_field "$CX12O" usage cache_write_input_tokens)" = null ] \
+  && ok "a running total that omits a field still measures every other field (per-field null)" || fail "omitted field nulled the leg (got: $CX12O)"
+# The rate-limit snapshot is its own fact: an unmeasurable usage does not null it.
+CX13="$LUW/codex-home-13"; mkdir -p "$CX13/sessions"
+{ lu_tc "$(lu_tot 100)"; lu_tc "$(lu_last 50)"; } > "$CX13/sessions/rollout-m.jsonl"
+python3 "$LU" snapshot codex "$CX13" /unused "$LUW/cx13.snap"
+printf '%s\n' '{"timestamp":"2026-09-25T10:00:09.000Z","type":"event_msg","payload":{"type":"token_count","info":'"$(lu_tot 170)"',"rate_limits":{"limit_id":"codex","primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1790000200}}}}' >> "$CX13/sessions/rollout-m.jsonl"
+CX13O="$(lu_run codex "$CX13" /unused "$LUW/cx13.snap")"
+lu_is "$CX13O" usage null && [ "$(lu_field "$CX13O" rate_limits used_percent)" = 12.5 ] \
+  && ok "an unmeasurable codex usage still reports the window's rate_limits snapshot" || fail "rate_limits lost with usage (got: $CX13O)"
 # Proven zero: the leg created the file itself (nothing before the window) — its first total is its own.
 CX8="$LUW/codex-home-8"; mkdir -p "$CX8/sessions"
 python3 "$LU" snapshot codex "$CX8" /unused "$LUW/cx8.snap"
@@ -193,10 +210,15 @@ python3 "$LU" snapshot claude "$CLR" "$CLM" "$LUW/clm.snap"
 CLMO="$(lu_run claude "$CLR" "$CLM" "$LUW/clm.snap")"
 [ "$(lu_field "$CLMO" usage output_tokens)" = 160 ] && [ "$(lu_field "$CLMO" usage responses)" = 2 ] \
   && ok "a <synthetic> claude message is not counted as a response" || fail "synthetic message counted (got: $CLMO)"
+# Exempt only while it SAYS it billed nothing: a <synthetic> record carrying tokens is counted. (grok, r3.)
+printf '%s\n' '{"type":"assistant","cwd":"'"$CLM"'","requestId":"req_S2","message":{"id":"msg_S2","model":"<synthetic>","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":7}}}' >> "$CLMD/sess-4.jsonl"
+CLMO="$(lu_run claude "$CLR" "$CLM" "$LUW/clm.snap")"
+[ "$(lu_field "$CLMO" usage output_tokens)" = 167 ] && [ "$(lu_field "$CLMO" usage responses)" = 3 ] \
+  && ok "a <synthetic> claude record that carries tokens is counted, not exempted" || fail "billed synthetic record skipped (got: $CLMO)"
 printf '%s\n' '{"type":"assistant","cwd":"'"$CLM"'","requestId":"req_C","message":{"id":"msg_C","model":"m"}}' >> "$CLMD/sess-4.jsonl"
 CLMO="$(lu_run claude "$CLR" "$CLM" "$LUW/clm.snap")"
 [ "$(lu_field "$CLMO" usage output_tokens)" = null ] && [ "$(lu_field "$CLMO" usage total_tokens)" = null ] \
-  && [ "$(lu_field "$CLMO" usage responses)" = 3 ] \
+  && [ "$(lu_field "$CLMO" usage responses)" = 4 ] \
   && ok "a claude response with no usage makes the leg's token fields null rather than a partial sum" || fail "missing claude usage dropped (got: $CLMO)"
 # A LONG cwd is truncated in the directory name; the neighbour sharing that prefix contributes nothing.
 CLL="$LUW/mounts/$(printf 'x%.0s' $(seq 1 200))-claude/view/tree"; mkdir -p "$CLL"

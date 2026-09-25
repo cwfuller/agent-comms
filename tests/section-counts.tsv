@@ -97,4 +97,4 @@ worktree list/retire: hand-run session-lifecycle retirement	95
 route-eval: more than one labeller	5
 compose: exactly one machine-readable compose-result line	20
 comms.sh version: the installed kernel commit and template version	18
-leg_usage.py: a leg's tokens come from the provider's own records	40
+leg_usage.py: a leg's tokens come from the provider's own records	43

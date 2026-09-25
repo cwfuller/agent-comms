@@ -348,12 +348,13 @@ def is_billing(r):
 
 
 def running_total(r):
-    """The token_count running total a record carries, or None."""
+    """The token_count running total a record carries, or None. The total OBJECT must be there;
+    a field it omits stays null and nulls only that field of the delta (the per-field rule), so
+    a runtime that never reports, say, cache writes still measures everything else."""
     if not is_billing(r) or r.get("type") != "event_msg":
         return None
     info = r["payload"]["info"]
-    t = codex_norm(info.get("total_token_usage")) if isinstance(info, dict) else None
-    return t if t is not None and all(is_count(t[k]) for k in FIELDS) else None
+    return codex_norm(info.get("total_token_usage")) if isinstance(info, dict) else None
 
 
 def last_running_total(recs):
@@ -425,6 +426,11 @@ def codex_rate_limits(windows):
     }
 
 
+def is_zero_usage(u):
+    keys = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+    return isinstance(u, dict) and all(u.get(k) == 0 and not isinstance(u.get(k), bool) for k in keys)
+
+
 def thinking_tokens(u):
     d = u.get("output_tokens_details")
     v = d.get("thinking_tokens") if isinstance(d, dict) else None
@@ -451,8 +457,9 @@ def claude_usage(windows, root, cwd):
             m = r.get("message")
             m = m if isinstance(m, dict) else {}
             # Claude Code's own synthetic messages (an interrupted or failed request) name the
-            # model "<synthetic>" and made no API call — not a response to bill.
-            if m.get("model") == "<synthetic>":
+            # model "<synthetic>" and made no API call. Exempt only while they SAY so — zero
+            # tokens everywhere; one carrying a real bill is counted like any response.
+            if m.get("model") == "<synthetic>" and is_zero_usage(m.get("usage")):
                 continue
             mid, req = m.get("id"), r.get("requestId")
             key = (mid, req) if (mid or req) else (f, r.get("uuid") or "line%d" % i)
@@ -545,7 +552,14 @@ def collect(provider, root, cwd, snap):
         return grok_usage(root, cwd, snap), None
     windows = window_records(provider, root, cwd, snap)
     if provider == "codex":
-        return codex_usage(windows), codex_rate_limits(windows)
+        # The rate-limit snapshot is its own fact: a window whose spend cannot be bounded still
+        # carries a readable latest snapshot, so an unmeasurable usage does not null it.
+        rate = codex_rate_limits(windows)
+        try:
+            return codex_usage(windows), rate
+        except Undecidable as e:
+            sys.stderr.write("usage unavailable: %s\n" % e)
+            return None, rate
     return claude_usage(windows, root, cwd), None
 
 
