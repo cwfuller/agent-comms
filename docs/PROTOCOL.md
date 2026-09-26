@@ -915,13 +915,17 @@ synonym `pass` — is the only completion signal).
 
 ## Custom profile bindings
 
-Custom requests and parent-brokered replies carry `agent_profile` (canonical JSON
+Custom `review-request`, retry `error`, and mailbox `question` messages, plus
+parent-brokered replies, carry `agent_profile` (canonical JSON
 encoded as URL-safe base64), `agent_profile_digest` (SHA-256 of that canonical JSON),
 `review_family`, and `review_model`. The public profile contains credential references,
 never resolved credentials. Execution compares the frozen binding with the operator
 profile. Replies must match their retained request; model/family metadata without
 the complete binding is invalid. Composition counts recorded families rather than
 looking up today's configuration. Legacy built-in replies retain their existing
-provider rules. These integrity checks bind local records; they are not signatures.
+provider rules. Keep the original request (normally in `.comms/archive`) for as
+long as its reply may be composed. An absent request makes that reply invalid;
+`validate <reply>` reports the missing request. These integrity checks bind local
+records; they are not signatures.
 
 See [AGENT_PROFILES.md](AGENT_PROFILES.md) for the configuration and evidence contract.

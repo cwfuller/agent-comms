@@ -8,7 +8,8 @@ No additional harness or inference account is required for built-in agents.
 
 Put operator profiles in `~/.agent-comms/agents.json` (or
 `$AGENT_COMMS_HOME/agents.json`). This file is never loaded from the reviewed project.
-It must be a regular file, must not be a symlink, and must not be writable by other users.
+It must be a regular file, must not be a symlink, and must have neither group nor
+other write permission (for example, mode `0600`).
 Project `.comms/config` selects enabled names:
 
 ```ini
@@ -110,9 +111,14 @@ plugins/MCP servers, refuses trees with outward or unresolvable symlinks before 
 exposes only read/glob/grep tools, and locks the model and the
 `comms-review` mode. This is an **in-process permission boundary**, not an OS sandbox.
 Its inference connection remains available; it is not a network isolation guarantee.
+The launch-time symlink inspection does not prevent another local process from
+changing a consult's tree during the turn. Mounted reviews additionally check the
+artifact after the turn; neither check provides filesystem isolation from local writers.
 Every successful review also checks newly appended runtime assistant records for the
 requested model and mode. This proves the harness's recorded selection, not the
 inference host's internal routing.
+Native evidence exports go through a private temporary regular file because this
+runtime version can truncate large exports when stdout is a pipe.
 
 ## Pins and history
 
@@ -127,10 +133,14 @@ a stamped request cannot silently retarget it. Consult/review session names incl
 identity and profile digest, so two pins do not reuse one session. The binding also
 records a launcher-code revision: an adapter upgrade starts a new session/state directory.
 One-shot custom consults use a unique named session to permit model inspection.
+These sessions remain in runtime state; consults do not automatically prune them.
 
 Parent-brokered replies inherit the same binding. Composition uses the retained request
 and stamped family, including after profiles are removed. Built-in historical replies
-keep their existing provider semantics. Run records include `profile` metadata;
+keep their existing provider semantics.
+Revalidating an archived request still requires its sender to be registered; the
+historical-profile exemption applies to replies.
+Run records include `profile` metadata;
 `profile-model-before.json` / `profile-model-after.json` hold ACP observations, and
 `profile-evidence.json` contains the OpenCode assistant-record evidence. Missing or
 mismatched evidence fails the turn before a verdict is published.

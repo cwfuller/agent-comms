@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
+import tempfile
 from profile_io import private_directory, place
 
 VERSION = "1.18.32"
@@ -108,7 +109,9 @@ def check_tree(directory):
                 target = path.resolve(strict=True)
             except (OSError, RuntimeError) as error:
                 raise ValueError(f"cannot resolve reviewer symlink: {path.relative_to(root)}") from error
-            if not target.is_relative_to(root):
+            try:
+                target.relative_to(root)
+            except ValueError:
                 raise ValueError(f"reviewer tree contains an escaping symlink: {path.relative_to(root)}")
 
 
@@ -125,11 +128,15 @@ def attest(profile, state_home, inherited, record, snapshot, phase):
     if not isinstance(session, str) or not session.startswith("ses_") or not session.isascii() or not session.replace("_", "").isalnum():
         raise ValueError("missing OpenCode session identity for model evidence")
     env = environment(profile, state_home, inherited)
-    exported = subprocess.run([profile["command"][0], "export", session], env=env,
-                              capture_output=True, text=True, timeout=30)
-    if exported.returncode:
-        raise ValueError("could not export OpenCode's model evidence")
-    data = json.loads(exported.stdout)
+    # OpenCode 1.18.32 exits before a large piped stdout buffer is flushed. A
+    # private, anonymous regular file receives the complete export synchronously.
+    with tempfile.TemporaryFile(mode="w+b") as output:
+        exported = subprocess.run([profile["command"][0], "export", session], env=env,
+                                  stdout=output, stderr=subprocess.PIPE, timeout=30)
+        if exported.returncode:
+            raise ValueError("could not export OpenCode's model evidence")
+        output.seek(0)
+        data = json.load(output)
     if data.get("info", {}).get("id") != session:
         raise ValueError("OpenCode export belongs to a different session")
     messages = [m["info"] for m in data.get("messages", []) if m.get("info", {}).get("role") == "assistant"]

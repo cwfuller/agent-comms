@@ -212,7 +212,9 @@ class Profiles(unittest.TestCase):
         old = {'id': 'old', 'role': 'assistant', 'modelID': 'old', 'providerID': 'vendor'}
         new = {'id': 'new', 'role': 'assistant', 'modelID': 'model-v1', 'providerID': 'vendor', 'sessionID': sid, 'agent': adapter.MODE}
         data = {'info': {'id': sid}, 'messages': [{'info': old}]}
-        def result(*a, **kw): return subprocess.CompletedProcess([], 0, json.dumps(data), '')
+        def result(*a, **kw):
+            kw['stdout'].write(json.dumps(data).encode())
+            return subprocess.CompletedProcess([], 0, None, b'')
         with patch.object(adapter, 'environment', return_value={}), patch.object(adapter.subprocess, 'run', side_effect=result):
             adapter.attest(p, self.root, {}, {'acpSessionId': sid}, snapshot, 'before')
             with self.assertRaises(ValueError): adapter.attest(p, self.root, {}, {'acpSessionId': sid}, snapshot, 'after')
@@ -222,6 +224,26 @@ class Profiles(unittest.TestCase):
             with self.assertRaises(ValueError): adapter.attest(p, self.root, {}, {'acpSessionId': sid}, snapshot, 'after')
             new['modelID'] = 'model-v1'; new['agent'] = 'build'
             with self.assertRaises(ValueError): adapter.attest(p, self.root, {}, {'acpSessionId': sid}, snapshot, 'after')
+
+    def test_large_native_export_uses_regular_file(self):
+        executable = self.root / 'exporter'
+        executable.write_text('#!' + sys.executable + '\n' + '''import json,os,stat,sys
+assert stat.S_ISREG(os.fstat(1).st_mode)
+data = {'info': {'id': 'ses_large'}, 'messages': [{'info': {
+    'id': 'one', 'role': 'assistant', 'modelID': 'model-v1',
+    'providerID': 'vendor', 'sessionID': 'ses_large', 'agent': 'comms-review'},
+    'parts': [{'text': 'x' * 800000}]}]}
+os.write(1, json.dumps(data).encode())
+os._exit(0)
+''')
+        executable.chmod(0o700)
+        p = opencode(); p['command'] = [str(executable)]
+        snapshot = self.root / 'history.json'
+        place(snapshot, {'session': 'ses_large', 'ids': []})
+        with patch.object(adapter, 'environment', return_value=dict(os.environ)):
+            evidence = adapter.attest(p, self.root, {}, {'acpSessionId': 'ses_large'}, snapshot, 'after')
+        self.assertEqual(evidence['message_ids'], ['one'])
+        self.assertEqual(evidence['model'], p['model'])
 
 
 class ProfileIntegration(unittest.TestCase):
