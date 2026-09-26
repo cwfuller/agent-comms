@@ -173,7 +173,7 @@ profile_for() {  # acpx built-in launch profile per agent; empty = unsupported
     codex)  echo codex ;;
     claude) echo claude ;;
     grok)   echo grok-build ;;
-    *)      echo "" ;;
+    *)      if comms_sibling agents --profile "$1" >/dev/null 2>&1; then echo agent-comms-custom; else echo ""; fi ;;
   esac
 }
 
@@ -794,6 +794,15 @@ cmd_consult() {
   acpx_prepare_cache
   # shellcheck disable=SC2206
   local -a launcher=($(acpx_launcher))
+  local custom_binding="" custom_home="" profile_py="$(dirname "${BASH_SOURCE[0]}")/agent_profiles.py"
+  if [ "$profile" = agent-comms-custom ]; then
+    custom_binding="$(comms_sibling agents --profile "$agent")" || die_fb "custom agent profile is unavailable"
+    custom_home="$(python3 "$profile_py" state-home "$custom_binding")" || die_fb "custom agent state is unavailable"
+    ACP_SESSION_NAME="$ACP_SESSION_NAME+as+$agent+p$(python3 "$profile_py" binding-field "$custom_binding" digest)"
+    launcher=(python3 "$profile_py" acpx "$custom_binding" "$custom_home" "${launcher[@]}" --)
+    # A pinned profile needs a named record so we can inspect the applied model before and after.
+    if [ "$oneshot" = true ]; then ACP_SESSION_NAME="$ACP_SESSION_NAME+oneoff+$$-$RANDOM"; oneshot=false; fi
+  fi
   # A consult that HANGS must not block forever, and a consult that returns rc=0 with ZERO bytes
   # must not read as a successful answer — the same rc-0-empty misdiagnosis the runphase path
   # already refuses (a dropped turn, an empty model reply). Pin an acpx `--timeout` (its exit 3 is
@@ -831,12 +840,22 @@ cmd_consult() {
     ens_out="$("${launcher[@]}" --timeout "$consult_timeout" "$profile" sessions ensure --name "$ACP_SESSION_NAME")" || rc=$?
     if [ "$rc" -ne 0 ] && [ -n "$(printf '%s' "$ens_out" | tr -d '[:space:]')" ]; then printf '%s\n' "$ens_out"; fi
     if [ "$rc" -eq 0 ]; then
+      if [ -n "$custom_binding" ]; then
+        "${launcher[@]}" --format json --timeout "$consult_timeout" "$profile" sessions show "$ACP_SESSION_NAME" \
+          | python3 "$profile_py" model-check "$custom_binding" >/dev/null \
+          || die_fb "consult: ACP did not confirm the configured model"
+      fi
       if [ -n "$qfile" ]; then
         out="$("${base[@]}" -s "$ACP_SESSION_NAME" --file "$qfile" ${words[@]+"${words[@]}"})" || rc=$?
       else
         out="$("${base[@]}" -s "$ACP_SESSION_NAME" "${words[@]}")" || rc=$?
       fi
     fi
+  fi
+  if [ "$rc" -eq 0 ] && [ -n "$custom_binding" ]; then
+    "${launcher[@]}" --format json --timeout "$consult_timeout" "$profile" sessions show "$ACP_SESSION_NAME" \
+      | python3 "$profile_py" model-check "$custom_binding" >/dev/null \
+      || die_fb "consult: ACP model changed or could not be confirmed after the turn"
   fi
   # Emit whatever acpx produced, so a NON-ZERO exit's diagnostics are actually visible — the error
   # branches below say "see output above", which was false while stdout was captured and dropped.

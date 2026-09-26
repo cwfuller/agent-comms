@@ -90,3 +90,9 @@ permission before any review text is sent); `--no-route` turns it off for one lo
 ## License
 
 MIT
+
+### Custom agents and model pins
+
+Use [operator-owned agent profiles](docs/AGENT_PROFILES.md) to name ACP agents, pin
+models, and group reviewers by model family. OpenCode is an optional contained
+review adapter; the guide includes a Venice/GLM example.

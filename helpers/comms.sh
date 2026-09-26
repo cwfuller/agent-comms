@@ -11,7 +11,7 @@
 #   workspace [set <name>]      print the mailbox identity (repo pin > worktree pin >
 #                               branch > repo dir); `set` pins it repo-scoped in .comms/workspace
 #   agents [default|--drivers|--review|--provider <id>|--others <driver>|
-#           --roster <driver> [a,b,...]|--supported]
+#           --family <id>|--profile <id>|--roster <driver> [a,b,...]|--supported]
 #                                  registered identities: every identity (bare), the
 #                                  drivers (`agents =` in .comms/config), their built-in
 #                                  review twins (<driver>-review, no config), one
@@ -407,12 +407,21 @@ REGISTRY_DEFAULT_TARGET="codex"
 
 registry_file() { echo "$(cmd_root)/config"; }
 
+profile_helper() { python3 "$(dirname "$SELF")/agent_profiles.py" "$@"; }
+custom_profile_names() {
+  local f="${AGENT_COMMS_HOME:-$HOME/.agent-comms}/agents.json"
+  if [ -e "$f" ] || [ -L "$f" ]; then profile_helper names; else printf '\n'; fi
+}
+
 # is_provider <value> — EXACT membership: one supported provider name, nothing else. A substring
 # test against " $SUPPORTED_AGENTS " would accept "claude codex", which compose would then count
 # as a provider of its own.
 is_provider() {
   case "$1" in ""|*[!a-z0-9-]*) return 1 ;; esac
   case " $SUPPORTED_AGENTS " in *" $1 "*) return 0 ;; esac
+  local custom
+  custom="$(custom_profile_names)" || return 1
+  case " $custom " in *" $1 "*) return 0 ;; esac
   return 1
 }
 
@@ -438,6 +447,9 @@ review_twins_of() {  # <driver list> -> "X-review:X ..."
 
 registry_parse() {
   local f agents_ct default_ct line a agents="" dflt review=""
+  local supported custom
+  custom="$(custom_profile_names)" || die "config: invalid operator agent profiles"
+  supported="$SUPPORTED_AGENTS${custom:+ $custom}"
   f="$(registry_file)"
   if [ ! -f "$f" ]; then
     printf '%s\n%s\n%s\n' "$REGISTRY_DEFAULT_AGENTS" "$REGISTRY_DEFAULT_TARGET" "$(review_twins_of "$REGISTRY_DEFAULT_AGENTS")"
@@ -464,9 +476,9 @@ registry_parse() {
     set -f   # a config value is data: never glob-expand it against the caller's cwd
     for a in $line; do
       validate_agent_name "$a" "$f"
-      case " $SUPPORTED_AGENTS " in
+      case " $supported " in
         *" $a "*) ;;
-        *) die "config: unsupported agent '$a' in $f — supported: $SUPPORTED_AGENTS" ;;
+        *) die "config: unsupported agent '$a' in $f — supported: $supported" ;;
       esac
       case " $agents " in
         *" $a "*) die "config: duplicate agent '$a' in $f" ;;
@@ -545,6 +557,22 @@ registry_provider() {  # <identity> — its provider (a driver is its own); 1 if
   return 1
 }
 
+# Family is an operator-declared independence group; runtime and API endpoint are separate.
+registry_family() {
+  local provider
+  provider="$(registry_provider "$1")" || return 1
+  case "$provider" in claude|codex|grok) printf '%s\n' "$provider" ;;
+    *) profile_helper field "$provider" family ;;
+  esac
+}
+
+reply_family() {
+  local encoded
+  encoded="$(frontmatter_field "$1" agent_profile)"
+  if [ -n "$encoded" ]; then profile_helper binding-field "$encoded" family
+  else reply_provider "$1"; fi
+}
+
 registry_is_review() {  # <identity> — 0 iff a review-only identity; malformed config exits
   local map a
   map="$(registry_review_map)" || exit 2
@@ -582,6 +610,33 @@ stamp_review_provider() {
   if [ -n "$want" ] || [ -n "$has" ]; then
     stamp_fm_key "$f" review_provider "$want"
   fi
+  local provider binding="" key value
+  provider="$(registry_provider "$to")" || return 1
+  case "$provider" in claude|codex|grok) ;;
+    *) binding="$(profile_helper binding "$provider")" || return 1 ;;
+  esac
+  local old_binding
+  old_binding="$(frontmatter_field "$f" agent_profile)"
+  if [ -n "$old_binding" ] && [ "$old_binding" != "$binding" ]; then
+    echo "agent profile changed since this request was stamped; create a new request" >&2
+    return 1
+  fi
+  for key in agent_profile agent_profile_digest review_family review_model; do
+    value=""
+    if [ -n "$binding" ]; then
+      case "$key" in
+        agent_profile) value="$binding" ;;
+        agent_profile_digest) value="$(profile_helper binding-field "$binding" digest)" ;;
+        review_family) value="$(profile_helper binding-field "$binding" family)" ;;
+        review_model) value="$(profile_helper binding-field "$binding" model)" ;;
+      esac
+    fi
+    # Strip user-supplied values even when sending to a legacy provider.
+    if [ -n "$value" ] || [ -n "$(frontmatter_field "$f" "$key")" ]; then
+      stamp_fm_key "$f" "$key" "$value" || return 1
+    fi
+  done
+  return 0
 }
 
 registry_has() {  # <name> — 0 iff registered; a MALFORMED config exits hard
@@ -678,6 +733,17 @@ cmd_agents() {
       # One parse, not three: every review turn calls this (runphase's resolution and peer rule).
       registry_provider "$1" || die "agents --provider: unknown agent '$1' (registered: $(registry_agents))"
       ;;
+    --family)
+      shift; [ -n "${1:-}" ] || usage_err "agents --family: an identity is required"
+      registry_family "$1" || die "agents --family: unknown agent '$1'"
+      ;;
+    --profile)
+      shift; [ -n "${1:-}" ] || usage_err "agents --profile: an identity is required"
+      local profile_provider
+      profile_provider="$(registry_provider "$1")" || die "agents --profile: unknown agent '$1'"
+      case "$profile_provider" in claude|codex|grok) return 1 ;; esac
+      profile_helper binding "$profile_provider"
+      ;;
     --others)
       # The default panel for a loop <driver> is driving: every OTHER DRIVER. Its own review twin
       # is opt-in — same-model review is off unless asked for — EXCEPT when no other driver
@@ -686,9 +752,15 @@ cmd_agents() {
       shift
       [ -n "${1:-}" ] || usage_err "agents --others <agent>: an agent name is required"
       require_driver "$1" "agents --others"
-      local drv oth="" d
+      local drv oth="" d family seen_families own_family
       drv="$(registry_drivers)" || exit 2
-      for d in $drv; do [ "$d" = "$1" ] || oth="$oth $d"; done
+      own_family="$(registry_family "$1")" || exit 2
+      seen_families=" $own_family "
+      for d in $drv; do
+        family="$(registry_family "$d")" || exit 2
+        case "$seen_families" in *" $family "*) continue ;; esac
+        oth="$oth $d"; seen_families="$seen_families$family "
+      done
       [ -n "$oth" ] || oth="$(review_twin_of "$1")"
       printf '%s\n' "${oth# }" | tr ' ' ','
       ;;
@@ -709,7 +781,7 @@ cmd_agents() {
         [ "$rr" = "$rself" ] && rr="$(review_twin_of "$rself")"
         require_agent "$rr" "agents --roster"
         case " $rout " in *" $rr "*) continue ;; esac
-        rp="$(registry_provider "$rr")" || exit 2
+        rp="$(registry_family "$rr")" || exit 2
         case "$rprovs" in
           *" $rp "*) usage_err "agents --roster: two reviewers on provider '$rp' in '$rwant' — one model reviewing twice is not two reviews; keep one" ;;
         esac
@@ -726,8 +798,11 @@ cmd_agents() {
       printf '%s\tinteractive,acp\n' claude
       printf '%s\tinteractive,acp\n' codex
       printf '%s\theadless,reviewer-consult-only\n' grok
+      local ca custom_supported
+      custom_supported="$(custom_profile_names)" || exit 2
+      for ca in $custom_supported; do printf '%s\tacp\n' "$ca"; done
       ;;
-    *) die "agents: unknown argument '$1' (expected: default | --drivers | --review | --provider <id> | --others <driver> | --roster <driver> [a,b,...] | --supported)" ;;
+    *) die "agents: unknown argument '$1' (expected: default | --drivers | --review | --provider <id> | --family <id> | --profile <id> | --others <driver> | --roster <driver> [a,b,...] | --supported)" ;;
   esac
 }
 
@@ -2347,7 +2422,7 @@ panel_roster_check() {
     # provider-keyed policy, same prompt — compose would count their agreement as two
     # independent reviewers. This is the early, friendly refusal; compose re-checks what it
     # actually counts, from the replies' own provider stamps.
-    prov="$(registry_provider "$ag")" || usage_err "$verb: cannot resolve the provider of '$ag'"
+    prov="$(registry_family "$ag")" || usage_err "$verb: cannot resolve the family of '$ag'"
     case " $provs " in
       *" $prov "*) usage_err "$verb: two legs on provider '$prov' ($(printf '%s' "$to" | tr ',' ' ')) — a panel's reviewers must be independent; keep one '$prov'-backed reviewer" ;;
     esac
@@ -2505,7 +2580,7 @@ cmd_panel() {
         # The same provenance rule compose gates on (reply_provider), so status cannot show a
         # healthy panel that compose will refuse. Reported on stderr: the table is a pinned shape.
         local st_p st_first
-        st_p="$(reply_provider "$reply")"
+        st_p="$(reply_family "$reply")"
         if [ -n "$st_p" ]; then
           st_first="$(printf '%s\n' "$st_provs" | awk -F'\t' -v p="$st_p" '$1 == p { print $2; exit }')"
           if [ -n "$st_first" ]; then
@@ -2991,7 +3066,7 @@ cmd_compose() {
     n_answered=$((n_answered + 1)); answered_agents="$answered_agents $ag"
     [ "$ag" = "$gating_ag" ] && gating_reply="$reply"
     leg_providers="$leg_providers
-$ag	$(reply_provider "$reply")"
+$ag	$(reply_family "$reply")"
     # A panel must never print a finding count over content it could not read. The broker
     # refuses to STAMP such a reply, but a leg can reach compose by other routes (a
     # self-sending agent authors its own envelope), and a partially-unreadable lane is not
@@ -5832,7 +5907,25 @@ cmd_validate() {
   msg_type="$(frontmatter_field "$file" type)"
   # from: is an open set validated against the registry — an unregistered sender
   # could otherwise inject mail no reader/state path can attribute.
-  if [ -n "$from_agent" ] && ! registry_has "$from_agent"; then
+  local profile_history=0 profile_packet profile_req="" profile_error=""
+  profile_packet="$(frontmatter_field "$file" agent_profile)"
+  if [ -n "$profile_packet" ]; then
+    if [ "$msg_type" = review-feedback ]; then
+      profile_req="$(find_message_by_id "$(frontmatter_field "$file" in-reply-to)" || true)"
+    fi
+    if profile_error="$(profile_helper message-check "$file" ${profile_req:+"$profile_req"} 2>&1)"; then
+      [ "$msg_type" != review-feedback ] || profile_history=1
+    else
+      errors="${errors}  invalid agent profile binding: $profile_error\n"
+    fi
+  elif [ -n "$(frontmatter_field "$file" agent_profile_digest)$(frontmatter_field "$file" review_family)$(frontmatter_field "$file" review_model)" ]; then
+    errors="${errors}  profile metadata is missing its agent_profile binding\n"
+  elif [ "$msg_type" = review-feedback ]; then
+    case "$from_agent" in claude|codex|grok|claude-review|codex-review|grok-review) ;;
+      *) errors="${errors}  custom review reply is missing its agent_profile binding\n" ;;
+    esac
+  fi
+  if [ -n "$from_agent" ] && [ "$profile_history" != 1 ] && ! registry_has "$from_agent"; then
     errors="${errors}  from '$from_agent' is not a registered agent (registered: $(registry_agents))\n"
   fi
   # A REVIEW identity authors exactly one thing: the review-feedback its broker stamps. Every
@@ -5848,7 +5941,13 @@ cmd_validate() {
   # (stamp_review_provider) and bound to the real target by send, shadow and runphase, so all
   # validate can say is that a present value is a provider.
   val="$(frontmatter_field "$file" review_provider)"
-  if [ "$msg_type" = "review-feedback" ] && [ -n "$from_agent" ] && registry_has "$from_agent"; then
+  if [ "$profile_history" = 1 ]; then
+    local recorded_provider
+    recorded_provider="$(profile_helper binding-field "$profile_packet" name)"
+    if [ -n "$val" ] && [ "$val" != "$recorded_provider" ]; then
+      errors="${errors}  review_provider disagrees with the recorded execution profile\n"
+    fi
+  elif [ "$msg_type" = "review-feedback" ] && [ -n "$from_agent" ] && registry_has "$from_agent"; then
     local rp_have rp_want
     rp_have="$val"
     rp_want="$(reply_provider "$file")"
@@ -6962,6 +7061,15 @@ cmd_send() {
     fi
     req_aid="$(frontmatter_field "$req" artifact_id)"
     req_sha="$(frontmatter_field "$req" head_sha)"
+    local bind_key bind_want bind_have
+    for bind_key in agent_profile agent_profile_digest review_family review_model; do
+      bind_want="$(frontmatter_field "$req" "$bind_key")"
+      bind_have="$(frontmatter_field "$rf" "$bind_key")"
+      if [ -n "$bind_have" ] && [ "$bind_have" != "$bind_want" ]; then
+        die "send: reply changed the request's $bind_key binding"
+      fi
+      [ -z "$bind_want" ] || stamp_fm_key "$rf" "$bind_key" "$bind_want"
+    done
     IFS= read -r rep_aid < <(fm_field_lines "$rf" artifact_id) || rep_aid=""
     IFS= read -r rep_sha < <(fm_field_lines "$rf" head_sha) || rep_sha=""
     if [ -n "$req_aid" ] && [ -n "$rep_aid" ] && [ "$req_aid" != "$rep_aid" ]; then
@@ -7140,7 +7248,7 @@ cmd_send() {
   # Every type a review identity accepts starts a review turn there — the request, and the per-leg
   # error lane that asks it to answer again — so every one of them carries the binding.
   case "$send_type" in
-    review-request|error)
+    review-request|error|question)
       stamp_review_provider "$file" "$to" || die "send: could not stamp the review provider for '$to'" ;;
   esac
 

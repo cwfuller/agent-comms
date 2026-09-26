@@ -681,3 +681,13 @@ the default rather than aborting teardown).
 # loop seems quiet?
 ~/.agent-comms/comms.sh stalled
 ```
+
+## Configurable agent profiles
+
+`comms.sh agents --family <id>` prints the model-family independence group.
+`comms.sh agents --profile <id>` prints the canonical encoded public binding for a
+custom identity (exit 1 for a built-in). `--provider` continues to mean execution
+profile, and maps a custom twin to its driver. `--others` selects one reviewer per
+other family; `--roster` and panel dispatch reject repeated families.
+
+See [profile setup, credentials and containment](AGENT_PROFILES.md).

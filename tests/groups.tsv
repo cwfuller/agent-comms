@@ -19,3 +19,4 @@ identity	parallel
 route	parallel
 worktree	parallel
 usage	parallel
+profiles	parallel

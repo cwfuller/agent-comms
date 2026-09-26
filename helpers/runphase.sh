@@ -229,6 +229,7 @@ RUN_PROVIDER=codex
 # RUN_PROVIDER (which runtime served it) only for a review identity such as claude-review.
 # Initialised here so a runner that died before recording it cannot trip `set -u` in await.
 RUN_AGENT=""
+RUN_PROFILE_BINDING=""; RUN_PROFILE_DIGEST=""; RUN_PROFILE_FAMILY=""; RUN_PROFILE_MODEL=""
 # Turn identity, captured ONCE from the inbound before the child archives it — the same
 # reason update_thread_state takes the thread VALUE rather than the message path. Every
 # coordinator-log line this runner writes is stamped from these.
@@ -391,13 +392,14 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
   # route / usage / rate_limits are embedded RAW (leg_usage_json admitted only one-line JSON or
   # null) and come LAST, each on its own line, so json_get's one-key-per-line reads of the string
   # fields above cannot match a key inside them (no route key shares a top-level name).
-  printf '{\n  "provider": "%s",\n  "agent": "%s",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s",\n  "route": %s,\n  "usage": %s,\n  "rate_limits": %s\n}\n' \
+  printf '{\n  "provider": "%s",\n  "agent": "%s",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s",\n  "route": %s,\n  "usage": %s,\n  "rate_limits": %s,\n  "profile": %s\n}\n' \
     "$(json_escape "$RUN_PROVIDER")" "$(json_escape "${RUN_AGENT:-$RUN_PROVIDER}")" \
     "$(json_escape "$status")" "$(json_escape "$reason")" "$(json_escape "$rc")" "$(json_escape "$sid")" \
     "$(json_escape "$mf")" "$(json_escape "$dir")" \
     "$(json_escape "${STARTED_AT:-}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(json_escape "$note")" "$(leg_route_json "$dir")" \
     "$(leg_usage_json "$LEG_USAGE_JSON")" "$(leg_usage_json "$LEG_RATE_JSON")" \
+    "$(if [ -n "$RUN_PROFILE_BINDING" ]; then python3 "$HELPER_DIR/agent_profiles.py" result "$dir" || printf null; else printf null; fi)" \
     > "$dir/result.json.tmp" || RESULT_COMPOSED=0
   # THE TERMINAL EVENT IS DURABLE FIRST. result.json is the signal `await` unblocks on, so
   # a runner that died between publishing it and appending this row left await with a
@@ -1158,6 +1160,12 @@ broker_stamp() {  # <msg> <run-dir> <peer> — reply-raw.md -> stamped, delivere
     # A review identity's reply names the PROVIDER that produced it — the fact compose counts
     # (reply_provider). A driver's provider is its own name, so its envelope is unchanged.
     [ "$GROK_AGENT" = "$RUN_PROVIDER" ] || printf 'review_provider: %s\n' "$RUN_PROVIDER"
+    if [ -n "$RUN_PROFILE_BINDING" ]; then
+      printf 'agent_profile: %s\n' "$RUN_PROFILE_BINDING"
+      printf 'agent_profile_digest: %s\n' "$RUN_PROFILE_DIGEST"
+      printf 'review_family: %s\n' "$RUN_PROFILE_FAMILY"
+      printf 'review_model: %s\n' "$RUN_PROFILE_MODEL"
+    fi
     printf 'timestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'workspace: %s\n' "$GROK_WS"
     printf 'message_id: %s\n' "$GROK_REPLY_ID"
@@ -1305,7 +1313,8 @@ resolve_turn_agent() {
     || die "$verb: '$id' is not a registered agent (or the registry is malformed) — refusing to guess its provider"
   case "$p" in
     claude|codex|grok) ;;
-    *) die "$verb: '$id' resolves to provider '${p:-<none>}' — a provider must be claude, codex, or grok" ;;
+    *) "$COMMS" agents --profile "$id" >/dev/null \
+         || die "$verb: '$id' has no usable operator execution profile" ;;
   esac
   RESOLVED_PROVIDER="$p"
 }
@@ -2721,6 +2730,22 @@ cmd_run() {
   trap 'exit 143' TERM
   trap 'exit 130' INT
 
+  case "$provider" in claude|codex|grok) ;;
+    *)
+      RUN_PROFILE_BINDING="$(frontmatter_field "$msg" agent_profile)"
+      python3 "$HELPER_DIR/agent_profiles.py" check-binding "$RUN_PROFILE_BINDING" "$agent" \
+        || { ABORT_NOTE="agent profile changed or is missing; send a new request"; die "run: $ABORT_NOTE"; }
+      python3 "$HELPER_DIR/agent_profiles.py" message-check "$msg" >/dev/null \
+        || die "run: malformed custom agent binding"
+      RUN_PROFILE_DIGEST="$(python3 "$HELPER_DIR/agent_profiles.py" binding-field "$RUN_PROFILE_BINDING" digest)"
+      RUN_PROFILE_FAMILY="$(python3 "$HELPER_DIR/agent_profiles.py" binding-field "$RUN_PROFILE_BINDING" family)"
+      RUN_PROFILE_MODEL="$(python3 "$HELPER_DIR/agent_profiles.py" binding-field "$RUN_PROFILE_BINDING" model)"
+      printf '%s\n' "$RUN_PROFILE_BINDING" > "$run_dir/agent-profile.b64"
+      printf 'profile_digest\t%s\nfamily\t%s\nrequested_model\t%s\n' \
+        "$RUN_PROFILE_DIGEST" "$RUN_PROFILE_FAMILY" "$RUN_PROFILE_MODEL" >> "$run_dir/turn.tsv"
+      ;;
+  esac
+
   # The driver's `send` writes thread state moments after `deliver` spawns us;
   # an instantly-completing turn (stubs, trivial errors) would otherwise update
   # state BEFORE send's write and get clobbered back to "spawned".
@@ -3213,6 +3238,12 @@ cmd_run() {
     # what made claude look uncontainable — `set-mode read-only` returns `Internal error` for the
     # claude adapter, which reads exactly like "modes are unimplemented" and is not.
     local acp_iso_mode=""
+    local custom_adapter="" custom_home=""
+    if [ -n "$RUN_PROFILE_BINDING" ]; then
+      custom_adapter="$(python3 "$HELPER_DIR/agent_profiles.py" binding-field "$RUN_PROFILE_BINDING" adapter)"
+      if [ -n "$mount_dir" ]; then custom_home="$mount_kdir/profile-home"
+      else custom_home="$(python3 "$HELPER_DIR/agent_profiles.py" state-home "$RUN_PROFILE_BINDING")"; fi
+    fi
     acp_sh="$(dirname "$SELF")/acp.sh"
     [ -x "$acp_sh" ] || die "run: --via acp but acp.sh is not installed next to runphase.sh"
     acp_profile="$("$acp_sh" profile "$provider" 2>/dev/null || true)"
@@ -3323,6 +3354,7 @@ cmd_run() {
     if [ -z "${mount_ident:-}" ] && [ "$agent" != "$provider" ]; then
       acp_session="$acp_session+as+$agent"
     fi
+    [ -z "$RUN_PROFILE_BINDING" ] || acp_session="$acp_session+as+$agent+p$RUN_PROFILE_DIGEST"
     # acpx GLOBAL options must precede the profile; only subcommand flags follow it.
     # (`--cwd` after the profile is rejected outright — caught live.) The turn runs
     # IN $workdir because acpx keys session identity on (agent, cwd, name) and compares
@@ -3337,6 +3369,9 @@ cmd_run() {
     # shellcheck disable=SC2206
     acp_launch=($("$acp_sh" launcher 2>/dev/null))
     [ "${#acp_launch[@]}" -gt 0 ] || acp_launch=(npx -y "acpx@$("$acp_sh" version)")
+    if [ -n "$RUN_PROFILE_BINDING" ]; then
+      acp_launch=(python3 "$HELPER_DIR/agent_profiles.py" acpx "$RUN_PROFILE_BINDING" "$custom_home" "${acp_launch[@]}" --)
+    fi
     { printf 'policy_digest\t%s\n' "${acp_policy_digest:-none}"
       printf 'acp_session\t%s\n' "$acp_session"
       # The PINNED acpx version and the launcher that actually ran: ACPX_BIN can replace the pin,
@@ -3520,6 +3555,13 @@ cmd_run() {
           acp_iso_mode="plan"
           ;;
         *)
+          if [ "$custom_adapter" = opencode ]; then
+            acp_iso_backend="opencode-read-search"
+            acp_iso_mode="comms-review"
+          elif [ -n "$RUN_PROFILE_BINDING" ]; then
+            ABORT_NOTE="no verified mounted-review adapter for custom profile '$provider'"
+            die "run: $ABORT_NOTE; generic ACP profiles support consults only"
+          else
           # NO VERIFIED BACKEND ON THIS OS. grok's own docs are explicit that child-network
           # blocking is "enforced on Linux only (via seccomp). On macOS it is a no-op", and
           # its read-only profile still write-allows /tmp — so a mounted grok turn on Darwin
@@ -3535,6 +3577,7 @@ cmd_run() {
           else
 ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s); mounted review turns require containment (COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to override)"
                         die "run: '$provider' has no verified isolation backend on $(uname -s), so a mounted review turn cannot be contained — refusing. See docs/ROADMAP.md (open security item). Set COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to accept an uncontained reviewer deliberately."
+          fi
           fi
           ;;
       esac
@@ -3625,7 +3668,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       # So for a mode-pinned backend the permission shape IS part of the boundary.
       # (grok, implement r1, BLOCKING — found by reading acpx's option resolution, not by running
       # it; confirmed here by ground truth.)
-      if [ "$acp_iso_backend" = "claude-plan" ]; then
+      if [ "$acp_iso_backend" = "claude-plan" ] || [ "$acp_iso_backend" = opencode-read-search ]; then
         acp_perm=(--approve-reads --non-interactive-permissions deny)
       fi
       # --approve-all gives the child a shell, so the boundary has to be enforced where
@@ -3691,6 +3734,13 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     if [ -n "$mount_dir" ] && [ -n "$acp_iso_mode" ]; then
       if ! acp_confirm_mode "$workdir" "$acp_profile" "$acp_session" "$acp_iso_mode" "$run_dir" "pre-canary"; then
         acp_refuse containment-unconfirmed "could not confirm '$provider' is pinned to '$acp_iso_mode' before the canary — containment unconfirmed"
+        return 1
+      fi
+    fi
+    if [ -n "$RUN_PROFILE_BINDING" ]; then
+      if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
+          | python3 "$HELPER_DIR/agent_profiles.py" model-check "$RUN_PROFILE_BINDING" > "$run_dir/profile-model-before.json"; then
+        acp_refuse policy-unapplied "custom agent did not confirm its configured model pin"
         return 1
       fi
     fi
@@ -3774,6 +3824,14 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # (the measured claude boundary). So pinning once, before the canary, contains both prompts.
     # THE REAL-TURN TIMER STARTS HERE, after the canary, so a slow-but-successful canary cannot make
     # a completed review look truncated. (codex, plan r3 advisory.)
+    if [ "$custom_adapter" = opencode ]; then
+      if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
+          | python3 "$HELPER_DIR/agent_profiles.py" attest "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" before \
+            > "$run_dir/profile-evidence-before.json"; then
+        acp_refuse policy-unapplied "could not snapshot custom runtime model evidence"
+        return 1
+      fi
+    fi
     # ROLLOUT SNAPSHOT — taken immediately before the billable prompt so the attestation below
     # reads only bytes THIS turn produced. A matching canary context, or a prior round's, must
     # never satisfy the gate; and a replacement session starts a NEW jsonl, so the snapshot
@@ -3798,6 +3856,21 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" || acp_rc=$?
     acp_elapsed=$(( $(date +%s) - acp_t0 ))
     echo "acp turn finished after ${acp_elapsed}s (budget ${timeout}s)" >>"$run_dir/runner.log"
+    if [ "$acp_rc" -eq 0 ] && [ -n "$RUN_PROFILE_BINDING" ]; then
+      if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
+          | python3 "$HELPER_DIR/agent_profiles.py" model-check "$RUN_PROFILE_BINDING" > "$run_dir/profile-model-after.json"; then
+        acp_refuse policy-unapplied "custom agent model pin changed or became unverifiable during the turn"
+        return 1
+      fi
+      if [ "$custom_adapter" = opencode ]; then
+        if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
+            | python3 "$HELPER_DIR/agent_profiles.py" attest "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" after \
+              > "$run_dir/profile-evidence.json"; then
+          acp_refuse policy-unapplied "custom runtime did not attest this turn's model and reviewer mode"
+          return 1
+        fi
+      fi
+    fi
     leg_usage_collect "$run_dir"
     # THE PROVIDER'S OWN RESULT, recorded where the provider actually exits — before the
     # broker runs. Emitting it from write_result put it AFTER every reply event on this

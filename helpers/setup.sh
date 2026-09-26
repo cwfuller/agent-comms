@@ -24,6 +24,10 @@ SETTINGS="$HOME_DIR/settings"
 SECRETS="$HOME_DIR/secrets"
 ALLOW="${COMMS_ROUTE_SHADOW_ALLOW:-$HOME_DIR/route-shadow-allow}"
 KNOWN_AGENTS="claude codex grok"
+if [ -e "$HOME_DIR/agents.json" ] || [ -L "$HOME_DIR/agents.json" ]; then
+  CUSTOM_AGENTS="$(python3 "$HERE/agent_profiles.py" names)" || exit 1
+  KNOWN_AGENTS="$KNOWN_AGENTS${CUSTOM_AGENTS:+ $CUSTOM_AGENTS}"
+fi
 
 YES=0; SHOW=0; SETS=()
 while [ "$#" -gt 0 ]; do
@@ -164,7 +168,11 @@ say ""
 say "2/5 Agents"
 DETECTED=""
 for a in $KNOWN_AGENTS; do
-  if command -v "$a" >/dev/null 2>&1; then
+  if [ -n "${CUSTOM_AGENTS:-}" ] && case " $CUSTOM_AGENTS " in *" $a "*) true ;; *) false ;; esac; then
+    if python3 "$HERE/agent_profiles.py" binding "$a" >/dev/null 2>&1; then
+      DETECTED="$DETECTED $a"; ok "$a (configured ACP profile)"
+    else bad "$a (configured runtime unavailable)"; fi
+  elif command -v "$a" >/dev/null 2>&1; then
     DETECTED="$DETECTED $a"; ok "$a $("$a" --version 2>/dev/null | head -1)"
   else say "  -     $a not found on PATH"; fi
 done
