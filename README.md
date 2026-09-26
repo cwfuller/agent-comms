@@ -87,12 +87,12 @@ permission before any review text is sent); `--no-route` turns it off for one lo
 | [ROADMAP](docs/ROADMAP.md) | decisions, field reports, what's next |
 | [AGENTS.md](AGENTS.md) | contributing to agent-comms itself |
 
-## License
-
-MIT
-
-### Custom agents and model pins
+## Custom agents and model pins
 
 Use [operator-owned agent profiles](docs/AGENT_PROFILES.md) to name ACP agents, pin
 models, and group reviewers by model family. OpenCode is an optional contained
 review adapter; the guide includes a Venice/GLM example.
+
+## License
+
+MIT

@@ -3241,7 +3241,7 @@ cmd_run() {
     local custom_adapter="" custom_home=""
     if [ -n "$RUN_PROFILE_BINDING" ]; then
       custom_adapter="$(python3 "$HELPER_DIR/agent_profiles.py" binding-field "$RUN_PROFILE_BINDING" adapter)"
-      if [ -n "$mount_dir" ]; then custom_home="$mount_kdir/profile-home"
+      if [ -n "$mount_dir" ]; then custom_home="$mount_kdir/profile-home/$RUN_PROFILE_DIGEST"
       else custom_home="$(python3 "$HELPER_DIR/agent_profiles.py" state-home "$RUN_PROFILE_BINDING")"; fi
     fi
     acp_sh="$(dirname "$SELF")/acp.sh"

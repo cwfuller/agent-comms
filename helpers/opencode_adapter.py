@@ -17,8 +17,8 @@ def validate_profile(profile):
     import re
     if len(profile["command"]) != 1 or "/" not in profile["model"]:
         raise ProfileError("opencode requires one executable and a provider/model pin")
-    if profile.get("runtime_version") != VERSION:
-        raise ProfileError(f"opencode containment requires runtime_version {VERSION}")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", text(profile.get("runtime_version"))):
+        raise ProfileError("opencode requires an explicit runtime_version")
     connection = profile.get("connection")
     if connection is None:
         return
@@ -34,6 +34,11 @@ def validate_profile(profile):
     for key in ("context", "output"):
         if type(connection[key]) is not int or not 0 < connection[key] <= 10_000_000:
             raise ProfileError(f"invalid connection {key}")
+
+
+def check_runtime_profile(profile):
+    if profile["runtime_version"] != VERSION:
+        raise ValueError(f"opencode containment requires runtime_version {VERSION}")
 
 
 def check_session(state, wanted, options):
@@ -68,6 +73,7 @@ def config(profile):
 
 
 def environment(profile, state_home, inherited):
+    check_runtime_profile(profile)
     root = private_directory(state_home)
     env = {k: v for k, v in inherited.items() if not k.startswith("OPENCODE_")}
     for key, folder in (("CONFIG", "config"), ("DATA", "data"), ("STATE", "state"), ("CACHE", "cache")):
@@ -88,7 +94,26 @@ def environment(profile, state_home, inherited):
     return env
 
 
+def check_tree(directory):
+    """The runtime's read tool checks lexical paths, so reject escaping symlinks."""
+    root = Path(directory).resolve(strict=True)
+    def unreadable(error):
+        raise ValueError("cannot inspect reviewer tree for escaping symlinks") from error
+    for parent, directories, files in os.walk(root, followlinks=False, onerror=unreadable):
+        for name in [*directories, *files]:
+            path = Path(parent) / name
+            if not path.is_symlink():
+                continue
+            try:
+                target = path.resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise ValueError(f"cannot resolve reviewer symlink: {path.relative_to(root)}") from error
+            if not target.is_relative_to(root):
+                raise ValueError(f"reviewer tree contains an escaping symlink: {path.relative_to(root)}")
+
+
 def launch(profile, state_home, inherited):
+    check_tree(os.getcwd())
     env = environment(profile, state_home, inherited)
     command = [profile["command"][0], "acp", "--pure", "--cwd", os.getcwd()]
     os.execve(command[0], command, env)

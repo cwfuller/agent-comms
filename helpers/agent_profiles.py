@@ -105,6 +105,16 @@ def load():
     return {name: validate(name, p) for name, p in data["agents"].items()}
 
 
+def launcher_revision():
+    # A warm owner runs the launch policy it started with. Changed policy code needs
+    # a new session and state directory, even when the user profile is unchanged.
+    root = Path(__file__).resolve().parent
+    hasher = hashlib.sha256()
+    for name in ("agent_profiles.py", "opencode_adapter.py", "profile_io.py", "acp.sh", "runphase.sh"):
+        hasher.update(name.encode() + b"\0" + (root / name).read_bytes())
+    return hasher.hexdigest()
+
+
 def resolve(name):
     profiles = load()
     if name not in profiles:
@@ -114,7 +124,10 @@ def resolve(name):
     if not executable:
         raise ProfileError(f"runtime executable not found for {name}: {p['command'][0]}")
     p["command"] = [str(Path(executable).absolute()), *p["command"][1:]]
-    return {"name": name, "profile": p}
+    if p["adapter"] == "opencode":
+        from opencode_adapter import check_runtime_profile
+        check_runtime_profile(p)
+    return {"name": name, "profile": p, "launcher_revision": launcher_revision()}
 
 
 def encode(binding):
@@ -125,7 +138,9 @@ def decode(encoded):
     if not encoded or len(encoded) > 32768:
         raise ProfileError("missing or oversized agent profile binding")
     binding = json.loads(base64.b64decode(encoded, altchars=b"-_", validate=True), object_pairs_hook=unique_object)
-    fields(binding, ("name", "profile"), ("name", "profile"))
+    fields(binding, ("name", "profile", "launcher_revision"), ("name", "profile", "launcher_revision"))
+    if not re.fullmatch(r"[0-9a-f]{64}", text(binding["launcher_revision"])):
+        raise ProfileError("invalid launcher revision")
     validate(binding["name"], binding["profile"])
     if encode(binding) != encoded:
         raise ProfileError("agent profile binding is not canonical")
@@ -185,7 +200,7 @@ def message_binding(path, request=None):
         if not request:
             raise ProfileError("profile reply needs its retained request")
         req = frontmatter(request)
-        if req.get("type") != "review-request" or req.get("message_id") != fm.get("in-reply-to"):
+        if req.get("type") not in ("review-request", "error") or req.get("message_id") != fm.get("in-reply-to"):
             raise ProfileError("profile reply does not answer this review request")
         if any(req.get(k) != fm.get(k) for k in BINDING_FIELDS):
             raise ProfileError("reply changed the request's agent profile binding")
@@ -221,9 +236,13 @@ def acpx_arguments(binding, state_home, argv):
 
 def model_check(binding, record):
     """ACP control-plane confirmation, not a claim of inference-provider attestation."""
+    if not isinstance(record, dict) or not isinstance(record.get("acpx", record), dict):
+        raise ProfileError("invalid ACP session record")
     state = record.get("acpx", record)
     wanted = binding["profile"]["model"]
     current = state.get("current_model_id", state.get("currentModelId"))
+    if current is not None and current != wanted:
+        raise ProfileError("ACP current model disagrees with the configured pin")
     options = state.get("config_options", state.get("configOptions", []))
     for option in options:
         if option.get("category") == "model" or option.get("id") == "model":
@@ -299,6 +318,8 @@ def main():
     elif operation == "serve":
         binding = decode(args[0])
         profile = binding["profile"]
+        if binding["launcher_revision"] != launcher_revision():
+            raise ProfileError("launcher changed since dispatch; send a new request")
         env = credentials(profile, os.environ)
         env["PWD"] = os.getcwd()
         if profile["adapter"] == "opencode":

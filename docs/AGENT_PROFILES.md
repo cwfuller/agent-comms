@@ -39,7 +39,9 @@ or a name on `PATH`; dispatch resolves it to an absolute path. Model identifiers
 opaque to the framework. `api_provider` is optional descriptive metadata. `family`
 is the operator's independence group: aliases and models from the same family count
 as one reviewer. A panel rejects duplicate families even if names, hosts or harnesses
-differ. Use the real model family consistently across your profiles.
+differ. Use model-family groups consistently: the built-in groups are `codex`,
+`claude`, and `grok`. A custom profile using the same family as a built-in must
+use that built-in group name, even through another inference host.
 
 Names follow `[a-z][a-z0-9-]{1,15}`. Built-in names and the `-review` suffix are reserved.
 Every enabled driver gets an automatic review twin (`analyst-review`). A custom driving
@@ -104,7 +106,8 @@ agent. Include the proposed diff and its base in review requests: this adapter c
 read/search the mounted tree but cannot run git or a shell.
 
 The adapter isolates runtime settings/state, disables project configuration and external
-plugins/MCP servers, exposes only read/glob/grep tools, and locks the model and the
+plugins/MCP servers, refuses trees with outward or unresolvable symlinks before launch,
+exposes only read/glob/grep tools, and locks the model and the
 `comms-review` mode. This is an **in-process permission boundary**, not an OS sandbox.
 Its inference connection remains available; it is not a network isolation guarantee.
 Every successful review also checks newly appended runtime assistant records for the
@@ -114,13 +117,16 @@ inference host's internal routing.
 ## Pins and history
 
 Profiles are exact pins. Updating `glm` to another GLM model is an explicit operator
-change. There is no automatic catalog selection or silent fallback.
+change. There is no automatic catalog selection or silent fallback. Custom profiles do not
+participate in tier/effort routing; their fixed pin is recorded in `result.json` under
+`profile.model`.
 
 Dispatch freezes the public resolved profile, digest, family and model in the request.
 Execution refuses if the operator profile changed; create a fresh request. Resending
 a stamped request cannot silently retarget it. Consult/review session names include
-identity and profile digest, so two pins do not reuse one session. One-shot custom
-consults use a unique named session to permit model inspection.
+identity and profile digest, so two pins do not reuse one session. The binding also
+records a launcher-code revision: an adapter upgrade starts a new session/state directory.
+One-shot custom consults use a unique named session to permit model inspection.
 
 Parent-brokered replies inherit the same binding. Composition uses the retained request
 and stamped family, including after profiles are removed. Built-in historical replies

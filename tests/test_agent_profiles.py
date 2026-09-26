@@ -85,6 +85,17 @@ class Profiles(unittest.TestCase):
         self.assertNotEqual(profiles.digest(binding), profiles.digest(second))
         with self.assertRaises(ValueError): profiles.decode(profiles.encode(binding) + ' ')
 
+    def test_launcher_change_invalidates_current_binding_not_history(self):
+        binding = self.binding()
+        with patch.object(profiles, 'launcher_revision', return_value='0' * 64):
+            changed = profiles.resolve('alpha')
+            self.assertNotEqual(profiles.digest(binding), profiles.digest(changed))
+            self.assertEqual(profiles.decode(profiles.encode(binding)), binding)
+        binding['profile'] = opencode()
+        binding['profile']['runtime_version'] = '0.0.1'
+        self.assertEqual(profiles.decode(profiles.encode(binding)), binding)
+        with self.assertRaises(ValueError): adapter.check_runtime_profile(binding['profile'])
+
     def test_command_arguments_are_not_shell_code(self):
         binding = self.binding()
         binding['profile']['command'].append('$(touch unsafe); `id`')
@@ -123,6 +134,10 @@ class Profiles(unittest.TestCase):
             profiles.model_check(binding, {'acpx': {'current_model_id': 'vendor/model-v1',
                 'config_options': [{'id': 'model', 'currentValue': 'other'}]}})
 
+        with self.assertRaises(ValueError):
+            profiles.model_check(binding, {'acpx': {'current_model_id': 'other',
+                'config_options': [{'id': 'model', 'currentValue': 'vendor/model-v1'}]}})
+
     def message(self, path, fields):
         path.write_text('---\n' + ''.join(f'{k}: {v}\n' for k, v in fields.items()) + '---\n\nbody\n')
         return path
@@ -134,6 +149,8 @@ class Profiles(unittest.TestCase):
         req = self.message(self.root / 'req.md', dict(fm, type='review-request', message_id='request-1'))
         reply = self.message(self.root / 'reply.md', dict(fm, type='review-feedback', **{'from': 'alpha', 'in-reply-to': 'request-1'}))
         self.config.unlink()
+        self.assertEqual(profiles.message_binding(reply, req), binding)
+        self.message(req, dict(fm, type='error', message_id='request-1'))
         self.assertEqual(profiles.message_binding(reply, req), binding)
         for key, value in [('review_family', 'other'), ('review_model', 'other'), ('agent_profile_digest', 'bad'), ('from', 'beta'), ('in-reply-to', 'other')]:
             fields = dict(fm, type='review-feedback', **{'from': 'alpha', 'in-reply-to': 'request-1'})
@@ -169,6 +186,18 @@ class Profiles(unittest.TestCase):
         self.assertEqual(cfg['model'], cfg['small_model'])
         self.assertEqual(cfg['mcp'], {}); self.assertEqual(cfg['plugin'], [])
         self.assertTrue(all(cfg['agent'][n]['disable'] for n in ['build', 'plan', 'general', 'explore']))
+
+    def test_opencode_refuses_escaping_symlinks_before_launch(self):
+        root = self.root / 'tree'; root.mkdir()
+        (root / 'file').write_text('safe')
+        (root / 'internal').symlink_to('file')
+        adapter.check_tree(root)
+        (root / 'escape').symlink_to(self.root / 'outside')
+        with self.assertRaises(ValueError): adapter.check_tree(root)
+        (root / 'escape').unlink()
+        (root / 'escape').symlink_to('loop')
+        (root / 'loop').symlink_to('escape')
+        with self.assertRaises(ValueError): adapter.check_tree(root)
 
     def test_opencode_model_and_mode_control(self):
         b = {'name': 'alpha', 'profile': opencode()}; wanted = b['profile']['model']
@@ -298,5 +327,32 @@ class ProfileIntegration(unittest.TestCase):
         self.assertIn('changed since dispatch', result.stdout + result.stderr + ((run / 'runner.log').read_text() if (run / 'runner.log').exists() else ''))
 
 
+class ProfileResult(unittest.TextTestResult):
+    """One report row per executed case so the umbrella coverage gate counts them."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cases = []
+
+    def startTest(self, test):
+        self.case_passed = False
+        super().startTest(test)
+
+    def addSuccess(self, test):
+        self.case_passed = True
+        super().addSuccess(test)
+
+    def stopTest(self, test):
+        self.cases.append({'name': test.id(), 'passed': self.case_passed})
+        super().stopTest(test)
+
+
 if __name__ == '__main__':
-    unittest.main()
+    report = None
+    if '--report' in sys.argv:
+        index = sys.argv.index('--report')
+        report = Path(sys.argv[index + 1])
+        del sys.argv[index:index + 2]
+    program = unittest.main(exit=False, testRunner=unittest.TextTestRunner(resultclass=ProfileResult))
+    if report:
+        report.write_text(json.dumps(program.result.cases))
+    sys.exit(0 if program.result.wasSuccessful() else 1)

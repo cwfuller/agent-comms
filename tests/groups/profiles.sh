@@ -1,6 +1,26 @@
 # Run through tests/run.sh; no live API or developer profile is used.
 section "profiles: parser, launch and evidence contracts"
-check "profile parser, ACP translation, historical bindings and runtime evidence" python3 "$REPO/tests/test_agent_profiles.py"
+PF_UNIT_RC=0
+# Enumerate the index, not a possibly recreated untracked file.
+if git -C "$REPO" ls-files --error-unmatch tests/test_agent_profiles.py >/dev/null 2>&1; then
+  python3 "$REPO/tests/test_agent_profiles.py" --report "$WORK/profiles-report.json" > "$WORK/profiles-unit.log" 2>&1 || PF_UNIT_RC=$?
+fi
+if python3 - "$WORK/profiles-report.json" > "$WORK/profiles-cases.tsv" <<'REPORT'
+import json,sys
+for case in json.load(open(sys.argv[1])):
+    print(('pass' if case['passed'] else 'fail') + '\t' + case['name'])
+REPORT
+then
+  PF_UNIT_FAILURES=0
+  while IFS=$'\t' read -r status name; do
+    if [ "$status" = pass ]; then ok "$name"
+    else fail "$name"; PF_UNIT_FAILURES=$((PF_UNIT_FAILURES + 1)); fi
+  done < "$WORK/profiles-cases.tsv"
+  if [ "$PF_UNIT_RC" -ne 0 ]; then
+    cat "$WORK/profiles-unit.log"
+    [ "$PF_UNIT_FAILURES" -gt 0 ] || fail "profile runner aborted without a failed case"
+  fi
+else fail "profile case report missing or invalid"; cat "$WORK/profiles-unit.log" 2>/dev/null; fi
 section "profiles: registry and family integration"
 PF_FIX="$WORK/profiles-repo"; mkdir -p "$PF_FIX/.comms"
 git -C "$PF_FIX" init -q -b main
