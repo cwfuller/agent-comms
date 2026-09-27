@@ -1823,7 +1823,7 @@ IT_CP="$(cat "$IT/child.pid" 2>/dev/null)"; IT_LP="$(cat "$IT/leader.pid" 2>/dev
   && ok "the suite's whole process group is killed, a TERM-ignoring child included (KILL after the grace)" \
   || { fail "survivors: child=$IT_CP leader=$IT_LP elapsed=${IT_EL}s"; kill -KILL "$IT_CP" "$IT_LP" 2>/dev/null || true; }
 it_tree_gone && grep -q '^hang-started$' "$IX/.comms/logs/integrate-$IT_C.suite.log" \
-  && ! [ -e "$IX/.comms/logs/integrate-$IT_C.suite.log.timeout" ] \
+  && ! ls "$IX/.comms/logs/integrate-$IT_C.suite.log.timeout"* >/dev/null 2>&1 \
   && grep -q 'TIMED OUT after 2s' "$IT/hang.err" \
   && ok "the verification tree is removed, the suite log is kept, and stderr names the timeout" \
   || fail "cleanup: tree_gone=$(it_tree_gone && echo y || echo n) log=$(head -c 200 "$IX/.comms/logs/integrate-$IT_C.suite.log" 2>/dev/null)"
