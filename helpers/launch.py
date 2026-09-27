@@ -83,7 +83,7 @@ def main(argv=None):
     if args.profile not in profiles:
         raise ProfileError(f'no operator profile for {args.profile}')
     profile = select_profile(args.profile, args.model, profiles)
-    binding = resolve(args.profile)
+    binding = resolve(args.profile, profiles=profiles)
     enabled, skills = project_context(Path(__file__).with_name('comms.sh'))
     driver = identity(args.profile, profile, profiles, enabled)
     settings = configuration(profile, os.environ, skills)
@@ -99,6 +99,9 @@ def main(argv=None):
     if version.returncode or version.stdout.strip() != VERSION:
         raise ProfileError(f'configured OpenCode runtime must be {VERSION}')
     env = credentials(profile, os.environ)
+    # A new interactive session must claim its own presence and worktree ownership.
+    for key in ('COMMS_PRESENCE_NAME', 'COMMS_PRESENCE_INSTANCE', 'COMMS_PRESENCE_PID'):
+        env.pop(key, None)
     # An unmatched override must never inherit the caller's codex/claude identity.
     env['COMMS_SELF'] = driver or 'unregistered-model:' + profile['model']
     env['OPENCODE_CONFIG_CONTENT'] = json.dumps(settings)

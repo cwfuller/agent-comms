@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Profile contract tests. No network, credentials, or installed model runtime required."""
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -295,7 +296,7 @@ class DriverLaunch(unittest.TestCase):
     def fixture(self):
         subprocess.run(['git','init','-q','-b','main'],cwd=self.root,check=True)
         executable = self.root/'runtime'; capture = self.root/'capture.py'
-        capture.write_text('import json,os,sys\nprint(json.dumps({"argv":sys.argv[1:],"identity":os.environ["COMMS_SELF"],"cwd":os.getcwd(),"key_present":os.environ.get("API_KEY")=="fixture-secret","config":json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])}))\n')
+        capture.write_text('import json,os,sys\nprint(json.dumps({"argv":sys.argv[1:],"identity":os.environ["COMMS_SELF"],"cwd":os.getcwd(),"key_present":os.environ.get("API_KEY")=="fixture-secret","presence":{k:v for k,v in os.environ.items() if k in ("COMMS_PRESENCE_NAME","COMMS_PRESENCE_INSTANCE","COMMS_PRESENCE_PID")},"config":json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])}))\n')
         executable.write_text('#!/bin/sh\nif [ "$1" = --version ]; then printf "%s\\n" "' + adapter.VERSION + '"; exit 0; fi\nexec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(capture)) + ' "$@"\n')
         executable.chmod(0o700)
         p = opencode(); p['command'] = [str(executable)]
@@ -321,15 +322,37 @@ class DriverLaunch(unittest.TestCase):
     def test_real_exec_passes_model_identity_credential_and_literal_prompt(self):
         self.fixture()
         prompt = 'do not run $(touch unsafe); `id`'
-        r = self.cli('alpha','--prompt',prompt,LAUNCH_TEST_KEY='fixture-secret')
+        r = self.cli('alpha','--prompt',prompt,LAUNCH_TEST_KEY='fixture-secret',
+                     COMMS_PRESENCE_NAME='parent',COMMS_PRESENCE_INSTANCE='parent-instance',COMMS_PRESENCE_PID='123')
         self.assertEqual(r.returncode,0,r.stderr)
         out=json.loads(r.stdout)
         self.assertEqual(out['identity'],'alpha')
         self.assertEqual(out['argv'],['--model','vendor/model-v1','--agent','build','--prompt',prompt])
         self.assertEqual(out['cwd'],str(self.root))
         self.assertTrue(out['key_present'])
+        self.assertEqual(out['presence'],{})
         self.assertNotIn('fixture-secret',r.stdout+r.stderr)
         self.assertFalse((self.root/'unsafe').exists())
+
+    def test_launch_uses_one_validated_profile_snapshot(self):
+        rows = {'alpha': self.fixture()}
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(driver,'load',return_value=rows) as first_read, \
+                patch.object(profiles,'load',side_effect=AssertionError('second profile read')), \
+                patch.object(driver,'project_context',return_value=(['alpha'],None)), \
+                patch('sys.stdout',new_callable=io.StringIO) as output:
+            driver.main(['alpha','--print'])
+        first_read.assert_called_once_with()
+        self.assertEqual(json.loads(output.getvalue())['identity'],'alpha')
+
+    def test_wrong_runtime_version_refused_before_credentials_or_exec(self):
+        p = self.fixture()
+        runtime = Path(p['command'][0])
+        runtime.write_text('#!/bin/sh\nprintf "0.0.0\\n"\n')
+        result = self.cli('alpha')
+        self.assertEqual(result.returncode,1)
+        self.assertIn('runtime must be '+adapter.VERSION,result.stderr)
+        self.assertNotIn('Launching',result.stderr)
 
     def test_unregistered_override_never_inherits_the_callers_identity(self):
         self.fixture()

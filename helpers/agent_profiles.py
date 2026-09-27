@@ -115,8 +115,10 @@ def launcher_revision():
     return hasher.hexdigest()
 
 
-def resolve(name):
-    profiles = load()
+def resolve(name, profiles=None):
+    # A caller resolving identity and execution together can pin one validated read.
+    if profiles is None:
+        profiles = load()
     if name not in profiles:
         raise ProfileError(f"no operator profile for {name}")
     p = dict(profiles[name])

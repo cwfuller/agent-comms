@@ -61,7 +61,7 @@ used by a remote inference service.
 
 ## Interactive coding sessions
 
-An OpenCode profile can also launch the main coding agent:
+From a Git project directory, an OpenCode profile can also launch the main coding agent:
 
 ```sh
 helpers/comms.sh launch glm
@@ -72,6 +72,8 @@ This starts the configured executable in native **Build** mode, with the profile
 provider connection and credential references. No token is printed or written to
 configuration. Normal OpenCode permissions and project settings apply; this is an
 implementing session, separate from the contained reviewer adapter below.
+It starts with no inherited agent-comms presence token; the new session claims its own
+presence when beginning a workflow. Identity and runtime selection use one profile snapshot.
 
 The optional model ID is scoped to the selected provider. It changes this launch only;
 it does not rewrite the profile or alter pending reviews. The connection's configured
