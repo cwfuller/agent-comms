@@ -4236,6 +4236,29 @@ agent_version() {  # best-effort CLI identity — empty beats a guess
 PRESENCE_TTL_SECS="${COMMS_PRESENCE_TTL_SECS:-2700}"
 
 presence_dir() { printf '%s/.comms/sessions' "$(main_repo_root)"; }
+pgroup_stop() {  # <pgid> <signal> — stop a whole process group; 0 iff it is gone afterwards
+  # THE ONE TEARDOWN for a supervised group, used by with-beat's quiescence sweep and by its
+  # timeout. <signal> first (the latched identity, or TERM), then CONT: a STOPPED member (a
+  # background read of the terminal draws SIGTTIN) holds every signal but KILL pending until it
+  # is continued. Then bounded escalation: 5s for the group to leave, KILL, 2s more. The caller
+  # decides what a survivor means. `sleep || true`: a group-INT during the poll must not abort
+  # the wrapper before the KILL escalation (grok, impl r5).
+  local pg="$1" sig="$2" n=0
+  kill -"$sig" -- "-$pg" 2>/dev/null || true
+  kill -CONT -- "-$pg" 2>/dev/null || true
+  while kill -0 -- "-$pg" 2>/dev/null; do
+    n=$((n + 1)); [ "$n" -ge 50 ] && break; sleep 0.1 || true
+  done
+  if kill -0 -- "-$pg" 2>/dev/null; then
+    kill -KILL -- "-$pg" 2>/dev/null || true
+    n=0
+    while kill -0 -- "-$pg" 2>/dev/null; do
+      n=$((n + 1)); [ "$n" -ge 20 ] && break; sleep 0.1 || true
+    done
+  fi
+  ! kill -0 -- "-$pg" 2>/dev/null
+}
+
 presence_validate_ids() {  # <name> [instance] — strict grammar at EVERY entry point:
   # these values become record paths, glob deletions, an rm -rf target, and trap
   # text. Validating only at claim left every later verb injectable. (codex, impl r1.)
@@ -4665,8 +4688,8 @@ cmd_presence() {
       # `kill -0` fails as soon as it has exited. A latched signal ends the poll and takes the
       # ordinary path below. Past the deadline the whole group gets TERM — and CONT, because a
       # STOPPED process (SIGTTIN from a background read of the terminal, say) holds TERM pending
-      # until it is continued — then KILL after the same 5s grace the quiescence sweep uses. The
-      # mark is written FIRST, so a caller can tell this apart from a command that merely exited
+      # until it is continued — then KILL after a 5s grace, through the same pgroup_stop the
+      # quiescence sweep uses. The mark is written FIRST, so a caller can tell this apart from a command that merely exited
       # 124 itself: an exit status is the one channel the command controls. (integrate
       # suite-timeout, 2026-09-27.)
       if [ "$timeout_secs" -gt 0 ]; then
@@ -4679,17 +4702,19 @@ cmd_presence() {
             timed_out=1
             [ -z "$timeout_mark" ] || : > "$timeout_mark" 2>/dev/null || true
             echo "presence with-beat: the command ran past --timeout-secs $timeout_secs — terminating its process group" >&2
-            kill -TERM -- "-$child" 2>/dev/null || true
-            kill -CONT -- "-$child" 2>/dev/null || true
-            local tn=0
-            while kill -0 -- "-$child" 2>/dev/null; do
-              tn=$((tn + 1)); [ "$tn" -ge 50 ] && break; sleep 0.1 || true
-            done
-            kill -0 -- "-$child" 2>/dev/null && { kill -KILL -- "-$child" 2>/dev/null || true; }
             break
           fi
           sleep 1 || true
         done
+        # BOUNDED TEARDOWN BEFORE THE WAIT, whether the poll ended on the deadline or on a
+        # latched INT/TERM. Without a timeout the trap interrupts a `wait` already in progress;
+        # here the trap only ends the poll, so an unconditional `wait` on a leader that ignores
+        # the signal would block forever and never reach the escalation below. (codex, suite-
+        # timeout r1, blocking.) A leader that already exited needs none: the sweep handles its
+        # stragglers.
+        if [ -n "$timed_out$latched" ] && kill -0 "$child" 2>/dev/null; then
+          pgroup_stop "$child" "${latched:-TERM}" || true
+        fi
       fi
       rc=0; wait "$child" || rc=$?
       # QUIESCENCE before return (codex, impl r4): the wrapper's success must mean
@@ -4697,21 +4722,7 @@ cmd_presence() {
       # return, and a straggling suite descendant made a same-shaped model return
       # 0 two seconds early. Sweep with the latched identity (or TERM), then
       # bounded escalation to KILL, then FAIL CLOSED if the group still breathes.
-      local sweep_sig="${latched:-TERM}" qn=0
-      kill -"$sweep_sig" -- "-$child" 2>/dev/null || true
-      while kill -0 -- "-$child" 2>/dev/null; do
-        qn=$((qn + 1)); [ "$qn" -ge 50 ] && break; sleep 0.1 || true
-      done
-      if kill -0 -- "-$child" 2>/dev/null; then
-        kill -KILL -- "-$child" 2>/dev/null || true
-        qn=0
-        while kill -0 -- "-$child" 2>/dev/null; do
-          qn=$((qn + 1)); [ "$qn" -ge 20 ] && break; sleep 0.1 || true
-        done
-      fi
-      # (sleep || true — a group-INT during the poll aborted the wrapper before
-      # KILL escalation; could not land, could leak a descendant. grok, impl r5.)
-      if kill -0 -- "-$child" 2>/dev/null; then
+      if ! pgroup_stop "$child" "${latched:-TERM}"; then
         echo "presence with-beat: the child's process group survived TERM and KILL — failing closed (result untrusted)" >&2
         rc=125
       fi
@@ -5118,7 +5129,10 @@ suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <
   # BACKGROUND process group, where a read of a controlling terminal STOPS it (SIGTTIN) — a
   # hang at 0% CPU of exactly the shape the timeout exists for, and a landing gate has no
   # input to give it anyway.
-  local tmark="$suite_log.timeout"
+  # Per INVOCATION ($$), not per candidate: two integrations of one candidate without identities
+  # take no lease, and a shared mark let one clear the other's timeout or hand it a false one.
+  # (codex, suite-timeout r1.)
+  local tmark="$suite_log.timeout.$$"
   rm -f "$tmark" 2>/dev/null || true
   # shellcheck disable=SC2086
   ( cd "$tw" && "${clean_env[@]}" "$SELF" presence with-beat $hb --name "$sv_name" --instance "$sv_instance" \

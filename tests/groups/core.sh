@@ -1889,6 +1889,25 @@ IT_WS=0; (cd "$IX" && "$COMMS" presence with-beat --no-heartbeat --name wb-timeo
 [ "$IT_WB" = 124 ] && [ -e "$IT/wb.mark" ] && [ "$IT_WS" = 124 ] && ! [ -e "$IT/wb-self.mark" ] \
   && ok "with-beat --timeout-secs exits 124 and writes its mark; a command's own 124 writes none" \
   || fail "with-beat timeout: timed=$IT_WB mark=$([ -e "$IT/wb.mark" ] && echo y) self=$IT_WS selfmark=$([ -e "$IT/wb-self.mark" ] && echo y)"
+# Round-1 review (codex, blocking): with a bound set, a TERM to the wrapper only ends the poll, and
+# an unconditional wait on a leader that ignores TERM blocked forever. The wrapper must tear the
+# group down (KILL after the grace) and return, well inside the command's own 300s.
+(cd "$IX" && exec "$COMMS" presence with-beat --no-heartbeat --name wb-timeout --instance 00000000000000000000000000000002 \
+  --timeout-secs 120 -- bash -c 'trap "" TERM; echo $$ > "$1"; while :; do sleep 1; done' _ "$IT/wb-leader.pid") >/dev/null 2>&1 &
+IT_WBP=$!; IT_N=0
+until [ -s "$IT/wb-leader.pid" ] || [ "$IT_N" -ge 100 ]; do sleep 0.1; IT_N=$((IT_N + 1)); done
+sleep 1; kill -TERM "$IT_WBP" 2>/dev/null; IT_N=0
+while kill -0 "$IT_WBP" 2>/dev/null && [ "$IT_N" -lt 300 ]; do sleep 0.1; IT_N=$((IT_N + 1)); done
+IT_WBL="$(cat "$IT/wb-leader.pid" 2>/dev/null)"
+if kill -0 "$IT_WBP" 2>/dev/null; then
+  fail "with-beat --timeout-secs: a TERM with a TERM-ignoring leader left the wrapper blocked (30s)"
+  kill -KILL "$IT_WBP" 2>/dev/null; [ -n "$IT_WBL" ] && kill -KILL "$IT_WBL" 2>/dev/null
+else
+  IT_WBR=0; wait "$IT_WBP" || IT_WBR=$?
+  [ "$IT_WBR" != 0 ] && [ -n "$IT_WBL" ] && ! kill -0 "$IT_WBL" 2>/dev/null \
+    && ok "a TERM to a bounded with-beat still tears down a TERM-ignoring leader and returns non-zero" \
+    || { fail "bounded with-beat under TERM: rc=$IT_WBR leader=$IT_WBL"; [ -n "$IT_WBL" ] && kill -KILL "$IT_WBL" 2>/dev/null; }
+fi
 IT_U1="$(ix_rc presence with-beat --no-heartbeat --name wb-timeout --instance 00000000000000000000000000000002 --timeout-secs x -- true)"
 IT_U2="$(ix_rc presence others --name wb-timeout --instance 00000000000000000000000000000002 --timeout-secs 5)"
 [ "$IT_U1" = 2 ] && [ "$IT_U2" = 2 ] \
