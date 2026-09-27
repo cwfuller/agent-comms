@@ -5567,12 +5567,52 @@ verify_fresh() {
   printf 'verify-result v1 status=verified cand=%s\n' "$cand"
 }
 
+# The runtime roots a review artifact never takes from the working tree unless the candidate
+# commit TRACKS the path: the mailbox and its state (.comms), a project-local helper pin
+# (.agent-comms), and in-checkout session worktrees (.claude/worktrees — a full second repo
+# copy; relying on .gitignore alone let one walk into a sibling loop's artifact before 7dc08b4).
+SNAPSHOT_RUNTIME_ROOTS=(.comms .agent-comms .claude/worktrees)
+
+# snapshot_strip_runtime <root> <temp-index> <candidate-commit-or-empty>
+# Drops from the temp index every path under a runtime root that the CANDIDATE does not track,
+# MECHANICALLY rather than trusting .gitignore: an artifact must never carry message bodies into
+# a git object that could later be pushed. (An exclude PATHSPEC on the `add` cannot do this —
+# `git add` reads it as naming an ignored path and fails the whole command.)
+# Paths the candidate DOES track stay, working-tree state and all, exactly like any other
+# tracked file. Stripping the whole root used to delete a tracked `.comms/README.md` from every
+# artifact, so a clean tree snapshotted as a synthetic commit whose only change was that
+# deletion — its head_sha no longer named the candidate and the verdict could not cover it.
+# (live, 2026-09-27.) "Untracked" is judged against the CANDIDATE, never the user's index: a
+# mailbox file someone `git add`ed but never committed is still runtime state.
+# Fails CLOSED: any git error, or any untracked runtime path still present afterwards, is a
+# non-zero return, and the caller refuses to mint the artifact.
+snapshot_strip_runtime() {
+  local root="$1" idx="$2" cand="$3" base list left
+  if [ -n "$cand" ]; then
+    base="$cand"
+  else
+    # Unborn HEAD: nothing is tracked, so the empty tree makes every runtime path untracked.
+    base="$(git -C "$root" hash-object -t tree /dev/null 2>/dev/null)" && [ -n "$base" ] || return 1
+  fi
+  list="$(dirname "$idx")/strip.z"
+  GIT_INDEX_FILE="$idx" git -C "$root" diff-index --cached --no-renames --diff-filter=A \
+    --name-only -z "$base" -- "${SNAPSHOT_RUNTIME_ROOTS[@]}" > "$list" 2>/dev/null || return 1
+  if [ -s "$list" ]; then
+    GIT_INDEX_FILE="$idx" git -C "$root" update-index -z --force-remove --stdin < "$list" 2>/dev/null \
+      || return 1
+  fi
+  left="$(GIT_INDEX_FILE="$idx" git -C "$root" diff-index --cached --no-renames --diff-filter=A \
+    --name-only "$base" -- "${SNAPSHOT_RUNTIME_ROOTS[@]}" 2>/dev/null)" || return 1
+  [ -z "$left" ]
+}
+
 cmd_snapshot() {
   # snapshot [create|list] — RETAIN the tree under review as a durable git object.
   #
   # A hash alone cannot resurrect the input, so this stores CONTENT: the working
-  # tree (tracked edits and untracked files, mailbox excluded) is written as a
-  # real commit object without touching the worktree, the index, or the stash.
+  # tree (tracked edits and untracked files; untracked runtime state under
+  # SNAPSHOT_RUNTIME_ROOTS excluded) is written as a real commit object without
+  # touching the worktree, the index, or the stash.
   # That commit starts unreferenced and would be garbage-collected, so it is
   # anchored under refs/agent-comms/ — the anchor IS the retention, and without
   # it the artifact this prerequisite exists to keep silently evaporates.
@@ -5605,16 +5645,8 @@ cmd_snapshot() {
   fi
   GIT_INDEX_FILE="$idx" git -C "$root" add -A -- . 2>/dev/null \
     || { rm -rf "$idxdir"; die "snapshot: cannot stage the working tree"; }
-  # Then drop the mailbox MECHANICALLY rather than trusting .gitignore: a grades
-  # artifact must never carry message bodies into a git object that could later
-  # be pushed. Same boundary rule as the archive-search scope fix. (An exclude
-  # PATHSPEC cannot do this — `git add` reads it as naming an ignored path and
-  # fails the whole command.)
-  GIT_INDEX_FILE="$idx" git -C "$root" rm --cached -r -q --ignore-unmatch -- .comms .agent-comms .claude/worktrees 2>/dev/null \
+  snapshot_strip_runtime "$root" "$idx" "$parent" \
     || { rm -rf "$idxdir"; die "snapshot: cannot exclude the mailbox from the artifact"; }
-  # .claude/worktrees joins the mechanical strip: an in-checkout session worktree is
-  # a full second repo copy, and relying on .gitignore alone let one walk into a
-  # sibling loop's review artifact before 7dc08b4. Mechanical, like the mailbox.
   tree="$(GIT_INDEX_FILE="$idx" git -C "$root" write-tree 2>/dev/null || true)"
   rm -rf "$idxdir"
   [ -n "$tree" ] || die "snapshot: cannot write the reviewed tree"

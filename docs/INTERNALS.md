@@ -364,10 +364,18 @@ someone has to remember:
   clobber `awaiting_from` while the primary reviewer is still working. So a shadow verdict
   cannot gate a loop it was never delivered into, and the primary's request is never
   archived out from under it.
-- **The artifact excludes the mailbox mechanically.** `snapshot` stages the working tree in
-  a throwaway index and then removes `.comms` and `.agent-comms` from it, rather than
-  trusting `.gitignore` — a grades artifact must never carry message bodies into a git
-  object that could later be pushed.
+- **The artifact excludes untracked runtime state mechanically.** `snapshot` stages the
+  working tree in a throwaway index and then removes every path under `.comms`,
+  `.agent-comms` and `.claude/worktrees` that the CANDIDATE commit (`HEAD`) does not track,
+  rather than trusting `.gitignore` — a grades artifact must never carry message bodies into a
+  git object that could later be pushed. "Tracked" is judged against the candidate, not the
+  user's index, so a mailbox file someone force-staged but never committed still stays out;
+  the strip re-checks its own result and refuses to mint the artifact if any untracked
+  runtime path survived. A file the candidate DOES track under those roots (a committed
+  `.comms/README.md`) is ordinary tracked content: it stays, and a working-tree edit to it is
+  carried like any other. Stripping the whole root used to delete such a file from every
+  artifact, so a clean tree snapshotted as a synthetic commit whose `head_sha` no longer named
+  the candidate — and a verdict on it could not cover the candidate (live, 2026-09-27).
 - **Grades never enter reviewer context.** The ledger lives outside anything
   `comms.sh lessons` reads. That rules out `docs/advisories.md`, whose read is a *mandatory
   first step in the reviewer's own turn* — the obvious "just track grades like advisories"

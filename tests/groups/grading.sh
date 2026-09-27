@@ -176,6 +176,52 @@ GR_CLEAN_SNAP="$(run_gr snapshot)"
   && ok "a clean tree snapshots to HEAD rather than failing" || fail "clean-tree snapshot"
 check_not "snapshot rejects an unknown argument" run_gr snapshot bogus
 
+section "snapshot keeps files the candidate TRACKS under .comms/ (strips only untracked runtime)"
+# Live 2026-09-27: a repo tracking .comms/README.md had it deleted from every artifact, so a
+# clean tree became a synthetic commit on top of the candidate and the verdict no longer named it.
+TC_FIX="$WORK/snap-tracked-comms"; rm -rf "$TC_FIX"; mkdir -p "$TC_FIX"; TC_FIX="$(cd "$TC_FIX" && pwd -P)"
+git -C "$TC_FIX" init -q -b main
+mkdir -p "$TC_FIX/.comms"
+printf '.comms/*\n!.comms/README.md\n.agent-comms/\n' > "$TC_FIX/.gitignore"
+echo "how this repo uses agent-comms" > "$TC_FIX/.comms/README.md"
+echo a > "$TC_FIX/a.txt"
+git -C "$TC_FIX" add .gitignore a.txt .comms/README.md >/dev/null 2>&1
+git -C "$TC_FIX" -c user.email=t@t -c user.name=t commit -q -m init
+# Runtime state of every kind, including one mailbox file force-staged into the USER'S index:
+# "tracked" means tracked by the candidate commit, never merely staged.
+mkdir -p "$TC_FIX/.comms/to-codex" "$TC_FIX/.comms/archive" "$TC_FIX/.comms/state" "$TC_FIX/.agent-comms"
+echo "message body" > "$TC_FIX/.comms/to-codex/m.md"
+echo "archived body" > "$TC_FIX/.comms/archive/old.md"
+echo "state" > "$TC_FIX/.comms/state/t.json"
+echo "pin" > "$TC_FIX/.agent-comms/comms.sh"
+run_tc() { (cd "$TC_FIX" && env "$COMMS" "$@"); }
+TC_HEAD="$(git -C "$TC_FIX" rev-parse HEAD)"
+TC_PAIR="$(run_tc snapshot create --with-base)"
+[ "$TC_PAIR" = "$(printf '%s\t%s' "$TC_HEAD" "$TC_HEAD")" ] \
+  && ok "a clean tree tracking .comms/README.md snapshots as HEAD itself (no synthetic commit)" \
+  || fail "tracked .comms file forced a synthetic artifact (got: $TC_PAIR, HEAD $TC_HEAD)"
+echo edit >> "$TC_FIX/a.txt"
+git -C "$TC_FIX" add -f .comms/state/t.json >/dev/null 2>&1
+TC_PAIR2="$(run_tc snapshot create --with-base)"
+TC_AID="${TC_PAIR2%%	*}"; TC_BASE="${TC_PAIR2#*	}"
+[ "$TC_AID" != "$TC_BASE" ] && [ "$TC_BASE" = "$TC_HEAD" ] && [ "$(git -C "$TC_FIX" rev-parse "$TC_AID^")" = "$TC_HEAD" ] \
+  && ok "a dirty tracked edit elsewhere still yields a synthetic artifact based on HEAD" || fail "dirty pair (got: $TC_PAIR2)"
+TC_LS="$(git -C "$TC_FIX" ls-tree -r --name-only "$TC_AID" 2>/dev/null)"
+printf '%s\n' "$TC_LS" | grep_full -qx '.comms/README.md' \
+  && ok "the synthetic artifact keeps the tracked .comms/README.md" || fail "tracked .comms file dropped (tree: $TC_LS)"
+printf '%s\n' "$TC_LS" | grep_full -Eq '^\.comms/(to-codex|archive|state)/|^\.agent-comms/' \
+  && fail "untracked runtime state leaked into the artifact (tree: $TC_LS)" \
+  || ok "untracked runtime state (mailbox, archive, state, helper pin; even force-staged) stays out"
+git -C "$TC_FIX" diff-tree --no-commit-id --name-only -r "$TC_HEAD" "$TC_AID" 2>/dev/null | grep_full -qx a.txt \
+  && [ "$(git -C "$TC_FIX" diff-tree --no-commit-id --name-only -r "$TC_HEAD" "$TC_AID" 2>/dev/null | grep -c .)" = 1 ] \
+  && ok "the synthetic artifact differs from HEAD only by the dirty edit" || fail "synthetic artifact carries an unexpected change"
+# A tracked file under .comms/ is ordinary tracked content: its working-tree edit is reviewed like
+# any other, never silently reverted to the candidate's copy.
+echo "edited guide" > "$TC_FIX/.comms/README.md"
+TC_AID3="$(run_tc snapshot create)"
+[ "$(git -C "$TC_FIX" cat-file -p "$TC_AID3:.comms/README.md" 2>/dev/null)" = "edited guide" ] \
+  && ok "a working-tree edit to a tracked .comms file is carried like any tracked edit" || fail "tracked .comms edit not carried"
+
 section "grading pilot: prompt-version partitions grades across an instruction edit"
 GR_HOME="$WORK/grading-home"
 mkdir -p "$GR_HOME"
