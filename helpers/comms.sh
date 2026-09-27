@@ -25,6 +25,8 @@
 #                               ancestor executable). Fails closed on no signal, on
 #                               conflicting signals, on a review-only identity, and
 #                               inside a review turn; never defaults to claude.
+#   launch <profile> [model] [--print] [--prompt TEXT]
+#                               open an interactive coding session using an operator profile
 #   list --as <agent> [--thread <t>]   pending inbox messages, newest first; exit 1 when none
 #   status                      one-screen loop state: latest archive, verdict, pending counts
 #   validate <file>             frontmatter + body checks; non-zero exit and reasons on failure
@@ -7487,6 +7489,7 @@ case "${1:-}" in
   root)      shift; cmd_root "$@" ;;
   workspace) shift; cmd_workspace "$@" ;;
   agents)    shift; cmd_agents "$@" ;;
+  launch)    shift; exec python3 "$(dirname "$SELF")/launch.py" "$@" ;;
   whoami)    shift; cmd_whoami "$@" ;;
   list)      shift; cmd_list "$@" ;;
   status)    shift; cmd_status "$@" ;;

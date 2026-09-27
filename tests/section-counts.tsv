@@ -104,5 +104,5 @@ comms.sh version: the installed kernel commit and template version	18
 leg_usage.py: a leg's tokens come from the provider's own records	46
 comms.sh: state idle/legacy (idle threads marked with evidence, never closed by age)	22
 worktree new: pins the workspace name for the new worktree	11
-profiles: parser, launch and evidence contracts	23
+profiles: parser, launch and evidence contracts	32
 profiles: registry and family integration	9

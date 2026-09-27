@@ -59,6 +59,48 @@ adapter; an arbitrary ACP server is refused even if an uncontained built-in over
 is enabled. ACP model confirmation is control-plane evidence, not proof of the model
 used by a remote inference service.
 
+## Interactive coding sessions
+
+An OpenCode profile can also launch the main coding agent:
+
+```sh
+helpers/comms.sh launch glm
+helpers/comms.sh launch glm z-ai-glm-5-3-flash
+```
+
+This starts the configured executable in native **Build** mode, with the profile's
+provider connection and credential references. No token is printed or written to
+configuration. Normal OpenCode permissions and project settings apply; this is an
+implementing session, separate from the contained reviewer adapter below.
+
+The optional model ID is scoped to the selected provider. It changes this launch only;
+it does not rewrite the profile or alter pending reviews. The connection's configured
+token limits are reused. Use a separate profile for a model requiring different limits.
+An exact enabled profile match sets `COMMS_SELF` to that agent's name. An unmatched
+or ambiguous override starts a standalone coding session and prevents agent-comms
+from inheriting the caller's identity; register a matching profile to use review loops.
+
+OpenCode 1.18.32 discovers `.agents/skills` and exposes those skills as slash commands,
+including `/auto` and `/ask`. The launcher also adds the primary checkout's installed
+skills path, so they remain available when starting from a session worktree. For example:
+
+```text
+/auto --reviewers codex implement the requested change
+```
+
+`--prompt TEXT` supplies an initial task. `--print` shows the public launch plan without
+reading credentials or starting OpenCode. Existing OpenCode configuration must be valid
+for the pinned runtime. The launcher does not upgrade or overwrite that configuration.
+
+For a short, operator-specific command, a shell wrapper can select a profile:
+
+```sh
+venice() { /path/to/installed/comms.sh launch glm "$@"; }
+venice z-ai-glm-5-3-flash
+```
+
+The wrapper name is a local preference; the framework has no default provider.
+
 ## Optional OpenCode reviewer
 
 The `opencode` adapter supports **OpenCode 1.18.32** over ACP. Install that exact

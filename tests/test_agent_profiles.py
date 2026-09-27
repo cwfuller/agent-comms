@@ -15,6 +15,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / 'helpers'))
 import agent_profiles as profiles
 import opencode_adapter as adapter
+import launch as driver
 from profile_io import private_directory, place
 
 
@@ -244,6 +245,108 @@ os._exit(0)
             evidence = adapter.attest(p, self.root, {}, {'acpSessionId': 'ses_large'}, snapshot, 'after')
         self.assertEqual(evidence['message_ids'], ['one'])
         self.assertEqual(evidence['model'], p['model'])
+
+
+class DriverLaunch(unittest.TestCase):
+    setUp = Profiles.setUp
+    write = Profiles.write
+
+    def test_model_override_is_provider_scoped_and_does_not_edit_profile(self):
+        original = opencode(); rows = {'alpha': original}
+        for value in ('next', 'vendor/next'):
+            self.assertEqual(driver.select_profile('alpha', value, rows)['model'], 'vendor/next')
+        self.assertEqual(original['model'], 'vendor/model-v1')
+        for bad in ('bad model', '-option', 'bad\nmodel'):
+            with self.assertRaises(ValueError): driver.select_profile('alpha', bad, rows)
+        with self.assertRaises(ValueError): driver.select_profile('alpha', None, {'alpha': profile()})
+
+    def test_identity_requires_exact_enabled_connection_and_model(self):
+        p = opencode(); rows = {'alpha': p}
+        self.assertEqual(driver.identity('alpha', p, rows, ['alpha']), 'alpha')
+        self.assertIsNone(driver.identity('alpha', p, rows, ['codex']))
+        changed = dict(p, model='vendor/next')
+        self.assertIsNone(driver.identity('alpha', changed, rows, ['alpha']))
+        rows['beta'] = dict(changed)
+        self.assertEqual(driver.identity('alpha', changed, rows, ['alpha','beta']), 'beta')
+        rows['delta'] = dict(changed)
+        self.assertIsNone(driver.identity('alpha', changed, rows, ['beta','delta']))
+        rows['beta']['credentials'] = {'KEY': {'env': 'OTHER'}}
+        self.assertIsNone(driver.identity('alpha', changed, rows, ['beta']))
+
+    def test_build_config_keeps_permissions_and_loads_primary_worktree_skills(self):
+        p = opencode()
+        inherited = {'OPENCODE_CONFIG_CONTENT': json.dumps({'permission': {'bash':'ask'}, 'command': {'local':{'template':'local'}}, 'skills':{'paths':['existing']}})}
+        cfg = driver.configuration(p, inherited, self.root/'skills')
+        self.assertEqual(cfg['permission'], {'bash':'ask'})
+        self.assertEqual(cfg['default_agent'], 'build')
+        self.assertFalse(cfg['agent']['build']['disable'])
+        self.assertEqual(cfg['agent']['build']['model'], p['model'])
+        self.assertEqual(cfg['model'], cfg['small_model'])
+        self.assertNotIn(adapter.MODE, cfg['agent'])
+        self.assertEqual(cfg['command']['local']['template'], 'local')
+        self.assertEqual(cfg['skills']['paths'], ['existing', str(self.root/'skills')])
+        self.assertNotIn('permission', driver.configuration(p, {}, None))
+
+    def test_malformed_inline_configuration_is_refused(self):
+        for value in ('[]', '{bad', '{"a":1,"a":2}', '{"skills":{"paths":"bad"}}'):
+            with self.assertRaises(ValueError):
+                driver.configuration(opencode(), {'OPENCODE_CONFIG_CONTENT':value}, self.root/'skills')
+
+    def fixture(self):
+        subprocess.run(['git','init','-q','-b','main'],cwd=self.root,check=True)
+        executable = self.root/'runtime'; capture = self.root/'capture.py'
+        capture.write_text('import json,os,sys\nprint(json.dumps({"argv":sys.argv[1:],"identity":os.environ["COMMS_SELF"],"cwd":os.getcwd(),"key_present":os.environ.get("API_KEY")=="fixture-secret","config":json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])}))\n')
+        executable.write_text('#!/bin/sh\nif [ "$1" = --version ]; then printf "%s\\n" "' + adapter.VERSION + '"; exit 0; fi\nexec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(capture)) + ' "$@"\n')
+        executable.chmod(0o700)
+        p = opencode(); p['command'] = [str(executable)]
+        p['credentials'] = {'API_KEY': {'env':'LAUNCH_TEST_KEY'}}
+        p['connection'] = dict(base_url='https://inference.example/v1',api_key_env='API_KEY',context=10000,output=1000)
+        self.write({'alpha':p})
+        (self.root/'.comms').mkdir()
+        (self.root/'.comms/config').write_text('agents = codex alpha\ndefault-target = codex\n')
+        return p
+
+    def cli(self, *args, **extra):
+        env = dict(os.environ, AGENT_COMMS_HOME=str(self.root), COMMS_SELF='codex', **extra)
+        env.pop('COMMS_REVIEW_TURN',None)
+        return subprocess.run([str(REPO/'helpers/comms.sh'),'launch',*args],cwd=self.root,env=env,capture_output=True,text=True,timeout=30)
+
+    def test_print_needs_no_credential_and_does_not_echo_secret_config(self):
+        self.fixture()
+        r = self.cli('alpha','--print', OPENCODE_CONFIG_CONTENT='{"other":"hidden-value"}')
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertEqual(json.loads(r.stdout)['identity'],'alpha')
+        self.assertNotIn('hidden-value',r.stdout+r.stderr)
+
+    def test_real_exec_passes_model_identity_credential_and_literal_prompt(self):
+        self.fixture()
+        prompt = 'do not run $(touch unsafe); `id`'
+        r = self.cli('alpha','--prompt',prompt,LAUNCH_TEST_KEY='fixture-secret')
+        self.assertEqual(r.returncode,0,r.stderr)
+        out=json.loads(r.stdout)
+        self.assertEqual(out['identity'],'alpha')
+        self.assertEqual(out['argv'],['--model','vendor/model-v1','--agent','build','--prompt',prompt])
+        self.assertEqual(out['cwd'],str(self.root))
+        self.assertTrue(out['key_present'])
+        self.assertNotIn('fixture-secret',r.stdout+r.stderr)
+        self.assertFalse((self.root/'unsafe').exists())
+
+    def test_unregistered_override_never_inherits_the_callers_identity(self):
+        self.fixture()
+        r=self.cli('alpha','next',LAUNCH_TEST_KEY='fixture-secret')
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertEqual(json.loads(r.stdout)['identity'],'unregistered-model:vendor/next')
+        self.assertIn('standalone',r.stderr)
+        self.assertEqual(profiles.load()['alpha']['model'],'vendor/model-v1')
+
+    def test_review_turn_refused_before_profile_or_credential_reads(self):
+        with patch.dict(os.environ, {'COMMS_REVIEW_TURN':'glm'}), patch.object(driver,'load') as read:
+            with self.assertRaises(ValueError): driver.main(['alpha'])
+            read.assert_not_called()
+
+    def test_project_registry_failure_is_not_treated_as_standalone(self):
+        with patch.object(driver.subprocess,'run',return_value=subprocess.CompletedProcess([],1,'','')):
+            with self.assertRaises(ValueError): driver.project_context(Path('/unused'))
 
 
 class ProfileIntegration(unittest.TestCase):
