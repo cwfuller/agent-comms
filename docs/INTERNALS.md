@@ -371,7 +371,8 @@ someone has to remember:
   git object that could later be pushed. "Tracked" is judged against the candidate, not the
   user's index, so a mailbox file someone force-staged but never committed still stays out;
   the strip re-checks its own result and refuses to mint the artifact if any untracked
-  runtime path survived. A file the candidate DOES track under those roots (a committed
+  runtime path survived. Both scans pass `--ignore-submodules=none`, so a nested repo under
+  `.claude/worktrees` that `.gitmodules` marks `ignore = all` cannot hide as a gitlink. A file the candidate DOES track under those roots (a committed
   `.comms/README.md`) is ordinary tracked content: it stays, and a working-tree edit to it is
   carried like any other. Stripping the whole root used to delete such a file from every
   artifact, so a clean tree snapshotted as a synthetic commit whose `head_sha` no longer named

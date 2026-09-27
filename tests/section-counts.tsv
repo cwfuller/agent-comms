@@ -62,7 +62,7 @@ grading pilot: findings extraction (the single-reviewer baseline)	15
 grading pilot: --out ledger is append-only and idempotent	4
 grading pilot: shadow role + run identity are stamped, not inferred	3
 grading pilot: snapshot RETAINS the reviewed tree (a hash alone cannot)	8
-snapshot keeps files the candidate TRACKS under .comms/ (strips only untracked runtime)	6
+snapshot keeps files the candidate TRACKS under .comms/ (strips only untracked runtime)	8
 grading pilot: prompt-version partitions grades across an instruction edit	8
 grading pilot: shadow reviewer is a MEASUREMENT, structurally unable to gate	53
 grading pilot: round-1 review fixes (mounted artifact, safe ids, whole claims)	44

@@ -5573,37 +5573,48 @@ verify_fresh() {
 # copy; relying on .gitignore alone let one walk into a sibling loop's artifact before 7dc08b4).
 SNAPSHOT_RUNTIME_ROOTS=(.comms .agent-comms .claude/worktrees)
 
-# snapshot_strip_runtime <root> <temp-index> <candidate-commit-or-empty>
-# Drops from the temp index every path under a runtime root that the CANDIDATE does not track,
-# MECHANICALLY rather than trusting .gitignore: an artifact must never carry message bodies into
-# a git object that could later be pushed. (An exclude PATHSPEC on the `add` cannot do this —
-# `git add` reads it as naming an ignored path and fails the whole command.)
+# snapshot_strip_runtime <repo> <temp-index> <candidate-commit-or-empty>
+# Drops from the temp index every path under SNAPSHOT_RUNTIME_ROOTS that the CANDIDATE does not
+# track, MECHANICALLY rather than trusting .gitignore: an artifact must never carry message bodies
+# into a git object that could later be pushed. (An exclude PATHSPEC on the `add` cannot do this —
+# `git add` reads it as naming an ignored path and fails the whole command.) Called ONCE with the
+# whole root list as its pathspec; <repo> is the work tree being snapshotted.
 # Paths the candidate DOES track stay, working-tree state and all, exactly like any other
 # tracked file. Stripping the whole root used to delete a tracked `.comms/README.md` from every
 # artifact, so a clean tree snapshotted as a synthetic commit whose only change was that
 # deletion — its head_sha no longer named the candidate and the verdict could not cover it.
 # (live, 2026-09-27.) "Untracked" is judged against the CANDIDATE, never the user's index: a
 # mailbox file someone `git add`ed but never committed is still runtime state.
+# `--ignore-submodules=none` on BOTH scans: diff filters gitlinks through per-submodule
+# `ignore` settings, so a nested repo under .claude/worktrees mapped `ignore = all` in
+# .gitmodules was staged as a gitlink yet invisible to the scan and its re-check alike.
+# (codex, r1.)
 # Fails CLOSED: any git error, or any untracked runtime path still present afterwards, is a
 # non-zero return, and the caller refuses to mint the artifact.
 snapshot_strip_runtime() {
-  local root="$1" idx="$2" cand="$3" base list left
+  local repo="$1" idx="$2" cand="$3" base list left
   if [ -n "$cand" ]; then
     base="$cand"
   else
     # Unborn HEAD: nothing is tracked, so the empty tree makes every runtime path untracked.
-    base="$(git -C "$root" hash-object -t tree /dev/null 2>/dev/null)" && [ -n "$base" ] || return 1
+    base="$(git -C "$repo" hash-object -t tree /dev/null 2>/dev/null)" && [ -n "$base" ] || return 1
   fi
   list="$(dirname "$idx")/strip.z"
-  GIT_INDEX_FILE="$idx" git -C "$root" diff-index --cached --no-renames --diff-filter=A \
-    --name-only -z "$base" -- "${SNAPSHOT_RUNTIME_ROOTS[@]}" > "$list" 2>/dev/null || return 1
+  snapshot_untracked_runtime "$repo" "$idx" "$base" -z > "$list" || return 1
   if [ -s "$list" ]; then
-    GIT_INDEX_FILE="$idx" git -C "$root" update-index -z --force-remove --stdin < "$list" 2>/dev/null \
+    GIT_INDEX_FILE="$idx" git -C "$repo" update-index -z --force-remove --stdin < "$list" 2>/dev/null \
       || return 1
   fi
-  left="$(GIT_INDEX_FILE="$idx" git -C "$root" diff-index --cached --no-renames --diff-filter=A \
-    --name-only "$base" -- "${SNAPSHOT_RUNTIME_ROOTS[@]}" 2>/dev/null)" || return 1
+  left="$(snapshot_untracked_runtime "$repo" "$idx" "$base")" || return 1
   [ -z "$left" ]
+}
+
+# snapshot_untracked_runtime <repo> <temp-index> <base-tree-ish> [-z]
+# The one query both the strip and its re-check use: runtime-root paths in the temp index that
+# <base> does not have.
+snapshot_untracked_runtime() {
+  GIT_INDEX_FILE="$2" git -C "$1" diff-index --cached --no-renames --ignore-submodules=none \
+    --diff-filter=A --name-only ${4:+"$4"} "$3" -- "${SNAPSHOT_RUNTIME_ROOTS[@]}" 2>/dev/null
 }
 
 cmd_snapshot() {
