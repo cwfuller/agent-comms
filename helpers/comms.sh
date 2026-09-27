@@ -64,7 +64,8 @@
 #                               evidence written in; never by age alone. Exit 0 / 2 usage / 3 refused
 #   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
 #   presence <claim|beat|others|release|expire|with-beat> [--name N] [--instance I]
-#            [--role R] [--state S] [--pid P] [--force <name>] [--no-heartbeat] [-- <cmd>]
+#            [--role R] [--state S] [--pid P] [--force <name>] [--no-heartbeat]
+#            [--timeout-secs N] [--timeout-mark F] [-- <cmd>]
 #                               advisory multi-session coordination on .comms/sessions/.
 #                               claim-then-check: 0 direct-safe / 3 peers / 4 isolate.
 #                               `others` re-pins self and so WRITES: 0 / 3 / 4 as claim,
@@ -103,12 +104,16 @@
 #                               self-healed through the landing; suite-attest-secs
 #                               = N config accepts a fresh attest-green record for
 #                               the candidate OID in place of the re-run.
+#                               suite-timeout-secs = N (default 3600, 0 = none) bounds
+#                               the suite: past it its process group is killed.
 #                               Exit: 0 landed / 2 usage / 10 config / 11 lease held /
 #                               12 not ff / 13 main occupied / 14 suite red /
 #                               15 suite unverified / 16 CAS lost / 17 unreadable env /
-#                               1 other. A landing prints one line
+#                               18 suite timed out / 1 other. A landing prints one line
 #                               `integrate-result v1 status=landed cand= main_before=
-#                               main_after= branch= suite=ran|skipped-docs|attested`
+#                               main_after= branch= suite=ran|skipped-docs|attested`;
+#                               a timeout prints `integrate-result v1 status=refused
+#                               reason=suite_timeout cand= main_before= branch= timeout_secs=`
 #   verify init [--yes] [--force] [--update] [--replace-suite-cmd] | fresh [<rev>] | status
 #                               landing suite for any repo: `init` scaffolds a committed
 #                               ci/verify.sh + ci/verify.steps (stack detection, frozen
@@ -469,8 +474,9 @@ registry_parse() {
   if [ -n "$cfg_root" ]; then
     config_scalar "$cfg_root" suite-cmd >/dev/null
     config_scalar "$cfg_root" suite-attest-secs >/dev/null
+    config_scalar "$cfg_root" suite-timeout-secs >/dev/null
   fi
-  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|suite-cmd[[:space:]]*=|suite-attest-secs[[:space:]]*=)' "$f" \
+  grep -vE '^[[:space:]]*(#|$|agents[[:space:]]*=|default-target[[:space:]]*=|suite-cmd[[:space:]]*=|suite-attest-secs[[:space:]]*=|suite-timeout-secs[[:space:]]*=)' "$f" \
     | head -3 | sed 's/^/warning: config: unknown line: /' >&2 || true
   if [ "${agents_ct:-0}" -eq 1 ]; then
     line="$(sed -n 's/^[[:space:]]*agents[[:space:]]*=[[:space:]]*//p' "$f" | head -1)"
@@ -4425,6 +4431,7 @@ cmd_presence() {
   # the next shared-checkout write.
   local sub="${1:-}"; shift 2>/dev/null || true
   local name="" instance="" role="" state="" pid="" force="" presence_no_heartbeat=""
+  local presence_timeout_secs="" presence_timeout_mark=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --name)     need_value "presence $sub" $# "$1"; shift; name="$1" ;;
@@ -4434,12 +4441,17 @@ cmd_presence() {
       --pid)      need_value "presence $sub" $# "$1"; shift; pid="$1" ;;
       --force)    need_value "presence $sub" $# "$1"; shift; force="$1" ;;
       --no-heartbeat) presence_no_heartbeat=1 ;;
+      --timeout-secs) need_value "presence $sub" $# "$1"; shift; presence_timeout_secs="$1" ;;
+      --timeout-mark) need_value "presence $sub" $# "$1"; shift; presence_timeout_mark="$1" ;;
       --) shift; break ;;
       -?*) usage_err "presence $sub: unknown option '$(clip "$1")'" ;;
       *) break ;;
     esac
     shift
   done
+  if [ "$sub" != with-beat ] && [ -n "$presence_timeout_secs$presence_timeout_mark" ]; then
+    usage_err "presence $sub: --timeout-secs and --timeout-mark belong to with-beat only"
+  fi
   local dir; dir="$(presence_dir)"
   case "$sub" in
     claim)
@@ -4593,10 +4605,13 @@ cmd_presence() {
       # fail-safe — a signal there is default-disposition DEATH (probed: 130 on
       # every delivered INT), never a latched-then-lost success.
       local parent=$$ beater="" child="" rc=0 healmark brc latched="" no_heartbeat="${presence_no_heartbeat:-}"
+      local timeout_secs="${presence_timeout_secs:-0}" timeout_mark="${presence_timeout_mark:-}" timed_out="" t_start
       trap 'latched=INT;  kill -INT  -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' INT
       trap 'latched=TERM; kill -TERM -- ${child:+-$child} ${beater:+-$beater} 2>/dev/null || true' TERM
       [ -n "$name" ] && [ -n "$instance" ] || usage_err "presence with-beat: --name and --instance required"
       presence_validate_ids "$name" "$instance" || usage_err "presence with-beat: invalid name/instance"
+      secs_value_ok "$timeout_secs" "$SUITE_TIMEOUT_MAX_SECS" \
+        || usage_err "presence with-beat: --timeout-secs must be a whole number from 0 (none) to $SUITE_TIMEOUT_MAX_SECS"
       [ $# -gt 0 ] || usage_err "presence with-beat: a command is required after --"
       # The heal marker belongs to the beater: with --no-heartbeat there is no beater, so
       # nothing to report — and the marker path is shared per identity, so initialising or
@@ -4645,6 +4660,37 @@ cmd_presence() {
       "$@" <&0 & child=$!
       [ -n "$latched" ] && kill "-$latched" -- "-$child" 2>/dev/null || true
       set +m
+      # THE TIMEOUT (--timeout-secs N, 0 = none). bash 3.2's `wait` cannot time out, so a bounded
+      # run polls the LEADER once a second instead: bash reaps a finished background child, so
+      # `kill -0` fails as soon as it has exited. A latched signal ends the poll and takes the
+      # ordinary path below. Past the deadline the whole group gets TERM — and CONT, because a
+      # STOPPED process (SIGTTIN from a background read of the terminal, say) holds TERM pending
+      # until it is continued — then KILL after the same 5s grace the quiescence sweep uses. The
+      # mark is written FIRST, so a caller can tell this apart from a command that merely exited
+      # 124 itself: an exit status is the one channel the command controls. (integrate
+      # suite-timeout, 2026-09-27.)
+      if [ "$timeout_secs" -gt 0 ]; then
+        t_start=$SECONDS
+        while [ -z "$latched" ] && kill -0 "$child" 2>/dev/null; do
+          # STRICTLY greater: SECONDS ticks on wall-clock second boundaries, so a difference of
+          # N can mean as little as N-1 real seconds (t_start read at x.99). -gt guarantees at
+          # least N, at the cost of firing up to two seconds late.
+          if [ $((SECONDS - t_start)) -gt "$timeout_secs" ]; then
+            timed_out=1
+            [ -z "$timeout_mark" ] || : > "$timeout_mark" 2>/dev/null || true
+            echo "presence with-beat: the command ran past --timeout-secs $timeout_secs — terminating its process group" >&2
+            kill -TERM -- "-$child" 2>/dev/null || true
+            kill -CONT -- "-$child" 2>/dev/null || true
+            local tn=0
+            while kill -0 -- "-$child" 2>/dev/null; do
+              tn=$((tn + 1)); [ "$tn" -ge 50 ] && break; sleep 0.1 || true
+            done
+            kill -0 -- "-$child" 2>/dev/null && { kill -KILL -- "-$child" 2>/dev/null || true; }
+            break
+          fi
+          sleep 1 || true
+        done
+      fi
       rc=0; wait "$child" || rc=$?
       # QUIESCENCE before return (codex, impl r4): the wrapper's success must mean
       # the child's whole group is GONE — integrate trusts the tree state on
@@ -4682,6 +4728,12 @@ cmd_presence() {
       # preserved; only a clean 0 under cancellation is forced to the signal's.
       if [ -n "$latched" ] && [ "$rc" -eq 0 ]; then
         [ "$latched" = INT ] && rc=130 || rc=143
+      fi
+      # A TIMED-OUT command never returns its own status: whatever the killed leader exited with
+      # (143, 137, or a 0 from a TERM handler that "finished cleanly") is not a result. 124 is the
+      # coreutils timeout(1) convention; a group that outlived KILL keeps the stronger 125.
+      if [ -n "$timed_out" ] && [ "$rc" -ne 125 ]; then
+        rc=124
       fi
       if [ -z "$no_heartbeat" ] && [ -f "$healmark" ]; then
         rm -f "$healmark" 2>/dev/null || true
@@ -4807,6 +4859,36 @@ config_scalar() {  # <root> <key> — the ONE way any consumer reads a config sc
   [ -z "$val" ] || printf '%s\n' "$val" | head -1
 }
 
+# SUITE TIMEOUT. integrate had no bound on the suite, so a suite that hung (live, 2026-09-27: a
+# vitest run idle at 0% CPU for 45+ minutes in the verification tree) blocked the landing, and
+# every driver waiting on it, forever. The default is generous for a real suite; 0 means none.
+SUITE_TIMEOUT_DEFAULT_SECS=3600
+SUITE_TIMEOUT_MAX_SECS=86400
+
+secs_value_ok() {  # <value> <max> — 0 iff a plain decimal 0..max (no sign, no leading zero)
+  # A leading zero is refused, not stripped: bash arithmetic reads `010` as octal, and `08`
+  # is an arithmetic error that would abort under errexit.
+  case "$1" in 0) return 0 ;; ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le "${#2}" ] && [ "$1" -le "$2" ]
+}
+
+suite_timeout_secs() {  # <root> — the ONE reader of suite-timeout-secs: prints the effective value
+  # Absent = the default. Present = a plain integer 0..SUITE_TIMEOUT_MAX_SECS, or a refusal: a
+  # typo'd bound must never silently become "no bound" or "the default". Duplicates die inside
+  # config_scalar, like every suite key. Returns 1 with the reason on stderr.
+  # A PRESENT-but-empty line is a typo too, not an absence (config_scalar answers "" for both).
+  local v
+  v="$(config_scalar "$1" suite-timeout-secs)" || return 1
+  if [ -z "$v" ] && ! grep -q '^[[:space:]]*suite-timeout-secs[[:space:]]*=' "$1/.comms/config" 2>/dev/null; then
+    printf '%s\n' "$SUITE_TIMEOUT_DEFAULT_SECS"; return 0
+  fi
+  secs_value_ok "$v" "$SUITE_TIMEOUT_MAX_SECS" || {
+    echo "config: suite-timeout-secs must be a whole number of seconds from 0 (no timeout) to $SUITE_TIMEOUT_MAX_SECS — got '$(clip "$v")'" >&2
+    return 1
+  }
+  printf '%s\n' "$v"
+}
+
 cmd_attest_green() {
   # attest-green [--passed N] — record "the suite ran green at this exact commit".
   # The record lets integrate skip its re-verification when the SAME OID was
@@ -4868,6 +4950,8 @@ INTEGRATE_RC_CAS_LOST=16    # main moved during the attempt; nothing landed (re-
 INTEGRATE_RC_ENV=17         # a precondition could not be READ (sessions dir, worktree list,
                             # occupant state, the pinned /usr/bin/env), or main could not be
                             # written although it had not moved (lock, permissions, disk)
+INTEGRATE_RC_SUITE_TIMEOUT=18  # the suite ran past suite-timeout-secs; its process group was
+                               # killed and nothing landed (a hang, not a red result)
 
 integrate_fail() {  # <code> <message...> — die with a classified exit code
   local code="$1"; shift
@@ -4933,7 +5017,7 @@ inert_lines() {
   LC_ALL=C sed "$INERT_LINES_SED"
 }
 
-suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <name> <instance> <presence_record>
+suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <name> <instance> <presence_record> <timeout_secs>
   # THE ONE VERIFICATION ROUTINE. `integrate` and `verify fresh` both call it, so the check that
   # guards a landing and the preflight that promises "this will land" can never drift apart.
   # It materializes <cand> at <tw>, runs suite-cmd there with the shell-startup scrub and the
@@ -4944,6 +5028,7 @@ suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <
   # restores presence) and its stdout contract. The worktree and log paths are the CALLER's, so a
   # preflight can never remove an in-flight landing's tree. (codex + grok, generic-verify plan r2/r3.)
   local who="$1" root="$2" cand="$3" tw="$4" suite_log="$5" suite_cmd="$6" name="$7" instance="$8" presence_record="$9"
+  local timeout_secs="${10:-0}"
   local rc=0
   SUITE_VERIFY_REASON=""
   # Recover any prior crash's stale registration before adding: remove the entry
@@ -5010,23 +5095,43 @@ suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <
   # (default 900s) and then beats, which HEALS an absent record — manufacturing the same
   # pid-less, unreapable record the two explicit gates prevent, fifteen minutes in, long
   # after every fixture had finished. (codex + grok, integrate-beat r5.)
-  if [ -n "$name" ] && [ -n "$instance" ]; then
-    # SUPERVISION ALWAYS; heartbeat only when there is a record to refresh. Running the
-    # suite unwrapped to avoid the healing beat gave up whole-process-group quiescence,
-    # and that is load-bearing: a suite can print its completion line, launch a
-    # stdio-detached descendant and exit 0, leaving it alive to mutate the verification
-    # tree after integrate validates and advances main. `--no-heartbeat` keeps the
-    # supervision and drops only the beater. (codex, integrate-beat r6, blocking.)
-    local hb=""
-    [ -f "$presence_record" ] || hb="--no-heartbeat"
-    # shellcheck disable=SC2086
-    ( cd "$tw" && "${clean_env[@]}" "$SELF" presence with-beat $hb --name "$name" --instance "$instance" -- "$@" ) 2>&1 | tee "$suite_log" >&2
-    rc=${PIPESTATUS[0]}
-  else
-    ( cd "$tw" && "${clean_env[@]}" "$@" ) 2>&1 | tee "$suite_log" >&2
-    rc=${PIPESTATUS[0]}
+  # SUPERVISION ALWAYS; heartbeat only when there is a record to refresh. Running the
+  # suite unwrapped to avoid the healing beat gave up whole-process-group quiescence,
+  # and that is load-bearing: a suite can print its completion line, launch a
+  # stdio-detached descendant and exit 0, leaving it alive to mutate the verification
+  # tree after integrate validates and advances main. `--no-heartbeat` keeps the
+  # supervision and drops only the beater. (codex, integrate-beat r6, blocking.)
+  # A caller with NO identity used to run the suite bare — no process group, no quiescence,
+  # and so nothing a timeout could kill without reaching the caller. It now gets the same
+  # supervision under a fixed synthetic identity that only satisfies with-beat's argument
+  # grammar: with --no-heartbeat nothing reads or writes a record under it (tests/dispatch.py
+  # supervises its workers the same way).
+  local sv_name="$name" sv_instance="$instance" hb=""
+  if [ -z "$name" ] || [ -z "$instance" ]; then
+    sv_name="integrate-suite" sv_instance="00000000000000000000000000000000" hb="--no-heartbeat"
   fi
+  [ -f "$presence_record" ] || hb="--no-heartbeat"
+  # THE TIMEOUT is with-beat's: it owns the suite's process group (its own, so a kill can never
+  # reach this helper or its caller), the TERM-then-KILL teardown and the quiescence proof. The
+  # mark is how a timeout is told apart from a red suite: the suite controls its exit status,
+  # not a file this helper names and clears first. stdin is /dev/null: the suite runs in a
+  # BACKGROUND process group, where a read of a controlling terminal STOPS it (SIGTTIN) — a
+  # hang at 0% CPU of exactly the shape the timeout exists for, and a landing gate has no
+  # input to give it anyway.
+  local tmark="$suite_log.timeout"
+  rm -f "$tmark" 2>/dev/null || true
+  # shellcheck disable=SC2086
+  ( cd "$tw" && "${clean_env[@]}" "$SELF" presence with-beat $hb --name "$sv_name" --instance "$sv_instance" \
+      --timeout-secs "$timeout_secs" --timeout-mark "$tmark" -- "$@" ) </dev/null 2>&1 | tee "$suite_log" >&2
+  rc=${PIPESTATUS[0]}
   set -e
+  if [ -e "$tmark" ]; then
+    rm -f "$tmark" 2>/dev/null || true
+    SUITE_VERIFY_REASON="$who: suite TIMED OUT after ${timeout_secs}s (suite-timeout-secs) at $cand — its process group was killed; main untouched; output so far kept at $suite_log
+$who: note — a timeout is a hang or a slow suite, not a red result: raise suite-timeout-secs in
+$who: .comms/config (0 = no timeout) if the suite is legitimately this slow."
+    return "$INTEGRATE_RC_SUITE_TIMEOUT"
+  fi
   # THE FRESH-CHECKOUT HINT. The verification tree is materialized by `git worktree add`,
   # so it carries TRACKED CONTENT ONLY — no untracked and no ignored files. A suite-cmd that
   # passes in the operator's checkout and fails here is usually depending on something that
@@ -5157,6 +5262,10 @@ cmd_integrate() {
   suite_cmd="$(config_scalar "$root" suite-cmd)" \
     || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: cannot read suite-cmd from .comms/config (see above)"
   [ -n "$suite_cmd" ] || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: no 'suite-cmd = ...' in .comms/config — refusing to land unverified (explicit configuration required)"
+  # Read BEFORE the lease, like suite-cmd: a bad bound refuses in a second, not after a suite run.
+  local suite_timeout
+  suite_timeout="$(suite_timeout_secs "$root")" \
+    || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: invalid suite-timeout-secs in .comms/config (see above)"
   # Advisory lease: refuse while any OTHER live presence is integrating. The scan
   # fails CLOSED on an unenumerable dir — a silent empty glob read as lease-free
   # (CAS keeps correctness, but blind concurrent suites are waste). (codex+grok, impl r3.)
@@ -5287,7 +5396,15 @@ cmd_integrate() {
   fi
   if [ -z "$skip_suite" ]; then
     local vrc=0 suite_log="$root/.comms/logs/integrate-${cand}.suite.log"
-    suite_verify_candidate integrate "$root" "$cand" "$tw" "$suite_log" "$suite_cmd" "$name" "$instance" "$presence_record" || vrc=$?
+    suite_verify_candidate integrate "$root" "$cand" "$tw" "$suite_log" "$suite_cmd" "$name" "$instance" "$presence_record" "$suite_timeout" || vrc=$?
+    # The ONE refusal that prints a result line: a driver waiting on a landing must be able to
+    # tell "the suite hung and was killed" from "the suite is red" without parsing prose, and
+    # the exit class alone is easy to lose through a wrapper. The EXIT trap still removes the
+    # verification tree and drops the integrating lease, exactly as on a red suite.
+    if [ "$vrc" = "$INTEGRATE_RC_SUITE_TIMEOUT" ]; then
+      printf 'integrate-result v1 status=refused reason=suite_timeout cand=%s main_before=%s branch=%s timeout_secs=%s\n' \
+        "$cand" "$expected" "$(integrate_kv "$branch")" "$suite_timeout"
+    fi
     [ "$vrc" = 0 ] || integrate_fail "$vrc" "$SUITE_VERIFY_REASON"
   fi
   # Final occupancy guard — a checkout could have moved onto main DURING the
@@ -5538,6 +5655,9 @@ verify_fresh() {
   suite_cmd="$(config_scalar "$root" suite-cmd)" \
     || integrate_fail "$INTEGRATE_RC_CONFIG" "verify: cannot read suite-cmd from .comms/config (see above)"
   [ -n "$suite_cmd" ] || integrate_fail "$INTEGRATE_RC_CONFIG" "verify: no 'suite-cmd = ...' in .comms/config — run: comms.sh verify init"
+  local suite_timeout
+  suite_timeout="$(suite_timeout_secs "$root")" \
+    || integrate_fail "$INTEGRATE_RC_CONFIG" "verify: invalid suite-timeout-secs in .comms/config (see above)"
   cand="$(git rev-parse --verify "$rev^{commit}" 2>/dev/null)" || usage_err "verify fresh: cannot resolve '$(clip "$rev")'"
   if [ "$rev" = HEAD ] && [ -n "$(git status --porcelain -uno 2>/dev/null)" ]; then
     echo "verify: note — uncommitted changes are NOT verified; only the committed $cand is" >&2
@@ -5558,10 +5678,12 @@ verify_fresh() {
   # shellcheck disable=SC2064
   trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true" EXIT
   echo "verify: running suite-cmd against $cand in a fresh checkout (nothing will land)"
-  suite_verify_candidate verify "$root" "$cand" "$tw" "$log" "$suite_cmd" "$name" "$instance" "$rec" || vrc=$?
+  suite_verify_candidate verify "$root" "$cand" "$tw" "$log" "$suite_cmd" "$name" "$instance" "$rec" "$suite_timeout" || vrc=$?
   git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
   rm -rf "$tw" 2>/dev/null || true
   trap - EXIT
+  [ "$vrc" != "$INTEGRATE_RC_SUITE_TIMEOUT" ] \
+    || printf 'verify-result v1 status=refused reason=suite_timeout cand=%s timeout_secs=%s\n' "$cand" "$suite_timeout"
   [ "$vrc" = 0 ] || integrate_fail "$vrc" "$SUITE_VERIFY_REASON"
   echo "verify: suite green at $cand in a fresh checkout — integrate would accept this suite (nothing landed)"
   printf 'verify-result v1 status=verified cand=%s\n' "$cand"

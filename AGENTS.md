@@ -113,8 +113,10 @@ Task size is not the criterion. Peer presence is.
   (pins mailbox identity so the branch switch cannot flap message prefixes), then
   `git checkout -b <branch>`.
 - `.comms/config` must carry a single non-empty `suite-cmd` line or `integrate` refuses to
-  land unverified; in this repo that value is `bash tests/run.sh`. Duplicate `suite-cmd`
-  or `suite-attest-secs` lines are refused outright rather than resolved by precedence.
+  land unverified; in this repo that value is `bash tests/run.sh`. Duplicate `suite-cmd`,
+  `suite-attest-secs` or `suite-timeout-secs` lines are refused outright rather than resolved
+  by precedence. `suite-timeout-secs` (default 3600, `0` = none) bounds the suite: a run past
+  it is killed and `integrate` exits 18 without landing.
 - **`suite-cmd` runs in a FRESH checkout and must provision its own prerequisites.** The
   verification worktree is materialized by `git worktree add` at the candidate, so it carries
   tracked content only — no untracked files, no ignored ones. Anything your suite needs that a

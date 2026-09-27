@@ -32,6 +32,7 @@ agents = claude codex grok
 default-target = codex
 suite-cmd = bash ci/verify.sh
 suite-attest-secs = 600
+suite-timeout-secs = 3600
 ```
 
 `suite-cmd` is what `integrate` runs at the candidate OID. It is **split on whitespace into
@@ -39,7 +40,11 @@ argv with no shell**, so `npm ci && tsc` does not work — commit a script and p
 runs in a FRESH checkout (tracked content only: no untracked files, no ignored ones), so it
 must provision its own prerequisites; it may leave ignored files but no git-visible changes.
 `suite-attest-secs = N` lets a fresh same-OID `attest-green` record stand in for integrate's
-re-run. Both keys are single-valued: duplicates are refused rather than resolved by precedence.
+re-run. `suite-timeout-secs = N` bounds the suite run (default 3600, `0` = none, at most 86400):
+a suite past it has its whole process group killed and `integrate` refuses with exit 18 and an
+`integrate-result v1 status=refused reason=suite_timeout` line, so a hung suite can no longer
+block a landing forever. An empty, non-numeric or out-of-range value is refused, never read as the
+default. All three keys are single-valued: duplicates are refused rather than resolved by precedence.
 
 Names are `[a-z][a-z0-9-]{1,15}` and must have a supported backend
 (`comms.sh agents --supported`); duplicates, multi-word defaults, and unsupported

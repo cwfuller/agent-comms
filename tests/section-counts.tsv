@@ -95,6 +95,7 @@ review identities: await synthesizes a result for a runner that died before turn
 review twins: setup accepts one driver and asks about its provider	8
 integrate: driver contract (classified exit codes + one result line)	27
 route.sh: decision reuse and probe mode	12
+integrate: suite timeout (a hung suite is killed, refused, and cleaned up)	13
 verify: a landing suite for any repo (template, init, status, fresh)	34
 value-taking options: given last with no value, exit 2 naming the option, and write nothing	81
 route-eval: labelled eval set for the classifiers	17

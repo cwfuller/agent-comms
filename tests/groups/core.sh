@@ -1792,6 +1792,109 @@ IX_OUT="$(ix integrate fut1 2>/dev/null)"
   && ok "control: a current attestation for the same OID does skip the red suite" || fail "attested control: $(grep integrate-result <<<"$IX_OUT")"
 printf 'suite-cmd = bash ./suite.sh\n' > "$IX/.comms/config"
 
+section "integrate: suite timeout (a hung suite is killed, refused, and cleaned up)"
+# Live case, 2026-09-27: a suite sat at 0% CPU in integrate's verification tree for 45+ minutes
+# and integrate, and the driver waiting on it, never ended. suite-timeout-secs bounds the run.
+# Reuses the driver-contract fixture above. The hang stub leaves a TERM-IGNORING child in its
+# process group, so only the KILL escalation can end it, and records both pids.
+IT="$WORK/integrate-timeout"; mkdir -p "$IT"
+it_tree_gone() { [ -z "$(git -C "$IX" worktree list --porcelain | grep '/\.integrate-')" ] && ! ls -d "$IX/.claude/worktrees/".integrate-* >/dev/null 2>&1; }
+ix_br hang1 main suite.sh "#!/bin/bash
+( trap '' TERM; exec sleep 300 ) &
+echo \$! > '$IT/child.pid'; echo \$\$ > '$IT/leader.pid'
+echo hang-started
+sleep 300
+"
+IT_C="$(git -C "$IX" rev-parse hang1)"
+printf 'suite-cmd = bash ./suite.sh\nsuite-timeout-secs = 2\n' > "$IX/.comms/config"
+IT_M="$(ix_main)"; IT_T0="$(date +%s)"
+IT_OUT="$(ix integrate hang1 2>"$IT/hang.err")"; IT_R=$?
+IT_EL=$(( $(date +%s) - IT_T0 ))
+[ "$IT_R" = 18 ] && [ "$(ix_main)" = "$IT_M" ] \
+  && ok "a suite past suite-timeout-secs exits 18 (suite timeout) and main does not move" \
+  || fail "timeout rc=$IT_R main=$(ix_main) expected=$IT_M"
+[ "$(printf '%s\n' "$IT_OUT" | grep -c '^integrate-result ')" = 1 ] \
+  && [ "$(printf '%s\n' "$IT_OUT" | tail -1)" = "integrate-result v1 status=refused reason=suite_timeout cand=$IT_C main_before=$IT_M branch=hang1 timeout_secs=2" ] \
+  && ok "a timeout prints exactly one result line: status=refused reason=suite_timeout" \
+  || fail "timeout result line: $(printf '%s\n' "$IT_OUT" | grep 'integrate-result')"
+IT_CP="$(cat "$IT/child.pid" 2>/dev/null)"; IT_LP="$(cat "$IT/leader.pid" 2>/dev/null)"
+[ -n "$IT_CP" ] && [ -n "$IT_LP" ] && ! kill -0 "$IT_CP" 2>/dev/null && ! kill -0 "$IT_LP" 2>/dev/null \
+  && [ "$IT_EL" -lt 60 ] \
+  && ok "the suite's whole process group is killed, a TERM-ignoring child included (KILL after the grace)" \
+  || { fail "survivors: child=$IT_CP leader=$IT_LP elapsed=${IT_EL}s"; kill -KILL "$IT_CP" "$IT_LP" 2>/dev/null || true; }
+it_tree_gone && grep -q '^hang-started$' "$IX/.comms/logs/integrate-$IT_C.suite.log" \
+  && ! [ -e "$IX/.comms/logs/integrate-$IT_C.suite.log.timeout" ] \
+  && grep -q 'TIMED OUT after 2s' "$IT/hang.err" \
+  && ok "the verification tree is removed, the suite log is kept, and stderr names the timeout" \
+  || fail "cleanup: tree_gone=$(it_tree_gone && echo y || echo n) log=$(head -c 200 "$IX/.comms/logs/integrate-$IT_C.suite.log" 2>/dev/null)"
+# The lease: with an identity, integrate marks its record integrating for the run and must drop
+# it on a timeout exactly as on a red suite. The suite reads the record while it hangs.
+IT_CL="$(ix presence claim --name timeout-lander --role landing 2>/dev/null)"
+IT_I="$(printf '%s' "$IT_CL" | sed -n 's/.*instance: //p')"
+IT_REC="$IX/.comms/sessions/timeout-lander-$IT_I.json"
+ix_br hang2 main suite.sh "#!/bin/bash
+sed -n 's/.*\"state\": \"\\([^\"]*\\)\".*/\\1/p' '$IT_REC' > '$IT/state-during'
+sleep 300
+"
+IT_R2=0; ix integrate hang2 --name timeout-lander --instance "$IT_I" >/dev/null 2>&1 || IT_R2=$?
+[ "$IT_R2" = 18 ] && [ "$(cat "$IT/state-during" 2>/dev/null)" = integrating ] \
+  && [ "$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$IT_REC")" = working ] && it_tree_gone \
+  && ok "with an identity, the integrating lease held during the suite is released on a timeout" \
+  || fail "lease: rc=$IT_R2 during=$(cat "$IT/state-during" 2>/dev/null) after=$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$IT_REC" 2>/dev/null)"
+ix presence release --name timeout-lander --instance "$IT_I" >/dev/null 2>&1
+# A suite finishing INSIDE the bound lands as before, and 0 means no timeout at all.
+ix_br quick1 main suite.sh $'#!/bin/bash\nsleep 1\ntest -f a.txt\n'; IT_Q="$(git -C "$IX" rev-parse quick1)"
+printf 'suite-cmd = bash ./suite.sh\nsuite-timeout-secs = 60\n' > "$IX/.comms/config"
+IT_OUT="$(ix integrate quick1 2>/dev/null)"; IT_R3=$?
+[ "$IT_R3" = 0 ] && [ "$(ix_main)" = "$IT_Q" ] && grep -q "^integrate-result v1 status=landed cand=$IT_Q .* suite=ran$" <<<"$IT_OUT" \
+  && ok "a suite that finishes inside suite-timeout-secs lands as before" || fail "inside the bound: rc=$IT_R3"
+ix_br zero1 main z.txt $'z\n'; IT_Z="$(git -C "$IX" rev-parse zero1)"
+printf 'suite-cmd = bash ./suite.sh\nsuite-timeout-secs = 0\n' > "$IX/.comms/config"
+IT_R4="$(ix_rc integrate zero1)"
+[ "$IT_R4" = 0 ] && [ "$(ix_main)" = "$IT_Z" ] \
+  && ok "suite-timeout-secs = 0 (no timeout) is accepted and lands" || fail "zero timeout rc=$IT_R4"
+# Bad values refuse as configuration (10) before any suite runs: a typo must never become
+# "no bound" or quietly fall back to the default.
+ix_br badcfg1 main y.txt $'y\n'; IT_MB="$(ix_main)"; IT_BAD=""
+for IT_V in 'abc' '-1' '010' '86401' '99999999999999999999' '1.5' ''; do
+  printf 'suite-cmd = bash ./suite.sh\nsuite-timeout-secs = %s\n' "$IT_V" > "$IX/.comms/config"
+  IT_RB="$(ix_rc integrate badcfg1)"
+  [ "$IT_RB" = 10 ] || IT_BAD="$IT_BAD '$IT_V':$IT_RB"
+done
+[ -z "$IT_BAD" ] && [ "$(ix_main)" = "$IT_MB" ] \
+  && ok "empty, non-numeric, signed, leading-zero, fractional and out-of-range suite-timeout-secs exit 10" \
+  || fail "bad timeout values:$IT_BAD"
+printf 'suite-cmd = bash ./suite.sh\nsuite-timeout-secs = 60\nsuite-timeout-secs = 0\n' > "$IX/.comms/config"
+IT_RD="$(ix_rc integrate badcfg1)"; IT_ERR="$(ix agents 2>&1 >/dev/null)"
+[ "$IT_RD" = 10 ] && [ "$(ix_main)" = "$IT_MB" ] && grep -q "duplicate 'suite-timeout-secs'" <<<"$IT_ERR" \
+  && ok "a duplicate suite-timeout-secs is refused (10), and every config reader refuses it too" \
+  || fail "duplicate timeout: rc=$IT_RD err=$IT_ERR"
+printf 'suite-cmd = bash ./suite.sh\nsuite-timeout-secs = 60\n' > "$IX/.comms/config"
+IT_ERR="$(ix agents 2>&1 >/dev/null)"
+! grep -q 'unknown line' <<<"$IT_ERR" && ok "suite-timeout-secs is a known config key (no unknown-line warning)" || fail "unknown-line warning: $IT_ERR"
+# verify fresh shares the verification routine, so it shares the bound and the class.
+printf 'suite-cmd = bash ./suite.sh\nsuite-timeout-secs = 1\n' > "$IX/.comms/config"
+IT_R5=0; IT_OUT="$(ix verify fresh hang2 2>/dev/null)" || IT_R5=$?
+[ "$IT_R5" = 18 ] && [ "$(printf '%s\n' "$IT_OUT" | tail -1)" = "verify-result v1 status=refused reason=suite_timeout cand=$(git -C "$IX" rev-parse hang2) timeout_secs=1" ] \
+  && ! ls -d "$IX/.claude/worktrees/".verify-* >/dev/null 2>&1 \
+  && ok "verify fresh times out with the same class (18) and a verify-result timeout line" \
+  || fail "verify fresh timeout: rc=$IT_R5 out=$(printf '%s' "$IT_OUT" | tail -1)"
+printf 'suite-cmd = bash ./suite.sh\n' > "$IX/.comms/config"
+# with-beat owns the bound. Its exit status is the command's to forge, so the MARK is what says
+# "timed out": a command exiting 124 on its own leaves none.
+IT_WB=0; (cd "$IX" && "$COMMS" presence with-beat --no-heartbeat --name wb-timeout --instance 00000000000000000000000000000002 \
+  --timeout-secs 1 --timeout-mark "$IT/wb.mark" -- sleep 30) >/dev/null 2>&1 || IT_WB=$?
+IT_WS=0; (cd "$IX" && "$COMMS" presence with-beat --no-heartbeat --name wb-timeout --instance 00000000000000000000000000000002 \
+  --timeout-secs 30 --timeout-mark "$IT/wb-self.mark" -- bash -c 'exit 124') >/dev/null 2>&1 || IT_WS=$?
+[ "$IT_WB" = 124 ] && [ -e "$IT/wb.mark" ] && [ "$IT_WS" = 124 ] && ! [ -e "$IT/wb-self.mark" ] \
+  && ok "with-beat --timeout-secs exits 124 and writes its mark; a command's own 124 writes none" \
+  || fail "with-beat timeout: timed=$IT_WB mark=$([ -e "$IT/wb.mark" ] && echo y) self=$IT_WS selfmark=$([ -e "$IT/wb-self.mark" ] && echo y)"
+IT_U1="$(ix_rc presence with-beat --no-heartbeat --name wb-timeout --instance 00000000000000000000000000000002 --timeout-secs x -- true)"
+IT_U2="$(ix_rc presence others --name wb-timeout --instance 00000000000000000000000000000002 --timeout-secs 5)"
+[ "$IT_U1" = 2 ] && [ "$IT_U2" = 2 ] \
+  && ok "a bad --timeout-secs, or one given to another presence verb, is a usage error (2)" \
+  || fail "timeout flag usage: bad=$IT_U1 other-verb=$IT_U2"
+
 section "verify: a landing suite for any repo (template, init, status, fresh)"
 # integrate runs suite-cmd in a fresh checkout with no shell, so a repo needs a committed script
 # that provisions its own dependencies and runs its checks. Every package manager here is a PATH
