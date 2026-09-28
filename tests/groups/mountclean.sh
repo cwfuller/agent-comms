@@ -66,6 +66,7 @@ rt_live_claim() {  # <kdir> — a live v2 runner claim; prints the holder pid
   printf '%s' "$p"
 }
 rt_unclaim() { kill "$2" 2>/dev/null; wait "$2" 2>/dev/null; rm -f "$1/.claim.99"; }
+RT_ECHO='rt\echo'   # a backslash in the raw thread must reach every comparison verbatim
 
 # Thread A = rt/alpha and thread B = rt_alpha share a safe_name; both have panel legs to two
 # reviewers (grok and its review twin), so each owns two durable mounts.
@@ -140,11 +141,11 @@ RT_RE="$(rt_cm --thread rt/alpha --yes)"; RT_REC=$?
   || fail "repeat apply (rc=$RT_REC): $RT_RE"
 
 # ---- scope: a busy target is a scoped skip; an unrelated live thread never blocks ----
-RT_E1="$(rt_turn rt-echo grok)"
-rt_state retire rt-echo >/dev/null
-RT_EDRY="$(rt_cm --thread rt-echo)"
+RT_E1="$(rt_turn "$RT_ECHO" grok)"
+rt_state retire "$RT_ECHO" >/dev/null
+RT_EDRY="$(rt_cm --thread "$RT_ECHO")"
 RT_EP="$(rt_live_claim "$RT_E1")"
-RT_EB="$(rt_cm --thread rt-echo --yes)"; RT_EBC=$?
+RT_EB="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_EBC=$?
 if rt_line "$RT_EDRY" "$RT_E1" would-remove proven && [ "$RT_EBC" = 3 ] && rt_line "$RT_EB" "$RT_E1" skipped busy-claim \
    && grep -q '^clean-mounts-result v1 status=retry ' <<<"$RT_EB" && rt_intact "$RT_E1"; then
   ok "a claim taken between the dry run and the apply is honoured: a scoped skip, exit 3"
@@ -161,7 +162,7 @@ printf 'pid=%s\nfmt=v2\nstart=%s\nrun=race\n' "\$p" "\$(LC_ALL=C TZ=UTC ps -p "\
 printf '%s' "\$p" > "$WORK/rt-hook-claim.pid"
 EOF
 chmod +x "$WORK/rt-hook-claim"
-RT_RC="$(COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-claim" rt_cm --thread rt-echo --yes)"; RT_RCC=$?
+RT_RC="$(COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-claim" rt_cm --thread "$RT_ECHO" --yes)"; RT_RCC=$?
 kill "$(cat "$WORK/rt-hook-claim.pid" 2>/dev/null)" 2>/dev/null; rm -f "$RT_E1"/.claim.98
 if [ "$RT_RCC" = 3 ] && rt_line "$RT_RC" "$RT_E1" skipped busy-claim && rt_intact "$RT_E1"; then
   ok "a claim that lands between the check and the exclusion claim preserves the mount"
@@ -171,14 +172,14 @@ fi
 # A queue lease still present is a live (or stale — indistinguishable) owner: skipped, never removed.
 RT_LEASE="$RT_HOME/.acpx/queues/$(printf '%s' "$(cat "$RT_E1/.state.record")" | shasum -a 256 | cut -c1-24).lock"
 : > "$RT_LEASE"
-RT_OW="$(rt_cm --thread rt-echo --yes)"; RT_OWC=$?
+RT_OW="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_OWC=$?
 rm -f "$RT_LEASE"
 [ "$RT_OWC" = 3 ] && rt_line "$RT_OW" "$RT_E1" skipped busy-owner && rt_intact "$RT_E1" \
   && ok "an acpx queue lease (live or stale) skips the target" || fail "owner lease (rc=$RT_OWC): $RT_OW"
 # Stale pid evidence: an older-format claim naming a LIVE pid cannot be proven recycled.
 sleep 300 </dev/null >/dev/null 2>&1 & RT_SP=$!
 printf 'pid=%s\nrun=old\n' "$RT_SP" > "$RT_E1/.claim.99"
-RT_ST="$(rt_cm --thread rt-echo --yes)"; RT_STC=$?
+RT_ST="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_STC=$?
 rt_unclaim "$RT_E1" "$RT_SP"
 [ "$RT_STC" = 3 ] && rt_line "$RT_ST" "$RT_E1" skipped busy-claim && rt_intact "$RT_E1" \
   && ok "a live pid in a claim without a start time is never read as dead" || fail "stale pid (rc=$RT_STC): $RT_ST"
@@ -186,7 +187,7 @@ rt_unclaim "$RT_E1" "$RT_SP"
 # ---- every gate refuses safely; each case restores the mount and re-proves it intact ----
 rt_refused() {  # <desc> <reason> — apply refuses with <reason>, exit 4, and the ident dir survives
   local out rc
-  out="$(rt_cm --thread rt-echo --yes)"; rc=$?
+  out="$(rt_cm --thread "$RT_ECHO" --yes)"; rc=$?
   if [ "$rc" = 4 ] && rt_line "$out" "$RT_E1" refused "$2" && [ -d "$RT_E1" ] \
      && grep -q '^clean-mounts-result v1 status=blocked ' <<<"$out"; then ok "$1"; else fail "$1 (rc=$rc): $out"; fi
 }
@@ -219,19 +220,19 @@ mv "$RT_E1/view/tree" "$WORK/rt-tree-real"; ln -s "$WORK/rt-tree-real" "$RT_E1/v
 rt_refused "a symlink substituted for the tree is never followed" unsafe-path
 rm "$RT_E1/view/tree"; mv "$WORK/rt-tree-real" "$RT_E1/view/tree"
 mv "$RT_E1" "$RT_E1.real"; ln -s "$RT_E1.real" "$RT_E1"
-RT_SY="$(rt_cm --thread rt-echo --yes)"; RT_SYC=$?
+RT_SY="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_SYC=$?
 rm "$RT_E1"; mv "$RT_E1.real" "$RT_E1"
 [ "$RT_SYC" = 4 ] && rt_line "$RT_SY" "$RT_E1" refused unsafe-path && rt_intact "$RT_E1" \
   && ok "a symlink substituted for the ident dir refuses and its target survives" || fail "ident symlink (rc=$RT_SYC): $RT_SY"
-(cd "$RT" && env "$RP" hold rt-echo >/dev/null 2>&1)
-RT_HD="$(rt_cm --thread rt-echo --yes)"; RT_HDC=$?
-(cd "$RT" && env "$RP" release rt-echo >/dev/null 2>&1)
+(cd "$RT" && env "$RP" hold "$RT_ECHO" >/dev/null 2>&1)
+RT_HD="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_HDC=$?
+(cd "$RT" && env "$RP" release "$RT_ECHO" >/dev/null 2>&1)
 [ "$RT_HDC" = 4 ] && grep -q '^clean-mounts-result v1 status=blocked .* selected=0 ' <<<"$RT_HD" && rt_intact "$RT_E1" \
   && ok "a held (paused) thread is not cleaned even when retired" || fail "held thread (rc=$RT_HDC): $RT_HD"
 # With every gate restored, the mount goes — while an UNRELATED thread holds a live claim, which
 # the whole-store GC would refuse the entire repo-key over. It is neither read nor touched.
 RT_BP="$(rt_live_claim "$RT_B1")"
-RT_OK="$(rt_cm --thread rt-echo --yes)"; RT_OKC=$?
+RT_OK="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_OKC=$?
 if [ "$RT_OKC" = 0 ] && rt_line "$RT_OK" "$RT_E1" removed proven && rt_gone "$RT_E1" \
    && ! grep -qF "path=$RT_B1" <<<"$RT_OK" && [ -f "$RT_B1/.claim.99" ] && rt_intact "$RT_B1"; then
   ok "with every gate restored the mount is removed; a live claim on another thread neither blocks nor is touched"

@@ -4342,7 +4342,9 @@ cm_ledger_uses() {
   if [ -e "$logs" ] && ! find "$logs" -mindepth 2 -maxdepth 2 -name turn.tsv -type f > "$list" 2>/dev/null; then
     rm -f "$list"; CM_NOTE="the run records under $logs cannot all be enumerated"; return 2
   fi
-  LC_ALL=C awk -v T="$t" -v SETS="$sets" -v LIST="$list" '
+  # Values reach awk through ENVIRON, never -v: -v processes backslash escapes, so a thread
+  # containing `\` would be compared as a different string.
+  CM_AWK_T="$t" CM_AWK_SETS="$sets" CM_AWK_LIST="$list" LC_ALL=C awk '
     function leg_base(th, ag,   s) {
       s = "-" ag
       if (length(th) > length(s) && substr(th, length(th) - length(s) + 1) == s) return substr(th, 1, length(th) - length(s))
@@ -4350,6 +4352,7 @@ cm_ledger_uses() {
     }
     function wanted(th, ag) { return th == T || th == (T "-" ag) }
     BEGIN {
+      T = ENVIRON["CM_AWK_T"]; SETS = ENVIRON["CM_AWK_SETS"]; LIST = ENVIRON["CM_AWK_LIST"]
       FS = "\t"; n = 0
       while ((r = (getline line < SETS)) > 0) {
         if (++n == 1) continue
@@ -4775,8 +4778,8 @@ cm_thread() {
     for use in direct panel; do
       if [ "$use" = direct ]; then raw="$CM_THREAD"; else raw="$CM_THREAD-$a"; fi
       ident="$(acp_mount_ident "$CM_MAIN_ROOT" "$raw" "$a")" || continue
-      owners="$(awk -F'\t' -v r="$raw" -v a="$a" '$1 == r && $2 == a { print $3 }' "$uses" | sort -u)"
-      arts="$(awk -F'\t' -v r="$raw" -v a="$a" '$1 == r && $2 == a && $4 != "-" { print $4 }' "$uses" | sort -u)"
+      owners="$(CM_AWK_R="$raw" CM_AWK_A="$a" awk -F'\t' '$1 == ENVIRON["CM_AWK_R"] && $2 == ENVIRON["CM_AWK_A"] { print $3 }' "$uses" | LC_ALL=C sort -u)"
+      arts="$(CM_AWK_R="$raw" CM_AWK_A="$a" awk -F'\t' '$1 == ENVIRON["CM_AWK_R"] && $2 == ENVIRON["CM_AWK_A"] && $4 != "-" { print $4 }' "$uses" | LC_ALL=C sort -u)"
       if [ -z "$owners" ]; then
         if [ -e "$CM_SCOPE/$ident" ] || [ -L "$CM_SCOPE/$ident" ]; then
           CM_NOTE="no ledger records a turn of '$raw' by $a, so this copy cannot be proven the thread's"
