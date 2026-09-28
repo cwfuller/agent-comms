@@ -194,6 +194,11 @@ ax_rollout_ok() {  # the DESTINATION must be inside the suite work root
 if [ -n "${AX_CWD_LOG:-}" ]; then
   printf '%s\t%s\n' "$(pwd -P)" "$*" >> "$AX_CWD_LOG"
 fi
+# AX_KDIR_RUN_LOG records the run a THROWAWAY mount says it was made for (<ident>/.state.run, two
+# levels above the cwd). The throwaway is removed when its turn ends, so only the child sees it.
+if [ -n "${AX_KDIR_RUN_LOG:-}" ] && [ -f "$(pwd -P)/../../.state.run" ]; then
+  cat "$(pwd -P)/../../.state.run" >> "$AX_KDIR_RUN_LOG" 2>/dev/null || true
+fi
 # AX_CFG_LOG captures the isolated config THE PROVIDER ACTUALLY SAW. The mount is unmounted
 # when the turn ends, so a test cannot read config.toml afterwards; recording it from inside
 # the child is both possible and stronger evidence than the parent re-reading its own write.

@@ -540,9 +540,15 @@ selected only when its ownership is PROVEN from `.comms/grades/sets.tsv` (one ro
 leg) and each run's `.comms/logs/<run>/turn.tsv`: every recorded use must belong to T or to
 another retired thread. The only way two threads share an identity is a leg thread that is also
 a thread's literal name (T's leg to codex is `T-codex`); such a copy is report-only until both
-are retired. A `tmp-<run>` throwaway is selected when a run T owns left one behind (a crashed
-turn); its name is derived from that run's directory. A ledger that exists but cannot be read
-refuses the whole call (exit 4).
+are retired. A `tmp-<run>` throwaway (a crashed turn's leftover) is named after `safe_name` of
+its run dir's basename, which several run dirs can share (`run+1`, `run_1`, or a `--dir` outside
+`.comms/logs`), so the name proves nothing: it is selected only when its `.state.run` — the
+physical run dir the runner recorded when it made the copy — is a run T owns. Any other copy a
+run of T's could have named is report-only (`no-ownership-evidence` when it records no run,
+`run-mismatch` when it records another). Every run record is enumerated before any is read: a
+`.comms/logs` that is a symlink, a symlinked entry in it, or a `turn.tsv` that is not a regular
+file would hide a use, so each refuses the whole call. A ledger that exists but cannot be read
+refuses the whole call too (exit 4).
 
 **Gates, each fail-closed and re-run under the claim:** the ident is a real directory at its own
 physical path; it holds only what the runner makes (`view/tree`, `home/`, `.state.*`, `.claim.*`,
@@ -551,17 +557,24 @@ physical path; it holds only what the runner makes (`view/tree`, `home/`, `.stat
 and corroborated by the acpx record for this tree, and no queue lease exists; the tree and its
 admin registration name each other, the admin is not locked and git lists the tree once; and
 the tree and every aside EQUAL an artifact the thread's ledger names that
-`refs/agent-comms/artifacts` still retains, with no ignored residue. A mount is dirty against
-HEAD by design, so "dirty" here means "differs from its retained artifact". Under the claim the
-thread's retirement, its hold and — for a durable copy — its ownership are decided again from a
-fresh read of the ledgers, since a live thread can start sharing the copy between the scan and
-the claim; that copy is then reported `ambiguous` and kept.
+`refs/agent-comms/artifacts` still retains, with no ignored residue, no nested repository
+anywhere below the tree, and every gitlink path still the empty directory the checkout left
+(`nested-repo` otherwise: tree identity records a submodule's HEAD, never its edits or untracked
+files, and skips files dropped into an unpopulated one). A mount is dirty against HEAD by design,
+so "dirty" here means "differs from its retained artifact". Under the claim the thread's
+retirement, its hold and its ownership — the ledgers for a durable copy, the ledger and the
+recorded run for a throwaway — are decided again from a fresh read, since a live thread can
+start sharing the copy between the scan and the claim; that copy is then reported `ambiguous`
+and kept.
 
-**Removal** renames the ident into `<store>/<repo-key>/.retire.<ident>.XXXXXX` (record written
-first), drops that one admin registration after re-verifying its back-pointer, then deletes the
-tombstone. No `git worktree remove --force`, no repo-wide prune. An interrupted run leaves either
-the untouched ident or a tombstone the next run of the same thread finishes. Nothing under
-`.comms/` is touched: replies, compositions, run records and their `usage` stay.
+**Removal** creates `<store>/<repo-key>/.retire.<ident>.XXXXXX`, claims it with the same
+generational claim a mount takes, writes its record, renames the ident into it, drops that one
+admin registration after re-verifying its back-pointer, then deletes the tombstone. No `git
+worktree remove --force`, no repo-wide prune. An interrupted run leaves either the untouched
+ident or a tombstone a later run finishes — only after taking its claim, so a cleanup whose
+maker is still alive (or a concurrent replay) is a scoped `busy-cleanup` skip, and only a maker
+proven dead is superseded. Nothing under `.comms/` is touched: replies, compositions, run records
+and their `usage` stay.
 
 One line per considered identity on stdout, then the summary, always last:
 
@@ -574,10 +587,10 @@ clean-mounts-result v1 status=<s> mode=dry-run|apply selected=N removed=N absent
 |---|---|---|
 | `would-remove` / `removed` | `proven`, `interrupted` | selected and (to be) removed; `interrupted` = finishing an earlier run's tombstone |
 | `absent` | `already-absent` | selected and already gone — an idempotent success |
-| `skipped` | `busy-claim`, `busy-owner`, `claim-unverifiable` | a runner or queue owner holds it (or `ps` could not say); re-run later |
+| `skipped` | `busy-claim`, `busy-owner`, `busy-cleanup`, `claim-unverifiable` | a runner, a queue owner or another cleanup holds it (or `ps` could not say); re-run later |
 | `incomplete` | `remove-failed`, `admin-unverified`, `admin-remove-failed` | removal started and could not finish; the tombstone is kept and the next run resumes it. Never reported as removed |
-| `refused` | `unsafe-path`, `unknown-content`, `pending-generation`, `claim-unreadable`, `state-unreadable`, `state-missing`, `state-corrupt`, `owner-unprovable`, `owner-uncorroborated`, `registration-mismatch`, `registration-unverifiable`, `worktree-locked`, `dirty`, `artifact-unretained`, `content-unverifiable`, `held`, `unretired`, `ledger-unreadable`, `tombstone-failed`, `rename-failed`, `tombstone-unverifiable` | a gate failed; nothing was removed. stderr names the path and the reason |
-| `ambiguous` | `no-ownership-evidence`, `ownership-unresolved`, `shared-with-live-thread` | an existing copy this thread may not be the only owner of: REPORT-ONLY, never selected |
+| `refused` | `unsafe-path`, `unknown-content`, `pending-generation`, `claim-unreadable`, `state-unreadable`, `state-missing`, `state-corrupt`, `owner-unprovable`, `owner-uncorroborated`, `registration-mismatch`, `registration-unverifiable`, `worktree-locked`, `dirty`, `nested-repo`, `artifact-unretained`, `content-unverifiable`, `held`, `unretired`, `ledger-unreadable`, `tombstone-failed`, `rename-failed`, `tombstone-unverifiable` | a gate failed; nothing was removed. stderr names the path and the reason |
+| `ambiguous` | `no-ownership-evidence`, `ownership-unresolved`, `shared-with-live-thread`, `run-mismatch` | an existing copy this thread may not be the only owner of: REPORT-ONLY, never selected |
 
 | exit | result `status` | meaning |
 |---|---|---|

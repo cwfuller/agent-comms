@@ -674,6 +674,13 @@ leg thread that is also a thread's literal name, `T-codex`), with unproven copie
 "dirty" means "not equal to an artifact the ledger names and `refs/agent-comms/artifacts` retains",
 because a mount is an uncommitted diff over its base by design. Removal is a journaled rename into
 `.retire.<ident>.*`, resumable after a kill at any boundary. The whole-store GC is unchanged.
+Review round 1 (codex) found four holes the green fixture missed, all fixed with regressions: a
+`find -type f` scan let a symlinked run record drop out of the evidence (records are now
+enumerated before they are read, and any unverifiable one refuses); a throwaway was selected by a
+name two run dirs can share (the runner now records `.state.run`, the physical run dir, and only
+that run's thread may remove it); a replay could clear a LIVE cleanup's tombstone between its
+record and its rename (the tombstone now carries its maker's claim); and tree identity cannot see
+inside a submodule (a nested repository or content under a gitlink refuses).
 Measured on the development fixture only; not yet run against a live store. Open: a turn that fails
 after staging but before recording its session leaves a copy both GCs treat differently (the
 whole-store GC reads a missing record as "no owner"; `--thread` refuses it as `state-missing`,

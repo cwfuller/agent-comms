@@ -482,24 +482,43 @@ waits on any other ident. Load-bearing choices:
   `grades/sets.tsv` records every dispatched leg and each run's `turn.tsv` records its thread,
   agent and review set. Every recorded use must belong to T or another retired thread; otherwise
   the copy is report-only. The ledgers live under `.comms/`, outside every mount, where a contained
-  child cannot write.
+  child cannot write. Every run record is enumerated before any is read, because a use that drops
+  out of the scan is exactly how a shared copy reads as T's alone: `find -type f` skipped a
+  symlinked or directory-shaped `turn.tsv`, and find never descends a symlinked run or logs dir, so
+  each of those now refuses the whole call.
+- **A throwaway's name is not its owner.** `tmp-<run>` is `safe_name` of the run dir's basename, and
+  `run+1`, `run_1` and a `--dir` elsewhere named `run_1` all map to one copy that the session and
+  content checks cannot tell apart when both runs reviewed one artifact. The runner therefore
+  records, under its claim, the physical run dir it made the copy for (`.state.run`); cleanup
+  selects the copy only for that run, re-reads it under its own claim, and reports any other
+  copy one of T's runs could have named.
 - **"Dirty" means "not a retained artifact".** A mount is an uncommitted diff over its base by
   design, so git's dirtiness (and `git worktree remove` without `--force`) would refuse every
   mount, and with `--force` would prove nothing. The gate is tree identity against an artifact the
   thread's ledger names and `refs/agent-comms/artifacts` still retains — `mount_tree_matches`'
   rule, read through the repo's own git dir so a gitfile inside the mount is never followed.
   Equal means every byte is recoverable after the copy is gone. Asides (previous generations kept
-  for a straggling cwd holder) pass the same test.
+  for a straggling cwd holder) pass the same test. Tree identity is blind below a gitlink —
+  `git add -A` records a populated submodule's HEAD and never its edits or untracked files, and
+  skips files dropped into an unpopulated one — so a nested repository anywhere in the tree, or
+  anything inside a gitlink path, refuses (`nested-repo`) rather than being verified.
 - **The scan decides nothing the claim does not re-decide.** A leg ident is shared the moment a
   live thread of the leg's literal name runs a turn in it, and that can happen between the scan and
   the claim. So under the claim the retirement, the hold and the ledger ownership are read again,
   not reused; only a turn that starts AFTER the claim is excluded by the claim itself.
-- **Removal is a journaled rename.** Under a held claim and after every gate re-runs, the record is
-  written into a fresh `.retire.<ident>.XXXXXX`, the ident is renamed into it, the one admin
-  registration whose back-pointer names the tree is dropped, and the tombstone is deleted. A kill
-  at any boundary leaves either the untouched ident or a tombstone the next run finishes; a delete
-  that fails part-way reports `incomplete`, never `removed`. No repo-wide `git worktree prune`,
-  which would also prune a peer worktree on an unmounted volume.
+- **Removal is a journaled rename.** Under a held claim and after every gate re-runs, a fresh
+  `.retire.<ident>.XXXXXX` is claimed (`mount_claim_take`, exactly as a mount is), the record is
+  written into it, the ident is renamed into it, the one admin registration whose back-pointer
+  names the tree is dropped, and the tombstone is deleted. A kill at any boundary leaves either
+  the untouched ident or a tombstone a later run finishes; a delete that fails part-way reports
+  `incomplete`, never `removed`. No repo-wide `git worktree prune`, which would also prune a peer
+  worktree on an unmounted volume.
+- **The journal has an owner.** A replay takes the tombstone's claim before touching it, so a
+  maker still alive — or a second replay — is a scoped `busy-cleanup` skip, and only a maker proven
+  dead is superseded. Replaying unclaimed let a concurrent cleanup read a live one's tombstone as
+  "interrupted before the rename" and drop its record just before the rename landed, leaving the
+  ident in a tombstone no later run could verify. The claim precedes the record, so a replay that
+  reaches an empty tombstone first owns it and clears it, and its maker steps back.
 
 **Residual risks, accepted.** (1) The ledgers ARE the evidence: deleting run records can hide a
 direct turn on a leg-shaped thread name, and the shared copy would then read as T's alone. (2) A
@@ -508,7 +527,8 @@ runner reaps an aside. (3) The isolated provider home (`home/`) is part of the c
 provider records go with it. The per-turn usage callers read was extracted into the run's
 `result.json` at turn end, before unmount, and stays. (4) A turn that failed after staging but
 before recording its session leaves a tree with no record; that copy refuses (`state-missing`)
-exactly as the runner itself refuses to trust it, and needs a human or the whole-store GC.
+exactly as the runner itself refuses to trust it, and needs a human or the whole-store GC. (5) A
+throwaway made by a runner that predates `.state.run` records no run and is report-only.
 
 ## ACP consult transport (acp.sh)
 

@@ -60,6 +60,7 @@ rt_gone() {  # <kdir> — the ident, its registration and any tombstone are all 
   [ ! -e "$1" ] && ! rt_reg "$1" && [ -z "$(ls -d "$(dirname "$1")/.retire.$(basename "$1")".* 2>/dev/null)" ]
 }
 rt_line() { grep -F " path=$2" <<<"$1" | grep_full -q "^clean-mounts-target v1 status=$3 reason=$4 "; }
+rt_none() { grep -q '^clean-mounts-result v1 status=blocked .* selected=0 ' <<<"$1"; }   # refused before selecting
 rt_live_claim() {  # <kdir> — a live v2 runner claim; prints the holder pid
   local p; sleep 300 </dev/null >/dev/null 2>&1 & p=$!
   printf 'pid=%s\nfmt=v2\nstart=%s\nrun=live\n' "$p" "$(LC_ALL=C TZ=UTC ps -p "$p" -o lstart= | tr -s ' ' | sed 's/^ *//; s/ *$//')" > "$1/.claim.99"
@@ -185,12 +186,13 @@ rt_unclaim "$RT_E1" "$RT_SP"
   && ok "a live pid in a claim without a start time is never read as dead" || fail "stale pid (rc=$RT_STC): $RT_ST"
 
 # ---- every gate refuses safely; each case restores the mount and re-proves it intact ----
-rt_refused() {  # <desc> <reason> — apply refuses with <reason>, exit 4, and the ident dir survives
+rt_refused_at() {  # <thread> <kdir> <desc> <reason> — apply refuses with <reason>, exit 4, and the ident dir survives
   local out rc
-  out="$(rt_cm --thread "$RT_ECHO" --yes)"; rc=$?
-  if [ "$rc" = 4 ] && rt_line "$out" "$RT_E1" refused "$2" && [ -d "$RT_E1" ] \
-     && grep -q '^clean-mounts-result v1 status=blocked ' <<<"$out"; then ok "$1"; else fail "$1 (rc=$rc): $out"; fi
+  out="$(rt_cm --thread "$1" --yes)"; rc=$?
+  if [ "$rc" = 4 ] && rt_line "$out" "$2" refused "$4" && [ -d "$2" ] \
+     && grep -q '^clean-mounts-result v1 status=blocked ' <<<"$out"; then ok "$3"; else fail "$3 (rc=$rc): $out"; fi
 }
+rt_refused() { rt_refused_at "$RT_ECHO" "$RT_E1" "$@"; }
 RT_REC_ID="$(cat "$RT_E1/.state.record")"
 chmod 000 "$RT_E1/.state.record"; rt_refused "an unreadable session record refuses" state-unreadable
 chmod 644 "$RT_E1/.state.record"
@@ -241,6 +243,31 @@ else
 fi
 rt_unclaim "$RT_B1" "$RT_BP"
 
+# ---- content under a gitlink is invisible to tree identity, so it refuses ----
+# `git add -A` records a populated submodule's HEAD — never its edits or untracked files — and
+# skips files dropped into an unpopulated one, so the tree still EQUALS the artifact in each case.
+RT_SUB="$WORK/rt-sub"; git init -q -b main "$RT_SUB"; printf 'sub\n' > "$RT_SUB/s.txt"
+git -C "$RT_SUB" add s.txt; git -C "$RT_SUB" -c user.email=t@t -c user.name=t commit -qm s
+RT_SM_TREE="$(cd "$RT" && GIT_INDEX_FILE="$WORK/rt-sm.idx" git read-tree "$RT_ART" \
+  && GIT_INDEX_FILE="$WORK/rt-sm.idx" git update-index --add --cacheinfo "160000,$(git -C "$RT_SUB" rev-parse HEAD),sm" \
+  && GIT_INDEX_FILE="$WORK/rt-sm.idx" git write-tree)"
+rm -f "$WORK/rt-sm.idx"
+RT_SM_ART="$(git -C "$RT" -c user.email=t@t -c user.name=t commit-tree "$RT_SM_TREE" -p "$RT_HEAD" -m sm)"
+git -C "$RT" update-ref "refs/agent-comms/artifacts/$RT_SM_ART" "$RT_SM_ART"
+RT_S1="$(RT_ART="$RT_SM_ART" rt_turn rt-sierra grok)"; RT_SM="$RT_S1/view/tree/sm"
+rt_state retire rt-sierra >/dev/null
+rmdir "$RT_SM" && git clone -q "$RT_SUB" "$RT_SM" && printf 'edit\n' >> "$RT_SM/s.txt"
+rt_refused_at rt-sierra "$RT_S1" "a modified file inside a populated submodule refuses" nested-repo
+git -C "$RT_SM" checkout -q -- s.txt && printf 'new\n' > "$RT_SM/new.txt"
+rt_refused_at rt-sierra "$RT_S1" "an untracked file inside a populated submodule refuses" nested-repo
+rm -rf "$RT_SM" && mkdir "$RT_SM" && printf 'stray\n' > "$RT_SM/stray.txt"
+rt_refused_at rt-sierra "$RT_S1" "a file dropped into an unpopulated submodule path refuses" nested-repo
+rm -f "$RT_SM/stray.txt"
+RT_SMR="$(rt_cm --thread rt-sierra --yes)"; RT_SMRC=$?
+[ -n "$RT_S1" ] && [ "$RT_SMRC" = 0 ] && rt_line "$RT_SMR" "$RT_S1" removed proven && rt_gone "$RT_S1" \
+  && ok "the same mount with its gitlink path left empty, as the checkout made it, is removed" \
+  || fail "clean gitlink mount (rc=$RT_SMRC, s1=$RT_S1): $RT_SMR"
+
 # ---- ownership that cannot be proven is report-only ----
 # A turn whose run record is not in this repo's ledger: the copy exists, nothing proves whose.
 RT_G1="$(rt_turn rt-gamma grok "" "$WORK/rt-unledgered")"
@@ -260,6 +287,28 @@ if [ "$RT_SHC" = 4 ] && rt_line "$RT_SH" "$RT_B1" ambiguous shared-with-live-thr
 else
   fail "shared ident (rc=$RT_SHC): $RT_SH"
 fi
+# The direct turn's record is the ONLY evidence that B1 is also rt_alpha-grok's. A record that is
+# not a regular file, or sits behind a symlink, must refuse the call — never drop out of the scan
+# and leave the panel ledger attributing the copy to retired rt_alpha alone.
+RT_DREC="$RT/.comms/logs/rt-direct/turn.tsv"
+mv "$RT_DREC" "$WORK/rt-direct.tsv"; ln -s "$WORK/rt-direct.tsv" "$RT_DREC"
+RT_SL="$(rt_cm --thread rt_alpha --yes)"; RT_SLC=$?
+rm -f "$RT_DREC"; mv "$WORK/rt-direct.tsv" "$RT_DREC"
+[ "$RT_SLC" = 4 ] && rt_none "$RT_SL" && rt_intact "$RT_B1" \
+  && ok "a symlinked direct-turn record refuses the whole call: the shared copy is never read as the leg's alone" \
+  || fail "symlinked record (rc=$RT_SLC): $RT_SL"
+mv "$RT/.comms/logs/rt-direct" "$WORK/rt-direct-dir"; ln -s "$WORK/rt-direct-dir" "$RT/.comms/logs/rt-direct"
+RT_SD="$(rt_cm --thread rt_alpha --yes)"
+rm -f "$RT/.comms/logs/rt-direct"; mv "$WORK/rt-direct-dir" "$RT/.comms/logs/rt-direct"
+mv "$RT/.comms/logs" "$WORK/rt-logs-dir"; ln -s "$WORK/rt-logs-dir" "$RT/.comms/logs"
+RT_SG="$(rt_cm --thread rt_alpha --yes)"
+rm -f "$RT/.comms/logs"; mv "$WORK/rt-logs-dir" "$RT/.comms/logs"
+mkdir -p "$RT/.comms/logs/rt-dirrec/turn.tsv"
+RT_SR="$(rt_cm --thread rt_alpha --yes)"
+rmdir "$RT/.comms/logs/rt-dirrec/turn.tsv" "$RT/.comms/logs/rt-dirrec"
+rt_none "$RT_SD" && rt_none "$RT_SG" && rt_none "$RT_SR" && rt_intact "$RT_B1" \
+  && ok "a symlinked run dir, a symlinked logs dir or a directory-shaped record refuses the whole call" \
+  || fail "unverifiable record shapes: $RT_SD / $RT_SG / $RT_SR"
 rt_state retire rt_alpha-grok >/dev/null
 RT_SH2="$(rt_cm --thread rt_alpha --yes)"; RT_SH2C=$?
 [ "$RT_SH2C" = 0 ] && rt_line "$RT_SH2" "$RT_B1" removed proven && rt_gone "$RT_B1" \
@@ -357,23 +406,101 @@ RT_IR="$(rt_cm --thread rt-kilo --yes)"; RT_IRC=$?
 [ "$RT_IRC" = 0 ] && rt_line "$RT_IR" "$RT_K" removed interrupted && rt_gone "$RT_K" && rt_intact "$RT_PEER" \
   && ok "the re-run finishes the kept tombstone and reports it removed" || fail "resume after incomplete (rc=$RT_IRC): $RT_IR"
 
-# ---- a crashed run's disposable copy is the thread's too, named from its own run dir ----
+# ---- two applies at once: a live cleanup's tombstone is never replayed from under it ----
+# A second apply of the same thread runs INSIDE the first, at the boundary under test, and must
+# find the tombstone claimed by a live maker: a scoped skip that leaves the journal as it was.
+cat > "$WORK/rt-hook-peer" <<EOF
+#!/bin/bash
+[ -z "\${RT_NESTED:-}" ] && [ "\$1" = "\$RT_PEER_AT" ] || exit 0
+RT_NESTED=1 "$RP" clean-mounts --thread rt-oscar --yes > "$WORK/rt-peer.out" 2>&1
+echo \$? > "$WORK/rt-peer.rc"
+{ [ -f "\$3/record" ] && echo record; [ -d "\$3/\$2" ] && echo moved; } > "$WORK/rt-peer.tomb"
+EOF
+chmod +x "$WORK/rt-hook-peer"
+rt_state retire rt-oscar >/dev/null
+for RT_AT in tombstoned renamed; do
+  RT_O="$(rt_turn rt-oscar grok)"
+  rm -f "$WORK/rt-peer.out" "$WORK/rt-peer.rc" "$WORK/rt-peer.tomb"
+  RT_OA="$(RT_PEER_AT="$RT_AT" COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-peer" rt_cm --thread rt-oscar --yes)"; RT_OAC=$?
+  RT_OB="$(cat "$WORK/rt-peer.out" 2>/dev/null)"
+  if [ "$RT_AT" = tombstoned ]; then RT_OW=record; else RT_OW="record moved"; fi
+  if [ -n "$RT_O" ] && [ "$(cat "$WORK/rt-peer.rc" 2>/dev/null)" = 3 ] && rt_line "$RT_OB" "$RT_O" skipped busy-cleanup \
+     && [ "$(tr '\n' ' ' < "$WORK/rt-peer.tomb" 2>/dev/null)" = "$RT_OW " ] \
+     && [ "$RT_OAC" = 0 ] && rt_line "$RT_OA" "$RT_O" removed proven && rt_gone "$RT_O"; then
+    ok "a second apply at '$RT_AT' skips the live cleanup's tombstone, which then finishes its own removal"
+  else
+    fail "concurrent apply at '$RT_AT' (rc=$RT_OAC, o=$RT_O, peer rc=$(cat "$WORK/rt-peer.rc" 2>/dev/null) tomb=$(cat "$WORK/rt-peer.tomb" 2>/dev/null)): $RT_OA / $RT_OB"
+  fi
+done
+
+# ---- a crashed run's disposable copy is the thread's too, when it names that run ----
+# The runner records the physical run dir a throwaway was made for; a real degraded turn shows it.
+RT_X1="$(rt_turn rt-xray grok)"; printf 'bad id!\n' > "$RT_X1/.state.record"
+RT_XD="$RT/.comms/logs/rt-xray-run"; mkdir -p "$RT_XD"
+export AX_KDIR_RUN_LOG="$WORK/rt-kdir-run.log"; : > "$AX_KDIR_RUN_LOG"
+RT_X2="$(rt_turn rt-xray grok "" "$RT_XD")"
+unset AX_KDIR_RUN_LOG
+case "$RT_X2" in */tmp-rt-xray-run) RT_XT=1 ;; *) RT_XT=0 ;; esac
+[ "$RT_XT" = 1 ] && [ "$(sed -n '$p' "$WORK/rt-kdir-run.log")" = "$(cd "$RT_XD" && pwd -P)" ] && [ ! -e "$RT_X2" ] \
+  && ok "a degraded turn's throwaway records the physical run dir it was made for" \
+  || fail "throwaway run record (x2=$RT_X2): $(cat "$WORK/rt-kdir-run.log")"
 # The shape a runner killed mid-turn on a degrade path leaves: a registered worktree holding the
-# artifact, its session bookkeeping, and the runner's claim with a dead pid.
-RT_TD="$RT/.comms/logs/rt-tmp-run"; mkdir -p "$RT_TD"
-printf 'thread\trt-tango\nset\t\nagent\tgrok\nartifact\t%s\n' "$RT_ART" > "$RT_TD/turn.tsv"
-RT_KEYDIR="$(dirname "$RT_PEER")"; RT_TW="$RT_KEYDIR/tmp-rt-tmp-run"
-mkdir -p "$RT_TW/view" "$RT_TW/home"
-git -C "$RT" worktree add -q --detach "$RT_TW/view/tree" "$RT_HEAD" >/dev/null 2>&1
-git -C "$RT_TW/view/tree" read-tree -u --reset "$RT_ART" && git -C "$RT_TW/view/tree" reset -q --mixed "$RT_HEAD"
-git -C "$RT_TW/view/tree" rev-parse --absolute-git-dir > "$RT_TW/.state.admin"
-printf 'tw-rec\n' > "$RT_TW/.state.record"; printf '%s\n' "$RT_HOME" > "$RT_TW/.state.home"
-printf '{\n  "cwd": "%s",\n  "name": "x"\n}\n' "$RT_TW/view/tree" > "$RT_HOME/.acpx/sessions/tw-rec.json"
-( exit 0 ) & RT_DEAD=$!; wait "$RT_DEAD"
-printf 'pid=%s\nrun=%s\n' "$RT_DEAD" "$RT_TD" > "$RT_TW/.claim.0"
+# artifact, its session bookkeeping, the run it was made for, and the runner's claim with a dead pid.
+RT_KEYDIR="$(dirname "$RT_PEER")"
+rt_tmp() {  # <run dir> <thread> [--no-run] — record the run as the thread's and leave its crashed throwaway; prints its path
+  local rd="$1" tw dead
+  mkdir -p "$rd"; printf 'thread\t%s\nset\t\nagent\tgrok\nartifact\t%s\n' "$2" "$RT_ART" > "$rd/turn.tsv"
+  tw="$RT_KEYDIR/tmp-$(printf '%s' "$(basename "$rd")" | tr -c 'A-Za-z0-9._-' '_')"
+  mkdir -p "$tw/view" "$tw/home"
+  git -C "$RT" worktree add -q --detach "$tw/view/tree" "$RT_HEAD" >/dev/null 2>&1
+  git -C "$tw/view/tree" read-tree -u --reset "$RT_ART" && git -C "$tw/view/tree" reset -q --mixed "$RT_HEAD"
+  git -C "$tw/view/tree" rev-parse --absolute-git-dir > "$tw/.state.admin"
+  printf '%s-rec\n' "${tw##*/}" > "$tw/.state.record"; printf '%s\n' "$RT_HOME" > "$tw/.state.home"
+  printf '{\n  "cwd": "%s",\n  "name": "x"\n}\n' "$tw/view/tree" > "$RT_HOME/.acpx/sessions/${tw##*/}-rec.json"
+  ( exit 0 ) & dead=$!; wait "$dead"
+  printf 'pid=%s\nrun=%s\n' "$dead" "$rd" > "$tw/.claim.0"
+  [ "${3:-}" = --no-run ] || (cd "$rd" && pwd -P) > "$tw/.state.run"
+  printf '%s' "$tw"
+}
+RT_TD="$RT/.comms/logs/rt-tmp-run"
+RT_TW="$(rt_tmp "$RT_TD" rt-tango --no-run)"
 rt_state retire rt-tango >/dev/null
+RT_TN="$(rt_cm --thread rt-tango --yes)"; RT_TNC=$?
+[ "$RT_TNC" = 4 ] && rt_line "$RT_TN" "$RT_TW" ambiguous no-ownership-evidence && rt_intact "$RT_TW" \
+  && ok "a throwaway that records no run is report-only: its name alone proves nothing" \
+  || fail "throwaway without a run record (rc=$RT_TNC): $RT_TN"
+(cd "$RT_TD" && pwd -P) > "$RT_TW/.state.run"
 RT_TT="$(rt_cm --thread rt-tango --yes)"; RT_TTC=$?
 [ "$RT_TTC" = 0 ] && grep -F " path=$RT_TW" <<<"$RT_TT" | grep_full -q "status=removed reason=proven kind=throwaway use=run " \
   && rt_gone "$RT_TW" && rt_intact "$RT_PEER" \
-  && ok "a crashed run's throwaway copy is selected by its run dir's name and removed" \
+  && ok "a crashed run's throwaway copy that names the thread's run is selected and removed" \
   || fail "throwaway (rc=$RT_TTC): $RT_TT"
+# Run dirs `rt+tw` (thread rt-uniform) and `rt_tw` (thread rt-victor) both name `tmp-rt_tw`, and
+# both reviewed one artifact, so only the run the copy records can tell whose it is.
+RT_UD="$RT/.comms/logs/rt+tw"; mkdir -p "$RT_UD"
+printf 'thread\trt-uniform\nset\t\nagent\tgrok\nartifact\t%s\n' "$RT_ART" > "$RT_UD/turn.tsv"
+RT_VW="$(rt_tmp "$RT/.comms/logs/rt_tw" rt-victor)"
+rt_state retire rt-uniform >/dev/null
+RT_UV="$(rt_cm --thread rt-uniform --yes)"; RT_UVC=$?
+[ "$RT_UVC" = 4 ] && rt_line "$RT_UV" "$RT_VW" ambiguous run-mismatch && rt_intact "$RT_VW" \
+  && ok "retiring a thread whose run dir normalizes alike leaves another thread's crashed throwaway intact" \
+  || fail "aliased throwaway (rc=$RT_UVC): $RT_UV"
+# Under the claim the copy is read again: a run that re-records it between the check and the
+# claim takes it out of this thread's hands.
+rt_state retire rt-victor >/dev/null
+cat > "$WORK/rt-hook-run" <<EOF
+#!/bin/bash
+[ "\$1" = prechecked ] || exit 0
+[ -f "\$3/.state.run" ] && (cd "$RT_UD" && pwd -P) > "\$3/.state.run"
+exit 0
+EOF
+chmod +x "$WORK/rt-hook-run"
+RT_VR="$(COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-run" rt_cm --thread rt-victor --yes)"; RT_VRC=$?
+[ "$RT_VRC" = 4 ] && rt_line "$RT_VR" "$RT_VW" ambiguous run-mismatch && rt_intact "$RT_VW" \
+  && ok "a throwaway re-recorded to another run before the claim is kept: its maker is re-read under the claim" \
+  || fail "re-recorded throwaway (rc=$RT_VRC): $RT_VR"
+(cd "$RT/.comms/logs/rt_tw" && pwd -P) > "$RT_VW/.state.run"
+RT_VO="$(rt_cm --thread rt-victor --yes)"; RT_VOC=$?
+[ "$RT_VOC" = 0 ] && rt_line "$RT_VO" "$RT_VW" removed proven && rt_gone "$RT_VW" && rt_intact "$RT_PEER" \
+  && ok "the thread whose run the throwaway names removes it" \
+  || fail "owner's throwaway (rc=$RT_VOC): $RT_VO"
