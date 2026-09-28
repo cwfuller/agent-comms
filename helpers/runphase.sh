@@ -4308,7 +4308,7 @@ mount_scope_check() {  # <scope> <canonical main_root> -> 0 usable | 1 absent | 
 # tombstone the next run of the same thread finishes. No `git worktree remove --force`, no
 # repo-wide prune: the content gate is the proof git's dirtiness check cannot give a mount.
 CM_NOTE=""; CM_ST=""; CM_WHY=""; CM_ADMIN=""
-CM_SCOPE=""; CM_MAIN_ROOT=""; CM_GITDIR=""; CM_THREAD=""; CM_YES=0
+CM_SCOPE=""; CM_MAIN_ROOT=""; CM_GITDIR=""; CM_ROOT=""; CM_THREAD=""; CM_YES=0; CM_ARTS=""
 CM_N_SEL=0; CM_N_REMOVED=0; CM_N_ABSENT=0; CM_N_WOULD=0; CM_N_SKIPPED=0; CM_N_REFUSED=0
 CM_N_INCOMPLETE=0; CM_N_AMBIG=0
 
@@ -4386,6 +4386,29 @@ cm_ledger_uses() {
     rm -f "$list" "$out.err"; return 2
   fi
   rm -f "$list" "$out.err"
+  return 0
+}
+
+# cm_own <uses file> <raw thread> <agent> — is this durable ident PROVABLY this thread's? Sets
+# CM_ARTS to the artifacts its recorded uses name. 0 proven | 1 recorded, and only another
+# thread's (not a target) | 2 report-only (CM_WHY/CM_NOTE). Asked twice — at selection, and again
+# under the held claim, because a live thread can start sharing the copy in between.
+cm_own() {
+  local uses="$1" raw="$2" a="$3" owners other
+  CM_WHY=""; CM_NOTE=""
+  owners="$(CM_AWK_R="$raw" CM_AWK_A="$a" awk -F'\t' '$1 == ENVIRON["CM_AWK_R"] && $2 == ENVIRON["CM_AWK_A"] { print $3 }' "$uses" | LC_ALL=C sort -u)"
+  CM_ARTS="$(CM_AWK_R="$raw" CM_AWK_A="$a" awk -F'\t' '$1 == ENVIRON["CM_AWK_R"] && $2 == ENVIRON["CM_AWK_A"] && $4 != "-" { print $4 }' "$uses" | LC_ALL=C sort -u)"
+  if [ -z "$owners" ]; then
+    CM_WHY=no-ownership-evidence; CM_NOTE="no ledger records a turn of '$raw' by $a, so this copy cannot be proven the thread's"
+    return 2
+  fi
+  grep -qxF -- "$CM_THREAD" <<<"$owners" || return 1
+  while IFS= read -r other; do
+    [ "$other" = "$CM_THREAD" ] && continue
+    if [ "$other" = "?" ]; then CM_WHY=ownership-unresolved; CM_NOTE="a recorded use of '$raw' by $a cannot be attributed to a thread"; return 2; fi
+    "$COMMS" state retired "$other" >/dev/null 2>&1 && continue
+    CM_WHY=shared-with-live-thread; CM_NOTE="this copy is also thread '$other''s, which is not retired"; return 2
+  done <<<"$owners"
   return 0
 }
 
@@ -4629,20 +4652,40 @@ cm_finish_tomb() {
   return 0
 }
 
-# cm_remove <ident> <artifacts> — claim, re-check EVERYTHING under the claim, then tombstone,
-# rename and finish. The first check was a snapshot; only the held claim excludes a runner.
+# cm_remove <kind> <raw thread> <agent> <ident> <artifacts> — claim, re-decide EVERYTHING under
+# the claim, then tombstone, rename and finish. The first check was a snapshot; only the held
+# claim excludes a runner, and only a fresh read of the ledgers sees a turn that ran in between.
 cm_remove() {
-  local ident="$1" arts="$2" d="$CM_SCOPE/$1" holder tomb
+  local kind="$1" raw="$2" agent="$3" ident="$4" arts="$5" d="$CM_SCOPE/$4" holder tomb uses orc=0
   MOUNT_HOLDER=""
   if ! mount_claim_take "$d" "clean-mounts:$$"; then
     CM_ST=skipped; CM_WHY=busy-claim; CM_NOTE="${MOUNT_CLAIM_NOTE:-a runner holds it}"; return 0
   fi
   holder="$MOUNT_HOLDER"
   cm_hook claimed "$ident" "$d"
-  cm_check "$ident" "$arts" "$holder"
-  if [ "$CM_ST" = ok ] && ! "$COMMS" state retired "$CM_THREAD" >/dev/null 2>&1; then
+  CM_ST=ok; CM_WHY=""; CM_NOTE=""
+  if ! "$COMMS" state retired "$CM_THREAD" >/dev/null 2>&1; then
     CM_ST=refused; CM_WHY=unretired; CM_NOTE="the thread's retirement was withdrawn during the run"
+  elif hold_active "$CM_THREAD" >/dev/null || hold_active "$raw" >/dev/null; then
+    CM_ST=refused; CM_WHY=held; CM_NOTE="thread '$raw' was held during the run"
+  elif [ "$kind" = durable ]; then
+    # A throwaway is named after one historical run, so no later turn can share it; a durable
+    # leg ident can gain a live co-owner at any time before the claim.
+    if ! uses="$(mktemp 2>/dev/null)"; then
+      CM_ST=refused; CM_WHY=ledger-unreadable; CM_NOTE="cannot create a scratch file to re-read the ledgers"
+    elif ! cm_ledger_uses "$CM_ROOT" "$CM_THREAD" "$uses"; then
+      CM_ST=refused; CM_WHY=ledger-unreadable
+    else
+      cm_own "$uses" "$raw" "$agent" || orc=$?
+      case "$orc" in
+        0) arts="$CM_ARTS" ;;
+        1) CM_ST=ambiguous; CM_WHY=no-ownership-evidence; CM_NOTE="the ledgers no longer record this thread's use of '$raw' by $agent" ;;
+        *) CM_ST=ambiguous ;;
+      esac
+    fi
+    rm -f "${uses:-}" 2>/dev/null || true
   fi
+  [ "$CM_ST" != ok ] || cm_check "$ident" "$arts" "$holder"
   if [ "$CM_ST" != ok ]; then MOUNT_HOLDER="$holder"; mount_claim_release; return 0; fi
   if ! tomb="$(mktemp -d "$CM_SCOPE/.retire.$ident.XXXXXX" 2>/dev/null)" \
      || ! { printf 'ident=%s\ntree=%s\nadmin=%s\n' "$ident" "$d/view/tree" "$CM_ADMIN" > "$tomb/record.tmp" \
@@ -4706,7 +4749,7 @@ cm_target() {
     ok)
       if [ "$CM_YES" != 1 ]; then cm_emit would-remove proven "$kind" "$use" "$agent" "$ident"; return 0; fi
       cm_hook prechecked "$ident" "$CM_SCOPE/$ident"
-      cm_remove "$ident" "$arts"
+      cm_remove "$kind" "$raw" "$agent" "$ident" "$arts"
       cm_emit "$CM_ST" "$CM_WHY" "$kind" "$use" "$agent" "$ident" ;;
     *) cm_emit "$CM_ST" "$CM_WHY" "$kind" "$use" "$agent" "$ident" ;;
   esac
@@ -4742,7 +4785,7 @@ cm_thread() {
     cm_result blocked; return 4
   fi
   local root base key sc_rc=0 gd
-  root="$("$COMMS" root)"
+  root="$("$COMMS" root)"; CM_ROOT="$root"
   CM_MAIN_ROOT="$( cd "${root%/.comms}" 2>/dev/null && pwd -P )" \
     || { echo "clean-mounts: cannot resolve the repo root" >&2; cm_result store-error; return 1; }
   if ! mount_base_root "$CM_MAIN_ROOT"; then
@@ -4773,35 +4816,20 @@ cm_thread() {
     case " $agents " in *" $a "*) ;; *) agents="$agents $a" ;; esac
   done
   set +f
-  local use raw ident owners other why arts done_idents=" " retired_ok=" "
+  local use raw ident orc done_idents=" "
   for a in $agents; do
     for use in direct panel; do
       if [ "$use" = direct ]; then raw="$CM_THREAD"; else raw="$CM_THREAD-$a"; fi
       ident="$(acp_mount_ident "$CM_MAIN_ROOT" "$raw" "$a")" || continue
-      owners="$(CM_AWK_R="$raw" CM_AWK_A="$a" awk -F'\t' '$1 == ENVIRON["CM_AWK_R"] && $2 == ENVIRON["CM_AWK_A"] { print $3 }' "$uses" | LC_ALL=C sort -u)"
-      arts="$(CM_AWK_R="$raw" CM_AWK_A="$a" awk -F'\t' '$1 == ENVIRON["CM_AWK_R"] && $2 == ENVIRON["CM_AWK_A"] && $4 != "-" { print $4 }' "$uses" | LC_ALL=C sort -u)"
-      if [ -z "$owners" ]; then
-        if [ -e "$CM_SCOPE/$ident" ] || [ -L "$CM_SCOPE/$ident" ]; then
-          CM_NOTE="no ledger records a turn of '$raw' by $a, so this copy cannot be proven the thread's"
-          cm_emit ambiguous no-ownership-evidence durable "$use" "$a" "$ident"
-        fi
-        continue
-      fi
-      grep -qxF -- "$CM_THREAD" <<<"$owners" || continue   # recorded, and not T's: another thread's copy
-      why=""
-      while IFS= read -r other; do
-        [ "$other" = "$CM_THREAD" ] && continue
-        if [ "$other" = "?" ]; then why=ownership-unresolved; CM_NOTE="a recorded use of '$raw' by $a cannot be attributed to a thread"; break; fi
-        case "$retired_ok" in *" $other "*) continue ;; esac
-        if "$COMMS" state retired "$other" >/dev/null 2>&1; then retired_ok="$retired_ok$other "; continue; fi
-        why=shared-with-live-thread; CM_NOTE="this copy is also thread '$other''s, which is not retired"; break
-      done <<<"$owners"
-      if [ -n "$why" ]; then
-        if [ -e "$CM_SCOPE/$ident" ] || [ -L "$CM_SCOPE/$ident" ]; then cm_emit ambiguous "$why" durable "$use" "$a" "$ident"; fi
-        CM_NOTE=""; continue
-      fi
+      orc=0; cm_own "$uses" "$raw" "$a" || orc=$?
+      case "$orc" in
+        0) ;;
+        1) continue ;;   # recorded, and not T's: another thread's copy
+        *) if [ -e "$CM_SCOPE/$ident" ] || [ -L "$CM_SCOPE/$ident" ]; then cm_emit ambiguous "$CM_WHY" durable "$use" "$a" "$ident"; fi
+           CM_NOTE=""; continue ;;
+      esac
       done_idents="$done_idents$ident "
-      cm_target durable "$use" "$a" "$raw" "$ident" "$arts"
+      cm_target durable "$use" "$a" "$raw" "$ident" "$CM_ARTS"
     done
   done
   # THROWAWAYS: a disposable copy is named after the run that made it, so a run T owns names its

@@ -552,7 +552,10 @@ and corroborated by the acpx record for this tree, and no queue lease exists; th
 admin registration name each other, the admin is not locked and git lists the tree once; and
 the tree and every aside EQUAL an artifact the thread's ledger names that
 `refs/agent-comms/artifacts` still retains, with no ignored residue. A mount is dirty against
-HEAD by design, so "dirty" here means "differs from its retained artifact".
+HEAD by design, so "dirty" here means "differs from its retained artifact". Under the claim the
+thread's retirement, its hold and — for a durable copy — its ownership are decided again from a
+fresh read of the ledgers, since a live thread can start sharing the copy between the scan and
+the claim; that copy is then reported `ambiguous` and kept.
 
 **Removal** renames the ident into `<store>/<repo-key>/.retire.<ident>.XXXXXX` (record written
 first), drops that one admin registration after re-verifying its back-pointer, then deletes the
@@ -573,7 +576,7 @@ clean-mounts-result v1 status=<s> mode=dry-run|apply selected=N removed=N absent
 | `absent` | `already-absent` | selected and already gone — an idempotent success |
 | `skipped` | `busy-claim`, `busy-owner`, `claim-unverifiable` | a runner or queue owner holds it (or `ps` could not say); re-run later |
 | `incomplete` | `remove-failed`, `admin-unverified`, `admin-remove-failed` | removal started and could not finish; the tombstone is kept and the next run resumes it. Never reported as removed |
-| `refused` | `unsafe-path`, `unknown-content`, `pending-generation`, `claim-unreadable`, `state-unreadable`, `state-missing`, `state-corrupt`, `owner-unprovable`, `owner-uncorroborated`, `registration-mismatch`, `registration-unverifiable`, `worktree-locked`, `dirty`, `artifact-unretained`, `content-unverifiable`, `held`, `unretired`, `tombstone-failed`, `rename-failed`, `tombstone-unverifiable` | a gate failed; nothing was removed. stderr names the path and the reason |
+| `refused` | `unsafe-path`, `unknown-content`, `pending-generation`, `claim-unreadable`, `state-unreadable`, `state-missing`, `state-corrupt`, `owner-unprovable`, `owner-uncorroborated`, `registration-mismatch`, `registration-unverifiable`, `worktree-locked`, `dirty`, `artifact-unretained`, `content-unverifiable`, `held`, `unretired`, `ledger-unreadable`, `tombstone-failed`, `rename-failed`, `tombstone-unverifiable` | a gate failed; nothing was removed. stderr names the path and the reason |
 | `ambiguous` | `no-ownership-evidence`, `ownership-unresolved`, `shared-with-live-thread` | an existing copy this thread may not be the only owner of: REPORT-ONLY, never selected |
 
 | exit | result `status` | meaning |

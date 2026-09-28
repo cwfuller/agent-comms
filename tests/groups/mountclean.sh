@@ -264,6 +264,57 @@ rt_state retire rt_alpha-grok >/dev/null
 RT_SH2="$(rt_cm --thread rt_alpha --yes)"; RT_SH2C=$?
 [ "$RT_SH2C" = 0 ] && rt_line "$RT_SH2" "$RT_B1" removed proven && rt_gone "$RT_B1" \
   && ok "once every thread sharing the copy is retired it is removed" || fail "shared then retired (rc=$RT_SH2C): $RT_SH2"
+# Ownership is re-proven UNDER the claim: a direct turn on the leg thread `rt-lima-grok` — a live
+# thread in its own right — is recorded after the unlocked check and before the claim.
+rt_sets set-l "rt-lima-grok" grok
+RT_L1="$(rt_turn "rt-lima-grok" grok set-l)"
+rt_state retire rt-lima >/dev/null
+cat > "$WORK/rt-hook-own" <<EOF
+#!/bin/bash
+[ "\$1" = prechecked ] || exit 0
+mkdir -p "$RT/.comms/logs/rt-late"
+printf 'thread\trt-lima-grok\nset\t\nagent\tgrok\nartifact\t%s\n' "$RT_ART" > "$RT/.comms/logs/rt-late/turn.tsv"
+EOF
+chmod +x "$WORK/rt-hook-own"
+RT_LO="$(COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-own" rt_cm --thread rt-lima --yes)"; RT_LOC=$?
+if [ -n "$RT_L1" ] && [ "$RT_LOC" = 4 ] && rt_line "$RT_LO" "$RT_L1" ambiguous shared-with-live-thread && rt_intact "$RT_L1"; then
+  ok "a live thread that starts sharing the copy before the claim keeps it: ownership is re-proven under the claim"
+else
+  fail "late shared use (rc=$RT_LOC, l1=$RT_L1): $RT_LO"
+fi
+rm -rf "$RT/.comms/logs/rt-late"
+RT_LR="$(rt_cm --thread rt-lima --yes)"; RT_LRC=$?
+[ "$RT_LRC" = 0 ] && rt_line "$RT_LR" "$RT_L1" removed proven && rt_gone "$RT_L1" \
+  && ok "the refused apply released its claim: once the late use is gone the next apply removes the copy" \
+  || fail "after the late use (rc=$RT_LRC): $RT_LR"
+
+# ---- evidence that cannot be read refuses the whole call before anything is selected ----
+RT_M1="$(rt_turn rt-mike grok)"
+rt_state retire rt-mike >/dev/null
+RT_MK="$(ls "$RT/.comms/state/retired/"rt-mike-* 2>/dev/null | head -1)"
+cp "$RT_MK" "$WORK/rt-marker"; printf 'thread=rt-other\nretired_at=x\n' > "$RT_MK"
+RT_MC="$(rt_cm --thread rt-mike --yes)"; RT_MCC=$?
+rt_state retired rt-mike >/dev/null; RT_MRC=$?
+cp "$WORK/rt-marker" "$RT_MK"
+if [ -n "$RT_M1" ] && [ -n "$RT_MK" ] && [ "$RT_MCC" = 4 ] && [ "$RT_MRC" = 4 ] \
+   && grep -q '^clean-mounts-result v1 status=blocked .* selected=0 ' <<<"$RT_MC" && rt_intact "$RT_M1"; then
+  ok "a retirement marker that names another thread is unverifiable: exit 4, nothing selected"
+else
+  fail "corrupt marker (rc=$RT_MCC/$RT_MRC, m1=$RT_M1): $RT_MC"
+fi
+chmod 000 "$RT/.comms/grades/sets.tsv"
+RT_LS="$(rt_cm --thread rt-mike --yes)"; RT_LSC=$?
+chmod 644 "$RT/.comms/grades/sets.tsv"
+RT_RUN1="$(ls -d "$RT/.comms/logs/"*/turn.tsv | head -1)"
+chmod 000 "$RT_RUN1"
+RT_LT="$(rt_cm --thread rt-mike --yes)"; RT_LTC=$?
+chmod 644 "$RT_RUN1"
+if [ "$RT_LSC" = 4 ] && [ "$RT_LTC" = 4 ] && grep -q '^clean-mounts-result v1 status=blocked .* selected=0 ' <<<"$RT_LS" \
+   && grep -q '^clean-mounts-result v1 status=blocked .* selected=0 ' <<<"$RT_LT" && rt_intact "$RT_M1"; then
+  ok "an unreadable set index or run record refuses the whole call: ownership is never proven on partial evidence"
+else
+  fail "unreadable ledger (rc=$RT_LSC/$RT_LTC): $RT_LS / $RT_LT"
+fi
 
 # ---- interruption at each destructive boundary: the re-run finishes, peers are untouched ----
 RT_PEER="$RT_G1"   # unproven, so every run below must leave it exactly as it is

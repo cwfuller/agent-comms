@@ -490,6 +490,10 @@ waits on any other ident. Load-bearing choices:
   rule, read through the repo's own git dir so a gitfile inside the mount is never followed.
   Equal means every byte is recoverable after the copy is gone. Asides (previous generations kept
   for a straggling cwd holder) pass the same test.
+- **The scan decides nothing the claim does not re-decide.** A leg ident is shared the moment a
+  live thread of the leg's literal name runs a turn in it, and that can happen between the scan and
+  the claim. So under the claim the retirement, the hold and the ledger ownership are read again,
+  not reused; only a turn that starts AFTER the claim is excluded by the claim itself.
 - **Removal is a journaled rename.** Under a held claim and after every gate re-runs, the record is
   written into a fresh `.retire.<ident>.XXXXXX`, the ident is renamed into it, the one admin
   registration whose back-pointer names the tree is dropped, and the tombstone is deleted. A kill

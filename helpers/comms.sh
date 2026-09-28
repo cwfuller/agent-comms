@@ -67,7 +67,7 @@
 #                               the only authority `clean mounts --thread` accepts (complete, idle
 #                               and a stopped reviewer never are). Keyed on the RAW thread.
 #                               retired: exit 0 retired / 3 not retired / 4 marker unverifiable
-#   stalled [minutes]          threads awaiting a reply older than N minutes (default 15)
+#   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
 #   presence <claim|beat|others|release|expire|with-beat> [--name N] [--instance I]
 #            [--role R] [--state S] [--pid P] [--force <name>] [--no-heartbeat]
 #            [--timeout-secs N] [--timeout-mark F] [-- <cmd>]
