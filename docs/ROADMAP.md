@@ -663,7 +663,22 @@ a branch, so the default path defeats the guidance.
 design: ignored files off a regenerable list, secrets and nested repos block; processes with a
 cwd or open file inside block (lsof); an owner stamp from `worktree new` ties a worktree to its
 presence record. Still NOT built: the automatic retire after `integrate` below (basis: only after
-explicit retire has run cleanly for a while), and per-thread mount reaping.
+explicit retire has run cleanly for a while).
+
+**Per-thread mount reaping BUILT 2026-09-28 (basis task 88)**, as `comms.sh state retire <thread>`
+plus `comms.sh clean mounts --thread <thread> [--yes]` (COMMANDS.md; design in INTERNALS "Review-mount
+cleanup"). It follows the paragraph below with three things the design did not settle: authority
+is an explicit, durable retirement record rather than any reading of thread state; ownership is
+PROVEN from `grades/sets.tsv` and each run's `turn.tsv` (the one ident two threads can share is a
+leg thread that is also a thread's literal name, `T-codex`), with unproven copies report-only; and
+"dirty" means "not equal to an artifact the ledger names and `refs/agent-comms/artifacts` retains",
+because a mount is an uncommitted diff over its base by design. Removal is a journaled rename into
+`.retire.<ident>.*`, resumable after a kill at any boundary. The whole-store GC is unchanged.
+Measured on the development fixture only; not yet run against a live store. Open: a turn that fails
+after staging but before recording its session leaves a copy both GCs treat differently (the
+whole-store GC reads a missing record as "no owner"; `--thread` refuses it as `state-missing`,
+matching the runner) — if these accumulate in practice, the runner could record the artifact and
+a "staged, no session yet" marker so `--thread` can prove them too.
 
 **Why it exists.** A cleanup pass removed **29 session worktrees, 49 mount worktrees and 39
 branches**, oldest dating to 2026-08-28. Every creation verb has no retirement counterpart:
@@ -702,7 +717,7 @@ the branch is unlocked, so another process can advance it before the delete. And
 after a landing the primary is commonly ON main, so it coincidentally passes while asking the
 wrong question.
 
-**Mount reaping COMPOSES with `clean mounts`** — a `--thread`/ident filter computing exact
+**Mount reaping COMPOSES with `clean mounts`** *(built — see above)* — a `--thread`/ident filter computing exact
 identities through `acp_mount_ident`, reusing its validated-store, repo-key scope, physical-path
 and `.root` checks. **Not** hung off `state complete`: completion is not terminal. If wired there
 at all, mark complete FIRST so a cleanup failure is retryable.
@@ -3587,6 +3602,11 @@ STILL OPEN (why the item is not closed):
   or its ownership is unprovable, and a recycled claim pid reads as live, so a single permanently
   ambiguous ident can wedge GC of unrelated stale idents. This is fail-SAFE (it never deletes a live
   mount, only declines to delete), and per-ident retained claims would relax it later if needed.
+  *(2026-09-28: `clean mounts --thread` is the per-thread alternative that does not wedge — it never
+  consults another thread's ident. Its claim reading also settles advisories (b) and (c) below for
+  that path: a readable zero-byte claim is a release tombstone, as `mount_claim_take` reads it, and
+  a non-regular `.claim.N` refuses. Its scan/claim/delete interleaving is tested deterministically
+  through a test seam, which is (d) for that path. The whole-store GC keeps its old behaviour.)*
 
   **Advisory follow-ups (impl r2 double-APPROVE, non-blocking — carry into increment 2's rework
   of this code).** (a) `clean mounts` and `unmount_artifact` never-follow a symlinked `view/tree`,

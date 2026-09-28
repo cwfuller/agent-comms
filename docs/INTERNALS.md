@@ -461,6 +461,51 @@ way the mount's PATH shim is documented as defence in depth rather than containm
 The recovery walk the log is designed to support is in
 [PROTOCOL.md](PROTOCOL.md#recovering-a-loop-from-the-log).
 
+## Review-mount cleanup: the whole store vs one retired thread
+
+Mounts live outside the repo, under `<base>/<repo-key>/<ident>/` (`runphase.sh`, "EXTERNAL MOUNT
+STORE"). Two verbs remove them, and they answer different questions.
+
+`clean mounts` is the whole-store GC: it refuses the whole repo-key when any one ident is live or
+unprovable. That is safe and, on a machine that is always reviewing something, rarely runnable.
+`clean mounts --thread <T>` removes only what one RETIRED thread owns, and never reads, claims or
+waits on any other ident. Load-bearing choices:
+
+- **Retirement is a record, not an inference.** `state complete` is written every round and a loop
+  resumes past it; an exited queue owner or an old timestamp is what a paused loop between rounds
+  looks like. Only the caller knows the work is terminal, so it writes `state retire <T>`
+  (`.comms/state/retired/`, keyed on a digest of the raw thread). A held thread is refused too.
+- **Identities are computed, ownership is proven.** The idents are `acp_mount_ident` over (root, T, A)
+  and (root, T-A, A); the hash already separates `a/b` from `a_b` and `task-1` from `task-10`. What
+  the hash cannot separate is a leg thread that is also some thread's literal name (T's leg to
+  codex and a thread called `T-codex`, both reviewed by codex, are ONE ident). The ledgers can:
+  `grades/sets.tsv` records every dispatched leg and each run's `turn.tsv` records its thread,
+  agent and review set. Every recorded use must belong to T or another retired thread; otherwise
+  the copy is report-only. The ledgers live under `.comms/`, outside every mount, where a contained
+  child cannot write.
+- **"Dirty" means "not a retained artifact".** A mount is an uncommitted diff over its base by
+  design, so git's dirtiness (and `git worktree remove` without `--force`) would refuse every
+  mount, and with `--force` would prove nothing. The gate is tree identity against an artifact the
+  thread's ledger names and `refs/agent-comms/artifacts` still retains — `mount_tree_matches`'
+  rule, read through the repo's own git dir so a gitfile inside the mount is never followed.
+  Equal means every byte is recoverable after the copy is gone. Asides (previous generations kept
+  for a straggling cwd holder) pass the same test.
+- **Removal is a journaled rename.** Under a held claim and after every gate re-runs, the record is
+  written into a fresh `.retire.<ident>.XXXXXX`, the ident is renamed into it, the one admin
+  registration whose back-pointer names the tree is dropped, and the tombstone is deleted. A kill
+  at any boundary leaves either the untouched ident or a tombstone the next run finishes; a delete
+  that fails part-way reports `incomplete`, never `removed`. No repo-wide `git worktree prune`,
+  which would also prune a peer worktree on an unmounted volume.
+
+**Residual risks, accepted.** (1) The ledgers ARE the evidence: deleting run records can hide a
+direct turn on a leg-shaped thread name, and the shared copy would then read as T's alone. (2) A
+detached process still holding a cwd inside the copy loses its directory, as it does when the
+runner reaps an aside. (3) The isolated provider home (`home/`) is part of the copy: its raw
+provider records go with it. The per-turn usage callers read was extracted into the run's
+`result.json` at turn end, before unmount, and stays. (4) A turn that failed after staging but
+before recording its session leaves a tree with no record; that copy refuses (`state-missing`)
+exactly as the runner itself refuses to trust it, and needs a human or the whole-store GC.
+
 ## ACP consult transport (acp.sh)
 
 Consults are synchronous by nature, so `/ask --via acp` bypasses the mailbox: one

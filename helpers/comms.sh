@@ -62,7 +62,12 @@
 #   state legacy [--days N] <id>...
 #                               mark ONLY the named ids legacy, each re-judged idle, with the
 #                               evidence written in; never by age alone. Exit 0 / 2 usage / 3 refused
-#   stalled [minutes]           threads awaiting a reply older than N minutes (default 15)
+#   state <retire|unretire|retired> <thread>
+#                               the caller's EXPLICIT, durable "this thread is terminal" record —
+#                               the only authority `clean mounts --thread` accepts (complete, idle
+#                               and a stopped reviewer never are). Keyed on the RAW thread.
+#                               retired: exit 0 retired / 3 not retired / 4 marker unverifiable
+#   stalled [minutes]          threads awaiting a reply older than N minutes (default 15)
 #   presence <claim|beat|others|release|expire|with-beat> [--name N] [--instance I]
 #            [--role R] [--state S] [--pid P] [--force <name>] [--no-heartbeat]
 #            [--timeout-secs N] [--timeout-mark F] [-- <cmd>]
@@ -134,6 +139,11 @@
 #                               GC this repo's EXTERNAL mount store (dry-run default;
 #                               refuses the whole repo-key on any live owner; --orphans reports
 #                               moved-checkout keys without deleting). No --as; needs no mailbox.
+#   clean mounts --thread <thread> [--yes]
+#                               remove ONE retired thread's proven review mounts (dry-run
+#                               default). Exact identities only; a busy target is skipped,
+#                               never the whole key. `clean-mounts-target v1` / `-result v1`
+#                               lines; exit 0 done / 3 retry later / 4 needs a human / 5 not retired
 #   lessons [--bytes N] [--surface P] [--file F]
 #                               bounded newest-first tail of docs/advisories.md (whole
 #                               "## " sections, never a byte slice). Exit 3 = truncated.
@@ -6576,6 +6586,65 @@ cmd_status() {
 
 state_dir() { echo "$(cmd_root)/state"; }
 
+# ---------- thread retirement: the caller's explicit "this thread is terminal" ----------
+# `complete` is NOT terminal — a loop marks a round complete and resumes — and an idle thread,
+# an exited queue owner or an old timestamp only say that nothing is running NOW. None of them
+# may authorize deleting a thread's warm review copies. Retirement is a separate, durable record
+# the caller writes when IT knows the work is over (basis: a terminal task); `clean mounts
+# --thread` accepts nothing else. Keyed through a digest of the RAW thread, never safe_name alone
+# (`a/b` and `a_b` share one safe_name), and the raw thread is stored inside and compared exactly.
+retire_thread_ok() {  # <thread> — non-empty and one line (it is stored and compared as a line)
+  case "$1" in ''|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  return 0
+}
+retire_marker() {  # <raw thread> -> the marker path
+  printf '%s/retired/%s-%s' "$(state_dir)" "$(safe_name "$1" | cut -c1-40)" "$(printf 'retired\0%s' "$1" | hash_stdin)"
+}
+retire_state() {  # <raw thread> -> 0 retired (prints retired_at) | 3 not retired | 4 present but unverifiable
+  local f first at=""
+  f="$(retire_marker "$1")"
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then return 3; fi
+  [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ] || return 4
+  { IFS= read -r first && IFS= read -r at; } < "$f" 2>/dev/null || true
+  [ "$first" = "thread=$1" ] || return 4
+  printf '%s' "${at#retired_at=}"
+}
+cmd_state_retire() {  # retire|unretire|retired <thread>
+  local sub="$1" f rc=0 at=""; shift
+  [ "$#" -eq 1 ] || usage_err "state $sub: exactly one thread argument is required"
+  retire_thread_ok "$1" || usage_err "state $sub: the thread must be non-empty and a single line"
+  f="$(retire_marker "$1")"
+  at="$(retire_state "$1")" || rc=$?
+  case "$sub" in
+    retired)
+      case "$rc" in
+        0) echo "retired retired_at=$at" ;;
+        3) echo "not retired" ;;
+        *) echo "state retired: a marker exists at $f but does not name this thread — unverifiable" >&2 ;;
+      esac
+      return "$rc" ;;
+    retire)
+      case "$rc" in
+        0) echo "already retired (retired_at=$at)"; return 0 ;;
+        4) die "state retire: a marker exists at $f but does not name this thread — refusing to overwrite it" ;;
+      esac
+      mkdir -p "$(dirname "$f")" || die "state retire: cannot create $(dirname "$f")"
+      if ! { printf 'thread=%s\nretired_at=%s\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$f.tmp.$$" \
+             && command mv -f "$f.tmp.$$" "$f"; }; then
+        rm -f "$f.tmp.$$" 2>/dev/null || true
+        die "state retire: could not write $f"
+      fi
+      echo "retired: its review mounts may now be removed with 'comms.sh clean mounts --thread <thread>' (dry run; --yes applies)" ;;
+    unretire)
+      case "$rc" in
+        3) echo "not retired"; return 0 ;;
+        4) die "state unretire: a marker exists at $f but does not name this thread — refusing to remove it" ;;
+      esac
+      rm -f "$f" || die "state unretire: could not remove $f"
+      echo "unretired" ;;
+  esac
+}
+
 # (safe_name is defined above cmd_workspace — thread/message/cache values all
 # become filename components, so anything outside [A-Za-z0-9._-] maps to '_'.)
 
@@ -6976,7 +7045,8 @@ cmd_state() {
       ;;
     idle) cmd_state_idle "$@" ;;
     legacy) cmd_state_legacy "$@" ;;
-    *) die "state: unknown subcommand '$sub' (get|list|complete|idle|legacy)" ;;
+    retire|unretire|retired) cmd_state_retire "$sub" "$@" ;;
+    *) die "state: unknown subcommand '$sub' (get|list|complete|idle|legacy|retire|unretire|retired)" ;;
   esac
 }
 
@@ -7048,12 +7118,15 @@ cmd_verdict() {
 }
 
 cmd_clean() {
-  local as="" yes=false orphans=false mode="" targets=()
+  local as="" yes=false orphans=false mode="" targets=() thread="" thread_set=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --as) need_value "clean" $# "$1"; shift; as="$1" ;;
       --yes) yes=true ;;
       --orphans) orphans=true ;;
+      --thread) need_value "clean" $# "$1"; shift
+                [ "$thread_set" = false ] || usage_err "clean mounts: --thread names ONE thread; run it once per thread"
+                thread="$1"; thread_set=true ;;
       *) [ -z "$mode" ] && mode="$1" || die "clean: unexpected argument '$1'" ;;
     esac
     shift
@@ -7067,9 +7140,13 @@ cmd_clean() {
     local -a mflags=()
     [ "$yes" = true ] && mflags+=(--yes)
     [ "$orphans" = true ] && mflags+=(--orphans)
+    # Forwarded even when empty: runphase refuses an empty selector rather than reading it as
+    # "no selector", which would be the whole-repo GC.
+    [ "$thread_set" = true ] && mflags+=(--thread "$thread")
     "$rp" clean-mounts ${mflags[@]+"${mflags[@]}"}
     return $?
   fi
+  [ "$thread_set" = false ] || usage_err "clean: --thread applies only to 'clean mounts'"
   [ -n "$as" ] || die "clean: --as <agent> is required (registered: $(registry_agents))"
   [ -n "$mode" ] || mode="workspace"
   local root ws inbox

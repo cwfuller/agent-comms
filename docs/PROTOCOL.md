@@ -475,7 +475,7 @@ in the reading agent's flow, from message frontmatter), and gives any dashboard 
 source of truth beyond pane titles — but a state write failure can never block the
 message flow (writes are non-fatal by construction).
 
-Inspection: `comms.sh state list | get <thread> | complete <thread>`, and
+Inspection: `comms.sh state list | get <thread> | complete <thread> | retired <thread>`, and
 `comms.sh stalled [minutes]` lists threads awaiting a reply longer than the threshold
 (default 15m) and marks a matching file still in the target inbox as `inbox=unread`.
 That persisted-file evidence outranks a prior notification result.
@@ -487,6 +487,20 @@ change and no message on the thread for N days (default 14); it changes nothing.
 each at marking time and refusing any that is not idle, and writes the evidence and the prior
 status into the state file (`legacy_*` fields). A legacy thread leaves `stalled` and the status
 shout; it is not `complete`, and the next `send` on it resumes it as in-progress.
+
+**Retirement is the caller's, and it is the only thing that frees a thread's review copies.**
+`complete`, `legacy`, an idle thread, an exited queue owner and an old timestamp each describe a
+round that is not running NOW — which is also what a paused or resumable loop between rounds
+looks like. None of them may authorize deleting that thread's warm mounts. Whoever owns the
+loop's lifecycle records the terminal decision explicitly: `comms.sh state retire <thread>`
+(Basis does this for a terminal task; `state unretire` withdraws it for a reopened one). The
+record lives in `.comms/state/retired/`, keyed on a digest of the RAW thread — never `safe_name`
+alone, which maps `a/b` and `a_b` to one name — and holds the thread for an exact comparison.
+`comms.sh clean mounts --thread <thread> [--yes]` then removes exactly the copies that thread
+provably owns (its direct turns' mount, its panel legs' mounts, and a crashed run's throwaway),
+refuses a held thread, and never touches another thread's mount or anything under `.comms/`.
+Cleanup is separate from landing: it can be run after it, fail, and be re-run (exit 3 = retry
+later; 4 = a human must look). See COMMANDS.md for the gates and the result lines.
 
 ## Coordinator event log
 

@@ -10,6 +10,7 @@ transport	parallel
 panel	parallel
 history	parallel
 mounts	parallel
+mountclean	parallel
 presence	serial
 statewait	parallel
 harness	parallel

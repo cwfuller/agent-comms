@@ -190,9 +190,11 @@ Verbs that a program drives classify further — `integrate`,
 | `state list \| get <thread> \| complete <thread>` | thread state inspection / closure (this workspace) |
 | `state idle [--days N]` | REPORT ONLY: one `idle id=<id> idle_days= last_activity= status= awaiting= unread=` line per thread, across every workspace, that is not complete or legacy and has had neither a state change (the later of its send time and the state file's mtime) nor a message on the thread (any `.md` under `.comms/`, its inboxes or `archive/`, by mtime) for N days (default 14, 1..36500); then a summary line. `<id>` is the state file's stem. Changes nothing. A message file that cannot be read fails the report (exit 1) — nothing is called idle on partial evidence |
 | `state legacy [--days N] <id>...` | mark exactly the named ids legacy — never by age alone: no ids is a usage error (exit 2), and there is no "all". Each id is re-judged at marking time with the same test as `idle` and refused (exit 3, others still processed) when it is not idle for N days, already complete or legacy, unknown, or its evidence cannot be read. A mark sets `status: legacy` and `awaiting_from: none` and records `legacy_marked_at`, `legacy_prior_status`, `legacy_prior_awaiting` and `legacy_evidence` (idle days, last activity, unread count) in the state file, keeping its mtime. Legacy is not `complete`: it only drops the thread from `stalled` and the status shout, and the next `send` on the thread resumes it as in-progress |
+| `state retire \| unretire \| retired <thread>` | the caller's EXPLICIT, durable record that a thread is terminal — the only authority `clean mounts --thread` accepts. `complete`, `idle`, `legacy`, an exited queue owner and an old timestamp never are: each describes an idle round, which is what a paused or resumable loop looks like. Written by whoever owns the loop's lifecycle (Basis retires a terminal task's thread) to `.comms/state/retired/<slug>-<digest>`, keyed on a digest of the RAW thread and holding it for an exact comparison, so `a/b` and `a_b` (one `safe_name`) are retired separately. `retire` is idempotent (keeps the first `retired_at`); `unretire` withdraws it for a reopened task. `retired` prints `retired retired_at=<ts>` (exit 0), `not retired` (exit 3), or refuses a marker that does not name the thread (exit 4); `retire`/`unretire` refuse such a marker (exit 1). A thread that is empty or not one line is a usage error (exit 2) |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |
 | `clean --as <agent> [workspace\|all\|archive\|<filename>] [--yes]` | guarded delete; without `--yes` it only lists what it would delete. `workspace` (the default): this workspace's messages in `<agent>`'s own inbox and in `archive/`. `all`: every file in every registered inbox (the review twins' included) and in `archive/`, every workspace. `archive`: all of `archive/`. `<filename>`: that basename wherever it sits in a registered inbox or `archive/` (exit 1 when it is nowhere) |
 | `clean mounts [--yes] [--orphans]` | GC this repo's EXTERNAL mount store (`${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts`, or `COMMS_MOUNT_BASE`); dry-run without `--yes`; scoped to this repo's `<repo-key>` and refuses the whole key if any owner is live or unprovable; `--orphans` REPORTS moved-checkout keys without deleting. Needs no `--as` |
+| `clean mounts --thread <thread> [--yes]` | remove the review mounts ONE retired thread owns, and nothing else; see [clean mounts --thread](#clean-mounts---thread-one-retired-threads-review-copies). Dry-run without `--yes`. Selects nothing (exit 5) unless `state retired <thread>` holds, and refuses a held thread (exit 4). Never falls back to the whole-store GC, and never reads, claims or waits on another thread's mount. `--orphans` or any other argument with `--thread` is a usage error (exit 2) |
 | `lessons [--bytes N] [--surface P] [--file F]` | bounded newest-first tail of the current worktree's `docs/advisories.md` |
 | `archive-search <pattern> [--bytes N] [--limit K]` | bounded newest-first search of `archive/` across workspaces |
 | `route [--probe] [--task T\|--file F\|--current-tier T\|--context-tokens N\|--] <task>` | classify an `/auto` query: `plan: yes\|no`, implementer `effort`, and abstract `tier` (`fast\|balanced\|strong`). The decision backend is **opt-in**: `COMMS_ROUTE_BACKEND=typesafe` (alias `jev`) or `COMMS_ROUTE=1`. A TypeSafe key alone does not enable it. `COMMS_ROUTE_STUB` selects the stub backend (tests). Register another backend in `helpers/route_backend.py`. Policy is composed in code (overrides, low-confidence → `balanced`, then one-step up on effort and tier, cache-sticky). Fail-open is not raised. `COMMS_ROUTE_CURRENT_TIER` / `COMMS_ROUTE_CONTEXT_TOKENS` are honoured when the flags are omitted (CLI wins; invalid ambient values are ignored). Prompt overrides still apply when an enabled backend errors or returns an unusable body. Fail-open with no backend. Never selects a reviewer or a vendor model id. `COMMS_ROUTE=0` disables. Every classification (not `disabled`) is saved to the main repo's `.comms/route-decisions/implementer/<id>.json` (UTC time, workspace, bounded state, whether anything was sent, raw answers, the ten keys) and the id printed as an eleventh line, `route_id:`, which `/auto` stamps on the loop's first request; only where git confirms the record directory and the exact record and temp paths are ignored (else a stderr note and no record); the directory is not env-settable and a failed write only warns. An identical repeat (same task, policy, backend, model, questions, current tier and context) within `COMMS_ROUTE_DEDUP_SECS` (default 900, 0 = off) answers from its record with the same `route_id` and sends nothing; fail-opens and probes are never reused. `--probe` runs the path without contacting any backend (`source: probe`, record marked `probe: true`); use it instead of a throwaway task. Optional `COMMS_ROUTE_LOG` JSONL (UTC; a reuse logs `reused`) |
@@ -514,6 +516,78 @@ verify-result v1 status=verified cand=<oid>
 - `cand` is the full commit id that was verified — the resolved `<rev>`, never the working tree. Uncommitted changes are not verified; for the default `HEAD`, tracked ones draw a stderr note saying so.
 - The suite's own output goes to stderr (and whole into the log), so nothing it prints can appear on stdout as a result line. A failure prints no result line, except a suite timeout (exit 18), which prints `verify-result v1 status=refused reason=suite_timeout cand=<oid> timeout_secs=<n>`; anything but `status=verified` means nothing was verified.
 - `verify fresh` itself lands nothing and records no attestation; a suite that attests its own green run (as this repo's `tests/run.sh` does) still does so. Parsers must ignore unknown keys; a breaking change bumps `v1`.
+
+#### clean mounts --thread: one retired thread's review copies
+
+`clean mounts` (no `--thread`) is all-or-nothing: one live or unprovable ident anywhere refuses the
+whole repo-key, so on a machine that is always reviewing something it rarely runs. `--thread`
+removes exactly the copies ONE retired thread owns. The caller's contract:
+
+1. **Retire first.** `comms.sh state retire <thread>` when the work is terminal (Basis: a closed
+   task), and never otherwise. Cleanup is a separate step you can run, fail and re-run after the
+   landing; it is not part of it.
+2. **Dry-run, then apply.** `comms.sh clean mounts --thread <thread>` lists what it would do;
+   `--yes` does it. Apply re-checks every target under its own exclusion claim, so the dry run
+   is a preview, never a licence.
+3. **Retry on 3; hand exit 4 to a human.** A busy or half-finished target resumes on the next
+   run; a refused or report-only one needs someone to look.
+
+**What is selected.** For `<thread>` T and each agent A — every registered identity, plus every
+agent the ledgers record for T, so a reviewer since dropped from the roster still counts — the
+exact identities `acp_mount_ident(root, T, A)` (a direct turn) and `acp_mount_ident(root, T-A, A)`
+(T's panel leg to A). Nothing is matched by name, substring, age or task number. An identity is
+selected only when its ownership is PROVEN from `.comms/grades/sets.tsv` (one row per dispatched
+leg) and each run's `.comms/logs/<run>/turn.tsv`: every recorded use must belong to T or to
+another retired thread. The only way two threads share an identity is a leg thread that is also
+a thread's literal name (T's leg to codex is `T-codex`); such a copy is report-only until both
+are retired. A `tmp-<run>` throwaway is selected when a run T owns left one behind (a crashed
+turn); its name is derived from that run's directory. A ledger that exists but cannot be read
+refuses the whole call (exit 4).
+
+**Gates, each fail-closed and re-run under the claim:** the ident is a real directory at its own
+physical path; it holds only what the runner makes (`view/tree`, `home/`, `.state.*`, `.claim.*`,
+`.aside.*/held`) and no interrupted restage; no claim is live (a pid counts as dead only when
+`ps` says so or a v2 record's start time differs); the session record is present, well-formed
+and corroborated by the acpx record for this tree, and no queue lease exists; the tree and its
+admin registration name each other, the admin is not locked and git lists the tree once; and
+the tree and every aside EQUAL an artifact the thread's ledger names that
+`refs/agent-comms/artifacts` still retains, with no ignored residue. A mount is dirty against
+HEAD by design, so "dirty" here means "differs from its retained artifact".
+
+**Removal** renames the ident into `<store>/<repo-key>/.retire.<ident>.XXXXXX` (record written
+first), drops that one admin registration after re-verifying its back-pointer, then deletes the
+tombstone. No `git worktree remove --force`, no repo-wide prune. An interrupted run leaves either
+the untouched ident or a tombstone the next run of the same thread finishes. Nothing under
+`.comms/` is touched: replies, compositions, run records and their `usage` stay.
+
+One line per considered identity on stdout, then the summary, always last:
+
+```
+clean-mounts-target v1 status=<s> reason=<r> kind=durable|throwaway use=direct|panel|run agent=<a> ident=<ident> path=<path>
+clean-mounts-result v1 status=<s> mode=dry-run|apply selected=N removed=N absent=N would_remove=N skipped=N incomplete=N refused=N ambiguous=N thread=<thread>
+```
+
+| target `status` | `reason` | meaning |
+|---|---|---|
+| `would-remove` / `removed` | `proven`, `interrupted` | selected and (to be) removed; `interrupted` = finishing an earlier run's tombstone |
+| `absent` | `already-absent` | selected and already gone — an idempotent success |
+| `skipped` | `busy-claim`, `busy-owner`, `claim-unverifiable` | a runner or queue owner holds it (or `ps` could not say); re-run later |
+| `incomplete` | `remove-failed`, `admin-unverified`, `admin-remove-failed` | removal started and could not finish; the tombstone is kept and the next run resumes it. Never reported as removed |
+| `refused` | `unsafe-path`, `unknown-content`, `pending-generation`, `claim-unreadable`, `state-unreadable`, `state-missing`, `state-corrupt`, `owner-unprovable`, `owner-uncorroborated`, `registration-mismatch`, `registration-unverifiable`, `worktree-locked`, `dirty`, `artifact-unretained`, `content-unverifiable`, `held`, `unretired`, `tombstone-failed`, `rename-failed`, `tombstone-unverifiable` | a gate failed; nothing was removed. stderr names the path and the reason |
+| `ambiguous` | `no-ownership-evidence`, `ownership-unresolved`, `shared-with-live-thread` | an existing copy this thread may not be the only owner of: REPORT-ONLY, never selected |
+
+| exit | result `status` | meaning |
+|---|---|---|
+| 0 | `complete` (apply) / `ready` (dry run) | every selected identity is gone, or would be |
+| 3 | `retry` | something was skipped or is incomplete, and nothing needs a human |
+| 4 | `blocked` | something was refused or is report-only, the thread is held, or its retirement record or a ledger cannot be read |
+| 5 | `not-retired` | the thread carries no retirement; nothing was selected |
+| 1 | `store-error` | the mount store or this repo's git dir cannot be resolved, or the store's `.root` names another checkout |
+| 2 | — | usage: a missing, empty or multi-line thread, `--orphans`, or any other argument |
+
+Parsers must ignore unknown keys; a breaking change bumps `v1`. `COMMS_TEST_CLEAN_MOUNTS_HOOK` is
+a test seam (an executable called at each boundary: `prechecked`, `claimed`, `tombstoned`,
+`renamed`, `unregistered`, `removed`) and is never set in normal use.
 
 ### `docs/loopspec/check.sh`
 
