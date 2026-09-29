@@ -324,8 +324,10 @@ rt_auto_ref="$(rt_refusals "$rt_auto_rec")"
 if [ -n "$rt_auto_ref" ]; then printf '%s\n' "$rt_auto_ref" | while IFS= read -r l; do say "  on it, $l"; done
 elif [ -n "$rt_auto" ]; then say "  it can run the default codex review"; fi
 # `bundled` is the adapter's own codex, whose version is unknown: a baseline that declares a
-# minimum runtime can never be proven servable there.
-rt_bundled_ref="$(printf '%s\n' "$(rt_check bundled)" | awk -F'\t' '$1=="baseline" && $5=="refused" {print $2 " needs codex >= " $4}')"
+# minimum runtime can never be proven servable there. Only a runtime-minimum refusal is about the
+# runtime; a refused (model, effort) pair is refused on every runtime, is already named above with
+# its own reason, and no newer codex fixes it — so it never becomes upgrade advice here.
+rt_bundled_ref="$(printf '%s\n' "$(rt_check bundled)" | awk -F'\t' '$1=="baseline" && $5=="refused" && $4!="-" && index($6, "needs codex >=") {print $2 " needs codex >= " $4}')"
 [ -z "$rt_bundled_ref" ] || say "  note: choosing 'bundled' refuses every baseline codex review ($rt_bundled_ref; the adapter's own codex cannot be shown to serve it)"
 RT="$(ask "  runtime: auto | bundled | /path/to/codex" "${COMMS_ACP_CODEX_PATH:-auto}")"
 case "$RT" in auto|"") set_user COMMS_ACP_CODEX_PATH "" ;;

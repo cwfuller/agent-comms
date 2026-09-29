@@ -1515,7 +1515,13 @@ ST_OUT="$(st -- "$COMMS" setup --yes </dev/null 2>&1)"; A=$?
 ST_OLD="$WORK/st-old-codex"; mkdir -p "$ST_OLD"; printf '#!/bin/sh\necho "codex-cli 0.155.1"\n' > "$ST_OLD/codex"; chmod +x "$ST_OLD/codex"
 ST_BMIN="$(awk -F'\t' '$1=="pair" && $2=="codex" && $3=="acp-mounted" && $4=="gpt-6.1-sol"{print $6}' "$REPO/helpers/policy-map.tsv")"
 ST_OUT="$(st PATH="$ST_OLD:$PATH" -- "$COMMS" setup --yes </dev/null 2>&1)"; A=$?
+# A refused (model, effort) PAIR is not a runtime problem: the bundled note must not relabel it as
+# "needs codex >= -" or advise a newer codex, since no runtime serves luna at ultra.
+ST_PAIR="$(st PATH="$ST_OLD:$PATH" COMMS_ACP_CODEX_MODEL=gpt-5.6-luna COMMS_ACP_CODEX_EFFORT=ultra -- "$COMMS" setup --yes </dev/null 2>&1)"
 [ "$A" = 0 ] && [ -n "$ST_BMIN" ] && printf '%s\n' "$ST_OUT" | grep -qF "auto-detected: $ST_OLD/codex (0.155.1)" \
+  && ! printf '%s\n' "$ST_PAIR" | grep -qF 'needs codex >= -' \
+  && ! printf '%s\n' "$ST_PAIR" | grep -qF "note: choosing 'bundled'" \
+  && printf '%s\n' "$ST_PAIR" | grep -qF "does not accept effort 'ultra'" \
   && printf '%s\n' "$ST_OUT" | grep -qF "every default codex review is REFUSED: model 'gpt-6.1-sol' (baseline) needs codex >= $ST_BMIN" \
   && printf '%s\n' "$ST_OUT" | grep -qF "note: choosing 'bundled' refuses every baseline codex review (gpt-6.1-sol needs codex >= $ST_BMIN" \
   && ! printf '%s\n' "$ST_OUT" | grep -q 'falls back to GPT' \
