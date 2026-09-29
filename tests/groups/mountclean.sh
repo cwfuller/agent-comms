@@ -237,6 +237,30 @@ RT_SY="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_SYC=$?
 rm "$RT_E1"; mv "$RT_E1.real" "$RT_E1"
 [ "$RT_SYC" = 4 ] && rt_line "$RT_SY" "$RT_E1" refused unsafe-path && rt_intact "$RT_E1" \
   && ok "a symlink substituted for the ident dir refuses and its target survives" || fail "ident symlink (rc=$RT_SYC): $RT_SY"
+# A glob over an unlistable dir reads as EMPTY. An unlistable view hid its dirty tree from `-d`, so
+# the registration went and the payload delete failed; once access returned, the replay deleted the
+# tree nothing had verified. Absent is concluded only from a listing that worked.
+printf 'unverified\n' > "$RT_E1/view/tree/sentinel.txt"; chmod u-rwx "$RT_E1/view"
+RT_UV="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_UVC=$?
+chmod u+rwx "$RT_E1/view"
+RT_UV2="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_UV2C=$?
+if [ "$RT_UVC" = 4 ] && rt_line "$RT_UV" "$RT_E1" refused content-unverifiable \
+   && [ "$RT_UV2C" = 4 ] && rt_line "$RT_UV2" "$RT_E1" refused dirty \
+   && [ -f "$RT_E1/view/tree/sentinel.txt" ] && rt_intact "$RT_E1" \
+   && [ -z "$(ls -d "$(dirname "$RT_E1")/.retire.$(basename "$RT_E1")".* 2>/dev/null)" ]; then
+  ok "an unlistable view refuses, and once access returns its unverified content is still judged and kept"
+else
+  fail "unlistable view (rc=$RT_UVC/$RT_UV2C): $RT_UV / $RT_UV2"
+fi
+rm -f "$RT_E1/view/tree/sentinel.txt"
+mkdir -p "$RT_E1/.aside.rt1/held"; printf 'unverified\n' > "$RT_E1/.aside.rt1/held/sentinel.txt"; chmod u-r "$RT_E1"
+RT_UI="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_UIC=$?
+chmod u+r "$RT_E1"
+[ "$RT_UIC" = 4 ] && rt_line "$RT_UI" "$RT_E1" refused content-unverifiable \
+  && [ -f "$RT_E1/.aside.rt1/held/sentinel.txt" ] && rt_intact "$RT_E1" \
+  && ok "a searchable but unlistable ident dir refuses: an aside it hides is never read as absent" \
+  || fail "unlistable ident dir (rc=$RT_UIC): $RT_UI"
+rm -rf "$RT_E1/.aside.rt1"
 (cd "$RT" && env "$RP" hold "$RT_ECHO" >/dev/null 2>&1)
 RT_HD="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_HDC=$?
 (cd "$RT" && env "$RP" release "$RT_ECHO" >/dev/null 2>&1)
@@ -320,6 +344,31 @@ rmdir "$RT/.comms/logs/rt-dirrec/turn.tsv" "$RT/.comms/logs/rt-dirrec"
 rt_none "$RT_SD" && rt_none "$RT_SG" && rt_none "$RT_SR" && rt_intact "$RT_B1" \
   && ok "a symlinked run dir, a symlinked logs dir or a directory-shaped record refuses the whole call" \
   || fail "unverifiable record shapes: $RT_SD / $RT_SG / $RT_SR"
+# A record cut short before its agent line (a run still writing it, or one written before records
+# carried an agent) or a leg row missing its agent column is an UNATTRIBUTABLE use, never an absent
+# one: dropping it left the panel ledger attributing the shared copy to retired rt_alpha alone.
+cp "$RT_DREC" "$WORK/rt-direct.full"; cp "$RT/.comms/grades/sets.tsv" "$WORK/rt-sets.full"
+sed '$d' "$WORK/rt-direct.full" > "$RT_DREC"
+RT_TR="$(rt_cm --thread rt_alpha --yes)"; RT_TRC=$?
+cp "$WORK/rt-direct.full" "$RT_DREC"
+printf 'set-b\treq\trt_alpha-grok\t1\tplan\t%s\tv1\t%s\tgrok\n' "$RT_ART" "$RT_HEAD" >> "$RT/.comms/grades/sets.tsv"
+RT_TS="$(rt_cm --thread rt_alpha --yes)"; RT_TSC=$?
+cp "$WORK/rt-sets.full" "$RT/.comms/grades/sets.tsv"
+if [ "$RT_TRC" = 4 ] && rt_line "$RT_TR" "$RT_B1" ambiguous ownership-unresolved \
+   && [ "$RT_TSC" = 4 ] && rt_line "$RT_TS" "$RT_B1" ambiguous ownership-unresolved && rt_intact "$RT_B1"; then
+  ok "a co-owner's record cut short before its agent, or a leg row without one, keeps the shared copy report-only"
+else
+  fail "incomplete co-owner evidence (rc=$RT_TRC/$RT_TSC): $RT_TR / $RT_TS"
+fi
+: > "$RT_DREC"
+RT_TE="$(rt_cm --thread rt_alpha --yes)"; RT_TEC=$?
+cp "$WORK/rt-direct.full" "$RT_DREC"
+printf 'set-b\treq\n' >> "$RT/.comms/grades/sets.tsv"
+RT_TN="$(rt_cm --thread rt_alpha --yes)"; RT_TNC=$?
+cp "$WORK/rt-sets.full" "$RT/.comms/grades/sets.tsv"
+[ "$RT_TEC" = 4 ] && rt_none "$RT_TE" && [ "$RT_TNC" = 4 ] && rt_none "$RT_TN" && rt_intact "$RT_B1" \
+  && ok "a run record or set-index row that names no thread refuses the whole call" \
+  || fail "threadless evidence (rc=$RT_TEC/$RT_TNC): $RT_TE / $RT_TN"
 rt_state retire rt_alpha-grok >/dev/null
 RT_SH2="$(rt_cm --thread rt_alpha --yes)"; RT_SH2C=$?
 [ "$RT_SH2C" = 0 ] && rt_line "$RT_SH2" "$RT_B1" removed proven && rt_gone "$RT_B1" \

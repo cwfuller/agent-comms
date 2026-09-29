@@ -548,10 +548,14 @@ run of T's could have named is report-only (`no-ownership-evidence` when it reco
 `run-mismatch` when it records another). Every run record is enumerated before any is read: a
 `.comms/logs` that is a symlink, a symlinked entry in it, or a `turn.tsv` that is not a regular
 file would hide a use, so each refuses the whole call. A ledger that exists but cannot be read
-refuses the whole call too (exit 4).
+refuses the whole call too (exit 4), as does a run record with no `thread` line or a `sets.tsv`
+row with fewer than three columns. A record of T or `T-<agent>` with no `agent` line (a run still
+writing it, or one written before records carried it) and a leg row without its agent are uses
+nobody can attribute: the copy they could name is report-only (`ownership-unresolved`).
 
 **Gates, each fail-closed and re-run under the claim:** the ident is a real directory at its own
-physical path; no claim is live (a pid counts as dead only when `ps` says so or a v2 record's
+physical path, and it, `view/` and every aside can be listed (a glob over one that cannot reads
+as empty: `content-unverifiable`); no claim is live (a pid counts as dead only when `ps` says so or a v2 record's
 start time differs) — read first, so a runner mid-restage is a `busy-claim` skip, not a refusal;
 it holds only what the runner makes (`view/tree`, `home/`, `.state.*`, `.claim.*`,
 `.aside.*/held`) and no restage no runner holds (`pending-generation`); the session record is present, well-formed

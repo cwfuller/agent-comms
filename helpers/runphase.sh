@@ -4301,16 +4301,17 @@ mount_scope_check() {  # <scope> <canonical main_root> -> 0 usable | 1 absent | 
 # must belong to T or to another RETIRED thread. An ident with no recorded use, or with a use
 # owned elsewhere, is REPORT-ONLY. Every run record is enumerated before any is read: one that is
 # not a regular file, or sits behind a symlink, refuses the whole call rather than vanishing from
-# the evidence. A throwaway (`tmp-<run>`) is named after safe_name of a run dir's BASENAME, which
-# several run dirs can share, so it is selected only when it records (.state.run, written by the
-# runner under its claim) the physical dir of a run T owns; any other copy is report-only.
+# the evidence; one that names no agent is a use no thread can be credited with, never no use. A
+# throwaway (`tmp-<run>`) is named after safe_name of a run dir's BASENAME, which several run dirs
+# can share, so it is selected only when it records (.state.run, written by the runner under its
+# claim) the physical dir of a run T owns; any other copy is report-only.
 #
 # EVERY GATE FAILS CLOSED and is re-run under a held claim before anything is destroyed: path
-# shape; an inventory of the ident dir (anything the runner does not create refuses); the claims;
-# the acpx queue owner, corroborated exactly as the runner corroborates it; the worktree
-# registration; and CONTENT — the tree and every aside must equal an artifact this thread's
-# ledger names AND refs/agent-comms/artifacts still retains, with no nested repository and no
-# content under a gitlink (both invisible to tree identity). A mount is dirty against HEAD by
+# shape; an inventory of the ident dir, read only from listings that worked (anything the runner
+# does not create refuses); the claims; the acpx queue owner, corroborated exactly as the runner
+# corroborates it; the worktree registration; and CONTENT — the tree and every aside must equal
+# an artifact this thread's ledger names AND refs/agent-comms/artifacts still retains, with no
+# nested repository and no content under a gitlink (both invisible to tree identity). A mount is dirty against HEAD by
 # design (the artifact is an uncommitted diff over its base), so "dirty" here means "differs from
 # its retained artifact": that difference is unique content only the mount holds.
 #
@@ -4348,8 +4349,10 @@ cm_agent_ok() {  # a ledger value becomes a path suffix, so it must be registry-
 # thread could own, selected EXACTLY (its thread is <thread> or "<thread>-<its agent>"):
 #   <raw thread> TAB <agent> TAB <owner thread, or ? when unresolvable> TAB <artifact|-> TAB <run dir|->
 # (no field is ever empty: `read` with a tab IFS would collapse it and shift every later field)
-# A panel leg's owner is its thread minus "-<agent>"; a direct turn owns its own thread. Returns 2
-# when a ledger exists but cannot be read in full: missing evidence is never read as no evidence.
+# A panel leg's owner is its thread minus "-<agent>"; a direct turn owns its own thread. A record
+# or leg row of such a thread that names no agent is a use with owner ? (agent * when its thread is
+# T itself, since any agent's direct copy could be it). Returns 2 when a ledger exists but cannot be
+# read in full, or a record names no thread: missing evidence is never read as no evidence.
 cm_ledger_uses() {
   local sets="$1/grades/sets.tsv" logs="$1/logs" t="$2" out="$3" list f rc=0
   CM_NOTE=""
@@ -4390,15 +4393,26 @@ cm_ledger_uses() {
       return "?"
     }
     function wanted(th, ag) { return th == T || th == (T "-" ag) }
+    # rel(th): could SOME agent make a use of th one of the candidates of T? (th is T, or T-<agent>)
+    function rel(th) { return th == T || (length(th) > length(T) + 1 && substr(th, 1, length(T) + 1) == (T "-")) }
+    # A record of a relevant thread that names no agent — cut short before its agent (a run still
+    # writing it) or written before records carried one — is an UNATTRIBUTABLE use, never an absent
+    # one: the only copy of T it could name (T-<agent> by that agent; T by any, "*") is unresolved.
+    function unresolved(th, d) {
+      if (th == T) print T "\t*\t?\t-\t" d
+      else print th "\t" substr(th, length(T) + 2) "\t?\t-\t" d
+    }
     BEGIN {
       T = ENVIRON["CM_AWK_T"]; SETS = ENVIRON["CM_AWK_SETS"]; LIST = ENVIRON["CM_AWK_LIST"]
       FS = "\t"; n = 0
       while ((r = (getline line < SETS)) > 0) {
-        if (++n == 1) continue
+        if (++n == 1 || line == "") continue
         k = split(line, c, "\t")
+        if (k < 3) { print SETS " carries a row that names no thread" > "/dev/stderr"; exit 2 }
+        if (k < 10 || c[10] == "") { if (rel(c[3])) unresolved(c[3], "-"); continue }
         # Only a row shaped like a dispatched leg (<base>-<agent>) records a mount use; a
         # shadow row is a non-ACP measurement and never had a durable mount.
-        if (k < 10 || c[10] == "" || leg_base(c[3], c[10]) == "?") continue
+        if (leg_base(c[3], c[10]) == "?") continue
         if (wanted(c[3], c[10])) print c[3] "\t" c[10] "\t" leg_base(c[3], c[10]) "\t" (c[6] == "" ? "-" : c[6]) "\t-"
       }
       if (r < 0) { print SETS > "/dev/stderr"; exit 2 }
@@ -4414,8 +4428,12 @@ cm_ledger_uses() {
         }
         if (r2 < 0) { print f > "/dev/stderr"; exit 2 }
         close(f)
-        if (th == "" || ag == "" || !wanted(th, ag)) continue
+        # No thread line at all (an empty or torn record): which threads it concerns is unknowable.
+        # An EMPTY thread value is a message-keyed turn, which no thread owns.
+        if (!index(seen, " thread ")) { print f " records no thread" > "/dev/stderr"; exit 2 }
         d = f; sub(/\/turn\.tsv$/, "", d)
+        if (ag == "") { if (rel(th)) unresolved(th, d); continue }
+        if (th == "" || !wanted(th, ag)) continue
         print th "\t" ag "\t" (st == "" ? th : leg_base(th, ag)) "\t" (ar == "" ? "-" : ar) "\t" d
       }
       if (r < 0) exit 2
@@ -4435,16 +4453,20 @@ cm_ledger_uses() {
 cm_own() {
   local uses="$1" raw="$2" a="$3" owners other
   CM_WHY=""; CM_NOTE=""
-  owners="$(CM_AWK_R="$raw" CM_AWK_A="$a" awk -F'\t' '$1 == ENVIRON["CM_AWK_R"] && $2 == ENVIRON["CM_AWK_A"] { print $3 }' "$uses" | LC_ALL=C sort -u)"
+  # A use whose agent the record lost ("*": a direct turn of <raw> by an unknown agent) could be this one.
+  owners="$(CM_AWK_R="$raw" CM_AWK_A="$a" awk -F'\t' '$1 == ENVIRON["CM_AWK_R"] && ($2 == ENVIRON["CM_AWK_A"] || $2 == "*") { print $3 }' "$uses" | LC_ALL=C sort -u)"
   CM_ARTS="$(CM_AWK_R="$raw" CM_AWK_A="$a" awk -F'\t' '$1 == ENVIRON["CM_AWK_R"] && $2 == ENVIRON["CM_AWK_A"] && $4 != "-" { print $4 }' "$uses" | LC_ALL=C sort -u)"
   if [ -z "$owners" ]; then
     CM_WHY=no-ownership-evidence; CM_NOTE="no ledger records a turn of '$raw' by $a, so this copy cannot be proven the thread's"
     return 2
   fi
+  # Before T's own use is looked for: an unattributable use may be T's, so it is never "another thread's".
+  if grep -qxF '?' <<<"$owners"; then
+    CM_WHY=ownership-unresolved; CM_NOTE="a recorded use of '$raw' by $a cannot be attributed to a thread (an incomplete run record or leg row)"; return 2
+  fi
   grep -qxF -- "$CM_THREAD" <<<"$owners" || return 1
   while IFS= read -r other; do
     [ "$other" = "$CM_THREAD" ] && continue
-    if [ "$other" = "?" ]; then CM_WHY=ownership-unresolved; CM_NOTE="a recorded use of '$raw' by $a cannot be attributed to a thread"; return 2; fi
     "$COMMS" state retired "$other" >/dev/null 2>&1 && continue
     CM_WHY=shared-with-live-thread; CM_NOTE="this copy is also thread '$other''s, which is not retired"; return 2
   done <<<"$owners"
@@ -4558,6 +4580,9 @@ cm_check() {
   if [ -L "$d" ] || [ ! -d "$d" ] || [ "$(cd "$d" 2>/dev/null && pwd -P)" != "$d" ]; then
     CM_WHY=unsafe-path; CM_NOTE="$d is not a real directory at its own physical path"; return 0
   fi
+  # Every glob below reads an unlistable dir as EMPTY — its claims, its asides and unknown entries
+  # would vanish, and a later replay deletes whatever was never verified.
+  if ! cm_listable "$d"; then CM_WHY=content-unverifiable; CM_NOTE="$d cannot be listed, so what it holds cannot be verified"; return 0; fi
   # CLAIMS FIRST: a live runner mid-restage leaves a pending generation and a half-built layout
   # that only it may judge, so what it holds is a scoped skip before anything is read as abandoned.
   cm_claims "$d" "$holder" || return 0
@@ -4577,6 +4602,8 @@ cm_check() {
   done
   for e in "$d"/view "$d"/.aside.*; do
     [ -d "$e" ] || continue
+    # An unlistable view hides its tree from `-d`: absent is concluded only from a listing that worked.
+    if ! cm_listable "$e"; then CM_WHY=content-unverifiable; CM_NOTE="$e cannot be listed, so what it holds cannot be verified"; return 0; fi
     for f in "$e"/* "$e"/.[!.]* "$e"/..?*; do
       [ -e "$f" ] || [ -L "$f" ] || continue
       case "${e##*/}/${f##*/}" in
@@ -4706,9 +4733,13 @@ cm_rm_last() {
   [ ! -e "$1" ] && [ ! -L "$1" ]
 }
 
+cm_listable() {  # <dir> — its entries can be listed AND reached; a glob over one that cannot reads as empty
+  [ -r "$1" ] && [ -x "$1" ] && ls -A -- "$1" >/dev/null 2>&1
+}
+
 cm_holds_only() {  # <dir> <entry name|""> — <dir> provably holds nothing but (at most) that one entry
   local e
-  [ -r "$1" ] && [ -x "$1" ] || return 1   # an unreadable dir globs as empty
+  cm_listable "$1" || return 1
   for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
     [ -n "$2" ] && [ "$e" = "$1/$2" ] && continue

@@ -696,6 +696,14 @@ through a symlink. The back-pointer is now deleted last (one "evidence last" del
 admin dir and the payload), a copy re-created at the ident that names the admin dir makes it that
 copy's, and the record is staged through an exclusively created file, with any non-regular staging
 entry refused before destructive work.
+Round 6 (codex) found two more ways missing evidence read as absent evidence. An unlistable `view/`
+hid a dirty tree from `-d`, so apply dropped the registration and a replay, once access returned,
+deleted the tree nothing had verified; the ident dir, `view/` and every aside must now list
+(`content-unverifiable` otherwise). And a co-owner's `turn.tsv` cut short before its `agent` line
+(a run still writing it, or a record older than that line) was skipped, leaving the panel ledger
+attributing a shared copy to the retired thread alone; such a record, or a leg row without its
+agent, is now an unattributable use (`ownership-unresolved`), and one naming no thread refuses the
+whole call.
 Measured on the development fixture only; not yet run against a live store. Open: a turn that fails
 after staging but before recording its session leaves a copy both GCs treat differently (the
 whole-store GC reads a missing record as "no owner"; `--thread` refuses it as `state-missing`,

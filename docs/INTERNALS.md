@@ -485,7 +485,15 @@ waits on any other ident. Load-bearing choices:
   child cannot write. Every run record is enumerated before any is read, because a use that drops
   out of the scan is exactly how a shared copy reads as T's alone: `find -type f` skipped a
   symlinked or directory-shaped `turn.tsv`, and find never descends a symlinked run or logs dir, so
-  each of those now refuses the whole call.
+  each of those now refuses the whole call. A record is not complete just because it can be read:
+  one of T or `T-<agent>` with no `agent` line (a run still writing it; `agent` is its last base
+  line, and records before 2026-09-26 never carried one) could be the co-owner's, so it is an
+  unattributable use that leaves the copy report-only; one with no `thread` line could concern any
+  thread and refuses the whole call. The same holds for a `sets.tsv` row.
+- **Absent only from a listing that worked.** A glob over a directory that cannot be listed reads
+  as EMPTY, and `-d` fails below one that cannot be searched, so an unlistable `view/` once passed
+  as "no tree" and its dirty tree reached the tombstone unverified. The ident dir, `view/` and each
+  aside must list before anything under them is concluded absent.
 - **A throwaway's name is not its owner.** `tmp-<run>` is `safe_name` of the run dir's basename, and
   `run+1`, `run_1` and a `--dir` elsewhere named `run_1` all map to one copy that the session and
   content checks cannot tell apart when both runs reviewed one artifact. The runner therefore
