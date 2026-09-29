@@ -558,7 +558,12 @@ waits on any other ident. Load-bearing choices:
   first removal passes (`cm_regate`, shared by both): a held use is refused before its tombstone
   is touched, and under the tombstone's claim the retirement, the holds and the ledger ownership
   are read again. The interrupted run proved them once; a paused loop, a withdrawn retirement or a
-  live co-owner recorded since keeps the tombstone whole until they hold again.
+  live co-owner recorded since keeps the tombstone whole until they hold again. When ownership
+  already fails at SELECTION, the report cannot key on the ident path alone: after a kill past the
+  rename that path is gone and the copy sits in its tombstone, so a co-owner or an agentless record
+  present before the retry read as "nothing selected, complete". Selection therefore also looks for
+  a tombstone of the ident this thread cannot rule out (`cm_tomb_scan`) and reports it `ambiguous`,
+  without replaying it.
 
 **Residual risks, accepted.** (1) The ledgers ARE the evidence: deleting run records can hide a
 direct turn on a leg-shaped thread name, and the shared copy would then read as T's alone. (2) A

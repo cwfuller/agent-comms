@@ -589,7 +589,10 @@ first removal does, so it passes the same authority and ownership gates: a held 
 (`held`) before its tombstone is touched, dry run or apply, and under the tombstone's claim the
 retirement, the holds and the ledger ownership are read again (`unretired`, `held`, or
 `ambiguous` for a co-owner recorded since), leaving the journal, the moved copy and its
-registration as they were. A delete that stops part-way keeps that `.state.run`
+registration as they were. Ownership that already fails at selection (a co-owner or an agentless
+record present before the retry) reports the identity `ambiguous` whether its copy is still at the
+ident path or already moved into a tombstone this thread's cleanup may have made: that pending
+removal is reported and never replayed, and never reads as absent. A delete that stops part-way keeps that `.state.run`
 beside whatever it could not remove (the run record is deleted last, and a copy already emptied
 has nothing left to prove), and the record stops naming the admin registration once it is dropped
 and before any payload is deleted, so a re-run finishes once the obstruction is gone and never

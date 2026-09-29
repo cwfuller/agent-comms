@@ -677,13 +677,34 @@ RT_JH="$(RT_REGATE=hold COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-regate" rt_c
 RT_JU="$(RT_REGATE=unretire COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-regate" rt_cm --thread rt-juliet --yes)"; RT_JUC=$?
 rt_state retire rt-juliet >/dev/null
 RT_JS="$(RT_REGATE=share COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-regate" rt_cm --thread rt-juliet --yes)"; RT_JSC=$?
-rm -rf "$RT/.comms/logs/rt-jshare"
 if [ "$RT_JHC" = 4 ] && rt_line "$RT_JH" "$RT_J" refused held \
    && [ "$RT_JUC" = 4 ] && rt_line "$RT_JU" "$RT_J" refused unretired \
    && [ "$RT_JSC" = 4 ] && rt_line "$RT_JS" "$RT_J" ambiguous shared-with-live-thread && rt_jtomb; then
   ok "a hold, a withdrawn retirement or a live co-owner appearing under the replay's claim keeps the tombstone whole"
 else
   fail "replay re-gate (rc=$RT_JHC/$RT_JUC/$RT_JSC): $RT_JH / $RT_JU / $RT_JS"
+fi
+# Ownership refused at SELECTION, before any claim: the ident path is gone (its copy sits in the
+# tombstone), so a report keyed on that path alone let the pending removal read as complete.
+RT_JCD="$(rt_cm --thread rt-juliet)"; RT_JCDC=$?
+RT_JC="$(rt_cm --thread rt-juliet --yes)"; RT_JCC=$?
+rm -rf "$RT/.comms/logs/rt-jshare"
+if [ "$RT_JCDC" = 4 ] && rt_line "$RT_JCD" "$RT_J" ambiguous shared-with-live-thread \
+   && [ "$RT_JCC" = 4 ] && rt_line "$RT_JC" "$RT_J" ambiguous shared-with-live-thread \
+   && grep -q '^clean-mounts-result v1 status=blocked ' <<<"$RT_JC" && rt_jtomb; then
+  ok "a co-owner still recorded at the next run reports the pending tombstone and replays nothing, in dry run and apply"
+else
+  fail "co-owner before the retry (rc=$RT_JCDC/$RT_JCC): $RT_JCD / $RT_JC"
+fi
+mkdir -p "$RT/.comms/logs/rt-jagentless"
+printf 'thread\trt-juliet-grok\nset\t\nartifact\t%s\n' "$RT_ART" > "$RT/.comms/logs/rt-jagentless/turn.tsv"
+RT_JN="$(rt_cm --thread rt-juliet --yes)"; RT_JNC=$?
+rm -rf "$RT/.comms/logs/rt-jagentless"
+if [ "$RT_JNC" = 4 ] && rt_line "$RT_JN" "$RT_J" ambiguous ownership-unresolved \
+   && grep -q '^clean-mounts-result v1 status=blocked ' <<<"$RT_JN" && rt_jtomb; then
+  ok "an agentless record present before the retry reports the pending tombstone and replays nothing"
+else
+  fail "agentless record before the retry (rc=$RT_JNC): $RT_JN"
 fi
 RT_JR="$(rt_cm --thread rt-juliet --yes)"; RT_JRC=$?
 [ "$RT_JRC" = 0 ] && rt_line "$RT_JR" "$RT_J" removed interrupted && rt_gone "$RT_J" && rt_intact "$RT_PEER" \

@@ -5190,7 +5190,7 @@ cm_thread() {
     case " $agents " in *" $a "*) ;; *) agents="$agents $a" ;; esac
   done
   set +f
-  local use raw ident orc done_idents=" "
+  local use raw ident orc own_why own_note done_idents=" "
   for a in $agents; do
     for use in direct panel; do
       if [ "$use" = direct ]; then raw="$CM_THREAD"; else raw="$CM_THREAD-$a"; fi
@@ -5199,7 +5199,15 @@ cm_thread() {
       case "$orc" in
         0) ;;
         1) continue ;;   # recorded, and not T's: another thread's copy
-        *) if [ -e "$CM_SCOPE/$ident" ] || [ -L "$CM_SCOPE/$ident" ]; then cm_emit ambiguous "$CM_WHY" durable "$use" "$a" "$ident"; fi
+        # Report-only — and an interrupted removal counts: once it reached `renamed` the ident path
+        # is gone and its copy sits in a tombstone, which is reported here and never replayed.
+        *) own_why="$CM_WHY"; own_note="$CM_NOTE"
+           if [ -e "$CM_SCOPE/$ident" ] || [ -L "$CM_SCOPE/$ident" ]; then
+             cm_emit ambiguous "$own_why" durable "$use" "$a" "$ident"
+           elif cm_tomb_scan "$ident"; then
+             CM_NOTE="$own_note; an interrupted removal of it is pending in a tombstone ($CM_SCOPE/.retire.$ident.*), left unreplayed until ownership is proven"
+             cm_emit ambiguous "$own_why" durable "$use" "$a" "$ident"
+           fi
            CM_NOTE=""; continue ;;
       esac
       done_idents="$done_idents$ident "
