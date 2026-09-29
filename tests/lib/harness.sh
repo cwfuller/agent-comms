@@ -298,7 +298,7 @@ grep_full() { # grep_full <grep args...> — grep that reads stdin to EOF before
 WORK="$(mktemp -d)"
 # THE PINNED REVIEWER RUNTIME (see the scrub above): a stub that reports one fixed codex version.
 # Not `bundled`: the adapter's bundled codex has no version we can know, so it cannot serve a map
-# model that declares a minimum runtime — and the committed baseline (gpt-6.1-sol, map 2026-09-29.1)
+# model that declares a minimum runtime — and the committed baseline (gpt-6.1-sol since map 2026-09-29.1)
 # declares 0.159.0, so a `bundled` corpus would refuse every baseline codex turn. The version is the
 # baseline's minimum; raise it with the map. Cases about `bundled` itself name it per invocation.
 HARNESS_CODEX_RUNTIME="$WORK/reviewer-runtime/codex"

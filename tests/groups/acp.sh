@@ -1102,6 +1102,14 @@ R="$(res COMMS_ACP_CODEX_PATH=bundled "$AP" resolve codex --tier fast --effort l
 R="$(res COMMS_ACP_CODEX_PATH=bundled "$AP" resolve codex --tier balanced --effort medium --decision rd-a --routing on --phase implement)"
 [ "$(rv "$R" model)" = gpt-5.6-terra ] && [ "$(rv "$R" effort)" = medium ] \
   && ok "tier and effort are SEPARATE dimensions (balanced -> terra, medium -> medium)" || fail "balanced/medium ($R)"
+# THE DEFAULT IS NOT THE STRONGEST (operator decision, map 2026-09-29.2): gpt-6.1-sol leads the
+# baseline and `balanced`; `strong` and the ceiling are gpt-6-astra, so the three never collapse.
+R="$(res "$AP" resolve codex --tier strong --effort xhigh --decision rd-a --routing on --phase implement)"
+R2="$(res "$AP" resolve codex --tier balanced --effort xhigh --decision rd-a --routing on --phase implement)"
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effective_tier)" = strong ] && [ "$(rv "$R" fallback)" = none ] \
+  && [ "$(rv "$R2" model)" = gpt-6.1-sol ] && [ "$(rv "$R2" effective_tier)" = balanced ] \
+  && [ "$(awk -F'\t' '$1=="ceiling"{print $4}' "$REPO/helpers/policy-map.tsv")" = gpt-6-astra ] \
+  && ok "strong and the ceiling run gpt-6-astra; gpt-6.1-sol is the default and leads balanced only" || fail "strong/balanced split ($R / $R2)"
 R="$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing off)"
 [ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" fallback)" = routing-disabled ] \
   && ok "routing disabled keeps the concrete baseline and says why" || fail "routing off ($R)"
@@ -1154,7 +1162,7 @@ OUT="$(res COMMS_ACP_CODEX_EFFORT=ultra "$AP" resolve codex --tier fast --effort
   && ok "an explicit decision that forms an invalid pair is refused, where a classified one falls back" || fail "explicit invalid pair (rc=$RC)"
 # THE CONCRETE POLICY'S IDENTITY (runphase names a mounted session after it).
 D1="$(rv "$(res "$AP" resolve codex)" policy_digest)"
-D2="$(rv "$(res "$AP" resolve codex --tier strong --effort xhigh --decision rd-a --routing on --phase implement)" policy_digest)"
+D2="$(rv "$(res "$AP" resolve codex --tier balanced --effort xhigh --decision rd-a --routing on --phase implement)" policy_digest)"
 D3="$(rv "$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)" policy_digest)"
 D4="$(rv "$(res "$AP" resolve claude)" policy_digest)"
 [ -n "$D1" ] && [ "$D1" = "$D2" ] && [ "$D1" != "$D3" ] && [ "$D4" = none ] \
@@ -1205,6 +1213,55 @@ res COMMS_ACP_CODEX_PATH="$RTD/new" "$AP" resolve codex >/dev/null 2>&1; A=$?
 res COMMS_ACP_CODEX_PATH=bundled COMMS_ACP_CODEX_MODEL=gpt-6-sol "$AP" resolve codex >/dev/null 2>&1; B=$?
 [ "$A" = 1 ] && [ "$B" = 1 ] \
   && ok "an unusable explicit runtime, or a pinned model the runtime cannot serve, is refused — never swapped" || fail "runtime refusals ($A/$B)"
+# AN UNPINNED BASELINE HAS NO FALLBACK. On the bundled runtime (version unknown) and on a codex older
+# than the baseline's pair-row minimum it is REFUSED with that minimum as the reason — never run as
+# something else. The reason's version is read from the map, so the assertion follows a map bump.
+RT_BMIN="$(awk -F'\t' '$1=="pair" && $2=="codex" && $3=="acp-mounted" && $4=="gpt-6.1-sol"{print $6}' "$REPO/helpers/policy-map.tsv")"
+for RT_V in bundled "$RTD/old/codex"; do
+  RT_O="$(res COMMS_ACP_CODEX_PATH="$RT_V" "$AP" resolve codex 2>&1 >/dev/null)"; A=$?
+  RT_R="$(res COMMS_ACP_CODEX_PATH="$RT_V" "$AP" resolve codex 2>/dev/null)"
+  [ "$A" = 1 ] && [ -z "$RT_R" ] && [ -n "$RT_BMIN" ] \
+    && printf '%s' "$RT_O" | grep -qF "model 'gpt-6.1-sol' (baseline) needs codex >= $RT_BMIN" \
+    && ok "an unpinned baseline on runtime $(basename "$(dirname "$RT_V")")/$(basename "$RT_V") is refused with the minimum-version reason" \
+    || fail "baseline on $RT_V not refused with its minimum (rc=$A out=$RT_O)"
+done
+# THE CEILING is checked the same way: with COMMS_REVIEW_MAX a runtime too old for the ceiling model is
+# refused naming ITS minimum. The committed ceiling (gpt-6-astra) has none, so a crafted map whose
+# ceiling is the baseline model stands in for "a ceiling that declares one".
+PMC="$WORK/policy-map-ceiling"; rm -rf "$PMC"; mkdir -p "$PMC"; cp "$AP" "$PMC/acp.sh"; chmod +x "$PMC/acp.sh"
+sed 's/^ceiling	codex	acp-mounted	gpt-6-astra	ultra$/ceiling	codex	acp-mounted	gpt-6.1-sol	ultra/' "$REPO/helpers/policy-map.tsv" > "$PMC/policy-map.tsv"
+RC_OK=1
+for RT_V in bundled "$RTD/old/codex"; do
+  RT_O="$(res COMMS_REVIEW_MAX=1 COMMS_ACP_CODEX_PATH="$RT_V" "$PMC/acp.sh" resolve codex 2>&1 >/dev/null)"; A=$?
+  R="$(res COMMS_REVIEW_MAX=1 COMMS_ACP_CODEX_PATH="$RT_V" "$AP" resolve codex 2>/dev/null)"; B=$?
+  { [ "$A" = 1 ] && printf '%s' "$RT_O" | grep -qF "model 'gpt-6.1-sol' (max) needs codex >= $RT_BMIN" \
+    && [ "$B" = 0 ] && [ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" model_source)" = max ]; } || RC_OK=0
+done
+grep -qx 'ceiling	codex	acp-mounted	gpt-6.1-sol	ultra' "$PMC/policy-map.tsv" && [ "$RC_OK" = 1 ] \
+  && ok "COMMS_REVIEW_MAX on bundled and on an old codex: a ceiling with a minimum is refused naming it; the committed astra ceiling runs" \
+  || fail "ceiling runtime refusal (last rc=$A/$B out=$RT_O)"
+# DOCTOR FAILS when the default review cannot run, with the reason, and runtime-check says the same
+# thing machine-readably. The current stub passes both. (The stub node keeps doctor past its node gate.)
+DOC_OK=1
+for RT_V in bundled "$RTD/old/codex"; do
+  DOC_O="$(res PATH="$ACP_STUB:$PATH" COMMS_ACP_CODEX_PATH="$RT_V" "$AP" doctor 2>&1)"; A=$?
+  CHK_O="$(res COMMS_ACP_CODEX_PATH="$RT_V" "$AP" runtime-check codex 2>/dev/null)"; B=$?
+  { [ "$A" = 4 ] && printf '%s\n' "$DOC_O" | grep -q "^default codex review: gpt-6.1-sol (baseline) — CANNOT RUN: model 'gpt-6.1-sol' (baseline) needs codex >= $RT_BMIN" \
+    && printf '%s\n' "$DOC_O" | grep -q '^result: FAIL' \
+    && [ "$B" = 4 ] && printf '%s\n' "$CHK_O" | awk -F'\t' -v m="$RT_BMIN" '$1=="baseline" && $2=="gpt-6.1-sol" && $3=="baseline" && $4==m && $5=="refused" && $6 ~ /needs codex >=/ {f=1} END{exit !f}' \
+    && printf '%s\n' "$CHK_O" | awk -F'\t' '$1=="ceiling" && $2=="gpt-6-astra" && $5=="ok" {f=1} END{exit !f}'; } || DOC_OK=0
+done
+DOC_N="$(res PATH="$ACP_STUB:$PATH" COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" doctor 2>&1)"; A=$?
+res COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" runtime-check codex >/dev/null 2>&1; B=$?
+[ "$DOC_OK" = 1 ] && [ "$A" = 0 ] && [ "$B" = 0 ] && printf '%s\n' "$DOC_N" | grep -q '^default codex review: gpt-6.1-sol (baseline) — runs on this runtime' \
+  && ! printf '%s\n' "$DOC_N" | grep -q 'result: FAIL' \
+  && ok "doctor and runtime-check fail (exit 4) with the minimum-version reason on bundled and an old codex, and pass on a new one" \
+  || fail "doctor runtime verdict (new rc=$A/$B; out=$(printf '%s' "$DOC_O" | grep -E 'review|result' | tr '\n' ' '))"
+res PATH="$ACP_STUB:$PATH" COMMS_ACP_CODEX_PATH="$RTD/new" "$AP" doctor >/dev/null 2>&1; A=$?
+res COMMS_ACP_CODEX_PATH="$RTD/new" "$AP" runtime-check codex >/dev/null 2>&1; B=$?
+res "$AP" runtime-check claude >/dev/null 2>&1; C=$?
+[ "$A" = 4 ] && [ "$B" = 1 ] && [ "$C" = 2 ] \
+  && ok "a refused runtime fails doctor (4) and runtime-check (1); runtime-check of a non-codex agent is a usage error" || fail "doctor/runtime-check refusals ($A/$B/$C)"
 res COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" resolve codex > "$WORK/rt-rec.tsv"
 sed "s|^runtime	.*|runtime	relative/codex|" "$WORK/rt-rec.tsv" > "$WORK/rt-bad.tsv"
 [ "$(res "$AP" runtime codex --policy-file "$WORK/rt-rec.tsv")" = "$RTD/new/codex" ] \
@@ -1214,7 +1271,7 @@ sed "s|^runtime	.*|runtime	relative/codex|" "$WORK/rt-rec.tsv" > "$WORK/rt-bad.t
 # explicit pins outrank it; it is strict; it claims nothing where nothing applies.
 R="$(res COMMS_REVIEW_MAX=1 "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
 R2="$(res COMMS_REVIEW_MAX=1 "$AP" resolve codex --phase plan)"
-[ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = ultra ] && [ "$(rv "$R" model_source)" = max ] \
+[ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effort)" = ultra ] && [ "$(rv "$R" model_source)" = max ] \
   && [ "$(rv "$R" fallback)" = max-override ] && [ "$(rv "$R2" effort)" = ultra ] \
   && ok "COMMS_REVIEW_MAX runs the map's ceiling over any route, baseline or phase" || fail "use max ($R)"
 R="$(res COMMS_REVIEW_MAX=1 COMMS_ACP_CODEX_EFFORT=high "$AP" resolve codex)"
@@ -1604,6 +1661,21 @@ rr_run rr-rt2 "" "$RR_D12" COMMS_ACP_CODEX_PATH=bundled COMMS_ACP_CODEX_MODEL=gp
   && [ "$(cn_status "$RR_D12")" = completed ] && grep -qx 'CODEX_PATH=<unset>' "$RR_ENV12" && ! grep -q 'bogus' "$RR_ENV12" \
   && [ -n "$(tv "$RR_D11" acpx_launcher)" ] \
   && ok "the resolved runtime is the child's CODEX_PATH, and a bundled turn unsets an inherited one" || fail "runtime to child: s11=$(cn_status "$RR_D11") s12=$(cn_status "$RR_D12")"
+# THE RUNTIME-LACKS FALLBACK, END TO END. The harness pins every run to a runtime new enough for the
+# whole map, so the fallback needs its own mounted turn on an OLD codex: a routed balanced turn runs
+# the tier's next model, recorded, and the same runtime refuses the unrouted baseline before any prompt.
+RRO="$(rr_decide rr-old balanced medium)"
+RR_D14="$WORK/rr-14"; RR_CFG14="$WORK/rr-14.cfg"; RR_ENV14="$WORK/rr-14.env"
+rr_run rr-old "$RRO" "$RR_D14" COMMS_REVIEW_ROUTE=1 COMMS_ACP_CODEX_PATH="$RTD/old/codex" AX_CFG_LOG="$RR_CFG14" AX_ENV_LOG="$RR_ENV14"
+RR_D15="$WORK/rr-15"; RR_L15="$WORK/rr-15.argv"
+rr_run rr-old2 "" "$RR_D15" COMMS_ACP_CODEX_PATH="$RTD/old/codex" AX_CWD_LOG="$RR_L15"
+[ -n "$RRO" ] && [ "$(cn_status "$RR_D14")" = completed ] && grep -q 'model = "gpt-6-sol"' "$RR_CFG14" \
+  && [ "$(tv "$RR_D14" requested_model)" = gpt-6-sol ] && [ "$(tv "$RR_D14" observed_model)" = gpt-6-sol ] \
+  && [ "$(tv "$RR_D14" policy_fallback)" = runtime-lacks:gpt-6.1-sol ] && grep -qx "CODEX_PATH=$RTD/old/codex" "$RR_ENV14" \
+  && [ "$(cn_status "$RR_D15")" = failed ] \
+  && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L15" 2>/dev/null | grep_full -q . \
+  && ok "on an old codex a mounted routed turn falls back to the tier's next model (recorded); the baseline is refused before any prompt" \
+  || fail "old-runtime mounted turn: s14=$(cn_status "$RR_D14") fb=$(tv "$RR_D14" policy_fallback) obs=$(tv "$RR_D14" observed_model) s15=$(cn_status "$RR_D15")"
 RR_D13="$WORK/rr-13"; RR_CFG13="$WORK/rr-13.cfg"
 rr_run rr-max "" "$RR_D13" COMMS_REVIEW_MAX=1 AX_CFG_LOG="$RR_CFG13"
 [ "$(cn_status "$RR_D13")" = completed ] && grep -q 'model_reasoning_effort = "ultra"' "$RR_CFG13" \

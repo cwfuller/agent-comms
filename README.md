@@ -65,9 +65,11 @@ A classifier (Jev, via TypeSafe) sizes the work so easy things run cheap:
 
 - **The loop:** decides whether a task needs an approach review first.
 - **Reviewers:** picks each Codex reviewer's model tier and effort per thread
-  from a versioned table (fast / balanced = GPT-6 Luna / Sol when your installed
-  codex is new enough, else GPT-5.6 Luna / Terra; strong = GPT-6 Astra). Low
-  confidence keeps the default depth.
+  from a versioned table: fast = GPT-6 Luna, balanced = GPT-6.1 Sol then GPT-6
+  Sol, each falling back to GPT-5.6 when your codex is too old to serve it;
+  strong = GPT-6 Astra, the frontier model. Low confidence keeps the default:
+  GPT-6.1 Sol at xhigh, which needs codex >= 0.159 (an older codex is refused,
+  not downgraded; `acp.sh doctor` says so). "Use max" runs GPT-6 Astra at ultra.
 
 Off by default. `comms.sh setup` turns it on (TypeSafe key, then per-project
 permission before any review text is sent); `--no-route` turns it off for one loop. Details:

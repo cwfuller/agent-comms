@@ -1509,6 +1509,19 @@ ST_OUT="$(st -- "$COMMS" setup --yes </dev/null 2>&1)"; A=$?
 [ "$A" = 0 ] && grep -qx 'suite-cmd = bash t.sh' "$ST_PROJ/.comms/config" && grep -qx 'agents = claude codex' "$ST_PROJ/.comms/config" \
   && printf '%s' "$ST_OUT" | grep -q '5/5 Codex reviewer runtime' \
   && ok "setup --yes runs every section unattended and keeps unrelated project config" || fail "setup --yes (rc=$A)"
+# THE RUNTIME HINT IS THE RESOLVER'S VERDICT, not a version written in setup: on a codex too old for
+# the baseline, setup names the refusal (the minimum comes from the map's pair row) and warns that
+# `bundled` refuses every baseline review too. setup.sh itself carries no version or model literal.
+ST_OLD="$WORK/st-old-codex"; mkdir -p "$ST_OLD"; printf '#!/bin/sh\necho "codex-cli 0.155.1"\n' > "$ST_OLD/codex"; chmod +x "$ST_OLD/codex"
+ST_BMIN="$(awk -F'\t' '$1=="pair" && $2=="codex" && $3=="acp-mounted" && $4=="gpt-6.1-sol"{print $6}' "$REPO/helpers/policy-map.tsv")"
+ST_OUT="$(st PATH="$ST_OLD:$PATH" -- "$COMMS" setup --yes </dev/null 2>&1)"; A=$?
+[ "$A" = 0 ] && [ -n "$ST_BMIN" ] && printf '%s\n' "$ST_OUT" | grep -qF "auto-detected: $ST_OLD/codex (0.155.1)" \
+  && printf '%s\n' "$ST_OUT" | grep -qF "every default codex review is REFUSED: model 'gpt-6.1-sol' (baseline) needs codex >= $ST_BMIN" \
+  && printf '%s\n' "$ST_OUT" | grep -qF "note: choosing 'bundled' refuses every baseline codex review (gpt-6.1-sol needs codex >= $ST_BMIN" \
+  && ! printf '%s\n' "$ST_OUT" | grep -q 'falls back to GPT' \
+  && ! grep -qE '[0-9]+\.[0-9]+\.[0-9]+|codex >= [0-9]|gpt-[0-9]' "$REPO/helpers/setup.sh" \
+  && ok "setup names the baseline's runtime refusal and the bundled warning from the map, with no version of its own" \
+  || fail "setup runtime hint (rc=$A: $(printf '%s\n' "$ST_OUT" | sed -n '/5\/5/,/^$/p' | tr '\n' ' '))"
 # Wiring: every entry helper loads settings, and the installer ships and offers them.
 N=0; for h in comms.sh runphase.sh acp.sh route.sh; do grep -q 'settings.sh" \] && \.' "$REPO/helpers/$h" && N=$((N+1)); done
 grep -q '^HELPERS=.*settings\.sh.*setup\.sh' "$REPO/install.sh" && [ "$N" = 4 ] \

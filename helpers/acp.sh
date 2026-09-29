@@ -15,8 +15,15 @@
 #       18,562 fresh input tokens vs warm round-2 146 — ~127x). --oneshot uses
 #       a stateless exec.
 #   doctor
-#       report node/acpx availability and the supported agent map; exit 0 iff
-#       consults can run here.
+#       report node/acpx availability, the supported agent map and the reviewer codex
+#       runtime; exit 0 iff consults can run here AND that runtime can run the default
+#       (baseline) and use-max (ceiling) codex review; 3 no usable node; 4 a codex
+#       review cannot run on the runtime (or the runtime is refused), reason printed.
+#   runtime-check codex
+#       machine-readable form of doctor's runtime verdict: `runtime` and
+#       `runtime_version` lines, then per row <baseline|ceiling> <model>
+#       <baseline|max|pin> <minimum|-> <ok|refused> <reason|-> (TAB-separated).
+#       Exit 0 all ok, 4 a row refused, 1 runtime refused or map defect, 2 usage.
 #   supports <agent>
 #       exit 0 iff a consult can run here for that agent (machine-readable —
 #       never parse doctor's prose).
@@ -97,7 +104,7 @@ NODE_MIN_MINOR=13
 # refused turn, not a silent float to whatever the account now serves. (grok, plan r1/r3.)
 #
 # THE CONCRETE VALUES LIVE IN policy-map.tsv beside this file, and nowhere else: the baseline
-# (gpt-6.1-sol/xhigh as of map 2026-09-29.1), the tier->model and effort->value rows a routed
+# (gpt-6.1-sol/xhigh as of map 2026-09-29.2), the tier->model and effort->value rows a routed
 # decision may select, and the efforts each model accepts. The operator's pins stay environment
 # variables (COMMS_ACP_CODEX_MODEL / COMMS_ACP_CODEX_EFFORT) and still win over everything. The
 # map is read ONLY from the sibling file, never from an environment override, so a second table
@@ -341,6 +348,16 @@ policy_model_available() {
   [ -z "$min" ] && return 0
   ver_ge "$RT_VERSION" "$min"
 }
+# policy_unservable_reason <agent> <transport> <model> <source> — nothing (exit 0) when the runtime
+# in RT_PATH/RT_VERSION serves the model; else the one-line reason it cannot (exit 1). The ONE
+# wording, with the minimum read from the map's pair row, behind resolve's refusal, `runtime-check`
+# and `doctor`, so no surface restates a version.
+policy_unservable_reason() {
+  policy_model_available "$1" "$2" "$3" && return 0
+  printf "model '%s' (%s) needs codex >= %s, but the reviewer runtime is %s (%s) — install a newer codex or set COMMS_ACP_CODEX_PATH\n" \
+    "$3" "$4" "$(policy_map_get pairmin "$1" "$2" "$3")" "$RT_PATH" "$RT_VERSION"
+  return 1
+}
 
 # The operator's pins, per provider. Only codex has an applied policy, so only codex has pins; a
 # provider added here must also gain an `eligible` capability row with its own evidence.
@@ -494,8 +511,9 @@ resolve_policy() {
   # The chosen model must exist on the runtime that will run it. A pinned, baseline or ceiling
   # model that needs a newer runtime is REFUSED here with the remedy, never swapped: the canary
   # would only discover it after a session was spent on it.
-  if ! policy_model_available "$agent" "$transport" "$R_MODEL"; then
-    echo "acp.sh: resolve: model '$R_MODEL' ($R_MSRC) needs codex >= $(policy_map_get pairmin "$agent" "$transport" "$R_MODEL"), but the reviewer runtime is $R_RUNTIME ($R_RUNTIME_VERSION) — install a newer codex or set COMMS_ACP_CODEX_PATH" >&2
+  local why
+  if ! why="$(policy_unservable_reason "$agent" "$transport" "$R_MODEL" "$R_MSRC")"; then
+    echo "acp.sh: resolve: $why" >&2
     return 1
   fi
   # THE USAGE LIMIT the chosen model spends, when the provider meters it apart from the rest (a
@@ -733,8 +751,47 @@ cmd_capabilities() {
     $1 == "limit"    && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s spends its own usage limit: %s\n", $2, $3, $4, $5; next }' "$ACP_POLICY_MAP" "$ACP_POLICY_MAP"
 }
 
+# THE RUNTIME'S STANDING: can the codex runtime already probed into RT_PATH/RT_VERSION run the review
+# a turn gets with no route — the map's baseline, and the "use max" ceiling — each with the
+# operator's model pin applied, as resolve would? No version literal: each minimum is the model's
+# `pair` row. Prints one line per row to stdout:
+#   <baseline|ceiling>\t<model>\t<baseline|max|pin>\t<minimum|->\t<ok|refused>\t<reason|->
+# and returns 0 when every row is ok, 4 when any is refused, 1 on a map defect. A map with no
+# ceiling row prints no ceiling line. Shared by `runtime-check` (machine-readable) and `doctor`.
+policy_runtime_standing() {  # <agent> <transport>
+  local agent="$1" transport="$2" row kind m src min why rc=0 pm
+  policy_map_check >/dev/null || return 1
+  pm="$(policy_pin_model "$agent")"
+  for kind in baseline ceiling; do
+    row="$(policy_map_get "$kind" "$agent" "$transport")"
+    if [ -z "$row" ]; then
+      [ "$kind" = ceiling ] && continue
+      echo "acp.sh: the map has no baseline for $agent/$transport" >&2; return 1
+    fi
+    m="${row%%$'\t'*}"; src="$( [ "$kind" = baseline ] && echo baseline || echo max )"
+    if [ -n "$pm" ]; then m="$pm"; src=pin; fi
+    min="$(policy_map_get pairmin "$agent" "$transport" "$m")"
+    if why="$(policy_unservable_reason "$agent" "$transport" "$m" "$src")"; then
+      printf '%s\t%s\t%s\t%s\tok\t-\n' "$kind" "$m" "$src" "${min:--}"
+    else
+      printf '%s\t%s\t%s\t%s\trefused\t%s\n' "$kind" "$m" "$src" "${min:--}" "$why"; rc=4
+    fi
+  done
+  return "$rc"
+}
+
+cmd_runtime_check() {  # runtime-check <agent>
+  local agent="${1:-}"
+  [ "$#" = 1 ] && [ "$agent" = codex ] || { echo "acp.sh: runtime-check: usage: runtime-check codex (only codex reviewers have a runtime)" >&2; exit 2; }
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
+  [ -z "$RT_ERR" ] || { echo "acp.sh: runtime-check: $RT_ERR" >&2; exit 1; }
+  printf 'runtime\t%s\nruntime_version\t%s\n' "$RT_PATH" "$RT_VERSION"
+  local rc=0; policy_runtime_standing codex acp-mounted || rc=$?
+  exit "$rc"
+}
+
 cmd_doctor() {
-  local a p
+  local a p fail=0
   if node_ok; then
     echo "node: $(node --version) (>= ${NODE_MIN_MAJOR}.${NODE_MIN_MINOR})"
   else
@@ -745,8 +802,22 @@ cmd_doctor() {
   echo "agents: codex claude grok enabled ($(for a in codex claude grok; do printf '%s=%s ' "$a" "$(profile_for "$a")"; done))"
   # Which codex a MOUNTED reviewer will run, and so which mapped models it can serve.
   RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
-  if [ -n "$RT_ERR" ]; then echo "reviewer codex runtime: REFUSED — $RT_ERR"
-  else echo "reviewer codex runtime: $RT_PATH (version $RT_VERSION)$( [ "$RT_PATH" = bundled ] && printf ' — the ACP adapter'"'"'s own copy; models that need a newer codex fall back per policy-map.tsv')"; fi
+  # And whether it can run the review a turn gets by default (and under "use max"): a baseline or
+  # ceiling model that needs a newer codex is REFUSED by resolve, never downgraded, so doctor fails
+  # (exit 4) rather than report a runtime every default codex review would be refused on.
+  if [ -n "$RT_ERR" ]; then echo "reviewer codex runtime: REFUSED — $RT_ERR"; fail=1
+  else
+    echo "reviewer codex runtime: $RT_PATH (version $RT_VERSION)$( [ "$RT_PATH" = bundled ] && printf ' — the ACP adapter'"'"'s own copy: a mapped model with a minimum runtime cannot run on it (a routed tier falls to its next model)')"
+    local st srs=0 k m src min ok why label
+    st="$(policy_runtime_standing codex acp-mounted)" || srs=$?
+    [ "$srs" = 0 ] || [ "$srs" = 4 ] || { echo "reviewer policy: the map is unreadable — no codex review can resolve"; fail=1; }
+    while IFS=$'\t' read -r k m src min ok why; do
+      [ -n "$k" ] || continue
+      label="default codex review"; [ "$k" = ceiling ] && label="use-max codex review (COMMS_REVIEW_MAX=1)"
+      if [ "$ok" = ok ]; then echo "$label: $m ($src) — runs on this runtime"
+      else echo "$label: $m ($src) — CANNOT RUN: $why"; fail=1; fi
+    done <<< "$st"
+  fi
   # Reply verification needs python3 (comms.sh reply-check). Without it every reply is UNDECIDABLE
   # and refused rather than trusted, so name it here rather than leaving the operator to discover it
   # mid-consult. (codex, acp-compat-gate plan r2.)
@@ -759,6 +830,10 @@ cmd_doctor() {
   echo "           refused when it is a provider API error or cannot be verified — the consult's own"
   echo "           reply IS its compatibility probe. (The in-session PONG canary that pre-qualifies a"
   echo "           session before an expensive REVIEW prompt runs in runphase, not on this path.)"
+  if [ "$fail" = 1 ]; then
+    echo "result: FAIL — a codex review above cannot run on this reviewer runtime (exit 4)"
+    exit 4
+  fi
 }
 
 cmd_consult() {
@@ -914,6 +989,7 @@ case "${1:-}" in
     ;;
   version) printf '%s\n' "$ACPX_VERSION" ;;
   resolve) shift; cmd_resolve "$@" ;;
+  runtime-check) shift; cmd_runtime_check "$@" ;;
   runtime)
     # runtime <agent> --policy-file <record> — the codex binary the persisted record resolved
     # (`bundled`, or a validated absolute path). runphase hands it to the adapter as CODEX_PATH, so

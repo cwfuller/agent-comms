@@ -57,14 +57,18 @@
 #   one. Sessions are still keyed by policy digest, so no correctness rests on either.
 #
 # GPT-6.1-SOL, 2026-09-29 (codex-acp 1.12.0 bundling codex 0.154.0; installed codex 0.159.0;
-# ChatGPT auth). Made the codex baseline and the first preference of `balanced` and `strong` at the
-# operator's request on release day.
+# ChatGPT auth). Made the codex baseline and the first preference of `balanced` at the operator's
+# request on release day. OPERATOR DECISION (map 2026-09-29.2): gpt-6.1-sol is the DEFAULT, not the
+# strongest. OpenAI describes it as the everyday workhorse and gpt-6-astra as the frontier model, so
+# `strong` and the `use max` ceiling stay gpt-6-astra; 6.1-sol leads the baseline and `balanced` only.
+# (Map 2026-09-29.1 had also put 6.1-sol first in `strong` and at the ceiling, which collapsed the
+# baseline, `strong` and `use max` onto one model; the verifier flagged it and .2 reverts that.)
 # - Catalog, per client (`<codex> debug models` for each installed release under
 #   ~/.codex/packages/standalone/releases/, and the adapter's bundled binary): only 0.159.0 lists
 #   gpt-6.1-sol ("Latest workhorse model for coding and everyday work", efforts
 #   low,medium,high,xhigh,max,ultra, default low). 0.155.1 through 0.158.0 list gpt-6-astra,
 #   gpt-6-sol and gpt-6-luna and nothing newer; the bundled 0.154.0 lists gpt-6-astra alone.
-#   No gpt-6.1 luna or astra is listed, so `fast` is unchanged and astra stays in `strong`.
+#   No gpt-6.1 luna or astra is listed, so `fast` is unchanged.
 # - Live (`printf 'Reply with exactly the word PONG…' | CODEX_HOME=<isolated home, copied
 #   auth.json> <codex> exec --skip-git-repo-check -s read-only -m gpt-6.1-sol
 #   -c model_reasoning_effort=low --json -`): 0.159.0 answered PONG; 0.158.0 and the bundled 0.154.0
@@ -72,13 +76,14 @@
 #   account", after "Model metadata for `gpt-6.1-sol` not found"). Hence the 0.159.0 minimum on its
 #   pair row: the adapter's bundled codex cannot serve it, so a mounted turn needs CODEX_PATH at an
 #   installed codex >= 0.159.0 (acp.sh auto-detects it on PATH). On an older runtime the baseline
-#   and ceiling are REFUSED (they have no fallback), and a routed tier falls to its next model.
+#   is REFUSED (it has no fallback; `acp.sh doctor` and `comms.sh setup` say so), and a routed
+#   `balanced` tier falls to its next model. The ceiling (gpt-6-astra) needs no minimum.
 # - Mounted (`runphase.sh run --agent codex --via acp --no-deliver` from a worktree carrying this
-#   map, COMMS_ACP_CODEX_PATH unset so the installed 0.159.0 was auto-detected): the canary passed and
-#   the turn completed; turn.tsv requested gpt-6.1-sol/xhigh, adapter_check match (acpx
-#   config_options), observed_model/effort gpt-6.1-sol/xhigh from the isolated rollout,
-#   session_created_runtime 0.159.0.
-version	2026-09-29.1
+#   map, COMMS_ACP_CODEX_PATH unset so the installed 0.159.0 was auto-detected; map 2026-09-29.1,
+#   whose baseline row .2 keeps): the canary passed and the turn completed; turn.tsv requested
+#   gpt-6.1-sol/xhigh, adapter_check match (acpx config_options), observed_model/effort
+#   gpt-6.1-sol/xhigh from the isolated rollout, session_created_runtime 0.159.0.
+version	2026-09-29.2
 
 # No mapped model has a usage limit of its own yet, so there are no `limit` rows: every mapped codex
 # model spends the shared codex limit. A row is added with the evidence that the model is served
@@ -95,18 +100,20 @@ capability	grok	acp	unsupported	none applied	as acp-mounted	-	-
 capability	grok	headless	unsupported	none: -m / --reasoning-effort exist but are not passed	as acp-mounted	grok 1.0.40	-
 
 baseline	codex	acp-mounted	gpt-6.1-sol	xhigh
-# `ultra` is the highest effort gpt-6.1-sol accepts. It can run well past an xhigh review, so a
-# `use max` loop may need a larger COMMS_RUNPHASE_TIMEOUT_SECS; set `max` here for a lower ceiling.
-ceiling	codex	acp-mounted	gpt-6.1-sol	ultra
+# The ceiling is the FRONTIER model, not the default one: gpt-6-astra, at `ultra`, the highest effort
+# it accepts. It can run well past an xhigh review, so a `use max` loop may need a larger
+# COMMS_RUNPHASE_TIMEOUT_SECS; set `max` here for a lower ceiling.
+ceiling	codex	acp-mounted	gpt-6-astra	ultra
 
 # The newest model the runtime can serve first: gpt-6.1-sol (codex >= 0.159.0), then GPT-6 (codex
 # >= 0.155.0), then the gpt-5.6 model the bundled runtime is proven to serve (astra needs no
-# minimum). Positioning per OpenAI: astra most capable, sol everyday value, luna narrow/easily
-# checked work; gpt-6.1-sol leads `strong` by operator choice. A model in two tiers reports the
-# FIRST as its effective_tier, so a baseline gpt-6.1-sol turn records `balanced`.
+# minimum). Positioning per OpenAI: astra most capable (the frontier model, so `strong`), sol
+# everyday value (gpt-6.1-sol the latest workhorse, so `balanced` and the baseline), luna
+# narrow/easily checked work. No model is in two tiers, so a baseline gpt-6.1-sol turn records
+# `balanced` as its effective_tier.
 tier	codex	acp-mounted	fast	gpt-6-luna,gpt-5.6-luna
 tier	codex	acp-mounted	balanced	gpt-6.1-sol,gpt-6-sol,gpt-5.6-terra
-tier	codex	acp-mounted	strong	gpt-6.1-sol,gpt-6-astra
+tier	codex	acp-mounted	strong	gpt-6-astra
 
 effort	codex	acp-mounted	low	low
 effort	codex	acp-mounted	medium	medium

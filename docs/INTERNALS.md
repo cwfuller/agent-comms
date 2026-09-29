@@ -510,8 +510,10 @@ runphase: current decision == stamped id? ─▶ acp.sh resolve ─▶ run_dir/p
 - **Runtime-aware tiers.** A tier is an ordered model list; the resolver picks the first model the
   reviewer's codex runtime can serve (minimum runtime per `pair` row), so gpt-6.1-sol is used where
   an installed codex >= 0.159 runs the review, gpt-6-luna/sol where >= 0.155 does, and gpt-5.6
-  otherwise, recorded either way. The baseline and ceiling (gpt-6.1-sol) have no fallback: a
-  runtime too old to serve them is refused, not downgraded. The
+  otherwise, recorded either way. The baseline (gpt-6.1-sol, the everyday default) has no
+  fallback: a runtime too old to serve it is refused, not downgraded, and `acp.sh doctor` fails
+  (exit 4) on such a runtime. `strong` and the ceiling are gpt-6-astra, the frontier model, which
+  needs no minimum. The
   runtime is auto-detected (or `COMMS_ACP_CODEX_PATH`), handed to the adapter as `CODEX_PATH`, and
   is part of the policy digest.
 - **"use max".** `COMMS_REVIEW_MAX=1` (`/auto --max`) runs the map's `ceiling` pair on every turn

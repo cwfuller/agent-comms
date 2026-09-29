@@ -541,9 +541,10 @@ effort→value, the efforts each model accepts, and a capability row per provide
 mechanism, evidence source and versions tested). Precedence per dimension: operator pin
 (`COMMS_ACP_CODEX_MODEL` / `COMMS_ACP_CODEX_EFFORT`) > the operator's "use max" ceiling
 (`COMMS_REVIEW_MAX=1`, the map's `ceiling` row) > an eligible, enabled, implement-phase route >
-baseline (gpt-6.1-sol/xhigh as of map 2026-09-29.1; its `ceiling` is gpt-6.1-sol/ultra). A tier is
+baseline (gpt-6.1-sol/xhigh as of map 2026-09-29.2 — the everyday default; its `ceiling` is the
+frontier model, gpt-6-astra/ultra). A tier is
 an ORDERED list (`fast` = gpt-6-luna then gpt-5.6-luna; `balanced` = gpt-6.1-sol, gpt-6-sol, then
-gpt-5.6-terra; `strong` = gpt-6.1-sol then gpt-6-astra): the first model the reviewer's codex runtime
+gpt-5.6-terra; `strong` = gpt-6-astra): the first model the reviewer's codex runtime
 can serve, by the minimum runtime on its `pair` row; a skipped preference is recorded
 (`runtime-lacks:<model>`). The pair is
 validated; an invalid routed dimension falls back to the baseline once (recorded), an invalid pin,
@@ -561,7 +562,8 @@ share. `--transport mailbox` (a leg nobody drives) resolves to `unsupported`.
 only to new enough clients (2026-09-22: bundled 0.154.0 is refused gpt-6-luna on a ChatGPT login;
 installed 0.155.1 serves gpt-6-luna and gpt-6-sol. 2026-09-29: gpt-6.1-sol, the baseline, is served
 only by codex >= 0.159.0, so the bundled runtime cannot run a baseline codex review and the resolver
-refuses it rather than substitute). `acp.sh` resolves the runtime per turn:
+refuses it rather than substitute; `acp.sh doctor` and `comms.sh setup` name that refusal).
+`acp.sh` resolves the runtime per turn:
 `COMMS_ACP_CODEX_PATH=<path>` uses that binary, `=bundled` uses the adapter's copy, and unset it
 auto-detects the installed `codex` on PATH (skipping cmux/asdf shims), falling back to bundled.
 The `--version` probe is bounded (`COMMS_ACP_RUNTIME_PROBE_SECS`, default 5; the whole process group
@@ -575,8 +577,17 @@ Nothing needs setting on a new machine with a current codex installed; `acp.sh d
 only codex/acp-mounted is eligible. The printed record (`policy_digest`, sources, `fallback`,
 `map_version`, …) is what runphase persists; `policy`, `provider-config`, `policy-check` and
 `policy-attest` take `--policy-file <record>` and then never re-resolve. `acp.sh capabilities`
-prints the table (`acp.sh doctor` also names the reviewer codex runtime and its version). Exit
-codes: resolve 0/1/2; check/attest 0 match, 20 mismatch, 21 undecidable.
+prints the table (`acp.sh doctor` also names the reviewer codex runtime and its version, and whether
+that runtime can run the default (baseline) and use-max (ceiling) codex review, each with the
+operator's model pin applied: a `default codex review:` and a `use-max codex review …:` line ending
+`runs on this runtime` or `CANNOT RUN: <reason>`). `acp.sh runtime-check codex` is the
+machine-readable form: `runtime` and `runtime_version` lines, then one TAB-separated line per row,
+`<baseline|ceiling> <model> <baseline|max|pin> <minimum|-> <ok|refused> <reason|->`, the minimum
+read from the model's `pair` row. Exit codes: resolve 0/1/2; check/attest 0 match, 20 mismatch, 21
+undecidable; doctor 0 consults AND the default and use-max codex reviews can run, 3 no usable
+node, 4 a codex review cannot run on the reviewer runtime or the runtime is refused (the reason is
+printed, and a final `result: FAIL` line); runtime-check 0 all ok, 4 a row refused, 1 the runtime is
+refused or the map is unreadable, 2 usage.
 
 ### `runphase.sh` (experimental)
 

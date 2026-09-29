@@ -305,10 +305,32 @@ fi
 # ---- 5. codex reviewer runtime + timeout ------------------------------------------------------
 say ""
 say "5/5 Codex reviewer runtime"
-rt_auto="$(env -u COMMS_ACP_CODEX_PATH "$HERE/acp.sh" resolve codex 2>/dev/null | awk -F'\t' '$1=="runtime"{r=$2} $1=="runtime_version"{v=$2} END{print r" "v}')"
-say "  auto-detected: ${rt_auto:-unknown}  (GPT-6 Sol/Luna need codex >= 0.155; older falls back to GPT-5.6)"
+# Everything below comes from `acp.sh runtime-check` (machine-readable; the minimum is the map's
+# pair row), never from a version written here: a runtime too old for the baseline is REFUSED by the
+# resolver, not downgraded, so setup names the refusal instead of promising a fallback.
+rt_check() {  # rt_check <COMMS_ACP_CODEX_PATH value, empty = auto> -> the runtime-check record
+  if [ -n "$1" ]; then COMMS_ACP_CODEX_PATH="$1" "$HERE/acp.sh" runtime-check codex 2>/dev/null
+  else env -u COMMS_ACP_CODEX_PATH "$HERE/acp.sh" runtime-check codex 2>/dev/null; fi
+  return 0
+}
+rt_refusals() {  # <record> -> "<label>: <reason>" per refused row
+  printf '%s\n' "$1" | awk -F'\t' '($1=="baseline"||$1=="ceiling") && $5=="refused" {
+    print ($1=="baseline" ? "every default codex review" : "every use-max codex review") " is REFUSED: " $6 }'
+}
+rt_auto_rec="$(rt_check "")"
+rt_auto="$(printf '%s\n' "$rt_auto_rec" | awk -F'\t' '$1=="runtime"{r=$2} $1=="runtime_version"{v=$2} END{if (r != "") print r" ("v")"}')"
+say "  auto-detected: ${rt_auto:-unknown}"
+rt_auto_ref="$(rt_refusals "$rt_auto_rec")"
+if [ -n "$rt_auto_ref" ]; then printf '%s\n' "$rt_auto_ref" | while IFS= read -r l; do say "  on it, $l"; done
+elif [ -n "$rt_auto" ]; then say "  it can run the default codex review"; fi
+# `bundled` is the adapter's own codex, whose version is unknown: a baseline that declares a
+# minimum runtime can never be proven servable there.
+rt_bundled_ref="$(printf '%s\n' "$(rt_check bundled)" | awk -F'\t' '$1=="baseline" && $5=="refused" {print $2 " needs codex >= " $4}')"
+[ -z "$rt_bundled_ref" ] || say "  note: choosing 'bundled' refuses every baseline codex review ($rt_bundled_ref; the adapter's own codex cannot be shown to serve it)"
 RT="$(ask "  runtime: auto | bundled | /path/to/codex" "${COMMS_ACP_CODEX_PATH:-auto}")"
-case "$RT" in auto|"") set_user COMMS_ACP_CODEX_PATH "" ;; bundled) set_user COMMS_ACP_CODEX_PATH bundled ;;
+case "$RT" in auto|"") set_user COMMS_ACP_CODEX_PATH "" ;;
+  bundled) set_user COMMS_ACP_CODEX_PATH bundled
+    [ -z "$rt_bundled_ref" ] || say "  warning: 'bundled' saved — every baseline codex review will be REFUSED until a newer codex is set ($rt_bundled_ref)" ;;
   /*) if [ -x "$RT" ]; then set_user COMMS_ACP_CODEX_PATH "$RT"; else say "  '$RT' is not executable — keeping auto"; set_user COMMS_ACP_CODEX_PATH ""; fi ;;
   *) say "  unrecognised — keeping auto"; set_user COMMS_ACP_CODEX_PATH "" ;; esac
 TO="$(ask "  review turn timeout, seconds" "${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}")"
