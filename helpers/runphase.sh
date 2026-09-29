@@ -4318,14 +4318,15 @@ mount_scope_check() {  # <scope> <canonical main_root> -> 0 usable | 1 absent | 
 # (mount_claim_take, as a mount is) and then gets its record (ident, tree path, admin dir, and its
 # OWNER: the thread, use, agent and — for a throwaway — the physical run); the ident dir is then
 # RENAMED into it (atomic, same filesystem); then that one admin registration is dropped after its
-# back-pointer is re-verified, and the record forgets it; then the copy (a throwaway's run record
-# last) and the tombstone are deleted. An interruption anywhere leaves either
-# the untouched ident or a tombstone a later run finishes — only after taking its claim, so a live
-# maker or a concurrent replay is a scoped skip, and only when the record names that run's own
-# thread and target, since a throwaway's tombstone is named after a basename two threads' run dirs
-# can share. Another thread's journal is report-only. No `git worktree
-# remove --force`, no repo-wide prune: the content gate is the proof git's dirtiness check cannot
-# give a mount.
+# back-pointer is re-verified (the back-pointer last), and the record forgets it; then the copy (a
+# throwaway's run record last) and the tombstone are deleted. The record is always staged through a
+# file created exclusively for it, never through a name that already exists. An interruption
+# anywhere leaves either the untouched ident or a tombstone a later run finishes — only after
+# taking its claim, so a live maker or a concurrent replay is a scoped skip, and only when the
+# record names that run's own thread and target, since a throwaway's tombstone is named after a
+# basename two threads' run dirs can share. Another thread's journal is report-only. No `git
+# worktree remove --force`, no repo-wide prune: the content gate is the proof git's dirtiness check
+# cannot give a mount.
 CM_NOTE=""; CM_ST=""; CM_WHY=""; CM_ADMIN=""
 CM_SCOPE=""; CM_MAIN_ROOT=""; CM_GITDIR=""; CM_ROOT=""; CM_THREAD=""; CM_YES=0; CM_ARTS=""
 CM_N_SEL=0; CM_N_REMOVED=0; CM_N_ABSENT=0; CM_N_WOULD=0; CM_N_SKIPPED=0; CM_N_REFUSED=0
@@ -4652,29 +4653,57 @@ cm_check() {
   return 0
 }
 
+cm_admin_path() {  # <admin dir> — a real directory, at its own physical path, directly in this repo's worktree admin root
+  case "${1#"$CM_GITDIR"/worktrees/}" in "$1"|''|*/*) return 1 ;; esac
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(cd "$1" 2>/dev/null && pwd -P)" = "$1" ]
+}
+
 cm_admin_ours() {  # <admin dir> <tree path> — a real admin dir in this repo whose back-pointer names <tree>
-  local adm="$1"
-  case "${adm#"$CM_GITDIR"/worktrees/}" in "$adm"|''|*/*) return 1 ;; esac
-  [ -d "$adm" ] && [ ! -L "$adm" ] && [ "$(cd "$adm" 2>/dev/null && pwd -P)" = "$adm" ] || return 1
-  [ "$(cat "$adm/gitdir" 2>/dev/null)" = "$2/.git" ]
+  cm_admin_path "$1" && [ "$(cat "$1/gitdir" 2>/dev/null)" = "$2/.git" ]
 }
 
 # cm_drop_tomb <tombstone> — delete a tombstone that no longer holds the ident. The record goes
 # first and the claims last: while the claim stands no contender can take the tombstone, and one
 # that wins it after the claims are gone finds only empty scaffolding.
 cm_drop_tomb() {
-  rm -f "$1/record" "$1/record.tmp" 2>/dev/null || true
+  rm -f "$1/record" "$1"/record.?????? 2>/dev/null || true
   rm -f "$1"/.claim.[0-9]* "$1"/.claim.stage.* 2>/dev/null || true
   rmdir "$1" 2>/dev/null
 }
 
 # cm_journal <tombstone> <ident> <admin|""> <kind> <raw> <agent> <physical run|-> — publish the
-# tombstone's record whole (tmp + rename): a reader sees the previous record or this one, never half.
+# tombstone's record whole: written to a file this call creates EXCLUSIVELY (mktemp) and renamed
+# over the record, so a reader sees the previous record or this one, never half — and no name that
+# already exists is ever opened for writing. A fixed staging name let a replay truncate whatever a
+# leftover `record.tmp` had become, a symlink to a peer's file included.
 cm_journal() {
+  local tmp
   case "$3$7" in *$'\n'*) return 1 ;; esac
-  printf 'ident=%s\ntree=%s\nadmin=%s\nthread=%s\nkind=%s\nraw=%s\nagent=%s\nrun=%s\n' \
-    "$2" "$CM_SCOPE/$2/view/tree" "$3" "$CM_THREAD" "$4" "$5" "$6" "$7" > "$1/record.tmp" 2>/dev/null \
-    && command mv -f "$1/record.tmp" "$1/record" 2>/dev/null
+  if [ -L "$1/record" ] || { [ -e "$1/record" ] && [ ! -f "$1/record" ]; }; then return 1; fi   # mv would land INSIDE it
+  tmp="$(mktemp "$1/record.XXXXXX" 2>/dev/null)" || return 1
+  if printf 'ident=%s\ntree=%s\nadmin=%s\nthread=%s\nkind=%s\nraw=%s\nagent=%s\nrun=%s\n' \
+       "$2" "$CM_SCOPE/$2/view/tree" "$3" "$CM_THREAD" "$4" "$5" "$6" "$7" > "$tmp" 2>/dev/null \
+     && command mv -f "$tmp" "$1/record" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+# cm_rm_last <dir> <entry> — delete <dir>, <entry> LAST: it is the evidence a re-run re-proves the
+# rest by, so a delete that stops part-way keeps it beside whatever could not be removed. 0 once
+# <dir> is gone.
+cm_rm_last() {
+  local e
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    [ "$e" = "$1/$2" ] || rm -rf -- "$e" 2>/dev/null || true
+  done
+  if cm_holds_only "$1" "$2"; then
+    rm -f -- "$1/$2" 2>/dev/null || true
+    rmdir -- "$1" 2>/dev/null || true
+  fi
+  [ ! -e "$1" ] && [ ! -L "$1" ]
 }
 
 cm_holds_only() {  # <dir> <entry name|""> — <dir> provably holds nothing but (at most) that one entry
@@ -4761,7 +4790,9 @@ cm_finish_tomb() {
     case "${e##*/}" in
       "$ident") moved=1
         if [ -L "$e" ] || [ ! -d "$e" ]; then CM_WHY=unsafe-path; CM_NOTE="$e is not a real directory"; return 0; fi ;;
-      record|record.tmp|.claim.[0-9]*|.claim.stage.*) ;;
+      record.??????)   # a journal write stopped before its rename: harmless, but only as a plain file
+        if [ -L "$e" ] || [ ! -f "$e" ]; then CM_WHY=unsafe-path; CM_NOTE="$e is not a regular file"; return 0; fi ;;
+      record|.claim.[0-9]*|.claim.stage.*) ;;
       *) CM_WHY=unknown-content; CM_NOTE="$e was not put there by a cleanup"; return 0 ;;
     esac
   done
@@ -4796,15 +4827,20 @@ cm_finish_tomb() {
     esac
   fi
   if [ -n "$r_admin" ] && { [ -e "$r_admin" ] || [ -L "$r_admin" ]; }; then
-    # Drop exactly the recorded registration, and only while it still names the moved tree. A
-    # runner that re-created the ident since owns a DIFFERENT admin dir with the same back-pointer,
-    # which is why the moved tree's own gitfile must name this one too while it still exists.
-    if ! cm_admin_ours "$r_admin" "$r_tree" \
-       || { [ -f "$tomb/$ident/view/tree/.git" ] && [ "$(cat "$tomb/$ident/view/tree/.git" 2>/dev/null)" != "gitdir: $r_admin" ]; }; then
+    # Drop exactly the recorded registration, and only while it is still the moved tree's. A runner
+    # that re-created the ident since owns a DIFFERENT admin dir with the same back-pointer — or,
+    # once this one is freed, the SAME name (git takes the lowest free one) — so the moved tree's
+    # own gitfile must name it while it still exists, and a re-created copy's must not. Its
+    # back-pointer is how a re-run re-proves it, so it is deleted LAST: an obstructed delete keeps
+    # it, and one stopped between it and the rmdir leaves an empty dir, which registers nothing.
+    if { [ -f "$tomb/$ident/view/tree/.git" ] && [ "$(cat "$tomb/$ident/view/tree/.git" 2>/dev/null)" != "gitdir: $r_admin" ]; } \
+       || { [ -f "$r_tree/.git" ] && [ "$(cat "$r_tree/.git" 2>/dev/null)" = "gitdir: $r_admin" ]; } \
+       || ! { cm_admin_ours "$r_admin" "$r_tree" || { cm_admin_path "$r_admin" && cm_holds_only "$r_admin" ""; }; }; then
       CM_ST=incomplete; CM_WHY=admin-unverified; CM_NOTE="$r_admin no longer names only the tree in $tomb; left for a human"; return 0
     fi
-    rm -rf -- "$r_admin" 2>/dev/null || true
-    if [ -e "$r_admin" ]; then CM_ST=incomplete; CM_WHY=admin-remove-failed; CM_NOTE="could not remove $r_admin"; return 0; fi
+    if ! cm_rm_last "$r_admin" gitdir; then
+      CM_ST=incomplete; CM_WHY=admin-remove-failed; CM_NOTE="could not remove all of $r_admin; its back-pointer is kept so a re-run finishes it"; return 0
+    fi
   fi
   # The journal forgets the registration once it is gone, and BEFORE any payload is deleted: a
   # partial delete can take the moved tree's gitfile, which is the cross-check above, and a replay
@@ -4814,20 +4850,9 @@ cm_finish_tomb() {
     CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not record in $tomb that $r_admin is gone"; return 0
   fi
   cm_hook unregistered "$ident" "$tomb"
-  if [ "$moved" = 1 ]; then
-    # The run record goes LAST: a throwaway's replay re-proves the copy from it, so a delete that
-    # stops part-way keeps it beside whatever could not be removed, and the re-run can finish.
-    for e in "$tomb/$ident"/* "$tomb/$ident"/.[!.]* "$tomb/$ident"/..?*; do
-      [ -e "$e" ] || [ -L "$e" ] || continue
-      [ "$e" = "$tomb/$ident/.state.run" ] || rm -rf -- "$e" 2>/dev/null || true
-    done
-    if cm_holds_only "$tomb/$ident" .state.run; then
-      rm -f -- "$tomb/$ident/.state.run" 2>/dev/null || true
-      rmdir -- "$tomb/$ident" 2>/dev/null || true
-    fi
-    if [ -e "$tomb/$ident" ] || [ -L "$tomb/$ident" ]; then
-      CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not delete everything under $tomb/$ident; the tombstone is kept so a re-run finishes it"; return 0
-    fi
+  # The run record goes LAST: a throwaway's replay re-proves the copy from it.
+  if [ "$moved" = 1 ] && ! cm_rm_last "$tomb/$ident" .state.run; then
+    CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not delete everything under $tomb/$ident; the tombstone is kept so a re-run finishes it"; return 0
   fi
   cm_drop_tomb "$tomb" || { CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not remove $tomb"; return 0; }
   cm_hook removed "$ident" "$tomb"

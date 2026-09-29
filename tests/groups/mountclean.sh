@@ -416,6 +416,86 @@ fi
 RT_IR="$(rt_cm --thread rt-kilo --yes)"; RT_IRC=$?
 [ "$RT_IRC" = 0 ] && rt_line "$RT_IR" "$RT_K" removed interrupted && rt_gone "$RT_K" && rt_intact "$RT_PEER" \
   && ok "the re-run finishes the kept tombstone and reports it removed" || fail "resume after incomplete (rc=$RT_IRC): $RT_IR"
+# The registration's back-pointer is deleted LAST, so a delete obstructed INSIDE the admin dir
+# keeps what the re-run re-proves it by: once the obstruction is gone the re-run finishes.
+cat > "$WORK/rt-hook-admlock" <<'EOF'
+#!/bin/bash
+[ "$1" = renamed ] || exit 0
+a="$(cat "$3/$2/.state.admin")"
+mkdir -p "$a/logs" && printf 'x\n' > "$a/logs/pinned" && chmod 000 "$a/logs"
+exit 0
+EOF
+chmod +x "$WORK/rt-hook-admlock"
+RT_K="$(rt_turn rt-kilo grok)"; RT_KADM="$(cat "$RT_K/.state.admin" 2>/dev/null)"
+RT_AI="$(COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-admlock" rt_cm --thread rt-kilo --yes)"; RT_AIC=$?
+RT_AT="$(ls -d "$RT_STORE"/*/.retire."$(basename "$RT_K")".* 2>/dev/null | head -1)"
+if [ -n "$RT_KADM" ] && [ "$RT_AIC" = 3 ] && rt_line "$RT_AI" "$RT_K" incomplete admin-remove-failed && [ -n "$RT_AT" ] \
+   && [ "$(cat "$RT_KADM/gitdir" 2>/dev/null)" = "$RT_K/view/tree/.git" ] && grep -qxF "admin=$RT_KADM" "$RT_AT/record" \
+   && [ -f "$RT_AT/$(basename "$RT_K")/view/tree/rt.txt" ]; then
+  ok "a delete obstructed inside the admin dir is incomplete and keeps the registration's back-pointer and the payload"
+else
+  fail "obstructed admin delete (rc=$RT_AIC, adm=$RT_KADM, tomb=$RT_AT): $RT_AI"
+fi
+[ -n "$RT_KADM" ] && chmod 755 "$RT_KADM/logs" 2>/dev/null
+RT_AR="$(rt_cm --thread rt-kilo --yes)"; RT_ARC=$?
+[ "$RT_ARC" = 0 ] && rt_line "$RT_AR" "$RT_K" removed interrupted && rt_gone "$RT_K" && [ -n "$RT_KADM" ] && [ ! -e "$RT_KADM" ] \
+  && rt_intact "$RT_PEER" \
+  && ok "with the admin dir's obstruction gone the re-run re-proves the registration and finishes" \
+  || fail "resume obstructed admin delete (rc=$RT_ARC): $RT_AR"
+# Without its back-pointer an admin dir still holding anything proves nothing, and one a copy
+# re-created at the ident claims is that copy's (git hands it the freed name, same back-pointer):
+# both are left for a human. One emptied down to itself registers nothing and holds nothing to lose.
+RT_K="$(rt_turn rt-kilo grok)"; RT_KADM="$(cat "$RT_K/.state.admin" 2>/dev/null)"
+RT_KILL_AT=renamed COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-kill" rt_cm --thread rt-kilo --yes >/dev/null 2>&1
+RT_ET="$(ls -d "$RT_STORE"/*/.retire."$(basename "$RT_K")".* 2>/dev/null | head -1)"
+RT_EUC=x; RT_ELC=x
+if [ -n "$RT_ET" ] && [ -n "$RT_KADM" ] && mv "$RT_KADM/gitdir" "$WORK/rt-gitdir"; then
+  RT_EU="$(rt_cm --thread rt-kilo --yes)"; RT_EUC=$?
+  mv "$WORK/rt-gitdir" "$RT_KADM/gitdir"
+  mkdir -p "$RT_K/view/tree"; printf 'gitdir: %s\n' "$RT_KADM" > "$RT_K/view/tree/.git"
+  RT_EL="$(rt_cm --thread rt-kilo --yes)"; RT_ELC=$?
+  rm -rf "$RT_K"
+fi
+if [ "$RT_EUC" = 3 ] && rt_line "$RT_EU" "$RT_K" incomplete admin-unverified \
+   && [ "$RT_ELC" = 3 ] && rt_line "$RT_EL" "$RT_K" incomplete admin-unverified \
+   && [ -f "$RT_KADM/gitdir" ] && [ -f "$RT_KADM/HEAD" ] && [ -f "$RT_ET/$(basename "$RT_K")/view/tree/rt.txt" ]; then
+  ok "an admin dir with no back-pointer, or one a re-created copy's gitfile names, is left with the payload"
+else
+  fail "unprovable admin dir (rc=$RT_EUC/$RT_ELC, tomb=$RT_ET): $RT_EU / $RT_EL"
+fi
+[ -n "$RT_KADM" ] && [ -d "$RT_KADM" ] && find "$RT_KADM" -mindepth 1 -delete 2>/dev/null
+RT_EE="$(rt_cm --thread rt-kilo --yes)"; RT_EEC=$?
+[ "$RT_EEC" = 0 ] && rt_line "$RT_EE" "$RT_K" removed interrupted && rt_gone "$RT_K" && [ ! -e "$RT_KADM" ] && rt_intact "$RT_PEER" \
+  && ok "an admin dir emptied down to itself is dropped and the re-run finishes" \
+  || fail "emptied admin dir (rc=$RT_EEC): $RT_EE"
+# The journal is published through a file created exclusively for it. A staging entry left in a
+# tombstone is at most a plain file: a symlink there — to a peer's file — refuses before anything
+# is deleted and is never written through, and a plain leftover is cleared with the tombstone.
+RT_K="$(rt_turn rt-kilo grok)"
+RT_KILL_AT=renamed COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-kill" rt_cm --thread rt-kilo --yes >/dev/null 2>&1
+RT_ST="$(ls -d "$RT_STORE"/*/.retire."$(basename "$RT_K")".* 2>/dev/null | head -1)"
+printf 'peer\n' > "$WORK/rt-sentinel"
+RT_SAC=x; RT_SBC=x
+if [ -n "$RT_ST" ]; then
+  ln -s "$WORK/rt-sentinel" "$RT_ST/record.tmp"
+  RT_SA="$(rt_cm --thread rt-kilo --yes)"; RT_SAC=$?
+  rm -f "$RT_ST/record.tmp"; ln -s "$WORK/rt-sentinel" "$RT_ST/record.Zz9Zz9"
+  RT_SB="$(rt_cm --thread rt-kilo --yes)"; RT_SBC=$?
+  rm -f "$RT_ST/record.Zz9Zz9"
+fi
+if [ "$RT_SAC" = 4 ] && rt_line "$RT_SA" "$RT_K" refused unknown-content \
+   && [ "$RT_SBC" = 4 ] && rt_line "$RT_SB" "$RT_K" refused unsafe-path \
+   && [ "$(cat "$WORK/rt-sentinel")" = peer ] && [ -f "$RT_ST/$(basename "$RT_K")/view/tree/rt.txt" ] && rt_reg "$RT_K"; then
+  ok "a symlinked staging entry in an interrupted tombstone refuses, deletes nothing and leaves its target unchanged"
+else
+  fail "symlinked journal staging (rc=$RT_SAC/$RT_SBC, tomb=$RT_ST, sentinel=$(cat "$WORK/rt-sentinel")): $RT_SA / $RT_SB"
+fi
+[ -n "$RT_ST" ] && printf 'half' > "$RT_ST/record.Qq1Qq1"
+RT_SC="$(rt_cm --thread rt-kilo --yes)"; RT_SCC=$?
+[ "$RT_SCC" = 0 ] && rt_line "$RT_SC" "$RT_K" removed interrupted && rt_gone "$RT_K" && [ "$(cat "$WORK/rt-sentinel")" = peer ] \
+  && rt_intact "$RT_PEER" \
+  && ok "a plain staging file left by an interrupted journal write is cleared and the re-run finishes" \
+  || fail "leftover journal staging (rc=$RT_SCC): $RT_SC"
 
 # The journal names its owner: a record another thread's cleanup wrote, or one missing a field,
 # is never replayed — the copy in it stays until its own thread's cleanup finishes it.

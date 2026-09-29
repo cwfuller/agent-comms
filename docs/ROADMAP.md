@@ -689,6 +689,13 @@ check ahead of the inventory, so a runner mid-restage is a scoped skip instead o
 Round 4 (codex) found a throwaway delete that stopped part-way took the moved copy's `.state.run`
 with it, so the replay refused forever even after the obstruction was gone; the run record is now
 deleted last, and the journal forgets the dropped admin registration before any payload goes.
+Round 5 (codex) found the same shape one level up — a registration delete obstructed inside the
+admin dir could take its `gitdir` back-pointer first, after which every retry was `admin-unverified`
+— and that the journal was staged through a fixed `record.tmp`, which a replay would truncate
+through a symlink. The back-pointer is now deleted last (one "evidence last" delete serves both the
+admin dir and the payload), a copy re-created at the ident that names the admin dir makes it that
+copy's, and the record is staged through an exclusively created file, with any non-regular staging
+entry refused before destructive work.
 Measured on the development fixture only; not yet run against a live store. Open: a turn that fails
 after staging but before recording its session leaves a copy both GCs treat differently (the
 whole-store GC reads a missing record as "no owner"; `--thread` refuses it as `state-missing`,

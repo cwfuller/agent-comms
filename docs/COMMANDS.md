@@ -582,7 +582,12 @@ it re-reads both under the tombstone's claim. A delete that stops part-way keeps
 beside whatever it could not remove (the run record is deleted last, and a copy already emptied
 has nothing left to prove), and the record stops naming the admin registration once it is dropped
 and before any payload is deleted, so a re-run finishes once the obstruction is gone and never
-judges a re-created copy's same-named registration. Another thread's tombstone is never selected by a
+judges a re-created copy's same-named registration. The registration's own back-pointer (`gitdir`)
+is likewise deleted last, so an admin dir that could not be fully removed (`admin-remove-failed`)
+is still provably this tree's on the re-run; one with no back-pointer that still holds anything, or
+one a copy re-created at the ident names, is `admin-unverified`. The record is written to a fresh
+exclusively-created file and renamed into place, never through an existing name; a leftover
+staging entry that is not a plain file refuses (`unsafe-path`). Another thread's tombstone is never selected by a
 throwaway's name, and one found on a selected identity is `ambiguous` (`foreign-tombstone`), left
 for that thread's own cleanup even after that thread is unretired; a record missing an owner field
 refuses (`tombstone-unverifiable`). Nothing under `.comms/` is touched: replies, compositions, run records

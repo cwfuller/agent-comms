@@ -515,8 +515,15 @@ waits on any other ident. Load-bearing choices:
   is ordered around its own evidence: once the registration is dropped the record is rewritten
   with `admin=` empty, BEFORE any payload goes (a partial delete can take the moved tree's
   gitfile, the only cross-check against a re-created copy that git gave the freed admin name), and
-  a throwaway's `.state.run` is deleted last (an emptied copy has nothing left to prove). No repo-wide `git worktree prune`, which would also prune a peer
-  worktree on an unmounted volume.
+  a throwaway's `.state.run` is deleted last (an emptied copy has nothing left to prove). The
+  registration is deleted the same way: its back-pointer (`gitdir`) goes last, so a delete
+  obstructed inside the admin dir keeps the one file the re-run re-proves it by, and an admin dir
+  already emptied down to itself registers nothing and is dropped. One a copy re-created at the
+  ident claims (its gitfile names that admin dir) is that copy's, and is left for a human. The
+  record is published through a file `mktemp` creates exclusively and renamed over the old one, so
+  no existing name is ever opened for writing; a leftover staging entry (`record.XXXXXX`) that is
+  not a plain file refuses (`unsafe-path`) before anything is deleted. No repo-wide `git worktree
+  prune`, which would also prune a peer worktree on an unmounted volume.
 - **The journal has an owner.** A replay takes the tombstone's claim before touching it, so a
   maker still alive — or a second replay — is a scoped `busy-cleanup` skip, and only a maker proven
   dead is superseded. Replaying unclaimed let a concurrent cleanup read a live one's tombstone as
