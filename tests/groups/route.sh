@@ -920,7 +920,7 @@ RP_MAPV="$(awk -F'\t' '$1=="version"{print $2; exit}' "$REPO/helpers/policy-map.
 rpp() { rrc COMMS_DELIVERY=acp "$@"; }
 rp_line() { printf 'route-plan v1 agent=%s provider=%s transport=acp-mounted %s phase=%s map_version=%s' "$1" "$2" "$3" "$4" "$RP_MAPV"; }
 RP_UNSUP='capability=unsupported model=n/a effort=n/a limit_id=n/a model_source=unsupported effort_source=unsupported'
-RP_BASE='capability=eligible model=gpt-6-astra effort=xhigh limit_id=- model_source=baseline effort_source=baseline'
+RP_BASE='capability=eligible model=gpt-6.1-sol effort=xhigh limit_id=- model_source=baseline effort_source=baseline'
 # The whole repo, contents included, so any file the verb creates, removes or rewrites shows.
 rp_tree() { ( cd "$RR_REPO" && find . -print | LC_ALL=C sort; find . -type f -exec shasum {} + | LC_ALL=C sort; git status --porcelain ); }
 RP_B0="$(rp_tree)"
@@ -951,7 +951,7 @@ RP_BEFORE="$(rp_tree)"   # the decision above is setup; everything after it must
 OUT="$(rpp COMMS_REVIEW_ROUTE=1 "$COMMS" review-route plan --to codex,grok --thread t-plan 2>&1)"; A=$?
 OFF="$(rpp "$COMMS" review-route plan --to codex --thread t-plan 2>&1)"
 PL="$(rpp COMMS_REVIEW_ROUTE=1 "$COMMS" review-route plan --to codex --thread t-plan --phase plan 2>&1)"
-RP_WANT="$(rp_line codex codex "capability=eligible model=gpt-5.6-luna effort=low limit_id=- model_source=route effort_source=route routing=on decision=$RP_ID" implement)
+RP_WANT="$(rp_line codex codex "capability=eligible model=gpt-6-luna effort=low limit_id=- model_source=route effort_source=route routing=on decision=$RP_ID" implement)
 $(rp_line grok grok "$RP_UNSUP routing=on decision=$RP_ID" implement)"
 [ -n "$RP_ID" ] && [ "$A" = 0 ] && [ "$OUT" = "$RP_WANT" ] \
   && [ "$OFF" = "$(rp_line codex codex "$RP_BASE routing=off decision=none" implement)" ] \

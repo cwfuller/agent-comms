@@ -41,10 +41,9 @@ unset COMMS_REVIEW_TURN 2>/dev/null || true
 # them set them per invocation.
 # The classifier's own switches go too: with reviewer routing on, every send and panel fixture in
 # the corpus would classify, and an inherited backend would reach TypeSafe from the suite.
-# THE REVIEWER RUNTIME is pinned to the adapter's bundled codex for the whole corpus: auto-detection
-# would otherwise find whatever codex the developer has installed, and the routed-model assertions
-# would describe that machine. The runtime cases set their own stub binaries per invocation.
-export COMMS_ACP_CODEX_PATH=bundled
+# THE REVIEWER RUNTIME is pinned for the whole corpus (to a fixed-version stub, once $WORK exists
+# below): auto-detection would otherwise find whatever codex the developer has installed, and the
+# routed-model assertions would describe that machine. The runtime cases set their own per invocation.
 # The installer offers interactive setup whenever /dev/tty opens; a suite run from a terminal
 # must never block on that prompt.
 export AGENT_COMMS_SETUP=0
@@ -57,7 +56,7 @@ unset COMMS_REVIEW_ROUTE COMMS_REVIEW_MAX COMMS_ACP_CODEX_MODEL COMMS_ACP_CODEX_
 # here; the settings section opts back in per case. Inherited values: a parent that already loaded
 # them (`integrate` runs this suite from comms.sh) exported them, so EVERY settable key is scrubbed,
 # from the loader's own list so a new key cannot be forgotten (an inherited ACPX_BIN would bypass
-# the npx stubs and reach the real transport). Only the pinned runtime above is re-applied.
+# the npx stubs and reach the real transport). Only the pinned runtime is re-applied, below.
 export AC_SETTINGS_LOADED=1
 # (The coordinator's own tests run this harness from a tree without helpers/: nothing to scrub there.)
 _ac_settings="$(dirname "${BASH_SOURCE[0]}")/../../helpers/settings.sh"
@@ -67,7 +66,6 @@ if [ -f "$_ac_settings" ]; then
   unset $AC_SETTINGS_KEYS $AC_SECRET_KEYS
 fi
 unset _ac_settings AC_SETTINGS_FROM
-export COMMS_ACP_CODEX_PATH=bundled
 
 # THE DEFAULT IS `mailbox`. What the harness needs from a default is "write the file and
 # nudge nobody" — no spawned child, no network. It used to get that by asking for cmux and
@@ -298,6 +296,16 @@ grep_full() { # grep_full <grep args...> — grep that reads stdin to EOF before
 
 
 WORK="$(mktemp -d)"
+# THE PINNED REVIEWER RUNTIME (see the scrub above): a stub that reports one fixed codex version.
+# Not `bundled`: the adapter's bundled codex has no version we can know, so it cannot serve a map
+# model that declares a minimum runtime — and the committed baseline (gpt-6.1-sol, map 2026-09-29.1)
+# declares 0.159.0, so a `bundled` corpus would refuse every baseline codex turn. The version is the
+# baseline's minimum; raise it with the map. Cases about `bundled` itself name it per invocation.
+HARNESS_CODEX_RUNTIME="$WORK/reviewer-runtime/codex"
+mkdir -p "$WORK/reviewer-runtime" \
+  && printf '#!/bin/sh\necho "codex-cli 0.159.0"\n' > "$HARNESS_CODEX_RUNTIME" \
+  && chmod +x "$HARNESS_CODEX_RUNTIME"
+export COMMS_ACP_CODEX_PATH="$HARNESS_CODEX_RUNTIME"
 _suite_gate_guard() { # <rc> — the sentinel's DECISION, side-effect free so it is testable
   [ "${GATE_REACHED:-0}" = 1 ] && return "$1"
   [ "$1" -eq 0 ] || return "$1"

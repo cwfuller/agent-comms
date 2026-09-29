@@ -512,7 +512,7 @@ env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$REPO/helpers/acp.sh" re
   turn_observe "$ISO_RQ" medium gpt-6-astra rec-9 t-9 /r/y.jsonl 7 )
 grep -qx "requested_effort	xhigh" "$ISO_RQ/turn.tsv" \
   && ok "turn.tsv records the REQUESTED effort from the persisted policy record" || fail "requested effort missing"
-grep -qx "requested_model	gpt-6-astra" "$ISO_RQ/turn.tsv" \
+grep -qx "requested_model	gpt-6.1-sol" "$ISO_RQ/turn.tsv" \
   && ok "turn.tsv records the REQUESTED model" || fail "requested model missing"
 # The divergence must be legible from the file alone, with no mount and no rollout.
 grep -qx "observed_effort	medium" "$ISO_RQ/turn.tsv" && grep -qx "requested_effort	xhigh" "$ISO_RQ/turn.tsv" \
@@ -536,7 +536,7 @@ grep -qx "requested_effort	unknown" "$ISO_RQ-na/turn.tsv" 2>/dev/null \
   && ok "a missing policy record records requested=unknown, never an assumed default" || fail "missing record did not record unknown"
 # A ROUTED record lands with its provenance: decision id, map version, per-dimension source.
 mkdir -p "$ISO_RQ-rt"
-env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$REPO/helpers/acp.sh" resolve codex --tier fast --effort low \
+env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT COMMS_ACP_CODEX_PATH=bundled "$REPO/helpers/acp.sh" resolve codex --tier fast --effort low \
   --decision rd-0123 --routing on --phase implement > "$ISO_RQ-rt/policy.tsv" 2>/dev/null
 ( eval "$ISO_TP"; turn_policy "$ISO_RQ-rt" "$ISO_RQ-rt/policy.tsv" rd-0123 ) 2>/dev/null
 grep -qx "route_decision	rd-0123" "$ISO_RQ-rt/turn.tsv" && grep -qx "policy_model_source	route" "$ISO_RQ-rt/turn.tsv" \

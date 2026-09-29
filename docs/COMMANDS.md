@@ -541,9 +541,11 @@ effort→value, the efforts each model accepts, and a capability row per provide
 mechanism, evidence source and versions tested). Precedence per dimension: operator pin
 (`COMMS_ACP_CODEX_MODEL` / `COMMS_ACP_CODEX_EFFORT`) > the operator's "use max" ceiling
 (`COMMS_REVIEW_MAX=1`, the map's `ceiling` row) > an eligible, enabled, implement-phase route >
-baseline. A tier is an ORDERED list (`fast` = gpt-6-luna then gpt-5.6-luna; `balanced` = gpt-6-sol
-then gpt-5.6-terra): the first model the reviewer's codex runtime can serve, by the minimum runtime
-on its `pair` row; a skipped preference is recorded (`runtime-lacks:<model>`). The pair is
+baseline (gpt-6.1-sol/xhigh as of map 2026-09-29.1; its `ceiling` is gpt-6.1-sol/ultra). A tier is
+an ORDERED list (`fast` = gpt-6-luna then gpt-5.6-luna; `balanced` = gpt-6.1-sol, gpt-6-sol, then
+gpt-5.6-terra; `strong` = gpt-6.1-sol then gpt-6-astra): the first model the reviewer's codex runtime
+can serve, by the minimum runtime on its `pair` row; a skipped preference is recorded
+(`runtime-lacks:<model>`). The pair is
 validated; an invalid routed dimension falls back to the baseline once (recorded), an invalid pin,
 max pair or explicit decision is refused, and so is a pinned/baseline/ceiling model the runtime
 cannot serve. The record also names the usage limit the chosen model spends: `limit_id` from a
@@ -557,7 +559,9 @@ share. `--transport mailbox` (a leg nobody drives) resolves to `unsupported`.
 **The reviewer's codex runtime.** The ACP adapter bundles its own codex and runs it unless
 `CODEX_PATH` names another; the bundled copy can lag your installed CLI, and new models are served
 only to new enough clients (2026-09-22: bundled 0.154.0 is refused gpt-6-luna on a ChatGPT login;
-installed 0.155.1 serves gpt-6-luna and gpt-6-sol). `acp.sh` resolves the runtime per turn:
+installed 0.155.1 serves gpt-6-luna and gpt-6-sol. 2026-09-29: gpt-6.1-sol, the baseline, is served
+only by codex >= 0.159.0, so the bundled runtime cannot run a baseline codex review and the resolver
+refuses it rather than substitute). `acp.sh` resolves the runtime per turn:
 `COMMS_ACP_CODEX_PATH=<path>` uses that binary, `=bundled` uses the adapter's copy, and unset it
 auto-detects the installed `codex` on PATH (skipping cmux/asdf shims), falling back to bundled.
 The `--version` probe is bounded (`COMMS_ACP_RUNTIME_PROBE_SECS`, default 5; the whole process group
