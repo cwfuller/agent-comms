@@ -4318,7 +4318,8 @@ mount_scope_check() {  # <scope> <canonical main_root> -> 0 usable | 1 absent | 
 # (mount_claim_take, as a mount is) and then gets its record (ident, tree path, admin dir, and its
 # OWNER: the thread, use, agent and — for a throwaway — the physical run); the ident dir is then
 # RENAMED into it (atomic, same filesystem); then that one admin registration is dropped after its
-# back-pointer is re-verified; then the tombstone is deleted. An interruption anywhere leaves either
+# back-pointer is re-verified, and the record forgets it; then the copy (a throwaway's run record
+# last) and the tombstone are deleted. An interruption anywhere leaves either
 # the untouched ident or a tombstone a later run finishes — only after taking its claim, so a live
 # maker or a concurrent replay is a scoped skip, and only when the record names that run's own
 # thread and target, since a throwaway's tombstone is named after a basename two threads' run dirs
@@ -4667,6 +4668,26 @@ cm_drop_tomb() {
   rmdir "$1" 2>/dev/null
 }
 
+# cm_journal <tombstone> <ident> <admin|""> <kind> <raw> <agent> <physical run|-> — publish the
+# tombstone's record whole (tmp + rename): a reader sees the previous record or this one, never half.
+cm_journal() {
+  case "$3$7" in *$'\n'*) return 1 ;; esac
+  printf 'ident=%s\ntree=%s\nadmin=%s\nthread=%s\nkind=%s\nraw=%s\nagent=%s\nrun=%s\n' \
+    "$2" "$CM_SCOPE/$2/view/tree" "$3" "$CM_THREAD" "$4" "$5" "$6" "$7" > "$1/record.tmp" 2>/dev/null \
+    && command mv -f "$1/record.tmp" "$1/record" 2>/dev/null
+}
+
+cm_holds_only() {  # <dir> <entry name|""> — <dir> provably holds nothing but (at most) that one entry
+  local e
+  [ -r "$1" ] && [ -x "$1" ] || return 1   # an unreadable dir globs as empty
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    [ -n "$2" ] && [ "$e" = "$1/$2" ] && continue
+    return 1
+  done
+  return 0
+}
+
 # cm_tomb_match <tombstone> <ident> <kind> <raw> <agent> <physical run|-> — WHOSE removal does this
 # journal record? The tombstone's name is derived from the ident, which for a throwaway is a
 # basename two run dirs share, so the name proves nothing: the record must name this thread and
@@ -4765,12 +4786,13 @@ cm_finish_tomb() {
   fi
   if [ "$moved" = 1 ] && [ "$kind" = throwaway ]; then
     # The relocated copy must still record the run its journal names: the record was written under
-    # the ident's claim, but the copy is what is about to be deleted.
+    # the ident's claim, but the copy is what is about to be deleted. A copy already emptied by an
+    # earlier delete holds nothing left to prove.
     have="$(mount_state_get "$tomb/$ident" run)" || hrc=$?
     case "$hrc" in
       0) [ "$have" = "$CM_J_RUN" ] || { CM_ST=ambiguous; CM_WHY=run-mismatch; CM_NOTE="$tomb/$ident was made for run '$have', not $CM_J_RUN"; return 0; } ;;
-      1) CM_ST=ambiguous; CM_WHY=no-ownership-evidence; CM_NOTE="$tomb/$ident records no run it was made for"; return 0 ;;
-      *) CM_WHY=state-unreadable; CM_NOTE="$tomb/$ident/.state.run is present but unreadable"; return 0 ;;
+      1) cm_holds_only "$tomb/$ident" "" || { CM_ST=ambiguous; CM_WHY=no-ownership-evidence; CM_NOTE="$tomb/$ident records no run it was made for"; return 0; } ;;
+      *) CM_ST=refused; CM_WHY=state-unreadable; CM_NOTE="$tomb/$ident/.state.run is present but unreadable"; return 0 ;;
     esac
   fi
   if [ -n "$r_admin" ] && { [ -e "$r_admin" ] || [ -L "$r_admin" ]; }; then
@@ -4784,9 +4806,25 @@ cm_finish_tomb() {
     rm -rf -- "$r_admin" 2>/dev/null || true
     if [ -e "$r_admin" ]; then CM_ST=incomplete; CM_WHY=admin-remove-failed; CM_NOTE="could not remove $r_admin"; return 0; fi
   fi
+  # The journal forgets the registration once it is gone, and BEFORE any payload is deleted: a
+  # partial delete can take the moved tree's gitfile, which is the cross-check above, and a replay
+  # still naming the admin would then judge a re-created copy's same-named registration (git reuses
+  # the lowest free name) by its back-pointer alone.
+  if [ -n "$r_admin" ] && ! cm_journal "$tomb" "$ident" "" "$kind" "$4" "$5" "$6"; then
+    CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not record in $tomb that $r_admin is gone"; return 0
+  fi
   cm_hook unregistered "$ident" "$tomb"
   if [ "$moved" = 1 ]; then
-    rm -rf -- "$tomb/$ident" 2>/dev/null || true
+    # The run record goes LAST: a throwaway's replay re-proves the copy from it, so a delete that
+    # stops part-way keeps it beside whatever could not be removed, and the re-run can finish.
+    for e in "$tomb/$ident"/* "$tomb/$ident"/.[!.]* "$tomb/$ident"/..?*; do
+      [ -e "$e" ] || [ -L "$e" ] || continue
+      [ "$e" = "$tomb/$ident/.state.run" ] || rm -rf -- "$e" 2>/dev/null || true
+    done
+    if cm_holds_only "$tomb/$ident" .state.run; then
+      rm -f -- "$tomb/$ident/.state.run" 2>/dev/null || true
+      rmdir -- "$tomb/$ident" 2>/dev/null || true
+    fi
     if [ -e "$tomb/$ident" ] || [ -L "$tomb/$ident" ]; then
       CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not delete everything under $tomb/$ident; the tombstone is kept so a re-run finishes it"; return 0
     fi
@@ -4902,10 +4940,7 @@ cm_remove() {
   # The record names its OWNER — this thread and the exact target (use, agent and, for a
   # throwaway, the physical run it was proven for) — because the tombstone's name carries only the
   # ident, which run dirs that normalize alike share. A replay finishes it only for that owner.
-  if ! { case "$CM_ADMIN$prun" in *$'\n'*) false ;; esac \
-         && printf 'ident=%s\ntree=%s\nadmin=%s\nthread=%s\nkind=%s\nraw=%s\nagent=%s\nrun=%s\n' \
-              "$ident" "$d/view/tree" "$CM_ADMIN" "$CM_THREAD" "$kind" "$raw" "$agent" "$prun" > "$tomb/record.tmp" \
-         && command mv -f "$tomb/record.tmp" "$tomb/record"; }; then
+  if ! cm_journal "$tomb" "$ident" "$CM_ADMIN" "$kind" "$raw" "$agent" "$prun"; then
     cm_drop_tomb "$tomb" || true
     MOUNT_HOLDER="$holder"; mount_claim_release
     CM_ST=refused; CM_WHY=tombstone-failed; CM_NOTE="could not stage a tombstone under $CM_SCOPE"; return 0

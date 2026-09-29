@@ -574,3 +574,54 @@ RT_VF="$(rt_cm --thread rt-victor --yes)"; RT_VFC=$?
 [ "$RT_VFC" = 0 ] && rt_line "$RT_VF" "$RT_VW" removed interrupted && rt_gone "$RT_VW" && rt_intact "$RT_PEER" \
   && ok "the thread whose run the journal names finishes its interrupted throwaway removal" \
   || fail "owner's replay (rc=$RT_VFC): $RT_VF"
+# A throwaway delete that stops part-way keeps the copy's run record beside what it could not
+# remove, and its journal has already forgotten the dropped registration, so once the obstruction
+# is gone the re-run re-proves the copy and finishes: nothing has to be rebuilt by hand.
+RT_WW="$(rt_tmp "$RT/.comms/logs/rt-whiskey-run" rt-whiskey)"
+RT_WADM="$(cat "$RT_WW/.state.admin")"
+rt_state retire rt-whiskey >/dev/null
+RT_WI="$(COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-lock" rt_cm --thread rt-whiskey --yes)"; RT_WIC=$?
+RT_WT="$(ls -d "$RT_KEYDIR/.retire.$(basename "$RT_WW")".* 2>/dev/null | head -1)"
+RT_WM="$RT_WT/$(basename "$RT_WW")"
+RT_WLEFT="$(LC_ALL=C ls -A "$RT_WM" 2>/dev/null | tr '\n' ' ')"
+if [ "$RT_WIC" = 3 ] && rt_line "$RT_WI" "$RT_WW" incomplete remove-failed && [ -n "$RT_WT" ] \
+   && [ "$RT_WLEFT" = ".state.run home " ] && grep -qx 'admin=' "$RT_WT/record" && [ ! -e "$RT_WADM" ] && [ ! -e "$RT_WW" ]; then
+  ok "a throwaway delete stopped part-way keeps its run record, and its journal no longer names the dropped registration"
+else
+  fail "partial throwaway delete (rc=$RT_WIC, tomb=$RT_WT, left=$RT_WLEFT): $RT_WI"
+fi
+[ -n "$RT_WT" ] && chmod 755 "$RT_WM/home" 2>/dev/null && chmod 000 "$RT_WM/.state.run" 2>/dev/null
+RT_WU="$(rt_cm --thread rt-whiskey --yes)"; RT_WUC=$?
+[ -n "$RT_WT" ] && chmod 644 "$RT_WM/.state.run" 2>/dev/null
+[ "$RT_WUC" = 4 ] && rt_line "$RT_WU" "$RT_WW" refused state-unreadable && [ -f "$RT_WM/home/pinned" ] \
+  && ok "a replay that cannot read the moved copy's run record is refused and deletes nothing" \
+  || fail "unreadable moved run record (rc=$RT_WUC): $RT_WU"
+# A copy re-created since gets the lowest free admin name — the one just dropped — with the same
+# back-pointer; the replay no longer claims a registration, so it must leave that one alone.
+RT_WKEEP=0
+if [ -n "$RT_WT" ] && mkdir "$RT_WADM" 2>/dev/null; then
+  printf '%s/view/tree/.git\n' "$RT_WW" > "$RT_WADM/gitdir"
+  RT_WF="$(rt_cm --thread rt-whiskey --yes)"; RT_WFC=$?
+  [ -f "$RT_WADM/gitdir" ] && RT_WKEEP=1
+  rm -rf "$RT_WADM"
+fi
+[ "$RT_WFC" = 0 ] && rt_line "$RT_WF" "$RT_WW" removed interrupted && [ "$RT_WKEEP" = 1 ] && rt_gone "$RT_WW" && rt_intact "$RT_PEER" \
+  && ok "with the obstruction gone the re-run finishes the throwaway and leaves a same-named registration alone" \
+  || fail "resume partial throwaway delete (rc=$RT_WFC, kept=$RT_WKEEP): $RT_WF"
+# The run record goes last, so a delete stopped between it and the final rmdir leaves an EMPTY
+# copy: nothing is left to prove, so it finishes. One still holding anything stays report-only.
+RT_YW="$(rt_tmp "$RT/.comms/logs/rt-yankee-run" rt-yankee)"
+rt_state retire rt-yankee >/dev/null
+RT_KILL_AT=unregistered COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-kill" rt_cm --thread rt-yankee --yes >/dev/null 2>&1
+RT_YT="$(ls -d "$RT_KEYDIR/.retire.$(basename "$RT_YW")".* 2>/dev/null | head -1)"
+RT_YM="$RT_YT/$(basename "$RT_YW")"
+[ -n "$RT_YT" ] && rm -f "$RT_YM/.state.run"
+RT_YA="$(rt_cm --thread rt-yankee --yes)"; RT_YAC=$?
+[ -n "$RT_YT" ] && [ "$RT_YAC" = 4 ] && rt_line "$RT_YA" "$RT_YW" ambiguous no-ownership-evidence && [ -f "$RT_YM/view/tree/rt.txt" ] \
+  && ok "a moved throwaway that still holds content but no run record is report-only" \
+  || fail "moved throwaway without a run record (rc=$RT_YAC, tomb=$RT_YT): $RT_YA"
+[ -n "$RT_YT" ] && find "$RT_YM" -mindepth 1 -delete 2>/dev/null
+RT_YE="$(rt_cm --thread rt-yankee --yes)"; RT_YEC=$?
+[ -n "$RT_YT" ] && [ "$RT_YEC" = 0 ] && rt_line "$RT_YE" "$RT_YW" removed interrupted && rt_gone "$RT_YW" && rt_intact "$RT_PEER" \
+  && ok "a moved throwaway already emptied down to its directory is finished: nothing is left to prove" \
+  || fail "emptied moved throwaway (rc=$RT_YEC): $RT_YE"

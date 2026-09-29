@@ -578,7 +578,11 @@ proven dead is superseded. The record names its owner — the thread, the use, t
 throwaway, the physical run — because the tombstone's name carries only the ident, which run dirs
 that normalize alike share. A replay finishes it only when the record names this thread and this
 exact target, and, for a throwaway, only while the moved copy's `.state.run` still names that run;
-it re-reads both under the tombstone's claim. Another thread's tombstone is never selected by a
+it re-reads both under the tombstone's claim. A delete that stops part-way keeps that `.state.run`
+beside whatever it could not remove (the run record is deleted last, and a copy already emptied
+has nothing left to prove), and the record stops naming the admin registration once it is dropped
+and before any payload is deleted, so a re-run finishes once the obstruction is gone and never
+judges a re-created copy's same-named registration. Another thread's tombstone is never selected by a
 throwaway's name, and one found on a selected identity is `ambiguous` (`foreign-tombstone`), left
 for that thread's own cleanup even after that thread is unretired; a record missing an owner field
 refuses (`tombstone-unverifiable`). Nothing under `.comms/` is touched: replies, compositions, run records

@@ -686,6 +686,9 @@ dir normalizes like another's replayed that thread's interrupted throwaway remov
 name; the record now names its owning thread, use, agent and physical run, and a replay re-checks
 it and the moved copy's `.state.run` under the tombstone's claim. The same round moved the claim
 check ahead of the inventory, so a runner mid-restage is a scoped skip instead of a refusal.
+Round 4 (codex) found a throwaway delete that stopped part-way took the moved copy's `.state.run`
+with it, so the replay refused forever even after the obstruction was gone; the run record is now
+deleted last, and the journal forgets the dropped admin registration before any payload goes.
 Measured on the development fixture only; not yet run against a live store. Open: a turn that fails
 after staging but before recording its session leaves a copy both GCs treat differently (the
 whole-store GC reads a missing record as "no owner"; `--thread` refuses it as `state-missing`,

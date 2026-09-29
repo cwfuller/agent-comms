@@ -511,7 +511,11 @@ waits on any other ident. Load-bearing choices:
   written into it, the ident is renamed into it, the one admin registration whose back-pointer
   names the tree is dropped, and the tombstone is deleted. A kill at any boundary leaves either
   the untouched ident or a tombstone a later run finishes; a delete that fails part-way reports
-  `incomplete`, never `removed`. No repo-wide `git worktree prune`, which would also prune a peer
+  `incomplete`, never `removed`. The re-run must be able to re-prove what is left, so the delete
+  is ordered around its own evidence: once the registration is dropped the record is rewritten
+  with `admin=` empty, BEFORE any payload goes (a partial delete can take the moved tree's
+  gitfile, the only cross-check against a re-created copy that git gave the freed admin name), and
+  a throwaway's `.state.run` is deleted last (an emptied copy has nothing left to prove). No repo-wide `git worktree prune`, which would also prune a peer
   worktree on an unmounted volume.
 - **The journal has an owner.** A replay takes the tombstone's claim before touching it, so a
   maker still alive — or a second replay — is a scoped `busy-cleanup` skip, and only a maker proven
