@@ -704,6 +704,12 @@ deleted the tree nothing had verified; the ident dir, `view/` and every aside mu
 attributing a shared copy to the retired thread alone; such a record, or a leg row without its
 agent, is now an unattributable use (`ownership-unresolved`), and one naming no thread refuses the
 whole call.
+Round 7 (codex) found the tombstone's own inventory still trusted a glob: a searchable but
+unlistable tombstone read as "never received the ident", so the registration went, the payload was
+skipped and dropping the tombstone deleted its journal beside the payload, stranding it. The
+tombstone and the copy in it must now list before a replay touches anything (`content-unverifiable`,
+in the dry run too), and a tombstone's record is deleted only once it provably holds nothing else.
+The scope that holds the tombstones must list as well, or the call refuses (`store-error`).
 Measured on the development fixture only; not yet run against a live store. Open: a turn that fails
 after staging but before recording its session leaves a copy both GCs treat differently (the
 whole-store GC reads a missing record as "no owner"; `--thread` refuses it as `state-missing`,

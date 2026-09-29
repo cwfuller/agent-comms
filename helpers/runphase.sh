@@ -4691,8 +4691,17 @@ cm_admin_ours() {  # <admin dir> <tree path> — a real admin dir in this repo w
 
 # cm_drop_tomb <tombstone> — delete a tombstone that no longer holds the ident. The record goes
 # first and the claims last: while the claim stands no contender can take the tombstone, and one
-# that wins it after the claims are gone finds only empty scaffolding.
+# that wins it after the claims are gone finds only empty scaffolding. The record is the only proof
+# of whose payload the tombstone holds, so it goes only once a listing that worked shows nothing
+# but journal and claims: dropping it beside a payload the caller never saw strands that payload
+# where every later replay refuses it.
 cm_drop_tomb() {
+  local e
+  cm_listable "$1" || return 1
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    case "${e##*/}" in record|record.??????|.claim.[0-9]*|.claim.stage.*) ;; *) return 1 ;; esac
+  done
   rm -f "$1/record" "$1"/record.?????? 2>/dev/null || true
   rm -f "$1"/.claim.[0-9]* "$1"/.claim.stage.* 2>/dev/null || true
   rmdir "$1" 2>/dev/null
@@ -4816,6 +4825,12 @@ cm_finish_tomb() {
   if [ -L "$tomb" ] || [ ! -d "$tomb" ] || [ "$(cd "$tomb" 2>/dev/null && pwd -P)" != "$tomb" ]; then
     CM_WHY=unsafe-path; CM_NOTE="$tomb is not a real directory at its own physical path"; return 0
   fi
+  # Whether it received the ident is read from its listing, and a glob over one that cannot be
+  # listed reads as EMPTY: the payload would pass as never moved while its registration and journal
+  # went. Nothing is touched until the tombstone — and the copy in it — list.
+  if ! cm_listable "$tomb"; then
+    CM_WHY=content-unverifiable; CM_NOTE="$tomb cannot be listed, so whether it holds $ident cannot be verified"; return 0
+  fi
   for e in "$tomb"/* "$tomb"/.[!.]* "$tomb"/..?*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
     case "${e##*/}" in
@@ -4827,6 +4842,9 @@ cm_finish_tomb() {
       *) CM_WHY=unknown-content; CM_NOTE="$e was not put there by a cleanup"; return 0 ;;
     esac
   done
+  if [ "$moved" = 1 ] && ! cm_listable "$tomb/$ident"; then
+    CM_WHY=content-unverifiable; CM_NOTE="$tomb/$ident cannot be listed, so what is left of it cannot be verified"; return 0
+  fi
   cm_tomb_match "$tomb" "$ident" "$kind" "$4" "$5" "$6"
   case "$CM_ST" in
     ours) ;;
@@ -5045,6 +5063,10 @@ cm_target() {
       *) cm_emit "$CM_ST" "$CM_WHY" "$kind" "$use" "$agent" "$ident"; return 0 ;;
     esac
     CM_NOTE=""
+    if ! cm_listable "$tomb"; then   # a dry run must not promise what the replay will refuse
+      CM_NOTE="$tomb cannot be listed, so whether it holds $ident cannot be verified"
+      cm_emit refused content-unverifiable "$kind" "$use" "$agent" "$ident"; return 0
+    fi
     if [ "$CM_YES" != 1 ]; then pending=1; continue; fi
     cm_replay_tomb "$ident" "$tomb" "$kind" "$raw" "$agent" "$prun"
     case "$CM_ST" in
@@ -5114,6 +5136,12 @@ cm_thread() {
   CM_SCOPE="$base/$key"
   mount_scope_check "$CM_SCOPE" "$CM_MAIN_ROOT" || sc_rc=$?
   if [ "$sc_rc" = 2 ]; then echo "clean-mounts: $MOUNT_SCOPE_NOTE" >&2; cm_result store-error; return 1; fi
+  # An interrupted removal is found by globbing the scope for its tombstone, and a glob over a
+  # scope that cannot be listed reads as EMPTY: the moved ident would pass as already absent.
+  if [ "$sc_rc" = 0 ] && ! cm_listable "$CM_SCOPE"; then
+    echo "clean-mounts: $CM_SCOPE cannot be listed, so an interrupted removal in it cannot be found — refusing" >&2
+    cm_result store-error; return 1
+  fi
   gd="$(mount_git -C "$CM_MAIN_ROOT" rev-parse --git-common-dir 2>/dev/null)" \
     && CM_GITDIR="$( cd "$CM_MAIN_ROOT" 2>/dev/null && cd "$gd" 2>/dev/null && pwd -P )" \
     || { echo "clean-mounts: cannot resolve this repo's git dir" >&2; cm_result store-error; return 1; }

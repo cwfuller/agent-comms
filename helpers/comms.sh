@@ -7127,7 +7127,7 @@ cmd_clean() {
       --thread) need_value "clean" $# "$1"; shift
                 [ "$thread_set" = false ] || usage_err "clean mounts: --thread names ONE thread; run it once per thread"
                 thread="$1"; thread_set=true ;;
-      *) [ -z "$mode" ] && mode="$1" || die "clean: unexpected argument '$1'" ;;
+      *) [ -z "$mode" ] && mode="$1" || usage_err "clean: unexpected argument '$1'" ;;
     esac
     shift
   done

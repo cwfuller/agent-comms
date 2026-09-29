@@ -493,7 +493,13 @@ waits on any other ident. Load-bearing choices:
 - **Absent only from a listing that worked.** A glob over a directory that cannot be listed reads
   as EMPTY, and `-d` fails below one that cannot be searched, so an unlistable `view/` once passed
   as "no tree" and its dirty tree reached the tombstone unverified. The ident dir, `view/` and each
-  aside must list before anything under them is concluded absent.
+  aside must list before anything under them is concluded absent. The same holds for a tombstone:
+  whether it received the ident is read from its listing, so an unlistable one once read as "never
+  moved" — the registration went, the payload was skipped, and dropping the "empty" tombstone
+  deleted its record beside the payload, which every replay then refused. A replay touches nothing
+  until the tombstone and the copy in it list, and `cm_drop_tomb` deletes the record only when a
+  working listing shows nothing but journal and claims. The scope itself must list too, or a
+  tombstone in it is never found and its moved ident reads as already absent (`store-error`).
 - **A throwaway's name is not its owner.** `tmp-<run>` is `safe_name` of the run dir's basename, and
   `run+1`, `run_1` and a `--dir` elsewhere named `run_1` all map to one copy that the session and
   content checks cannot tell apart when both runs reviewed one artifact. The runner therefore

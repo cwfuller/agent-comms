@@ -90,11 +90,13 @@ rt_cm --thread "" >/dev/null; RT_U2=$?
 rt_cm --thread rt/alpha --orphans >/dev/null; RT_U3=$?
 rt_cm --thread rt/alpha --ident x --yes >/dev/null; RT_U4=$?
 (cd "$RT" && env HOME="$RT_HOME" COMMS_MOUNT_BASE="$RT_STORE" "$COMMS" clean --thread rt/alpha --yes >/dev/null 2>&1); RT_U5=$?
+(cd "$RT" && env HOME="$RT_HOME" COMMS_MOUNT_BASE="$RT_STORE" "$COMMS" clean mounts --thread rt/alpha --bogus --yes >/dev/null 2>&1); RT_U6=$?
+(cd "$RT" && env HOME="$RT_HOME" COMMS_MOUNT_BASE="$RT_STORE" "$COMMS" clean --bogus mounts --thread rt/alpha --yes >/dev/null 2>&1); RT_U7=$?
 if [ "$RT_U1" = 2 ] && [ "$RT_U2" = 2 ] && [ "$RT_U3" = 2 ] && [ "$RT_U4" = 2 ] && [ "$RT_U5" = 2 ] \
-   && rt_intact "$RT_A1" && rt_intact "$RT_B1"; then
+   && [ "$RT_U6" = 2 ] && [ "$RT_U7" = 2 ] && rt_intact "$RT_A1" && rt_intact "$RT_B1"; then
   ok "a missing, empty or unknown selector and --orphans with --thread are usage errors that remove nothing"
 else
-  fail "selector refusals rc=$RT_U1/$RT_U2/$RT_U3/$RT_U4/$RT_U5"
+  fail "selector refusals rc=$RT_U1/$RT_U2/$RT_U3/$RT_U4/$RT_U5/$RT_U6/$RT_U7"
 fi
 
 # ---- authority: an idle loop between rounds is not retired ----
@@ -517,6 +519,51 @@ RT_EE="$(rt_cm --thread rt-kilo --yes)"; RT_EEC=$?
 [ "$RT_EEC" = 0 ] && rt_line "$RT_EE" "$RT_K" removed interrupted && rt_gone "$RT_K" && [ ! -e "$RT_KADM" ] && rt_intact "$RT_PEER" \
   && ok "an admin dir emptied down to itself is dropped and the re-run finishes" \
   || fail "emptied admin dir (rc=$RT_EEC): $RT_EE"
+# Whether a tombstone received the ident is read from its listing, and a glob over a searchable but
+# unlistable one reads as EMPTY: the registration went, the payload was skipped as never moved, and
+# dropping the "empty" tombstone deleted its journal beside the payload, which every later replay
+# then refused for good. Nothing is touched until it lists, and the journal goes only once it
+# provably holds nothing else.
+cat > "$WORK/rt-hook-unlist" <<'EOF'
+#!/bin/bash
+[ "$1" = renamed ] && chmod u-r "$3"
+exit 0
+EOF
+chmod +x "$WORK/rt-hook-unlist"
+RT_K="$(rt_turn rt-kilo grok)"; RT_KADM="$(cat "$RT_K/.state.admin" 2>/dev/null)"
+RT_UL="$(COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-unlist" rt_cm --thread rt-kilo --yes)"; RT_ULC=$?
+RT_UT="$(ls -d "$RT_STORE"/*/.retire."$(basename "$RT_K")".* 2>/dev/null | head -1)"
+RT_UD="$(rt_cm --thread rt-kilo)"; RT_UDC=$?
+if [ -n "$RT_K" ] && [ -n "$RT_KADM" ] && [ "$RT_ULC" = 4 ] && rt_line "$RT_UL" "$RT_K" refused content-unverifiable \
+   && [ "$RT_UDC" = 4 ] && rt_line "$RT_UD" "$RT_K" refused content-unverifiable && [ -n "$RT_UT" ] \
+   && grep -qxF "admin=$RT_KADM" "$RT_UT/record" && [ "$(cat "$RT_KADM/gitdir" 2>/dev/null)" = "$RT_K/view/tree/.git" ] \
+   && [ -f "$RT_UT/$(basename "$RT_K")/view/tree/rt.txt" ]; then
+  ok "an unlistable tombstone refuses in dry run and apply, keeping its journal, registration and payload"
+else
+  fail "unlistable tombstone (rc=$RT_ULC/$RT_UDC, tomb=$RT_UT): $RT_UL / $RT_UD"
+fi
+[ -n "$RT_UT" ] && chmod u+r "$RT_UT"
+RT_UR="$(rt_cm --thread rt-kilo --yes)"; RT_URC=$?
+[ "$RT_URC" = 0 ] && rt_line "$RT_UR" "$RT_K" removed interrupted && rt_gone "$RT_K" && [ -n "$RT_KADM" ] && [ ! -e "$RT_KADM" ] \
+  && rt_intact "$RT_PEER" \
+  && ok "once the tombstone lists again the re-run finishes the removal from its journal" \
+  || fail "resume unlistable tombstone (rc=$RT_URC): $RT_UR"
+# One level up, the same glob finds the tombstone in the scope: an unlistable scope hid it, and the
+# moved ident read as already absent — a success report beside a payload nothing removed.
+RT_K="$(rt_turn rt-kilo grok)"; RT_SS="$(dirname "$RT_K")"
+RT_KILL_AT=renamed COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-kill" rt_cm --thread rt-kilo --yes >/dev/null 2>&1
+RT_ST2="$(ls -d "$RT_SS"/.retire."$(basename "$RT_K")".* 2>/dev/null | head -1)"
+chmod u-r "$RT_SS"
+RT_SL="$(rt_cm --thread rt-kilo --yes)"; RT_SLC=$?
+chmod u+r "$RT_SS"
+RT_SR="$(rt_cm --thread rt-kilo --yes)"; RT_SRC=$?
+if [ -n "$RT_K" ] && [ -n "$RT_ST2" ] && [ "$RT_SLC" = 1 ] && grep -q '^clean-mounts-result v1 status=store-error ' <<<"$RT_SL" \
+   && ! grep -q '^clean-mounts-target ' <<<"$RT_SL" \
+   && [ "$RT_SRC" = 0 ] && rt_line "$RT_SR" "$RT_K" removed interrupted && rt_gone "$RT_K" && rt_intact "$RT_PEER"; then
+  ok "an unlistable scope refuses the call before any target, and the re-run finishes the hidden tombstone"
+else
+  fail "unlistable scope (rc=$RT_SLC/$RT_SRC, tomb=$RT_ST2): $RT_SL / $RT_SR"
+fi
 # The journal is published through a file created exclusively for it. A staging entry left in a
 # tombstone is at most a plain file: a symlink there — to a peer's file — refuses before anything
 # is deleted and is never written through, and a plain leftover is cleared with the tombstone.
