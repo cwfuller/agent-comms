@@ -489,7 +489,10 @@ waits on any other ident. Load-bearing choices:
   one of T or `T-<agent>` with no `agent` line (a run still writing it; `agent` is its last base
   line, and records before 2026-09-26 never carried one) could be the co-owner's, so it is an
   unattributable use that leaves the copy report-only; one with no `thread` line could concern any
-  thread and refuses the whole call. The same holds for a `sets.tsv` row.
+  thread and refuses the whole call. The same holds for a `sets.tsv` row. The index's first line
+  is skipped only once it proves to be the header naming the columns read: skipped unseen, a
+  headerless index dropped its first leg row, and when that row was a live thread's the only
+  evidence that a retired direct thread's copy was shared, the copy read as the retired thread's.
 - **Absent only from a listing that worked.** A glob over a directory that cannot be listed reads
   as EMPTY, and `-d` fails below one that cannot be searched, so an unlistable `view/` once passed
   as "no tree" and its dirty tree reached the tombstone unverified. The ident dir, `view/` and each
@@ -551,6 +554,11 @@ waits on any other ident. Load-bearing choices:
   only (ident, tree, admin) let thread A's cleanup finish thread B's removal, retired or not. The
   record now carries the thread, use, agent and physical run; selection reads only this thread's
   records, and a replay re-checks the record and the moved copy's `.state.run` under the claim.
+- **A replay is a removal.** It deletes a payload and a registration, so it passes the gates a
+  first removal passes (`cm_regate`, shared by both): a held use is refused before its tombstone
+  is touched, and under the tombstone's claim the retirement, the holds and the ledger ownership
+  are read again. The interrupted run proved them once; a paused loop, a withdrawn retirement or a
+  live co-owner recorded since keeps the tombstone whole until they hold again.
 
 **Residual risks, accepted.** (1) The ledgers ARE the evidence: deleting run records can hide a
 direct turn on a leg-shaped thread name, and the shared copy would then read as T's alone. (2) A

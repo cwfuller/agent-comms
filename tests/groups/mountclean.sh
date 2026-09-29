@@ -398,6 +398,27 @@ RT_LR="$(rt_cm --thread rt-lima --yes)"; RT_LRC=$?
 [ "$RT_LRC" = 0 ] && rt_line "$RT_LR" "$RT_L1" removed proven && rt_gone "$RT_L1" \
   && ok "the refused apply released its claim: once the late use is gone the next apply removes the copy" \
   || fail "after the late use (rc=$RT_LRC): $RT_LR"
+# The set index's first line is skipped only once it proves to be the header. Here LIVE thread
+# rt-hotel's leg row is the only evidence that retired direct thread rt-hotel-grok's copy is shared:
+# an index that opens with that row (no header), or with a header naming other columns, must refuse
+# the call — never drop the row and read the copy as rt-hotel-grok's alone.
+RT_IDX="$RT/.comms/grades/sets.tsv"
+RT_H1="$(rt_turn rt-hotel-grok grok)"
+rt_sets set-h "rt-hotel-grok" grok
+rt_state retire rt-hotel-grok >/dev/null
+RT_HX="$(rt_cm --thread rt-hotel-grok --yes)"; RT_HXC=$?
+cp "$RT_IDX" "$WORK/rt-sets.hdr"
+{ sed -n '$p' "$WORK/rt-sets.hdr"; sed '1d;$d' "$WORK/rt-sets.hdr"; } > "$RT_IDX"
+RT_HN="$(rt_cm --thread rt-hotel-grok --yes)"; RT_HNC=$?
+{ sed -n '1p' "$WORK/rt-sets.hdr" | awk -F'\t' -v OFS='\t' '{ t = $3; $3 = $10; $10 = t; print }'; sed '1d' "$WORK/rt-sets.hdr"; } > "$RT_IDX"
+RT_HW="$(rt_cm --thread rt-hotel-grok --yes)"; RT_HWC=$?
+cp "$WORK/rt-sets.hdr" "$RT_IDX"
+if [ -n "$RT_H1" ] && [ "$RT_HXC" = 4 ] && rt_line "$RT_HX" "$RT_H1" ambiguous shared-with-live-thread \
+   && [ "$RT_HNC" = 4 ] && rt_none "$RT_HN" && [ "$RT_HWC" = 4 ] && rt_none "$RT_HW" && rt_intact "$RT_H1"; then
+  ok "a set index without its header, or whose header names other columns, refuses: a live co-owner's first row is never skipped"
+else
+  fail "set index header (rc=$RT_HXC/$RT_HNC/$RT_HWC, h1=$RT_H1): $RT_HX / $RT_HN / $RT_HW"
+fi
 
 # ---- evidence that cannot be read refuses the whole call before anything is selected ----
 RT_M1="$(rt_turn rt-mike grok)"
@@ -616,6 +637,58 @@ fi
 RT_KR="$(rt_cm --thread rt-kilo --yes)"; RT_KRC=$?
 [ "$RT_KRC" = 0 ] && rt_line "$RT_KR" "$RT_K" removed interrupted && rt_gone "$RT_K" && rt_intact "$RT_PEER" \
   && ok "with its own record restored the thread's re-run finishes the removal" || fail "restored journal (rc=$RT_KRC): $RT_KR"
+
+# ---- a replay is a removal: the authority and ownership gates run before it, and under its claim ----
+# The interrupted run proved them once. A hold on the leg (a paused loop), a withdrawn retirement or
+# a live co-owner recorded since must each keep the journal, the moved copy and its registration.
+rt_sets set-j "rt-juliet-grok" grok
+rt_state retire rt-juliet >/dev/null
+RT_J="$(rt_turn "rt-juliet-grok" grok set-j)"
+RT_KILL_AT=renamed COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-kill" rt_cm --thread rt-juliet --yes >/dev/null 2>&1
+RT_JT="$(ls -d "$RT_STORE"/*/.retire."$(basename "$RT_J")".* 2>/dev/null | head -1)"
+rt_jtomb() {  # the journal, the moved copy and its registration are exactly as the kill left them
+  [ -n "$RT_JT" ] && [ -f "$RT_JT/record" ] && [ -f "$RT_JT/$(basename "$RT_J")/view/tree/rt.txt" ] \
+    && rt_reg "$RT_J" && [ ! -e "$RT_J" ]
+}
+(cd "$RT" && env "$RP" hold rt-juliet-grok >/dev/null 2>&1)
+RT_JD="$(rt_cm --thread rt-juliet)"; RT_JDC=$?
+RT_JA="$(rt_cm --thread rt-juliet --yes)"; RT_JAC=$?
+(cd "$RT" && env "$RP" release rt-juliet-grok >/dev/null 2>&1)
+if [ -n "$RT_J" ] && [ "$RT_JDC" = 4 ] && rt_line "$RT_JD" "$RT_J" refused held \
+   && [ "$RT_JAC" = 4 ] && rt_line "$RT_JA" "$RT_J" refused held && rt_jtomb; then
+  ok "a held leg's interrupted removal is refused before its tombstone is replayed, in dry run and apply"
+else
+  fail "held leg replay (rc=$RT_JDC/$RT_JAC, j=$RT_J, tomb=$RT_JT): $RT_JD / $RT_JA"
+fi
+cat > "$WORK/rt-hook-regate" <<EOF
+#!/bin/bash
+[ "\$1" = reclaimed ] || exit 0
+case "\$RT_REGATE" in
+  hold) "$RP" hold rt-juliet-grok ;;
+  unretire) "$COMMS" state unretire rt-juliet ;;
+  share) mkdir -p "$RT/.comms/logs/rt-jshare"
+         printf 'thread\trt-juliet-grok\nset\t\nagent\tgrok\nartifact\t%s\n' "$RT_ART" > "$RT/.comms/logs/rt-jshare/turn.tsv" ;;
+esac >/dev/null 2>&1
+exit 0
+EOF
+chmod +x "$WORK/rt-hook-regate"
+RT_JH="$(RT_REGATE=hold COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-regate" rt_cm --thread rt-juliet --yes)"; RT_JHC=$?
+(cd "$RT" && env "$RP" release rt-juliet-grok >/dev/null 2>&1)
+RT_JU="$(RT_REGATE=unretire COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-regate" rt_cm --thread rt-juliet --yes)"; RT_JUC=$?
+rt_state retire rt-juliet >/dev/null
+RT_JS="$(RT_REGATE=share COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-regate" rt_cm --thread rt-juliet --yes)"; RT_JSC=$?
+rm -rf "$RT/.comms/logs/rt-jshare"
+if [ "$RT_JHC" = 4 ] && rt_line "$RT_JH" "$RT_J" refused held \
+   && [ "$RT_JUC" = 4 ] && rt_line "$RT_JU" "$RT_J" refused unretired \
+   && [ "$RT_JSC" = 4 ] && rt_line "$RT_JS" "$RT_J" ambiguous shared-with-live-thread && rt_jtomb; then
+  ok "a hold, a withdrawn retirement or a live co-owner appearing under the replay's claim keeps the tombstone whole"
+else
+  fail "replay re-gate (rc=$RT_JHC/$RT_JUC/$RT_JSC): $RT_JH / $RT_JU / $RT_JS"
+fi
+RT_JR="$(rt_cm --thread rt-juliet --yes)"; RT_JRC=$?
+[ "$RT_JRC" = 0 ] && rt_line "$RT_JR" "$RT_J" removed interrupted && rt_gone "$RT_J" && rt_intact "$RT_PEER" \
+  && ok "with every gate restored the replay finishes the interrupted removal" \
+  || fail "replay after the re-gate (rc=$RT_JRC): $RT_JR"
 
 # ---- two applies at once: a live cleanup's tombstone is never replayed from under it ----
 # A second apply of the same thread runs INSIDE the first, at the boundary under test, and must

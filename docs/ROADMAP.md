@@ -710,6 +710,14 @@ skipped and dropping the tombstone deleted its journal beside the payload, stran
 tombstone and the copy in it must now list before a replay touches anything (`content-unverifiable`,
 in the dry run too), and a tombstone's record is deleted only once it provably holds nothing else.
 The scope that holds the tombstones must list as well, or the call refuses (`store-error`).
+Panel round 9 (codex) found two more. The set index's first line was skipped unseen, so a
+headerless `sets.tsv` lost its first leg row — a live co-owner's, when that row was the only
+evidence a retired direct thread's copy was shared; the header must now name the columns read, or
+the call refuses. And a replay ran before the leg's hold was checked and never re-ran the
+retirement or ownership gates under its claim, so an interrupted removal of a paused leg deleted
+its payload and registration before reporting `held`; the hold is now checked before any
+tombstone is touched, and a replay re-runs the same authority and ownership gates a first removal
+does (`cm_regate`, shared by both) under the tombstone's claim.
 Measured on the development fixture only; not yet run against a live store. Open: a turn that fails
 after staging but before recording its session leaves a copy both GCs treat differently (the
 whole-store GC reads a missing record as "no owner"; `--thread` refuses it as `state-missing`,

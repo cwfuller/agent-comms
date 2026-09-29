@@ -548,8 +548,10 @@ run of T's could have named is report-only (`no-ownership-evidence` when it reco
 `run-mismatch` when it records another). Every run record is enumerated before any is read: a
 `.comms/logs` that is a symlink, a symlinked entry in it, or a `turn.tsv` that is not a regular
 file would hide a use, so each refuses the whole call. A ledger that exists but cannot be read
-refuses the whole call too (exit 4), as does a run record with no `thread` line or a `sets.tsv`
-row with fewer than three columns. A record of T or `T-<agent>` with no `agent` line (a run still
+refuses the whole call too (exit 4), as does a run record with no `thread` line, a `sets.tsv`
+whose first line is not its header (`review_set_id`, with `thread`, `artifact_id` and
+`shadow_agent` in the columns read) — a headerless index would otherwise lose its first leg row —
+or a `sets.tsv` row with fewer than three columns. A record of T or `T-<agent>` with no `agent` line (a run still
 writing it, or one written before records carried it) and a leg row without its agent are uses
 nobody can attribute: the copy they could name is report-only (`ownership-unresolved`).
 
@@ -582,7 +584,12 @@ proven dead is superseded. The record names its owner — the thread, the use, t
 throwaway, the physical run — because the tombstone's name carries only the ident, which run dirs
 that normalize alike share. A replay finishes it only when the record names this thread and this
 exact target, and, for a throwaway, only while the moved copy's `.state.run` still names that run;
-it re-reads both under the tombstone's claim. A delete that stops part-way keeps that `.state.run`
+it re-reads both under the tombstone's claim. A replay destroys a payload and a registration as a
+first removal does, so it passes the same authority and ownership gates: a held use is refused
+(`held`) before its tombstone is touched, dry run or apply, and under the tombstone's claim the
+retirement, the holds and the ledger ownership are read again (`unretired`, `held`, or
+`ambiguous` for a co-owner recorded since), leaving the journal, the moved copy and its
+registration as they were. A delete that stops part-way keeps that `.state.run`
 beside whatever it could not remove (the run record is deleted last, and a copy already emptied
 has nothing left to prove), and the record stops naming the admin registration once it is dropped
 and before any payload is deleted, so a re-run finishes once the obstruction is gone and never
@@ -627,7 +634,8 @@ clean-mounts-result v1 status=<s> mode=dry-run|apply selected=N removed=N absent
 
 Parsers must ignore unknown keys; a breaking change bumps `v1`. `COMMS_TEST_CLEAN_MOUNTS_HOOK` is
 a test seam (an executable called at each boundary: `prechecked`, `claimed`, `tombstoned`,
-`renamed`, `unregistered`, `removed`) and is never set in normal use.
+`renamed`, `reclaimed` (a replay holds its tombstone), `unregistered`, `removed`) and is never set
+in normal use.
 
 ### `docs/loopspec/check.sh`
 

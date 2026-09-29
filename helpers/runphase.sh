@@ -4333,9 +4333,10 @@ CM_SCOPE=""; CM_MAIN_ROOT=""; CM_GITDIR=""; CM_ROOT=""; CM_THREAD=""; CM_YES=0; 
 CM_N_SEL=0; CM_N_REMOVED=0; CM_N_ABSENT=0; CM_N_WOULD=0; CM_N_SKIPPED=0; CM_N_REFUSED=0
 CM_N_INCOMPLETE=0; CM_N_AMBIG=0
 
-# A TEST SEAM: when set, called as `<hook> <event> <ident> <path>` at each boundary
-# (prechecked, claimed, tombstoned, renamed, unregistered, removed) so the suite can plant a race
-# or kill this process there. Its status is ignored; unset, it costs nothing.
+# A TEST SEAM: when set, called as `<hook> <event> <ident> <path>` at each boundary (prechecked,
+# claimed, tombstoned, renamed, reclaimed — a replay holds its tombstone —, unregistered, removed)
+# so the suite can plant a race or kill this process there. Its status is ignored; unset, it costs
+# nothing.
 cm_hook() {
   [ -n "${COMMS_TEST_CLEAN_MOUNTS_HOOK:-}" ] || return 0
   "$COMMS_TEST_CLEAN_MOUNTS_HOOK" "$@" || true
@@ -4352,7 +4353,8 @@ cm_agent_ok() {  # a ledger value becomes a path suffix, so it must be registry-
 # A panel leg's owner is its thread minus "-<agent>"; a direct turn owns its own thread. A record
 # or leg row of such a thread that names no agent is a use with owner ? (agent * when its thread is
 # T itself, since any agent's direct copy could be it). Returns 2 when a ledger exists but cannot be
-# read in full, or a record names no thread: missing evidence is never read as no evidence.
+# read in full, the set index does not open with its header, or a record names no thread: missing
+# evidence is never read as no evidence.
 cm_ledger_uses() {
   local sets="$1/grades/sets.tsv" logs="$1/logs" t="$2" out="$3" list f rc=0
   CM_NOTE=""
@@ -4406,7 +4408,16 @@ cm_ledger_uses() {
       T = ENVIRON["CM_AWK_T"]; SETS = ENVIRON["CM_AWK_SETS"]; LIST = ENVIRON["CM_AWK_LIST"]
       FS = "\t"; n = 0
       while ((r = (getline line < SETS)) > 0) {
-        if (++n == 1 || line == "") continue
+        # The first line is skipped only once it PROVES to be the header naming the columns read
+        # below: skipped unseen, a headerless index lost its first leg row, a live co-owner included.
+        if (++n == 1) {
+          split(line, h, "\t")
+          if (h[1] != "review_set_id" || h[3] != "thread" || h[6] != "artifact_id" || h[10] != "shadow_agent") {
+            print SETS " does not start with the set index header, so its leg rows cannot be read" > "/dev/stderr"; exit 2
+          }
+          continue
+        }
+        if (line == "") continue
         k = split(line, c, "\t")
         if (k < 3) { print SETS " carries a row that names no thread" > "/dev/stderr"; exit 2 }
         if (k < 10 || c[10] == "") { if (rel(c[3])) unresolved(c[3], "-"); continue }
@@ -4914,7 +4925,10 @@ cm_finish_tomb() {
 # so a maker still alive — or a concurrent replay — is a scoped skip, and only a maker proven dead
 # is superseded. Replaying without that claim let a second cleanup clear a live one's journal
 # between its record and its rename, stranding the ident in a tombstone nothing could verify.
-cm_replay_tomb() {  # <ident> <tombstone> <kind> <raw> <agent> <physical run|->
+# Under that claim the replay re-runs the authority and ownership gates a first removal runs
+# (cm_regate) before it touches the journal: the interrupted run proved them once, and a hold, a
+# withdrawn retirement or a live co-owner recorded since must keep the tombstone as it is.
+cm_replay_tomb() {  # <ident> <tombstone> <kind> <raw> <agent> <physical run|-> <run dir|->
   local ident="$1" tomb="$2" tclaim
   CM_NOTE=""
   if [ -L "$tomb" ] || [ ! -d "$tomb" ] || [ "$(cd "$tomb" 2>/dev/null && pwd -P)" != "$tomb" ]; then
@@ -4929,7 +4943,9 @@ cm_replay_tomb() {  # <ident> <tombstone> <kind> <raw> <agent> <physical run|->
     CM_ST=skipped; CM_WHY=busy-cleanup; CM_NOTE="another cleanup holds $tomb: ${MOUNT_CLAIM_NOTE:-}"; return 0
   fi
   tclaim="$MOUNT_HOLDER"; MOUNT_HOLDER=""
-  cm_finish_tomb "$@"
+  cm_hook reclaimed "$ident" "$tomb"
+  cm_regate "$3" "$4" "$5" "$7"
+  [ "$CM_ST" != ok ] || cm_finish_tomb "$1" "$2" "$3" "$4" "$5" "$6"
   MOUNT_HOLDER="$tclaim"; mount_claim_release   # a no-op once the tombstone is gone
 }
 
@@ -4959,23 +4975,19 @@ cm_run_recorded() {
     END { exit !f }' "$1")"
 }
 
-# cm_remove <kind> <raw thread> <agent> <ident> <artifacts> <run dir|-> <physical run|-> — claim,
-# re-decide EVERYTHING under the claim, then tombstone, rename and finish. The first check was a
-# snapshot; only the held claim excludes a runner, and only a fresh read of the ledgers sees a turn
-# that ran in between.
-cm_remove() {
-  local kind="$1" raw="$2" agent="$3" ident="$4" arts="$5" rd="$6" prun="$7" d="$CM_SCOPE/$4" holder tomb tclaim uses="" orc=0
-  MOUNT_HOLDER=""
-  if ! mount_claim_take "$d" "clean-mounts:$$"; then
-    CM_ST=skipped; CM_WHY=busy-claim; CM_NOTE="${MOUNT_CLAIM_NOTE:-a runner holds it}"; return 0
-  fi
-  holder="$MOUNT_HOLDER"
-  cm_hook claimed "$ident" "$d"
-  CM_ST=ok; CM_WHY=""; CM_NOTE=""
+# cm_regate <kind> <raw thread> <agent> <run dir|-> — the AUTHORITY and OWNERSHIP gates, re-read
+# under a held claim before anything is destroyed (a first removal, or a replay of an interrupted
+# one): the thread is still retired, neither it nor the use is held, and a fresh read of the ledgers
+# still proves the copy this thread's alone. A snapshot taken before the claim decides nothing:
+# retirement can be withdrawn, a paused loop held and a live co-owner recorded in between. Sets
+# CM_ST ok (with CM_ARTS the artifacts the ledgers name), refused or ambiguous.
+cm_regate() {
+  local kind="$1" raw="$2" agent="$3" rd="$4" uses="" orc=0
+  CM_ST=ok; CM_WHY=""; CM_NOTE=""; CM_ARTS=""
   if ! "$COMMS" state retired "$CM_THREAD" >/dev/null 2>&1; then
     CM_ST=refused; CM_WHY=unretired; CM_NOTE="the thread's retirement was withdrawn during the run"
   elif hold_active "$CM_THREAD" >/dev/null || hold_active "$raw" >/dev/null; then
-    CM_ST=refused; CM_WHY=held; CM_NOTE="thread '$raw' was held during the run"
+    CM_ST=refused; CM_WHY=held; CM_NOTE="thread '$raw' is held (paused); release the hold first"
   elif ! uses="$(mktemp 2>/dev/null)"; then
     CM_ST=refused; CM_WHY=ledger-unreadable; CM_NOTE="cannot create a scratch file to re-read the ledgers"
   elif ! cm_ledger_uses "$CM_ROOT" "$CM_THREAD" "$uses"; then
@@ -4984,17 +4996,30 @@ cm_remove() {
     # A durable leg ident can gain a live co-owner at any time before the claim.
     cm_own "$uses" "$raw" "$agent" || orc=$?
     case "$orc" in
-      0) arts="$CM_ARTS" ;;
+      0) ;;
       1) CM_ST=ambiguous; CM_WHY=no-ownership-evidence; CM_NOTE="the ledgers no longer record this thread's use of '$raw' by $agent" ;;
       *) CM_ST=ambiguous ;;
     esac
-  elif cm_run_recorded "$uses" "$raw" "$agent" "$rd"; then
-    arts="$CM_ARTS"
-  else
+  elif ! cm_run_recorded "$uses" "$raw" "$agent" "$rd"; then
     CM_ST=ambiguous; CM_WHY=no-ownership-evidence; CM_NOTE="the ledgers no longer record run $rd as this thread's"
   fi
   [ -z "$uses" ] || rm -f "$uses" 2>/dev/null || true
-  [ "$CM_ST" != ok ] || cm_check "$ident" "$arts" "$holder"
+}
+
+# cm_remove <kind> <raw thread> <agent> <ident> <run dir|-> <physical run|-> — claim, re-decide
+# EVERYTHING under the claim, then tombstone, rename and finish. The first check was a snapshot;
+# only the held claim excludes a runner, and only a fresh read of the ledgers sees a turn that ran
+# in between.
+cm_remove() {
+  local kind="$1" raw="$2" agent="$3" ident="$4" rd="$5" prun="$6" d="$CM_SCOPE/$4" holder tomb tclaim
+  MOUNT_HOLDER=""
+  if ! mount_claim_take "$d" "clean-mounts:$$"; then
+    CM_ST=skipped; CM_WHY=busy-claim; CM_NOTE="${MOUNT_CLAIM_NOTE:-a runner holds it}"; return 0
+  fi
+  holder="$MOUNT_HOLDER"
+  cm_hook claimed "$ident" "$d"
+  cm_regate "$kind" "$raw" "$agent" "$rd"
+  [ "$CM_ST" != ok ] || cm_check "$ident" "$CM_ARTS" "$holder"
   # A throwaway's maker is re-read under the claim too: a later run whose dir normalizes to the
   # same name must take this claim before it can re-record the copy as its own.
   [ "$CM_ST" != ok ] || [ "$kind" != throwaway ] || cm_run_own "$ident" "$rd" || true
@@ -5052,8 +5077,15 @@ cm_target() {
   local kind="$1" use="$2" agent="$3" raw="$4" ident="$5" arts="$6" rd="${7:--}" tomb resumed=0 pending=0 prun=-
   CM_N_SEL=$((CM_N_SEL + 1)); CM_NOTE=""
   if [ "$kind" = throwaway ]; then prun="$(cd "$rd" 2>/dev/null && pwd -P)" || prun=""; fi
+  # A held (paused) use is refused before ANYTHING of it is touched — an interrupted removal's
+  # tombstone included: a replay deletes a payload and a registration just as a first removal does.
+  if hold_active "$raw" >/dev/null; then
+    CM_NOTE="thread '$raw' is held (paused); release the hold first"
+    cm_emit refused held "$kind" "$use" "$agent" "$ident"; return 0
+  fi
   # Finish any interrupted removal first — but only one whose journal names this target. The read
-  # here is a snapshot that picks what to report; the replay re-reads it under the tombstone's claim.
+  # here is a snapshot that picks what to report; the replay re-reads it, and re-runs the authority
+  # and ownership gates, under the tombstone's claim.
   for tomb in "$CM_SCOPE"/.retire."$ident".??????; do
     [ -e "$tomb" ] || [ -L "$tomb" ] || continue
     cm_tomb_match "$tomb" "$ident" "$kind" "$raw" "$agent" "$prun"
@@ -5068,17 +5100,13 @@ cm_target() {
       cm_emit refused content-unverifiable "$kind" "$use" "$agent" "$ident"; return 0
     fi
     if [ "$CM_YES" != 1 ]; then pending=1; continue; fi
-    cm_replay_tomb "$ident" "$tomb" "$kind" "$raw" "$agent" "$prun"
+    cm_replay_tomb "$ident" "$tomb" "$kind" "$raw" "$agent" "$prun" "$rd"
     case "$CM_ST" in
       removed) resumed=1 ;;
       cleared) ;;
       *) cm_emit "$CM_ST" "$CM_WHY" "$kind" "$use" "$agent" "$ident"; return 0 ;;
     esac
   done
-  if hold_active "$raw" >/dev/null; then
-    CM_NOTE="thread '$raw' is held (paused); release the hold first"
-    cm_emit refused held "$kind" "$use" "$agent" "$ident"; return 0
-  fi
   cm_check "$ident" "$arts" ""
   [ "$CM_ST" != ok ] || [ "$kind" != throwaway ] || cm_run_own "$ident" "$rd" || true
   case "$CM_ST" in
@@ -5089,7 +5117,7 @@ cm_target() {
     ok)
       if [ "$CM_YES" != 1 ]; then cm_emit would-remove proven "$kind" "$use" "$agent" "$ident"; return 0; fi
       cm_hook prechecked "$ident" "$CM_SCOPE/$ident"
-      cm_remove "$kind" "$raw" "$agent" "$ident" "$arts" "$rd" "$prun"
+      cm_remove "$kind" "$raw" "$agent" "$ident" "$rd" "$prun"
       cm_emit "$CM_ST" "$CM_WHY" "$kind" "$use" "$agent" "$ident" ;;
     *) cm_emit "$CM_ST" "$CM_WHY" "$kind" "$use" "$agent" "$ident" ;;
   esac
