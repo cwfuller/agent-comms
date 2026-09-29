@@ -215,6 +215,17 @@ rt_refused "ignored residue in the tree refuses as dirty" dirty
 rm -rf "$RT_E1/view/tree/.comms"
 printf 'mine\n' > "$RT_E1/notes.txt"; rt_refused "an unknown entry beside the mount refuses" unknown-content
 rm -f "$RT_E1/notes.txt"
+# A pending generation is normal while a live runner restages: its claim is read first, so that
+# is a scoped skip. Only with no live holder is it an abandoned restage that needs the runner.
+mkdir "$RT_E1/.new.rtpend"; printf '%s\n' "$RT_E1/.new.rtpend" > "$RT_E1/.state.pending"
+RT_PP="$(rt_live_claim "$RT_E1")"
+RT_PG="$(rt_cm --thread "$RT_ECHO" --yes)"; RT_PGC=$?
+rt_unclaim "$RT_E1" "$RT_PP"
+[ "$RT_PGC" = 3 ] && rt_line "$RT_PG" "$RT_E1" skipped busy-claim && [ -d "$RT_E1/.new.rtpend" ] && rt_intact "$RT_E1" \
+  && ok "a live runner mid-restage (pending generation) is a scoped skip, not a refusal" \
+  || fail "restage under a live claim (rc=$RT_PGC): $RT_PG"
+rt_refused "a pending generation no live runner holds refuses" pending-generation
+rm -rf "$RT_E1/.new.rtpend" "$RT_E1/.state.pending"
 git -C "$RT" update-ref -d "refs/agent-comms/artifacts/$RT_ART"
 rt_refused "a tree whose artifact is no longer retained refuses" artifact-unretained
 git -C "$RT" update-ref "refs/agent-comms/artifacts/$RT_ART" "$RT_ART"
@@ -406,6 +417,30 @@ RT_IR="$(rt_cm --thread rt-kilo --yes)"; RT_IRC=$?
 [ "$RT_IRC" = 0 ] && rt_line "$RT_IR" "$RT_K" removed interrupted && rt_gone "$RT_K" && rt_intact "$RT_PEER" \
   && ok "the re-run finishes the kept tombstone and reports it removed" || fail "resume after incomplete (rc=$RT_IRC): $RT_IR"
 
+# The journal names its owner: a record another thread's cleanup wrote, or one missing a field,
+# is never replayed — the copy in it stays until its own thread's cleanup finishes it.
+RT_K="$(rt_turn rt-kilo grok)"
+RT_KILL_AT=renamed COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-kill" rt_cm --thread rt-kilo --yes >/dev/null 2>&1
+RT_KT="$(ls -d "$RT_STORE"/*/.retire."$(basename "$RT_K")".* 2>/dev/null | head -1)"
+if [ -n "$RT_KT" ] && [ -f "$RT_KT/record" ]; then
+  cp "$RT_KT/record" "$WORK/rt-krec"
+  sed 's/^thread=.*/thread=rt-other/' "$WORK/rt-krec" > "$RT_KT/record"
+  RT_KF="$(rt_cm --thread rt-kilo --yes)"; RT_KFC=$?
+  grep -v '^run=' "$WORK/rt-krec" > "$RT_KT/record"
+  RT_KU="$(rt_cm --thread rt-kilo --yes)"; RT_KUC=$?
+  cp "$WORK/rt-krec" "$RT_KT/record"
+fi
+if [ -n "$RT_KT" ] && [ "$RT_KFC" = 4 ] && rt_line "$RT_KF" "$RT_K" ambiguous foreign-tombstone \
+   && [ "$RT_KUC" = 4 ] && rt_line "$RT_KU" "$RT_K" refused tombstone-unverifiable \
+   && [ -f "$RT_KT/$(basename "$RT_K")/view/tree/rt.txt" ] && rt_reg "$RT_K"; then
+  ok "a tombstone whose record names another thread, or lacks its owner, is left with its copy and registration"
+else
+  fail "foreign/partial journal (rc=$RT_KFC/$RT_KUC, tomb=$RT_KT): $RT_KF / $RT_KU"
+fi
+RT_KR="$(rt_cm --thread rt-kilo --yes)"; RT_KRC=$?
+[ "$RT_KRC" = 0 ] && rt_line "$RT_KR" "$RT_K" removed interrupted && rt_gone "$RT_K" && rt_intact "$RT_PEER" \
+  && ok "with its own record restored the thread's re-run finishes the removal" || fail "restored journal (rc=$RT_KRC): $RT_KR"
+
 # ---- two applies at once: a live cleanup's tombstone is never replayed from under it ----
 # A second apply of the same thread runs INSIDE the first, at the boundary under test, and must
 # find the tombstone claimed by a live maker: a scoped skip that leaves the journal as it was.
@@ -504,3 +539,38 @@ RT_VO="$(rt_cm --thread rt-victor --yes)"; RT_VOC=$?
 [ "$RT_VOC" = 0 ] && rt_line "$RT_VO" "$RT_VW" removed proven && rt_gone "$RT_VW" && rt_intact "$RT_PEER" \
   && ok "the thread whose run the throwaway names removes it" \
   || fail "owner's throwaway (rc=$RT_VOC): $RT_VO"
+# A tombstone is named after the ident, so B's interrupted removal of its throwaway sits under the
+# name A's run also derives. A (retired) must neither replay nor clear it — nor may it once B is
+# unretired — and B's own replay re-checks the relocated copy's recorded run before deleting it.
+RT_VW="$(rt_tmp "$RT/.comms/logs/rt_tw" rt-victor)"
+RT_VK="$(RT_KILL_AT=renamed COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-kill" rt_cm --thread rt-victor --yes 2>/dev/null)"; RT_VKC=$?
+RT_VT="$(ls -d "$RT_KEYDIR/.retire.$(basename "$RT_VW")".* 2>/dev/null | head -1)"
+rt_vtomb() {  # B's journal and its moved copy are exactly as the kill left them
+  [ -n "$RT_VT" ] && [ -f "$RT_VT/record" ] && [ -f "$RT_VT/$(basename "$RT_VW")/view/tree/rt.txt" ] \
+    && [ -f "$RT_VT/$(basename "$RT_VW")/.state.run" ] && rt_reg "$RT_VW" && [ ! -e "$RT_VW" ]
+}
+RT_UD1="$(rt_cm --thread rt-uniform)"; RT_UD1C=$?
+RT_UA1="$(rt_cm --thread rt-uniform --yes)"; RT_UA1C=$?
+if [ "$RT_VKC" = 137 ] && ! grep -q '^clean-mounts-result' <<<"$RT_VK" && [ "$RT_UD1C" = 0 ] && [ "$RT_UA1C" = 0 ] \
+   && ! grep -qF "path=$RT_VW" <<<"$RT_UD1$RT_UA1" && rt_vtomb; then
+  ok "a retired thread's cleanup never replays another thread's interrupted throwaway tombstone of the same name"
+else
+  fail "aliased tombstone (rc=$RT_VKC/$RT_UD1C/$RT_UA1C, tomb=$RT_VT): $RT_UD1 / $RT_UA1"
+fi
+rt_state unretire rt-victor >/dev/null
+RT_UA2="$(rt_cm --thread rt-uniform --yes)"; RT_UA2C=$?
+[ "$RT_UA2C" = 0 ] && ! grep -qF "path=$RT_VW" <<<"$RT_UA2" && rt_vtomb \
+  && ok "the aliased tombstone stays untouched after its own thread is unretired" \
+  || fail "aliased tombstone after unretire (rc=$RT_UA2C): $RT_UA2"
+rt_state retire rt-victor >/dev/null
+RT_VRUN="$RT_VT/$(basename "$RT_VW")/.state.run"
+cp "$RT_VRUN" "$WORK/rt-vrun"; (cd "$RT_UD" && pwd -P) > "$RT_VRUN"
+RT_VM="$(rt_cm --thread rt-victor --yes)"; RT_VMC=$?
+cp "$WORK/rt-vrun" "$RT_VRUN"
+[ "$RT_VMC" = 4 ] && rt_line "$RT_VM" "$RT_VW" ambiguous run-mismatch && rt_vtomb \
+  && ok "a replay whose relocated copy records another run is report-only" \
+  || fail "relocated copy re-recorded (rc=$RT_VMC): $RT_VM"
+RT_VF="$(rt_cm --thread rt-victor --yes)"; RT_VFC=$?
+[ "$RT_VFC" = 0 ] && rt_line "$RT_VF" "$RT_VW" removed interrupted && rt_gone "$RT_VW" && rt_intact "$RT_PEER" \
+  && ok "the thread whose run the journal names finishes its interrupted throwaway removal" \
+  || fail "owner's replay (rc=$RT_VFC): $RT_VF"

@@ -4315,11 +4315,14 @@ mount_scope_check() {  # <scope> <canonical main_root> -> 0 usable | 1 absent | 
 # its retained artifact": that difference is unique content only the mount holds.
 #
 # DESTRUCTION IS RESUMABLE. A tombstone `<scope>/.retire.<ident>.XXXXXX` is claimed by its maker
-# (mount_claim_take, as a mount is) and then gets its record (ident, tree path, admin dir); the
-# ident dir is then RENAMED into it (atomic, same filesystem); then that one admin registration is
-# dropped after its back-pointer is re-verified; then the tombstone is deleted. An interruption
-# anywhere leaves either the untouched ident or a tombstone a later run finishes — only after
-# taking its claim, so a live maker or a concurrent replay is a scoped skip. No `git worktree
+# (mount_claim_take, as a mount is) and then gets its record (ident, tree path, admin dir, and its
+# OWNER: the thread, use, agent and — for a throwaway — the physical run); the ident dir is then
+# RENAMED into it (atomic, same filesystem); then that one admin registration is dropped after its
+# back-pointer is re-verified; then the tombstone is deleted. An interruption anywhere leaves either
+# the untouched ident or a tombstone a later run finishes — only after taking its claim, so a live
+# maker or a concurrent replay is a scoped skip, and only when the record names that run's own
+# thread and target, since a throwaway's tombstone is named after a basename two threads' run dirs
+# can share. Another thread's journal is report-only. No `git worktree
 # remove --force`, no repo-wide prune: the content gate is the proof git's dirtiness check cannot
 # give a mount.
 CM_NOTE=""; CM_ST=""; CM_WHY=""; CM_ADMIN=""
@@ -4553,6 +4556,9 @@ cm_check() {
   if [ -L "$d" ] || [ ! -d "$d" ] || [ "$(cd "$d" 2>/dev/null && pwd -P)" != "$d" ]; then
     CM_WHY=unsafe-path; CM_NOTE="$d is not a real directory at its own physical path"; return 0
   fi
+  # CLAIMS FIRST: a live runner mid-restage leaves a pending generation and a half-built layout
+  # that only it may judge, so what it holds is a scoped skip before anything is read as abandoned.
+  cm_claims "$d" "$holder" || return 0
   # INVENTORY: only what the runner creates. Anything else is content nobody accounted for.
   for e in "$d"/* "$d"/.[!.]* "$d"/..?*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
@@ -4561,7 +4567,7 @@ cm_check() {
       view|home|.aside.*)
         if [ -L "$e" ] || [ ! -d "$e" ]; then CM_WHY=unsafe-path; CM_NOTE="$e is not a real directory"; return 0; fi ;;
       .state.pending|.new.*)
-        CM_WHY=pending-generation; CM_NOTE="a restage was interrupted at $d; the runner's next round reclaims it"; return 0 ;;
+        CM_WHY=pending-generation; CM_NOTE="a restage was interrupted at $d and no runner holds it; the runner's next round reclaims it"; return 0 ;;
       .state.[a-z]*|.claim.[0-9]*|.claim.stage.*)
         if [ -L "$e" ] || [ ! -f "$e" ]; then CM_WHY=unsafe-path; CM_NOTE="$e is not a regular file"; return 0; fi ;;
       *) CM_WHY=unknown-content; CM_NOTE="$e is not part of a review mount"; return 0 ;;
@@ -4581,7 +4587,6 @@ cm_check() {
     done
   done
   [ -d "$tree" ] && has_tree=1
-  cm_claims "$d" "$holder" || return 0
   # OWNER. The same (record, home) reading and corroboration the runner applies before it will
   # restage: an absent record beside an existing tree means whether an owner holds it is unknown.
   local rec="" home="" src=0 hrc=0 orc=0 sj scwd=""
@@ -4662,12 +4667,70 @@ cm_drop_tomb() {
   rmdir "$1" 2>/dev/null
 }
 
-# cm_finish_tomb <ident> <tombstone> — complete a removal whose tombstone THIS process has claimed
-# (its own, or a dead maker's it superseded). Sets CM_ST: removed (the tombstone held the ident
-# and is gone), cleared (it never received the ident, so the live ident path is untouched and
-# still to be judged), incomplete or refused.
+# cm_tomb_match <tombstone> <ident> <kind> <raw> <agent> <physical run|-> — WHOSE removal does this
+# journal record? The tombstone's name is derived from the ident, which for a throwaway is a
+# basename two run dirs share, so the name proves nothing: the record must name this thread and
+# exactly this target. Sets CM_ST: blank (no record — it never received anything), ours, foreign
+# (another thread's; only that thread's cleanup may finish it), ambiguous (this thread's, but
+# another use or run) or refused (unreadable, or not a whole record). On a parsed record
+# CM_J_THREAD, CM_J_ADMIN and CM_J_RUN carry its fields.
+CM_J_THREAD=""; CM_J_ADMIN=""; CM_J_RUN=""
+cm_tomb_match() {
+  local r="$1/record" line k seen=" " j_ident="" j_tree="" j_thread="" j_kind="" j_raw="" j_agent="" j_admin="" j_run=""
+  CM_ST=refused; CM_WHY=tombstone-unverifiable; CM_J_THREAD=""; CM_J_ADMIN=""; CM_J_RUN=""
+  if [ ! -e "$r" ] && [ ! -L "$r" ]; then CM_ST=blank; CM_WHY=""; return 0; fi
+  if [ -L "$r" ] || [ ! -f "$r" ] || [ ! -r "$r" ]; then CM_NOTE="$r is not a readable file"; return 0; fi
+  while IFS= read -r line; do
+    case "$line" in *=*) ;; *) CM_NOTE="$r carries a line that is not key=value"; return 0 ;; esac
+    k="${line%%=*}"
+    case "$seen" in *" $k "*) CM_NOTE="$r records '$k' twice"; return 0 ;; esac
+    seen="$seen$k "
+    case "$k" in
+      ident) j_ident="${line#*=}" ;; tree) j_tree="${line#*=}" ;; admin) j_admin="${line#*=}" ;;
+      thread) j_thread="${line#*=}" ;; kind) j_kind="${line#*=}" ;; raw) j_raw="${line#*=}" ;;
+      agent) j_agent="${line#*=}" ;; run) j_run="${line#*=}" ;;
+      *) CM_NOTE="$r carries an unknown key '$k'"; return 0 ;;
+    esac
+  done < "$r"
+  for k in ident tree admin thread kind raw agent run; do
+    case "$seen" in *" $k "*) ;; *) CM_NOTE="$r records no '$k', so whose removal it is cannot be proven"; return 0 ;; esac
+  done
+  if [ "$j_ident" != "$2" ] || [ "$j_tree" != "$CM_SCOPE/$2/view/tree" ]; then CM_NOTE="$r does not describe $2"; return 0; fi
+  CM_J_THREAD="$j_thread"; CM_J_ADMIN="$j_admin"; CM_J_RUN="$j_run"
+  if [ "$j_thread" != "$CM_THREAD" ]; then
+    CM_ST=foreign; CM_WHY=foreign-tombstone
+    CM_NOTE="$1 journals thread '$j_thread''s removal of this copy; only that thread's cleanup may finish it"; return 0
+  fi
+  if [ "$j_kind" != "$3" ] || [ "$j_raw" != "$4" ] || [ "$j_agent" != "$5" ] || [ "$j_run" != "$6" ] \
+     || { [ "$3" = throwaway ] && [ -z "$6" ]; }; then
+    CM_ST=ambiguous; CM_WHY=tombstone-mismatch
+    CM_NOTE="$1 journals another $j_kind removal of this thread's (thread '$j_raw', agent $j_agent, run $j_run)"; return 0
+  fi
+  CM_ST=ours; CM_WHY=""
+}
+
+# cm_tomb_scan <ident> [<physical run>] -> 0 when a tombstone of <ident> may be this thread's: given
+# a run, one whose record names exactly that run of this thread; without one, any this thread
+# cannot rule out (no record yet, an unreadable one, or its own). A foreign journal never selects.
+cm_tomb_scan() {
+  local t
+  for t in "$CM_SCOPE"/.retire."$1".??????; do
+    [ -e "$t" ] || [ -L "$t" ] || continue
+    cm_tomb_match "$t" "$1" - - - -
+    CM_NOTE=""
+    [ "$CM_ST" != foreign ] || continue
+    if [ -z "${2:-}" ] || { [ "$CM_J_THREAD" = "$CM_THREAD" ] && [ "$CM_J_RUN" = "$2" ]; }; then return 0; fi
+  done
+  return 1
+}
+
+# cm_finish_tomb <ident> <tombstone> <kind> <raw> <agent> <physical run|-> — complete a removal whose
+# tombstone THIS process has claimed (its own, or a dead maker's it superseded), and only when its
+# record names this target (cm_tomb_match). Sets CM_ST: removed (the tombstone held the ident and
+# is gone), cleared (it never received the ident, so the live ident path is untouched and still to
+# be judged), incomplete, ambiguous or refused.
 cm_finish_tomb() {
-  local ident="$1" tomb="$2" e line r_ident="" r_tree="" r_admin="" moved=0
+  local ident="$1" tomb="$2" kind="$3" e r_tree r_admin moved=0 have hrc=0
   CM_ST=refused; CM_WHY=tombstone-unverifiable; CM_NOTE=""
   if [ -L "$tomb" ] || [ ! -d "$tomb" ] || [ "$(cd "$tomb" 2>/dev/null && pwd -P)" != "$tomb" ]; then
     CM_WHY=unsafe-path; CM_NOTE="$tomb is not a real directory at its own physical path"; return 0
@@ -4675,32 +4738,40 @@ cm_finish_tomb() {
   for e in "$tomb"/* "$tomb"/.[!.]* "$tomb"/..?*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
     case "${e##*/}" in
-      "$ident") moved=1 ;;
+      "$ident") moved=1
+        if [ -L "$e" ] || [ ! -d "$e" ]; then CM_WHY=unsafe-path; CM_NOTE="$e is not a real directory"; return 0; fi ;;
       record|record.tmp|.claim.[0-9]*|.claim.stage.*) ;;
       *) CM_WHY=unknown-content; CM_NOTE="$e was not put there by a cleanup"; return 0 ;;
     esac
   done
-  if [ ! -f "$tomb/record" ] || [ -L "$tomb/record" ]; then
-    # The record is published (tmp + rename) BEFORE the ident is moved in, so a tombstone without
-    # one never received anything: it is empty scaffolding.
-    if [ "$moved" = 1 ]; then CM_NOTE="$tomb holds $ident but no record"; return 0; fi
-    cm_drop_tomb "$tomb" || { CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not remove $tomb"; return 0; }
-    CM_ST=cleared; return 0
-  fi
-  while IFS= read -r line; do
-    case "$line" in
-      ident=*) r_ident="${line#ident=}" ;;
-      tree=*) r_tree="${line#tree=}" ;;
-      admin=*) r_admin="${line#admin=}" ;;
-    esac
-  done < "$tomb/record"
-  if [ "$r_ident" != "$ident" ] || [ "$r_tree" != "$CM_SCOPE/$ident/view/tree" ]; then
-    CM_NOTE="$tomb/record does not describe $ident"; return 0
-  fi
+  cm_tomb_match "$tomb" "$ident" "$kind" "$4" "$5" "$6"
+  case "$CM_ST" in
+    ours) ;;
+    blank)
+      # The record is published (tmp + rename) BEFORE the ident is moved in, so a tombstone without
+      # one never received anything: it is empty scaffolding.
+      CM_ST=refused; CM_WHY=tombstone-unverifiable
+      if [ "$moved" = 1 ]; then CM_NOTE="$tomb holds $ident but no record"; return 0; fi
+      cm_drop_tomb "$tomb" || { CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not remove $tomb"; return 0; }
+      CM_ST=cleared; return 0 ;;
+    foreign) CM_ST=ambiguous; return 0 ;;
+    *) return 0 ;;
+  esac
+  r_tree="$CM_SCOPE/$ident/view/tree"; r_admin="$CM_J_ADMIN"
   if [ "$moved" = 0 ] && { [ -e "$CM_SCOPE/$ident" ] || [ -L "$CM_SCOPE/$ident" ]; }; then
     # Its maker died before the rename: the ident — and its registration — were never touched.
     cm_drop_tomb "$tomb" || { CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not remove $tomb"; return 0; }
     CM_ST=cleared; return 0
+  fi
+  if [ "$moved" = 1 ] && [ "$kind" = throwaway ]; then
+    # The relocated copy must still record the run its journal names: the record was written under
+    # the ident's claim, but the copy is what is about to be deleted.
+    have="$(mount_state_get "$tomb/$ident" run)" || hrc=$?
+    case "$hrc" in
+      0) [ "$have" = "$CM_J_RUN" ] || { CM_ST=ambiguous; CM_WHY=run-mismatch; CM_NOTE="$tomb/$ident was made for run '$have', not $CM_J_RUN"; return 0; } ;;
+      1) CM_ST=ambiguous; CM_WHY=no-ownership-evidence; CM_NOTE="$tomb/$ident records no run it was made for"; return 0 ;;
+      *) CM_WHY=state-unreadable; CM_NOTE="$tomb/$ident/.state.run is present but unreadable"; return 0 ;;
+    esac
   fi
   if [ -n "$r_admin" ] && { [ -e "$r_admin" ] || [ -L "$r_admin" ]; }; then
     # Drop exactly the recorded registration, and only while it still names the moved tree. A
@@ -4731,7 +4802,7 @@ cm_finish_tomb() {
 # so a maker still alive — or a concurrent replay — is a scoped skip, and only a maker proven dead
 # is superseded. Replaying without that claim let a second cleanup clear a live one's journal
 # between its record and its rename, stranding the ident in a tombstone nothing could verify.
-cm_replay_tomb() {
+cm_replay_tomb() {  # <ident> <tombstone> <kind> <raw> <agent> <physical run|->
   local ident="$1" tomb="$2" tclaim
   CM_NOTE=""
   if [ -L "$tomb" ] || [ ! -d "$tomb" ] || [ "$(cd "$tomb" 2>/dev/null && pwd -P)" != "$tomb" ]; then
@@ -4746,7 +4817,7 @@ cm_replay_tomb() {
     CM_ST=skipped; CM_WHY=busy-cleanup; CM_NOTE="another cleanup holds $tomb: ${MOUNT_CLAIM_NOTE:-}"; return 0
   fi
   tclaim="$MOUNT_HOLDER"; MOUNT_HOLDER=""
-  cm_finish_tomb "$ident" "$tomb"
+  cm_finish_tomb "$@"
   MOUNT_HOLDER="$tclaim"; mount_claim_release   # a no-op once the tombstone is gone
 }
 
@@ -4776,12 +4847,12 @@ cm_run_recorded() {
     END { exit !f }' "$1")"
 }
 
-# cm_remove <kind> <raw thread> <agent> <ident> <artifacts> <run dir|-> — claim, re-decide
-# EVERYTHING under the claim, then tombstone, rename and finish. The first check was a snapshot;
-# only the held claim excludes a runner, and only a fresh read of the ledgers sees a turn that
-# ran in between.
+# cm_remove <kind> <raw thread> <agent> <ident> <artifacts> <run dir|-> <physical run|-> — claim,
+# re-decide EVERYTHING under the claim, then tombstone, rename and finish. The first check was a
+# snapshot; only the held claim excludes a runner, and only a fresh read of the ledgers sees a turn
+# that ran in between.
 cm_remove() {
-  local kind="$1" raw="$2" agent="$3" ident="$4" arts="$5" rd="$6" d="$CM_SCOPE/$4" holder tomb tclaim uses="" orc=0
+  local kind="$1" raw="$2" agent="$3" ident="$4" arts="$5" rd="$6" prun="$7" d="$CM_SCOPE/$4" holder tomb tclaim uses="" orc=0
   MOUNT_HOLDER=""
   if ! mount_claim_take "$d" "clean-mounts:$$"; then
     CM_ST=skipped; CM_WHY=busy-claim; CM_NOTE="${MOUNT_CLAIM_NOTE:-a runner holds it}"; return 0
@@ -4828,7 +4899,12 @@ cm_remove() {
     CM_ST=skipped; CM_WHY=busy-cleanup; CM_NOTE="another cleanup took $tomb before it was used: ${MOUNT_CLAIM_NOTE:-}"; return 0
   fi
   tclaim="$MOUNT_HOLDER"
-  if ! { printf 'ident=%s\ntree=%s\nadmin=%s\n' "$ident" "$d/view/tree" "$CM_ADMIN" > "$tomb/record.tmp" \
+  # The record names its OWNER — this thread and the exact target (use, agent and, for a
+  # throwaway, the physical run it was proven for) — because the tombstone's name carries only the
+  # ident, which run dirs that normalize alike share. A replay finishes it only for that owner.
+  if ! { case "$CM_ADMIN$prun" in *$'\n'*) false ;; esac \
+         && printf 'ident=%s\ntree=%s\nadmin=%s\nthread=%s\nkind=%s\nraw=%s\nagent=%s\nrun=%s\n' \
+              "$ident" "$d/view/tree" "$CM_ADMIN" "$CM_THREAD" "$kind" "$raw" "$agent" "$prun" > "$tomb/record.tmp" \
          && command mv -f "$tomb/record.tmp" "$tomb/record"; }; then
     cm_drop_tomb "$tomb" || true
     MOUNT_HOLDER="$holder"; mount_claim_release
@@ -4842,7 +4918,7 @@ cm_remove() {
   fi
   # The ident's claim moved with it and is deleted with it; the tombstone's claim is held to the end.
   cm_hook renamed "$ident" "$tomb"
-  cm_finish_tomb "$ident" "$tomb"
+  cm_finish_tomb "$ident" "$tomb" "$kind" "$raw" "$agent" "$prun"
   MOUNT_HOLDER="$tclaim"; mount_claim_release   # a no-op once the tombstone is gone
 }
 
@@ -4864,13 +4940,22 @@ cm_emit() {  # <status> <reason> <kind> <use> <agent> <ident>
 
 # cm_target <kind> <use> <agent> <raw thread> <ident> <artifacts> [<run dir>] — one SELECTED identity.
 cm_target() {
-  local kind="$1" use="$2" agent="$3" raw="$4" ident="$5" arts="$6" rd="${7:--}" tomb resumed=0 pending=0
+  local kind="$1" use="$2" agent="$3" raw="$4" ident="$5" arts="$6" rd="${7:--}" tomb resumed=0 pending=0 prun=-
   CM_N_SEL=$((CM_N_SEL + 1)); CM_NOTE=""
-  # Finish any interrupted removal first; a tombstone is this path's own journal.
+  if [ "$kind" = throwaway ]; then prun="$(cd "$rd" 2>/dev/null && pwd -P)" || prun=""; fi
+  # Finish any interrupted removal first — but only one whose journal names this target. The read
+  # here is a snapshot that picks what to report; the replay re-reads it under the tombstone's claim.
   for tomb in "$CM_SCOPE"/.retire."$ident".??????; do
     [ -e "$tomb" ] || [ -L "$tomb" ] || continue
+    cm_tomb_match "$tomb" "$ident" "$kind" "$raw" "$agent" "$prun"
+    case "$CM_ST" in
+      ours|blank) ;;
+      foreign) cm_emit ambiguous "$CM_WHY" "$kind" "$use" "$agent" "$ident"; return 0 ;;
+      *) cm_emit "$CM_ST" "$CM_WHY" "$kind" "$use" "$agent" "$ident"; return 0 ;;
+    esac
+    CM_NOTE=""
     if [ "$CM_YES" != 1 ]; then pending=1; continue; fi
-    cm_replay_tomb "$ident" "$tomb"
+    cm_replay_tomb "$ident" "$tomb" "$kind" "$raw" "$agent" "$prun"
     case "$CM_ST" in
       removed) resumed=1 ;;
       cleared) ;;
@@ -4891,7 +4976,7 @@ cm_target() {
     ok)
       if [ "$CM_YES" != 1 ]; then cm_emit would-remove proven "$kind" "$use" "$agent" "$ident"; return 0; fi
       cm_hook prechecked "$ident" "$CM_SCOPE/$ident"
-      cm_remove "$kind" "$raw" "$agent" "$ident" "$arts" "$rd"
+      cm_remove "$kind" "$raw" "$agent" "$ident" "$arts" "$rd" "$prun"
       cm_emit "$CM_ST" "$CM_WHY" "$kind" "$use" "$agent" "$ident" ;;
     *) cm_emit "$CM_ST" "$CM_WHY" "$kind" "$use" "$agent" "$ident" ;;
   esac
@@ -4976,19 +5061,24 @@ cm_thread() {
   done
   # THROWAWAYS: a disposable copy (only a crashed turn leaves one) is named after its run dir's
   # BASENAME through safe_name, which several run dirs can share. It is this thread's only when it
-  # records (.state.run) one of this thread's runs, so pass 1 selects each copy under the run it
-  # names, and pass 2 hands every other copy a run of this thread could have named to cm_target,
-  # whose ownership gate reports it (or finishes its tombstone) — it is never selected by name.
-  local rd tid rraw rart pass
+  # records (.state.run) one of this thread's runs — or, once an interrupted removal moved it, when
+  # its tombstone's record names this thread and that run. So pass 1 selects each copy under the
+  # run it names, and pass 2 hands every other copy a run of this thread could have named to
+  # cm_target, whose ownership gate reports it (or finishes its tombstone) — it is never selected
+  # by name. A tombstone whose record names another thread never makes a candidate: it is that
+  # thread's alone to finish.
+  local rd tid rraw rart pass prd
   for pass in 1 2; do
     while IFS="$(printf '\t')" read -r rraw a other rart rd; do
       [ "$other" = "$CM_THREAD" ] && [ "$rd" != "-" ] && cm_agent_ok "$a" || continue
       tid="tmp-$(safe_name "$(basename "$rd")")"
       case "$done_idents" in *" $tid "*) continue ;; esac
       if [ "$pass" = 1 ]; then
-        cm_run_own "$tid" "$rd" || { CM_NOTE=""; continue; }
-      elif [ ! -e "$CM_SCOPE/$tid" ] && [ ! -L "$CM_SCOPE/$tid" ] \
-           && [ -z "$(cd "$CM_SCOPE" 2>/dev/null && ls -d .retire."$tid".?????? 2>/dev/null)" ]; then
+        if ! cm_run_own "$tid" "$rd"; then
+          CM_NOTE=""; prd="$(cd "$rd" 2>/dev/null && pwd -P)" || prd=""
+          [ -n "$prd" ] && cm_tomb_scan "$tid" "$prd" || continue
+        fi
+      elif [ ! -e "$CM_SCOPE/$tid" ] && [ ! -L "$CM_SCOPE/$tid" ] && ! cm_tomb_scan "$tid"; then
         continue
       fi
       done_idents="$done_idents$tid "

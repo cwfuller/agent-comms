@@ -551,9 +551,10 @@ file would hide a use, so each refuses the whole call. A ledger that exists but 
 refuses the whole call too (exit 4).
 
 **Gates, each fail-closed and re-run under the claim:** the ident is a real directory at its own
-physical path; it holds only what the runner makes (`view/tree`, `home/`, `.state.*`, `.claim.*`,
-`.aside.*/held`) and no interrupted restage; no claim is live (a pid counts as dead only when
-`ps` says so or a v2 record's start time differs); the session record is present, well-formed
+physical path; no claim is live (a pid counts as dead only when `ps` says so or a v2 record's
+start time differs) — read first, so a runner mid-restage is a `busy-claim` skip, not a refusal;
+it holds only what the runner makes (`view/tree`, `home/`, `.state.*`, `.claim.*`,
+`.aside.*/held`) and no restage no runner holds (`pending-generation`); the session record is present, well-formed
 and corroborated by the acpx record for this tree, and no queue lease exists; the tree and its
 admin registration name each other, the admin is not locked and git lists the tree once; and
 the tree and every aside EQUAL an artifact the thread's ledger names that
@@ -573,7 +574,14 @@ admin registration after re-verifying its back-pointer, then deletes the tombsto
 worktree remove --force`, no repo-wide prune. An interrupted run leaves either the untouched
 ident or a tombstone a later run finishes — only after taking its claim, so a cleanup whose
 maker is still alive (or a concurrent replay) is a scoped `busy-cleanup` skip, and only a maker
-proven dead is superseded. Nothing under `.comms/` is touched: replies, compositions, run records
+proven dead is superseded. The record names its owner — the thread, the use, the agent and, for a
+throwaway, the physical run — because the tombstone's name carries only the ident, which run dirs
+that normalize alike share. A replay finishes it only when the record names this thread and this
+exact target, and, for a throwaway, only while the moved copy's `.state.run` still names that run;
+it re-reads both under the tombstone's claim. Another thread's tombstone is never selected by a
+throwaway's name, and one found on a selected identity is `ambiguous` (`foreign-tombstone`), left
+for that thread's own cleanup even after that thread is unretired; a record missing an owner field
+refuses (`tombstone-unverifiable`). Nothing under `.comms/` is touched: replies, compositions, run records
 and their `usage` stay.
 
 One line per considered identity on stdout, then the summary, always last:
@@ -590,7 +598,7 @@ clean-mounts-result v1 status=<s> mode=dry-run|apply selected=N removed=N absent
 | `skipped` | `busy-claim`, `busy-owner`, `busy-cleanup`, `claim-unverifiable` | a runner, a queue owner or another cleanup holds it (or `ps` could not say); re-run later |
 | `incomplete` | `remove-failed`, `admin-unverified`, `admin-remove-failed` | removal started and could not finish; the tombstone is kept and the next run resumes it. Never reported as removed |
 | `refused` | `unsafe-path`, `unknown-content`, `pending-generation`, `claim-unreadable`, `state-unreadable`, `state-missing`, `state-corrupt`, `owner-unprovable`, `owner-uncorroborated`, `registration-mismatch`, `registration-unverifiable`, `worktree-locked`, `dirty`, `nested-repo`, `artifact-unretained`, `content-unverifiable`, `held`, `unretired`, `ledger-unreadable`, `tombstone-failed`, `rename-failed`, `tombstone-unverifiable` | a gate failed; nothing was removed. stderr names the path and the reason |
-| `ambiguous` | `no-ownership-evidence`, `ownership-unresolved`, `shared-with-live-thread`, `run-mismatch` | an existing copy this thread may not be the only owner of: REPORT-ONLY, never selected |
+| `ambiguous` | `no-ownership-evidence`, `ownership-unresolved`, `shared-with-live-thread`, `run-mismatch`, `foreign-tombstone`, `tombstone-mismatch` | an existing copy (or an interrupted removal's tombstone) this thread may not be the only owner of: REPORT-ONLY, never selected |
 
 | exit | result `status` | meaning |
 |---|---|---|

@@ -680,7 +680,12 @@ enumerated before they are read, and any unverifiable one refuses); a throwaway 
 name two run dirs can share (the runner now records `.state.run`, the physical run dir, and only
 that run's thread may remove it); a replay could clear a LIVE cleanup's tombstone between its
 record and its rename (the tombstone now carries its maker's claim); and tree identity cannot see
-inside a submodule (a nested repository or content under a gitlink refuses).
+inside a submodule (a nested repository or content under a gitlink refuses). Round 3 (codex)
+found the tombstone journal still recorded only (ident, tree, admin), so a retired thread whose run
+dir normalizes like another's replayed that thread's interrupted throwaway removal by its shared
+name; the record now names its owning thread, use, agent and physical run, and a replay re-checks
+it and the moved copy's `.state.run` under the tombstone's claim. The same round moved the claim
+check ahead of the inventory, so a runner mid-restage is a scoped skip instead of a refusal.
 Measured on the development fixture only; not yet run against a live store. Open: a turn that fails
 after staging but before recording its session leaves a copy both GCs treat differently (the
 whole-store GC reads a missing record as "no owner"; `--thread` refuses it as `state-missing`,

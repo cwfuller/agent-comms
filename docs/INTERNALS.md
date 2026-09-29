@@ -519,6 +519,13 @@ waits on any other ident. Load-bearing choices:
   "interrupted before the rename" and drop its record just before the rename landed, leaving the
   ident in a tombstone no later run could verify. The claim precedes the record, so a replay that
   reaches an empty tombstone first owns it and clears it, and its maker steps back.
+- **The journal also names its owning thread.** The claim decides WHO may replay a tombstone now;
+  the record decides WHOSE removal it is. A throwaway's tombstone is named after `tmp-<safe_name of
+  the run dir's basename>`, which two threads' run dirs can share, and once a removal is interrupted
+  after the rename the moved copy's `.state.run` is no longer where selection looks — so a record of
+  only (ident, tree, admin) let thread A's cleanup finish thread B's removal, retired or not. The
+  record now carries the thread, use, agent and physical run; selection reads only this thread's
+  records, and a replay re-checks the record and the moved copy's `.state.run` under the claim.
 
 **Residual risks, accepted.** (1) The ledgers ARE the evidence: deleting run records can hide a
 direct turn on a leg-shaped thread name, and the shared copy would then read as T's alone. (2) A
