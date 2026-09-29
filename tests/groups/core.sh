@@ -1522,6 +1522,23 @@ ST_OUT="$(st PATH="$ST_OLD:$PATH" -- "$COMMS" setup --yes </dev/null 2>&1)"; A=$
   && ! grep -qE '[0-9]+\.[0-9]+\.[0-9]+|codex >= [0-9]|gpt-[0-9]' "$REPO/helpers/setup.sh" \
   && ok "setup names the baseline's runtime refusal and the bundled warning from the map, with no version of its own" \
   || fail "setup runtime hint (rc=$A: $(printf '%s\n' "$ST_OUT" | sed -n '/5\/5/,/^$/p' | tr '\n' ' '))"
+# THE SELECTED RUNTIME IS CHECKED, not just auto-detection: with a current codex on PATH, an explicit
+# path kept from an earlier setup that is too old gets the minimum-version refusal (and a current
+# explicit path gets the can-run line), because what is saved is what will run.
+ST_NEW="$WORK/st-new-codex"; mkdir -p "$ST_NEW"; printf '#!/bin/sh\necho "codex-cli 9.9.9"\n' > "$ST_NEW/codex"; chmod +x "$ST_NEW/codex"
+printf 'COMMS_ACP_CODEX_PATH=%s\n' "$ST_OLD/codex" > "$ST_HOME/settings"
+ST_OUT="$(st PATH="$ST_NEW:$PATH" -- "$COMMS" setup --yes </dev/null 2>&1)"; A=$?
+printf 'COMMS_ACP_CODEX_PATH=%s\n' "$ST_NEW/codex" > "$ST_HOME/settings"
+ST_OUT2="$(st PATH="$ST_OLD:$PATH" -- "$COMMS" setup --yes </dev/null 2>&1)"; B=$?
+: > "$ST_HOME/settings"
+[ "$A" = 0 ] && [ "$B" = 0 ] && printf '%s\n' "$ST_OUT" | grep -qF "auto-detected: $ST_NEW/codex (9.9.9)" \
+  && printf '%s\n' "$ST_OUT" | grep -qF "selected: $ST_OLD/codex (0.155.1)" \
+  && printf '%s\n' "$ST_OUT" | grep -qF "on the selected runtime, every default codex review is REFUSED: model 'gpt-6.1-sol' (baseline) needs codex >= $ST_BMIN" \
+  && printf '%s\n' "$ST_OUT2" | grep -qF "selected: $ST_NEW/codex (9.9.9)" \
+  && printf '%s\n' "$ST_OUT2" | grep -qF "the selected runtime can run the default codex review" \
+  && ! printf '%s\n' "$ST_OUT2" | grep -qF "on the selected runtime" \
+  && ok "setup checks the SELECTED runtime: a retained explicit old path is refused with the minimum, a current one is not" \
+  || fail "setup selected-runtime check (rc=$A/$B: $(printf '%s\n' "$ST_OUT" | sed -n '/5\/5/,/^$/p' | tr '\n' ' '))"
 # Wiring: every entry helper loads settings, and the installer ships and offers them.
 N=0; for h in comms.sh runphase.sh acp.sh route.sh; do grep -q 'settings.sh" \] && \.' "$REPO/helpers/$h" && N=$((N+1)); done
 grep -q '^HELPERS=.*settings\.sh.*setup\.sh' "$REPO/install.sh" && [ "$N" = 4 ] \

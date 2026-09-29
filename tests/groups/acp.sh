@@ -1257,6 +1257,18 @@ res COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" runtime-check codex >/dev/null 2
   && ! printf '%s\n' "$DOC_N" | grep -q 'result: FAIL' \
   && ok "doctor and runtime-check fail (exit 4) with the minimum-version reason on bundled and an old codex, and pass on a new one" \
   || fail "doctor runtime verdict (new rc=$A/$B; out=$(printf '%s' "$DOC_O" | grep -E 'review|result' | tr '\n' ' '))"
+# THE PAIR, not just the runtime: pinning a model that does not accept the ceiling's effort (luna has no
+# `ultra`) makes resolve refuse under COMMS_REVIEW_MAX, so doctor and runtime-check must refuse the
+# use-max row with the same pair reason while the default row (a pair luna accepts) still runs.
+PIN_R="$(res COMMS_ACP_CODEX_MODEL=gpt-5.6-luna COMMS_REVIEW_MAX=1 COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" resolve codex 2>&1 >/dev/null)"; R0=$?
+PIN_D="$(res PATH="$ACP_STUB:$PATH" COMMS_ACP_CODEX_MODEL=gpt-5.6-luna COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" doctor 2>&1)"; A=$?
+PIN_C="$(res COMMS_ACP_CODEX_MODEL=gpt-5.6-luna COMMS_ACP_CODEX_PATH="$RTD/new/codex" "$AP" runtime-check codex 2>/dev/null)"; B=$?
+[ "$R0" = 1 ] && printf '%s' "$PIN_R" | grep -qF "model 'gpt-5.6-luna' does not accept effort 'ultra'" \
+  && [ "$A" = 4 ] && printf '%s\n' "$PIN_D" | grep -q "^default codex review: gpt-5.6-luna (pin) — runs on this runtime" \
+  && printf '%s\n' "$PIN_D" | grep -q "^use-max codex review (COMMS_REVIEW_MAX=1): gpt-5.6-luna (pin) — CANNOT RUN: model 'gpt-5.6-luna' does not accept effort 'ultra'" \
+  && [ "$B" = 4 ] && printf '%s\n' "$PIN_C" | awk -F'\t' '$1=="baseline" && $5=="ok" {a=1} $1=="ceiling" && $2=="gpt-5.6-luna" && $3=="pin" && $5=="refused" && $6 ~ /does not accept effort .ultra./ {b=1} END{exit !(a && b)}' \
+  && ok "a pinned model that cannot take the ceiling effort: doctor and runtime-check refuse the use-max row with resolve's pair reason" \
+  || fail "pinned-pair standing (resolve=$R0 doctor=$A check=$B: $(printf '%s\n' "$PIN_C" | tr '\t\n' '| '))"
 res PATH="$ACP_STUB:$PATH" COMMS_ACP_CODEX_PATH="$RTD/new" "$AP" doctor >/dev/null 2>&1; A=$?
 res COMMS_ACP_CODEX_PATH="$RTD/new" "$AP" runtime-check codex >/dev/null 2>&1; B=$?
 res "$AP" runtime-check claude >/dev/null 2>&1; C=$?

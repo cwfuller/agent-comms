@@ -368,6 +368,34 @@ policy_pin_effort() { case "$1" in codex) printf '%s' "${COMMS_ACP_CODEX_EFFORT:
 # not an author-steering channel the way a cheaper route would be.
 policy_max_on() { case "${COMMS_REVIEW_MAX:-}" in 1|true|yes|on|TRUE|YES|ON) return 0 ;; esac; return 1; }
 
+# THE PAIR RULE, defined once: `resolve` and `runtime-check`/`doctor` (policy_runtime_standing) both
+# judge a (model, effort) pair through this, so no surface can report a review runnable that
+# resolve would refuse.
+# policy_pair_verdict <agent> <transport> <model> <model-source> <effort> <effort-source> — prints
+# the verdict token; exit 0 when the pair may run (`validated`, or `unverified-pin`: a pinned model
+# the map does not know, honoured and labelled), exit 1 with the reason token when it may not
+# (`unsupported-pair`; `unverified-pin` when a ROUTED effort rides on an unmapped pin;
+# `max-unmapped-pin` when "use max" cannot be validated on a pinned, unmapped model).
+policy_pair_verdict() {
+  local accepted; accepted="$(policy_map_get pair "$1" "$2" "$3")"
+  if [ -z "$accepted" ]; then
+    if [ "$4" != pin ]; then echo unsupported-pair; return 1; fi
+    if [ "$6" = max ]; then echo max-unmapped-pin; return 1; fi
+    echo unverified-pin
+    [ "$6" != route ]; return
+  fi
+  case ",$accepted," in *",$5,"*) echo validated; return 0 ;; esac
+  echo unsupported-pair; return 1
+}
+# policy_pair_refusal <token> <model> <model-source> <effort> <effort-source> <map-version> — the one
+# wording of a pair refusal (resolve's stderr, runtime-check's reason column, doctor's line).
+policy_pair_refusal() {
+  case "$1" in
+    max-unmapped-pin) printf "COMMS_REVIEW_MAX cannot validate effort '%s' for the pinned, unmapped model '%s'\n" "$4" "$2" ;;
+    *) printf "model '%s' does not accept effort '%s' (model from %s, effort from %s; map %s)\n" "$2" "$4" "$3" "$5" "$6" ;;
+  esac
+}
+
 # resolve_policy <agent> <transport> <tier> <effort> <decision> <routing> <phase> <candidate-source>
 # Sets the R_* globals describing the resolved policy. Returns 0 resolved, 1 refused (a message is
 # on stderr). NEVER prints the record — emit_policy_record does that — so every caller shares one
@@ -380,7 +408,7 @@ policy_max_on() { case "${COMMS_REVIEW_MAX:-}" in 1|true|yes|on|TRUE|YES|ON) ret
 resolve_policy() {
   local agent="$1" transport="$2" tier="$3" effort="$4" decision="$5" routing="$6"
   local phase="${7:--}" csrc="${8:-none}"
-  local base bm be pm pe accepted fb="" route_ok=0
+  local base bm be pm pe fb="" route_ok=0
   R_AGENT="$agent"; R_TRANSPORT="$transport"; R_TIER="$tier"; R_EFFORT_IN="$effort"
   R_DECISION="$decision"; R_ROUTING="$routing"; R_PHASE="$phase"; R_CSRC="$csrc"; R_DIGEST=none
   R_MAPV="$(policy_map_check)" || return 1
@@ -480,23 +508,11 @@ resolve_policy() {
   # the silent float this policy exists to prevent.
   local attempt bad=""
   for attempt in 1 2; do
-    accepted="$(policy_map_get pair "$agent" "$transport" "$R_MODEL")"
-    bad=""
-    if [ -z "$accepted" ]; then
-      if [ "$R_MSRC" = pin ] && [ "$R_ESRC" = max ]; then
-        echo "acp.sh: resolve: COMMS_REVIEW_MAX cannot validate effort '$R_EFFORT' for the pinned, unmapped model '$R_MODEL' — refusing" >&2; return 1
-      fi
-      if [ "$R_MSRC" = pin ]; then
-        # A pinned model the map does not know: honoured, labelled unverified. A ROUTED effort on
-        # top of it would be an unvalidated combination the map never approved, so it is dropped.
-        if [ "$R_ESRC" = route ]; then bad=unverified-pin; else R_PAIR=unverified-pin; break; fi
-      else
-        bad=unsupported-pair
-      fi
-    elif case ",$accepted," in *",$R_EFFORT,"*) true ;; *) false ;; esac; then
-      R_PAIR=validated; break
-    else
-      bad=unsupported-pair
+    if bad="$(policy_pair_verdict "$agent" "$transport" "$R_MODEL" "$R_MSRC" "$R_EFFORT" "$R_ESRC")"; then
+      R_PAIR="$bad"; break
+    fi
+    if [ "$bad" = max-unmapped-pin ]; then
+      echo "acp.sh: resolve: $(policy_pair_refusal "$bad" "$R_MODEL" "$R_MSRC" "$R_EFFORT" "$R_ESRC" "$R_MAPV") — refusing" >&2; return 1
     fi
     if [ "$attempt" = 1 ] && { [ "$R_MSRC" = route ] || [ "$R_ESRC" = route ]; }; then
       if [ "$csrc" = explicit ]; then explicit_refuse "model '$R_MODEL' with effort '$R_EFFORT' ($bad)"; return 1; fi
@@ -505,7 +521,7 @@ resolve_policy() {
       fb="${fb:+$fb;}$bad"
       continue
     fi
-    echo "acp.sh: resolve: model '$R_MODEL' does not accept effort '$R_EFFORT' (model from $R_MSRC, effort from $R_ESRC; map $R_MAPV) — refusing rather than substituting" >&2
+    echo "acp.sh: resolve: $(policy_pair_refusal "$bad" "$R_MODEL" "$R_MSRC" "$R_EFFORT" "$R_ESRC" "$R_MAPV") — refusing rather than substituting" >&2
     return 1
   done
   # The chosen model must exist on the runtime that will run it. A pinned, baseline or ceiling
@@ -759,19 +775,24 @@ cmd_capabilities() {
 # and returns 0 when every row is ok, 4 when any is refused, 1 on a map defect. A map with no
 # ceiling row prints no ceiling line. Shared by `runtime-check` (machine-readable) and `doctor`.
 policy_runtime_standing() {  # <agent> <transport>
-  local agent="$1" transport="$2" row kind m src min why rc=0 pm
-  policy_map_check >/dev/null || return 1
-  pm="$(policy_pin_model "$agent")"
+  local agent="$1" transport="$2" row kind m e src esrc min why rc=0 pm pe mapv pv
+  mapv="$(policy_map_check)" || return 1
+  pm="$(policy_pin_model "$agent")"; pe="$(policy_pin_effort "$agent")"
   for kind in baseline ceiling; do
     row="$(policy_map_get "$kind" "$agent" "$transport")"
     if [ -z "$row" ]; then
       [ "$kind" = ceiling ] && continue
       echo "acp.sh: the map has no baseline for $agent/$transport" >&2; return 1
     fi
-    m="${row%%$'\t'*}"; src="$( [ "$kind" = baseline ] && echo baseline || echo max )"
+    m="${row%%$'\t'*}"; e="${row#*$'\t'}"; src="$( [ "$kind" = baseline ] && echo baseline || echo max )"; esrc="$src"
     if [ -n "$pm" ]; then m="$pm"; src=pin; fi
+    if [ -n "$pe" ]; then e="$pe"; esrc=pin; fi
     min="$(policy_map_get pairmin "$agent" "$transport" "$m")"
-    if why="$(policy_unservable_reason "$agent" "$transport" "$m" "$src")"; then
+    # The same two judgements resolve makes, in its order: the (model, effort) pair, then the runtime.
+    if ! pv="$(policy_pair_verdict "$agent" "$transport" "$m" "$src" "$e" "$esrc")"; then
+      printf '%s\t%s\t%s\t%s\trefused\t%s\n' "$kind" "$m" "$src" "${min:--}" \
+        "$(policy_pair_refusal "$pv" "$m" "$src" "$e" "$esrc" "$mapv")"; rc=4
+    elif why="$(policy_unservable_reason "$agent" "$transport" "$m" "$src")"; then
       printf '%s\t%s\t%s\t%s\tok\t-\n' "$kind" "$m" "$src" "${min:--}"
     else
       printf '%s\t%s\t%s\t%s\trefused\t%s\n' "$kind" "$m" "$src" "${min:--}" "$why"; rc=4

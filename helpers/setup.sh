@@ -331,7 +331,20 @@ RT="$(ask "  runtime: auto | bundled | /path/to/codex" "${COMMS_ACP_CODEX_PATH:-
 case "$RT" in auto|"") set_user COMMS_ACP_CODEX_PATH "" ;;
   bundled) set_user COMMS_ACP_CODEX_PATH bundled
     [ -z "$rt_bundled_ref" ] || say "  warning: 'bundled' saved — every baseline codex review will be REFUSED until a newer codex is set ($rt_bundled_ref)" ;;
-  /*) if [ -x "$RT" ]; then set_user COMMS_ACP_CODEX_PATH "$RT"; else say "  '$RT' is not executable — keeping auto"; set_user COMMS_ACP_CODEX_PATH ""; fi ;;
+  /*) if [ -x "$RT" ]; then
+        set_user COMMS_ACP_CODEX_PATH "$RT"
+        # The SELECTED runtime gets the same verdict auto-detection did — including an explicit path
+        # kept from an earlier setup: what is saved is what will run, so it is checked, not assumed.
+        rt_sel_rec="$(rt_check "$RT")"
+        rt_sel="$(printf '%s\n' "$rt_sel_rec" | awk -F'\t' '$1=="runtime"{r=$2} $1=="runtime_version"{v=$2} END{if (r != "") print r" ("v")"}')"
+        if [ -z "$rt_sel" ]; then say "  selected: $RT — could not be verified as a codex runtime; every codex review will be REFUSED on it"
+        else
+          say "  selected: $rt_sel"
+          rt_sel_ref="$(rt_refusals "$rt_sel_rec")"
+          if [ -n "$rt_sel_ref" ]; then printf '%s\n' "$rt_sel_ref" | while IFS= read -r l; do say "  on the selected runtime, $l"; done
+          else say "  the selected runtime can run the default codex review"; fi
+        fi
+      else say "  '$RT' is not executable — keeping auto"; set_user COMMS_ACP_CODEX_PATH ""; fi ;;
   *) say "  unrecognised — keeping auto"; set_user COMMS_ACP_CODEX_PATH "" ;; esac
 TO="$(ask "  review turn timeout, seconds" "${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}")"
 case "$TO" in ''|*[!0-9]*) say "  not a number — keeping ${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}" ;;
