@@ -89,6 +89,7 @@ harness: complete parallel worker reports	1
 comms.sh: settings and setup	28
 route.sh: implementer decision records	11
 review identities: registry, roles and send	92
+gemini: a supported provider with a driver, a review twin and one reviewer per provider	19
 review identities: panel dispatch and compose provenance	45
 review identities: a claude-review turn over ACP	26
 review identities: shadow and the direct grok arm	31
@@ -105,7 +106,10 @@ route-eval: more than one labeller	5
 compose: exactly one machine-readable compose-result line	22
 comms.sh version: the installed kernel commit and template version	18
 leg_usage.py: a leg's tokens come from the provider's own records	46
+leg_usage.py: gemini usage and answering models come from the CLI's own chat record	11
 comms.sh: state idle/legacy (idle threads marked with evidence, never closed by age)	22
 worktree new: pins the workspace name for the new worktree	11
 profiles: parser, launch and evidence contracts	34
 profiles: registry and family integration	9
+gemini: the ACP profile, runtime, doctor and policy map (PATH-stubbed gemini)	47
+gemini: a mounted review turn (stub acpx driving a stub gemini over real ACP)	27

@@ -154,6 +154,8 @@ pair	codex	acp-mounted	gpt-5.6-sol	low,medium,high,xhigh,max,ultra
 pair	codex	acp-mounted	gpt-5.6-terra	low,medium,high,xhigh,max,ultra
 pair	codex	acp-mounted	gpt-5.6-luna	low,medium,high,xhigh,max
 
+# The ceiling EQUALS the baseline today: `high` is the strongest level mapped and gemini-3.1-pro-preview the
+# strongest served model, so COMMS_REVIEW_MAX=1 changes nothing for gemini. Point it at Gemini 4 when it ships.
 baseline	gemini	acp-mounted	gemini-3.1-pro-preview	high
 ceiling	gemini	acp-mounted	gemini-3.1-pro-preview	high
 

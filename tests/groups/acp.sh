@@ -1108,7 +1108,7 @@ R="$(res "$AP" resolve codex --tier strong --effort xhigh --decision rd-a --rout
 R2="$(res "$AP" resolve codex --tier balanced --effort xhigh --decision rd-a --routing on --phase implement)"
 [ "$(rv "$R" model)" = gpt-6-astra ] && [ "$(rv "$R" effective_tier)" = strong ] && [ "$(rv "$R" fallback)" = none ] \
   && [ "$(rv "$R2" model)" = gpt-6.1-sol ] && [ "$(rv "$R2" effective_tier)" = balanced ] \
-  && [ "$(awk -F'\t' '$1=="ceiling"{print $4}' "$REPO/helpers/policy-map.tsv")" = gpt-6-astra ] \
+  && [ "$(awk -F'\t' '$1=="ceiling" && $2=="codex"{print $4}' "$REPO/helpers/policy-map.tsv")" = gpt-6-astra ] \
   && ok "strong and the ceiling run gpt-6-astra; gpt-6.1-sol is the default and leads balanced only" || fail "strong/balanced split ($R / $R2)"
 R="$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing off)"
 [ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" fallback)" = routing-disabled ] \
