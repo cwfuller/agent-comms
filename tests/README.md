@@ -23,6 +23,15 @@ worker, duplicate section, reused skip allowance, or cancelled run cannot pass.
 Workers use the existing process supervisor to finish descendant cleanup before
 their results are accepted.
 
+Each worker receives a fresh random presence instance, so a leftover worker from
+an earlier run cannot share the new worker's supervisor identity. `run.sh` traps
+EXIT, INT and TERM, signals the coordinator and waits for its worker session sweep
+before removing results. The coordinator also checks its parent every scheduling
+poll (normally 0.1 seconds); if `run.sh` is killed with SIGKILL, reparenting triggers
+the same cleanup. Cleanup signals supervisors, allows up to 15 seconds for them
+to finish, then kills remaining groups in each owned session, including nested
+job-control groups. Cancelled runs cannot produce a complete suite verdict.
+
 For a landing, commit the candidate, run the complete suite on that commit, and
 review that same committed candidate. The `ATTESTATION` line says whether
 `integrate` can reuse the result within `suite-attest-secs`. A passing run made

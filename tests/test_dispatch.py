@@ -325,6 +325,106 @@ def assert_stopped(test, pid):
     test.fail(f'worker process {pid} survived cancellation ({state})')
 
 
+class RunnerOwnership(unittest.TestCase):
+    setUp = CompleteRunner.setUp
+    git = CompleteRunner.git
+    run_suite = CompleteRunner.run_suite
+
+    def test_killing_run_sh_stops_all_worker_session_members(self):
+        shutil.copyfile(Path(__file__).parents[1] / 'helpers/comms.sh',
+                        self.root / 'helpers/comms.sh')
+        (self.root / 'tests/worker.sh').write_text('''#!/bin/bash
+set -m
+bash -c 'trap "" INT TERM; echo $$ > .descendant-pid; exec sleep 60' &
+echo $$ > .worker-pid
+echo "$PPID" > .supervisor-pid
+ps -p "$PPID" -o ppid= > .dispatcher-pid
+wait
+''')
+        # Target only run.sh, never the launcher's group: workers live in their
+        # own sessions, including a descendant in a separate job-control group.
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(signal=sig):
+                for name in ('worker', 'descendant', 'supervisor', 'dispatcher'):
+                    (self.root / ('.' + name + '-pid')).unlink(missing_ok=True)
+                proc = subprocess.Popen(['bash', 'tests/run.sh'], cwd=self.root,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True, start_new_session=True)
+                try:
+                    for name in ('descendant', 'dispatcher'):
+                        wait_file(self.root / ('.' + name + '-pid'))
+                    supervisor = int((self.root / '.supervisor-pid').read_text())
+                    dispatcher_pid = int((self.root / '.dispatcher-pid').read_text())
+                    os.kill(proc.pid, sig)
+                    out, err = proc.communicate(timeout=25)
+                    self.assertEqual(proc.returncode,
+                                     -sig if sig == signal.SIGKILL else 128 + sig, out + err)
+                    self.assertNotIn('worker cleanup failed', err)
+                    self.assertNotIn('ATTESTATION: recorded', out)
+                    for pid in (supervisor, dispatcher_pid,
+                                int((self.root / '.worker-pid').read_text()),
+                                int((self.root / '.descendant-pid').read_text())):
+                        assert_stopped(self, pid)
+                finally:
+                    # On failure, signal the still-owned dispatcher to perform its
+                    # session sweep rather than leaving test-created orphans.
+                    marker = self.root / '.dispatcher-pid'
+                    if marker.exists() and marker.read_text().strip():
+                        try:
+                            os.kill(int(marker.read_text()), signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.communicate(timeout=25)
+
+    def test_leftover_orphan_cannot_reduce_later_run_coverage(self):
+        # Model identity-keyed supervisor state with a live leftover wrapper.
+        # A repeated instance takes the collision path and silently omits work.
+        helper = self.root / 'helpers/comms.sh'
+        helper.write_text('''#!/bin/bash
+if [ "$1" = attest-green ]; then touch .attested; exit 0; fi
+name=""; instance=""
+while [ "$1" != -- ]; do
+  case "$1" in
+    --name) shift; name="$1" ;;
+    --instance) shift; instance="$1" ;;
+  esac
+  shift
+done
+shift
+mkdir -p .leases
+lease=".leases/$name-$instance"
+mkdir "$lease" 2>/dev/null || exit 0
+printf '%s %s\\n' "$name" "$instance" >> .instances
+trap 'rm -rf "$lease"' EXIT
+"$@"
+''')
+        legacy = '00000000000000000000000000000001'
+        orphan = subprocess.Popen([str(helper), 'presence', 'with-beat', '--no-heartbeat',
+                                   '--name', 'suite-sample', '--instance', legacy, '--',
+                                   'bash', '-c', 'echo ready > .orphan-ready; exec sleep 60'],
+                                  cwd=self.root, start_new_session=True,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            wait_file(self.root / '.orphan-ready')
+            for _ in range(2):
+                run = self.run_suite('--group', 'presence', '--group', 'sample')
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn('FOCUSED: passed=2 failed=0 skipped=0', run.stdout)
+                self.assertIsNone(orphan.poll(), 'probe orphan must remain live during later runs')
+            identities = (self.root / '.instances').read_text().splitlines()
+            self.assertEqual(len(identities), 5)
+            tokens = [row.split()[1] for row in identities]
+            self.assertEqual(len(set(tokens)), 5, 'runs and workers must have distinct instances')
+            for token in tokens:
+                self.assertRegex(token, r'^[0-9a-f]{32}$')
+            self.assertFalse((self.root / '.attested').exists())
+        finally:
+            os.killpg(orphan.pid, signal.SIGKILL)
+            orphan.wait(timeout=5)
+
+
 class WorkerLifecycle(unittest.TestCase):
     def test_inspection_failure_is_not_proof_of_process_exit(self):
         for rc, error in ((1, 'ps: Operation not permitted'), (0, '')):

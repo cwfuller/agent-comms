@@ -4,8 +4,26 @@ set -uo pipefail
 unset tested_oid
 export PYTHONDONTWRITEBYTECODE=1
 source "$(dirname "${BASH_SOURCE[0]}")/lib/harness.sh"
-python3 "$REPO/tests/dispatch.py" "$REPO" "$TESTED_OID" "$WORK" "$@"
+dispatcher_pid=""
+_run_exit() {
+  local rc=$?
+  # Join the coordinator's session sweep before the harness removes its results.
+  # Ignore repeated cancellation while it finishes cleaning up worker descendants.
+  trap '' INT TERM
+  if [ -n "$dispatcher_pid" ]; then
+    kill -TERM "$dispatcher_pid" 2>/dev/null || true
+    wait "$dispatcher_pid" 2>/dev/null || true
+  fi
+  return "$rc"
+}
+trap '_run_exit; _suite_exit' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+python3 "$REPO/tests/dispatch.py" "$REPO" "$TESTED_OID" "$WORK" --parent-pid "$$" "$@" &
+dispatcher_pid=$!
+wait "$dispatcher_pid"
 rc=$?
+dispatcher_pid=""
 if [ "$rc" -ne 0 ]; then
   echo "SUITE: worker failure; no complete verdict (exit $rc)." >&2
   exit "$rc"

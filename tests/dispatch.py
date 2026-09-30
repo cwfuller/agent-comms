@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import resource
+import secrets
 import signal
 import subprocess
 import sys
@@ -137,7 +138,15 @@ def stop_workers(active, sig, grace=15):
             time.sleep(0.05)
 
 
-def run_workers(repo, oid, directory, rows, jobs):
+def run_workers(repo, oid, directory, rows, jobs, parent_pid=None):
+    parent_pid = os.getppid() if parent_pid is None else parent_pid
+
+    def check_parent():
+        # run.sh cannot trap SIGKILL. Reparenting also detects death before our
+        # first poll, because run.sh passes its PID rather than letting us adopt init.
+        if os.getppid() != parent_pid:
+            raise RuntimeError('run.sh exited; cancelling worker sessions')
+
     active = {}
     failed = False
     timings = []
@@ -147,7 +156,9 @@ def run_workers(repo, oid, directory, rows, jobs):
     try:
         for pending, limit in phases:
             while pending or active:
+                check_parent()
                 while pending and len(active) < limit:
+                    check_parent()
                     name = pending.pop(0)
                     log = (directory / (name + '.log')).open('wb')
                     env = os.environ.copy()
@@ -155,7 +166,7 @@ def run_workers(repo, oid, directory, rows, jobs):
                         env.pop(key, None)
                     command = [str(repo / 'helpers/comms.sh'), 'presence', 'with-beat',
                                '--no-heartbeat', '--name', 'suite-' + name,
-                               '--instance', '00000000000000000000000000000001', '--',
+                               '--instance', secrets.token_hex(16), '--',
                                'bash', str(repo / 'tests/worker.sh'), name, oid, str(directory)]
                     # A signal after Popen spawns but before registration must not leave
                     # an untracked worker. The child unmasks in reset_signals before exec.
@@ -187,6 +198,7 @@ def run_workers(repo, oid, directory, rows, jobs):
                     print((directory / (name + '.log')).read_text(errors='replace'), end='', flush=True)
                 if active:
                     time.sleep(0.1)
+        check_parent()
     except BaseException:
         # A second cancellation must not interrupt cleanup of the remaining workers.
         handlers = {sig: signal.signal(sig, signal.SIG_IGN)
@@ -212,6 +224,8 @@ def main():
     parser.add_argument('--jobs', type=int, default=min(4, os.cpu_count() or 1))
     parser.add_argument('--group', action='append', help='focused run; never a complete suite verdict')
     parser.add_argument('--list', action='store_true')
+    parser.add_argument('--parent-pid', type=int, default=os.getppid(),
+                        help='owning run.sh PID; reparenting cancels all workers')
     args = parser.parse_args()
     if not 1 <= args.jobs <= 16:
         parser.error('--jobs must be between 1 and 16')
@@ -228,7 +242,7 @@ def main():
             parser.error('unknown or duplicate --group')
         rows = [(n, m) for n, m in rows if n in args.group]
     started = time.monotonic()
-    good = run_workers(args.repo, args.oid, args.results, rows, args.jobs)
+    good = run_workers(args.repo, args.oid, args.results, rows, args.jobs, args.parent_pid)
     totals, sections = merge_reports(args.results, [n for n, _ in rows])
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     print(f'TIMING wall={time.monotonic()-started:.2f}s user={usage.ru_utime:.2f}s system={usage.ru_stime:.2f}s', flush=True)
