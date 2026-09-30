@@ -23,7 +23,7 @@ HOME_DIR="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
 SETTINGS="$HOME_DIR/settings"
 SECRETS="$HOME_DIR/secrets"
 ALLOW="${COMMS_ROUTE_SHADOW_ALLOW:-$HOME_DIR/route-shadow-allow}"
-KNOWN_AGENTS="claude codex grok"
+KNOWN_AGENTS="claude codex grok gemini"
 if [ -e "$HOME_DIR/agents.json" ] || [ -L "$HOME_DIR/agents.json" ]; then
   CUSTOM_AGENTS="$(python3 "$HERE/agent_profiles.py" names)" || exit 1
   KNOWN_AGENTS="$KNOWN_AGENTS${CUSTOM_AGENTS:+ $CUSTOM_AGENTS}"

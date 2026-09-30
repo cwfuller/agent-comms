@@ -11,7 +11,7 @@ import shlex
 import subprocess
 import sys
 
-BUILTINS = ("claude", "codex", "grok")
+BUILTINS = ("claude", "codex", "grok", "gemini")
 NAME = re.compile(r"[a-z][a-z0-9-]{1,15}\Z")
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,255}\Z")
 FAMILY = re.compile(r"[a-z][a-z0-9-]{1,63}\Z")

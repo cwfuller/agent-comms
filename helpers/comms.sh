@@ -20,7 +20,8 @@
 #                                  drivers; a lone driver gets its own twin). --roster is
 #                                  the ONE reviewer-list resolver /auto uses: no list =
 #                                  --others; a list naming the driver itself swaps in its
-#                                  twin. (zero-config: claude codex grok, target codex)
+#                                  twin. (zero-config: claude codex grok, target codex;
+#                                  gemini is supported and opt-in: `agents = ... gemini`)
 #   whoami                      print the driving agent (COMMS_SELF → session env →
 #                               ancestor executable). Fails closed on no signal, on
 #                               conflicting signals, on a review-only identity, and
@@ -418,7 +419,10 @@ cmd_workspace() {
 # sharing an inbox, a thread, or awaiting_from. A twin is review-only: it never drives,
 # authors a request, or answers a consult. Everything above the process boundary is keyed on
 # the identity; only the spawn resolves the provider (registry_provider).
-SUPPORTED_AGENTS="claude codex grok"   # the PROVIDERS. claude/codex: interactive+acp; grok: headless reviewer/consult
+# the PROVIDERS. claude/codex/gemini: interactive+acp; grok: headless reviewer/consult. gemini is supported but
+# NOT a zero-config default: a project opts in with `agents = ... gemini`, so an install without the
+# Gemini CLI never sees a third-family reviewer it cannot run.
+SUPPORTED_AGENTS="claude codex grok gemini"
 REGISTRY_DEFAULT_AGENTS="claude codex grok"
 REGISTRY_DEFAULT_TARGET="codex"
 
@@ -579,7 +583,7 @@ registry_provider() {  # <identity> — its provider (a driver is its own); 1 if
 registry_family() {
   local provider
   provider="$(registry_provider "$1")" || return 1
-  case "$provider" in claude|codex|grok) printf '%s\n' "$provider" ;;
+  case "$provider" in claude|codex|grok|gemini) printf '%s\n' "$provider" ;;
     *) profile_helper field "$provider" family ;;
   esac
 }
@@ -630,7 +634,7 @@ stamp_review_provider() {
   fi
   local provider binding="" key value
   provider="$(registry_provider "$to")" || return 1
-  case "$provider" in claude|codex|grok) ;;
+  case "$provider" in claude|codex|grok|gemini) ;;
     *) binding="$(profile_helper binding "$provider")" || return 1 ;;
   esac
   local old_binding
@@ -696,6 +700,7 @@ whoami_from_ancestors() {
     base="$(basename "$exe")"
     case "$base" in
       grok|grok-*) printf '%s\n' grok; return 0 ;;
+      gemini)      printf '%s\n' gemini; return 0 ;;
       claude)      printf '%s\n' claude; return 0 ;;
       codex)       printf '%s\n' codex; return 0 ;;
     esac
@@ -718,6 +723,8 @@ cmd_whoami() {
     # Two distinct hits fail closed; a single hit wins; none falls through to ancestors.
     local hits="" hit seen="" n=0
     [ "${GROK_AGENT:-}" = "1" ] && hits="$hits grok"
+    # Gemini CLI marks the shells it spawns with GEMINI_CLI=1 (its own identification variable).
+    [ "${GEMINI_CLI:-}" = "1" ] && hits="$hits gemini"
     { [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${CLAUDE_PID:-}" ]; } && hits="$hits claude"
     { [ -n "${CODEX_SANDBOX:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; } && hits="$hits codex"
     for hit in $hits; do
@@ -759,7 +766,7 @@ cmd_agents() {
       shift; [ -n "${1:-}" ] || usage_err "agents --profile: an identity is required"
       local profile_provider
       profile_provider="$(registry_provider "$1")" || die "agents --profile: unknown agent '$1'"
-      case "$profile_provider" in claude|codex|grok) return 1 ;; esac
+      case "$profile_provider" in claude|codex|grok|gemini) return 1 ;; esac
       profile_helper binding "$profile_provider"
       ;;
     --others)
@@ -815,6 +822,7 @@ cmd_agents() {
       # (codex, S4-2 r3, blocking.) Do NOT add reviewer-consult-only here — see below.
       printf '%s\tinteractive,acp\n' claude
       printf '%s\tinteractive,acp\n' codex
+      printf '%s\tinteractive,acp\n' gemini
       printf '%s\theadless,reviewer-consult-only\n' grok
       local ca custom_supported
       custom_supported="$(custom_profile_names)" || exit 2
@@ -6112,7 +6120,7 @@ cmd_validate() {
   elif [ -n "$(frontmatter_field "$file" agent_profile_digest)$(frontmatter_field "$file" review_family)$(frontmatter_field "$file" review_model)" ]; then
     errors="${errors}  profile metadata is missing its agent_profile binding\n"
   elif [ "$msg_type" = review-feedback ]; then
-    case "$from_agent" in claude|codex|grok|claude-review|codex-review|grok-review) ;;
+    case "$from_agent" in claude|codex|grok|gemini|claude-review|codex-review|grok-review|gemini-review) ;;
       *) errors="${errors}  custom review reply is missing its agent_profile binding\n" ;;
     esac
   fi

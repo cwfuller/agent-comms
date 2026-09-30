@@ -14,6 +14,11 @@ and a summary cannot be deduplicated or audited. Each provider keeps its own led
           (message.id, requestId) and the LAST copy wins (streaming finalises output_tokens).
   grok    <home>/sessions/<quoted-cwd>/<session>/usage.json — turns[] per prompt. The file is
           rewritten, not appended, so a turn is identified by (file, turnNumber).
+  gemini  <GEMINI_CLI_HOME>/.gemini/tmp/<project>/chats/**/*.jsonl — one record per chat message;
+          a `gemini` message carries the model that answered and tokens{input, output, cached,
+          thoughts, tool, total}. A message is appended again when its tokens arrive, so records are
+          deduplicated by id and the LAST copy wins. No rate-limit record exists (null). Read from
+          the CLI's bundled source (0.62.0), not yet against a live session.
 
 The window is the turn, not the session: `snapshot` records the state of the provider's records
 immediately before the billable prompt, and `collect` reads only what appeared after it. A warm
@@ -31,10 +36,13 @@ total_tokens = input_tokens + output_tokens. `turns` counts prompts (codex turn_
 null where the provider does not number them) and `responses` counts deduplicated model responses.
 
 Usage:
-  leg_usage.py snapshot <codex|claude|grok> <records-root> <cwd> <out-file>
-  leg_usage.py collect  <codex|claude|grok> <records-root> <cwd> <snapshot-file>
+  leg_usage.py snapshot <codex|claude|grok|gemini> <records-root> <cwd> <out-file>
+  leg_usage.py collect  <codex|claude|grok|gemini> <records-root> <cwd> <snapshot-file>
+  leg_usage.py models   gemini <records-root> <cwd> <snapshot-file>
 collect prints exactly two lines, `usage\\t<json|null>` and `rate_limits\\t<json|null>`, and exits 0
-whenever it could print them; the reason for a null goes to stderr.
+whenever it could print them; the reason for a null goes to stderr. models prints one
+`model\\t<id>` line per distinct model that answered in the window and exits 0, or exits 1 printing
+nothing when the window cannot be bounded or holds no answered message — absent evidence is never a match.
 """
 import hashlib
 import json
@@ -115,6 +123,18 @@ def jsonl_files(provider, root, cwd):
         for d, _, names in os.walk(base, onerror=_boom):
             for n in names:
                 if n.startswith("rollout-") and n.endswith(".jsonl"):
+                    files.append(os.path.join(d, n))
+    elif provider == "gemini":
+        base = os.path.join(root, "tmp")
+        if absent(root) or absent(base):
+            return files
+        for d, _, names in os.walk(base, onerror=_boom):
+            # Only a `chats` directory holds session records (tmp/<project>/chats, and
+            # chats/<parent-session>/ for a sub-agent's own); the rest of tmp is scratch.
+            if "chats" not in os.path.relpath(d, base).split(os.sep):
+                continue
+            for n in names:
+                if n.endswith(".jsonl"):
                     files.append(os.path.join(d, n))
     elif provider == "claude":
         dirs, _ = claude_dirs(root, cwd)
@@ -495,6 +515,64 @@ def claude_usage(windows, root, cwd):
     return total
 
 
+def gemini_answers(windows):
+    """One record per answered model response in the window: a `gemini` message, deduplicated by id
+    with the LAST copy winning (the CLI appends a message again when its tokens arrive)."""
+    last, order = {}, []
+    for f, _start, recs in windows:
+        for i, r in enumerate(recs):
+            if not isinstance(r, dict) or r.get("type") != "gemini":
+                continue
+            key = r.get("id") or (f, "line%d" % i)
+            if key not in last:
+                order.append(key)
+            last[key] = r
+    return [last[k] for k in order]
+
+
+def gemini_usage(windows):
+    rows = []
+    for r in gemini_answers(windows):
+        t = r.get("tokens")
+        t = t if isinstance(t, dict) else {}
+        inp, out, cached, thoughts, tool = (t.get("input"), t.get("output"), t.get("cached"),
+                                            t.get("thoughts"), t.get("tool"))
+        # promptTokenCount already includes the cached reads; the tool-use prompt and the thinking
+        # tokens are billed beside it and beside the candidates, so they join input and output.
+        ok = all(is_count(v) for v in (inp, out, thoughts, tool))
+        rows.append({
+            "input_tokens": inp + tool if ok else None,
+            "cached_input_tokens": cached if is_count(cached) else None,
+            "cache_write_input_tokens": None,      # the CLI does not record cache writes
+            "output_tokens": out + thoughts if ok else None,
+            "reasoning_output_tokens": thoughts if is_count(thoughts) else None,
+            "total_tokens": inp + tool + out + thoughts if ok else None,
+        })
+    total = add_usage(rows)
+    if total is None:
+        return None
+    total["turns"] = None
+    total["responses"] = len(rows)
+    total["source"] = "gemini-chat-record"
+    return total
+
+
+def gemini_models(root, cwd, snap):
+    """The distinct models that answered in the window, or raise when there is nothing to name.
+    An answered message that carries no model is not evidence of the model, so it poisons the set."""
+    answers = gemini_answers(window_records("gemini", root, cwd, snap))
+    if not answers:
+        raise Undecidable("no answered gemini message in this turn's window")
+    models = []
+    for r in answers:
+        m = r.get("model")
+        if not isinstance(m, str) or not m:
+            raise Undecidable("a gemini message in the window names no model")
+        if m not in models:
+            models.append(m)
+    return models
+
+
 GROK_MAP = {
     "input_tokens": "inputTokens",
     "cached_input_tokens": "cachedReadTokens",
@@ -551,6 +629,8 @@ def collect(provider, root, cwd, snap):
     if provider == "grok":
         return grok_usage(root, cwd, snap), None
     windows = window_records(provider, root, cwd, snap)
+    if provider == "gemini":
+        return gemini_usage(windows), None
     if provider == "codex":
         # The rate-limit snapshot is its own fact: a window whose spend cannot be bounded still
         # carries a readable latest snapshot, so an unmeasurable usage does not null it.
@@ -564,10 +644,26 @@ def collect(provider, root, cwd, snap):
 
 
 def main(argv):
-    if len(argv) != 6 or argv[1] not in ("snapshot", "collect") or argv[2] not in ("codex", "claude", "grok"):
-        sys.stderr.write("usage: leg_usage.py snapshot|collect codex|claude|grok <records-root> <cwd> <file>\n")
+    if len(argv) != 6 or argv[1] not in ("snapshot", "collect", "models") \
+            or argv[2] not in ("codex", "claude", "grok", "gemini") \
+            or (argv[1] == "models" and argv[2] != "gemini"):
+        sys.stderr.write("usage: leg_usage.py snapshot|collect codex|claude|grok|gemini <records-root> <cwd> <file>\n"
+                         "       leg_usage.py models gemini <records-root> <cwd> <snapshot-file>\n")
         return 2
     verb, provider, root, cwd, path = argv[1:]
+    if verb == "models":
+        try:
+            with open(path) as fh:
+                snap = json.load(fh)
+            if not isinstance(snap, dict):
+                raise Undecidable("the snapshot is not an object")
+            models = gemini_models(root, cwd, snap)
+        except (OSError, ValueError, Undecidable) as e:
+            sys.stderr.write("models unavailable: %s\n" % e)
+            return 1
+        for m in models:
+            sys.stdout.write("model\t%s\n" % m)
+        return 0
     if verb == "snapshot":
         try:
             snap = snapshot(provider, root, cwd)

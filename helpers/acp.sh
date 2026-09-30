@@ -15,15 +15,19 @@
 #       18,562 fresh input tokens vs warm round-2 146 — ~127x). --oneshot uses
 #       a stateless exec.
 #   doctor
-#       report node/acpx availability, the supported agent map and the reviewer codex
-#       runtime; exit 0 iff consults can run here AND that runtime can run the default
-#       (baseline) and use-max (ceiling) codex review; 3 no usable node; 4 a codex
-#       review cannot run on the runtime (or the runtime is refused), reason printed.
-#   runtime-check codex
+#       report node/acpx availability, the supported agent map, the reviewer codex
+#       runtime and the Gemini CLI; exit 0 iff consults can run here AND that runtime can
+#       run the default (baseline) and use-max (ceiling) codex review AND any installed
+#       Gemini CLI can run `--acp`; 3 no usable node; 4 a codex review cannot run on the
+#       runtime (or the runtime is refused), or the Gemini CLI is too old for `--acp`,
+#       reason printed. A Gemini CLI that is simply absent is reported, not a failure:
+#       gemini is an opt-in reviewer.
+#   runtime-check codex|gemini
 #       machine-readable form of doctor's runtime verdict: `runtime` and
 #       `runtime_version` lines, then per row <baseline|ceiling> <model>
 #       <baseline|max|pin> <minimum|-> <ok|refused> <reason|-> (TAB-separated).
-#       Exit 0 all ok, 4 a row refused, 1 runtime refused or map defect, 2 usage.
+#       Exit 0 all ok, 4 a row refused, 1 runtime refused (for gemini: absent, or older than
+#       the first release with `--acp`; the version lines still print) or map defect, 2 usage.
 #   supports <agent>
 #       exit 0 iff a consult can run here for that agent (machine-readable —
 #       never parse doctor's prose).
@@ -54,18 +58,25 @@
 #       map_version — as `key=value` words or a one-line JSON object. The ONE field list
 #       behind `comms.sh review-route plan` and result.json's "route".
 #   capabilities
-#       the map version and every provider/transport capability row, with the
-#       concrete controls of each routing-eligible combination.
+#       the map version, the reviewer codex runtime and Gemini CLI, and every
+#       provider/transport capability row, with the concrete controls of each combination
+#       that applies a policy (and every model the map marks disabled).
 #   runtime <agent> --policy-file <record>
 #       the codex binary the record resolved (`bundled`, or an absolute path) —
 #       see policy_runtime_codex for COMMS_ACP_CODEX_PATH and auto-detection.
+#   gemini-auth <settings.json> | gemini-effort <settings.json> | failure-reason <provider> <stderr-file>
+#       gemini's helpers for runphase: the operator's selected auth type (one allowlisted token), the
+#       thinking level an isolated settings.json carries (as a policy effort token), and the
+#       classification of a provider refusal (`rate-limited` | `auth-failed` | nothing) from the
+#       diagnostics acpx relayed.
 #   policy <agent> [--policy-file <record>]
 #       the reviewer model+effort policy for an agent, tab-separated
 #       (<model>\t<effort>); empty + exit 1 where no policy applies.
-#   provider-config <agent> [--policy-file <record>]
+#   provider-config <agent> [--policy-file <record>] [--auth-type <type>]
 #       the COMPLETE isolated provider config file text for a mounted review
-#       turn. runphase asks for this rather than holding a literal, so the
-#       policy is spelled exactly once.
+#       turn (codex: config.toml; gemini: settings.json, where --auth-type carries the
+#       operator's selected auth type forward). runphase asks for this rather than holding
+#       a literal, so the policy is spelled exactly once.
 #   policy-check <agent> - [--policy-file <record>]
 #   policy-attest <agent> <effort> [model] [--policy-file <record>]
 #       compare an `acpx sessions show --format json` record on stdin, or an
@@ -80,7 +91,9 @@
 # npx -y acpx@$ACPX_VERSION (cached by npm after first use; no global install).
 # Requires Node >= 22.13 (acpx's floor). Enabled agents: codex, claude. acpx
 # 0.13.1 ships builtins for all three registered agents; grok maps to the
-# `grok-build` profile (verified against `acpx --help`, 2026-08-25). Unsupported agents fail closed naming the fallback.
+# `grok-build` profile (verified against `acpx --help`, 2026-08-25); gemini maps to acpx's `gemini`
+# builtin, which launches `gemini --acp` (or the deprecated `--experimental-acp` below gemini 0.33.0,
+# which this helper refuses instead). Unsupported agents fail closed naming the fallback.
 set -euo pipefail
 
 # User/project SETTINGS (helpers/settings.sh): fills unset variables from the settings files, so
@@ -180,6 +193,7 @@ profile_for() {  # acpx built-in launch profile per agent; empty = unsupported
     codex)  echo codex ;;
     claude) echo claude ;;
     grok)   echo grok-build ;;
+    gemini) echo gemini ;;
     *)      if comms_sibling agents --profile "$1" >/dev/null 2>&1; then echo agent-comms-custom; else echo ""; fi ;;
   esac
 }
@@ -220,6 +234,9 @@ policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic o
     $1 == "limit" {
       if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 !~ re) bad("malformed limit")
       once("l" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
+    $1 == "disabled" {
+      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 !~ re) bad("malformed disabled")
+      once("d" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
     { bad("unknown row kind \"" $1 "\"") }
     END {
       if (nv != 1) { printf "acp.sh: policy map: expected exactly one version row, found %d\n", nv > "/dev/stderr"; err = 1 }
@@ -230,7 +247,7 @@ policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic o
 # policy_map_get <kind> <provider> <transport> [key] — the value column(s) of ONE row, or nothing.
 #   capability -> <eligible|fixed|unsupported>   baseline -> <model>\t<effort>
 #   tier <t> -> <model>   effort <e> -> <provider-effort>   pair <model> -> <comma list>
-#   ceiling -> <model>\t<effort>   limit <model> -> <limit_id>
+#   ceiling -> <model>\t<effort>   limit <model> -> <limit_id>   disabled <model> -> <reason>
 # Only ever called after policy_map_check has passed for this invocation.
 policy_map_get() {
   awk -F'\t' -v k="$1" -v p="$2" -v t="$3" -v key="${4:-}" '
@@ -257,7 +274,7 @@ policy_map_reverse() {
 # capability-unimplemented), so a map edit alone can never make the ledger claim a policy that no
 # code applies or checks. Adding a provider here requires its runphase arm to write the config,
 # preflight it and attest it. (code review r1.)
-policy_applied_combo() { case "$1/$2" in codex/acp-mounted) return 0 ;; esac; return 1; }
+policy_applied_combo() { case "$1/$2" in codex/acp-mounted|gemini/acp-mounted) return 0 ;; esac; return 1; }
 
 # ver_ge <a> <b> — dotted numeric version a >= b. A non-numeric side is "not known to be >=".
 ver_ge() {
@@ -341,6 +358,40 @@ print(m.group(1).decode())
 RTPY
 }
 
+# THE GEMINI RUNTIME a review turn will run: the `gemini` acpx launches BY NAME, so the one found on
+# PATH. Unlike codex there is no bundled copy and no path override — acpx's `gemini` profile is
+# `gemini --acp`, and a runtime other than the one named here would be a second, unreported one.
+# `--acp` replaced the deprecated `--experimental-acp` in gemini 0.33.0 (acpx's own
+# GEMINI_ACP_FLAG_VERSION): below it the flag this helper launches does not exist, so it is refused
+# here, with the same wording on every surface, rather than discovered as a dead turn.
+# Sets RT_PATH (absolute path, or empty when absent), RT_VERSION (x.y.z, or `unknown`) and RT_ERR.
+ACP_GEMINI_MIN_VERSION=0.33.0
+policy_runtime_gemini() {
+  local cand v
+  RT_PATH=""; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""
+  cand="$(command -v gemini 2>/dev/null)" || cand=""
+  if [ -z "$cand" ] || [ -d "$cand" ] || [ ! -x "$cand" ]; then RT_ERR="the gemini CLI was not found on PATH"; return 0; fi
+  if ! [[ "$cand" =~ $ACP_RUNTIME_PATH_RE ]]; then RT_ERR="the gemini CLI at '$cand' is not a plain absolute path"; return 0; fi
+  RT_PATH="$cand"
+  v="$(runtime_version_probe "$cand")" || v=""
+  if [ -z "$v" ]; then RT_ERR="the gemini CLI at $cand did not report a version within ${ACP_RUNTIME_PROBE_SECS}s"; return 0; fi
+  RT_VERSION="$v"
+  ver_ge "$v" "$ACP_GEMINI_MIN_VERSION" \
+    || RT_ERR="gemini $v has no --acp flag (first shipped in $ACP_GEMINI_MIN_VERSION; older builds only have the deprecated --experimental-acp) — upgrade the Gemini CLI"
+}
+
+# policy_runtime_for <agent> — the ONE dispatch from an agent to its runtime probe; sets RT_*.
+# Only codex and gemini have a runtime a policy is resolved against.
+policy_runtime_for() {
+  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""
+  case "$1" in codex) policy_runtime_codex ;; gemini) policy_runtime_gemini ;; esac
+}
+
+# policy_model_disabled <agent> <transport> <model> — the reason a model is DISABLED (a `disabled` row),
+# or nothing. A disabled model is one the provider has announced but nothing can serve yet: its tier
+# and pair rows may already be written, and removing the row is the whole act of enabling it.
+policy_model_disabled() { policy_map_get disabled "$1" "$2" "$3"; }
+
 # policy_model_available <agent> <transport> <model> — 0 iff the model's declared minimum runtime
 # (optional 6th column of its `pair` row) is met by RT_VERSION. No minimum = available everywhere.
 policy_model_available() {
@@ -354,15 +405,16 @@ policy_model_available() {
 # and `doctor`, so no surface restates a version.
 policy_unservable_reason() {
   policy_model_available "$1" "$2" "$3" && return 0
-  printf "model '%s' (%s) needs codex >= %s, but the reviewer runtime is %s (%s) — install a newer codex or set COMMS_ACP_CODEX_PATH\n" \
-    "$3" "$4" "$(policy_map_get pairmin "$1" "$2" "$3")" "$RT_PATH" "$RT_VERSION"
+  printf "model '%s' (%s) needs %s >= %s, but the reviewer runtime is %s (%s) — install a newer %s%s\n" \
+    "$3" "$4" "$1" "$(policy_map_get pairmin "$1" "$2" "$3")" "$RT_PATH" "$RT_VERSION" "$1" \
+    "$( [ "$1" = codex ] && printf ' or set COMMS_ACP_CODEX_PATH')"
   return 1
 }
 
-# The operator's pins, per provider. Only codex has an applied policy, so only codex has pins; a
-# provider added here must also gain an `eligible` capability row with its own evidence.
-policy_pin_model()  { case "$1" in codex) printf '%s' "${COMMS_ACP_CODEX_MODEL:-}" ;; esac; }
-policy_pin_effort() { case "$1" in codex) printf '%s' "${COMMS_ACP_CODEX_EFFORT:-}" ;; esac; }
+# The operator's pins, per provider. Only providers with an applied policy (codex, gemini) have pins; a
+# provider added here must also gain a capability row with its own evidence.
+policy_pin_model()  { case "$1" in codex) printf '%s' "${COMMS_ACP_CODEX_MODEL:-}" ;; gemini) printf '%s' "${COMMS_ACP_GEMINI_MODEL:-}" ;; esac; }
+policy_pin_effort() { case "$1" in codex) printf '%s' "${COMMS_ACP_CODEX_EFFORT:-}" ;; gemini) printf '%s' "${COMMS_ACP_GEMINI_EFFORT:-}" ;; esac; }
 # THE OPERATOR'S "use max": every reviewer turn that applies a policy runs the map's `ceiling` pair.
 # Provider-neutral on purpose — it names no model, the map does. It only ever RAISES depth, so it is
 # not an author-steering channel the way a cheaper route would be.
@@ -429,8 +481,7 @@ resolve_policy() {
     return 0
   fi
   # THE RUNTIME, resolved before any model is chosen: which models exist depends on it.
-  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""
-  if [ "$agent" = codex ]; then policy_runtime_codex; fi
+  policy_runtime_for "$agent"
   [ -z "$RT_ERR" ] || { echo "acp.sh: resolve: $RT_ERR — refusing rather than running another runtime" >&2; return 1; }
   [ -z "$RT_NOTE" ] || fb="${fb:+$fb;}$RT_NOTE"
   R_RUNTIME="$RT_PATH"; R_RUNTIME_VERSION="$RT_VERSION"
@@ -479,6 +530,7 @@ resolve_policy() {
     tl="$(policy_map_get tier "$agent" "$transport" "$tier")"
     local IFS_SAVE="$IFS"; IFS=,
     for m1 in $tl; do
+      if [ -n "$(policy_model_disabled "$agent" "$transport" "$m1")" ]; then fb="${fb:+$fb;}disabled:$m1"; continue; fi
       if policy_model_available "$agent" "$transport" "$m1"; then rm="$m1"; break; fi
       fb="${fb:+$fb;}runtime-lacks:$m1"
     done
@@ -528,6 +580,11 @@ resolve_policy() {
   # model that needs a newer runtime is REFUSED here with the remedy, never swapped: the canary
   # would only discover it after a session was spent on it.
   local why
+  why="$(policy_model_disabled "$agent" "$transport" "$R_MODEL")"
+  if [ -n "$why" ]; then
+    echo "acp.sh: resolve: model '$R_MODEL' ($R_MSRC) is disabled in the policy map ($why; map $R_MAPV) — refusing rather than substituting" >&2
+    return 1
+  fi
   if ! why="$(policy_unservable_reason "$agent" "$transport" "$R_MODEL" "$R_MSRC")"; then
     echo "acp.sh: resolve: $why" >&2
     return 1
@@ -630,10 +687,38 @@ policy_for() {  # <agent> [record] -> "<model>\t<effort>"; empty + 1 where no po
   printf '%s\t%s\n' "$R_MODEL" "$R_EFFORT"
 }
 
-provider_config_for() {  # <agent> [record] -> the COMPLETE isolated config text
+# gemini_config_for <model> <effort> <auth-type|-> -> the COMPLETE isolated `.gemini/settings.json`.
+# Everything but the three values is a LITERAL; the values are allowlisted tokens (ACP_POLICY_RE), so
+# nothing can close a string and add a key — the same rule as the codex TOML above. What it pins:
+#   model.name                       the leg's model (acpx also sets it on the session with --model)
+#   modelConfigs.customOverrides     the thinking level for that model. The CLI has no ACP control for
+#                                    it, so the settings file is the only way to bind it per leg. An
+#                                    effort of `default` writes NO override (a model with no thinking
+#                                    control is left alone rather than sent a parameter it may reject).
+#   general.plan.modelRouting=false  plan mode otherwise SWITCHES model (Pro to plan, Flash to implement),
+#                                    which would make the pinned model a suggestion.
+#   general.enableAutoUpdate=false   a review turn never upgrades the CLI under a running session.
+#   privacy.usageStatisticsEnabled=false
+#   security.auth.selectedType       only when the operator has one (an allowlisted token): it is the
+#                                    one piece of the operator's settings that keeps the login working.
+gemini_config_for() {
+  local m="$1" e="$2" auth="${3:--}" level="" ov="" au=""
+  case "$e" in
+    low) level=LOW ;; medium) level=MEDIUM ;; high) level=HIGH ;; default) level="" ;;
+    *) echo "acp.sh: provider-config: gemini has no thinking level for effort '$e'" >&2; return 1 ;;
+  esac
+  [ "$auth" = - ] || [[ "$auth" =~ $ACP_POLICY_RE ]] \
+    || { echo "acp.sh: provider-config: auth type '$auth' is not a bare identifier" >&2; return 1; }
+  [ -z "$level" ] || ov="$(printf ',\n  "modelConfigs": {"customOverrides": [{"match": {"model": "%s"}, "modelConfig": {"generateContentConfig": {"thinkingConfig": {"thinkingLevel": "%s"}}}}]}' "$m" "$level")"
+  [ "$auth" = - ] || au="$(printf ',\n  "security": {"auth": {"selectedType": "%s"}}' "$auth")"
+  printf '{\n  "model": {"name": "%s"},\n  "general": {"plan": {"modelRouting": false}, "enableAutoUpdate": false},\n  "privacy": {"usageStatisticsEnabled": false}%s%s\n}\n' "$m" "$ov" "$au"
+}
+
+provider_config_for() {  # <agent> [record] [auth-type] -> the COMPLETE isolated config text
   local pol m e
   pol="$(policy_for "$1" "${2:-}")" || return 1
   m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"
+  if [ "$1" = gemini ]; then gemini_config_for "$m" "$e" "${3:--}"; return; fi
   # approval_policy and sandbox_mode are LITERALS, never concatenated from the environment —
   # only the two policy values are interpolated, and both are allowlisted above. (grok, plan r2.)
   printf 'approval_policy = "on-request"\nsandbox_mode = "read-only"\nmodel = "%s"\nmodel_reasoning_effort = "%s"\n' "$m" "$e"
@@ -661,16 +746,111 @@ policy_verdict() {
 }
 
 # policy_args <args...> — split the accessors' arguments into positionals (PA_POS, empty values
-# PRESERVED: the attestation passes an empty observation on purpose) and --policy-file (PA_FILE).
+# PRESERVED: the attestation passes an empty observation on purpose), --policy-file (PA_FILE) and
+# --auth-type (PA_AUTH, read by provider-config only).
 policy_args() {
-  PA_POS=(); PA_FILE=""
+  PA_POS=(); PA_FILE=""; PA_AUTH=""
   while [ "$#" -gt 0 ]; do
     if [ "$1" = --policy-file ]; then
       [ "$#" -ge 2 ] && [ -n "$2" ] || die "--policy-file needs a path"
       PA_FILE="$2"; shift 2; continue
     fi
+    if [ "$1" = --auth-type ]; then
+      [ "$#" -ge 2 ] && [ -n "$2" ] || die "--auth-type needs a value"
+      PA_AUTH="$2"; shift 2; continue
+    fi
     PA_POS+=("$1"); shift
   done
+}
+
+# gemini_policy_check <record> — the PREFLIGHT reading for gemini, from an `acpx sessions show --format
+# json` record on stdin: the model the session reports (acpx `current_model_id`, or a `model` config
+# option) and any SAVED model preference acpx would replay onto a replacement session must be the
+# policy's model. The thinking level is NOT observable here — gemini's ACP surface has no control for
+# it, it is bound by the isolated settings.json, and that is read back by `settings-effort` after the
+# turn — so this check says so instead of pretending to match it. Like the codex reading it is
+# necessary and NOT sufficient: the post-turn attestation is what gates.
+# Exit 0 match | 20 mismatch | 21 undecidable (no model reported is never "it matched").
+gemini_policy_check() {
+  local pol m obs cur des
+  pol="$(policy_for gemini "$1")" || return 21
+  m="${pol%%$'\t'*}"
+  obs="$(python3 -c '
+import json,sys
+try: r=json.load(sys.stdin)
+except Exception: print("BAD\t"); sys.exit(0)
+ax=r.get("acpx") if isinstance(r,dict) else None
+ax=ax if isinstance(ax,dict) else {}
+cur=ax.get("current_model_id")
+for o in ax.get("config_options") or []:
+    if isinstance(o,dict) and str(o.get("id"))=="model" and cur is None: cur=o.get("currentValue")
+so=ax.get("session_options")
+des=so.get("model") if isinstance(so,dict) else None
+print("%s\t%s" % ("" if cur is None else cur, "" if des is None else des))
+' 2>/dev/null)" || { echo "undecidable: could not parse the session record" >&2; return 21; }
+  cur="$(printf '%s' "$obs" | cut -f1)"; des="$(printf '%s' "$obs" | cut -f2)"
+  if [ "$cur" = BAD ]; then echo "undecidable: could not parse the session record" >&2; return 21; fi
+  if [ -n "$des" ] && [ "$des" != "$m" ]; then
+    printf 'a saved model preference (%s) conflicts with the policy and would be replayed onto a replacement session\n' "$des"; return 20
+  fi
+  [ -n "$cur" ] || { printf 'undecidable: the session reports no current model\n'; return 21; }
+  if [ "$cur" != "$m" ]; then printf 'want model=%s; the session reports model=%s\n' "$m" "$cur"; return 20; fi
+  printf 'model=%s (thinking level is bound by the isolated settings, read back after the turn)\n' "$cur"
+}
+
+# gemini_settings_effort <settings.json> — the thinking level the isolated settings.json will make the
+# CLI send, as the policy's effort token: `low|medium|high`, or `default` when it carries no override.
+# Read back with the same vocabulary gemini_config_for writes, so the post-turn attestation compares
+# like with like. Anything it cannot read or does not recognise prints nothing and fails.
+gemini_settings_effort() {
+  python3 - "$1" <<'GSE' 2>/dev/null
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    name=d["model"]["name"]
+    ovs=(d.get("modelConfigs") or {}).get("customOverrides") or []
+    lv=[]
+    for o in ovs:
+        if isinstance(o,dict) and (o.get("match") or {}).get("model")==name:
+            t=o["modelConfig"]["generateContentConfig"]["thinkingConfig"]["thinkingLevel"]
+            lv.append(t)
+    if len(lv)>1: sys.exit(1)
+    if not lv: print("default")
+    else:
+        v={"LOW":"low","MEDIUM":"medium","HIGH":"high"}.get(lv[0])
+        if v is None: sys.exit(1)
+        print(v)
+except Exception:
+    sys.exit(1)
+GSE
+}
+
+# gemini_settings_auth <settings.json> — the operator's selected auth type (`security.auth.selectedType`)
+# as ONE bare token, or nothing. The only part of their settings that crosses into a review home.
+gemini_settings_auth() {
+  python3 - "$1" <<'GSA' 2>/dev/null
+import json,re,sys
+try:
+    v=json.load(open(sys.argv[1]))["security"]["auth"]["selectedType"]
+    if isinstance(v,str) and re.fullmatch(r"[a-z][a-z0-9-]*",v): print(v)
+except Exception:
+    pass
+GSA
+}
+
+# failure_reason <provider> <stderr-file> — classify a provider's REFUSAL of a turn from the diagnostics
+# acpx relayed, for providers whose refusals have a stable wording. Prints `rate-limited` or
+# `auth-failed` (the former wins when both match: a 429 body can mention credentials), else nothing.
+# Matched case-insensitively against the STDERR file only — never a reply, which may legitimately
+# discuss a 429 — and only the gemini wording is known (its ACP agent surfaces the API's own status
+# and gRPC code names: 429 / RESOURCE_EXHAUSTED; 401 / UNAUTHENTICATED; "Authentication required").
+ACP_GEMINI_RATE_RE='rate[ _-]?limit|resource_exhausted|too many requests|quota (has been )?(exceeded|exhausted)|exhausted your capacity|(^|[^0-9])429([^0-9]|$)'
+ACP_GEMINI_AUTH_RE='unauthenticated|authentication (is )?(required|failed)|not (logged|signed) in|log ?in (is )?required|invalid (api )?key|api key not valid|api_key_invalid|unauthori[sz]ed|(^|[^0-9])401([^0-9]|$)|please set an auth|no auth method|oauth.*(expired|invalid|revoked)|credentials? (expired|invalid|not found)'
+failure_reason() {
+  [ "$1" = gemini ] && [ -f "$2" ] || return 0
+  if grep -Eiq "$ACP_GEMINI_RATE_RE" "$2"; then printf 'rate-limited\n'
+  elif grep -Eiq "$ACP_GEMINI_AUTH_RE" "$2"; then printf 'auth-failed\n'; fi
+  return 0
 }
 
 cmd_resolve() {
@@ -752,6 +932,8 @@ cmd_capabilities() {
   printf 'map_version: %s (%s)\n' "$ver" "$ACP_POLICY_MAP"
   RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
   printf 'reviewer codex runtime: %s (version %s)%s\n' "$RT_PATH" "$RT_VERSION" "${RT_ERR:+ — REFUSED: $RT_ERR}"
+  policy_runtime_gemini
+  printf 'reviewer gemini runtime: %s (version %s)%s\n' "${RT_PATH:-none}" "$RT_VERSION" "${RT_ERR:+ — REFUSED: $RT_ERR}"
   # Two passes, so a routing-eligible combination's rows print whatever order the map lists them in.
   awk -F'\t' '
     { sub(/\r$/, "") }
@@ -763,8 +945,9 @@ cmd_capabilities() {
     $1 == "ceiling"  && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s ceiling (use max): model=%s effort=%s\n", $2, $3, $4, $5; next }
     $1 == "tier"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s tier %s -> first servable of %s\n", $2, $3, $4, $5; next }
     $1 == "effort"   && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s effort %s -> %s\n", $2, $3, $4, $5; next }
-    $1 == "pair"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s accepts: %s%s\n", $2, $3, $4, $5, (NF == 6 ? " (needs codex >= " $6 ")" : ""); next }
-    $1 == "limit"    && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s spends its own usage limit: %s\n", $2, $3, $4, $5; next }' "$ACP_POLICY_MAP" "$ACP_POLICY_MAP"
+    $1 == "pair"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s accepts: %s%s\n", $2, $3, $4, $5, (NF == 6 ? " (needs " $2 " >= " $6 ")" : ""); next }
+    $1 == "limit"    && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s spends its own usage limit: %s\n", $2, $3, $4, $5; next }
+    $1 == "disabled" && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s is DISABLED: %s\n", $2, $3, $4, $5; next }' "$ACP_POLICY_MAP" "$ACP_POLICY_MAP"
 }
 
 # THE RUNTIME'S STANDING: can the codex runtime already probed into RT_PATH/RT_VERSION run the review
@@ -803,12 +986,31 @@ policy_runtime_standing() {  # <agent> <transport>
 
 cmd_runtime_check() {  # runtime-check <agent>
   local agent="${1:-}"
-  [ "$#" = 1 ] && [ "$agent" = codex ] || { echo "acp.sh: runtime-check: usage: runtime-check codex (only codex reviewers have a runtime)" >&2; exit 2; }
-  RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
+  { [ "$#" = 1 ] && { [ "$agent" = codex ] || [ "$agent" = gemini ]; }; } \
+    || { echo "acp.sh: runtime-check: usage: runtime-check codex|gemini (only codex and gemini reviewers have a runtime)" >&2; exit 2; }
+  policy_runtime_for "$agent"
+  # A gemini that is found but too old still REPORTS what it is before it is refused: the version is
+  # the evidence for the refusal. (An absent one has nothing to report.)
+  if [ "$agent" = gemini ] && [ -n "$RT_PATH" ]; then printf 'runtime\t%s\nruntime_version\t%s\n' "$RT_PATH" "$RT_VERSION"; fi
   [ -z "$RT_ERR" ] || { echo "acp.sh: runtime-check: $RT_ERR" >&2; exit 1; }
-  printf 'runtime\t%s\nruntime_version\t%s\n' "$RT_PATH" "$RT_VERSION"
-  local rc=0; policy_runtime_standing codex acp-mounted || rc=$?
+  [ "$agent" = gemini ] || printf 'runtime\t%s\nruntime_version\t%s\n' "$RT_PATH" "$RT_VERSION"
+  local rc=0; policy_runtime_standing "$agent" acp-mounted || rc=$?
   exit "$rc"
+}
+
+# doctor_standing <agent> — one line per baseline/ceiling row of the reviewer policy on the runtime
+# already probed into RT_PATH/RT_VERSION, setting the caller's `fail` when a row cannot run. The ONE
+# loop behind doctor's codex and gemini lines, so neither can report a runtime the other's rule refuses.
+doctor_standing() {
+  local st srs=0 k m src min ok why label noun="$1"
+  st="$(policy_runtime_standing "$1" acp-mounted)" || srs=$?
+  [ "$srs" = 0 ] || [ "$srs" = 4 ] || { echo "reviewer policy: the map is unreadable — no $noun review can resolve"; fail=1; }
+  while IFS=$'\t' read -r k m src min ok why; do
+    [ -n "$k" ] || continue
+    label="default $noun review"; [ "$k" = ceiling ] && label="use-max $noun review (COMMS_REVIEW_MAX=1)"
+    if [ "$ok" = ok ]; then echo "$label: $m ($src) — runs on this runtime"
+    else echo "$label: $m ($src) — CANNOT RUN: $why"; fail=1; fi
+  done <<< "$st"
 }
 
 cmd_doctor() {
@@ -820,7 +1022,7 @@ cmd_doctor() {
     exit 3
   fi
   echo "acpx: pinned @$ACPX_VERSION via npx (cached after first use)"
-  echo "agents: codex claude grok enabled ($(for a in codex claude grok; do printf '%s=%s ' "$a" "$(profile_for "$a")"; done))"
+  echo "agents: codex claude grok gemini supported ($(for a in codex claude grok gemini; do printf '%s=%s ' "$a" "$(profile_for "$a")"; done))"
   # Which codex a MOUNTED reviewer will run, and so which mapped models it can serve.
   RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
   # And whether it can run the review a turn gets by default (and under "use max"): a baseline or
@@ -829,15 +1031,16 @@ cmd_doctor() {
   if [ -n "$RT_ERR" ]; then echo "reviewer codex runtime: REFUSED — $RT_ERR"; fail=1
   else
     echo "reviewer codex runtime: $RT_PATH (version $RT_VERSION)$( [ "$RT_PATH" = bundled ] && printf ' — the ACP adapter'"'"'s own copy: a mapped model with a minimum runtime cannot run on it (a routed tier falls to its next model)')"
-    local st srs=0 k m src min ok why label
-    st="$(policy_runtime_standing codex acp-mounted)" || srs=$?
-    [ "$srs" = 0 ] || [ "$srs" = 4 ] || { echo "reviewer policy: the map is unreadable — no codex review can resolve"; fail=1; }
-    while IFS=$'\t' read -r k m src min ok why; do
-      [ -n "$k" ] || continue
-      label="default codex review"; [ "$k" = ceiling ] && label="use-max codex review (COMMS_REVIEW_MAX=1)"
-      if [ "$ok" = ok ]; then echo "$label: $m ($src) — runs on this runtime"
-      else echo "$label: $m ($src) — CANNOT RUN: $why"; fail=1; fi
-    done <<< "$st"
+    doctor_standing codex
+  fi
+  # The Gemini CLI is an OPT-IN reviewer: absent is a report, not a failure (most installs have none),
+  # but one that is present and cannot run `--acp` fails like a codex runtime that cannot run its review.
+  policy_runtime_gemini
+  if [ -n "$RT_ERR" ] && [ "$RT_ERR" = "the gemini CLI was not found on PATH" ]; then echo "reviewer gemini runtime: not installed — gemini reviews unavailable (optional; install the Gemini CLI >= $ACP_GEMINI_MIN_VERSION to use gemini)"
+  elif [ -n "$RT_ERR" ]; then echo "reviewer gemini runtime: ${RT_PATH:-none} (version $RT_VERSION) — REFUSED: $RT_ERR"; fail=1
+  else
+    echo "reviewer gemini runtime: $RT_PATH (version $RT_VERSION) — supports --acp"
+    doctor_standing gemini
   fi
   # Reply verification needs python3 (comms.sh reply-check). Without it every reply is UNDECIDABLE
   # and refused rather than trusted, so name it here rather than leaving the operator to discover it
@@ -852,7 +1055,7 @@ cmd_doctor() {
   echo "           reply IS its compatibility probe. (The in-session PONG canary that pre-qualifies a"
   echo "           session before an expensive REVIEW prompt runs in runphase, not on this path.)"
   if [ "$fail" = 1 ]; then
-    echo "result: FAIL — a codex review above cannot run on this reviewer runtime (exit 4)"
+    echo "result: FAIL — a review above cannot run on its reviewer runtime (exit 4)"
     exit 4
   fi
 }
@@ -1026,6 +1229,22 @@ case "${1:-}" in
     printf '%s\n' "$_rt"
     ;;
   capabilities) shift; cmd_capabilities ;;
+  failure-reason)
+    # failure-reason <provider> <stderr-file> — `rate-limited` | `auth-failed` | nothing (exit 0 always).
+    shift; [ "$#" = 2 ] || die "failure-reason: usage: failure-reason <provider> <stderr-file>"
+    failure_reason "$1" "$2"
+    ;;
+  gemini-auth)
+    # gemini-auth <settings.json> — the operator's selected auth type, allowlisted; empty when none.
+    shift; [ -n "${1:-}" ] || die "gemini-auth: a settings.json path is required"
+    gemini_settings_auth "$1"
+    ;;
+  gemini-effort)
+    # gemini-effort <settings.json> — the thinking level a mounted gemini turn's isolated settings
+    # carry, as a policy effort token. runphase attests with it after the turn.
+    shift; [ -n "${1:-}" ] || die "gemini-effort: a settings.json path is required"
+    gemini_settings_effort "$1" || exit 1
+    ;;
   route-view) shift; cmd_route_view "$@" ;;
   policy)
     shift; policy_args "$@"
@@ -1035,7 +1254,7 @@ case "${1:-}" in
   provider-config)
     shift; policy_args "$@"
     [ -n "${PA_POS[0]:-}" ] || die "provider-config: an agent name is required"
-    provider_config_for "${PA_POS[0]}" "$PA_FILE" || exit 1
+    provider_config_for "${PA_POS[0]}" "$PA_FILE" "${PA_AUTH:--}" || exit 1
     ;;
   policy-check)
     # policy-check <agent> - [--policy-file <record>]   (session record JSON on stdin)
@@ -1048,6 +1267,7 @@ case "${1:-}" in
     _pc_agent="${PA_POS[0]}"
     [ "${PA_POS[1]:-}" = "-" ] || die "policy-check: the record is read from stdin — pass '-'"
     command -v python3 >/dev/null 2>&1 || { echo "undecidable: python3 is unavailable" >&2; exit 21; }
+    if [ "$_pc_agent" = gemini ]; then gemini_policy_check "$PA_FILE"; exit $?; fi
     # THE SAVED PREFERENCES ARE READ TOO, and this is the point of the check. acpx replays
     # `desired_config_options` (effort) and `session_options.model` (a model set with `acpx set
     # model` or `--model`) when it creates a REPLACEMENT session, so a leftover preference that
@@ -1138,6 +1358,8 @@ print("%s\t%s\t%s\t%s" % (g("reasoning_effort"), g("model"), dv, dm))
     [ -n "${1:-}" ] || die "supports: an agent name is required"
     [ -n "$(profile_for "$1")" ] || exit 1
     node_ok || exit 1
+    # gemini has no bundled copy: it runs only where a Gemini CLI with `--acp` is on PATH.
+    if [ "$1" = gemini ]; then policy_runtime_gemini; [ -z "$RT_ERR" ] || exit 1; fi
     ;;
   ""|help|-h|--help)
     awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"

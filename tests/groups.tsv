@@ -21,3 +21,4 @@ route	parallel
 worktree	parallel
 usage	parallel
 profiles	parallel
+gemini	parallel

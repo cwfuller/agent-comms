@@ -22,6 +22,9 @@
 #               [<minimum codex runtime version that can serve it>]
 #   ceiling     <provider> <transport> <model> <effort>   the operator's "use max" pair
 #               (COMMS_REVIEW_MAX=1): the strongest model at its highest accepted effort
+#   disabled    <provider> <transport> <model> <reason>   a model the provider has announced but nothing
+#               can serve yet. Its tier/pair rows may already be written; resolve REFUSES it (a pin) and
+#               a routed tier skips it, so deleting this one row is the whole act of enabling it.
 #   limit       <provider> <transport> <model> <limit_id>   a model the provider meters under a
 #               usage limit of its OWN (codex's Spark models, for example), named by the limit_id
 #               its rate-limit records report. A model with no row spends the provider's shared
@@ -83,7 +86,27 @@
 #   whose baseline row .2 keeps): the canary passed and the turn completed; turn.tsv requested
 #   gpt-6.1-sol/xhigh, adapter_check match (acpx config_options), observed_model/effort
 #   gpt-6.1-sol/xhigh from the isolated rollout, session_created_runtime 0.159.0.
-version	2026-09-29.2
+#
+# GEMINI, 2026-09-30 (read-only: @google/gemini-cli 0.62.0 bundle source and its bundled docs, acpx
+# 0.13.1 dist; NOT exercised against the live API — no authenticated Gemini session was available).
+# - ACP surface (gemini --acp): session modes default/autoEdit/yolo/plan (plan = "Read-only mode", on by
+#   default) and `unstable_setSessionModel`; there is NO ACP control for thinking depth. Hence the
+#   model is bound twice (isolated settings.json `model.name` and acpx `--model`, which acpx confirms
+#   as `current_model_id`) and the thinking level ONCE, by a settings.json `modelConfigs` override.
+# - Thinking vocabulary: the CLI's bundled SDK enum is LOW | HIGH, and its own aliases default Gemini 3
+#   to HIGH, so `low` and `high` are the efforts mapped. `medium` and `xhigh` have no row: a routed
+#   candidate of those falls back to the baseline, recorded, rather than sending a level nothing
+#   evidenced. A model the CLI does not describe as thinking-capable accepts `default` (no override).
+# - Tier labels follow the CLI's own model table: pro = strong, flash = balanced, flash-lite = fast.
+# - Capability is `fixed`, not `eligible`: the model has per-turn evidence (the CLI's own chat record
+#   names the model of every response) but the thinking level has none, and the map's own rule is that
+#   a provider is eligible only when controls AND per-turn evidence were both established. The tier and
+#   effort rows are written so promoting it is one capability edit once a live turn shows the level.
+# - GEMINI 4 IS NOT RELEASED. Its row below is DISABLED and its id is a GUESS following the existing
+#   naming (gemini-3-pro-preview, gemini-3.1-pro-preview): replace it with the id the CLI's model list
+#   reports, then delete the `disabled` row and bump `version`. While the row exists a pin of that
+#   id is refused and the `strong` tier skips it to gemini-3.1-pro-preview.
+version	2026-09-30.1
 
 # No mapped model has a usage limit of its own yet, so there are no `limit` rows: every mapped codex
 # model spends the shared codex limit. A row is added with the evidence that the model is served
@@ -98,6 +121,9 @@ capability	claude	headless	unsupported	none: claude review turns are ACP-only	no
 capability	grok	acp-mounted	unsupported	none applied; newer builds expose ACP `model` + `reasoning_effort` (older builds: none)	~/.grok/sessions summary.json: effort per SESSION only	grok 1.0.40 (read from --help/docs, not exercised)	effort is dropped silently on models without supportsReasoningEffort; refused on Darwin without an uncontained override
 capability	grok	acp	unsupported	none applied	as acp-mounted	-	-
 capability	grok	headless	unsupported	none: -m / --reasoning-effort exist but are not passed	as acp-mounted	grok 1.0.40	-
+capability	gemini	acp-mounted	fixed	isolated GEMINI_CLI_HOME settings.json (model.name, a modelConfigs customOverride for the thinking level, plan model routing off) plus acpx --model on the session; mode pinned to `plan`	preflight: acpx sessions show current_model_id; gate: the model named by every response in the CLI's own chat record for the turn, with the thinking level read back from the parent-written settings.json (no per-turn evidence of it exists)	gemini 0.62.0 (source and docs read, NOT exercised live); acpx 0.13.1	routing is ignored (fixed) until a live turn evidences the thinking level; the CLI must be >= 0.33.0 (first build with --acp)
+capability	gemini	acp	unsupported	none: an unmounted turn runs the operator's own ~/.gemini settings	none	-	nothing applies or attests a policy
+capability	gemini	headless	unsupported	none: gemini review turns are ACP-only	none	-	-
 
 baseline	codex	acp-mounted	gpt-6.1-sol	xhigh
 # The ceiling is the FRONTIER model, not the default one: gpt-6-astra, at `ultra`, the highest effort
@@ -127,3 +153,27 @@ pair	codex	acp-mounted	gpt-6-luna	low,medium,high,xhigh,max	0.155.0
 pair	codex	acp-mounted	gpt-5.6-sol	low,medium,high,xhigh,max,ultra
 pair	codex	acp-mounted	gpt-5.6-terra	low,medium,high,xhigh,max,ultra
 pair	codex	acp-mounted	gpt-5.6-luna	low,medium,high,xhigh,max
+
+baseline	gemini	acp-mounted	gemini-3.1-pro-preview	high
+ceiling	gemini	acp-mounted	gemini-3.1-pro-preview	high
+
+# Preference lists, first servable wins. `strong` leads with the DISABLED Gemini 4 row, which is skipped
+# (recorded as `disabled:<model>`) until its `disabled` row below is deleted.
+tier	gemini	acp-mounted	fast	gemini-3.5-flash-lite,gemini-3.1-flash-lite
+tier	gemini	acp-mounted	balanced	gemini-3.5-flash,gemini-3-flash-preview
+tier	gemini	acp-mounted	strong	gemini-4-pro,gemini-3.1-pro-preview,gemini-3-pro-preview
+
+effort	gemini	acp-mounted	low	low
+effort	gemini	acp-mounted	high	high
+
+pair	gemini	acp-mounted	gemini-4-pro	low,high
+pair	gemini	acp-mounted	gemini-3.1-pro-preview	low,high
+pair	gemini	acp-mounted	gemini-3-pro-preview	low,high
+pair	gemini	acp-mounted	gemini-3.5-flash	low,high,default
+pair	gemini	acp-mounted	gemini-3-flash-preview	low,high,default
+pair	gemini	acp-mounted	gemini-3.5-flash-lite	default
+pair	gemini	acp-mounted	gemini-3.1-flash-lite	default
+
+# GEMINI 4 — DISABLED until it exists. Not released as of 2026-09-30; the id is a guess (see the GEMINI
+# note above). Delete this row once the real id is in the tier and pair rows.
+disabled	gemini	acp-mounted	gemini-4-pro	not-released-2026-09-30

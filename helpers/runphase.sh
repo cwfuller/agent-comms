@@ -313,14 +313,16 @@ LEG_USAGE_PROVIDER=""; LEG_USAGE_ROOT=""; LEG_USAGE_CWD=""
 # MEASURED: its cwd is unique to (thread, agent), so the grok sessions and claude transcripts keyed
 # by that cwd are this leg's alone. An unmounted leg runs in the repo root, which an interactive
 # session or another thread's leg can share, and summing their records would bill their spend to
-# this leg. codex additionally needs the mount's isolated home: the shared ~/.codex interleaves
-# every codex session on the machine.
+# this leg. codex and gemini additionally need the mount's isolated home: the shared ~/.codex and
+# ~/.gemini interleave every session on the machine.
 leg_usage_root() {
   [ -n "${2:-}" ] || return 0
   case "$1" in
     codex)  printf '%s' "${3:-}" ;;
     claude) [ -n "${HOME:-}${CLAUDE_CONFIG_DIR:-}" ] && printf '%s/projects' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ;;
     grok)   [ -n "${HOME:-}" ] && printf '%s/.grok/sessions' "$HOME" ;;
+    # the CLI's own state dir inside the mount's isolated GEMINI_CLI_HOME, so every record there is this leg's
+    gemini) [ -n "${3:-}" ] && printf '%s/.gemini' "$3" ;;
   esac
   return 0
 }
@@ -1308,11 +1310,11 @@ resolve_turn_agent() {
   # A provider's own name IS that provider's driver identity — the registry refuses a review
   # identity named after a provider — so only another name needs the registry. Driver turns
   # therefore cost exactly what they did before identities existed.
-  case "$id" in claude|codex|grok) RESOLVED_PROVIDER="$id"; return 0 ;; esac
+  case "$id" in claude|codex|grok|gemini) RESOLVED_PROVIDER="$id"; return 0 ;; esac
   p="$("$COMMS" agents --provider "$id" 2>/dev/null)" \
     || die "$verb: '$id' is not a registered agent (or the registry is malformed) — refusing to guess its provider"
   case "$p" in
-    claude|codex|grok) ;;
+    claude|codex|grok|gemini) ;;
     *) "$COMMS" agents --profile "$id" >/dev/null \
          || die "$verb: '$id' has no usable operator execution profile" ;;
   esac
@@ -2292,6 +2294,23 @@ policy_retire_cmd() {
   printf 'acpx --cwd %s %s sessions close %s' "$_q" "$1" "$2"
 }
 
+# acp_gemini_observed <acp.sh> <iso-home> <usage-snapshot> <cwd> — the gemini analogue of
+# acp_rollout_observed, printing the same tab layout ("<effort>\t<model>\t<turn-id>\t<evidence-file>\t
+# <window-origin>\t<runtime>\t<created-runtime>"), or exiting non-zero. TWO independent facts:
+#   model   from the CLI's OWN chat record: every answered message in the turn's window (the canary
+#           included) must name one model. Zero messages, a message with no model, or two models is
+#           undecidable — never a match. This is the per-turn evidence.
+#   effort  read back from the parent-written isolated settings.json. The CLI has no per-turn record of
+#           its thinking level, so this proves what the CLI was CONFIGURED to send, not what it ran;
+#           the evidence source below says so, and the map keeps the capability `fixed` for that reason.
+acp_gemini_observed() {
+  local acp="$1" home="$2" snap="$3" cwd="$4" eff models
+  eff="$("$acp" gemini-effort "$home/.gemini/settings.json")" || { echo "gemini: the isolated settings.json could not be read back" >&2; return 21; }
+  models="$(python3 "$HELPER_DIR/leg_usage.py" models gemini "$home/.gemini" "$cwd" "$snap")" || return 21
+  [ "$(printf '%s\n' "$models" | grep -c .)" = 1 ] || { echo "gemini: the turn's responses name more than one model" >&2; return 21; }
+  printf '%s\t%s\t-\t%s\t-\t\t\n' "$eff" "${models#model	}" "$home/.gemini/tmp"
+}
+
 acp_rollout_snapshot() {  # <iso-home> <out> — path, inode and size of every rollout file
   command -v python3 >/dev/null 2>&1 || return 1
   python3 - "$1" "$2" <<'PY'
@@ -2525,17 +2544,36 @@ turn_observe() {
     printf 'observed_turn\t%s\n'   "${5:-}"
     printf 'evidence_file\t%s\n'   "${6:-}"
     printf 'evidence_offset\t%s\n' "${7:-}"
-    printf 'evidence_source\t%s\n' "${6:+provider-rollout}"
+    # A provider whose evidence is not a codex rollout names its own source (10th argument).
+    printf 'evidence_source\t%s\n' "${10:-${6:+provider-rollout}}"
     printf 'observed_runtime\t%s\n' "${8:-}"
     printf 'session_created_runtime\t%s\n' "${9:-}"
   } | sed 's/\t$/\tunknown/' >> "$1/turn.tsv" 2>/dev/null || true
+}
+
+# acp_failure_reason <provider> <stderr-file> — why a provider REFUSED a turn, read from the diagnostics acpx
+# wrote to stderr (never the reply: a review may legitimately discuss a 429): `rate-limited`,
+# `auth-failed`, or nothing. The vocabulary is acp.sh's (failure-reason); only providers whose refusals
+# have a stable wording are classified (gemini). Recorded as the result's `reason`, it tells the
+# operator the two things they can act on — wait for a limit to reset, or log in again — without
+# sending them into runner.log, and it is what keeps a refused turn from reading as a silent empty one.
+acp_failure_reason() {
+  [ -s "${2:-}" ] || return 0
+  "$HELPER_DIR/acp.sh" failure-reason "$1" "$2" 2>/dev/null || true
+}
+# acp_failure_note <reason> <provider> — the one sentence for each classified refusal.
+acp_failure_note() {
+  case "$1" in
+    rate-limited) printf '%s refused the turn: a rate limit or quota is exhausted — wait for it to reset (or review with another agent) and re-send' "$2" ;;
+    auth-failed)  printf '%s refused the turn: authentication failed — log in again with its CLI (or set its API key) and re-send' "$2" ;;
+  esac
 }
 
 # acp_canary <workdir> <profile> <session> <run-dir> <secs> — prove the session's runtime serves its
 # configured model BEFORE the real prompt, by prompting the SAME session through the SAME argv shape
 # (the caller passes the identical option vector). It sets, never echoes, two globals:
 #   ACP_CANARY_REASON  — "" on pass, else runtime-incompatible|canary-timeout|canary-exit-N|
-#                        canary-unexpected|reply-unverifiable
+#                        canary-unexpected|reply-unverifiable|rate-limited|auth-failed
 #   ACP_CANARY_NOTE    — a human line for result.json / the refusal, wording that MATCHES the evidence
 #                        (a timeout or an off-script answer makes NO compatibility claim).
 # The canary reply is classified by comms.sh reply-check, the same decoder the broker uses, so the
@@ -2546,9 +2584,11 @@ acp_canary() {
   local wd="$1" prof="$2" sess="$3" rd="$4" secs="$5"
   ACP_CANARY_REASON=""; ACP_CANARY_NOTE=""
   local out="" rc=0
+  # The canary's stderr is kept apart (then appended to runner.log) so a provider REFUSAL can be classified.
   out="$( acp_exec "$wd" ${ACP_CANARY_OPTS[@]+"${ACP_CANARY_OPTS[@]}"} \
           --timeout "$secs" --format quiet "$prof" -s "$sess" \
-          "Reply with exactly the single word PONG and nothing else." 2>>"$rd/runner.log" )" || rc=$?
+          "Reply with exactly the single word PONG and nothing else." 2>"$rd/canary.err" )" || rc=$?
+  cat "$rd/canary.err" >>"$rd/runner.log" 2>/dev/null || true
   printf 'canary: rc=%s bytes=%s\n' "$rc" "${#out}" >>"$rd/runner.log"
   if [ "$rc" -eq 3 ]; then
     ACP_CANARY_REASON="canary-timeout"
@@ -2556,7 +2596,14 @@ acp_canary() {
     return 1
   fi
   if [ "$rc" -ne 0 ]; then
-    # Every other nonzero transport exit refuses, even with PONG in stdout. (codex r3.)
+    # A classified provider refusal (a rate limit, a failed login) names itself; anything else is the
+    # generic exit. Both refuse. Every other nonzero transport exit refuses, even with PONG in stdout. (codex r3.)
+    local cls; cls="$(acp_failure_reason "${ACP_CANARY_PROVIDER:-}" "$rd/canary.err")"
+    if [ -n "$cls" ]; then
+      ACP_CANARY_REASON="$cls"
+      ACP_CANARY_NOTE="$(acp_failure_note "$cls" "$ACP_CANARY_PROVIDER") (the compatibility canary exited $rc before answering; see runner.log)"
+      return 1
+    fi
     ACP_CANARY_REASON="canary-exit-$rc"
     ACP_CANARY_NOTE="the compatibility canary exited $rc before answering (see runner.log) — no compatibility claim is made"
     return 1
@@ -2609,7 +2656,8 @@ acp_canary() {
 # what one launched by a codex or grok driver always saw. COMMS_REVIEW_TURN (exported by cmd_run)
 # is deliberately NOT scrubbed: it is what makes `comms.sh whoami` fail closed inside the turn.
 TURN_CHILD_SCRUB=(-u COMMS_SELF -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u COMMS_PRESENCE_PID
-                  -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID)
+                  -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID
+                  -u GEMINI_CLI)
 
 acp_exec() {  # <cwd> [acpx args...]
   local _cwd="$1"; shift
@@ -2739,7 +2787,7 @@ cmd_run() {
   trap 'exit 143' TERM
   trap 'exit 130' INT
 
-  case "$provider" in claude|codex|grok) ;;
+  case "$provider" in claude|codex|grok|gemini) ;;
     *)
       RUN_PROFILE_BINDING="$(frontmatter_field "$msg" agent_profile)"
       python3 "$HELPER_DIR/agent_profiles.py" check-binding "$RUN_PROFILE_BINDING" "$agent" \
@@ -3027,6 +3075,23 @@ cmd_run() {
       unmount_artifact
       trap - EXIT
       exit 1
+    fi
+    # THE GEMINI ANALOGUE. gemini resolves `.gemini/` (settings.json, .env, extensions, hooks, MCP servers,
+    # custom commands) from the workspace, and a workspace `.env` can set GOOGLE_GEMINI_BASE_URL or an API
+    # key — so a hostile artifact could redirect the reviewer's traffic or start a provider-side process.
+    # Same rule as codex's and claude's: ANY such file is refused and its content is not parsed. This
+    # CLOSES the named vectors; it is a denylist, not a general project-config boundary.
+    if [ "$provider" = gemini ]; then
+      local gemini_cfg
+      for gemini_cfg in .gemini .env; do
+        if [ -e "$mount_dir/$gemini_cfg" ] || [ -L "$mount_dir/$gemini_cfg" ]; then
+          update_thread_state "$msg_thread" failed "" "$sfield" || true
+          write_result "$run_dir" failed 1 "" "$msg" "the reviewed tree carries $gemini_cfg, which gemini reads from the workspace and which can declare MCP servers, hooks or a redirected API endpoint that run outside the plan-mode pin — refusing (any such entry is refused; content is not parsed)"
+          unmount_artifact
+          trap - EXIT
+          exit 1
+        fi
+      done
     fi
     # THE CLAUDE ANALOGUE, and it did not exist until the claude arm shipped: codex's cwd-resolved
     # config was refused while claude's equivalents were not, so the new backend would otherwise
@@ -3403,6 +3468,38 @@ cmd_run() {
     # still permits reads, `git log` and the model's own API call. Five parent-side controls
     # that do NOT work are recorded in docs/ROADMAP.md; do not substitute one of them.
     if [ -n "$mount_dir" ]; then
+      # EVERY file in the reused home is written FRESH and RENAMED into place, never
+      # overwritten in situ. The home persists across rounds for warmth, so a prior
+      # (possibly uncontained, pre-isolation) writer could have left a `config.toml` or
+      # `auth.json` that is a SYMLINK (cp/`>` would write through it and land outside the
+      # home) or a HARD LINK (truncation would corrupt the link target). A symlink `-L`
+      # check alone misses the hard-link case; writing a fresh temp and `mv -f` over the
+      # dirent defeats both, because rename replaces the name rather than the inode.
+      # (codex, implement r3, blocking; grok, implement r3, advisory.)
+      _iso_place() {  # <src-or-empty> <dest> <mode> [literal-content]
+        local _src="$1" _dst="$2" _mode="$3" _lit="${4:-}" _tmp
+        # REFUSE a hostile pre-existing dest that is not a plain regular file. `mv -f` onto a
+        # symlink-to-DIRECTORY or a real directory does NOT replace the dirent — it drops the
+        # staged file INSIDE the target and still exits 0, so the intended config would be
+        # absent and the read-only sandbox never applied. rm -f clears a symlink (of either
+        # kind) but not a directory; a leftover directory is refused outright. (codex, r4, blocking.)
+        if [ -L "$_dst" ]; then rm -f "$_dst" || return 1; fi
+        if [ -e "$_dst" ] && [ ! -f "$_dst" ]; then return 1; fi
+        _tmp="$(mktemp "$acp_iso_home/.stage.XXXXXX")" || return 1
+        if [ -n "$_lit" ]; then printf '%s' "$_lit" > "$_tmp" || { rm -f "$_tmp"; return 1; }
+        elif [ -n "$_src" ] && [ -f "$_src" ] && [ ! -L "$_src" ]; then
+          cat "$_src" > "$_tmp" || { rm -f "$_tmp"; return 1; }
+        fi
+        # chmod fails CLOSED: the mode is part of the contract (600 on a credential), not
+        # advisory. (codex, r4, advisory.)
+        chmod "$_mode" "$_tmp" || { rm -f "$_tmp"; return 1; }
+        command mv -f "$_tmp" "$_dst" || { rm -f "$_tmp"; return 1; }
+        # VERIFY the rename landed a regular file. This DETECTS (not prevents) a symlink a
+        # concurrent actor could re-plant between the precheck and mv; that race is outside
+        # the current lifecycle (prior owner gone, next provider not spawned), and detection
+        # fails the place closed. (codex, r4 + r5.)
+        [ -f "$_dst" ] && [ ! -L "$_dst" ] || return 1
+      }
       case "$provider" in
         codex)
           # The adapter reads INITIAL_AGENT_MODE (not sandbox_mode) and defaults to
@@ -3447,38 +3544,7 @@ cmd_run() {
             ABORT_NOTE="refused: isolated CODEX_HOME for '$provider' resolves outside its mount"
             die "run: the isolated CODEX_HOME resolves outside its mount (want '$acp_iso_home', got '$acp_iso_phys') — refusing"
           fi
-          # EVERY file in the reused home is written FRESH and RENAMED into place, never
-          # overwritten in situ. The home persists across rounds for warmth, so a prior
-          # (possibly uncontained, pre-isolation) writer could have left a `config.toml` or
-          # `auth.json` that is a SYMLINK (cp/`>` would write through it and land outside the
-          # home) or a HARD LINK (truncation would corrupt the link target). A symlink `-L`
-          # check alone misses the hard-link case; writing a fresh temp and `mv -f` over the
-          # dirent defeats both, because rename replaces the name rather than the inode.
-          # (codex, implement r3, blocking; grok, implement r3, advisory.)
-          _iso_place() {  # <src-or-empty> <dest> <mode> [literal-content]
-            local _src="$1" _dst="$2" _mode="$3" _lit="${4:-}" _tmp
-            # REFUSE a hostile pre-existing dest that is not a plain regular file. `mv -f` onto a
-            # symlink-to-DIRECTORY or a real directory does NOT replace the dirent — it drops the
-            # staged file INSIDE the target and still exits 0, so the intended config would be
-            # absent and the read-only sandbox never applied. rm -f clears a symlink (of either
-            # kind) but not a directory; a leftover directory is refused outright. (codex, r4, blocking.)
-            if [ -L "$_dst" ]; then rm -f "$_dst" || return 1; fi
-            if [ -e "$_dst" ] && [ ! -f "$_dst" ]; then return 1; fi
-            _tmp="$(mktemp "$acp_iso_home/.stage.XXXXXX")" || return 1
-            if [ -n "$_lit" ]; then printf '%s' "$_lit" > "$_tmp" || { rm -f "$_tmp"; return 1; }
-            elif [ -n "$_src" ] && [ -f "$_src" ] && [ ! -L "$_src" ]; then
-              cat "$_src" > "$_tmp" || { rm -f "$_tmp"; return 1; }
-            fi
-            # chmod fails CLOSED: the mode is part of the contract (600 on a credential), not
-            # advisory. (codex, r4, advisory.)
-            chmod "$_mode" "$_tmp" || { rm -f "$_tmp"; return 1; }
-            command mv -f "$_tmp" "$_dst" || { rm -f "$_tmp"; return 1; }
-            # VERIFY the rename landed a regular file. This DETECTS (not prevents) a symlink a
-            # concurrent actor could re-plant between the precheck and mv; that race is outside
-            # the current lifecycle (prior owner gone, next provider not spawned), and detection
-            # fails the place closed. (codex, r4 + r5.)
-            [ -f "$_dst" ] && [ ! -L "$_dst" ] || return 1
-          }
+          # (_iso_place is defined above the provider case: the gemini arm places its home the same way.)
           # Credentials only, copied fresh. NOT the broad workspace permission profile an
           # operator may have set globally: such a profile is exactly what makes the agent
           # self-authorise, so no permission request is ever issued and no client-side denial
@@ -3563,6 +3629,98 @@ cmd_run() {
           acp_iso_backend="claude-plan"
           acp_iso_mode="plan"
           ;;
+        gemini)
+          # THE GEMINI ISOLATED HOME. GEMINI_CLI_HOME names the directory that CONTAINS `.gemini/`, so the
+          # CLI's whole user state — settings, extensions, hooks, MCP servers, chat records, credentials
+          # files — lives under $acp_iso_home/.gemini and the operator's ~/.gemini never reaches a review
+          # turn. Beside the mount, like codex's, so the CLI's own session state (what warm resume is made
+          # of) survives the per-round restage.
+          #
+          # CREDENTIALS STAY USABLE, by three routes that need no copy of a secret into the review home:
+          # an API key or Vertex setting in the ENVIRONMENT is inherited as it is; a login kept in the OS
+          # keychain does not depend on the home at all. The one file-backed login, the OAuth token, is
+          # copied fresh (oauth_creds.json, google_accounts.json) exactly as codex's auth.json is, with the
+          # same residual: the reviewer can read it. And the operator's selected auth TYPE is carried into
+          # the isolated settings, because without it a home with no settings asks interactively.
+          #
+          # CONTAINMENT, stated plainly: the backend is the in-process `plan` mode pin ("Read-only mode"),
+          # the same class as claude's, NOT a kernel sandbox — the child's network stays open and the OAuth
+          # token is readable. It fails closed where it can be checked (the pre-canary set-mode must be
+          # confirmed, and the permission shape refuses every approval), but it has NOT been measured
+          # against a live gemini turn the way codex's and claude's were. See docs/ROADMAP.md.
+          acp_iso_home="$mount_kdir/home"
+          if [ -L "$acp_iso_home" ]; then
+            ABORT_NOTE="refused: isolated GEMINI_CLI_HOME for '$provider' is a symlink — refusing to follow it out of the mount"
+            die "run: the isolated GEMINI_CLI_HOME path is a symlink ($acp_iso_home) — refusing to follow it out of the mount"
+          fi
+          ABORT_NOTE="refused: could not create a usable isolated GEMINI_CLI_HOME for '$provider'"
+          mkdir -p "$acp_iso_home" || die "run: cannot create the isolated GEMINI_CLI_HOME"
+          local acp_iso_phys; acp_iso_phys="$( cd "$acp_iso_home" 2>/dev/null && pwd -P )" || true
+          if [ "$acp_iso_phys" != "$acp_iso_home" ]; then
+            ABORT_NOTE="refused: isolated GEMINI_CLI_HOME for '$provider' resolves outside its mount"
+            die "run: the isolated GEMINI_CLI_HOME resolves outside its mount (want '$acp_iso_home', got '$acp_iso_phys') — refusing"
+          fi
+          # The `.gemini` directory itself: a leftover symlink or file there would steer every place below.
+          local acp_gm_dir="$acp_iso_home/.gemini"
+          if [ -L "$acp_gm_dir" ] || { [ -e "$acp_gm_dir" ] && [ ! -d "$acp_gm_dir" ]; }; then
+            ABORT_NOTE="refused: the isolated .gemini for '$provider' is not a plain directory"
+            die "run: the isolated .gemini is not a plain directory ($acp_gm_dir) — refusing"
+          fi
+          mkdir -p "$acp_gm_dir" || die "run: cannot create the isolated .gemini"
+          local acp_gm_phys; acp_gm_phys="$( cd "$acp_gm_dir" 2>/dev/null && pwd -P )" || true
+          if [ "$acp_gm_phys" != "$acp_iso_home/.gemini" ]; then
+            ABORT_NOTE="refused: isolated .gemini for '$provider' resolves outside its mount"
+            die "run: the isolated .gemini resolves outside its mount — refusing"
+          fi
+          rm -f "$acp_iso_home"/.stage.* 2>/dev/null || true
+          local acp_gm_src="${GEMINI_CLI_HOME:-$HOME}/.gemini" acp_gm_f
+          for acp_gm_f in oauth_creds.json google_accounts.json; do
+            if [ -f "$acp_gm_src/$acp_gm_f" ] && [ ! -L "$acp_gm_src/$acp_gm_f" ]; then
+              ABORT_NOTE="refused: could not stage isolated $acp_gm_f for '$provider'"
+              _iso_place "$acp_gm_src/$acp_gm_f" "$acp_gm_dir/$acp_gm_f" 600 \
+                || die "run: cannot stage the isolated $acp_gm_f"
+            elif [ -e "$acp_gm_dir/$acp_gm_f" ] || [ -L "$acp_gm_dir/$acp_gm_f" ]; then
+              # STALE-CREDENTIAL CLEAR, as for codex: a copy from an earlier round must not outlive the
+              # source's removal or rotation, or the turn would run on a revoked login.
+              ABORT_NOTE="refused: could not clear a stale isolated $acp_gm_f for '$provider' after its source went away"
+              rm -f "$acp_gm_dir/$acp_gm_f" 2>/dev/null || true
+              if [ -e "$acp_gm_dir/$acp_gm_f" ] || [ -L "$acp_gm_dir/$acp_gm_f" ]; then
+                die "run: a stale isolated $acp_gm_f persists after its source credential was removed — refusing to run on a possibly-revoked credential"
+              fi
+            fi
+          done
+          ABORT_NOTE="refused: could not write the isolated gemini settings for '$provider'"
+          if [ -n "$acp_route_err" ]; then
+            ABORT_NOTE="refused: $acp_route_err"
+            die "run: $acp_route_err — refusing to write an isolated config"
+          fi
+          policy_record_intact "$acp_policy" "$acp_policy_sha" \
+            || { ABORT_NOTE="refused: the resolved policy record changed before the config was written"; die "run: the policy record changed after resolution"; }
+          # The operator's selected auth TYPE, read as one allowlisted token — nothing else of their
+          # settings crosses (an extension, hook or MCP server there is exactly what isolation excludes).
+          local acp_gm_auth="" acp_iso_cfg=""
+          acp_gm_auth="$("$acp_sh" gemini-auth "$acp_gm_src/settings.json" 2>/dev/null || true)"
+          acp_iso_cfg="$("$acp_sh" provider-config gemini --policy-file "$acp_policy" ${acp_gm_auth:+--auth-type "$acp_gm_auth"})" \
+            || die "run: the gemini reviewer policy is invalid — refusing to write an isolated config"
+          [ -n "$acp_iso_cfg" ] || die "run: acp.sh returned an empty isolated gemini config"
+          _iso_place "" "$acp_gm_dir/settings.json" 600 "$acp_iso_cfg" \
+            || die "run: cannot write the isolated gemini settings"
+          ABORT_NOTE="runner aborted unexpectedly — see runner.log"
+          # The model rides on EVERY acpx call too (a global option, so it precedes the profile): acpx
+          # sets it on the session and records the confirmed `current_model_id` the preflight reads.
+          local acp_gm_model=""
+          acp_gm_model="$("$acp_sh" policy gemini --policy-file "$acp_policy" 2>>"$run_dir/runner.log" | cut -f1)" || acp_gm_model=""
+          [ -n "$acp_gm_model" ] || { ABORT_NOTE="refused: the gemini model could not be read from the resolved policy"; die "run: no gemini model in the resolved policy"; }
+          acp_launch+=(--model "$acp_gm_model")
+          # Precedence traps, scrubbed so the isolated settings are what the CLI reads: GEMINI_MODEL beats
+          # settings.model.name; the two SYSTEM settings paths outrank every user file; GEMINI_SANDBOX
+          # would re-exec the CLI under a sandbox nobody measured; the trust variables would trust the mount.
+          acp_iso=(env -u GEMINI_MODEL -u GEMINI_SANDBOX -u GEMINI_CLI_SYSTEM_SETTINGS_PATH
+                       -u GEMINI_CLI_SYSTEM_DEFAULTS_PATH -u GEMINI_CLI_TRUSTED_FOLDERS_PATH
+                       -u GEMINI_CLI_TRUST_WORKSPACE "GEMINI_CLI_HOME=$acp_iso_home")
+          acp_iso_backend="gemini-plan"
+          acp_iso_mode="plan"
+          ;;
         *)
           if [ "$custom_adapter" = opencode ]; then
             acp_iso_backend="opencode-read-search"
@@ -3594,7 +3752,8 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     fi
     local acp_ensure_out="" acp_record_id=""
     acp_ensure_out="$( acp_exec "$workdir" --format text "$acp_profile" \
-        sessions ensure --name "$acp_session" 2>>"$run_dir/runner.log" )" || true
+        sessions ensure --name "$acp_session" 2>"$run_dir/ensure.err" )" || true
+    cat "$run_dir/ensure.err" >>"$run_dir/runner.log" 2>/dev/null || true
     printf 'sessions ensure: %s\n' "$acp_ensure_out" >>"$run_dir/runner.log"
     acp_record_id="$(printf '%s' "$acp_ensure_out" | head -1 | cut -f1)"
     if [ -n "$mount_dir" ]; then
@@ -3609,7 +3768,12 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
          || ! mount_state_put "$mount_kdir" home "$HOME" \
          || ! mount_state_put "$mount_kdir" record "$acp_record_id"; then
         update_thread_state "$msg_thread" failed "" "$sfield" || true
-        write_result "$run_dir" failed 1 "" "$msg" "could not durably record the ACP session id for this mount — refusing, because the next round could not then prove the queue owner had exited"
+        local ens_cls="" ens_note="could not durably record the ACP session id for this mount — refusing, because the next round could not then prove the queue owner had exited"
+        if [ -z "$acp_record_id" ]; then
+          ens_cls="$(acp_failure_reason "$provider" "$run_dir/ensure.err")"
+          [ -z "$ens_cls" ] || ens_note="$(acp_failure_note "$ens_cls" "$provider") (the session could not be created)"
+        fi
+        write_result "$run_dir" failed 1 "" "$msg" "$ens_note" "$ens_cls"
         unmount_artifact
         trap - EXIT
         exit 1
@@ -3677,7 +3841,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       # So for a mode-pinned backend the permission shape IS part of the boundary.
       # (grok, implement r1, BLOCKING — found by reading acpx's option resolution, not by running
       # it; confirmed here by ground truth.)
-      if [ "$acp_iso_backend" = "claude-plan" ] || [ "$acp_iso_backend" = opencode-read-search ]; then
+      if [ "$acp_iso_backend" = "claude-plan" ] || [ "$acp_iso_backend" = "gemini-plan" ] || [ "$acp_iso_backend" = opencode-read-search ]; then
         acp_perm=(--approve-reads --non-interactive-permissions deny)
       fi
       # --approve-all gives the child a shell, so the boundary has to be enforced where
@@ -3774,7 +3938,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       fi
       local pol_out="" pol_rc=0
       pol_out="$( acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" 2>>"$run_dir/runner.log" \
-                  | "$acp_sh" policy-check codex - --policy-file "$acp_policy" 2>>"$run_dir/runner.log" )" || pol_rc=$?
+                  | "$acp_sh" policy-check "$provider" - --policy-file "$acp_policy" 2>>"$run_dir/runner.log" )" || pol_rc=$?
       # What the ADAPTER reported, kept apart from both the request and the provider's own
       # rollout: an adapter accepting a value is not proof the billable turn ran it.
       local pol_verdict=undecidable
@@ -3803,6 +3967,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # deliberately EXCLUDES it — a different question.) Nothing before this point bills.
     leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$mount_dir" "$acp_iso_home")" "$(cd "$workdir" && pwd -P)" "$run_dir"
     ACP_CANARY_OPTS=( "${acp_prompt_opts[@]}" )
+    ACP_CANARY_PROVIDER="$provider"
     if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
       local canary_note="$ACP_CANARY_NOTE"
       if [ "$ACP_CANARY_REASON" = runtime-incompatible ]; then
@@ -3851,7 +4016,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # written nothing would silently skip the GNU arm and leave an EMPTY snapshot — under which
     # old bytes read as newly appended. Enumeration failure REFUSES before the prompt rather
     # than proceeding with evidence we cannot bound. (codex, implement r1 B1; grok r1.)
-    if [ -n "$acp_iso_home" ]; then
+    if [ -n "$acp_iso_home" ] && [ "$provider" = codex ]; then
       if ! acp_rollout_snapshot "$acp_iso_home" "$run_dir/rollout-snapshot.txt"; then
         acp_refuse policy-unapplied "could not enumerate the provider's rollout files before the prompt — refusing rather than paying for a turn whose depth could not then be attested"
         return 1
@@ -3862,7 +4027,8 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
         ${acp_prompt_opts[@]+"${acp_prompt_opts[@]}"} \
         --timeout "$timeout" --format quiet \
         "$acp_profile" -s "$acp_session" --file "$run_dir/prompt.md" ) \
-      > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log" || acp_rc=$?
+      > "$run_dir/reply-raw.md" 2>"$run_dir/prompt.err" || acp_rc=$?
+    cat "$run_dir/prompt.err" >>"$run_dir/runner.log" 2>/dev/null || true
     acp_elapsed=$(( $(date +%s) - acp_t0 ))
     echo "acp turn finished after ${acp_elapsed}s (budget ${timeout}s)" >>"$run_dir/runner.log"
     if [ "$acp_rc" -eq 0 ] && [ -n "$RUN_PROFILE_BINDING" ]; then
@@ -3893,8 +4059,13 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     #                     budget was working and may well answer with more of it; that is a
     #                     turn to retry, not a roster to reduce.
     #   zero bytes back — nothing to read, as opposed to something unreadable.
+    local acp_fail_cls=""
+    if [ "$acp_rc" -ne 0 ] && [ "$acp_rc" -ne 3 ]; then
+      acp_fail_cls="$(acp_failure_reason "$provider" "$run_dir/prompt.err")"
+    fi
     if [ "$acp_rc" -ne 0 ] && [ "$acp_rc" -ne 3 ] && [ ! -s "$run_dir/reply-raw.md" ]; then
-      acp_reason=no-output
+      # A provider that SAID why it refused is recorded under that reason instead of the bare observation.
+      acp_reason="${acp_fail_cls:-no-output}"
     fi
     log_event provider-result "$([ "$acp_rc" -eq 0 ] && echo completed || echo failed)" \
       "exit=$acp_rc elapsed=${acp_elapsed}s budget=${timeout}s via=acp${acp_reason:+ reason=$acp_reason}"
@@ -3931,7 +4102,11 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
       local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
-      att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
+      if [ "$provider" = gemini ]; then
+        att_out="$(acp_gemini_observed "$acp_sh" "$acp_iso_home" "$run_dir/usage-snapshot.json" "$(cd "$workdir" && pwd -P)" 2>>"$run_dir/runner.log")" || att_rc=$?
+      else
+        att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
+      fi
       if [ "$att_rc" -eq 0 ]; then
         # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
         # field after an empty one shifts left — a context missing its effort was reported as a
@@ -3951,10 +4126,11 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
         if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
           att_rc=22; att_msg="the resolved policy record changed during the turn"
         else
-          att_msg="$("$acp_sh" policy-attest codex "$att_eff" "$att_mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || att_rc=$?
+          att_msg="$("$acp_sh" policy-attest "$provider" "$att_eff" "$att_mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || att_rc=$?
         fi
       fi
-      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}" "${att_rtc:-}"
+      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}" "${att_rtc:-}" \
+        "$( [ "$provider" = gemini ] && [ -n "$att_src" ] && printf 'gemini-chat-record+settings-readback')"
       if [ "$att_rc" -ne 0 ]; then
         printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
         if [ "$att_rc" -eq 20 ]; then
@@ -4026,6 +4202,8 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
       # Still carries the elapsed/budget tail: a non-zero acpx exit near the budget is
       # worth seeing, it just is not evidence of a kill.
       acp_note="${GROK_BROKER_NOTE:-acpx exited $acp_rc — see runner.log} (after ${acp_elapsed}s of a ${timeout}s budget)"
+      # A classified refusal leads the note: it is what the operator can act on.
+      [ -z "$acp_fail_cls" ] || acp_note="$(acp_failure_note "$acp_fail_cls" "$provider") (acpx exited $acp_rc after ${acp_elapsed}s of a ${timeout}s budget)"
     fi
     update_thread_state "$msg_thread" "$acp_status" "acp:$acp_session" "$sfield" || true
     write_result "$run_dir" "$acp_status" "$acp_rc" "acp:$acp_session" "$msg" "$acp_note" "${acp_reason:-}"
