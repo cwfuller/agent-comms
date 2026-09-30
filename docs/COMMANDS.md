@@ -585,9 +585,10 @@ machine-readable form: `runtime` and `runtime_version` lines, then one TAB-separ
 `<baseline|ceiling> <model> <baseline|max|pin> <minimum|-> <ok|refused> <reason|->`, the minimum
 read from the model's `pair` row. Exit codes: resolve 0/1/2; check/attest 0 match, 20 mismatch, 21
 undecidable; doctor 0 consults AND the default and use-max codex reviews can run, 3 no usable
-node, 4 a codex review cannot run on the reviewer runtime or the runtime is refused (the reason is
-printed, and a final `result: FAIL` line); runtime-check 0 all ok, 4 a row refused, 1 the runtime is
-refused or the map is unreadable, 2 usage.
+node, 4 a codex review cannot run on the reviewer runtime, the runtime is refused, or the policy
+map is missing, unreadable, or defective (the reason is printed, and a final `result: FAIL` line);
+runtime-check 0 all ok, 4 a row refused, 1 the runtime is refused or the policy map is missing,
+unreadable, or defective, 2 usage.
 
 ### `runphase.sh` (experimental)
 
