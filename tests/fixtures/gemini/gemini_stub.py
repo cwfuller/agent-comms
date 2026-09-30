@@ -10,6 +10,7 @@ a second time once the tokens arrive).
 
 Levers (environment):
   GM_VERSION        what `--version` prints (default 0.62.0)
+  GM_COUNT          a file counting prompts across processes (acpx starts a fresh agent per call)
   GM_LOG            append one `key<TAB>value` line per observation (argv, home, env, settings, prompt)
   GM_MODE           ok (default) | auth (session/new refuses: Authentication required)
                     | ratelimit (every prompt refused with a 429) | ratelimit-real (only the prompt
@@ -160,6 +161,16 @@ for line in sys.stdin:
         reply(rid, {})
     elif method == "session/prompt":
         state["prompts"] += 1
+        # acpx starts a fresh agent process per call, so "the second prompt" is counted in a file
+        counter = os.environ.get("GM_COUNT")
+        if counter:
+            try:
+                n = int(open(counter).read() or 0)
+            except (OSError, ValueError):
+                n = 0
+            state["prompts"] = n + 1
+            with open(counter, "w") as fh:
+                fh.write(str(state["prompts"]))
         mode = os.environ.get("GM_MODE", "ok")
         if mode == "auth":
             fail(rid, -32000, "Authentication required.")

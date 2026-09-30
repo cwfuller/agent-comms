@@ -1,0 +1,3 @@
+{"sessionId":"sess-g1","projectHash":"p","startTime":"2026-09-30T00:00:00Z","lastUpdated":"2026-09-30T00:00:00Z","kind":"main"}
+{"id":"m0","type":"user","content":"earlier round"}
+{"id":"m0a","type":"gemini","model":"gemini-3.1-pro-preview","content":"earlier answer","tokens":{"input":5000,"output":500,"cached":4000,"thoughts":100,"tool":0,"total":5600}}

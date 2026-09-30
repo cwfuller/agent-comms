@@ -1424,3 +1424,55 @@ grep -q "inbound from: '<absent>' is not a registered agent" "$RI_NF_DIR/result.
   && ok "a from-less inbound to a grok driver is refused with the driver wording, not the review-identity one" \
   || fail "from-less grok driver refusal (got: $(sed -n 's/.*"note": "\(.*\)".*/\1/p' "$RI_NF_DIR/result.json" 2>/dev/null))"
 rm -f "$RI_NOFROM"
+
+section "gemini: a supported provider with a driver, a review twin and one reviewer per provider"
+# gemini is SUPPORTED but opt-in: it is not in the zero-config default, so an install without the Gemini
+# CLI never acquires a reviewer it cannot run. A project enables it with `agents = ... gemini`.
+rm -f "$RI_FIX/.comms/config"
+ri_try "$COMMS" agents
+ri_is "zero-config does NOT include gemini (opt-in): the three built-in drivers and their twins" "claude codex grok claude-review codex-review grok-review"
+ri_try "$COMMS" agents --roster claude gemini
+ri_expect "zero-config: naming gemini in a roster is refused as unknown until the project enables it" 1 "agents --roster: unknown agent 'gemini'"
+ri_cfg 'agents = claude codex grok gemini\ndefault-target = codex\n'
+ri_try "$COMMS" agents
+ri_is "enabled with agents = ...: gemini is a driver and gemini-review its built-in twin" "claude codex grok gemini claude-review codex-review grok-review gemini-review"
+ri_try "$COMMS" agents --provider gemini-review
+ri_is "gemini-review runs on provider gemini" "gemini"
+ri_try "$COMMS" agents --provider gemini
+ri_is "a gemini driver is its own provider" "gemini"
+ri_try "$COMMS" agents --family gemini-review
+ri_is "gemini's family (the independence group) is gemini — a third family beside codex, claude and grok" "gemini"
+ri_split "$COMMS" agents --supported
+printf '%s\n' "$RI_OUT" | grep -qx "$(printf 'gemini\tinteractive,acp')" \
+  && ok "the capability table lists gemini as interactive+acp (ACP-only for reviews, no headless arm)" || fail "agents --supported lacks gemini (got: $RI_OUT)"
+ri_try "$COMMS" agents --others claude
+ri_is "gemini joins a claude driver's default panel (other drivers, one per family)" "codex,grok,gemini"
+ri_try "$COMMS" agents --others gemini
+ri_is "a gemini driver's default panel is the other three drivers" "claude,codex,grok"
+ri_try "$COMMS" agents --roster claude gemini
+ri_is "--roster resolves gemini to itself for another driver" "gemini"
+ri_try "$COMMS" agents --roster gemini gemini,codex
+ri_is "from gemini, 'gemini' becomes gemini-review: a driver never reviews under its own name" "gemini-review,codex"
+ri_try "$COMMS" agents --roster claude gemini,gemini-review
+ri_expect "gemini and gemini-review are refused together: one reviewer per provider" 2 "agents --roster: two reviewers on provider 'gemini' in 'gemini,gemini-review'"
+ri_try "$COMMS" agents --roster claude codex,gemini-review,claude-review
+ri_is "control: one reviewer per provider (codex, gemini-review, claude-review) resolves in order" "codex,gemini-review,claude-review"
+ri_cfg 'agents = gemini\ndefault-target = gemini\n'
+ri_try "$COMMS" agents --others gemini
+ri_is "a lone gemini driver's default panel is its own twin" "gemini-review"
+ri_cfg 'agents = claude codex grok gemini\ndefault-target = codex\n'
+ri_try COMMS_SELF=gemini "$COMMS" whoami
+ri_is "whoami resolves a gemini driver named by COMMS_SELF" "gemini"
+ri_try COMMS_SELF=gemini-review "$COMMS" whoami
+ri_expect "whoami refuses gemini-review as a driving identity" 1 "whoami: 'gemini-review' is a review-only identity"
+ri_try GEMINI_CLI=1 "$COMMS" whoami
+ri_is "the Gemini CLI's own marker (GEMINI_CLI=1) identifies the driving session" "gemini"
+ri_try GEMINI_CLI=1 CLAUDECODE=1 "$COMMS" whoami
+ri_expect "a nested launch (GEMINI_CLI and CLAUDECODE both set) fails closed instead of picking one" 1 "conflicting identity signals"
+# The name is RESERVED: an operator profile may not shadow the built-in provider.
+printf '{"version":1,"agents":{"gemini":{"adapter":"acp","command":["%s"],"family":"x","model":"m/m"}}}' "$(command -v python3)" > "$AGENT_COMMS_HOME/agents.json"
+chmod 600 "$AGENT_COMMS_HOME/agents.json"
+ri_try "$COMMS" agents
+ri_expect "an operator profile named gemini is refused: the built-in name is reserved" nonzero "reserved custom agent name: gemini"
+rm -f "$AGENT_COMMS_HOME/agents.json"
+ri_cfg "$RI_CFG"

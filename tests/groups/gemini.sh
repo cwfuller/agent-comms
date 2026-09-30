@@ -229,7 +229,7 @@ gm_turn() { # <thread> <tag> <artifact> [env assignments...] -> the run dir
   } > "$msg"
   dir="$GM/run-$tag"; mkdir -p "$dir"
   ( cd "$MA_FIX" && env PATH="$GMB:$AXB:$PATH" HOME="$GM/home" COMMS_MOUNT_BASE="$GM_STORE" \
-      GM_LOG="$GM/stub-$tag.log" GM_ACPX_LOG="$GM/acpx-$tag.log" \
+      GM_LOG="$GM/stub-$tag.log" GM_ACPX_LOG="$GM/acpx-$tag.log" GM_COUNT="$GM/count-$tag" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_RUNPHASE_OWNER_WAIT_SECS=3 \
       GEMINI_MODEL=operator-model GEMINI_SANDBOX=true GEMINI_CLI=1 \
       "$@" "$RP" run --message "$msg" --dir "$dir" --provider gemini --via acp --timeout-secs 30 ) >"$dir/stdout.log" 2>"$dir/stderr.log"
@@ -336,5 +336,38 @@ GM_D5="$(gm_turn gm-rate2 t5 "$GM_A1" GM_MODE=ratelimit-real)"
   && gm_res "$GM_D5" note | grep -qF "a rate limit or quota is exhausted" && gm_events gm-rate2 | grep -q 'provider-result.*reason=rate-limited'; } \
   && ok "a rate limit on the REVIEW prompt (the canary passed) is a failed turn with reason rate-limited, on the provider-result event too" \
   || fail "real-prompt rate limit: $(tr '\n' ' ' < "$GM_D5/result.json" | cut -c1-400); events: $(gm_events gm-rate2 | cut -c1-200 | tr '\n' '|')"
+# ---- a hostile or drifting reviewer is refused, never published ----
+# The reviewed tree cannot configure the reviewer: gemini reads .gemini/ and .env from the workspace.
+GM_I=0
+for GM_CFGP in .gemini/settings.json .env; do
+  GM_I=$((GM_I + 1))
+  GM_AX="$(gm_artifact "gm-cfg-$GM_I" "$GM_CFGP")"
+  GM_DX="$(gm_turn "gm-cfg-$GM_I" "cfg$GM_I" "$GM_AX")"
+  { [ "$(gm_res "$GM_DX" status)" = failed ] && gm_res "$GM_DX" note | grep -qF "the reviewed tree carries ${GM_CFGP%%/*}" \
+    && [ ! -e "$GM/stub-cfg$GM_I.log" ]; } \
+    && ok "a tree carrying $GM_CFGP is refused before gemini is started" \
+    || fail "tree with $GM_CFGP: status=$(gm_res "$GM_DX" status) note=$(gm_res "$GM_DX" note | cut -c1-160) stub-ran=$([ -e "$GM/stub-cfg$GM_I.log" ] && echo yes || echo no)"
+done
+# A gemini without --acp is refused at resolution: no flag is launched that the CLI lacks.
+GM_D6="$(gm_turn gm-old t6 "$GM_A1" GM_VERSION=0.32.9)"
+{ [ "$(gm_res "$GM_D6" status)" = failed ] && grep -qF "gemini 0.32.9 has no --acp flag" "$GM_D6/runner.log" && [ ! -e "$GM/stub-t6.log" ]; } \
+  && ok "a turn on a gemini older than the first --acp release is refused at policy resolution, before anything is launched" \
+  || fail "old gemini turn: status=$(gm_res "$GM_D6" status) runner: $(grep -i 'acp flag\|resolve' "$GM_D6/runner.log" | head -2)"
+# The model the CLI's own record names must be the policy's: a leg that ran something else is withheld.
+GM_D7="$(gm_turn gm-drift t7 "$GM_A1" GM_ANSWER_MODEL=gemini-2.5-pro)"
+{ [ "$(gm_res "$GM_D7" status)" = failed ] && [ "$(gm_res "$GM_D7" reason)" = policy-unapplied ] \
+  && gm_res "$GM_D7" note | grep -qF "did not run the declared model/effort policy"; } \
+  && ok "a turn whose chat record names another model is withheld unpublished (policy-unapplied)" \
+  || fail "model drift: $(tr '\n' ' ' < "$GM_D7/result.json" | cut -c1-400)"
+GM_D8="$(gm_turn gm-nomodel t8 "$GM_A1" GM_NO_MODEL=1)"
+{ [ "$(gm_res "$GM_D8" status)" = failed ] && [ "$(gm_res "$GM_D8" reason)" = policy-unapplied ] \
+  && gm_res "$GM_D8" note | grep -qF "could not attest the model/effort"; } \
+  && ok "a turn whose chat record names NO model is withheld too: absent evidence is never a match" \
+  || fail "missing model evidence: $(tr '\n' ' ' < "$GM_D8/result.json" | cut -c1-400)"
+# The preflight reads what acpx confirmed on the session BEFORE any prompt is spent.
+GM_D9="$(gm_turn gm-preflight t9 "$GM_A1" GM_SHOW_MODEL=gemini-2.5-pro)"
+{ [ "$(gm_res "$GM_D9" status)" = failed ] && [ "$(gm_res "$GM_D9" reason)" = policy-unapplied ] && ! grep -q '^prompt_bytes' "$GM/stub-t9.log" 2>/dev/null; } \
+  && ok "a session acpx reports on another model is refused before the canary: no prompt reached gemini" \
+  || fail "preflight mismatch: status=$(gm_res "$GM_D9" status) reason=$(gm_res "$GM_D9" reason) prompts=$(grep -c '^prompt_bytes' "$GM/stub-t9.log" 2>/dev/null)"
 GM_NREP="$(ls "$MA_FIX/.comms/to-claude/" 2>/dev/null | grep -c 'gemini-reply' || true)"
 [ "$GM_NREP" = 2 ] && ok "no review was published for any refused turn (only the two completed turns reply)" || fail "a refused turn published a reply ($GM_NREP gemini replies)"

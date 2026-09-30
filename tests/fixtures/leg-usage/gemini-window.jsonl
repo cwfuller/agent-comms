@@ -1,0 +1,5 @@
+{"id":"m1","type":"user","content":"this round"}
+{"id":"m2","type":"gemini","model":"gemini-3.1-pro-preview","content":"first answer"}
+{"id":"m2","type":"gemini","model":"gemini-3.1-pro-preview","content":"first answer","tokens":{"input":1000,"output":50,"cached":800,"thoughts":30,"tool":20,"total":1100}}
+{"id":"m3","type":"gemini","model":"gemini-3.1-pro-preview","content":"second answer","tokens":{"input":500,"output":10,"cached":0,"thoughts":0,"tool":0,"total":510}}
+{"$set":{"lastUpdated":"2026-09-30T00:01:00Z"}}

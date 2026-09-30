@@ -329,3 +329,58 @@ python3 "$LU" snapshot codex "$CX" /unused "$LUW/no-such-dir/s.snap" 2>"$LUW/unw
 [ "$LU_URC" = 1 ] && grep -q 'usage snapshot unwritable' "$LUW/unwritable.err" && [ ! -e "$LUW/no-such-dir" ] \
   && ok "a snapshot that cannot be written exits 1 and says so, rather than leaving the runner a missing file silently" \
   || fail "unwritable snapshot rc=$LU_URC: $(cat "$LUW/unwritable.err")"
+
+section "leg_usage.py: gemini usage and answering models come from the CLI's own chat record"
+# Synthetic records in the shape the Gemini CLI's ChatRecordingService writes (read from its bundled source,
+# 0.62.0): one JSONL per session under <home>/.gemini/tmp/<project>/chats/, a `gemini` message per model
+# response carrying the answering model and tokens{input, output, cached, thoughts, tool, total}, appended a
+# second time once its tokens arrive. The expected numbers are chosen so a first-copy-wins reading, a double
+# count, or counting the pre-window answer produces a DIFFERENT number.
+GMR="$LUW/gemini-home/.gemini"; GMC="$GMR/tmp/some-project/chats"; mkdir -p "$GMC"
+cp "$LUF/gemini-prewindow.jsonl" "$GMC/session-a.jsonl"
+python3 "$LU" snapshot gemini "$GMR" /unused "$LUW/gm.snap" \
+  && ok "a gemini snapshot is taken over the isolated .gemini" || fail "gemini snapshot failed"
+cat "$LUF/gemini-window.jsonl" >> "$GMC/session-a.jsonl"
+GMO="$(lu_run gemini "$GMR" /unused "$LUW/gm.snap")"
+{ [ "$(lu_field "$GMO" usage input_tokens)" = 1520 ] && [ "$(lu_field "$GMO" usage total_tokens)" = 1610 ] \
+  && [ "$(lu_field "$GMO" usage responses)" = 2 ]; } \
+  && ok "gemini usage is the window's answers, each once from its final copy (input 1520 incl. tool-use prompt, total 1610, 2 responses)" \
+  || fail "gemini window sum (got: $GMO)"
+{ [ "$(lu_field "$GMO" usage cached_input_tokens)" = 800 ] && [ "$(lu_field "$GMO" usage output_tokens)" = 90 ] \
+  && [ "$(lu_field "$GMO" usage reasoning_output_tokens)" = 30 ]; } \
+  && ok "gemini cached reads, output (candidates + thoughts) and reasoning (thoughts) are normalised to the shared convention" \
+  || fail "gemini per-field sums (got: $GMO)"
+{ [ "$(lu_field "$GMO" usage cache_write_input_tokens)" = null ] && [ "$(lu_field "$GMO" usage turns)" = null ] \
+  && [ "$(lu_field "$GMO" usage source)" = gemini-chat-record ] && lu_is "$GMO" rate_limits null; } \
+  && ok "what the CLI does not record (cache writes, turns, rate limits) is null, and the source is named" || fail "gemini null fields (got: $GMO)"
+# A record file outside a chats directory (scratch, logs) is not a session record, however it parses.
+mkdir -p "$GMR/tmp/some-project/logs"
+printf '{"id":"x1","type":"gemini","model":"gemini-3.1-pro-preview","tokens":{"input":999999,"output":1,"cached":0,"thoughts":0,"tool":0,"total":1000000}}\n' > "$GMR/tmp/some-project/logs/other.jsonl"
+[ "$(lu_field "$(lu_run gemini "$GMR" /unused "$LUW/gm.snap")" usage input_tokens)" = 1520 ] \
+  && ok "a .jsonl outside a chats directory is ignored" || fail "a non-session record file was counted"
+# An answered message with no tokens object is unknown spend: every token field goes null, never a partial sum.
+cp "$GMC/session-a.jsonl" "$LUW/gm-keep.jsonl"
+printf '{"id":"m4","type":"gemini","model":"gemini-3.1-pro-preview","content":"never finalised"}\n' >> "$GMC/session-a.jsonl"
+GMN="$(lu_run gemini "$GMR" /unused "$LUW/gm.snap")"
+{ [ "$(lu_field "$GMN" usage input_tokens)" = null ] && [ "$(lu_field "$GMN" usage responses)" = 3 ]; } \
+  && ok "a gemini response with no tokens makes the leg's token fields null rather than a partial sum" || fail "missing gemini tokens dropped (got: $GMN)"
+cp "$LUW/gm-keep.jsonl" "$GMC/session-a.jsonl"
+
+# ---- models: what the CLI itself says answered ----
+GMM="$(python3 "$LU" models gemini "$GMR" /unused "$LUW/gm.snap" 2>/dev/null)"; GMM_RC=$?
+[ "$GMM_RC" = 0 ] && [ "$GMM" = "$(printf 'model\tgemini-3.1-pro-preview')" ] \
+  && ok "models names the ONE model that answered in the window (the pre-window answer is not evidence)" || fail "gemini models (rc=$GMM_RC got: $GMM)"
+printf '{"id":"m5","type":"gemini","model":"gemini-2.5-pro","content":"x","tokens":{"input":1,"output":1,"cached":0,"thoughts":0,"tool":0,"total":2}}\n' >> "$GMC/session-a.jsonl"
+GMM="$(python3 "$LU" models gemini "$GMR" /unused "$LUW/gm.snap" 2>/dev/null)"
+[ "$(printf '%s\n' "$GMM" | grep -c .)" = 2 ] && printf '%s\n' "$GMM" | grep -qx "$(printf 'model\tgemini-2.5-pro')" \
+  && ok "models lists every distinct model, so a caller can refuse a turn that used a second one" || fail "gemini models with two models (got: $GMM)"
+cp "$LUW/gm-keep.jsonl" "$GMC/session-a.jsonl"
+printf '{"id":"m6","type":"gemini","content":"no model named","tokens":{"input":1,"output":1,"cached":0,"thoughts":0,"tool":0,"total":2}}\n' >> "$GMC/session-a.jsonl"
+GMM="$(python3 "$LU" models gemini "$GMR" /unused "$LUW/gm.snap" 2>/dev/null)"; GMM_RC=$?
+[ "$GMM_RC" = 1 ] && [ -z "$GMM" ] && ok "an answered message that names no model is refused: absent evidence is never a match" || fail "a modelless answer was accepted (rc=$GMM_RC got: $GMM)"
+cp "$LUW/gm-keep.jsonl" "$GMC/session-a.jsonl"
+python3 "$LU" snapshot gemini "$GMR" /unused "$LUW/gm2.snap"
+GMM="$(python3 "$LU" models gemini "$GMR" /unused "$LUW/gm2.snap" 2>/dev/null)"; GMM_RC=$?
+[ "$GMM_RC" = 1 ] && [ -z "$GMM" ] && ok "a window with no answered message has no model to name (exit 1)" || fail "an empty window named a model (rc=$GMM_RC got: $GMM)"
+python3 "$LU" models codex "$GMR" /unused "$LUW/gm.snap" >/dev/null 2>&1; GMM_RC=$?
+[ "$GMM_RC" = 2 ] && ok "models exists only for gemini (usage error for another provider)" || fail "models accepted another provider (rc=$GMM_RC)"
