@@ -54,7 +54,7 @@ the policy map's ceiling (strongest model, highest effort) whatever routing deci
 One-off judgment call — no review framing, no loop, no verdict.
 
 **Target parse:** if the first word of the argument is a registered agent name
-(`comms.sh agents` — the `.comms/config` registry; zero-config default `claude codex grok`),
+(`comms.sh agents` — the `.comms/config` registry; zero-config default `claude codex grok`; `gemini` is supported and opt-in via `agents =`),
 it names the target and the rest is the question; otherwise the whole argument —
 unrecognized first word included, unmodified — is a question to the default agent
 (`comms.sh agents default`). `/ask grok is X sound?` targets grok when grok is
@@ -85,7 +85,7 @@ runs as one blocking acpx call (pinned, via npx; Node >= 22.13) and the answer
 lands directly in context, followed by acpx's token-usage line. Warm by default: a
 named per-repo session makes follow-ups pay only the delta (measured 2026-08-20:
 cold one-shot 18,562 fresh input tokens vs warm round-2 146 — ~127x). `--oneshot` forces a stateless
-exec. All three registered agents have ACP profiles (codex, claude, and grok via `grok-build`).
+exec. Every supported agent has an ACP profile (codex, claude, grok via `grok-build`, and gemini via acpx's `gemini` profile, i.e. `gemini --acp`; gemini needs the Gemini CLI >= 0.33.0 on PATH).
 On any failure the helper names the fallback: rerun without `--via acp`.
 
 > **Internals.** `/send-to-codex` and `/read-from-codex` are the loop's individual steps.
@@ -162,7 +162,7 @@ Verbs that a program drives classify further — `integrate`,
 | `help` (also `-h`, `--help`, or no subcommand) | print the header banner of `comms.sh`, the summary this table expands. An unknown subcommand exits 1 and points here |
 | `root` | print the main repo's `.comms` path (worktree-safe) |
 | `workspace` | print the resolved workspace name (repo pin → worktree pin → branch → repo dir) |
-| `agents [default\|--drivers\|--review\|--provider <id>\|--others <driver>\|--roster <driver> [a,b,...]\|--supported]` | the registry. Bare: every identity, drivers first then their review twins (zero-config: `claude codex grok claude-review codex-review grok-review`). `default`: the default target (always a driver; a twin there is refused). `--drivers`: the `agents =` line of `.comms/config`. `--review`: the built-in review twins, one `<driver>-review` per driver, each running on its driver's provider — there is no config key (a leftover `review-agents` line only warns as an unknown line). `--provider <id>`: the provider an identity runs on (a driver is its own; a twin is its driver's). `--others <driver>`: the default panel, comma-separated — every other driver, or for a lone driver its own twin; refuses a twin. `--roster <driver> [a,b,...]`: the ONE reviewer-list resolver every runtime's loop uses (`/auto`, `$auto`, `/user:auto`) — no list = `--others`; with a list each name is validated (unknown: exit 1), the driver's OWN name becomes its twin (from claude, `claude,codex` → `claude-review,codex`; from grok, `grok` → `grok-review`), repeats collapse (`claude,claude-review` → `claude-review`), order is kept so the first still gates, and two reviewers on one provider are refused (exit 2, `two reviewers on provider`); a `<driver>` that is not a driver is refused. `--supported`: the PROVIDER capability table (no identity rows). See PROTOCOL "Identities and providers" |
+| `agents [default\|--drivers\|--review\|--provider <id>\|--others <driver>\|--roster <driver> [a,b,...]\|--supported]` | the registry. Bare: every identity, drivers first then their review twins (zero-config: `claude codex grok claude-review codex-review grok-review`). `default`: the default target (always a driver; a twin there is refused). `--drivers`: the `agents =` line of `.comms/config`. `--review`: the built-in review twins, one `<driver>-review` per driver, each running on its driver's provider — there is no config key (a leftover `review-agents` line only warns as an unknown line). `--provider <id>`: the provider an identity runs on (a driver is its own; a twin is its driver's). `--others <driver>`: the default panel, comma-separated — every other driver, or for a lone driver its own twin; refuses a twin. `--roster <driver> [a,b,...]`: the ONE reviewer-list resolver every runtime's loop uses (`/auto`, `$auto`, `/user:auto`) — no list = `--others`; with a list each name is validated (unknown: exit 1), the driver's OWN name becomes its twin (from claude, `claude,codex` → `claude-review,codex`; from grok, `grok` → `grok-review`), repeats collapse (`claude,claude-review` → `claude-review`), order is kept so the first still gates, and two reviewers on one provider are refused (exit 2, `two reviewers on provider`); a `<driver>` that is not a driver is refused. `--supported`: the PROVIDER capability table (no identity rows; `gemini` is `interactive,acp`). `gemini` is supported but NOT in the zero-config list: a project opts in with `agents = claude codex grok gemini`, which adds `gemini-review`; `gemini` and `gemini-review` are one provider, so a roster naming both is refused. See PROTOCOL "Identities and providers" |
 | `setup [--yes] [--show] [--set KEY=VALUE ...]` | re-runnable setup: prerequisites, agent detection (writes `agents` / `default-target` in `.comms/config`, other lines kept), reviewer containment, Jev routing (key to the 0600 `secrets` file, backend, reviewer routing, project permit), Codex reviewer runtime (the auto-detected one, and the selected explicit path when one is chosen or kept, each checked against the baseline's minimum), review timeout. Saves to `~/.agent-comms/settings`, which every helper reads below the environment and a project `.comms/settings` ([INSTALL](INSTALL.md#settings-commssh-setup)). `--yes` takes the detected defaults without prompting; `--show` prints each value and its source (never the key); `--set` writes keys directly, an empty value removes one. |
 | `launch <profile> [model] [--print] [--prompt TEXT]` | launch the configured OpenCode runtime as the main coding agent in Build mode. The optional model ID stays within the profile's provider and does not change its stored pin. Sets the exact matching enabled identity, otherwise starts standalone with agent-comms identity blocked. Uses credential references at launch, preserves native permissions/config, and discovers primary-checkout skills. `--print` shows only public launch settings and does not read credentials or start the runtime; `--prompt` supplies the initial task. Exit 2 for CLI usage; 1 for invalid configuration, a review-turn caller, unavailable credentials/runtime, or registry failure. Other exits come from OpenCode. See [AGENT_PROFILES](AGENT_PROFILES.md#interactive-coding-sessions). |
 | `whoami` | print the driving agent: `COMMS_SELF` → session env (`GROK_AGENT=1`, `CLAUDECODE`, `CODEX_SANDBOX`, …) → ancestor executable. Fails closed on no signal, on conflicting signals, on a review twin (it never drives), and whenever `COMMS_REVIEW_TURN` is set — runphase exports that marker for every review turn, so nothing inside one resolves to a driver; never defaults to `claude` |
@@ -664,14 +664,19 @@ with the fallback rather than returned as an answer.
 `helpers/policy-map.tsv` — the ONE versioned table naming vendor models (baseline, tier→model,
 effort→value, the efforts each model accepts, and a capability row per provider/transport with its
 mechanism, evidence source and versions tested). Precedence per dimension: operator pin
-(`COMMS_ACP_CODEX_MODEL` / `COMMS_ACP_CODEX_EFFORT`) > the operator's "use max" ceiling
+(`COMMS_ACP_CODEX_MODEL` / `COMMS_ACP_CODEX_EFFORT`; for gemini `COMMS_ACP_GEMINI_MODEL` /
+`COMMS_ACP_GEMINI_EFFORT`) > the operator's "use max" ceiling
 (`COMMS_REVIEW_MAX=1`, the map's `ceiling` row) > an eligible, enabled, implement-phase route >
 baseline (gpt-6.1-sol/xhigh as of map 2026-09-29.2 — the everyday default; its `ceiling` is the
 frontier model, gpt-6-astra/ultra). A tier is
 an ORDERED list (`fast` = gpt-6-luna then gpt-5.6-luna; `balanced` = gpt-6.1-sol, gpt-6-sol, then
 gpt-5.6-terra; `strong` = gpt-6-astra): the first model the reviewer's codex runtime
 can serve, by the minimum runtime on its `pair` row; a skipped preference is recorded
-(`runtime-lacks:<model>`). The pair is
+(`runtime-lacks:<model>`). A `disabled <provider> <transport> <model> <reason>` row marks a model the
+provider has announced but nothing can serve yet: a tier skips it (`disabled:<model>`), a pin,
+baseline or ceiling naming it is refused with the reason, and deleting that one row is the whole act
+of enabling it — the map carries one for the not-yet-released Gemini 4 (its id is a placeholder to
+replace from the CLI's model list). The pair is
 validated; an invalid routed dimension falls back to the baseline once (recorded), an invalid pin,
 max pair or explicit decision is refused, and so is a pinned/baseline/ceiling model the runtime
 cannot serve. The record also names the usage limit the chosen model spends: `limit_id` from a
@@ -699,10 +704,13 @@ Nothing needs setting on a new machine with a current codex installed; `acp.sh d
 `runtime_version`, runphase passes it as the child's `CODEX_PATH` (and unsets an inherited one for
 `bundled`), and the runtime is part of `policy_digest`, so an upgrade is a fresh session. Capability `eligible` may route,
 `fixed` applies and attests the baseline only, `unsupported` claims nothing (`verify none`) — today
-only codex/acp-mounted is eligible. The printed record (`policy_digest`, sources, `fallback`,
+codex/acp-mounted is eligible and gemini/acp-mounted is fixed (its model has per-turn evidence, its
+thinking level does not, so a routed tier is ignored and recorded `capability-fixed`; the baseline is
+gemini-3.1-pro-preview at `high`, with `low` the only other mapped level, and pins can pick any mapped
+model, e.g. a Flash tier model with effort `low`, `high` or `default`). The printed record (`policy_digest`, sources, `fallback`,
 `map_version`, …) is what runphase persists; `policy`, `provider-config`, `policy-check` and
 `policy-attest` take `--policy-file <record>` and then never re-resolve. `acp.sh capabilities`
-prints the table (`acp.sh doctor` also names the reviewer codex runtime and its version, and whether
+prints the table plus both reviewer runtimes (`acp.sh doctor` also names the reviewer codex runtime and its version, and whether
 that runtime can run the default (baseline) and use-max (ceiling) codex review, each with the
 operator's model and effort pins applied, and the resulting (model, effort) pair judged by the same rule resolve uses, so a row is refused for a pair the model does not accept as well as for a runtime too old: a `default codex review:` and a `use-max codex review …:` line ending
 `runs on this runtime` or `CANNOT RUN: <reason>`). `acp.sh runtime-check codex` is the
@@ -710,10 +718,28 @@ machine-readable form: `runtime` and `runtime_version` lines, then one TAB-separ
 `<baseline|ceiling> <model> <baseline|max|pin> <minimum|-> <ok|refused> <reason|->`, the minimum
 read from the model's `pair` row. Exit codes: resolve 0/1/2; check/attest 0 match, 20 mismatch, 21
 undecidable; doctor 0 consults AND the default and use-max codex reviews can run, 3 no usable
-node, 4 a codex review cannot run on the reviewer runtime, the runtime is refused, or the policy
-map is missing, unreadable, or defective (the reason is printed, and a final `result: FAIL` line);
-runtime-check 0 all ok, 4 a row refused, 1 the runtime is refused or the policy map is missing,
-unreadable, or defective, 2 usage.
+node, 4 a codex review cannot run on the reviewer runtime, the runtime is refused, the Gemini CLI is
+present but too old for `--acp`, or the policy map is missing, unreadable, or defective (the reason is
+printed, and a final `result: FAIL` line); runtime-check 0 all ok, 4 a row refused, 1 the runtime is
+refused or the policy map is missing, unreadable, or defective, 2 usage.
+
+**The reviewer's Gemini runtime.** acpx launches the `gemini` it finds on PATH (`gemini --acp`; acpx
+itself falls back to the deprecated `--experimental-acp` below 0.33.0, which this helper refuses
+instead). `acp.sh doctor` reports the path and version — `reviewer gemini runtime: <path> (version
+X) — supports --acp` and the default/use-max gemini review lines — and treats an ABSENT Gemini CLI as
+informational (it is an opt-in reviewer) but a present one older than 0.33.0 as a failure (exit 4).
+`acp.sh runtime-check gemini` is the machine-readable form (same `runtime`, `runtime_version` and row
+lines; an old build exits 1 after printing its version, an absent one exits 1), `capabilities` prints
+the version beside the codex runtime, `supports gemini` exits 1 for either, and `resolve gemini`
+refuses rather than launch a flag the CLI lacks. There is no bundled copy and no path override. The
+mounted policy is bound per leg by an isolated `GEMINI_CLI_HOME` (`provider-config gemini
+[--auth-type T]` prints its `.gemini/settings.json`: `model.name`, a `modelConfigs` thinking-level
+override, plan-mode model routing off, auto-update off, and only the operator's selected auth type);
+the preflight reads acpx's confirmed `current_model_id`, and after the turn the model must be the one
+every answered message in the CLI's own chat record names (`policy-attest`), with the thinking level read
+back from the parent-written settings (`gemini-effort`) — the evidence source is recorded as
+`gemini-chat-record+settings-readback`, because the CLI keeps no per-turn record of its thinking level.
+`failure-reason gemini <stderr-file>` classifies a refusal (`rate-limited`, `auth-failed`).
 
 ### `runphase.sh` (experimental)
 
@@ -726,7 +752,8 @@ configured model before the expensive review turn is spent — catching a stale 
 would otherwise return a provider API error. A canary that is an error, times out, exits nonzero,
 answers off-script, or cannot be verified refuses the turn BEFORE the real prompt, with a distinct
 `reason` in `result.json` (`runtime-incompatible` / `canary-timeout` / `canary-exit-N` /
-`canary-unexpected` / `reply-unverifiable`), none of which is `no-output`, so `compose` never reads
+`canary-unexpected` / `reply-unverifiable`; for gemini also `rate-limited` / `auth-failed`, read from
+the provider's stderr), none of which is `no-output`, so `compose` never reads
 one as a droppable-leg signal. The mode is pinned ONCE (before the canary): a repeat `set-mode` after
 any prompt returns "Internal error" on the live adapter, and the single pin holds through both
 prompts because the mode is persistent owner state a contained canary cannot move. It runs per turn,
@@ -796,7 +823,9 @@ turn must be unchanged, since grok rewrites the file. claude: the project transc
 leg's cwd, deduplicated by `(message.id, requestId)`, last copy wins. Fields follow codex's convention —
 `input_tokens` (INCLUDING cache reads and writes), `cached_input_tokens`,
 `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens` — plus
-`turns`, `responses` and `source`. A codex leg also records `rate_limits`, its newest snapshot
+`turns`, `responses` and `source`. gemini: the `gemini` messages of the CLI's own chat record under the
+isolated `.gemini/tmp/*/chats/` (deduplicated by message id, last copy wins; `input_tokens` adds the tool-use
+prompt and `output_tokens` adds the thinking tokens; cache writes, turns and rate limits are null). A codex leg also records `rate_limits`, its newest snapshot
 (`limit_id`, `window_minutes`, `used_percent`, `resets_at`). **Missing is null, never 0**: no
 records, an unbounded window (a file replaced, truncated or gone mid-turn), or a field some record
 lacks. `round-note` copies the leg's `usage` into the last column of `.comms/grades/rounds.tsv`:

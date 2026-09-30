@@ -335,6 +335,19 @@ override — pointing `CLAUDE_CONFIG_DIR` at the mount breaks authentication —
 credential with a claude driver on the same machine. The twin separates the mailbox and the
 session, not the model's configuration.
 
+**The gemini provider's isolation differs from both.** Unlike claude, the Gemini CLI does honour a
+relocated home: `GEMINI_CLI_HOME` names the directory that CONTAINS `.gemini/`, so a mounted turn
+gets a parent-owned home beside the mount and the operator's settings, extensions, hooks and MCP
+servers never reach it (so `gemini-review` does not share configuration with a gemini driver).
+The operator's login is carried by construction, not by sharing the home: environment credentials
+pass through, a keychain login is home-independent, and only the file-backed OAuth token and the
+selected auth TYPE are copied (and cleared when the source goes away, like codex's `auth.json`).
+What it shares with claude is the class of containment — the in-process `plan` mode pin under the
+narrowed permission shape, network open. Its per-turn evidence is the CLI's own chat record (the
+model of every answered message, and the tokens usage is read from); the thinking level, which the
+CLI cannot be told over ACP and does not record, is bound through the isolated `settings.json`
+and only read back, which is why its policy capability is `fixed` (docs/ROADMAP.md).
+
 ## Grading pilot storage (`.comms/grades/`)
 
 Local, gitignored, per-install — resolved as **per-install only**, not synced. Cross-machine

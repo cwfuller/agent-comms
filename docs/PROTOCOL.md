@@ -19,7 +19,7 @@ agent runs from):
 .comms/
   config       agent registry (optional — see below; absent = claude codex grok)
   to-<agent>/  each registered identity's inbox (to-claude/, to-codex/, to-grok/,
-               to-claude-review/, …) — created on first send; a missing one reads as empty
+               to-gemini/ when enabled, to-claude-review/, …) — created on first send; a missing one reads as empty
   archive/     processed messages (every agent moves its own inbox here)
   state/       per-thread loop state, JSON (written by comms.sh send)
 ```
@@ -50,7 +50,7 @@ Names are `[a-z][a-z0-9-]{1,15}` and must have a supported backend
 (`comms.sh agents --supported`); duplicates, multi-word defaults, and unsupported
 names are hard parse errors — an unrunnable agent must never accept mail. A missing
 file means `agents = claude codex grok`, `default-target = codex` (zero-config
-back-compat). Two authorities replaced the old two-party complements: a thread's
+back-compat; `gemini` is supported but opt-in — add it to the `agents =` line). Two authorities replaced the old two-party complements: a thread's
 `awaiting_from` is the explicit `send --to` target, and `--archive-inbound` derives
 the inbound's owner from the OUTBOUND message's `from:` (validated against the
 directory the inbound actually occupies; already-archived is an idempotent no-op).
@@ -61,8 +61,8 @@ directory the inbound actually occupies; already-archived is an idempotent no-op
 
 An **identity** is a name in the mailbox: whose inbox, whose `from:`, whose leg thread
 (`<thread>-<identity>`), whose thread state (`awaiting_from`), events (`agent`), shadow store
-and acpx session. A **provider** is the runtime that serves a turn — `claude`, `codex` or
-`grok` — and it keys everything at the process boundary: transport capability, the ACP-only
+and acpx session. A **provider** is the runtime that serves a turn — `claude`, `codex`, `grok`
+or `gemini` — and it keys everything at the process boundary: transport capability, the ACP-only
 rule, the acpx profile, the isolation/containment arm, the hostile-artifact refusals and the
 reviewer policy map row. The `agents =` line lists **drivers**, each named after its provider,
 so for a driver the two are the same word and nothing about it changed.
@@ -95,7 +95,31 @@ A review twin is **review-only**, and each rule sits at the one funnel that sees
 It inherits everything provider-keyed from its driver's provider — containment (`grok-review`
 needs `COMMS_RUNPHASE_ALLOW_UNCONTAINED` exactly as grok does), transport, and the policy map
 row. There are no per-identity pins or map rows, and one routing decision per base thread
-covers every leg. **Residual:** `claude-review` runs under the same `~/.claude` (settings, user
+covers every leg.
+
+**The gemini provider** (a fourth model family, Google's, so it can gate work claude or codex
+wrote). It is **supported but opt-in**: `gemini` is not in the zero-config registry, so an install
+without the Gemini CLI never acquires a reviewer it cannot run — a project enables it with
+`agents = claude codex grok gemini`, which also creates `gemini-review` (`agents --roster claude
+gemini` is then one reviewer, and `gemini,gemini-review` is refused as two on one provider). Its
+family, for the independence rule, is `gemini`. Reviews are **ACP-only** (`gemini --acp`, through
+acpx's own `gemini` profile; there is no headless arm) and need the Gemini CLI on `PATH` at
+**0.33.0 or later**, the first release with `--acp`: `acp.sh doctor`, `runtime-check gemini`,
+`capabilities`, `supports` and `resolve` all refuse an older build with the same wording. A mounted
+gemini turn gets its own `GEMINI_CLI_HOME` beside the mount (the CLI keeps `.gemini/` inside it), so
+the operator's settings, extensions, hooks and MCP servers never reach a review; the leg's model and
+thinking level are written to that home's `settings.json` from the policy record (the ACP surface has
+no thinking control) and the model is set on the session by acpx (`--model`). The operator's login
+keeps working: an API key or Vertex setting in the environment is inherited, a keychain login needs
+nothing, and the file-backed OAuth token (`oauth_creds.json`, `google_accounts.json`) and the selected
+auth TYPE are carried across — and cleared again when the operator removes them. The containment
+is the in-process **`plan` mode** pin ("Read-only mode") under `--approve-reads
+--non-interactive-permissions deny`, the same class as claude's and not a kernel sandbox: the child's
+network stays open and the copied OAuth token is readable. It fails closed where it can be checked (an
+unconfirmed `set-mode plan` refuses the turn) but was not measured against a live gemini turn;
+a reviewed tree carrying `.gemini/` or `.env` is refused unread, like `.codex/config.toml`. A model pin
+is `COMMS_ACP_GEMINI_MODEL` / `COMMS_ACP_GEMINI_EFFORT`, and a refusal is recorded as a failed turn with
+its reason (`rate-limited`, `auth-failed` — see below). **Residual:** `claude-review` runs under the same `~/.claude` (settings, user
 instructions, memory) and keychain credential as a claude driver on the same machine. The twin
 separates the mailbox, not the model's configuration.
 
@@ -834,7 +858,13 @@ verified isolation backend all end the same way: the child exits non-zero having
 zero bytes, and the provider says nothing about why — the case this was built against
 reported only `RUNTIME QUEUE_RUNTIME_PROMPT_FAILED Internal error`. The runner therefore
 records what it OBSERVED, not a diagnosis: `reason: no-output` in `result.json` and on the
-`provider-result` event. That is a fact about the ROSTER, distinct from a reply that arrived
+`provider-result` event. One refinement: a provider whose refusals have a stable wording is
+classified from the diagnostics acpx relayed on stderr (never from the reply), and the turn is
+recorded under that reason instead — gemini's are `rate-limited` (a 429 / `RESOURCE_EXHAUSTED` /
+exhausted quota) and `auth-failed` (`Authentication required`, `UNAUTHENTICATED`, an invalid key),
+on a refused canary, a refused review prompt or a session that could not be created, with a note that
+says what to do (wait for the limit to reset; log in again). Like the `canary-*` refusals they are
+retry-and-fix conditions: `compose --degrade` does not treat them as droppable-leg evidence. That is a fact about the ROSTER, distinct from a reply that arrived
 and failed the verdict contract, which is a fact about the REVIEW.
 
 A reviewer whose review can never be PUBLISHED is the same roster fact. When the broker

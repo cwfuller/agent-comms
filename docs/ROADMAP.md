@@ -551,6 +551,36 @@ dynamic routing should survive because it demonstrably improves cost at acceptab
 because three approved arcs already exist.
 
 
+### BUILT ON BRANCH 2026-09-30, NOT MEASURED LIVE: gemini as a fourth review provider (task 163)
+
+`gemini` (driver, `gemini-review` twin, provider/family `gemini`) reviews through acpx's own `gemini`
+profile (`gemini --acp`). Built and tested against a PATH-stubbed `gemini` that speaks ACP (tests/fixtures/gemini),
+from the Gemini CLI 0.62.0 bundle's source and docs — **no authenticated Gemini session was available, so
+nothing below was exercised against the live API**. What that leaves open, in the order it matters:
+
+- **Containment is unmeasured.** The backend (`gemini-plan`) is the in-process `plan` mode pin under
+  `--approve-reads --non-interactive-permissions deny`, claude's class: network open, the copied OAuth token
+  readable. Fails closed on an unconfirmed `set-mode plan`; the escape that bit claude (a model-requested exit
+  from plan mode auto-approved under `--approve-all`) is closed by the same permission shape, but that is
+  inferred from claude's measurement, not observed for gemini. Probe before relying on it for code the
+  operator did not write: write attempts from plan mode, `ExitPlanMode`-style escalation, and whether
+  `run_shell_command` (the reviewer's `git diff`) is denied or auto-approved there. The CLI's `--sandbox`
+  (seatbelt) is unused: it re-execs the CLI, and nobody measured it under ACP.
+- **The thinking level has no per-turn evidence**, which is why the capability is `fixed`, not `eligible`: the
+  model is attested from the chat record's per-message `model`, the level only read back from the settings the
+  parent wrote. The bundled SDK's enum is LOW | HIGH; `medium` and `xhigh` are deliberately unmapped.
+- **Chat-record format read from source** (message `id`/`type`/`model`/`tokens`, appended again when tokens
+  arrive): usage and the model attestation depend on it; a format drift degrades to null usage and a
+  `policy-unapplied` refusal, never to a wrong number or a published review.
+- **Folder trust** is off by default in the CLI, so the mount is treated as trusted; the defence is refusing a
+  tree that carries `.gemini/` or `.env`, not the CLI's own trust gate (whose ACP behaviour is unknown).
+- **Gemini 4** has a `disabled` policy-map row with a GUESSED id (`gemini-4-pro`); replace it from the CLI's
+  model list and delete the row when it ships.
+- **Refusal reasons** `rate-limited` / `auth-failed` are classified from acpx's stderr wording (429 /
+  RESOURCE_EXHAUSTED; Authentication required / UNAUTHENTICATED), written from the CLI's source; they are
+  deliberately not droppable-leg evidence for `compose --degrade` (retry-and-fix conditions, like `canary-*`).
+  Revisit once a real rate-limited turn shows what acpx actually prints.
+
 ### OPEN: the reviewer containment measurement is stale — re-probe on codex-acp 1.12.0 (2026-09-19, sev 2, acpx surface probe)
 
 **Widened 2026-09-22 (codex, reviewer-routing implement r4, advisory):** the routing binding makes

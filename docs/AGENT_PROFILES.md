@@ -1,7 +1,8 @@
 # Configurable agents
 
 Agents can have independent names, ACP harnesses and exact model pins. Built-in
-`claude`, `codex`, `grok` and their review twins continue to work without this file.
+`claude`, `codex`, `grok`, `gemini` and their review twins continue to work without this file
+(`gemini` is opt-in through the `agents =` line; all four names are reserved).
 No additional harness or inference account is required for built-in agents.
 
 ## Register and enable
@@ -41,7 +42,7 @@ opaque to the framework. `api_provider` is optional descriptive metadata. `famil
 is the operator's independence group: aliases and models from the same family count
 as one reviewer. A panel rejects duplicate families even if names, hosts or harnesses
 differ. Use model-family groups consistently: the built-in groups are `codex`,
-`claude`, and `grok`. A custom profile using the same family as a built-in must
+`claude`, `grok`, and `gemini`. A custom profile using the same family as a built-in must
 use that built-in group name, even through another inference host.
 
 Names follow `[a-z][a-z0-9-]{1,15}`. Built-in names and the `-review` suffix are reserved.

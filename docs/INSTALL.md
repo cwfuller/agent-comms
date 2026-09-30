@@ -38,6 +38,13 @@ kernel sandbox; `claude` was measured write-contained but still reaches the netw
 behavioural defence rather than a kernel boundary. Both measurements are due a re-probe on
 current adapters and on the installed codex runtime reviewers now use (docs/ROADMAP.md).
 
+`gemini` (opt-in; needs the Gemini CLI >= 0.33.0) reviews in an isolated `GEMINI_CLI_HOME` under
+Gemini's read-only `plan` mode, pinned and confirmed before the canary, with permissions narrowed to
+reads. That is an in-process pin like `claude`'s, not a kernel sandbox: the child's network is open, the
+copied OAuth token (if you log in with Google rather than an API key or the keychain) is readable, and the
+containment has not yet been measured against a live Gemini turn (docs/ROADMAP.md). A reviewed tree
+carrying `.gemini/` or `.env` is refused.
+
 `grok` has no verified backend, so a mounted grok *review* turn is refused rather than run
 unconstrained, and a default panel that includes it will not complete. Grok as a *driver* is
 fine. Either narrow the roster (`<auto> --reviewers codex`, or drop `grok` from `agents` in
@@ -165,11 +172,11 @@ load your shell rc (agent tool shells, cron, CI). Precedence, highest first:
 Files are `KEY=value` lines. They are parsed, never executed, and only known keys are accepted:
 `COMMS_REVIEW_ROUTE`, `COMMS_ROUTE`, `COMMS_ROUTE_BACKEND`, `COMMS_ROUTE_MODEL`,
 `COMMS_ROUTE_TIMEOUT_SECS`, `COMMS_ACP_CODEX_PATH`, `COMMS_ACP_CODEX_MODEL`,
-`COMMS_ACP_CODEX_EFFORT`, `COMMS_ACP_CANARY_SECS`, `COMMS_ACP_RUNTIME_PROBE_SECS`,
+`COMMS_ACP_CODEX_EFFORT`, `COMMS_ACP_GEMINI_MODEL`, `COMMS_ACP_GEMINI_EFFORT`, `COMMS_ACP_CANARY_SECS`, `COMMS_ACP_RUNTIME_PROBE_SECS`,
 `COMMS_RUNPHASE_TIMEOUT_SECS`, `COMMS_RUNPHASE_ALLOW_UNCONTAINED`, `ACPX_BIN`.
 
 A project file is repository content, not your consent, so it may only tune depth and time
-(`COMMS_REVIEW_ROUTE`, `COMMS_ACP_CODEX_MODEL`/`_EFFORT`, the `*_SECS` timeouts) and opt out
+(`COMMS_REVIEW_ROUTE`, `COMMS_ACP_CODEX_MODEL`/`_EFFORT`, `COMMS_ACP_GEMINI_MODEL`/`_EFFORT`, the `*_SECS` timeouts) and opt out
 with `COMMS_ROUTE=0`. Anything that runs a binary (`ACPX_BIN`, `COMMS_ACP_CODEX_PATH`), lifts
 containment (`COMMS_RUNPHASE_ALLOW_UNCONTAINED`) or turns classification on
 (`COMMS_ROUTE_BACKEND`, `COMMS_ROUTE=1`, `COMMS_ROUTE_MODEL`) is honoured only from the user file.
