@@ -248,17 +248,17 @@ OUT="$(ACP_STUB_NODE_V=v18.0.0 run_acp consult codex hello 2>&1)" && rc=0 || rc=
 OUT="$(ACP_STUB_NODE_V=v18.0.0 run_acp doctor 2>&1)" && rc=0 || rc=$?
 [ "$rc" -eq 3 ] && ok "doctor exits 3 without a usable node" || fail "doctor node gate (rc=$rc)"
 : > "$ACP_STUB_LOG"
-# gemini has no ACP profile here; grok DOES since 2026-08-25 (acpx `grok-build`,
-# verified against `acpx --help` and one live consult).
-OUT="$(run_acp consult gemini hello 2>&1)" && rc=0 || rc=$?
+# mistral has no ACP profile here; grok DOES since 2026-08-25 (acpx `grok-build`, verified against
+# `acpx --help` and one live consult), and gemini since 2026-09-30 (acpx's own `gemini`, `gemini --acp`).
+OUT="$(run_acp consult mistral hello 2>&1)" && rc=0 || rc=$?
 [ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'mailbox path' && [ ! -s "$ACP_STUB_LOG" ] \
   && ok "an agent with no ACP profile fails closed before any acpx call" || fail "unsupported-agent refusal"
 for acp_a in codex claude grok; do
   bash "$REPO/helpers/acp.sh" supports "$acp_a" >/dev/null 2>&1 \
     && ok "acp supports $acp_a" || fail "acp supports $acp_a"
 done
-bash "$REPO/helpers/acp.sh" supports gemini >/dev/null 2>&1 \
-  && fail "acp claims to support an unprofiled agent" || ok "acp supports probe is machine-readable and refuses gemini"
+bash "$REPO/helpers/acp.sh" supports mistral >/dev/null 2>&1 \
+  && fail "acp claims to support an unprofiled agent" || ok "acp supports probe is machine-readable and refuses mistral"
 grep -q 'ACPX_VERSION="0.13.1"' "$ACP" && ok "acpx version is pinned in one place" || fail "acpx pin"
 [ -x "$INST_FIX/.agent-comms/acp.sh" ] && ok "local install ships an executable acp.sh" || fail "local install acp.sh"
 grep -qF '"$ACP_SH" consult' "$REPO/templates/claude-commands/ask.md" \

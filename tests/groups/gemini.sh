@@ -56,6 +56,11 @@ GM_OUT="$(env PATH="$GM_ABSENT_PATH" "$AP" doctor 2>&1)"; GM_RC=$?
   && ok "doctor treats an absent Gemini CLI as informational (opt-in reviewer), not a failure" \
   || fail "doctor with no gemini (rc=$GM_RC): $(printf '%s' "$GM_OUT" | grep -i gemini | tr '\n' ' ')"
 
+# ---- consult: an old gemini is refused with the mailbox fallback, not launched ----
+GM_OUT="$(gacp GM_VERSION=0.32.9 "$AP" consult gemini hello 2>&1)"; GM_RC=$?
+{ [ "$GM_RC" = 1 ] && printf '%s' "$GM_OUT" | grep -qF "gemini 0.32.9 has no --acp flag" && printf '%s' "$GM_OUT" | grep -qF "mailbox path"; } \
+  && ok "a consult on a gemini without --acp is refused with the mailbox fallback" || fail "consult on an old gemini (rc=$GM_RC out=$GM_OUT)"
+
 # ---- capabilities ----
 GM_OUT="$(gacp "$AP" capabilities 2>&1)"
 { printf '%s\n' "$GM_OUT" | grep -qF "reviewer gemini runtime: $GMB/gemini (version 0.62.0)" \
@@ -323,17 +328,17 @@ printf '{"refresh_token":"operator-oauth-token"}\n' > "$GM/home/.gemini/oauth_cr
 # ---- failures are recorded, with their reasons ----
 GM_D3="$(gm_turn gm-auth t3 "$GM_A1" GM_MODE=auth)"
 { [ "$(gm_res "$GM_D3" status)" = failed ] && [ "$(gm_res "$GM_D3" reason)" = auth-failed ] \
-  && gm_res "$GM_D3" note | grep -qF "gemini refused the turn: authentication failed"; } \
+  && gm_res "$GM_D3" note | grep_full -qF "gemini refused the turn: authentication failed"; } \
   && ok "an authentication failure is a FAILED turn with reason auth-failed and a note that says what to do" \
   || fail "auth failure: $(tr '\n' ' ' < "$GM_D3/result.json" | cut -c1-500)"
 GM_D4="$(gm_turn gm-rate t4 "$GM_A1" GM_MODE=ratelimit)"
 { [ "$(gm_res "$GM_D4" status)" = failed ] && [ "$(gm_res "$GM_D4" reason)" = rate-limited ] \
-  && gm_res "$GM_D4" note | grep -qF "a rate limit or quota is exhausted"; } \
+  && gm_res "$GM_D4" note | grep_full -qF "a rate limit or quota is exhausted"; } \
   && ok "a rate limit at the canary is a FAILED turn with reason rate-limited (the review prompt is never spent)" \
   || fail "canary rate limit: $(tr '\n' ' ' < "$GM_D4/result.json" | cut -c1-500)"
 GM_D5="$(gm_turn gm-rate2 t5 "$GM_A1" GM_MODE=ratelimit-real)"
 { [ "$(gm_res "$GM_D5" status)" = failed ] && [ "$(gm_res "$GM_D5" reason)" = rate-limited ] \
-  && gm_res "$GM_D5" note | grep -qF "a rate limit or quota is exhausted" && gm_events gm-rate2 | grep -q 'provider-result.*reason=rate-limited'; } \
+  && gm_res "$GM_D5" note | grep_full -qF "a rate limit or quota is exhausted" && gm_events gm-rate2 | grep_full -q 'provider-result.*reason=rate-limited'; } \
   && ok "a rate limit on the REVIEW prompt (the canary passed) is a failed turn with reason rate-limited, on the provider-result event too" \
   || fail "real-prompt rate limit: $(tr '\n' ' ' < "$GM_D5/result.json" | cut -c1-400); events: $(gm_events gm-rate2 | cut -c1-200 | tr '\n' '|')"
 # ---- a hostile or drifting reviewer is refused, never published ----
@@ -343,7 +348,7 @@ for GM_CFGP in .gemini/settings.json .env; do
   GM_I=$((GM_I + 1))
   GM_AX="$(gm_artifact "gm-cfg-$GM_I" "$GM_CFGP")"
   GM_DX="$(gm_turn "gm-cfg-$GM_I" "cfg$GM_I" "$GM_AX")"
-  { [ "$(gm_res "$GM_DX" status)" = failed ] && gm_res "$GM_DX" note | grep -qF "the reviewed tree carries ${GM_CFGP%%/*}" \
+  { [ "$(gm_res "$GM_DX" status)" = failed ] && gm_res "$GM_DX" note | grep_full -qF "the reviewed tree carries ${GM_CFGP%%/*}" \
     && [ ! -e "$GM/stub-cfg$GM_I.log" ]; } \
     && ok "a tree carrying $GM_CFGP is refused before gemini is started" \
     || fail "tree with $GM_CFGP: status=$(gm_res "$GM_DX" status) note=$(gm_res "$GM_DX" note | cut -c1-160) stub-ran=$([ -e "$GM/stub-cfg$GM_I.log" ] && echo yes || echo no)"
@@ -356,12 +361,12 @@ GM_D6="$(gm_turn gm-old t6 "$GM_A1" GM_VERSION=0.32.9)"
 # The model the CLI's own record names must be the policy's: a leg that ran something else is withheld.
 GM_D7="$(gm_turn gm-drift t7 "$GM_A1" GM_ANSWER_MODEL=gemini-2.5-pro)"
 { [ "$(gm_res "$GM_D7" status)" = failed ] && [ "$(gm_res "$GM_D7" reason)" = policy-unapplied ] \
-  && gm_res "$GM_D7" note | grep -qF "did not run the declared model/effort policy"; } \
+  && gm_res "$GM_D7" note | grep_full -qF "did not run the declared model/effort policy"; } \
   && ok "a turn whose chat record names another model is withheld unpublished (policy-unapplied)" \
   || fail "model drift: $(tr '\n' ' ' < "$GM_D7/result.json" | cut -c1-400)"
 GM_D8="$(gm_turn gm-nomodel t8 "$GM_A1" GM_NO_MODEL=1)"
 { [ "$(gm_res "$GM_D8" status)" = failed ] && [ "$(gm_res "$GM_D8" reason)" = policy-unapplied ] \
-  && gm_res "$GM_D8" note | grep -qF "could not attest the model/effort"; } \
+  && gm_res "$GM_D8" note | grep_full -qF "could not attest the model/effort"; } \
   && ok "a turn whose chat record names NO model is withheld too: absent evidence is never a match" \
   || fail "missing model evidence: $(tr '\n' ' ' < "$GM_D8/result.json" | cut -c1-400)"
 # The preflight reads what acpx confirmed on the session BEFORE any prompt is spent.

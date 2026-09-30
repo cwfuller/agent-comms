@@ -20,8 +20,8 @@ printf 'agents = claude ../evil\n' > "$MA_FIX/.comms/config"
 check_not "path-traversal agent name rejected" run_ma agents
 printf 'agents = claude co.dex\n' > "$MA_FIX/.comms/config"
 check_not "dotted agent name rejected" run_ma agents
-printf 'agents = claude gemini\n' > "$MA_FIX/.comms/config"
-check_not "unsupported agent (gemini) rejected at parse" run_ma agents
+printf 'agents = claude mistral\n' > "$MA_FIX/.comms/config"
+check_not "unsupported agent (mistral) rejected at parse" run_ma agents
 printf 'agents = claude codex claude\n' > "$MA_FIX/.comms/config"
 check_not "duplicate agent rejected" run_ma agents
 printf 'agents = claude codex\nagents = claude\n' > "$MA_FIX/.comms/config"
@@ -1110,9 +1110,9 @@ ri_expect "a twin's reply without review_provider is refused" 1 "carries no vali
 ri_msg "$RI_MSGS/fb-prov.md" review-feedback claude-review 'verdict: APPROVE' 'review_provider: claude'
 ri_try "$COMMS" validate "$RI_MSGS/fb-prov.md"
 [ "$RI_RC" = 0 ] && ok "control: the same reply stamped review_provider: claude validates" || fail "stamped twin reply (got: $RI_OUT)"
-ri_msg "$RI_MSGS/fb-badprov.md" review-feedback claude-review 'verdict: APPROVE' 'review_provider: gemini'
+ri_msg "$RI_MSGS/fb-badprov.md" review-feedback claude-review 'verdict: APPROVE' 'review_provider: mistral'
 ri_try "$COMMS" validate "$RI_MSGS/fb-badprov.md"
-ri_expect "a twin's reply stamped with an unsupported provider is refused" 1 "carries no valid review_provider \(got 'gemini'\)"
+ri_expect "a twin's reply stamped with an unsupported provider is refused" 1 "carries no valid review_provider \(got 'mistral'\)"
 # A twin's provider is FIXED. A supported-but-wrong stamp is a forged or stale reply: compose would
 # count a claude-review answer as a codex one, and an independent codex leg as its duplicate.
 ri_msg "$RI_MSGS/fb-forged.md" review-feedback claude-review 'verdict: APPROVE' 'review_provider: codex'
@@ -1153,9 +1153,9 @@ RI_V2="$(cd "$RI_FIX" && "$COMMS" validate "$RI_MSGS/fb-drv-none.md" >/dev/null 
 ri_msg "$RI_MSGS/rr-cross.md" review-request codex 'review_provider: claude'
 ri_try "$COMMS" validate "$RI_MSGS/rr-cross.md"
 [ "$RI_RC" = 0 ] && ok "a codex-authored request stamped for claude-review (claude) validates" || fail "cross-provider request stamp (got: $RI_OUT)"
-ri_msg "$RI_MSGS/rr-gemini.md" review-request claude 'review_provider: gemini'
-ri_try "$COMMS" validate "$RI_MSGS/rr-gemini.md"
-ri_expect "a request stamp that is not a supported provider is refused" 1 "review_provider 'gemini' is not a supported provider"
+ri_msg "$RI_MSGS/rr-mistral.md" review-request claude 'review_provider: mistral'
+ri_try "$COMMS" validate "$RI_MSGS/rr-mistral.md"
+ri_expect "a request stamp that is not a supported provider is refused" 1 "review_provider 'mistral' is not a supported provider"
 # Membership is EXACT, one name: "claude codex" contains two providers as substrings, and compose
 # would otherwise count it as a third provider of its own.
 ri_msg "$RI_MSGS/rr-multi.md" review-request claude 'review_provider: claude codex'
