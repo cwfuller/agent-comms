@@ -16,7 +16,8 @@ others review the same pinned snapshot, and the loop repeats until they approve.
 curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.sh | bash -s -- --scope=both
 ```
 
-Needs git, Node >= 22.13 and an agent CLI — two or more for cross-model review
+Needs git, Node >= 22.13 and an agent CLI (codex >= 0.159 for the default
+GPT-6.1 Sol reviewer; `helpers/acp.sh doctor` checks it) — two or more for cross-model review
 (`claude` and `codex` work out of the box); a lone agent is reviewed by its own
 model. Clone-first install, scopes and reviewer containment:
 [docs/INSTALL.md](docs/INSTALL.md).
