@@ -170,7 +170,7 @@ exit 0
         for key in ('BASH_ENV', 'ENV', 'SHELLOPTS', 'BASHOPTS'):
             env.pop(key, None)
         return subprocess.run(['bash', 'tests/run.sh', *args], cwd=self.root, env=env,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=90)
 
     def test_complete_run_reaches_attestation(self):
         run = self.run_suite()
@@ -235,7 +235,7 @@ printf '%s\\t1\\n' "$name" > "$results/$name.sections"
 : > "$results/$name.skips"
 printf '1\\t0\\t0\\n%s\\ncomplete\\n' "$name" > "$results/$name.done"
 JOB_CONTROL
-sleep 60 &
+sleep 300 &
 echo $! > .descendant-pid
 echo $$ > .worker-pid
 # Worker -> supervisor -> lifeline owner -> dispatcher.
@@ -249,7 +249,7 @@ wait
         try:
             wait_file(self.root / '.dispatcher-pid')
             os.kill(int((self.root / '.dispatcher-pid').read_text()), signal.SIGINT)
-            out, err = proc.communicate(timeout=20)
+            out, err = proc.communicate(timeout=90)
             self.assertEqual(proc.returncode, 130, out + err)
             self.assertNotIn('worker cleanup failed', err)
             self.assertNotIn('passed:', out)
@@ -259,7 +259,7 @@ wait
         finally:
             if proc.poll() is None:
                 os.killpg(proc.pid, signal.SIGKILL)
-                proc.communicate(timeout=5)
+                proc.communicate(timeout=30)
 
     def test_presence_is_exclusive_and_parallel_worker_limit_is_enforced(self):
         names = ('presence', 'sample', 'other', 'last')
@@ -278,9 +278,9 @@ case "$name" in
   presence) sleep 0.1 ;;
   sample|other)
     : > ".$name-ready"
-    n=0
+    deadline=$((SECONDS + 60))
     while [ ! -e .sample-ready ] || [ ! -e .other-ready ]; do
-      n=$((n+1)); [ "$n" -lt 500 ] || exit 9
+      [ "$SECONDS" -lt "$deadline" ] || exit 9
       sleep 0.02
     done
     ;;
@@ -303,7 +303,7 @@ printf '1\\t0\\t0\\n%s\\ncomplete\\n' "$name" > "$results/$name.done"
 
 
 def wait_file(path):
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         if path.exists() and path.read_text().strip():
             return
@@ -311,7 +311,7 @@ def wait_file(path):
     raise AssertionError('worker did not become ready: ' + str(path))
 
 
-def assert_stopped(test, pid, timeout=5):
+def assert_stopped(test, pid, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         probe = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
@@ -359,10 +359,17 @@ class RunnerOwnership(unittest.TestCase):
                 marker = '.worker-cleanup' if lines[i].startswith('def stop_workers(') else '.dispatch-cleanup'
                 lines.insert(i + 1, f"    with open('{marker}', 'a') as probe: probe.write('cleanup\\n')\n")
         source.write_text(''.join(lines))
+        # Observe that run.sh queued its TERM before resuming the stopped
+        # dispatcher. A fixed delay could resume it before that trap ran.
+        entry = self.root / 'tests/run.sh'
+        entry.write_text(entry.read_text().replace(
+            'kill -TERM "$dispatcher_pid" 2>/dev/null || true',
+            'kill -TERM "$dispatcher_pid" 2>/dev/null || true\n'
+            '    echo ready > .run-exit-signalled'))
         (self.root / 'tests/worker.sh').write_text('''#!/bin/bash
 trap '' INT TERM
 set -m
-bash -c 'trap "" INT TERM; echo $$ > .descendant-pid; exec sleep 60' &
+bash -c 'trap "" INT TERM; echo $$ > .descendant-pid; exec sleep 300' &
 echo $$ > .worker-pid
 echo "$PPID" > .supervisor-pid
 wait
@@ -372,7 +379,7 @@ wait
             command = [str(self.root / 'helpers/comms.sh'), 'presence', 'with-beat',
                        '--no-heartbeat', '--name', 'timeout-probe',
                        '--instance', '00000000000000000000000000000001',
-                       '--timeout-secs', '2', '--', *command]
+                       '--timeout-secs', '20', '--', *command]
         proc = subprocess.Popen(command, cwd=self.root,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, start_new_session=True)
@@ -407,7 +414,7 @@ wait
                 self.assertNotEqual(os.getpgid(owner_pid), run_pgid)
             if pending_signals or sig == signal.SIGINT:
                 os.kill(dispatcher_pid, signal.SIGSTOP)
-                deadline = time.monotonic() + 5
+                deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
                     state = subprocess.check_output(
                         ['ps', '-p', str(dispatcher_pid), '-o', 'stat='], text=True).strip()
@@ -421,11 +428,11 @@ wait
                 else:
                     # INT reaches run.sh too; its EXIT trap then queues TERM.
                     os.killpg(run_pgid, signal.SIGINT)
-                    time.sleep(0.5)
+                    wait_file(self.root / '.run-exit-signalled')
                 os.kill(dispatcher_pid, signal.SIGCONT)
             elif sig != 'timeout':
                 os.killpg(run_pgid, sig)
-            out, err = proc.communicate(timeout=20)
+            out, err = proc.communicate(timeout=90)
             if sig == signal.SIGKILL:
                 self.assertEqual(proc.returncode, -sig, out + err)
             elif sig == 'timeout':
@@ -465,7 +472,7 @@ wait
                     os.killpg(group, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
-            proc.communicate(timeout=20)
+            proc.communicate(timeout=90)
             # Only the launcher is our child to reap; orphaned descendants are
             # adopted by the system reaper. Wait for known non-children to stop.
             for pid in [owner_pid, dispatcher_pid, *pids]:
@@ -477,7 +484,7 @@ wait
                         self.root / 'helpers/comms.sh')
         (self.root / 'tests/worker.sh').write_text('''#!/bin/bash
 set -m
-bash -c 'trap "" INT TERM; echo $$ > .descendant-pid; exec sleep 60' &
+bash -c 'trap "" INT TERM; echo $$ > .descendant-pid; exec sleep 300' &
 echo $$ > .worker-pid
 echo "$PPID" > .supervisor-pid
 owner="$(ps -p "$PPID" -o ppid=)"
@@ -500,7 +507,7 @@ wait
                     supervisor = int((self.root / '.supervisor-pid').read_text())
                     dispatcher_pid = int((self.root / '.dispatcher-pid').read_text())
                     os.kill(proc.pid, sig)
-                    out, err = proc.communicate(timeout=25)
+                    out, err = proc.communicate(timeout=90)
                     self.assertEqual(proc.returncode,
                                      -sig if sig == signal.SIGKILL else 128 + sig, out + err)
                     self.assertNotIn('worker cleanup failed', err)
@@ -520,7 +527,7 @@ wait
                             pass
                     if proc.poll() is None:
                         proc.kill()
-                    proc.communicate(timeout=25)
+                    proc.communicate(timeout=90)
 
     def test_leftover_orphan_cannot_reduce_later_run_coverage(self):
         # Model identity-keyed supervisor state with a live leftover wrapper.
@@ -547,7 +554,7 @@ trap 'rm -rf "$lease"' EXIT
         legacy = '00000000000000000000000000000001'
         orphan = subprocess.Popen([str(helper), 'presence', 'with-beat', '--no-heartbeat',
                                    '--name', 'suite-sample', '--instance', legacy, '--',
-                                   'bash', '-c', 'echo ready > .orphan-ready; exec sleep 60'],
+                                   'bash', '-c', 'echo ready > .orphan-ready; exec sleep 300'],
                                   cwd=self.root, start_new_session=True,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -566,7 +573,7 @@ trap 'rm -rf "$lease"' EXIT
             self.assertFalse((self.root / '.attested').exists())
         finally:
             os.killpg(orphan.pid, signal.SIGKILL)
-            orphan.wait(timeout=5)
+            orphan.wait(timeout=30)
 
 
 class WorkerLifecycle(unittest.TestCase):
@@ -621,7 +628,7 @@ print('cleanup exactly once')
 '''
                 run = subprocess.run([sys.executable, '-B', '-c', script,
                                       str(Path(dispatch.__file__).resolve()), temp,
-                                      str(first), str(second)], capture_output=True, text=True, timeout=10)
+                                      str(first), str(second)], capture_output=True, text=True, timeout=30)
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
                 self.assertEqual(run.stdout.strip(), 'cleanup exactly once')
 
@@ -666,7 +673,7 @@ print('cleanup exactly once')
                     for proc in spawned:
                         if proc.poll() is None:
                             os.killpg(proc.pid, signal.SIGKILL)
-                            proc.wait(timeout=5)
+                            proc.wait(timeout=30)
 
     def test_forced_cleanup_reaches_separate_child_group_only_in_owned_session(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -674,11 +681,11 @@ print('cleanup exactly once')
             proc = subprocess.Popen(['bash', '-c', '''
 trap '' TERM
 set -m
-bash -c 'trap "" TERM; echo $$ > "$1"; exec sleep 60' bash "$1" &
+bash -c 'trap "" TERM; echo $$ > "$1"; exec sleep 300' bash "$1" &
 wait
 ''', 'bash', str(marker)], start_new_session=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+            unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'],
                                          start_new_session=True)
             try:
                 wait_file(marker)
@@ -693,8 +700,8 @@ wait
             finally:
                 if proc.poll() is None:
                     dispatch.kill_worker_session(proc)
-                    proc.wait(timeout=5)
-                unrelated.kill(); unrelated.wait(timeout=5)
+                    proc.wait(timeout=30)
+                unrelated.kill(); unrelated.wait(timeout=30)
 
 
 if __name__ == '__main__':

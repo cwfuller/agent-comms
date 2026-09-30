@@ -36,7 +36,7 @@ SW_SF="$SW/.comms/state/$(echo "$SW_WS" | tr '/' '-')_sw-arc-1.json"
 sw_run() {  # sw_run <rundir> [env assignments...] -- refuses, exits nonzero
   local rd="$1"; shift
   mkdir -p "$rd"
-  ( cd "$SW" && env PATH="$STUB_BIN:$PATH" \
+  ( cd "$SW" && env PATH="$SW_BIN:$STUB_BIN:$PATH" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$@" \
       "COMMS_RUNPHASE_GROK_ARGS=--sandbox off" \
       "$RP" run --message "$SW_MSG" --dir "$rd" --provider grok ) 2>&1
@@ -57,6 +57,19 @@ fi
 exit 2
 SWSTUB
 chmod +x "$SW_BIN/grok"
+# Observe requested sleeps, not time spent waiting to be scheduled. The optional
+# write occurs at the first sleep INSIDE the state wait, so it cannot precede it.
+cat > "$SW_BIN/sleep" <<'SWSLEEP'
+#!/bin/bash
+if [ -n "${SW_SLEEP_LOG:-}" ] && [ "$*" != 0 ]; then
+  printf '%s\n' "$*" >> "$SW_SLEEP_LOG"
+  if [ -n "${SW_MID_STATE:-}" ]; then
+    printf '{\n  "workspace": "sw",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' > "$SW_MID_STATE"
+  fi
+fi
+exec /bin/sleep "$@"
+SWSLEEP
+chmod +x "$SW_BIN/sleep"
 sw_turn() {  # sw_turn <rundir> [env assignments...] — a turn that REACHES the provider
   local rd="$1"; shift
   mkdir -p "$rd"
@@ -66,9 +79,10 @@ sw_turn() {  # sw_turn <rundir> [env assignments...] — a turn that REACHES the
 }
 
 # 1. No declaration -> no wait. This is the regression that mattered.
-SW_E1="$(sw_elapsed sw_run "$WORK/sw-r1")"
-[ "$SW_E1" -lt 3 ] && ok "unheralded spawn does not wait for a state file that is not coming (${SW_E1}s)" \
-  || fail "unheralded spawn still waits (${SW_E1}s, expected <3)"
+SW_BUDGET=20
+SW_E1="$(sw_elapsed sw_run "$WORK/sw-r1" COMMS_RUNPHASE_STATE_WAIT_SECS="$SW_BUDGET")"
+[ "$SW_E1" -lt $((SW_BUDGET / 2)) ] && ok "unheralded spawn does not wait for a state file that is not coming (${SW_E1}s of ${SW_BUDGET}s)" \
+  || fail "unheralded spawn still waits (${SW_E1}s, expected < half of ${SW_BUDGET}s)"
 # NB: sw_run exits nonzero BY DESIGN (it refuses), and this suite sets pipefail,
 # so `sw_run | grep -q ...` is decided by the refusal's status, not by grep —
 # it fails when the note is present and "passes" when it is absent. Capture,
@@ -81,9 +95,9 @@ esac
 
 # 2. Declared, file never arrives -> the budget is HONOURED, not ignored. A fix
 #    that simply deleted the wait would pass test 1 and fail this one.
-SW_E2="$(sw_elapsed sw_run "$WORK/sw-r2" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=1)"
-[ "$SW_E2" -ge 1 ] && ok "declared spawn waits out its budget when the write never lands (${SW_E2}s)" \
-  || fail "declared spawn skipped its budget (${SW_E2}s, expected >=1)"
+SW_E2="$(sw_elapsed sw_run "$WORK/sw-r2" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS="$SW_BUDGET")"
+[ "$SW_E2" -ge "$SW_BUDGET" ] && ok "declared spawn waits out its budget when the write never lands (${SW_E2}s)" \
+  || fail "declared spawn skipped its budget (${SW_E2}s, expected >=${SW_BUDGET})"
 
 # 3. Declared, file lands DURING the turn -> the race window still works, and the
 #    state is actually MUTATED. Asserting only that the "missing file" note is absent
@@ -101,20 +115,15 @@ rm -f "$SW_SF"
 
 # 3a. The poll must WAKE EARLY. Test 2 already covers "the wait exists at all"; 3a's
 #     unique job is narrower — that the wait is a POLL and not a flat `sleep $budget`.
-#     Test 3's file already exists when the waiter starts, so nothing there touches
-#     the polling. Here the file lands ~1s into a 10s budget: a non-polling
-#     implementation takes 10s and fails the <6s bound, while the real one returns
-#     in ~1s. The margin is deliberately wide because this suite is known to flake
-#     under machine load, and a false failure here costs more than a loose bound.
-#     If load delays the runner past the 1s write, this degrades to test 3 (file
-#     already present) and still passes — it loses coverage, never invents failure.
-#     (codex + grok, panel r2 flagged the gap; codex, r3 asked for the wider margin.)
-( sleep 1; printf '{\n  "workspace": "sw",\n  "thread": "sw-arc-1",\n  "last_delivery": "spawned"\n}\n' > "$SW_SF" ) &
-SW_MIDW=$!
-SW_E3A="$(sw_elapsed sw_run "$WORK/sw-r3a" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=10)"
-wait "$SW_MIDW" 2>/dev/null || true
-[ "$SW_E3A" -lt 6 ] && ok "a file landing mid-wait wakes the poll early (${SW_E3A}s of a 10s budget)" \
-  || fail "the wait did not wake early (${SW_E3A}s of a 10s budget — is it polling?)"
+#     Test 3's file already exists when the waiter starts. Here the sleep observer
+#     writes it during the first poll. Exactly one short sleep proves the waiter
+#     wakes early; a flat sleep of the budget or continued polling fails, regardless
+#     of scheduling delays. The mutation assertion also rejects skipping the wait.
+SW_POLLS="$WORK/sw-mid-sleeps"
+sw_run "$WORK/sw-r3a" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS="$SW_BUDGET" \
+  SW_SLEEP_LOG="$SW_POLLS" SW_MID_STATE="$SW_SF" >/dev/null 2>&1 || true
+[ "$(cat "$SW_POLLS" 2>/dev/null)" = 0.1 ] && ok "a file landing mid-wait wakes the poll after one short sleep" \
+  || fail "the wait did not wake early (sleep requests: $(cat "$SW_POLLS" 2>/dev/null))"
 grep -q '"last_delivery": "failed"' "$SW_SF" 2>/dev/null \
   && ok "the mid-wait file is mutated too" || fail "mid-wait file not mutated"
 rm -f "$SW_SF"
@@ -153,11 +162,14 @@ grep -q '"status"' "$WORK/sw-r3c/result.json" 2>/dev/null \
   || fail "result.json missing or statusless after a malformed budget"
 # An absurd budget must not wrap negative and silently skip the declared wait —
 # nor stall the turn for hours. It is malformed input: fall back to the default.
-SW_E3D="$(sw_elapsed sw_run "$WORK/sw-r3d" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=1844674407370955161)"
+SW_OVERFLOW_POLLS="$WORK/sw-overflow-sleeps"
+SW_E3D="$(sw_elapsed sw_run "$WORK/sw-r3d" COMMS_RUNPHASE_EXPECT_STATE=1 COMMS_RUNPHASE_STATE_WAIT_SECS=1844674407370955161 SW_SLEEP_LOG="$SW_OVERFLOW_POLLS")"
 [ "$SW_E3D" -ge 3 ] && ok "an overflowing budget still waits, not wrapped into no wait (${SW_E3D}s)" \
   || fail "an overflowing budget skipped the declared wait entirely (${SW_E3D}s)"
-[ "$SW_E3D" -le 20 ] && ok "an overflowing budget falls back rather than stalling for hours (${SW_E3D}s)" \
-  || fail "an overflowing budget was clamped to something enormous (${SW_E3D}s)"
+[ "$(grep -c '^0\.1$' "$SW_OVERFLOW_POLLS" 2>/dev/null)" = 60 ] \
+  && [ "$(wc -l < "$SW_OVERFLOW_POLLS" | tr -d ' ')" = 60 ] \
+  && ok "an overflowing budget falls back to the default 60 short polls" \
+  || fail "an overflowing budget did not use the default polling budget (${SW_E3D}s)"
 
 # 4. Anti-drift, as a SOURCE contract: the writer's rule and the spawner's
 #    promise must be the same predicate, not two copies that agree today. If

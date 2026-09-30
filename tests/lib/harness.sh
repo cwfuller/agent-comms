@@ -253,6 +253,29 @@ check() { # check <desc> <expr...>
   local desc="$1"; shift
   if "$@" >/dev/null 2>&1; then ok "$desc"; else fail "$desc"; fi
 }
+# Readiness is an event, not a fixed startup sleep. The deadline only bounds a
+# broken fixture; callers must include a failed handshake in their assertion.
+wait_until() { # <command...> — up to 60s, with no assertion/counter side effects
+  local deadline=$((SECONDS + 60))
+  until "$@"; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.1
+  done
+}
+# An orphan can remain a zombie until the system reaper runs (notably on Linux).
+# Absence or Z proves it stopped; a failed ps inspection proves nothing.
+process_stopped() { # <pid>
+  local state rc=0 err
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  err="$(mktemp "$WORK/process-state.XXXXXX")" || return 1
+  state="$(ps -p "$1" -o stat= 2>"$err")" || rc=$?
+  if [ -s "$err" ]; then rm -f "$err"; return 1; fi
+  rm -f "$err"
+  state="${state#"${state%%[![:space:]]*}"}"
+  if [ "$rc" = 1 ] && [ -z "$state" ]; then return 0; fi
+  [ "$rc" = 0 ] || return 1
+  case "$state" in Z*) return 0 ;; *) return 1 ;; esac
+}
 check_not() {
   local desc="$1"; shift
   # PRECONDITION. check_not passes when its command FAILS, so a command that does

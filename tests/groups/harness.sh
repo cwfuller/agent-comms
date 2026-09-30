@@ -617,7 +617,20 @@ mkdir -p "$IH8/tests" "$IH8/.comms"
 printf 'total\t3\n' > "$IH8/tests/expected-counts.tsv"
 # Completion line first, then a detached descendant, then exit 0 — the shape that walks
 # past a supervisor which only waits on the direct child.
-printf '#!/bin/bash\nprintf "passed: 3  failed: 0  skipped: 0\\n"\n( sleep 2; : > "$IH8_MARK" ) </dev/null >/dev/null 2>&1 &\nexit 0\n' > "$IH8/tests/detach.sh"
+cat > "$IH8/tests/detach.sh" <<'IH8STUB'
+#!/bin/bash
+printf 'passed: 3  failed: 0  skipped: 0\n'
+(
+  deadline=$((SECONDS + 60))
+  until [ -f "$IH8_RELEASE" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || exit 124
+    sleep 0.1
+  done
+  : > "$IH8_MARK"
+) </dev/null >/dev/null 2>&1 &
+printf '%s\n' "$!" > "$IH8_PID"
+exit 0
+IH8STUB
 chmod +x "$IH8/tests/detach.sh"
 printf 'suite-cmd = bash tests/detach.sh\n' > "$IH8/.comms/config"
 (cd "$IH8" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) >/dev/null 2>&1
@@ -627,26 +640,26 @@ printf 'suite-cmd = bash tests/detach.sh\n' > "$IH8/.comms/config"
   && git -c user.email=t@t -c user.name=t commit -qm "feat: m") >/dev/null 2>&1
 # The property is NOT that the run waits for the descendant — supervision TERMs the whole
 # group and escalates to KILL. So the observable is that the descendant never gets to act:
-# its post-sleep marker must never appear. (A first draft asserted elapsed >= 3s and failed
+# its post-release marker must never appear. (A first draft asserted elapsed >= 3s and failed
 # against BOTH modes, because waiting is not what quiescence does.)
-IH8_MARKF="$WORK/ih8-descendant-ran"
+IH8_MARKF="$WORK/ih8-descendant-ran"; IH8_PIDF="$WORK/ih8-descendant-pid"; IH8_GATE="$WORK/ih8-release"
 rm -f "$IH8_MARKF"
-(cd "$IH8" && env IH8_MARK="$IH8_MARKF" \
+(cd "$IH8" && env IH8_MARK="$IH8_MARKF" IH8_PID="$IH8_PIDF" IH8_RELEASE="$IH8_GATE" \
     COMMS_PRESENCE_NAME=detachghost COMMS_PRESENCE_INSTANCE=66666666666666666666666666666666 \
     "$COMMS" integrate worktree-detachone) >/dev/null 2>&1 || true
 [ "$(cd "$IH8" && git rev-parse main)" = "$(cd "$IH8" && git rev-parse worktree-detachone)" ] \
   && ok "the detached-descendant fixture lands" || fail "the detach fixture did not land"
-sleep 3   # outlive the descendant's own sleep, so a SURVIVING one would have marked by now
-[ ! -f "$IH8_MARKF" ] \
+IH8_CHILD="$(cat "$IH8_PIDF" 2>/dev/null)"
+[ -n "$IH8_CHILD" ] && process_stopped "$IH8_CHILD" && [ ! -f "$IH8_MARKF" ] \
   && ok "an absent-record run still reaps its process group (the descendant never acted)" \
-  || fail "a detached descendant outlived the landing — supervision was lost on the absent-record path"
+  || { fail "a detached descendant outlived the landing — supervision was lost on the absent-record path"; [ -z "$IH8_CHILD" ] || kill -KILL "$IH8_CHILD" 2>/dev/null; }
 # CONTROL: unsupervised, that descendant DOES act — otherwise the assertion above is vacuous.
 rm -f "$IH8_MARKF"
-( cd "$IH8" && IH8_MARK="$IH8_MARKF" bash tests/detach.sh ) >/dev/null 2>&1 || true
-sleep 3
-[ -f "$IH8_MARKF" ] \
+( cd "$IH8" && IH8_MARK="$IH8_MARKF" IH8_PID="$IH8_PIDF" IH8_RELEASE="$IH8_GATE" bash tests/detach.sh ) >/dev/null 2>&1 || true
+: > "$IH8_GATE"
+wait_until test -f "$IH8_MARKF" \
   && ok "unsupervised, the same descendant does act (control)" \
-  || fail "the control did not reproduce a surviving descendant — the assertion above proves nothing"
+  || { fail "the control did not reproduce a surviving descendant — the assertion above proves nothing"; kill -KILL "$(cat "$IH8_PIDF")" 2>/dev/null; }
 rm -f "$IH8_MARKF"
 [ "$(find "$IH8/.comms/sessions" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
   && ok "supervision without a heartbeat still creates no record" || fail "the supervised absent-record path manufactured one"

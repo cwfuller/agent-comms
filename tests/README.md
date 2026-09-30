@@ -59,6 +59,13 @@ Add tests to the group that owns their fixtures. New groups must be listed in
 reintroduces the duplicated work this split removes. Preserve existing section
 banners unless intentionally changing the coverage contract.
 
+Use readiness events before signaling or inspecting an asynchronous fixture.
+Include failed readiness in the assertion rather than treating a missing PID or
+marker as evidence of successful teardown. Compare necessary elapsed bounds with
+an explicit fixture budget; observe polling and process state when scheduler speed
+is irrelevant. See [the load-sensitive test audit](../docs/test-load-flakes.md) for
+the changed assertions and retained timing controls.
+
 The suite runs under `set -o pipefail`, so never pipe a command into `grep -q`:
 grep exits at its first match, a producer that is still writing fails the
 pipeline, and a negated check passes. End such a pipe with `grep_full`

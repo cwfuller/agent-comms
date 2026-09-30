@@ -1931,8 +1931,8 @@ IT_WS=0; (cd "$IX" && "$COMMS" presence with-beat --no-heartbeat --name wb-timeo
 (cd "$IX" && exec "$COMMS" presence with-beat --no-heartbeat --name wb-timeout --instance 00000000000000000000000000000002 \
   --timeout-secs 120 -- bash -c 'trap "" TERM; echo $$ > "$1"; while :; do sleep 1; done' _ "$IT/wb-leader.pid") >/dev/null 2>&1 &
 IT_WBP=$!; IT_N=0
-until [ -s "$IT/wb-leader.pid" ] || [ "$IT_N" -ge 100 ]; do sleep 0.1; IT_N=$((IT_N + 1)); done
-sleep 1; kill -TERM "$IT_WBP" 2>/dev/null; IT_N=0
+IT_READY=0; wait_until test -s "$IT/wb-leader.pid" && IT_READY=1
+kill -TERM "$IT_WBP" 2>/dev/null; IT_N=0
 while kill -0 "$IT_WBP" 2>/dev/null && [ "$IT_N" -lt 300 ]; do sleep 0.1; IT_N=$((IT_N + 1)); done
 IT_WBL="$(cat "$IT/wb-leader.pid" 2>/dev/null)"
 if kill -0 "$IT_WBP" 2>/dev/null; then
@@ -1940,7 +1940,7 @@ if kill -0 "$IT_WBP" 2>/dev/null; then
   kill -KILL "$IT_WBP" 2>/dev/null; [ -n "$IT_WBL" ] && kill -KILL "$IT_WBL" 2>/dev/null
 else
   IT_WBR=0; wait "$IT_WBP" || IT_WBR=$?
-  [ "$IT_WBR" != 0 ] && [ -n "$IT_WBL" ] && ! kill -0 "$IT_WBL" 2>/dev/null \
+  [ "$IT_READY" = 1 ] && [ "$IT_WBR" != 0 ] && [ -n "$IT_WBL" ] && ! kill -0 "$IT_WBL" 2>/dev/null \
     && ok "a TERM to a bounded with-beat still tears down a TERM-ignoring leader and returns non-zero" \
     || { fail "bounded with-beat under TERM: rc=$IT_WBR leader=$IT_WBL"; [ -n "$IT_WBL" ] && kill -KILL "$IT_WBL" 2>/dev/null; }
 fi

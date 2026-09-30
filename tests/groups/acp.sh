@@ -1201,14 +1201,26 @@ D_B="$(rv "$(res "$AP" resolve codex)" policy_digest)"; D_N="$(rv "$(res COMMS_A
 # A RUNTIME THAT HANGS on --version is killed at the probe deadline: auto-detection stays on the
 # bundled runtime (recorded), an explicit path is refused — neither stalls the turn.
 mkdir -p "$RTD/hang"; printf '#!/bin/sh
-sleep 30
+echo $$ >> "$RT_PROBE_PIDS"
+sleep 300
+echo "codex-cli 0.159.0"
 ' > "$RTD/hang/codex"; chmod +x "$RTD/hang/codex"
-RT_T0="$(date +%s)"
-R="$(cd "$WORK" && env -u COMMS_ACP_CODEX_PATH -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT COMMS_ACP_RUNTIME_PROBE_SECS=1 COMMS_ACP_CODEX_MODEL=gpt-6-astra PATH="$RTD/hang:$PATH" "$AP" resolve codex)"
-res COMMS_ACP_RUNTIME_PROBE_SECS=1 COMMS_ACP_CODEX_PATH="$RTD/hang/codex" "$AP" resolve codex >/dev/null 2>&1; A=$?
-RT_EL=$(( $(date +%s) - RT_T0 ))
-[ "$(rv "$R" runtime)" = bundled ] && [ "$(rv "$R" fallback)" = runtime-probe-failed ] && [ "$A" = 1 ] && [ "$RT_EL" -lt 15 ] \
-  && ok "a runtime hanging on --version is cut off at the deadline: auto stays bundled (recorded), explicit is refused" || fail "hanging runtime (el=${RT_EL}s rc=$A $R)"
+RT_PROBE_PIDS="$WORK/runtime-probe-pids"
+# Leave startup room for both recorded probes under contention; they still
+# cannot naturally finish their 300s hang inside this declared budget.
+RT_PROBE_BUDGET=10
+R="$(cd "$WORK" && env -u COMMS_ACP_CODEX_PATH -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT RT_PROBE_PIDS="$RT_PROBE_PIDS" COMMS_ACP_RUNTIME_PROBE_SECS="$RT_PROBE_BUDGET" COMMS_ACP_CODEX_MODEL=gpt-6-astra PATH="$RTD/hang:$PATH" "$AP" resolve codex)"
+res RT_PROBE_PIDS="$RT_PROBE_PIDS" COMMS_ACP_RUNTIME_PROBE_SECS="$RT_PROBE_BUDGET" COMMS_ACP_CODEX_PATH="$RTD/hang/codex" "$AP" resolve codex >/dev/null 2>&1; A=$?
+RT_STOPPED=1; RT_N=0
+while read -r RT_PID; do
+  RT_N=$((RT_N + 1))
+  process_stopped "$RT_PID" || RT_STOPPED=0
+done < "$RT_PROBE_PIDS"
+# A missed deadline would return a valid version and succeed. Require both
+# probes to have started and been reaped as well as the refusal/fallback.
+[ "$(rv "$R" runtime)" = bundled ] && [ "$(rv "$R" fallback)" = runtime-probe-failed ] && [ "$A" = 1 ] \
+  && [ "$RT_N" = 2 ] && [ "$RT_STOPPED" = 1 ] \
+  && ok "a runtime hanging on --version is cut off at the deadline: auto stays bundled (recorded), explicit is refused" || fail "hanging runtime (started=$RT_N stopped=$RT_STOPPED rc=$A $R)"
 res COMMS_ACP_CODEX_PATH="$RTD/new" "$AP" resolve codex >/dev/null 2>&1; A=$?
 res COMMS_ACP_CODEX_PATH=bundled COMMS_ACP_CODEX_MODEL=gpt-6-sol "$AP" resolve codex >/dev/null 2>&1; B=$?
 [ "$A" = 1 ] && [ "$B" = 1 ] \

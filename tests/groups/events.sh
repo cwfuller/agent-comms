@@ -781,14 +781,33 @@ printf '%s\ty\tz\t1\timplement\taid\tpv\tbase\tcodex\tcodex\tdispatched\t\t2026-
 # spawn, so every row below was appended by a process the dispatching shell no longer owns.
 EV_HL="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-10-00_ev-hl.md"
 sed 's/message_id: ev-req-1/message_id: ev-hl-1/; s/thread: ev-loop/thread: ev-headless/' "$EV_REQ" > "$EV_HL"
-run_ev_hl() { (cd "$EV" && env COMMS_DELIVERY=headless PATH="$STUB_BIN:$PATH" "$COMMS" "$@"); }
+EV_DELAY_BIN="$WORK/ev-delay-bin"; mkdir -p "$EV_DELAY_BIN"
+cat > "$EV_DELAY_BIN/sleep" <<'EVDELAY'
+#!/bin/bash
+if [ -n "${EV_SPAWN_GATE:-}" ] && [ "$*" = 0 ]; then
+  : > "$EV_SPAWN_GATE.ready"
+  deadline=$((SECONDS + 60))
+  until [ -f "$EV_SPAWN_GATE" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || exit 124
+    /bin/sleep 0.1
+  done
+fi
+exec /bin/sleep "$@"
+EVDELAY
+chmod +x "$EV_DELAY_BIN/sleep"
+run_ev_hl() { (cd "$EV" && env COMMS_DELIVERY=headless COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 PATH="$EV_DELAY_BIN:$STUB_BIN:$PATH" "$COMMS" "$@"); }
 mkdir -p "$EV/.comms/to-grok"
-EV_HLOUT="$(run_ev_hl send --to grok "$EV_HL" 2>/dev/null)"
+EV_HL_GATE="$WORK/ev-spawn-release"
+EV_HLOUT="$(EV_SPAWN_GATE="$EV_HL_GATE" run_ev_hl send --to grok "$EV_HL" 2>/dev/null)"
 EV_HLDIR="$(rundir_of "$EV_HLOUT")"
 [ -n "$EV_HLDIR" ] && ok "the headless dispatch spawned a detached runner" || fail "no run dir (got: $EV_HLOUT)"
-awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && $e=="turn-started"' "$EV_LOG" | grep_full -q . \
-  && fail "turn-started was written before any runner ran" \
-  || ok "no turn is claimed to have started before its runner runs"
+EV_HL_READY=0; wait_until test -f "$EV_HL_GATE.ready" && EV_HL_READY=1
+if [ "$EV_HL_READY" = 1 ] && ! { awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && $e=="turn-started"' "$EV_LOG" | grep_full -q .; }; then
+  ok "no turn is claimed to have started before its runner runs"
+else
+  fail "runner readiness failed or turn-started was written before the runner was released"
+fi
+: > "$EV_HL_GATE"
 (cd "$EV" && env PATH="$STUB_BIN:$PATH" "$RUNPHASE" await "$EV_HLDIR" --timeout-secs 60 >/dev/null 2>&1) || true
 awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && $e=="turn-started"' "$EV_LOG" | grep_full -q . \
   && ok "the detached runner records that the turn started" || fail "runner turn-started missing"
@@ -808,12 +827,13 @@ EV_ORDER="$(awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-headless" && ($e=="tur
 # event must still name the right leg or a kill is a permanent unknown. (grok, plan r2.)
 EV_KL="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-11-00_ev-kill.md"
 sed 's/message_id: ev-req-1/message_id: ev-kill-1/; s/thread: ev-loop/thread: ev-killed/' "$EV_REQ" > "$EV_KL"
-EV_KOUT="$(GROK_STUB_HANG=30 run_ev_hl send --to grok "$EV_KL" 2>/dev/null)"
+EV_KOUT="$(GROK_STUB_HANG=300 run_ev_hl send --to grok "$EV_KL" 2>/dev/null)"
 EV_KDIR="$(rundir_of "$EV_KOUT")"
-sleep 2
+EV_KREADY=0
+wait_until grep -q '^thread	ev-killed$' "$EV_KDIR/turn.tsv" 2>/dev/null && EV_KREADY=1
 kill -9 "$(cat "$EV_KDIR/pid" 2>/dev/null)" 2>/dev/null || true
 (cd "$EV" && env PATH="$STUB_BIN:$PATH" "$RUNPHASE" await "$EV_KDIR" --timeout-secs 30 >/dev/null 2>&1) || true
-awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-killed" && $e=="turn-finished"' "$EV_LOG" | grep_full -q . \
+[ "$EV_KREADY" = 1 ] && awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-killed" && $e=="turn-finished"' "$EV_LOG" | grep_full -q . \
   && ok "a killed runner still gets a terminal event, from the awaiting process" || fail "synthetic turn-finished missing"
 
 EV_GMSG="$EV/.comms/to-grok/$(basename "$EV")_2026-08-29T09-30-00_ev-grok.md"

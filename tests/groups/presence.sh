@@ -484,9 +484,26 @@ printf 'suite-cmd = bash ./suite.sh\n' > "$PW/.comms/config"
 
 # with-beat: a beat lands DURING a blocked child (AC1).
 PW_HB_BEFORE="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
-(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 4) >/dev/null 2>&1
+cat > "$PW/wait-heartbeat.sh" <<'PWHEART'
+record="$1"; before="$2"; first="$3"
+deadline=$((SECONDS + 60))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  now="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$record" 2>/dev/null)"
+  if [ -n "$now" ]; then
+    # Healing must be followed by a later tick, not just the healing write.
+    if [ -z "$before" ]; then before="$now"; printf '%s\n' "$now" > "$first"
+    elif [ "$now" -gt "$before" ]; then exit 0
+    fi
+  fi
+  sleep 0.1
+done
+exit 124
+PWHEART
+PW_HBRC=0
+(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" \
+  -- bash "$PW/wait-heartbeat.sh" "$PW_SD/alpha-$PW_I1.json" "$PW_HB_BEFORE" "$WORK/hb-first") >/dev/null 2>&1 || PW_HBRC=$?
 PW_HB_AFTER="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json")"
-[ "$PW_HB_AFTER" != "$PW_HB_BEFORE" ] && ok "with-beat lands a heartbeat DURING a blocked child" || fail "no beat during block"
+[ "$PW_HBRC" = 0 ] && [ "$PW_HB_AFTER" != "$PW_HB_BEFORE" ] && ok "with-beat lands a heartbeat DURING a blocked child" || fail "no beat during block"
 # with-beat rc contract (grok, impl r1: wait-on-SIGTERM'd-beater returned 143 under
 # errexit and green suites refused to land — the timestamp test alone missed it).
 run_pw presence with-beat --name alpha --instance "$PW_I1" -- true >/dev/null 2>&1; PW_WB0=$?
@@ -496,31 +513,33 @@ run_pw presence with-beat --name alpha --instance "$PW_I1" -- false >/dev/null 2
 # HEAL MID-RUN (codex+grok, impl r2: the set-e beater died on beat exit 5 before
 # the marker line — heal was eaten AND heartbeats stopped): delete the record
 # during with-beat; the warning must surface AND a beat LATER than the heal must
-# land (epoch strictly after start+3 proves post-heal ticks — reviewers noted the
-# heal write alone satisfied the old assertion).
+# land (observe the first healed epoch, then require a later tick — the heal
+# write alone cannot satisfy this, even when startup is delayed).
 rm -f "$PW_SD/alpha-$PW_I1.json"
-PW_WBT0="$(date +%s)"
-PW_WBH="$( (cd "$PW" && env COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 5) 2>&1 )"; PW_WBHRC=$?
+PW_WBH="$( (cd "$PW" && env COMMS_PRESENCE_TTL_SECS=3 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" \
+  -- bash "$PW/wait-heartbeat.sh" "$PW_SD/alpha-$PW_I1.json" '' "$WORK/heal-first") 2>&1 )"; PW_WBHRC=$?
 printf '%s\n' "$PW_WBH" | grep -q 'HEALED a vanished record' \
   && ok "a heal during with-beat surfaces the tenure warning" || fail "heal eaten by the beater"
 [ "$PW_WBHRC" = 0 ] && ok "the healing run still returns the child's status" || fail "heal perturbed rc=$PW_WBHRC"
 PW_HB2="$(sed -n 's/.*"last_heartbeat_epoch": "\([0-9]*\)".*/\1/p' "$PW_SD/alpha-$PW_I1.json" 2>/dev/null)"
-[ -n "$PW_HB2" ] && [ "$PW_HB2" -ge $((PW_WBT0 + 3)) ] \
-  && ok "the beater survived the heal and kept beating (post-heal tick landed)" || fail "beater died after heal (epoch $PW_HB2 vs start $PW_WBT0)"
+PW_HEAL_FIRST="$(cat "$WORK/heal-first" 2>/dev/null)"
+[ -n "$PW_HB2" ] && [ -n "$PW_HEAL_FIRST" ] && [ "$PW_HB2" -gt "$PW_HEAL_FIRST" ] \
+  && ok "the beater survived the heal and kept beating (post-heal tick landed)" || fail "beater died after heal (epoch $PW_HB2 vs first $PW_HEAL_FIRST)"
 # SIGNAL CONTRACT (codex, impl r3): TERM to the WRAPPER tears down the whole child
 # process tree (grandchildren included) and the wrapper's rc reflects the signal.
 PW_MARK="$WORK/wb-descendant.$$"
 # exec: the subshell BECOMES the wrapper, so the TERM lands on comms.sh itself —
 # killing the intermediate subshell instead just orphaned the real wrapper and
 # the first version of this test failed against a correct teardown.
-( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- bash -c "sleep 30 & echo \$! > '$PW_MARK'; wait" ) & PW_WRAP=$!
-sleep 2
+( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- bash -c "sleep 300 & echo \$! > '$PW_MARK'; wait" ) & PW_WRAP=$!
+PW_READY=0; wait_until test -s "$PW_MARK" && PW_READY=1
 kill -TERM "$PW_WRAP" 2>/dev/null
 PW_SIGRC=0; wait "$PW_WRAP" 2>/dev/null || PW_SIGRC=$?
-[ "$PW_SIGRC" != 0 ] && ok "TERM to the wrapper terminates it with a signal status" || fail "wrapper ignored TERM"
-sleep 1
+[ "$PW_READY" = 1 ] && [ "$PW_SIGRC" != 0 ] && ok "TERM to the wrapper terminates it with a signal status" || fail "wrapper never became ready or ignored TERM"
 PW_GRAND="$(cat "$PW_MARK" 2>/dev/null)"
-if [ -n "$PW_GRAND" ] && kill -0 "$PW_GRAND" 2>/dev/null; then
+if [ "$PW_READY" != 1 ] || [ -z "$PW_GRAND" ]; then
+  fail "grandchild readiness was not established"
+elif kill -0 "$PW_GRAND" 2>/dev/null; then
   kill "$PW_GRAND" 2>/dev/null; fail "a grandchild survived the wrapper's teardown"
 else
   ok "the child's whole process group is torn down (no surviving grandchild)"
@@ -533,18 +552,20 @@ PW_PIPE="$(echo piped-hello | run_pw presence with-beat --name alpha --instance 
 # SIGINT ignored, and POSIX forbids trapping a signal ignored at entry — the
 # first version of this test no-op'd its own kill and timed out to rc 0.
 set -m
-( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- sleep 30 ) & PW_IW=$!
+( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" \
+  -- bash -c ': > "$1"; exec sleep 300' _ "$WORK/iw-ready" ) & PW_IW=$!
 set +m
-sleep 2; kill -INT "$PW_IW" 2>/dev/null
+PW_IREADY=0; wait_until test -f "$WORK/iw-ready" && PW_IREADY=1
+kill -INT "$PW_IW" 2>/dev/null
 PW_IRC=0; wait "$PW_IW" 2>/dev/null || PW_IRC=$?
-[ "$PW_IRC" = 130 ] && ok "INT to the wrapper yields the child's INT status (130)" || fail "INT identity lost (rc=$PW_IRC)"
+[ "$PW_IREADY" = 1 ] && [ "$PW_IRC" = 130 ] && ok "INT to the wrapper yields the child's INT status (130)" || fail "INT readiness/identity lost (rc=$PW_IRC)"
 # CANCELLATION NEVER SUCCEEDS: exercise a running child and an already-exited
 # zero-status child. Handshake before signaling: an immediate post-fork INT can
 # hit the pre-exec launch shell, and kill also succeeds against a zombie.
 cat > "$PW/cancel-fast-child.sh" <<'PWCANCEL'
 printf '%s\n' "$$" > "$1.ready"
-[ "${2:-}" != live ] || exec sleep 30
-deadline=$((SECONDS + 10))
+[ "${2:-}" != live ] || exec sleep 300
+deadline=$((SECONDS + 60))
 while [ ! -f "$1.release" ]; do
   [ "$SECONDS" -lt "$deadline" ] || exit 124
   sleep 0.01
@@ -560,7 +581,7 @@ PW_CANCEL_OUT="$(bash -c '
     set -m
     ( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- bash "$PW/cancel-fast-child.sh" "$mark" live ) 2>/tmp/pwcancel.$$.err & p=$!
     set +m
-    deadline=$((SECONDS + 10))
+    deadline=$((SECONDS + 60))
     while [ ! -s "$mark.ready" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.01; done
     if [ -s "$mark.ready" ] && kill -INT "$p" 2>/dev/null; then
       delivered=$((delivered + 1))
@@ -584,7 +605,7 @@ PW_CANCEL_OUT="$(bash -c '
     set -m
     ( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$C" presence with-beat --name alpha --instance "$I" -- bash "$PW/cancel-fast-child.sh" "$mark" ) 2>/tmp/pwcancel.$$.err & p=$!
     set +m
-    deadline=$((SECONDS + 10))
+    deadline=$((SECONDS + 60))
     while [ ! -s "$mark.ready" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.01; done
     child="$(cat "$mark.ready" 2>/dev/null)"
     stopped=0; exited=0
@@ -632,14 +653,28 @@ PW_FALSE0="$(printf '%s\n' "$PW_CANCEL_OUT" | sed -n 's/.*false0=\([0-9]*\).*/\1
   || fail "cancellation loop: $PW_CANCEL_OUT"
 # LATE CANCEL during quiescence (codex, impl r6: the latch updated after the old
 # coercion point and a signal during the polls returned 0): the child exits 0
-# instantly but parks a TERM-ignoring descendant so the polls run; INT mid-poll
+# after descendant readiness, leaving it TERM-ignoring so the polls run; INT mid-poll
 # must still yield a nonzero wrapper status.
 set -m
-( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" -- bash -c "trap '' TERM; sleep 4 & exit 0" ) & PW_LW=$!
+cat > "$PW/late-child.sh" <<'PWLATE'
+trap ': > "$1"; kill -INT "$(cat "$2")"' TERM
+: > "$1.ready"
+while :; do sleep 1; done
+PWLATE
+( cd "$PW" && exec env COMMS_PRESENCE_TTL_SECS=60 "$COMMS" presence with-beat --name alpha --instance "$PW_I1" \
+  -- bash -c 'bash "$1" "$2" "$3" &
+    deadline=$((SECONDS + 60))
+    until [ -f "$2.ready" ] && [ -s "$3" ]; do
+      [ "$SECONDS" -lt "$deadline" ] || exit 124
+      sleep 0.1
+    done
+    exit 0' _ "$PW/late-child.sh" "$WORK/late-quiescence" "$WORK/late-wrapper" ) & PW_LW=$!
 set +m
-sleep 1; kill -INT "$PW_LW" 2>/dev/null
+printf '%s\n' "$PW_LW" > "$WORK/late-wrapper"
+# The descendant sends INT from its TERM trap: that event can only occur after
+# the zero-status leader exited and the wrapper entered quiescence.
 PW_LRC=0; wait "$PW_LW" 2>/dev/null || PW_LRC=$?
-[ "$PW_LRC" != 0 ] && ok "a cancel DURING quiescence still refuses success" || fail "late cancel returned 0"
+[ -f "$WORK/late-quiescence" ] && [ "$PW_LRC" != 0 ] && ok "a cancel DURING quiescence still refuses success" || fail "late cancel missed quiescence or returned 0"
 # Reserved delimiter: a dotted name containing '.tomb.' is refused at every entry.
 check_not "a name containing the reserved .tomb. delimiter is refused" run_pw presence claim --name 'foo.tomb.bar' --role x
 # MULTILINE identifiers are refused everywhere (codex, impl r7: grep validates

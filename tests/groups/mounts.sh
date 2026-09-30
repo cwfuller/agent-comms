@@ -435,7 +435,7 @@ fi
 # lstart`'s one-second granularity render the two values identical.
 if [ -n "$WM_KR" ] && [ -d "$WM_KR" ]; then
   rm -f "$WM_KR"/.claim.* 2>/dev/null
-  sleep 45 & WM_LIVE=$!
+  sleep 300 & WM_LIVE=$!
   WM_LSTART="$(LC_ALL=C TZ=UTC ps -p "$WM_LIVE" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ *//; s/ *$//')"
   printf 'pid=%s\nfmt=v2\nstart=%s\nrun=live-holder\n' "$WM_LIVE" "$WM_LSTART" > "$WM_KR/.claim.0"
   sleep 1.2
@@ -757,7 +757,7 @@ fi
 # A LIVE claim on any ident refuses the WHOLE repo-key, even under --yes.
 RELO_K6="$(find "$RELO_STORE" -maxdepth 2 -type d -name 'relo-*-grok' 2>/dev/null | head -1)"
 if [ -n "$RELO_K6" ] && [ -d "$RELO_K6" ]; then
-  sleep 30 & RELO_LIVE=$!
+  sleep 300 & RELO_LIVE=$!
   RELO_LS="$(LC_ALL=C TZ=UTC ps -p "$RELO_LIVE" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ *//; s/ *$//')"
   printf 'pid=%s\nfmt=v2\nstart=%s\nrun=live\n' "$RELO_LIVE" "$RELO_LS" > "$RELO_K6/.claim.0"
   RELO_CM_LIVE="$(relo_clean --yes)"

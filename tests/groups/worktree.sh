@@ -37,11 +37,11 @@ wr_retired() {  # <desc> <slug> [env...]
   if [ "$rc" = 0 ] && wr_gone "$slug"; then ok "$desc"
   else fail "$desc (rc=$rc): $(printf '%s' "$out" | tail -3 | tr '\n' '|')"; fi
 }
-wr_wait_lsof() {  # <pid> <path-fragment> — until lsof shows the process holding the path (<=5s)
-  local n=0
-  while [ "$n" -lt 50 ]; do
+wr_wait_lsof() {  # <pid> <path-fragment> — bounded readiness, far below the 300s holder life
+  local deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$deadline" ]; do
     lsof -n -P -w -p "$1" -Fn 2>/dev/null | grep_full -qF "$2" && return 0
-    sleep 0.1; n=$((n + 1))
+    sleep 0.1
   done
   return 1
 }
@@ -175,12 +175,12 @@ wr_refused "a symlink retargeted under assume-unchanged is refused (link text ex
 wr_landed bare2; git init -q --bare "$(wr_path bare2)/node_modules/$(printf 'mirror\nrepo.git')"
 wr_refused "a bare repository under a newline-bearing directory is refused" bare2 "nested-git: "
 wr_landed proc1
-(cd "$(wr_path proc1)" && exec sleep 30) & WR_P1=$!
+(cd "$(wr_path proc1)" && exec sleep 300) & WR_P1=$!
 wr_wait_lsof "$WR_P1" "$(wr_path proc1)" || true
 wr_refused "refuses while a process has its cwd inside" proc1 "processes: pid .*$WR_P1"
 kill "$WR_P1" 2>/dev/null; wait "$WR_P1" 2>/dev/null
 wr_landed proc2
-sleep 30 < "$(wr_path proc2)/proc2.txt" & WR_P2=$!
+sleep 300 < "$(wr_path proc2)/proc2.txt" & WR_P2=$!
 wr_wait_lsof "$WR_P2" "proc2.txt" || true
 wr_refused "refuses while a process holds a file open inside" proc2 "processes: pid .*$WR_P2"
 kill "$WR_P2" 2>/dev/null; wait "$WR_P2" 2>/dev/null
