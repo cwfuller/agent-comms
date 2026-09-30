@@ -168,7 +168,8 @@ def own_worker(lifeline, command):
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous)
         while True:
-            if select.select([lifeline], [], [], 0.1)[0]:
+            # EOF wakes select immediately; only ordinary completion polling waits.
+            if select.select([lifeline], [], [], 0.5)[0]:
                 raise RuntimeError('dispatcher exited; cancelling worker session')
             # poll() would reap the session leader, releasing its identity before
             # the sweep. Inspect without reaping, including on ordinary completion.
@@ -201,7 +202,12 @@ def stop_owners(active):
     for _, _, _, lifeline in active.values():
         os.close(lifeline)
     for proc, *_ in active.values():
-        proc.wait(timeout=15)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired as exc:
+            # Owners keep sweeping independently. Do not replace the cancellation
+            # being unwound, or skip waiting for the remaining owners.
+            print(f'SUITE: owner cleanup timed out for {proc.pid}: {exc}', file=sys.stderr)
 
 
 def run_workers(repo, oid, directory, rows, jobs, parent_pid=None):

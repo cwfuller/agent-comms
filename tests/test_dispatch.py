@@ -1,5 +1,6 @@
 """Adversarial checks of the actual coordinator report reader and scheduling."""
 import importlib.util
+import io
 import os
 from pathlib import Path
 import shutil
@@ -9,7 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('dispatch', Path(__file__).with_name('dispatch.py'))
 dispatch = importlib.util.module_from_spec(spec)
@@ -376,6 +377,7 @@ wait
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, start_new_session=True)
         groups = set()
+        pids = []
         dispatcher_pid = None
         owner_pid = None
         try:
@@ -383,20 +385,24 @@ wait
                 wait_file(self.root / ('.' + name + '-pid'))
             pids = [int((self.root / ('.' + name + '-pid')).read_text())
                     for name in ('supervisor', 'worker', 'descendant')]
-            groups = {os.getpgid(pid) for pid in pids}
-            children = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True)
+            for pid in pids:
+                groups.add(os.getpgid(pid))
+            children = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,command='], text=True)
+            rows = [line.split(None, 2) for line in children.splitlines()]
             parents = dict((int(pid), int(parent)) for pid, parent in
-                           (line.split() for line in children.splitlines()))
+                           (row[:2] for row in rows))
+            owner_pid = parents[pids[0]]
+            groups.add(os.getpgid(owner_pid))
             run_pid = proc.pid
             if sig == 'timeout':
-                # The helper runs the suite in its own job-control process group.
-                run_pid, = [pid for pid, parent in parents.items() if parent == proc.pid]
-            dispatcher_pid, = [int(pid) for pid, parent in
-                               (line.split() for line in children.splitlines())
-                               if int(parent) == run_pid]
+                # with-beat also owns a transient deadline sleep. Select the suite
+                # invocation, which has its own job-control process group.
+                run_pid, = [int(row[0]) for row in rows if len(row) == 3
+                            and int(row[1]) == proc.pid and row[2] == 'bash tests/run.sh']
             run_pgid = os.getpgid(run_pid)
+            groups.add(run_pgid)
+            dispatcher_pid, = [pid for pid, parent in parents.items() if parent == run_pid]
             self.assertEqual(os.getpgid(dispatcher_pid), run_pgid)
-            owner_pid = parents[pids[0]]
             if owner_pid != dispatcher_pid:
                 self.assertNotEqual(os.getpgid(owner_pid), run_pgid)
             if pending_signals or sig == signal.SIGINT:
@@ -439,25 +445,32 @@ wait
         finally:
             # The negative control deliberately leaks. Remove all fixture groups,
             # including the worker's separate job-control group, even on failure.
+            # Recover workers even if readiness or process discovery failed early.
+            for name in ('supervisor', 'worker', 'descendant'):
+                marker = self.root / ('.' + name + '-pid')
+                if marker.exists() and marker.read_text().strip():
+                    pid = int(marker.read_text())
+                    if pid not in pids:
+                        pids.append(pid)
+                    try:
+                        groups.add(os.getpgid(pid))
+                    except ProcessLookupError:
+                        pass
+            # An unreaped launcher still pins its session identity. Sweep its
+            # separate run.sh group too, including when discovery failed above.
+            if proc.returncode is None:
+                dispatch.kill_worker_session(proc)
             for group in groups:
                 try:
                     os.killpg(group, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
-            if dispatcher_pid is not None:
-                try:
-                    os.kill(dispatcher_pid, signal.SIGCONT)
-                    os.kill(dispatcher_pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-            if owner_pid is not None and owner_pid != dispatcher_pid:
-                try:
-                    os.kill(owner_pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-            if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
             proc.communicate(timeout=20)
+            # Only the launcher is our child to reap; orphaned descendants are
+            # adopted by the system reaper. Wait for known non-children to stop.
+            for pid in [owner_pid, dispatcher_pid, *pids]:
+                if pid is not None:
+                    assert_stopped(self, pid, timeout=15)
 
     def test_killing_run_sh_stops_all_worker_session_members(self):
         shutil.copyfile(Path(__file__).parents[1] / 'helpers/comms.sh',
@@ -557,6 +570,24 @@ trap 'rm -rf "$lease"' EXIT
 
 
 class WorkerLifecycle(unittest.TestCase):
+    def test_owner_wait_timeout_preserves_cancellation_and_joins_other_owners(self):
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=sig), tempfile.TemporaryDirectory() as temp:
+                first, second = Mock(pid=101), Mock(pid=102)
+                cancellation = KeyboardInterrupt(sig)
+                first.poll.side_effect = cancellation
+                first.wait.side_effect = subprocess.TimeoutExpired('owner', 15)
+                second.wait.return_value = 0
+                with patch.object(dispatch.subprocess, 'Popen', side_effect=[first, second]), \
+                        patch('sys.stderr', new_callable=io.StringIO) as err:
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        dispatch.run_workers(Path(temp), 'probe', Path(temp),
+                                             [('first', 'parallel'), ('second', 'parallel')], 2)
+                self.assertIs(raised.exception, cancellation)
+                first.wait.assert_called_once_with(timeout=15)
+                second.wait.assert_called_once_with(timeout=15)
+                self.assertIn('owner cleanup timed out for 101', err.getvalue())
+
     def test_pending_signal_orders_enter_cleanup_once(self):
         # Real pending POSIX signals, with spawning/session inspection replaced
         # only here so this isolates the Python handler/unwind race itself.

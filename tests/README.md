@@ -38,13 +38,15 @@ each owned session, including nested job-control groups. The coordinator may be
 killed during that window; lifeline owners continue independently. Cancellation
 handlers ignore further INT/TERM before unwinding, so overlapping signals cannot
 interrupt or repeat cleanup. Cancelled runs cannot produce a complete suite verdict.
+After an integrate timeout returns, owners and worker sessions may still be
+tearing down for a few seconds (grace plus sweep).
 
 The coordinator group runs the entire `test_dispatch.py` module with bytecode
 writes disabled, so newly added test classes are discovered automatically. It
 includes whole-group SIGKILL, both pending INT/TERM orders, terminal Ctrl-C while
 the coordinator is stopped, and integrate-style timeout of TERM-ignoring workers.
-The Python module is one shell assertion; consolidating the previous three
-invocations changes both shell count contracts by exactly -2.
+The Python module remains one shell assertion, so adding Python cases does not
+change either shell count contract.
 
 For a landing, commit the candidate, run the complete suite on that commit, and
 review that same committed candidate. The `ATTESTATION` line says whether
