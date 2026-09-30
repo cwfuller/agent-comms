@@ -247,6 +247,10 @@ case " $AGENTS " in
   *" grok "*) if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi ;;
   *) say "  grok is not registered here — nothing to allow." ;;
 esac
+case " $AGENTS " in
+  *" gemini "*) say "  gemini reviews run under Gemini's read-only plan mode in an isolated home: an in-process pin (network open,"
+                say "  not a kernel sandbox, not yet measured against a live turn) — no override is needed or offered." ;;
+esac
 
 # ---- 4. Jev routing ---------------------------------------------------------------------------
 say ""
@@ -348,6 +352,16 @@ case "$RT" in auto|"") set_user COMMS_ACP_CODEX_PATH "" ;;
         fi
       else say "  '$RT' is not executable — keeping auto"; set_user COMMS_ACP_CODEX_PATH ""; fi ;;
   *) say "  unrecognised — keeping auto"; set_user COMMS_ACP_CODEX_PATH "" ;; esac
+# The Gemini CLI, when gemini is registered: stated once, from the same machine-readable check doctor uses.
+case " ${AGENTS:-} " in
+  *" gemini "*)
+    gm_out="$("$HERE/acp.sh" runtime-check gemini 2>&1)"; gm_rc=$?
+    if [ "$gm_rc" = 0 ]; then
+      say "  gemini reviewer runtime: $(printf '%s\n' "$gm_out" | awk -F'\t' '$1=="runtime"{print $2}') ($(printf '%s\n' "$gm_out" | awk -F'\t' '$1=="runtime_version"{print $2}')) — supports --acp"
+    else
+      say "  gemini reviewer runtime: every gemini review is REFUSED — $(printf '%s\n' "$gm_out" | sed -n 's/^acp.sh: runtime-check: //p' | head -1)"
+    fi ;;
+esac
 TO="$(ask "  review turn timeout, seconds" "${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}")"
 case "$TO" in ''|*[!0-9]*) say "  not a number — keeping ${COMMS_RUNPHASE_TIMEOUT_SECS:-1800}" ;;
   1800) set_user COMMS_RUNPHASE_TIMEOUT_SECS "" ;; *) set_user COMMS_RUNPHASE_TIMEOUT_SECS "$TO" ;; esac

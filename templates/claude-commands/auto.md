@@ -120,7 +120,8 @@ asked. Do not narrate every dispatch.
      `--roster` validates every name, collapses repeats, and refuses two reviewers on one
      provider. Hold the result as a LIST, never a single scalar copied across write paths.
    - **Naming yourself means your own model.** Every driver has a built-in review twin —
-     `claude-review`, `codex-review`, `grok-review` — with its own inbox and leg thread,
+     `claude-review`, `codex-review`, `grok-review` (and `gemini-review` when `gemini` is
+     enabled on the `agents =` line) — with its own inbox and leg thread,
      running on that driver's model. No config: `--roster` swaps it in whenever `--reviewers`
      names `$SELF` (`--reviewers claude,codex` from Claude resolves to `claude-review,codex`;
      from Grok, `--reviewers grok` resolves to `grok-review`). A request never goes to

@@ -1082,6 +1082,8 @@ cmd_consult() {
   profile="$(profile_for "$agent")"
   [ -n "$profile" ] || die_fb "consult: '$agent' has no ACP profile — use the mailbox path"
   require_node
+  # gemini has no bundled copy: a consult needs a Gemini CLI that has `--acp`, and says so otherwise.
+  if [ "$agent" = gemini ]; then policy_runtime_gemini; [ -z "$RT_ERR" ] || die_fb "consult: $RT_ERR"; fi
   [ -n "$qfile" ] && [ ! -f "$qfile" ] && die_fb "consult: no such file: $qfile"
   [ -n "$qfile" ] || [ "${#words[@]}" -gt 0 ] || die_fb "consult: a question is required (words or --file)"
   # Warm by default: ensure the named per-repo session once, then prompt it.
