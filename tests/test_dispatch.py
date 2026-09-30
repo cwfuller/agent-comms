@@ -237,8 +237,9 @@ JOB_CONTROL
 sleep 60 &
 echo $! > .descendant-pid
 echo $$ > .worker-pid
-# The worker's parent is with-beat, whose parent is the dispatcher.
-ps -p "$PPID" -o ppid= > .dispatcher-pid
+# Worker -> supervisor -> lifeline owner -> dispatcher.
+owner="$(ps -p "$PPID" -o ppid=)"
+ps -p "$owner" -o ppid= > .dispatcher-pid
 wait
 '''.replace('JOB_CONTROL', 'set -m' if nested_group else ':'))
         proc = subprocess.Popen(['bash', 'tests/run.sh'], cwd=self.root,
@@ -309,8 +310,8 @@ def wait_file(path):
     raise AssertionError('worker did not become ready: ' + str(path))
 
 
-def assert_stopped(test, pid):
-    deadline = time.monotonic() + 5
+def assert_stopped(test, pid, timeout=5):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         probe = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
                                capture_output=True, text=True)
@@ -330,6 +331,134 @@ class RunnerOwnership(unittest.TestCase):
     git = CompleteRunner.git
     run_suite = CompleteRunner.run_suite
 
+    def test_group_sigkill_stops_workers_and_nested_groups(self):
+        self.check_group_cancellation(signal.SIGKILL)
+
+    def test_pending_int_then_term_stops_workers_once(self):
+        self.check_group_cancellation(None, (signal.SIGINT, signal.SIGTERM))
+
+    def test_pending_term_then_int_stops_workers_once(self):
+        self.check_group_cancellation(None, (signal.SIGTERM, signal.SIGINT))
+
+    def test_terminal_ctrl_c_with_stopped_dispatcher_stops_workers_once(self):
+        self.check_group_cancellation(signal.SIGINT)
+
+    def test_integrate_timeout_stops_term_ignoring_workers(self):
+        self.check_group_cancellation('timeout')
+
+    def check_group_cancellation(self, sig, pending_signals=()):
+        shutil.copyfile(Path(__file__).parents[1] / 'helpers/comms.sh',
+                        self.root / 'helpers/comms.sh')
+        # Observe cleanup entry in the copied code, without changing its signal
+        # handling, scheduling, lifeline or session-sweep logic.
+        source = self.root / 'tests/dispatch.py'
+        lines = source.read_text().splitlines(keepends=True)
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].startswith(('def stop_workers(', 'def stop_owners(')):
+                marker = '.worker-cleanup' if lines[i].startswith('def stop_workers(') else '.dispatch-cleanup'
+                lines.insert(i + 1, f"    with open('{marker}', 'a') as probe: probe.write('cleanup\\n')\n")
+        source.write_text(''.join(lines))
+        (self.root / 'tests/worker.sh').write_text('''#!/bin/bash
+trap '' INT TERM
+set -m
+bash -c 'trap "" INT TERM; echo $$ > .descendant-pid; exec sleep 60' &
+echo $$ > .worker-pid
+echo "$PPID" > .supervisor-pid
+wait
+''')
+        command = ['bash', 'tests/run.sh']
+        if sig == 'timeout':
+            command = [str(self.root / 'helpers/comms.sh'), 'presence', 'with-beat',
+                       '--no-heartbeat', '--name', 'timeout-probe',
+                       '--instance', '00000000000000000000000000000001',
+                       '--timeout-secs', '2', '--', *command]
+        proc = subprocess.Popen(command, cwd=self.root,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+        groups = set()
+        dispatcher_pid = None
+        owner_pid = None
+        try:
+            for name in ('descendant', 'worker', 'supervisor'):
+                wait_file(self.root / ('.' + name + '-pid'))
+            pids = [int((self.root / ('.' + name + '-pid')).read_text())
+                    for name in ('supervisor', 'worker', 'descendant')]
+            groups = {os.getpgid(pid) for pid in pids}
+            children = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True)
+            parents = dict((int(pid), int(parent)) for pid, parent in
+                           (line.split() for line in children.splitlines()))
+            run_pid = proc.pid
+            if sig == 'timeout':
+                # The helper runs the suite in its own job-control process group.
+                run_pid, = [pid for pid, parent in parents.items() if parent == proc.pid]
+            dispatcher_pid, = [int(pid) for pid, parent in
+                               (line.split() for line in children.splitlines())
+                               if int(parent) == run_pid]
+            run_pgid = os.getpgid(run_pid)
+            self.assertEqual(os.getpgid(dispatcher_pid), run_pgid)
+            owner_pid = parents[pids[0]]
+            if owner_pid != dispatcher_pid:
+                self.assertNotEqual(os.getpgid(owner_pid), run_pgid)
+            if pending_signals or sig == signal.SIGINT:
+                os.kill(dispatcher_pid, signal.SIGSTOP)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    state = subprocess.check_output(
+                        ['ps', '-p', str(dispatcher_pid), '-o', 'stat='], text=True).strip()
+                    if state.startswith('T'):
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(state.startswith('T'), 'dispatcher never stopped')
+                if pending_signals:
+                    for pending in pending_signals:
+                        os.kill(dispatcher_pid, pending)
+                else:
+                    # INT reaches run.sh too; its EXIT trap then queues TERM.
+                    os.killpg(run_pgid, signal.SIGINT)
+                    time.sleep(0.5)
+                os.kill(dispatcher_pid, signal.SIGCONT)
+            elif sig != 'timeout':
+                os.killpg(run_pgid, sig)
+            out, err = proc.communicate(timeout=20)
+            if sig == signal.SIGKILL:
+                self.assertEqual(proc.returncode, -sig, out + err)
+            elif sig == 'timeout':
+                self.assertEqual(proc.returncode, 124, out + err)
+            else:
+                self.assertIn(proc.returncode, (130, 143), out + err)
+            self.assertNotIn('ATTESTATION: recorded', out)
+            self.assertNotIn('passed:', out)
+            # Group KILL returns before the independent owner's five-second
+            # grace starts. Allow that grace plus the session sweep to finish.
+            assert_stopped(self, owner_pid, timeout=15)
+            for pid in [dispatcher_pid, *pids]:
+                assert_stopped(self, pid)
+            self.assertEqual((self.root / '.worker-cleanup').read_text().splitlines(), ['cleanup'])
+            if sig not in (signal.SIGKILL, 'timeout'):
+                self.assertEqual((self.root / '.dispatch-cleanup').read_text().splitlines(), ['cleanup'])
+        finally:
+            # The negative control deliberately leaks. Remove all fixture groups,
+            # including the worker's separate job-control group, even on failure.
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            if dispatcher_pid is not None:
+                try:
+                    os.kill(dispatcher_pid, signal.SIGCONT)
+                    os.kill(dispatcher_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            if owner_pid is not None and owner_pid != dispatcher_pid:
+                try:
+                    os.kill(owner_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate(timeout=20)
+
     def test_killing_run_sh_stops_all_worker_session_members(self):
         shutil.copyfile(Path(__file__).parents[1] / 'helpers/comms.sh',
                         self.root / 'helpers/comms.sh')
@@ -338,14 +467,16 @@ set -m
 bash -c 'trap "" INT TERM; echo $$ > .descendant-pid; exec sleep 60' &
 echo $$ > .worker-pid
 echo "$PPID" > .supervisor-pid
-ps -p "$PPID" -o ppid= > .dispatcher-pid
+owner="$(ps -p "$PPID" -o ppid=)"
+echo "$owner" > .owner-pid
+ps -p "$owner" -o ppid= > .dispatcher-pid
 wait
 ''')
         # Target only run.sh, never the launcher's group: workers live in their
         # own sessions, including a descendant in a separate job-control group.
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
             with self.subTest(signal=sig):
-                for name in ('worker', 'descendant', 'supervisor', 'dispatcher'):
+                for name in ('worker', 'descendant', 'supervisor', 'dispatcher', 'owner'):
                     (self.root / ('.' + name + '-pid')).unlink(missing_ok=True)
                 proc = subprocess.Popen(['bash', 'tests/run.sh'], cwd=self.root,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -361,7 +492,7 @@ wait
                                      -sig if sig == signal.SIGKILL else 128 + sig, out + err)
                     self.assertNotIn('worker cleanup failed', err)
                     self.assertNotIn('ATTESTATION: recorded', out)
-                    for pid in (supervisor, dispatcher_pid,
+                    for pid in (supervisor, dispatcher_pid, int((self.root / '.owner-pid').read_text()),
                                 int((self.root / '.worker-pid').read_text()),
                                 int((self.root / '.descendant-pid').read_text())):
                         assert_stopped(self, pid)
@@ -426,6 +557,43 @@ trap 'rm -rf "$lease"' EXIT
 
 
 class WorkerLifecycle(unittest.TestCase):
+    def test_pending_signal_orders_enter_cleanup_once(self):
+        # Real pending POSIX signals, with spawning/session inspection replaced
+        # only here so this isolates the Python handler/unwind race itself.
+        for first, second in ((signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)):
+            with self.subTest(order=(first, second)), tempfile.TemporaryDirectory() as temp:
+                script = '''
+import importlib.util, os, signal, sys
+from pathlib import Path
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('dispatch', sys.argv[1])
+d = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(d)
+for sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, d.interrupted)
+def launch(*args, **kwargs):
+    os.kill(os.getpid(), int(sys.argv[3]))
+    os.kill(os.getpid(), int(sys.argv[4]))
+    return object()
+calls = []
+def cleanup(active):
+    calls.append(len(active))
+    assert all(signal.getsignal(sig) == signal.SIG_IGN for sig in (signal.SIGINT, signal.SIGTERM))
+    for _, _, _, fd in active.values(): os.close(fd)
+with patch.object(d.subprocess, 'Popen', launch), patch.object(d, 'stop_owners', cleanup):
+    try:
+        d.run_workers(Path(sys.argv[2]), 'probe', Path(sys.argv[2]), [('presence', 'serial')], 1)
+    except KeyboardInterrupt:
+        pass
+assert calls == [1], calls
+print('cleanup exactly once')
+'''
+                run = subprocess.run([sys.executable, '-B', '-c', script,
+                                      str(Path(dispatch.__file__).resolve()), temp,
+                                      str(first), str(second)], capture_output=True, text=True, timeout=10)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual(run.stdout.strip(), 'cleanup exactly once')
+
     def test_inspection_failure_is_not_proof_of_process_exit(self):
         for rc, error in ((1, 'ps: Operation not permitted'), (0, '')):
             with self.subTest(status=rc):

@@ -28,9 +28,23 @@ an earlier run cannot share the new worker's supervisor identity. `run.sh` traps
 EXIT, INT and TERM, signals the coordinator and waits for its worker session sweep
 before removing results. The coordinator also checks its parent every scheduling
 poll (normally 0.1 seconds); if `run.sh` is killed with SIGKILL, reparenting triggers
-the same cleanup. Cleanup signals supervisors, allows up to 15 seconds for them
-to finish, then kills remaining groups in each owned session, including nested
-job-control groups. Cancelled runs cannot produce a complete suite verdict.
+cleanup. Each worker also has a lifeline owner in a separate session. Only the
+coordinator holds the pipe's write end; killing the entire run/coordinator group
+closes it, so the owner survives to sweep the worker session on EOF. The owner
+retains the unreaped supervisor PID through the sweep, including on ordinary
+completion. Cleanup signals supervisors, allows up to 5 seconds for them to
+finish (matching integrate's TERM-to-KILL window), then kills remaining groups in
+each owned session, including nested job-control groups. The coordinator may be
+killed during that window; lifeline owners continue independently. Cancellation
+handlers ignore further INT/TERM before unwinding, so overlapping signals cannot
+interrupt or repeat cleanup. Cancelled runs cannot produce a complete suite verdict.
+
+The coordinator group runs the entire `test_dispatch.py` module with bytecode
+writes disabled, so newly added test classes are discovered automatically. It
+includes whole-group SIGKILL, both pending INT/TERM orders, terminal Ctrl-C while
+the coordinator is stopped, and integrate-style timeout of TERM-ignoring workers.
+The Python module is one shell assertion; consolidating the previous three
+invocations changes both shell count contracts by exactly -2.
 
 For a landing, commit the candidate, run the complete suite on that commit, and
 review that same committed candidate. The `ATTESTATION` line says whether

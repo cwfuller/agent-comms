@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import resource
 import secrets
+import select
 import signal
 import subprocess
 import sys
@@ -102,7 +103,7 @@ def kill_worker_session(proc):
                     raise
 
 
-def stop_workers(active, sig, grace=15):
+def stop_workers(active, sig, grace=5):
     # Do not poll/wait/send_signal until session cleanup: each can reap the
     # supervisor and release the PID that proves ownership of nested job groups.
     pending = [proc for proc, *_ in active.values() if proc.returncode is None]
@@ -136,6 +137,71 @@ def stop_workers(active, sig, grace=15):
             pending.remove(proc)
         if pending:
             time.sleep(0.05)
+
+
+def ignore_cancellation():
+    # Block both while replacing handlers: another pending signal must not raise
+    # between the first handler update and the second, or while unwinding to cleanup.
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    handlers = {sig: signal.signal(sig, signal.SIG_IGN)
+                for sig in (signal.SIGINT, signal.SIGTERM)}
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+    return handlers
+
+
+def interrupted(signum, _frame):
+    ignore_cancellation()
+    raise KeyboardInterrupt(signum)
+
+
+def own_worker(lifeline, command):
+    """Outside the run's group, retain the supervisor PID until its session is swept."""
+    proc = None
+    try:
+        # EOF before launch means the dispatcher already died. Only it holds the
+        # write end; neither this owner nor the supervisor/worker inherits it.
+        if select.select([lifeline], [], [], 0)[0]:
+            raise RuntimeError('dispatcher exited before worker launch')
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+        try:
+            proc = subprocess.Popen(command, start_new_session=True, preexec_fn=reset_signals)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        while True:
+            if select.select([lifeline], [], [], 0.1)[0]:
+                raise RuntimeError('dispatcher exited; cancelling worker session')
+            # poll() would reap the session leader, releasing its identity before
+            # the sweep. Inspect without reaping, including on ordinary completion.
+            state = subprocess.check_output(
+                ['ps', '-p', str(proc.pid), '-o', 'stat='], text=True).strip()
+            if not state:
+                raise RuntimeError('cannot inspect unreaped worker supervisor')
+            if state.startswith('Z'):
+                # Still inside the protected try: cancellation here takes the
+                # exception cleanup path, rather than interrupting the else block.
+                ignore_cancellation()
+                break
+    except BaseException:
+        ignore_cancellation()
+        if proc is not None:
+            stop_workers({'worker': (proc,)}, signal.SIGTERM)
+        raise
+    else:
+        # Block cancellation through normal cleanup too; a cancelled completion
+        # cannot enter the exception path and sweep the same session twice.
+        kill_worker_session(proc)
+        return proc.wait(timeout=5)
+    finally:
+        os.close(lifeline)
+
+
+def stop_owners(active):
+    # Closing every lifeline starts all sweeps concurrently. These owners live
+    # outside the run's group and continue even if integrate kills the dispatcher.
+    for _, _, _, lifeline in active.values():
+        os.close(lifeline)
+    for proc, *_ in active.values():
+        proc.wait(timeout=15)
 
 
 def run_workers(repo, oid, directory, rows, jobs, parent_pid=None):
@@ -172,25 +238,32 @@ def run_workers(repo, oid, directory, rows, jobs, parent_pid=None):
                     # an untracked worker. The child unmasks in reset_signals before exec.
                     previous_mask = signal.pthread_sigmask(
                         signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+                    reader, writer = os.pipe()
                     try:
-                        proc = subprocess.Popen(command, cwd=repo, env=env, stdin=subprocess.DEVNULL,
+                        owner = [sys.executable, str(Path(__file__).resolve()),
+                                 '--own-worker', str(reader), *command]
+                        proc = subprocess.Popen(owner, cwd=repo, env=env, stdin=subprocess.DEVNULL,
                                                 stdout=log, stderr=subprocess.STDOUT,
-                                                start_new_session=True, preexec_fn=reset_signals)
-                        active[name] = (proc, log, time.monotonic())
+                                                start_new_session=True, preexec_fn=reset_signals,
+                                                pass_fds=(reader,))
+                        active[name] = (proc, log, time.monotonic(), writer)
                     except BaseException:
+                        os.close(writer)
                         log.close()
                         raise
                     finally:
+                        os.close(reader)
                         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
                     print('START ' + name, flush=True)
-                for name, (proc, log, started) in list(active.items()):
+                for name, (proc, log, started, lifeline) in list(active.items()):
                     elapsed = time.monotonic() - started
                     if elapsed > 1800 and proc.poll() is None:
                         raise RuntimeError(name + ': exceeded 30 minute worker budget')
                     if proc.poll() is None:
                         continue
+                    del active[name]  # the owner has already swept its worker session
                     log.close()
-                    del active[name]
+                    os.close(lifeline)
                     failed |= proc.returncode != 0
                     timings.append((name, elapsed, proc.returncode))
                     print(f'END {name}: {elapsed:.1f}s, exit {proc.returncode}', flush=True)
@@ -201,16 +274,15 @@ def run_workers(repo, oid, directory, rows, jobs, parent_pid=None):
         check_parent()
     except BaseException:
         # A second cancellation must not interrupt cleanup of the remaining workers.
-        handlers = {sig: signal.signal(sig, signal.SIG_IGN)
-                    for sig in (signal.SIGINT, signal.SIGTERM)}
+        handlers = ignore_cancellation()
         try:
-            stop_workers(active, signal.SIGTERM)
+            stop_owners(active)
         finally:
             for sig, handler in handlers.items():
                 signal.signal(sig, handler)
         raise
     finally:
-        for _, log, _ in active.values():
+        for _, log, _, _ in active.values():
             log.close()
     (directory / 'timings.tsv').write_text(''.join(f'{n}\t{s:.3f}\t{rc}\n' for n, s, rc in timings))
     return not failed
@@ -256,11 +328,11 @@ def main():
 
 
 if __name__ == '__main__':
-    def interrupted(signum, _frame):
-        raise KeyboardInterrupt(signum)
     signal.signal(signal.SIGINT, interrupted)
     signal.signal(signal.SIGTERM, interrupted)
     try:
+        if len(sys.argv) > 1 and sys.argv[1] == '--own-worker':
+            sys.exit(own_worker(int(sys.argv[2]), sys.argv[3:]))
         sys.exit(main())
     except KeyboardInterrupt as exc:
         print('SUITE: interrupted; no verdict', file=sys.stderr)
