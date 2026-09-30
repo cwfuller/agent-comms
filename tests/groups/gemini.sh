@@ -150,7 +150,12 @@ printf '%s\n' "$GM_CFG" > "$WORK/gm-cfg-default.json"; printf '%s\n' "$(gacp "$A
 printf '{"model":{"name":"m"},"modelConfigs":{"customOverrides":[{"match":{"model":"m"},"modelConfig":{"generateContentConfig":{"thinkingConfig":{"thinkingLevel":"MAX"}}}}]}}' > "$WORK/gm-cfg-bad.json"
 gacp "$AP" gemini-effort "$WORK/gm-cfg-bad.json" >/dev/null 2>&1; GM_RC=$?
 [ "$GM_RC" = 1 ] && ok "a thinking level outside the vocabulary reads back as undecidable, never as a match" || fail "an unknown level read back (rc=$GM_RC)"
-[ "$(gacp "$AP" gemini-auth "$HOME/.gemini/settings.json" 2>/dev/null)" = "" ] && ok "gemini-auth of a missing settings file is empty" || fail "gemini-auth invented a value"
+printf '{"security":{"auth":{"selectedType":"oauth-personal"}},"mcpServers":{"x":{}}}' > "$WORK/gm-operator-settings.json"
+printf '{"security":{"auth":{"selectedType":"x\\"y"}}}' > "$WORK/gm-operator-bad.json"
+{ [ "$(gacp "$AP" gemini-auth "$WORK/gm-operator-settings.json")" = oauth-personal ] \
+  && [ -z "$(gacp "$AP" gemini-auth "$WORK/gm-no-such-settings.json")" ] && [ -z "$(gacp "$AP" gemini-auth "$WORK/gm-operator-bad.json")" ]; } \
+  && ok "gemini-auth carries ONE allowlisted token: the selected type; a missing file or a value outside the allowlist gives nothing" \
+  || fail "gemini-auth"
 
 # ---- the preflight and the attestation compare the same policy ----
 gacp "$AP" policy-attest gemini high gemini-3.1-pro-preview --policy-file "$GM_REC" >/dev/null 2>&1; GM_RC=$?
@@ -182,3 +187,154 @@ gfr() { printf '%s\n' "$1" > "$GM_E"; "$AP" failure-reason "${2:-gemini}" "$GM_E
 [ -z "$(gfr 'Error: Internal error')" ] && [ -z "$(gfr 'timed out after 4290 ms')" ] \
   && ok "an unclassifiable refusal, and a number that merely contains 429, classify as nothing" || fail "over-classified"
 [ -z "$(gfr '[error] [429] quota' codex)" ] && ok "only gemini's refusal wording is known: another provider classifies as nothing" || fail "classified a non-gemini provider"
+
+section "gemini: a mounted review turn (stub acpx driving a stub gemini over real ACP)"
+# A real `runphase.sh run --via acp` turn for agent `gemini`, through the mount, the isolated home, the
+# compatibility canary and the broker. acpx is the shared stub; the prompt is a genuine ACP exchange with
+# the stub gemini, so a refusal reaches runphase as acpx's own stderr and exit status would.
+GM="$WORK/gm-turn"; mkdir -p "$GM"
+GM_MBASE="$GM/mbase"; mkdir -p "$GM_MBASE"; GM_MBASE="$(cd "$GM_MBASE" && pwd -P)"
+GM_STORE="$GM_MBASE/agent-comms/mounts"
+mkdir -p "$GM/home/.acpx/sessions" "$GM/home/.acpx/queues" "$GM/home/.gemini"; : > "$GM/home/.acpx-test-store"
+# The operator's own Gemini state: an API-key login, a file-backed OAuth token, and settings that carry
+# things a review turn must NOT inherit (a different model, an MCP server).
+printf '{"security":{"auth":{"selectedType":"gemini-api-key"}},"model":{"name":"operator-model"},"mcpServers":{"operator-server":{"command":"x"}}}\n' > "$GM/home/.gemini/settings.json"
+printf '{"refresh_token":"operator-oauth-token"}\n' > "$GM/home/.gemini/oauth_creds.json"
+printf '{"active":"operator@example.test"}\n' > "$GM/home/.gemini/google_accounts.json"
+GM_OP_SUM="$(cat "$GM/home/.gemini/settings.json" "$GM/home/.gemini/oauth_creds.json" | shasum | cut -d' ' -f1)"
+printf 'agents = claude codex grok gemini\ndefault-target = codex\n' > "$MA_FIX/.comms/config"
+printf '.comms/\n' > "$MA_FIX/.gitignore"
+mkdir -p "$MA_FIX/.comms/to-gemini" "$MA_FIX/.comms/to-claude"
+# A dangling commit: HEAD's tree plus a marker, plus any extra tracked paths. Built in a private index
+# from blobs, so the live checkout is never written to.
+gm_artifact() { # <marker> [extra tracked path...] -> commit sha
+  local marker="$1" idx="$GM/idx.$1" blob t extra; shift
+  rm -f "$idx"
+  GIT_INDEX_FILE="$idx" git -C "$MA_FIX" read-tree HEAD
+  blob="$(printf '%s\n' "$marker" | git -C "$MA_FIX" hash-object -w --stdin)"
+  GIT_INDEX_FILE="$idx" git -C "$MA_FIX" update-index --add --cacheinfo "100644,$blob,gm-marker.txt"
+  for extra in "$@"; do GIT_INDEX_FILE="$idx" git -C "$MA_FIX" update-index --add --cacheinfo "100644,$blob,$extra"; done
+  t="$(GIT_INDEX_FILE="$idx" git -C "$MA_FIX" write-tree)"
+  git -C "$MA_FIX" -c user.email=t@t -c user.name=t commit-tree "$t" -p HEAD -m "artifact $marker"
+}
+GM_HEAD="$(git -C "$MA_FIX" rev-parse HEAD)"
+GM_A1="$(gm_artifact gm-round-1)"
+gm_turn() { # <thread> <tag> <artifact> [env assignments...] -> the run dir
+  local thread="$1" tag="$2" art="$3"; shift 3
+  local msg dir
+  msg="$MA_FIX/.comms/to-gemini/${MA_WS}_2026-09-30T10-00-00_gm-$tag.md"
+  { head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+    printf 'artifact_id: %s\nhead_sha: %s\n' "$art" "$GM_HEAD"
+    tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" | sed -e "s|^thread: ma-arc-1\$|thread: $thread|"
+  } > "$msg"
+  dir="$GM/run-$tag"; mkdir -p "$dir"
+  ( cd "$MA_FIX" && env PATH="$GMB:$AXB:$PATH" HOME="$GM/home" COMMS_MOUNT_BASE="$GM_STORE" \
+      GM_LOG="$GM/stub-$tag.log" GM_ACPX_LOG="$GM/acpx-$tag.log" \
+      COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_RUNPHASE_OWNER_WAIT_SECS=3 \
+      GEMINI_MODEL=operator-model GEMINI_SANDBOX=true GEMINI_CLI=1 \
+      "$@" "$RP" run --message "$msg" --dir "$dir" --provider gemini --via acp --timeout-secs 30 ) >"$dir/stdout.log" 2>"$dir/stderr.log"
+  printf '%s' "$dir"
+}
+gm_res() { python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]+"/result.json"))
+for k in sys.argv[2:]: d=d.get(k) if isinstance(d,dict) else None
+print("<null>" if d is None else d)' "$@" 2>/dev/null; }
+gm_log() { sed -n "s/^$2	//p" "$GM/stub-$1.log" 2>/dev/null | head -1; }      # first value of a stub observation
+gm_events() { (cd "$MA_FIX" && env "$COMMS" events --all --agent gemini --thread "$1" 2>/dev/null); }
+
+GM_D1="$(gm_turn gm-thread t1 "$GM_A1")"
+{ [ "$(gm_res "$GM_D1" status)" = completed ] && [ "$(gm_res "$GM_D1" provider)" = gemini ] && [ -z "$(gm_res "$GM_D1" reason)" ]; } \
+  && ok "a mounted gemini review turn completes and records its result (provider gemini, status completed)" \
+  || fail "gemini turn did not complete: $(tr '\n' ' ' < "$GM_D1/result.json" 2>/dev/null | cut -c1-400) | $(tail -5 "$GM_D1/runner.log" 2>/dev/null | tr '\n' ' ')"
+GM_REPLY="$(ls "$MA_FIX/.comms/to-claude/"*gemini-reply*.md 2>/dev/null | head -1)"
+{ [ -n "$GM_REPLY" ] && grep -q '^from: gemini$' "$GM_REPLY" && grep -q '^verdict: APPROVE$' "$GM_REPLY"; } \
+  && ok "the parent stamps and delivers the review as gemini's, with the verdict the reply carried" \
+  || fail "no stamped gemini reply (got: ${GM_REPLY:-none})"
+{ [ "$(gm_res "$GM_D1" route model)" = gemini-3.1-pro-preview ] && [ "$(gm_res "$GM_D1" route effort)" = high ] \
+  && [ "$(gm_res "$GM_D1" route capability)" = fixed ] && [ "$(gm_res "$GM_D1" route transport)" = acp-mounted ]; } \
+  && ok "result.json's route names what the leg was bound to: gemini-3.1-pro-preview / high, capability fixed" \
+  || fail "result route: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["route"])' "$GM_D1/result.json" 2>&1)"
+
+# ---- usage, read from the CLI's own chat records ----
+# Two answered messages (the canary and the review), each recorded twice by the stub — once without and
+# once with its tokens — so a first-copy-wins or a double count gives a different number: input 100+0
+# per response, cached 40, output 20, thoughts 10.
+{ [ "$(gm_res "$GM_D1" usage source)" = gemini-chat-record ] && [ "$(gm_res "$GM_D1" usage responses)" = 2 ] \
+  && [ "$(gm_res "$GM_D1" usage input_tokens)" = 200 ] && [ "$(gm_res "$GM_D1" usage cached_input_tokens)" = 80 ] \
+  && [ "$(gm_res "$GM_D1" usage output_tokens)" = 60 ] && [ "$(gm_res "$GM_D1" usage reasoning_output_tokens)" = 20 ] \
+  && [ "$(gm_res "$GM_D1" usage total_tokens)" = 260 ]; } \
+  && ok "usage lands in result.json from the gemini chat record, each response counted once (input 200, output 60, total 260)" \
+  || fail "gemini usage: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["usage"])' "$GM_D1/result.json" 2>&1)"
+{ [ "$(gm_res "$GM_D1" usage cache_write_input_tokens)" = "<null>" ] && [ "$(gm_res "$GM_D1" rate_limits)" = "<null>" ]; } \
+  && ok "what gemini does not record is null (cache writes, rate limits), never 0" || fail "missing gemini fields were not null"
+
+# ---- the isolation the CLI actually saw ----
+GM_HOME_SEEN="$(gm_log t1 gemini_cli_home)"
+{ [ -n "$GM_HOME_SEEN" ] && [ "$GM_HOME_SEEN" != "$GM/home" ] && case "$GM_HOME_SEEN" in "$GM_STORE"/*/home) true ;; *) false ;; esac; } \
+  && ok "the CLI ran with GEMINI_CLI_HOME at a parent-owned home beside the mount, not the operator's" || fail "GEMINI_CLI_HOME was '$GM_HOME_SEEN'"
+GM_SET="$(gm_log t1 settings)"
+GM_SETCHK="$(printf '%s' "$GM_SET" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+ov=d["modelConfigs"]["customOverrides"][0]
+print(d["model"]["name"], ov["modelConfig"]["generateContentConfig"]["thinkingConfig"]["thinkingLevel"],
+      d["security"]["auth"]["selectedType"], "mcpServers" in d, d["general"]["plan"]["modelRouting"])' 2>&1)"
+[ "$GM_SETCHK" = "gemini-3.1-pro-preview HIGH gemini-api-key False False" ] \
+  && ok "the settings the CLI read bind the leg's model and thinking level, carry only the auth TYPE, and drop the operator's model and MCP server" \
+  || fail "isolated settings as the CLI saw them: $GM_SETCHK ($GM_SET)"
+{ [ "$(gm_log t1 env_GEMINI_MODEL)" = '<unset>' ] && [ "$(gm_log t1 env_GEMINI_SANDBOX)" = '<unset>' ] && [ "$(gm_log t1 env_GEMINI_CLI)" = '<unset>' ]; } \
+  && ok "the precedence traps are scrubbed: GEMINI_MODEL, GEMINI_SANDBOX and the driver's GEMINI_CLI marker never reach the CLI" \
+  || fail "inherited Gemini env reached the CLI (model=$(gm_log t1 env_GEMINI_MODEL) sandbox=$(gm_log t1 env_GEMINI_SANDBOX) cli=$(gm_log t1 env_GEMINI_CLI))"
+{ [ "$(gm_log t1 cred_oauth_creds.json)" = '{"refresh_token":"operator-oauth-token"} mode=600' ] \
+  && [ "$(gm_log t1 cred_google_accounts.json)" = '{"active":"operator@example.test"} mode=600' ]; } \
+  && ok "the operator's file-backed login keeps working: the OAuth files are copied into the isolated home at mode 600" \
+  || fail "credentials as the CLI saw them: $(gm_log t1 cred_oauth_creds.json) / $(gm_log t1 cred_google_accounts.json)"
+[ "$(cat "$GM/home/.gemini/settings.json" "$GM/home/.gemini/oauth_creds.json" | shasum | cut -d' ' -f1)" = "$GM_OP_SUM" ] \
+  && ok "the operator's own ~/.gemini is untouched by the turn" || fail "the operator's Gemini files changed"
+[ "$(gm_log t1 argv)" = "--acp" ] \
+  && ok "gemini is launched as plain 'gemini --acp' (no deprecated flag, no model flag: the settings bind it)" || fail "gemini argv was '$(gm_log t1 argv)'"
+{ grep -qF -- "--model gemini-3.1-pro-preview" "$GM/acpx-t1.log" && [ "$(gm_log t1 set_model)" = gemini-3.1-pro-preview ]; } \
+  && ok "acpx is handed the leg's model on its calls and sets it on the session" \
+  || fail "the model was not bound through acpx (acpx log: $(head -2 "$GM/acpx-t1.log" | tr '\t\n' '  '))"
+{ grep -qF -- "--approve-reads" "$GM/acpx-t1.log" && ! grep -qF -- "--approve-all" "$GM/acpx-t1.log"; } \
+  && ok "the plan-mode backend narrows permissions (--approve-reads, never --approve-all): the pin is part of the boundary" \
+  || fail "gemini ran under the wide permission shape"
+grep -q 'set-mode plan' "$GM_D1/runner.log" \
+  && ok "the session is pinned to plan mode before the canary" || fail "no plan-mode pin: $(grep -i 'set-mode' "$GM_D1/runner.log" | head -2)"
+grep -q '^isolation: provider=gemini backend=gemini-plan' "$GM_D1/runner.log" \
+  && ok "the run records its isolation backend (gemini-plan)" || fail "no isolation record: $(grep -i isolation "$GM_D1/runner.log" | head -2)"
+
+# ---- attestation evidence ----
+GM_TSV="$(cat "$GM_D1/turn.tsv" 2>/dev/null)"
+{ [ "$(gv "$GM_TSV" observed_model)" = gemini-3.1-pro-preview ] && [ "$(gv "$GM_TSV" observed_effort)" = high ] \
+  && [ "$(gv "$GM_TSV" evidence_source)" = gemini-chat-record+settings-readback ] && [ "$(gv "$GM_TSV" adapter_check)" = match ]; } \
+  && ok "turn.tsv records the preflight match and the attested pair, and names its evidence: the chat record plus the settings read-back" \
+  || fail "turn.tsv: $(printf '%s' "$GM_TSV" | tr '\t\n' '= ' | cut -c1-500)"
+
+# ---- a stale credential does not outlive its source (same thread: the home is reused) ----
+rm -f "$GM/home/.gemini/oauth_creds.json"
+GM_D2="$(gm_turn gm-thread t2 "$GM_A1")"
+{ [ "$(gm_res "$GM_D2" status)" = completed ] && [ "$(gm_log t2 cred_oauth_creds.json)" = '<absent>' ]; } \
+  && ok "a credential the operator removed is cleared from the reused isolated home, not run on" \
+  || fail "the stale OAuth file survived (status=$(gm_res "$GM_D2" status), saw: $(gm_log t2 cred_oauth_creds.json))"
+printf '{"refresh_token":"operator-oauth-token"}\n' > "$GM/home/.gemini/oauth_creds.json"
+
+# ---- failures are recorded, with their reasons ----
+GM_D3="$(gm_turn gm-auth t3 "$GM_A1" GM_MODE=auth)"
+{ [ "$(gm_res "$GM_D3" status)" = failed ] && [ "$(gm_res "$GM_D3" reason)" = auth-failed ] \
+  && gm_res "$GM_D3" note | grep -qF "gemini refused the turn: authentication failed"; } \
+  && ok "an authentication failure is a FAILED turn with reason auth-failed and a note that says what to do" \
+  || fail "auth failure: $(tr '\n' ' ' < "$GM_D3/result.json" | cut -c1-500)"
+GM_D4="$(gm_turn gm-rate t4 "$GM_A1" GM_MODE=ratelimit)"
+{ [ "$(gm_res "$GM_D4" status)" = failed ] && [ "$(gm_res "$GM_D4" reason)" = rate-limited ] \
+  && gm_res "$GM_D4" note | grep -qF "a rate limit or quota is exhausted"; } \
+  && ok "a rate limit at the canary is a FAILED turn with reason rate-limited (the review prompt is never spent)" \
+  || fail "canary rate limit: $(tr '\n' ' ' < "$GM_D4/result.json" | cut -c1-500)"
+GM_D5="$(gm_turn gm-rate2 t5 "$GM_A1" GM_MODE=ratelimit-real)"
+{ [ "$(gm_res "$GM_D5" status)" = failed ] && [ "$(gm_res "$GM_D5" reason)" = rate-limited ] \
+  && gm_res "$GM_D5" note | grep -qF "a rate limit or quota is exhausted" && gm_events gm-rate2 | grep -q 'provider-result.*reason=rate-limited'; } \
+  && ok "a rate limit on the REVIEW prompt (the canary passed) is a failed turn with reason rate-limited, on the provider-result event too" \
+  || fail "real-prompt rate limit: $(tr '\n' ' ' < "$GM_D5/result.json" | cut -c1-400); events: $(gm_events gm-rate2 | cut -c1-200 | tr '\n' '|')"
+GM_NREP="$(ls "$MA_FIX/.comms/to-claude/" 2>/dev/null | grep -c 'gemini-reply' || true)"
+[ "$GM_NREP" = 2 ] && ok "no review was published for any refused turn (only the two completed turns reply)" || fail "a refused turn published a reply ($GM_NREP gemini replies)"
