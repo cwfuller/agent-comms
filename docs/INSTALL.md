@@ -38,7 +38,7 @@ kernel sandbox; `claude` was measured write-contained but still reaches the netw
 behavioural defence rather than a kernel boundary. Both measurements are due a re-probe on
 current adapters and on the installed codex runtime reviewers now use (docs/ROADMAP.md).
 
-`gemini` (opt-in; needs the Gemini CLI >= 0.33.0) reviews in an isolated `GEMINI_CLI_HOME` under
+`gemini` (opt-in; needs the Gemini CLI >= 0.39.0) reviews in an isolated `GEMINI_CLI_HOME` under
 Gemini's read-only `plan` mode, pinned and confirmed before the canary, with permissions narrowed to
 reads. That is an in-process pin like `claude`'s, not a kernel sandbox: the child's network is open, the
 copied OAuth token (if you log in with Google rather than an API key or the keychain) is readable, and the

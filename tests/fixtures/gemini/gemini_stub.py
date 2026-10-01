@@ -15,6 +15,7 @@ Levers (environment):
   GM_MODE           ok (default) | auth (session/new refuses: Authentication required)
                     | ratelimit (every prompt refused with a 429) | ratelimit-real (only the prompt
                     AFTER the first one is refused: the canary passes, the review is refused)
+                    | ratelimit-partial (as ratelimit-real, but the review streams some text first)
   GM_ANSWER_FILE    a file whose bytes are the reply to a non-canary prompt
   GM_ANSWER_MODEL   the model the chat record names (default: the model in force)
   GM_NO_MODEL       write the answered message with no model field
@@ -67,7 +68,7 @@ def settings():
 
 cfg = settings()
 log("settings", json.dumps(cfg, sort_keys=True, separators=(",", ":")))
-for name in ("oauth_creds.json", "google_accounts.json"):
+for name in ("oauth_creds.json", "google_accounts.json", "gemini-credentials.json"):
     p = os.path.join(gdir, name)
     if os.path.isfile(p):
         with open(p) as fh:
@@ -175,7 +176,10 @@ for line in sys.stdin:
         if mode == "auth":
             fail(rid, -32000, "Authentication required.")
             continue
-        if mode == "ratelimit" or (mode == "ratelimit-real" and state["prompts"] > 1):
+        if mode == "ratelimit-partial" and state["prompts"] > 1:
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "stub-session-1", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "VERDICT: APPR"}}}})
+        if mode == "ratelimit" or (mode in ("ratelimit-real", "ratelimit-partial") and state["prompts"] > 1):
             fail(rid, -32603, "[429] You have exhausted your capacity on this model. Your quota will reset after 59m30s.",
                  {"status": 429})
             continue

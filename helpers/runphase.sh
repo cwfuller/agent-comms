@@ -3638,8 +3638,8 @@ cmd_run() {
           #
           # CREDENTIALS STAY USABLE, by three routes that need no copy of a secret into the review home:
           # an API key or Vertex setting in the ENVIRONMENT is inherited as it is; a login kept in the OS
-          # keychain does not depend on the home at all. The one file-backed login, the OAuth token, is
-          # copied fresh (oauth_creds.json, google_accounts.json) exactly as codex's auth.json is, with the
+          # keychain does not depend on the home at all. The file-backed logins (the OAuth token and the CLI's
+          # credential store) are copied fresh exactly as codex's auth.json is, with the
           # same residual: the reviewer can read it. And the operator's selected auth TYPE is carried into
           # the isolated settings, because without it a home with no settings asks interactively.
           #
@@ -3674,7 +3674,12 @@ cmd_run() {
           fi
           rm -f "$acp_iso_home"/.stage.* 2>/dev/null || true
           local acp_gm_src="${GEMINI_CLI_HOME:-$HOME}/.gemini" acp_gm_f
-          for acp_gm_f in oauth_creds.json google_accounts.json; do
+          # gemini-credentials.json is the file-backed store the CLI uses when no native keychain is
+          # available (or GEMINI_FORCE_FILE_STORAGE is set), and the one it migrates a copied legacy
+          # token INTO and then prefers. All three are mirrored from the source every round — copied when
+          # present, cleared when not — so a rotated or removed login (and a token the CLI migrated into
+          # this reused home) cannot outlive its source.
+          for acp_gm_f in oauth_creds.json google_accounts.json gemini-credentials.json; do
             if [ -f "$acp_gm_src/$acp_gm_f" ] && [ ! -L "$acp_gm_src/$acp_gm_f" ]; then
               ABORT_NOTE="refused: could not stage isolated $acp_gm_f for '$provider'"
               _iso_place "$acp_gm_src/$acp_gm_f" "$acp_gm_dir/$acp_gm_f" 600 \
@@ -4063,9 +4068,12 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     if [ "$acp_rc" -ne 0 ] && [ "$acp_rc" -ne 3 ]; then
       acp_fail_cls="$(acp_failure_reason "$provider" "$run_dir/prompt.err")"
     fi
-    if [ "$acp_rc" -ne 0 ] && [ "$acp_rc" -ne 3 ] && [ ! -s "$run_dir/reply-raw.md" ]; then
-      # A provider that SAID why it refused is recorded under that reason instead of the bare observation.
-      acp_reason="${acp_fail_cls:-no-output}"
+    if [ -n "$acp_fail_cls" ]; then
+      # A provider that SAID why it refused is recorded under that reason whatever it streamed first: a
+      # 429 that lands after partial output is still a rate limit, and the operator acts on that.
+      acp_reason="$acp_fail_cls"
+    elif [ "$acp_rc" -ne 0 ] && [ "$acp_rc" -ne 3 ] && [ ! -s "$run_dir/reply-raw.md" ]; then
+      acp_reason=no-output
     fi
     log_event provider-result "$([ "$acp_rc" -eq 0 ] && echo completed || echo failed)" \
       "exit=$acp_rc elapsed=${acp_elapsed}s budget=${timeout}s via=acp${acp_reason:+ reason=$acp_reason}"

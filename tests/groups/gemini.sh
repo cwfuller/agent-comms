@@ -61,6 +61,35 @@ GM_OUT="$(gacp GM_VERSION=0.32.9 "$AP" consult gemini hello 2>&1)"; GM_RC=$?
 { [ "$GM_RC" = 1 ] && printf '%s' "$GM_OUT" | grep -qF "gemini 0.32.9 has no --acp flag" && printf '%s' "$GM_OUT" | grep -qF "mailbox path"; } \
   && ok "a consult on a gemini without --acp is refused with the mailbox fallback" || fail "consult on an old gemini (rc=$GM_RC out=$GM_OUT)"
 
+# ---- the mounted-review floor: 0.33-0.38 have --acp but write chat records the attestation cannot read ----
+gacp GM_VERSION=0.38.9 "$AP" supports gemini && gacp GM_VERSION=0.33.0 "$AP" supports gemini \
+  && ok "supports gemini needs only --acp: 0.33.0 through 0.38.9 are still accepted (a consult publishes no review)" || fail "supports refused a gemini with --acp"
+GM_OUT="$(gacp GM_VERSION=0.38.9 "$AP" runtime-check gemini 2>"$WORK/gm-rc.err")"; GM_RC=$?
+{ [ "$GM_RC" = 1 ] && [ "$(gv "$GM_OUT" runtime_version)" = 0.38.9 ] && grep -qF "gemini 0.38.9 cannot back a mounted review" "$WORK/gm-rc.err" \
+  && grep -qF "first written by 0.39.0" "$WORK/gm-rc.err"; } \
+  && ok "runtime-check refuses a gemini below 0.39.0 (legacy .json chat records) before any prompt is spent, naming the version" \
+  || fail "runtime-check 0.38.9 (rc=$GM_RC err=$(cat "$WORK/gm-rc.err"))"
+gacp GM_VERSION=0.39.0 "$AP" runtime-check gemini >/dev/null 2>&1; GM_RC=$?
+[ "$GM_RC" = 0 ] && ok "runtime-check accepts 0.39.0, the first build with the .jsonl chat record" || fail "0.39.0 refused (rc=$GM_RC)"
+GM_OUT="$(gacp GM_VERSION=0.38.9 "$AP" doctor 2>&1)"; GM_RC=$?
+{ [ "$GM_RC" = 4 ] && printf '%s\n' "$GM_OUT" | grep -qF "(version 0.38.9) — REFUSED: gemini 0.38.9 cannot back a mounted review"; } \
+  && ok "doctor fails on a gemini below the mounted-review floor" || fail "doctor 0.38.9 (rc=$GM_RC)"
+GM_OUT="$(gacp GM_VERSION=0.38.9 "$AP" capabilities 2>&1)"
+printf '%s\n' "$GM_OUT" | grep -qF "reviewer gemini runtime: $GMB/gemini (version 0.38.9) — REFUSED: gemini 0.38.9 cannot back a mounted review" \
+  && ok "capabilities reports the floor refusal with the version" || fail "capabilities 0.38.9"
+GM_OUT="$(gacp GM_VERSION=0.38.9 "$AP" resolve gemini 2>&1 >/dev/null)"; GM_RC=$?
+{ [ "$GM_RC" = 1 ] && printf '%s' "$GM_OUT" | grep -qF "cannot back a mounted review"; } \
+  && ok "resolve refuses a gemini below the floor, so a mounted turn never starts on records it cannot attest" || fail "resolve 0.38.9 (rc=$GM_RC)"
+
+# ---- a DISABLED model is reported unrunnable by the diagnostics, as resolve refuses it ----
+GM_OUT="$(gacp COMMS_ACP_GEMINI_MODEL=gemini-4-pro "$AP" runtime-check gemini 2>/dev/null)"; GM_RC=$?
+{ [ "$GM_RC" = 4 ] && printf '%s\n' "$GM_OUT" | awk -F'\t' '$1=="baseline" && $2=="gemini-4-pro" && $5=="refused" && $6 ~ /is disabled in the policy map/ {f=1} END{exit !f}'; } \
+  && ok "runtime-check with the disabled Gemini 4 pinned: rows refused (exit 4), naming the disabled model" \
+  || fail "runtime-check on a disabled pin (rc=$GM_RC out=$GM_OUT)"
+GM_OUT="$(gacp COMMS_ACP_GEMINI_MODEL=gemini-4-pro "$AP" doctor 2>&1)"; GM_RC=$?
+{ [ "$GM_RC" = 4 ] && printf '%s\n' "$GM_OUT" | grep -qF "default gemini review: gemini-4-pro (pin) — CANNOT RUN: model 'gemini-4-pro' (pin) is disabled in the policy map"; } \
+  && ok "doctor agrees with resolve: a pinned disabled model CANNOT RUN" || fail "doctor on a disabled pin (rc=$GM_RC)"
+
 # ---- capabilities ----
 GM_OUT="$(gacp "$AP" capabilities 2>&1)"
 { printf '%s\n' "$GM_OUT" | grep -qF "reviewer gemini runtime: $GMB/gemini (version 0.62.0)" \
@@ -161,6 +190,14 @@ printf '{"security":{"auth":{"selectedType":"x\\"y"}}}' > "$WORK/gm-operator-bad
   && [ -z "$(gacp "$AP" gemini-auth "$WORK/gm-no-such-settings.json")" ] && [ -z "$(gacp "$AP" gemini-auth "$WORK/gm-operator-bad.json")" ]; } \
   && ok "gemini-auth carries ONE allowlisted token: the selected type; a missing file or a value outside the allowlist gives nothing" \
   || fail "gemini-auth"
+printf '{\n  // the account I use for work\n  "ui": {"url": "http://x.test//y"}, /* block */\n  "security": {"auth": {"selectedType": "oauth-personal" /* personal */}}\n}\n' > "$WORK/gm-operator-commented.json"
+printf '{"security":{"auth":{"selectedType":"oauth-personal"}} // trailing\n}' > "$WORK/gm-operator-commented2.json"
+{ [ "$(gacp "$AP" gemini-auth "$WORK/gm-operator-commented.json")" = oauth-personal ] && [ "$(gacp "$AP" gemini-auth "$WORK/gm-operator-commented2.json")" = oauth-personal ]; } \
+  && ok "gemini-auth reads a settings.json with // and /* */ comments (a // inside a string is not one), as the CLI does" \
+  || fail "a commented settings.json lost the auth selection"
+printf '{"x":"// not a comment","security":{"auth":{"selectedType":"gemini-api-key"}}}' > "$WORK/gm-operator-str.json"
+[ "$(gacp "$AP" gemini-auth "$WORK/gm-operator-str.json")" = gemini-api-key ] \
+  && ok "a comment marker inside a string value is left alone" || fail "a string containing // broke the parse"
 
 # ---- the preflight and the attestation compare the same policy ----
 gacp "$AP" policy-attest gemini high gemini-3.1-pro-preview --policy-file "$GM_REC" >/dev/null 2>&1; GM_RC=$?
@@ -189,6 +226,8 @@ gfr() { printf '%s\n' "$1" > "$GM_E"; "$AP" failure-reason "${2:-gemini}" "$GM_E
   && ok "an authentication refusal classifies as auth-failed" || fail "auth classification"
 [ "$(gfr '[error] 429 unauthorized credentials')" = rate-limited ] \
   && ok "when both match the rate limit wins (a 429 body can mention credentials)" || fail "rate/auth precedence"
+[ "$(gfr 'Gemini API key is missing or not configured.')" = auth-failed ] \
+  && ok "the CLI's own missing-credentials wording classifies as auth-failed" || fail "missing API key not classified"
 [ -z "$(gfr 'Error: Internal error')" ] && [ -z "$(gfr 'timed out after 4290 ms')" ] \
   && ok "an unclassifiable refusal, and a number that merely contains 429, classify as nothing" || fail "over-classified"
 [ -z "$(gfr '[error] [429] quota' codex)" ] && ok "only gemini's refusal wording is known: another provider classifies as nothing" || fail "classified a non-gemini provider"
@@ -374,5 +413,28 @@ GM_D9="$(gm_turn gm-preflight t9 "$GM_A1" GM_SHOW_MODEL=gemini-2.5-pro)"
 { [ "$(gm_res "$GM_D9" status)" = failed ] && [ "$(gm_res "$GM_D9" reason)" = policy-unapplied ] && ! grep -q '^prompt_bytes' "$GM/stub-t9.log" 2>/dev/null; } \
   && ok "a session acpx reports on another model is refused before the canary: no prompt reached gemini" \
   || fail "preflight mismatch: status=$(gm_res "$GM_D9" status) reason=$(gm_res "$GM_D9" reason) prompts=$(grep -c '^prompt_bytes' "$GM/stub-t9.log" 2>/dev/null)"
+# ---- the CLI's file-backed credential store (no keychain) crosses, rotates and clears like the OAuth files ----
+printf '{"store":"operator-store-v1"}\n' > "$GM/home/.gemini/gemini-credentials.json"
+GM_D10="$(gm_turn gm-thread t10 "$GM_A1")"
+{ [ "$(gm_res "$GM_D10" status)" = completed ] && [ "$(gm_log t10 cred_gemini-credentials.json)" = '{"store":"operator-store-v1"} mode=600' ]; } \
+  && ok "the CLI's file credential store (gemini-credentials.json) is copied into the isolated home at mode 600" \
+  || fail "credential store as the CLI saw it: $(gm_log t10 cred_gemini-credentials.json)"
+printf '{"store":"operator-store-v2"}\n' > "$GM/home/.gemini/gemini-credentials.json"
+GM_D11="$(gm_turn gm-thread t11 "$GM_A1")"
+[ "$(gm_log t11 cred_gemini-credentials.json)" = '{"store":"operator-store-v2"} mode=600' ] \
+  && ok "a rotated credential store replaces the copy in the reused home (the CLI cannot keep preferring a stale migrated one)" \
+  || fail "rotation: the CLI saw $(gm_log t11 cred_gemini-credentials.json)"
+rm -f "$GM/home/.gemini/gemini-credentials.json"
+GM_D12="$(gm_turn gm-thread t12 "$GM_A1")"
+{ [ "$(gm_res "$GM_D12" status)" = completed ] && [ "$(gm_log t12 cred_gemini-credentials.json)" = '<absent>' ] \
+  && [ "$(gm_log t12 cred_oauth_creds.json)" = '{"refresh_token":"operator-oauth-token"} mode=600' ]; } \
+  && ok "a removed credential store is cleared from the reused home while the legacy OAuth file still crosses" \
+  || fail "removal: the CLI saw store=$(gm_log t12 cred_gemini-credentials.json)"
+# A refusal that lands AFTER the reviewer streamed some text is still recorded under its reason.
+GM_D13="$(gm_turn gm-rate3 t13 "$GM_A1" GM_MODE=ratelimit-partial)"
+{ [ "$(gm_res "$GM_D13" status)" = failed ] && [ "$(gm_res "$GM_D13" reason)" = rate-limited ] \
+  && [ -s "$GM_D13/reply-raw.md" ] && gm_events gm-rate3 | grep_full -q 'provider-result.*reason=rate-limited'; } \
+  && ok "a rate limit after partial output keeps its reason (result.json and provider-result), not just a bare failure" \
+  || fail "partial-output rate limit: reason=$(gm_res "$GM_D13" reason) reply=$(wc -c < "$GM_D13/reply-raw.md" 2>/dev/null) events: $(gm_events gm-rate3 | cut -c1-200 | tr '\n' '|')"
 GM_NREP="$(ls "$MA_FIX/.comms/to-claude/" 2>/dev/null | grep -c 'gemini-reply' || true)"
-[ "$GM_NREP" = 2 ] && ok "no review was published for any refused turn (only the two completed turns reply)" || fail "a refused turn published a reply ($GM_NREP gemini replies)"
+[ "$GM_NREP" = 5 ] && ok "no review was published for any refused turn (only the five completed turns reply)" || fail "a refused turn published a reply ($GM_NREP gemini replies)"

@@ -67,7 +67,7 @@ unless they asked.
      and names the fallback: rerun without `--via acp` — the mailbox path below is
      always available. Do NOT retry the ACP path on the same failure.
    - Every supported agent has an ACP profile (codex, claude, grok → `grok-build`, and
-     gemini when enabled → acpx's `gemini`, which needs the Gemini CLI >= 0.33.0). An agent
+     gemini when enabled → acpx's `gemini`, which needs the Gemini CLI >= 0.33.0 for a consult, >= 0.39.0 for a mounted review). An agent
      without one fails closed and names the mailbox fallback.
 
 3. **Choose the mode.** If the question (after removing the agent word, when present) is EMPTY — bare `/ask`, or `/ask codex` alone — build an informal **thoughts consult** (step 6). Otherwise build an **explicit question** (step 5).

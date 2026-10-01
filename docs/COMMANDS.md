@@ -85,7 +85,7 @@ runs as one blocking acpx call (pinned, via npx; Node >= 22.13) and the answer
 lands directly in context, followed by acpx's token-usage line. Warm by default: a
 named per-repo session makes follow-ups pay only the delta (measured 2026-08-20:
 cold one-shot 18,562 fresh input tokens vs warm round-2 146 — ~127x). `--oneshot` forces a stateless
-exec. Every supported agent has an ACP profile (codex, claude, grok via `grok-build`, and gemini via acpx's `gemini` profile, i.e. `gemini --acp`; gemini needs the Gemini CLI >= 0.33.0 on PATH).
+exec. Every supported agent has an ACP profile (codex, claude, grok via `grok-build`, and gemini via acpx's `gemini` profile, i.e. `gemini --acp`; gemini needs the Gemini CLI >= 0.33.0 on PATH for a consult and >= 0.39.0 for a mounted review).
 On any failure the helper names the fallback: rerun without `--via acp`.
 
 > **Internals.** `/send-to-codex` and `/read-from-codex` are the loop's individual steps.
@@ -725,9 +725,12 @@ refused or the policy map is missing, unreadable, or defective, 2 usage.
 
 **The reviewer's Gemini runtime.** acpx launches the `gemini` it finds on PATH (`gemini --acp`; acpx
 itself falls back to the deprecated `--experimental-acp` below 0.33.0, which this helper refuses
-instead). `acp.sh doctor` reports the path and version — `reviewer gemini runtime: <path> (version
+instead). A mounted review needs **0.39.0 or later**, the first build that writes the append-only
+`.jsonl` chat record the review attestation reads (0.33–0.38 write a rewritten `.json` per session,
+which cannot supply the model evidence), so every reviewer surface refuses 0.33–0.38 up front with that
+reason; `consult` and `supports` need only the `--acp` flag (0.33.0). `acp.sh doctor` reports the path and version — `reviewer gemini runtime: <path> (version
 X) — supports --acp` and the default/use-max gemini review lines — and treats an ABSENT Gemini CLI as
-informational (it is an opt-in reviewer) but a present one older than 0.33.0 as a failure (exit 4).
+informational (it is an opt-in reviewer) but a present one below the mounted-review floor (0.39.0) as a failure (exit 4). A model the map marks `disabled` (e.g. `COMMS_ACP_GEMINI_MODEL=gemini-4-pro`) is reported `CANNOT RUN` by `doctor`/`runtime-check`, as `resolve` refuses it.
 `acp.sh runtime-check gemini` is the machine-readable form (same `runtime`, `runtime_version` and row
 lines; an old build exits 1 after printing its version, an absent one exits 1), `capabilities` prints
 the version beside the codex runtime, `supports gemini` exits 1 for either, and `resolve gemini`

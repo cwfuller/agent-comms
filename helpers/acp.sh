@@ -365,7 +365,13 @@ RTPY
 # GEMINI_ACP_FLAG_VERSION): below it the flag this helper launches does not exist, so it is refused
 # here, with the same wording on every surface, rather than discovered as a dead turn.
 # Sets RT_PATH (absolute path, or empty when absent), RT_VERSION (x.y.z, or `unknown`) and RT_ERR.
-ACP_GEMINI_MIN_VERSION=0.33.0
+ACP_GEMINI_ACP_VERSION=0.33.0
+# A MOUNTED REVIEW needs more than the flag: it is published only on the model evidence read back from
+# the CLI's own chat record, and gemini writes that record as append-only `.jsonl` from 0.39.0 (0.33–0.38
+# wrote one rewritten `.json` per session, which helpers/leg_usage.py does not read). Below this a turn
+# would pass every gate before the prompt and then fail attestation after the review was paid for, so the
+# review surfaces refuse it up front. A consult needs no evidence and keeps the lower ACP floor.
+ACP_GEMINI_MIN_VERSION=0.39.0
 policy_runtime_gemini() {
   local cand v
   RT_PATH=""; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""
@@ -376,15 +382,25 @@ policy_runtime_gemini() {
   v="$(runtime_version_probe "$cand")" || v=""
   if [ -z "$v" ]; then RT_ERR="the gemini CLI at $cand did not report a version within ${ACP_RUNTIME_PROBE_SECS}s"; return 0; fi
   RT_VERSION="$v"
-  ver_ge "$v" "$ACP_GEMINI_MIN_VERSION" \
-    || RT_ERR="gemini $v has no --acp flag (first shipped in $ACP_GEMINI_MIN_VERSION; older builds only have the deprecated --experimental-acp) — upgrade the Gemini CLI"
+  ver_ge "$v" "$ACP_GEMINI_ACP_VERSION" \
+    || RT_ERR="gemini $v has no --acp flag (first shipped in $ACP_GEMINI_ACP_VERSION; older builds only have the deprecated --experimental-acp) — upgrade the Gemini CLI"
+}
+
+# policy_runtime_gemini_review — policy_runtime_gemini plus the mounted-review floor (see
+# ACP_GEMINI_MIN_VERSION). Every reviewer surface (resolve, runtime-check, doctor, capabilities) calls
+# this one; only consult and `supports`, which publish no review, use the bare probe.
+policy_runtime_gemini_review() {
+  policy_runtime_gemini
+  [ -z "$RT_ERR" ] || return 0
+  ver_ge "$RT_VERSION" "$ACP_GEMINI_MIN_VERSION" \
+    || RT_ERR="gemini $RT_VERSION cannot back a mounted review: its chat records are not the .jsonl the review attestation reads (first written by $ACP_GEMINI_MIN_VERSION) — upgrade the Gemini CLI"
 }
 
 # policy_runtime_for <agent> — the ONE dispatch from an agent to its runtime probe; sets RT_*.
 # Only codex and gemini have a runtime a policy is resolved against.
 policy_runtime_for() {
   RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""
-  case "$1" in codex) policy_runtime_codex ;; gemini) policy_runtime_gemini ;; esac
+  case "$1" in codex) policy_runtime_codex ;; gemini) policy_runtime_gemini_review ;; esac
 }
 
 # policy_model_disabled <agent> <transport> <model> — the reason a model is DISABLED (a `disabled` row),
@@ -402,8 +418,14 @@ policy_model_available() {
 # policy_unservable_reason <agent> <transport> <model> <source> — nothing (exit 0) when the runtime
 # in RT_PATH/RT_VERSION serves the model; else the one-line reason it cannot (exit 1). The ONE
 # wording, with the minimum read from the map's pair row, behind resolve's refusal, `runtime-check`
-# and `doctor`, so no surface restates a version.
+# and `doctor`, so no surface restates a version. A DISABLED model is unservable on any runtime, so the
+# diagnostics agree with resolve instead of reporting a row runnable that every mounted turn refuses.
 policy_unservable_reason() {
+  local dis; dis="$(policy_model_disabled "$1" "$2" "$3")"
+  if [ -n "$dis" ]; then
+    printf "model '%s' (%s) is disabled in the policy map (%s)\n" "$3" "$4" "$dis"
+    return 1
+  fi
   policy_model_available "$1" "$2" "$3" && return 0
   printf "model '%s' (%s) needs %s >= %s, but the reviewer runtime is %s (%s) — install a newer %s%s\n" \
     "$3" "$4" "$1" "$(policy_map_get pairmin "$1" "$2" "$3")" "$RT_PATH" "$RT_VERSION" "$1" \
@@ -830,9 +852,37 @@ GSE
 gemini_settings_auth() {
   python3 - "$1" <<'GSA' 2>/dev/null
 import json,re,sys
+
+def strip_comments(t):
+    """Drop // and /* */ comments outside strings: the dialect the CLI's own settings loader accepts."""
+    out, i, n, q = [], 0, len(t), False
+    while i < n:
+        c = t[i]
+        if q:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(t[i + 1]); i += 1
+            elif c == '"':
+                q = False
+        elif c == '"':
+            q = True; out.append(c)
+        elif t.startswith("//", i):
+            while i < n and t[i] not in "\r\n": i += 1
+            continue
+        elif t.startswith("/*", i):
+            j = t.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            out.append(" ")
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
 try:
-    v=json.load(open(sys.argv[1]))["security"]["auth"]["selectedType"]
-    if isinstance(v,str) and re.fullmatch(r"[a-z][a-z0-9-]*",v): print(v)
+    with open(sys.argv[1], encoding="utf-8-sig") as fh:
+        v = json.loads(strip_comments(fh.read()))["security"]["auth"]["selectedType"]
+    if isinstance(v, str) and re.fullmatch(r"[a-z][a-z0-9-]*", v): print(v)
 except Exception:
     pass
 GSA
@@ -845,7 +895,7 @@ GSA
 # discuss a 429 — and only the gemini wording is known (its ACP agent surfaces the API's own status
 # and gRPC code names: 429 / RESOURCE_EXHAUSTED; 401 / UNAUTHENTICATED; "Authentication required").
 ACP_GEMINI_RATE_RE='rate[ _-]?limit|resource_exhausted|too many requests|quota (has been )?(exceeded|exhausted)|exhausted your capacity|(^|[^0-9])429([^0-9]|$)'
-ACP_GEMINI_AUTH_RE='unauthenticated|authentication (is )?(required|failed)|not (logged|signed) in|log ?in (is )?required|invalid (api )?key|api key not valid|api_key_invalid|unauthori[sz]ed|(^|[^0-9])401([^0-9]|$)|please set an auth|no auth method|oauth.*(expired|invalid|revoked)|credentials? (expired|invalid|not found)'
+ACP_GEMINI_AUTH_RE='unauthenticated|api key is (missing|not configured)|authentication (is )?(required|failed)|not (logged|signed) in|log ?in (is )?required|invalid (api )?key|api key not valid|api_key_invalid|unauthori[sz]ed|(^|[^0-9])401([^0-9]|$)|please set an auth|no auth method|oauth.*(expired|invalid|revoked)|credentials? (expired|invalid|not found)'
 failure_reason() {
   [ "$1" = gemini ] && [ -f "$2" ] || return 0
   if grep -Eiq "$ACP_GEMINI_RATE_RE" "$2"; then printf 'rate-limited\n'
@@ -932,7 +982,7 @@ cmd_capabilities() {
   printf 'map_version: %s (%s)\n' "$ver" "$ACP_POLICY_MAP"
   RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
   printf 'reviewer codex runtime: %s (version %s)%s\n' "$RT_PATH" "$RT_VERSION" "${RT_ERR:+ — REFUSED: $RT_ERR}"
-  policy_runtime_gemini
+  policy_runtime_gemini_review
   printf 'reviewer gemini runtime: %s (version %s)%s\n' "${RT_PATH:-none}" "$RT_VERSION" "${RT_ERR:+ — REFUSED: $RT_ERR}"
   # Two passes, so a routing-eligible combination's rows print whatever order the map lists them in.
   awk -F'\t' '
@@ -1035,7 +1085,7 @@ cmd_doctor() {
   fi
   # The Gemini CLI is an OPT-IN reviewer: absent is a report, not a failure (most installs have none),
   # but one that is present and cannot run `--acp` fails like a codex runtime that cannot run its review.
-  policy_runtime_gemini
+  policy_runtime_gemini_review
   if [ -n "$RT_ERR" ] && [ "$RT_ERR" = "the gemini CLI was not found on PATH" ]; then echo "reviewer gemini runtime: not installed — gemini reviews unavailable (optional; install the Gemini CLI >= $ACP_GEMINI_MIN_VERSION to use gemini)"
   elif [ -n "$RT_ERR" ]; then echo "reviewer gemini runtime: ${RT_PATH:-none} (version $RT_VERSION) — REFUSED: $RT_ERR"; fail=1
   else

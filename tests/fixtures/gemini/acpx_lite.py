@@ -34,6 +34,7 @@ def call(method, params):
         if msg.get("id") == nid[0]:
             if "error" in msg:
                 e = msg["error"]
+                sys.stdout.write("".join(chunks))  # whatever streamed before the refusal reaches stdout
                 raise SystemExit(_die("%s (code %s)%s" % (e.get("message"), e.get("code"),
                                                           " " + json.dumps(e["data"]) if "data" in e else "")))
             return msg["result"], "".join(chunks)

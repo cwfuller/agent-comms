@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/cwfuller/agent-comms/main/install.s
 Needs git, Node >= 22.13 and an agent CLI (codex >= 0.159 for the default
 GPT-6.1 Sol reviewer; `helpers/acp.sh doctor` checks it) — two or more for cross-model review
 (`claude` and `codex` work out of the box); a lone agent is reviewed by its own
-model. Gemini CLI >= 0.33 adds a fourth model family as a reviewer: enable it with
+model. Gemini CLI >= 0.39 adds a fourth model family as a reviewer: enable it with
 `agents = claude codex grok gemini` in `.comms/config` (or `comms.sh setup`). Clone-first
 install, scopes and reviewer containment:
 [docs/INSTALL.md](docs/INSTALL.md).

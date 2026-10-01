@@ -104,15 +104,19 @@ without the Gemini CLI never acquires a reviewer it cannot run — a project ena
 gemini` is then one reviewer, and `gemini,gemini-review` is refused as two on one provider). Its
 family, for the independence rule, is `gemini`. Reviews are **ACP-only** (`gemini --acp`, through
 acpx's own `gemini` profile; there is no headless arm) and need the Gemini CLI on `PATH` at
-**0.33.0 or later**, the first release with `--acp`: `acp.sh doctor`, `runtime-check gemini`,
-`capabilities`, `supports` and `resolve` all refuse an older build with the same wording. A mounted
+**0.39.0 or later** for a mounted review (the first build that writes the `.jsonl` chat record the
+attestation reads; `--acp` itself arrived in 0.33.0): `acp.sh doctor`, `runtime-check gemini`,
+`capabilities` and `resolve` refuse an older build with the same wording, while `consult` and `supports`
+need only 0.33.0. A mounted
 gemini turn gets its own `GEMINI_CLI_HOME` beside the mount (the CLI keeps `.gemini/` inside it), so
 the operator's settings, extensions, hooks and MCP servers never reach a review; the leg's model and
 thinking level are written to that home's `settings.json` from the policy record (the ACP surface has
 no thinking control) and the model is set on the session by acpx (`--model`). The operator's login
 keeps working: an API key or Vertex setting in the environment is inherited, a keychain login needs
-nothing, and the file-backed OAuth token (`oauth_creds.json`, `google_accounts.json`) and the selected
-auth TYPE are carried across — and cleared again when the operator removes them. The containment
+nothing, and the file-backed login (`oauth_creds.json`, `google_accounts.json`, and `gemini-credentials.json`,
+the CLI's own file store when there is no keychain) and the selected auth TYPE (read from the operator's
+`settings.json` with comments allowed, as the CLI reads it) are carried across — all mirrored each round,
+so one the operator rotated or removed, or the CLI migrated into the reused home, does not outlive its source. The containment
 is the in-process **`plan` mode** pin ("Read-only mode") under `--approve-reads
 --non-interactive-permissions deny`, the same class as claude's and not a kernel sandbox: the child's
 network stays open and the copied OAuth token is readable. It fails closed where it can be checked (an
