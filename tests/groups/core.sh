@@ -1954,12 +1954,12 @@ section "verify: a landing suite for any repo (template, init, status, fresh)"
 # integrate runs suite-cmd in a fresh checkout with no shell, so a repo needs a committed script
 # that provisions its own dependencies and runs its checks. Every package manager here is a PATH
 # stub that records its argv and creates the directory a real install would; nothing touches the
-# network. Real node (or python3) reads package.json scripts, as it does in the template itself.
+# network. A fixed node stand-in reads package.json scripts through the fixture Python.
 VX="$WORK/verify"; VX_BIN="$VX/bin"; VX_TOOLS="$VX/tools"; VX_LOG="$VX/argv.log"
 mkdir -p "$VX_BIN" "$VX_TOOLS" "$VX/nobin"; : > "$VX/all.out"
-# Only node and git are linked in, so no package manager the host has installed can shadow a stub
-# or satisfy the missing-tool case below.
-for t in node git; do command -v "$t" >/dev/null 2>&1 && ln -sf "$(command -v "$t")" "$VX_TOOLS/$t"; done
+# Link only git; a host node can be a version-manager shim whose manager is deliberately absent
+# from vx_run's restricted PATH. The node stand-in below owns the one operation this fixture needs.
+ln -sf "$(command -v git)" "$VX_TOOLS/git"
 vx_stub() { # <name> [extra shell line] — records "<name> <argv>"; an install makes its outputs
   { printf '#!/bin/bash\nprintf "%%s %%s\\n" "%s" "$*" >> "%s"\n' "$1" "$VX_LOG"
     printf 'case "$1" in ci|install|sync) mkdir -p node_modules .venv ;; esac\n'
@@ -1984,6 +1984,13 @@ fi
 exec "$VX_PY" "\$@"
 STUB
 chmod +x "$VX_BIN/python3"
+cat > "$VX_TOOLS/node" <<'STUB'
+#!/bin/bash
+# verify.sh uses node only to enumerate package.json script names.
+[ "$1" = -e ] || exit 1
+exec python3 -c 'import json; print("\n".join((json.load(open("package.json")).get("scripts") or {})))'
+STUB
+chmod +x "$VX_TOOLS/node"
 vx_repo() { # <name> <gitignore> <path=content>... — a committed fixture repo
   local d="$VX/$1" ig="$2" kv; shift 2
   rm -rf "$d"; mkdir -p "$d"; git -C "$d" init -q -b main
