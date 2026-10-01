@@ -120,7 +120,13 @@ so one the operator rotated or removed, or the CLI migrated into the reused home
 is the in-process **`plan` mode** pin ("Read-only mode") under `--approve-reads
 --non-interactive-permissions deny`, the same class as claude's and not a kernel sandbox: the child's
 network stays open and the copied OAuth token is readable. It fails closed where it can be checked (an
-unconfirmed `set-mode plan` refuses the turn) but was not measured against a live gemini turn;
+unconfirmed `set-mode plan` refuses the turn) but was not measured against a live gemini turn.
+The CLI's plan policy denies `run_shell_command` outright, so a gemini reviewer **cannot run read-only
+`git diff` / `log` / `show`**: it reads the mounted files, and a review that needs a diff or history must
+carry it in the request body. The model it ran is attested from the CLI's own chat record in the REVIEW
+prompt's window only (a snapshot taken after the canary), so a review the CLI streamed but never recorded
+is withheld rather than published on the canary's evidence, and the CLI's own synthetic `gemini` messages
+(no model, no tokens) are neither counted nor treated as missing evidence;
 a reviewed tree carrying `.gemini/` or `.env` is refused unread, like `.codex/config.toml`. A model pin
 is `COMMS_ACP_GEMINI_MODEL` / `COMMS_ACP_GEMINI_EFFORT`, and a refusal is recorded as a failed turn with
 its reason (`rate-limited`, `auth-failed` — see below). **Residual:** `claude-review` runs under the same `~/.claude` (settings, user

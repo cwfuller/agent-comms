@@ -515,13 +515,25 @@ def claude_usage(windows, root, cwd):
     return total
 
 
+def gemini_synthetic(r):
+    """True for a `gemini` message the CLI WROTE ITSELF rather than received from the model (e.g.
+    "Binary content received. Proceeding with analysis." after an image tool result). The CLI records
+    these through recordSyntheticMessage: no model, no tokens, and content that is a list of
+    thought parts. A genuine response is never that shape — its content is a string and it names
+    its model — so a response missing its model is still evidence-free, not synthetic."""
+    parts = r.get("content")
+    return (not r.get("model") and not r.get("tokens") and isinstance(parts, list) and bool(parts)
+            and all(isinstance(p, dict) and p.get("thought") is True for p in parts))
+
+
 def gemini_answers(windows):
     """One record per answered model response in the window: a `gemini` message, deduplicated by id
-    with the LAST copy winning (the CLI appends a message again when its tokens arrive)."""
+    with the LAST copy winning (the CLI appends a message again when its tokens arrive). Synthetic
+    messages are not responses and are skipped."""
     last, order = {}, []
     for f, _start, recs in windows:
         for i, r in enumerate(recs):
-            if not isinstance(r, dict) or r.get("type") != "gemini":
+            if not isinstance(r, dict) or r.get("type") != "gemini" or gemini_synthetic(r):
                 continue
             key = r.get("id") or (f, "line%d" % i)
             if key not in last:

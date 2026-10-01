@@ -379,6 +379,15 @@ printf '{"id":"m6","type":"gemini","content":"no model named","tokens":{"input":
 GMM="$(python3 "$LU" models gemini "$GMR" /unused "$LUW/gm.snap" 2>/dev/null)"; GMM_RC=$?
 [ "$GMM_RC" = 1 ] && [ -z "$GMM" ] && ok "an answered message that names no model is refused: absent evidence is never a match" || fail "a modelless answer was accepted (rc=$GMM_RC got: $GMM)"
 cp "$LUW/gm-keep.jsonl" "$GMC/session-a.jsonl"
+# A synthetic message the CLI wrote itself (no model, no tokens, content a list of thought parts) is not a
+# response: it is neither counted nor refused, while a string-content message with no model still is (m6).
+printf '{"id":"s1","type":"gemini","content":[{"text":"Binary content received. Proceeding with analysis.","thought":true}]}\n' >> "$GMC/session-a.jsonl"
+GMM="$(python3 "$LU" models gemini "$GMR" /unused "$LUW/gm.snap" 2>/dev/null)"; GMM_RC=$?
+GMS="$(lu_run gemini "$GMR" /unused "$LUW/gm.snap")"
+{ [ "$GMM_RC" = 0 ] && [ "$GMM" = "$(printf 'model\tgemini-3.1-pro-preview')" ] && [ "$(lu_field "$GMS" usage responses)" = 2 ] \
+  && [ "$(lu_field "$GMS" usage total_tokens)" = 1610 ]; } \
+  && ok "a synthetic gemini message is skipped: it neither poisons the model set nor adds a response" || fail "a synthetic gemini message was mishandled (rc=$GMM_RC models=$GMM usage=$GMS)"
+cp "$LUW/gm-keep.jsonl" "$GMC/session-a.jsonl"
 python3 "$LU" snapshot gemini "$GMR" /unused "$LUW/gm2.snap"
 GMM="$(python3 "$LU" models gemini "$GMR" /unused "$LUW/gm2.snap" 2>/dev/null)"; GMM_RC=$?
 [ "$GMM_RC" = 1 ] && [ -z "$GMM" ] && ok "a window with no answered message has no model to name (exit 1)" || fail "an empty window named a model (rc=$GMM_RC got: $GMM)"

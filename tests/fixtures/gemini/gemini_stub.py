@@ -19,6 +19,10 @@ Levers (environment):
   GM_ANSWER_FILE    a file whose bytes are the reply to a non-canary prompt
   GM_ANSWER_MODEL   the model the chat record names (default: the model in force)
   GM_NO_MODEL       write the answered message with no model field
+  GM_UNRECORDED     a non-canary prompt streams its answer but writes NO chat record (the CLI's
+                    NO_FINISH_REASON path); the canary is still recorded
+  GM_SYNTHETIC      a non-canary prompt also writes a synthetic `gemini` message (no model, no tokens,
+                    content a list of thought parts), as the CLI does after a binary tool result
 """
 import json
 import os
@@ -109,6 +113,13 @@ def chat_file():
     return path
 
 
+def record_synthetic():
+    with open(chat_file(), "a") as fh:
+        fh.write(json.dumps({"id": str(uuid.uuid4()), "timestamp": "2026-09-30T00:00:01Z", "type": "gemini",
+                             "content": [{"text": "Binary content received. Proceeding with analysis.",
+                                          "thought": True, "thoughtSignature": "synthetic"}]}) + "\n")
+
+
 def record_answer(text):
     path = chat_file()
     mid = str(uuid.uuid4())
@@ -190,7 +201,10 @@ for line in sys.stdin:
         else:
             path = os.environ.get("GM_ANSWER_FILE")
             answer = open(path).read() if path else "VERDICT: APPROVE\n\n## Summary\nstub gemini review\n\n### Blocking\n- None.\n"
-        record_answer(answer)
+        if answer != "PONG" and os.environ.get("GM_SYNTHETIC"):
+            record_synthetic()
+        if not (answer != "PONG" and os.environ.get("GM_UNRECORDED")):
+            record_answer(answer)
         send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "stub-session-1", "update": {
             "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": answer}}}})
         reply(rid, {"stopReason": "end_turn"})

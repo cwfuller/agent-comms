@@ -436,5 +436,17 @@ GM_D13="$(gm_turn gm-rate3 t13 "$GM_A1" GM_MODE=ratelimit-partial)"
   && [ -s "$GM_D13/reply-raw.md" ] && gm_events gm-rate3 | grep_full -q 'provider-result.*reason=rate-limited'; } \
   && ok "a rate limit after partial output keeps its reason (result.json and provider-result), not just a bare failure" \
   || fail "partial-output rate limit: reason=$(gm_res "$GM_D13" reason) reply=$(wc -c < "$GM_D13/reply-raw.md" 2>/dev/null) events: $(gm_events gm-rate3 | cut -c1-200 | tr '\n' '|')"
+# The canary's own record must not attest the review: a review streamed but never recorded is withheld.
+GM_D14="$(gm_turn gm-unrec t14 "$GM_A1" GM_UNRECORDED=1)"
+{ [ "$(gm_res "$GM_D14" status)" = failed ] && [ "$(gm_res "$GM_D14" reason)" = policy-unapplied ] \
+  && gm_res "$GM_D14" note | grep_full -qF "could not attest the model/effort" && [ -s "$GM_D14/reply-raw.md" ]; } \
+  && ok "a review the CLI streamed but never recorded is withheld: the canary's PONG record cannot attest it" \
+  || fail "canary-only evidence: status=$(gm_res "$GM_D14" status) reason=$(gm_res "$GM_D14" reason) note=$(gm_res "$GM_D14" note | cut -c1-200)"
+# A synthetic gemini message (no model, no tokens) is not a response: it neither refuses nor counts.
+GM_D15="$(gm_turn gm-synth t15 "$GM_A1" GM_SYNTHETIC=1)"
+{ [ "$(gm_res "$GM_D15" status)" = completed ] && [ "$(gm_res "$GM_D15" usage responses)" = 2 ] \
+  && [ "$(gm_res "$GM_D15" usage total_tokens)" = 260 ]; } \
+  && ok "a synthetic gemini message in the chat record neither refuses a valid review nor inflates its usage" \
+  || fail "synthetic record: status=$(gm_res "$GM_D15" status) usage=$(gm_res "$GM_D15" usage responses)/$(gm_res "$GM_D15" usage total_tokens) note=$(gm_res "$GM_D15" note | cut -c1-200)"
 GM_NREP="$(ls "$MA_FIX/.comms/to-claude/" 2>/dev/null | grep -c 'gemini-reply' || true)"
-[ "$GM_NREP" = 5 ] && ok "no review was published for any refused turn (only the five completed turns reply)" || fail "a refused turn published a reply ($GM_NREP gemini replies)"
+[ "$GM_NREP" = 6 ] && ok "no review was published for any refused turn (only the six completed turns reply)" || fail "a refused turn published a reply ($GM_NREP gemini replies)"

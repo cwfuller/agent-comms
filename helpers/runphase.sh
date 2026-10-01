@@ -2294,11 +2294,11 @@ policy_retire_cmd() {
   printf 'acpx --cwd %s %s sessions close %s' "$_q" "$1" "$2"
 }
 
-# acp_gemini_observed <acp.sh> <iso-home> <usage-snapshot> <cwd> — the gemini analogue of
+# acp_gemini_observed <acp.sh> <iso-home> <attest-snapshot> <cwd> — the gemini analogue of
 # acp_rollout_observed, printing the same tab layout ("<effort>\t<model>\t<turn-id>\t<evidence-file>\t
 # <window-origin>\t<runtime>\t<created-runtime>"), or exiting non-zero. TWO independent facts:
-#   model   from the CLI's OWN chat record: every answered message in the turn's window (the canary
-#           included) must name one model. Zero messages, a message with no model, or two models is
+#   model   from the CLI's OWN chat record: every answered message in the REVIEW prompt's window (its
+#           snapshot is taken after the canary, so the canary's record cannot stand in) must name one model. Zero messages, a message with no model, or two models is
 #           undecidable — never a match. This is the per-turn evidence.
 #   effort  read back from the parent-written isolated settings.json. The CLI has no per-turn record of
 #           its thinking level, so this proves what the CLI was CONFIGURED to send, not what it ran;
@@ -4027,6 +4027,17 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
         return 1
       fi
     fi
+    # GEMINI ATTESTATION WINDOW, opened AFTER the canary for the same reason: the usage snapshot above
+    # predates the canary (it is a cost question), so a model attestation read from it would be
+    # satisfied by the canary's PONG record alone — a review the CLI streamed but never recorded
+    # would publish on the canary's evidence. This second snapshot bounds the window to the review
+    # prompt; the usage snapshot is left alone.
+    if [ -n "$acp_iso_home" ] && [ "$provider" = gemini ]; then
+      if ! python3 "$HELPER_DIR/leg_usage.py" snapshot gemini "$acp_iso_home/.gemini" "$(cd "$workdir" && pwd -P)" "$run_dir/attest-snapshot.json" 2>>"$run_dir/runner.log"; then
+        acp_refuse policy-unapplied "could not snapshot the gemini chat records before the review prompt — refusing rather than paying for a turn whose model could not then be attested"
+        return 1
+      fi
+    fi
     acp_t0="$(date +%s)"
     ( acp_exec "$workdir" \
         ${acp_prompt_opts[@]+"${acp_prompt_opts[@]}"} \
@@ -4111,7 +4122,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
       local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
       if [ "$provider" = gemini ]; then
-        att_out="$(acp_gemini_observed "$acp_sh" "$acp_iso_home" "$run_dir/usage-snapshot.json" "$(cd "$workdir" && pwd -P)" 2>>"$run_dir/runner.log")" || att_rc=$?
+        att_out="$(acp_gemini_observed "$acp_sh" "$acp_iso_home" "$run_dir/attest-snapshot.json" "$(cd "$workdir" && pwd -P)" 2>>"$run_dir/runner.log")" || att_rc=$?
       else
         att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
       fi
