@@ -222,7 +222,8 @@ BXPY
   env HOME="$BXH" "$BX_BOX/bin/box-run" /bin/cat "$BXH/.grok/auth.json" >/dev/null 2>&1 && BX_BAD="$BX_BAD [read the operator's login]"
   BX_ENV="$(env GITHUB_TOKEN=leak AWS_SECRET_ACCESS_KEY=leak HOME="$BXH" "$BX_BOX/bin/box-run" /usr/bin/env 2>/dev/null)"
   [[ "$BX_ENV" != *leak* ]] || BX_BAD="$BX_BAD [operator environment reached the child]"
-  [[ "$BX_ENV" == *"HOME=$BX_BOX/scratch"* && "$BX_ENV" == *"GROK_HOME=$BX_GH"* ]] || BX_BAD="$BX_BAD [HOME/GROK_HOME are not the isolated ones]"
+  BX_PB="$(cd "$BX_BOX" && pwd -P)"; BX_PGH="$(cd "$BX_GH" && pwd -P)"   # the profile speaks physical paths
+  [[ "$BX_ENV" == *"HOME=$BX_PB/scratch"* && "$BX_ENV" == *"GROK_HOME=$BX_PGH"* ]] || BX_BAD="$BX_BAD [HOME/GROK_HOME are not the isolated ones]"
   env PATH="$BX_BOX/bin:$BXB:$PATH" HOME="$BXH" grok models >/dev/null 2>&1
   "$BXP" launched --dir "$BX_BOX" >/dev/null 2>&1 || BX_BAD="$BX_BAD [the shim's launch was not recorded under the current profile]"
   [ -z "$BX_BAD" ] && ok "by hand, a contained process writes scratch only, cannot read the operator's login, sees an allowlisted environment, and its launch is recorded" \
