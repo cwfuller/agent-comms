@@ -236,15 +236,32 @@ fi
 # ---- 3. reviewer safety -----------------------------------------------------------------------
 say ""
 say "3/5 Reviewer containment"
-say "  codex and claude reviewers run contained. grok has no verified sandbox, so a grok REVIEW"
-say "  turn is refused unless you allow uncontained reviews — then it can write outside its"
-say "  mount and reach the network with your git credentials. Fine for your own code on your"
-say "  own machine; not for code you did not write."
+say "  codex, claude and gemini reviewers run contained. grok reviews run inside a macOS Seatbelt"
+say "  sandbox that agent-comms applies itself (writes, the keychain, other processes and non-HTTPS"
+say "  network are closed; your login is staged without its refresh token). No override is needed."
+say "  Where grok has no sandbox backend (anything but macOS), a grok REVIEW turn is refused unless"
+say "  you allow uncontained reviews — then it can write outside its mount and reach the network"
+say "  with your git credentials. Fine for your own code on your own machine; not for code you did"
+say "  not write."
 cur_unc="$(yn_of "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-}")"
 # Containment is a property of the PROVIDER. Review twins run on their driver's provider, so the
 # agents line alone decides it: grok-review exists exactly when grok does.
 case " $AGENTS " in
-  *" grok "*) if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi ;;
+  *" grok "*)
+    if [ "$(uname -s)" = Darwin ] && [ -x "$(dirname "${BASH_SOURCE[0]}")/box.sh" ] && "$(dirname "${BASH_SOURCE[0]}")/box.sh" supports grok >/dev/null 2>&1; then
+      say "  grok containment on this Mac: ready (Seatbelt)."
+      # A stale override from another machine would not be used here, but it would still be the
+      # setting that applies the day this backend is unavailable. Offer to drop it, never drop it silently.
+      if [ "$cur_unc" = y ]; then
+        if ask_yn "  COMMS_RUNPHASE_ALLOW_UNCONTAINED is set (probably carried over): remove it" y; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi
+      fi
+    else
+      if [ "$(uname -s)" = Darwin ]; then
+        why="$("$(dirname "${BASH_SOURCE[0]}")/box.sh" supports grok 2>&1 | tail -1)"
+        say "  grok containment on this Mac: NOT available — $why"
+      fi
+      if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi
+    fi ;;
   *) say "  grok is not registered here — nothing to allow." ;;
 esac
 case " $AGENTS " in

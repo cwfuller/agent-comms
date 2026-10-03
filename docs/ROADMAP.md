@@ -658,6 +658,11 @@ string assertions on committed template text, so this is cheap. (grok, corrobora
 
 ### OPEN: an exported containment override does not reach the spawned turn (2026-09-03, sev 2)
 
+*(2026-10-03: grok on macOS no longer needs the override — see "grok review restored on macOS". It stays
+the way out for a provider with NO backend (grok on Linux), so this item stands for those hosts. The
+refusal now says where the variable is read from: the environment of the spawning process and
+`~/.agent-comms/settings`, never a project file.)*
+
 `COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` is the documented escape hatch for grok on Darwin, where
 there is no verified isolation backend and a mounted review turn is refused. Exporting it from
 an interactive shell profile (`~/.zshrc`) does NOT make it reach a leg spawned from a
@@ -3380,6 +3385,67 @@ the queue.
    grading track, but their deliverables stay tracked in the scope-dial section above;
    budget signaling; stakes-tiering docs) and the standing DEFERRED backlog in
    docs/advisories.md
+
+## grok review restored on macOS: a Seatbelt backend (2026-10-03, basis task 226)
+
+**Report.** On a new Mac a mounted grok review was refused in seconds: `result.json`
+`status=failed`, `note: refused: no verified isolation backend for 'grok' on Darwin`, route
+`transport=acp-mounted capability=unsupported`. The operator's grok reviews had worked on the old machine.
+
+**Actual cause (two layers, kept apart).**
+1. *Transport selection was never the problem.* `comms.sh transport grok --loop` correctly answered `acp`,
+   and `capability=unsupported` in the route is the reviewer MODEL/effort policy (agent-comms applies none to
+   grok), not containment.
+2. *Execution containment:* since 21cb780 / c913006 (2026-08-29/30) a mounted turn requires a per-provider
+   isolation backend and grok had none on Darwin (its own sandbox is documented as a child-network no-op on
+   macOS and write-allows `/tmp`). The old machine therefore ran grok reviews only through the documented
+   override `COMMS_RUNPHASE_ALLOW_UNCONTAINED=1`, which lives in that machine's `~/.agent-comms/settings` or
+   shell and is not part of any checkout; the new Mac has neither (no settings file, variable unset). The
+   migration lost an uncontained setting, and the refusal was correct. (The old machine's settings could not be
+   inspected from here: this is the inference that fits every observation, not a recovered record.)
+
+**Fix: a verified backend instead of a copied override.** `helpers/box.sh` applies the OS's own Seatbelt
+around the grok CLI (header of the file is the specification). Measured 2026-10-03 on macOS 27 / arm64,
+grok 1.0.46, acpx 0.13.1, and each point was a failure of the obvious version:
+
+- **acpx executes grok's tools unless told not to.** With acpx's default capabilities a grok shell command
+  and file write run in the *unsandboxed queue owner* (ACP `terminal/*`, `fs/*`): a Seatbelt around grok left
+  `echo x > /tmp/...` succeeding and `ls ~` listing the real home. `--no-terminal --no-fs` makes grok run its
+  tools in-process; the same commands then fail with `Operation not permitted`. The flags are part of the
+  boundary and `box.sh prepare` prints them.
+- **Seatbelt allow-backs must name the same operation as the deny.** `(allow file-read* ...)` did not
+  re-open a path under `(deny file-read-data (subpath HOME))`; `(allow file-read-data ...)` did.
+- **Paths are physical.** `/tmp/...` matched nothing; `/private/tmp/...` did.
+- **`open` really escapes.** With only filesystem rules, a contained process launched an app through
+  LaunchServices (unsandboxed); denying `process-exec` of `open`/`launchctl`/`osascript`/`sudo` and the
+  LaunchServices/Security mach services closed it. `launchctl submit` and `osascript` children inherit the
+  sandbox. TLS to the model API still works with the Security daemons unreachable.
+- **A refresh in the reviewer's login copy would strand the operator's.** The staged `auth.json` therefore
+  drops `refresh_token` (verified: a review runs on the access token alone) and is refused when the access
+  token is within ten minutes of expiry after one renewal attempt by the operator's own `grok models`.
+
+Live evidence: a mounted review through `comms.sh send --to grok --wait` on a disposable fixture
+completed, replied bound to the request (`in-reply-to`, `artifact_id`, `head_sha`) with the right
+verdict; `runner.log` records `isolation: provider=grok backend=grok-seatbelt`; a prompt telling
+the reviewer to write to `/tmp` and to the reviewed tree left no file on disk (checked against the
+filesystem, not the model's report — the model also declined parts on its own, which proves nothing),
+and `ls ~` inside the box listed only the scratch directory.
+
+**Residuals, stated plainly.**
+- The network is open on `:443` (Seatbelt filters ports, not hosts): the staged access token is readable
+  by the reviewer and could be sent out. Same shape as codex's staged `auth.json`; short-lived and not
+  refreshable. An `XAI_API_KEY` in the environment is inherited by design.
+- Reads are a denylist of the operator's home, `/tmp` and `/Library/Keychains`, not an allowlist of the
+  machine: a world-readable file elsewhere is readable.
+- The escape-route denies are the *known* routes, named, not a proof; `sandbox-exec` is deprecated by
+  Apple though functional.
+- A reviewed tree's own `.grok/` project config (hooks, MCP servers, `sandbox.toml`) is not refused the way
+  `.codex/config.toml` is. Anything it runs is inside the box and the folder is untrusted in the isolated
+  home, but this was NOT measured. Follow-up: measure, then refuse as codex's arm does.
+- The toolchain is not integrity-pinned (grok CLI version, acpx), as for the other backends.
+
+**Open (not done here).** A reviewer under `--no-terminal --no-fs` is still granted `--approve-all`; with a
+kernel boundary that is the codex shape and deliberate, but nothing re-derives it per turn beyond the probes.
 
 ## Open security item: the mounted review turn is contained for reviewer behavior, not yet for a hostile artifact
 

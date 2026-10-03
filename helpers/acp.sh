@@ -69,6 +69,18 @@
 #       thinking level an isolated settings.json carries (as a policy effort token), and the
 #       classification of a provider refusal (`rate-limited` | `auth-failed` | nothing) from the
 #       diagnostics acpx relayed.
+#   containment <agent>
+#       whether a MOUNTED review of that agent can be contained on this host, and by what: one
+#       `backend<TAB><name>` line (exit 0), or the reason it cannot be, on stderr (exit 1 no backend
+#       exists for this agent/OS, 3 a backend exists but a prerequisite is missing). The same answer
+#       the runner acts on, so `doctor` and a refused leg cannot disagree. grok's comes from box.sh.
+#   grok-auth <auth.json> [refresh]
+#       the grok login a mounted turn is staged with: the operator's auth.json minus its refresh token,
+#       on stdout. Exit 4 when its access token is expired or about to be (`refresh` first runs the
+#       operator's own `grok models` once to renew it), 1 when unreadable.
+#   grok-config <config.toml>
+#       the isolated grok home's config.toml text: the operator's default model and reasoning effort
+#       (two allowlisted keys of `[models]`) and nothing else of theirs.
 #   policy <agent> [--policy-file <record>]
 #       the reviewer model+effort policy for an agent, tab-separated
 #       (<model>\t<effort>); empty + exit 1 where no policy applies.
@@ -138,6 +150,12 @@ comms_sibling() {
   local c; c="$(dirname "${BASH_SOURCE[0]}")/comms.sh"
   [ -x "$c" ] || { echo "acp.sh: no comms.sh beside $(basename "${BASH_SOURCE[0]}")" >&2; return 3; }
   "$c" "$@"
+}
+# box.sh sits beside this script like every helper; a missing one is "no backend", never a silent pass.
+comms_box() {
+  local b; b="$(dirname "${BASH_SOURCE[0]}")/box.sh"
+  [ -x "$b" ] || { echo "acp.sh: no box.sh beside $(basename "${BASH_SOURCE[0]}") — grok's containment backend is not installed" >&2; return 3; }
+  "$b" "$@"
 }
 # Every failure names the fallback, uniformly — the template's contract is
 # "do NOT retry the ACP path on the same failure; the mailbox always works".
@@ -847,6 +865,110 @@ except Exception:
 GSE
 }
 
+# grok_isolated_config <operator config.toml> — the config a mounted grok turn runs on. The operator's
+# own config.toml is NOT copied: it can carry `permission_mode = "always-approve"`, custom model entries
+# with API keys, hooks and MCP servers — exactly what isolation excludes. Only the review's depth crosses
+# (the default model and reasoning effort), each as ONE allowlisted token, so a mounted review runs the
+# model the operator chose rather than whatever the CLI now defaults to.
+grok_isolated_config() {
+  local src="$1" model="" effort=""
+  if [ -f "$src" ] && [ ! -L "$src" ]; then
+    model="$(awk '/^[[:space:]]*\[/ { t = $0; gsub(/[[:space:]]/, "", t); in_m = (t == "[models]"); next }
+      in_m && /^[[:space:]]*default[[:space:]]*=/ { v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); gsub(/^"|"[[:space:]]*(#.*)?$/, "", v); print v; exit }' "$src" 2>/dev/null)"
+    effort="$(awk '/^[[:space:]]*\[/ { t = $0; gsub(/[[:space:]]/, "", t); in_m = (t == "[models]"); next }
+      in_m && /^[[:space:]]*default_reasoning_effort[[:space:]]*=/ { v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); gsub(/^"|"[[:space:]]*(#.*)?$/, "", v); print v; exit }' "$src" 2>/dev/null)"
+  fi
+  case "$model" in ""|*[!A-Za-z0-9._:/-]*) model="" ;; esac
+  case "$effort" in ""|*[!A-Za-z0-9._-]*) effort="" ;; esac
+  printf '# agent-comms isolated grok home: the operator config is not read here\n[cli]\nuse_leader = false\n'
+  if [ -n "$model" ] || [ -n "$effort" ]; then
+    printf '\n[models]\n'
+    [ -z "$model" ] || printf 'default = "%s"\n' "$model"
+    [ -z "$effort" ] || printf 'default_reasoning_effort = "%s"\n' "$effort"
+  fi
+}
+
+# containment_for <agent> — what contains a MOUNTED review of that agent on this host, as prose, with
+# the exit status the `containment` subcommand returns: 0 contained, 1 no backend exists, 3 a backend
+# exists but cannot run here. The runner and `doctor` both read this, so they cannot disagree.
+containment_for() {
+  local out rc=0
+  case "$1" in
+    codex)  echo "codex-home+read-only (the adapter's own kernel sandbox)"; return 0 ;;
+    claude) echo "claude-plan (in-process mode pin; network open)"; return 0 ;;
+    gemini) echo "gemini-plan (in-process mode pin; network open)"; return 0 ;;
+    grok)
+      out="$(comms_box supports grok 2>&1)" || rc=$?
+      if [ "$rc" = 0 ]; then echo "grok-seatbelt (kernel sandbox around the CLI; acpx terminal and fs disabled)"; return 0; fi
+      printf '%s\n' "$out" | tail -1; return "$rc" ;;
+  esac
+  echo "no containment backend is implemented for '$1'"; return 1
+}
+
+# grok_stage_auth <auth.json> [refresh] — the login a mounted grok turn runs on, printed to stdout.
+# TWO things change on the way in, both on purpose:
+#   * the REFRESH TOKEN is dropped. The staged copy lives in a home the reviewer can read, and a refresh
+#     done there would ROTATE the token and strand the operator's own login (the source is never written
+#     back). Without it the copy can only be used until its access token expires, and cannot mint more.
+#   * an access token that is expired or within 10 minutes of expiry is refused (exit 4) rather than
+#     staged: the turn would die mid-review on a login nobody can renew from inside the box. With the
+#     `refresh` argument the operator's OWN grok is first run once, outside any reviewer (`grok models`,
+#     which renews a login as a side effect), and the file is re-read.
+# Exit 0 staged, 1 unreadable or not JSON, 4 expired. Reads nothing but the one file.
+grok_stage_auth() {
+  python3 - "$1" "${2:-}" <<'GSA'
+import datetime, json, os, shutil, subprocess, sys
+
+path, refresh = sys.argv[1], sys.argv[2] == "refresh"
+
+def load():
+    with open(path) as f:
+        return json.load(f)
+
+def soonest(doc):
+    best = None
+    for v in doc.values():
+        if not isinstance(v, dict) or "expires_at" not in v:
+            continue
+        try:
+            t = datetime.datetime.fromisoformat(str(v["expires_at"]).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        best = t if best is None or t < best else best
+    return best
+
+def stale(doc):
+    t = soonest(doc)
+    return t is not None and t < datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+
+try:
+    doc = load()
+    if not isinstance(doc, dict):
+        raise ValueError("not an object")
+    if stale(doc) and refresh and shutil.which("grok"):
+        try:
+            subprocess.run(["grok", "models"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=45)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        doc = load()
+except (OSError, ValueError):
+    sys.exit(1)
+
+if stale(doc):
+    sys.exit(4)
+
+def strip(x):
+    if isinstance(x, dict):
+        return {k: strip(v) for k, v in x.items() if k != "refresh_token"}
+    return x
+
+json.dump(strip(doc), sys.stdout)
+GSA
+}
+
 # gemini_settings_auth <settings.json> — the operator's selected auth type (`security.auth.selectedType`)
 # as ONE bare token, or nothing. The only part of their settings that crosses into a review home.
 gemini_settings_auth() {
@@ -1092,6 +1214,14 @@ cmd_doctor() {
     echo "reviewer gemini runtime: $RT_PATH (version $RT_VERSION) — supports --acp"
     doctor_standing gemini
   fi
+  # Containment of a MOUNTED review, per reviewer. A report, not a failure: an agent you do not use
+  # being uncontainable here costs nothing, and the refusal at send time names the same reason.
+  local c_out c_rc
+  for a in codex claude gemini grok; do
+    c_rc=0; c_out="$(containment_for "$a" 2>&1)" || c_rc=$?
+    if [ "$c_rc" = 0 ]; then echo "reviewer $a containment: $c_out"
+    else echo "reviewer $a containment: UNAVAILABLE — $c_out; mounted $a reviews are refused here"; fi
+  done
   # Reply verification needs python3 (comms.sh reply-check). Without it every reply is UNDECIDABLE
   # and refused rather than trusted, so name it here rather than leaving the operator to discover it
   # mid-consult. (codex, acp-compat-gate plan r2.)
@@ -1290,6 +1420,19 @@ case "${1:-}" in
     # gemini-auth <settings.json> — the operator's selected auth type, allowlisted; empty when none.
     shift; [ -n "${1:-}" ] || die "gemini-auth: a settings.json path is required"
     gemini_settings_auth "$1"
+    ;;
+  grok-auth)
+    shift; [ -n "${1:-}" ] || die "grok-auth: an auth.json path is required"
+    grok_stage_auth "$1" "${2:-}"
+    ;;
+  grok-config)
+    shift; [ -n "${1:-}" ] || die "grok-config: a config.toml path is required"
+    grok_isolated_config "$1"
+    ;;
+  containment)
+    shift; [ -n "${1:-}" ] || die "containment: an agent name is required"
+    _ct_rc=0; _ct_out="$(containment_for "$1" 2>&1)" || _ct_rc=$?
+    if [ "$_ct_rc" = 0 ]; then printf 'backend\t%s\n' "$_ct_out"; else printf '%s\n' "$_ct_out" >&2; exit "$_ct_rc"; fi
     ;;
   gemini-effort)
     # gemini-effort <settings.json> — the thinking level a mounted gemini turn's isolated settings

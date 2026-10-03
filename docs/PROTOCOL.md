@@ -93,9 +93,29 @@ A review twin is **review-only**, and each rule sits at the one funnel that sees
   refuses a question addressed to its own author.
 
 It inherits everything provider-keyed from its driver's provider — containment (`grok-review`
-needs `COMMS_RUNPHASE_ALLOW_UNCONTAINED` exactly as grok does), transport, and the policy map
+is contained exactly as grok is: by the Seatbelt backend on macOS, and refused without
+`COMMS_RUNPHASE_ALLOW_UNCONTAINED` where grok has none), transport, and the policy map
 row. There are no per-identity pins or map rows, and one routing decision per base thread
 covers every leg.
+
+**The grok provider's containment.** Two questions are answered separately and must not be
+confused. *Transport selection* (`comms.sh transport grok --loop` -> `acp`, route
+`transport=acp-mounted capability=unsupported`) only says how a turn is delivered; `unsupported` is
+the reviewer MODEL/effort policy (agent-comms applies none to grok), not containment. *Containment* is
+decided by the runner, per turn, by `helpers/box.sh`: on macOS the grok CLI runs inside a Seatbelt
+profile agent-comms applies itself, in an isolated `GROK_HOME` beside the mount (the operator's
+`config.toml` is not read; only their default model and reasoning effort are carried; their login is
+staged without its refresh token, so the reviewer's copy can never rotate it, and is refused if it is
+expired or within ten minutes of expiry after one attempt to renew it with the operator's own `grok
+models`). The queue owner is launched with `--no-terminal --no-fs` and a contained `grok` first on its
+PATH; after the canary the runner requires a launch record under the current profile hash
+(`reason: containment-unconfirmed` otherwise). `box.sh prepare` runs a battery of positive and
+negative probes against the exact profile each turn and refuses on any failure. On a host with no
+backend (not macOS) a mounted grok turn is refused unless `COMMS_RUNPHASE_ALLOW_UNCONTAINED=1`; where a
+backend exists but cannot run (no `sandbox-exec`, no `grok`, a failed probe) the turn is refused and the
+override is NOT consulted — it covers a provider with no backend, not one whose backend is broken.
+Both the foreground (`send --wait`) and detached runners reach the same `cmd_run`, so they cannot
+disagree; `acp.sh doctor` and `acp.sh containment grok` report the same answer ahead of time.
 
 **The gemini provider** (a fourth model family, Google's, so it can gate work claude or codex
 wrote). It is **supported but opt-in**: `gemini` is not in the zero-config registry, so an install

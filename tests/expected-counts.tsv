@@ -5,3 +5,9 @@ skip_ok	acl-report
 skip_ok	acl-xattr-fixture
 skip_ok	acl-behind-xattr
 skip_ok	acl-xattr-only
+skip_ok	seatbelt-prepare
+skip_ok	seatbelt-hand
+skip_ok	seatbelt-mutate
+skip_ok	seatbelt-runner
+skip_ok	seatbelt-nolaunch
+skip_ok	seatbelt-expired

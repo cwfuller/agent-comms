@@ -320,7 +320,7 @@ leg_usage_root() {
   case "$1" in
     codex)  printf '%s' "${3:-}" ;;
     claude) [ -n "${HOME:-}${CLAUDE_CONFIG_DIR:-}" ] && printf '%s/projects' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ;;
-    grok)   [ -n "${HOME:-}" ] && printf '%s/.grok/sessions' "$HOME" ;;
+    grok)   if [ -n "${3:-}" ]; then printf '%s/sessions' "$3"; else [ -n "${HOME:-}" ] && printf '%s/.grok/sessions' "$HOME"; fi ;;
     # the CLI's own state dir inside the mount's isolated GEMINI_CLI_HOME, so every record there is this leg's
     gemini) [ -n "${3:-}" ] && printf '%s/.gemini' "$3" ;;
   esac
@@ -2661,7 +2661,7 @@ TURN_CHILD_SCRUB=(-u COMMS_SELF -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANC
 
 acp_exec() {  # <cwd> [acpx args...]
   local _cwd="$1"; shift
-  ( cd "$_cwd" && PATH="${acp_shim:+$acp_shim:}$PATH" \
+  ( cd "$_cwd" && PATH="${acp_shim:+$acp_shim:}${acp_boxpath:+$acp_boxpath:}$PATH" \
       env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
           -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
           "${TURN_CHILD_SCRUB[@]}" \
@@ -3253,7 +3253,8 @@ cmd_run() {
         *[!a-zA-Z0-9._-]*|"")
           die "run: COMMS_RUNPHASE_GROK_SANDBOX must be a bare profile name (got '$grok_sandbox')" ;;
       esac
-      if [ "$grok_sandbox" = "read-only" ]; then
+      # (Only the direct headless path runs under this profile; an ACP turn is contained by box.sh instead.)
+      if [ "$grok_sandbox" = "read-only" ] && [ "$via" != acp ]; then
         echo "warning: grok review running under the default read-only sandbox — the mailbox stays readable to this child. For an enforced boundary, add the deny-profile from docs/INTERNALS.md and set COMMS_RUNPHASE_GROK_SANDBOX." >&2
       fi
       cmd=(grok --prompt-file "$run_dir/prompt.md" --output-format streaming-messages-json
@@ -3306,6 +3307,11 @@ cmd_run() {
     local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim="" acp_reason=""
     local -a acp_iso=()          # isolation env, applied to EVERY owner-spawning invocation
     local acp_iso_backend=none acp_iso_home=""
+    # grok's kernel containment (helpers/box.sh): the dir holding its profile and launch shim, which is
+    # put FIRST on every acpx invocation's PATH so the owner's `grok` is always the contained one; the
+    # home it runs in (kept apart from acp_iso_home, which switches on codex/gemini-only policy checks);
+    # and where _iso_place stages when that is not acp_iso_home.
+    local acp_box_dir="" acp_boxpath="" acp_grok_home="" acp_stage_dir=""
     # The mode id the backend must hold, carried as DATA because it is PROVIDER VOCABULARY, not a
     # shared constant: codex names its read-only mode `read-only`, claude names its `plan`. Empty
     # means "this backend has no mode to pin". Hardcoding one provider's id in the re-pin below is
@@ -3485,7 +3491,7 @@ cmd_run() {
         # kind) but not a directory; a leftover directory is refused outright. (codex, r4, blocking.)
         if [ -L "$_dst" ]; then rm -f "$_dst" || return 1; fi
         if [ -e "$_dst" ] && [ ! -f "$_dst" ]; then return 1; fi
-        _tmp="$(mktemp "$acp_iso_home/.stage.XXXXXX")" || return 1
+        _tmp="$(mktemp "${acp_stage_dir:-$acp_iso_home}/.stage.XXXXXX")" || return 1
         if [ -n "$_lit" ]; then printf '%s' "$_lit" > "$_tmp" || { rm -f "$_tmp"; return 1; }
         elif [ -n "$_src" ] && [ -f "$_src" ] && [ ! -L "$_src" ]; then
           cat "$_src" > "$_tmp" || { rm -f "$_tmp"; return 1; }
@@ -3499,6 +3505,18 @@ cmd_run() {
         # the current lifecycle (prior owner gone, next provider not spawned), and detection
         # fails the place closed. (codex, r4 + r5.)
         [ -f "$_dst" ] && [ ! -L "$_dst" ] || return 1
+      }
+      # A provider with NO containment backend on this OS. Refusing is the fail-closed answer; the escape hatch
+      # is explicit, it is not the default, and it is only for a provider that has no backend at all — a silent
+      # degradation to an uncontained mount is how a security item gets marked done while staying open.
+      iso_no_backend() {
+        if [ "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-0}" = 1 ]; then
+          acp_iso_backend="none(operator-override)"
+          echo "warning: '$provider' has no verified isolation backend on $(uname -s) and COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 — this mounted turn is NOT contained: it can write outside the mount and reach the network with your git credentials." >&2
+        else
+          ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s); mounted review turns require containment (COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to override)"
+          die "run: '$provider' has no verified isolation backend on $(uname -s), so a mounted review turn cannot be contained — refusing. See docs/ROADMAP.md (open security item). Set COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to accept an uncontained reviewer deliberately (it is read from the environment and ~/.agent-comms/settings, not from a project file)."
+        fi
       }
       case "$provider" in
         codex)
@@ -3726,6 +3744,88 @@ cmd_run() {
           acp_iso_backend="gemini-plan"
           acp_iso_mode="plan"
           ;;
+        grok)
+          # grok's containment is applied from OUTSIDE it, with the OS's own Seatbelt (helpers/box.sh): grok
+          # ships no sandbox that holds on macOS (its docs: child-network blocking is Linux-only and every
+          # profile write-allows /tmp). Three things make this a backend rather than a wrapper, and each is a
+          # measured failure of the obvious version, not a design preference:
+          #   1. acpx must be launched with --no-terminal --no-fs. By default acpx advertises ACP terminal
+          #      and filesystem capabilities and grok then asks the CLIENT — the unsandboxed queue owner —
+          #      to run its shell commands and write its files, so a Seatbelt around grok contained nothing
+          #      (the write landed and `ls ~` listed the real home). box.sh prints the flags it depends on.
+          #   2. the contained `grok` must be what the owner launches, on EVERY acpx call (the owner is
+          #      spawned lazily, by whichever call comes first), so its dir leads PATH in acp_exec.
+          #   3. the launch is checked, not assumed: the shim logs each launch with the profile hash and the
+          #      turn is refused after the canary if none under THIS profile was recorded.
+          # The profile and its positive/negative probes are in box.sh; `prepare` refuses unless every one holds.
+          local box_sh box_out="" box_rc=0 box_why="" box_flags="" gk_src
+          box_sh="$(dirname "$SELF")/box.sh"
+          [ -x "$box_sh" ] || { ABORT_NOTE="refused: grok's containment helper (box.sh) is not installed next to runphase.sh"; die "run: box.sh is not installed next to runphase.sh — reinstall agent-comms"; }
+          "$box_sh" supports grok >/dev/null 2>"$run_dir/box.err" || box_rc=$?
+          box_why="$(tail -1 "$run_dir/box.err" 2>/dev/null)"
+          if [ "$box_rc" = 1 ]; then
+            iso_no_backend
+          elif [ "$box_rc" != 0 ]; then
+            ABORT_NOTE="refused: grok review containment is unavailable on this host: $box_why"
+            die "run: grok review containment is unavailable here — $box_why. A mounted grok turn is refused rather than run uncontained; fix the prerequisite ('acp.sh doctor' shows it) and re-send. COMMS_RUNPHASE_ALLOW_UNCONTAINED is not consulted: it covers a provider with NO backend, not one whose backend cannot run."
+          else
+          acp_grok_home="$mount_kdir/home"
+          if [ -L "$acp_grok_home" ]; then
+            ABORT_NOTE="refused: isolated GROK_HOME for '$provider' is a symlink — refusing to follow it out of the mount"
+            die "run: the isolated GROK_HOME path is a symlink ($acp_grok_home) — refusing to follow it out of the mount"
+          fi
+          ABORT_NOTE="refused: could not create a usable isolated GROK_HOME for '$provider'"
+          mkdir -p "$acp_grok_home" || die "run: cannot create the isolated GROK_HOME"
+          local acp_gk_phys; acp_gk_phys="$( cd "$acp_grok_home" 2>/dev/null && pwd -P )" || true
+          if [ "$acp_gk_phys" != "$acp_grok_home" ]; then
+            ABORT_NOTE="refused: isolated GROK_HOME for '$provider' resolves outside its mount"
+            die "run: the isolated GROK_HOME resolves outside its mount (want '$acp_grok_home', got '$acp_gk_phys') — refusing"
+          fi
+          acp_stage_dir="$acp_grok_home"
+          rm -f "$acp_grok_home"/.stage.* 2>/dev/null || true
+          gk_src="${GROK_HOME:-$HOME/.grok}"
+          # The LOGIN: staged fresh every round minus its refresh token (see acp.sh grok_stage_auth), or
+          # cleared when the source is gone, exactly as codex's auth.json is.
+          if [ -f "$gk_src/auth.json" ] && [ ! -L "$gk_src/auth.json" ]; then
+            local gk_auth="" gk_auth_rc=0
+            gk_auth="$("$acp_sh" grok-auth "$gk_src/auth.json" refresh 2>>"$run_dir/runner.log")" || gk_auth_rc=$?
+            case "$gk_auth_rc" in
+              0) ;;
+              4) ABORT_NOTE="refused: the grok login has expired (or expires within 10 minutes) and could not be renewed"
+                 die "run: the grok login in $gk_src/auth.json has expired and renewing it ('grok models') did not help — run 'grok login', then re-send" ;;
+              *) ABORT_NOTE="refused: the grok login could not be read"
+                 die "run: $gk_src/auth.json could not be read as a grok login — run 'grok login', then re-send" ;;
+            esac
+            ABORT_NOTE="refused: could not stage the isolated grok login"
+            _iso_place "" "$acp_grok_home/auth.json" 600 "$gk_auth" || die "run: cannot stage the isolated auth.json"
+            gk_auth=""
+          elif [ -e "$acp_grok_home/auth.json" ] || [ -L "$acp_grok_home/auth.json" ]; then
+            ABORT_NOTE="refused: could not clear a stale isolated auth.json for '$provider' after its source went away"
+            rm -f "$acp_grok_home/auth.json" 2>/dev/null || true
+            if [ -e "$acp_grok_home/auth.json" ] || [ -L "$acp_grok_home/auth.json" ]; then
+              die "run: a stale isolated auth.json persists after its source credential was removed — refusing to run on a possibly-revoked credential"
+            fi
+          fi
+          ABORT_NOTE="refused: could not write the isolated grok config for '$provider'"
+          _iso_place "" "$acp_grok_home/config.toml" 600 "$("$acp_sh" grok-config "$gk_src/config.toml")" \
+            || die "run: cannot write the isolated grok config"
+          acp_stage_dir=""
+          # PROVE the sandbox on this host, with this home and this tree, before any model is spoken to.
+          ABORT_NOTE="refused: grok's containment self-check did not pass"
+          box_out="$("$box_sh" prepare grok --dir "$mount_kdir/box" --home "$acp_grok_home" --mount "$mount_dir" 2>"$run_dir/box.err")" \
+            || { box_why="$(tail -1 "$run_dir/box.err" 2>/dev/null)"; ABORT_NOTE="refused: grok containment could not be established: $box_why"; die "run: grok containment could not be established — $box_why"; }
+          ABORT_NOTE="runner aborted unexpectedly — see runner.log"
+          acp_box_dir="$mount_kdir/box"
+          acp_boxpath="$(printf '%s\n' "$box_out" | awk -F'\t' '$1=="path_prefix" {print $2; exit}')"
+          box_flags="$(printf '%s\n' "$box_out" | awk -F'\t' '$1=="acpx_flags" {print $2; exit}')"
+          [ -n "$acp_boxpath" ] && [ -n "$box_flags" ] || die "run: box.sh prepare returned no launch path or acpx flags"
+          # shellcheck disable=SC2206
+          acp_launch+=($box_flags)
+          printf 'containment: %s\n' "$(printf '%s' "$box_out" | tr '\t\n' '= ' | cut -c1-300)" >>"$run_dir/runner.log"
+          acp_iso=(env -u GROK_SANDBOX)
+          acp_iso_backend="grok-seatbelt"
+          fi
+          ;;
         *)
           if [ "$custom_adapter" = opencode ]; then
             acp_iso_backend="opencode-read-search"
@@ -3734,22 +3834,7 @@ cmd_run() {
             ABORT_NOTE="no verified mounted-review adapter for custom profile '$provider'"
             die "run: $ABORT_NOTE; generic ACP profiles support consults only"
           else
-          # NO VERIFIED BACKEND ON THIS OS. grok's own docs are explicit that child-network
-          # blocking is "enforced on Linux only (via seccomp). On macOS it is a no-op", and
-          # its read-only profile still write-allows /tmp — so a mounted grok turn on Darwin
-          # can clone to /tmp and push with the inherited keychain helper. claude no longer
-          # reaches this arm — it has its own `claude)` backend above — so on Darwin this is
-          # grok's arm in practice. Refusing is the fail-closed answer both reviewers
-          # asked for; the escape hatch is explicit and it is not the default, because a
-          # silent degradation to an uncontained mount is how this item gets marked done
-          # while staying open.
-          if [ "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-0}" = 1 ]; then
-            acp_iso_backend="none(operator-override)"
-            echo "warning: '$provider' has no verified isolation backend on $(uname -s) and COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 — this mounted turn is NOT contained: it can write outside the mount and reach the network with your git credentials." >&2
-          else
-ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s); mounted review turns require containment (COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to override)"
-                        die "run: '$provider' has no verified isolation backend on $(uname -s), so a mounted review turn cannot be contained — refusing. See docs/ROADMAP.md (open security item). Set COMMS_RUNPHASE_ALLOW_UNCONTAINED=1 to accept an uncontained reviewer deliberately."
-          fi
+            iso_no_backend
           fi
           ;;
       esac
@@ -3970,7 +4055,7 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
     # THE LEG'S USAGE WINDOW OPENS HERE, before the canary: the canary is a billed prompt in the
     # same session, so it is part of what this leg cost. (The attestation's rollout snapshot below
     # deliberately EXCLUDES it — a different question.) Nothing before this point bills.
-    leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$mount_dir" "$acp_iso_home")" "$(cd "$workdir" && pwd -P)" "$run_dir"
+    leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$mount_dir" "${acp_iso_home:-$acp_grok_home}")" "$(cd "$workdir" && pwd -P)" "$run_dir"
     ACP_CANARY_OPTS=( "${acp_prompt_opts[@]}" )
     ACP_CANARY_PROVIDER="$provider"
     if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
@@ -3986,6 +4071,14 @@ ABORT_NOTE="refused: no verified isolation backend for '$provider' on $(uname -s
         canary_note="$canary_note. $retire_hint, then re-send"
       fi
       acp_refuse "$ACP_CANARY_REASON" "$canary_note"
+      return 1
+    fi
+
+    # grok: the canary has just forced the owner to launch the provider, so the shim must have logged a launch
+    # under THIS profile. A missing record means the owner resolved `grok` some other way — an uncontained
+    # reviewer behind a green self-check — and the real prompt must not be sent.
+    if [ -n "$acp_box_dir" ] && ! "$(dirname "$SELF")/box.sh" launched --dir "$acp_box_dir" 2>>"$run_dir/runner.log"; then
+      acp_refuse containment-unconfirmed "grok was not launched through the containment shim under the current profile (a warm owner started under an older profile keeps running until it exits: retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send) — containment unconfirmed"
       return 1
     fi
 

@@ -25,7 +25,7 @@ else.
 - A git repository.
 - An agent CLI — two or more for cross-model review; a lone agent is reviewed by its own model
   (its built-in `<agent>-review` twin). `claude` and `codex` work out of the box; `grok` is
-  registered by default, but read the containment note below before using it as a *reviewer*.
+  registered by default; read the containment note below before using it as a *reviewer* anywhere but macOS.
 - Node >= 22.13 for the ACP transport. `ACPX_BIN` pointing at an installed `acpx` skips the
   `npx` download; the Node floor still applies.
 - No pane multiplexer: loops run over ACP in the background.
@@ -45,13 +45,49 @@ copied OAuth token (if you log in with Google rather than an API key or the keyc
 containment has not yet been measured against a live Gemini turn (docs/ROADMAP.md). A reviewed tree
 carrying `.gemini/` or `.env` is refused.
 
-`grok` has no verified backend, so a mounted grok *review* turn is refused rather than run
-unconstrained, and a default panel that includes it will not complete. Grok as a *driver* is
-fine. Either narrow the roster (`<auto> --reviewers codex`, or drop `grok` from `agents` in
+`grok` (macOS) reviews inside a Seatbelt sandbox that agent-comms applies itself (`helpers/box.sh`),
+because grok's own sandbox does not hold on macOS (its docs: child-network blocking is Linux-only and
+every profile write-allows `/tmp`). The kernel closes writes (only the isolated grok home and a
+per-mount scratch directory stay writable — not the reviewed tree, the repository or `/tmp`), your
+home directory and `/tmp` for reads, the keychain daemons, signals to other processes, `launchctl` /
+`open` / `osascript`, unix-domain sockets, and every outbound port but `:443` (HTTPS) and DNS. The
+child gets an allowlisted environment, not yours, and your grok login is staged without its refresh
+token so the reviewer's copy can never rotate yours. Before every turn `box.sh` runs positive and
+negative probes against the profile it just wrote and refuses the turn unless all hold. acpx is launched
+with `--no-terminal --no-fs`: otherwise acpx — outside the sandbox — would execute grok's shell commands
+and file writes for it. Residuals: the network is open on `:443` (Seatbelt cannot filter by host), so
+the staged login is readable and could be sent out; an `XAI_API_KEY` in your environment is inherited by
+design; reads are a denylist of your home, not an allowlist of the machine. No override is needed, and
+`COMMS_RUNPHASE_ALLOW_UNCONTAINED` is not consulted on a host that has the backend.
+
+Where grok has **no** backend (anything but macOS), a mounted grok *review* turn is refused rather than
+run unconstrained, and a default panel that includes it will not complete. Grok as a *driver* is fine.
+Either narrow the roster (`<auto> --reviewers codex`, or drop `grok` from `agents` in
 `.comms/config`), or accept an uncontained reviewer deliberately with
-`export COMMS_RUNPHASE_ALLOW_UNCONTAINED=1`. An uncontained turn can write outside its mount and
-reach the network with your git credentials: fine for your own code on your own machine, not
-for code you did not write.
+`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1`, exported in the **environment that spawns the turn** or set in
+`~/.agent-comms/settings` (`comms.sh setup`; a project file may not set it, and an `export` in your shell
+rc does not reach a turn spawned from a non-interactive tool shell). An uncontained turn can write
+outside its mount and reach the network with your git credentials: fine for your own code on your own
+machine, not for code you did not write.
+
+`comms.sh`'s `acp.sh doctor` prints `reviewer <agent> containment:` for every reviewer, and
+`acp.sh containment grok` is the machine-readable form (`backend<TAB>grok-seatbelt`, or the reason on
+stderr with exit 1 = no backend for this OS, 3 = a prerequisite is missing). The runner acts on the same
+answer, so a refused leg and `doctor` cannot disagree.
+
+### Moving to a new machine
+
+Reviewer settings live outside the repository and are not part of a project checkout, so a new machine
+starts without them. A grok reviewer that worked on the old machine because it ran under
+`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` (in that machine's `~/.agent-comms/settings` or shell) keeps
+working only if that setting is recreated — which is the wrong fix on macOS. On the new machine:
+
+1. Install (`install.sh`) and run `comms.sh setup`; with grok registered it reports `grok containment on
+   this Mac: ready (Seatbelt)` or the missing prerequisite.
+2. Make sure the `grok` CLI is installed and signed in (`grok login`), and that `/usr/bin/sandbox-exec`
+   exists (it ships with macOS).
+3. Do **not** carry `COMMS_RUNPHASE_ALLOW_UNCONTAINED` across; `setup` offers to remove a stale one.
+4. Check with `~/.agent-comms/acp.sh doctor` and send one review.
 
 ## Interactive install
 
@@ -69,7 +105,7 @@ Run interactively (no `--scope`) and the installer shows a menu:
 
 | scope | installs | where |
 |---|---|---|
-| `global` | 5 driver commands for Claude, Grok, and Codex; 8 helper files (scripts plus the reviewer policy map); 2 loopspec fragments; the Codex protocol note | `~/.claude/commands/`, `~/.grok/commands/`, `~/.codex/skills/`, `~/.agent-comms/`, `~/.codex/AGENTS.md` |
+| `global` | 5 driver commands for Claude, Grok, and Codex; the helper scripts and the reviewer policy map; 2 loopspec fragments; the Codex protocol note | `~/.claude/commands/`, `~/.grok/commands/`, `~/.codex/skills/`, `~/.agent-comms/`, `~/.codex/AGENTS.md` |
 | `project` | per-repo state only | `.comms/{to-codex,to-claude,to-grok,archive}/`, `.gitignore` entries |
 | `both` | global + project | the recommended pair |
 | `local` | pinned copies of everything into the repo | `.claude/commands/`, `.grok/commands/`, `.agents/skills/`, `.agents/loopspec-fragments/`, `.agent-comms/` + project state |

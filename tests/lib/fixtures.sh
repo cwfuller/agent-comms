@@ -323,6 +323,10 @@ case " $* " in
     fi
     printf 'mode set: %s\n' "$ax_mode"; exit 0 ;;
 esac
+# AX_LAUNCH_GROK models acpx's queue owner spawning its agent: real acpx runs `grok agent stdio` found
+# on PATH, which under a containment backend is the shim box.sh put first. The stub's `grok` exits at once.
+# AX_GROK_OUT collects what that stub grok reported from inside the box.
+[ -n "${AX_LAUNCH_GROK:-}" ] && grok agent stdio </dev/null >>"${AX_GROK_OUT:-/dev/null}" 2>&1
 # --- compatibility canary: a bare -s prompt (no --file). The real prompt has --file and falls
 # through to the payload below. AX_CANARY selects the outcome. (compat-gate tests.)
 case " $* " in
@@ -415,6 +419,15 @@ cat > "$AXB/node" <<'AXNODE'
 echo "v22.22.3"
 AXNODE
 chmod +x "$AXB/node"
+# The suite's host is not what the grok fixtures are about. Mounted grok turns here are the "no containment
+# backend on this OS" shape (the operator-override path), and on macOS grok now HAS a backend that needs a
+# real sandbox-exec and grok. Reporting Linux keeps them host-independent; the Darwin backend is exercised
+# by tests/groups/box.sh against a stub grok on purpose, without this directory.
+cat > "$AXB/uname" <<'AXUNAME'
+#!/bin/bash
+case "$*" in ""|-s) echo Linux ;; *) exec "$(PATH=/usr/bin:/bin command -v uname)" "$@" ;; esac
+AXUNAME
+chmod +x "$AXB/uname"
 }
 
 # A PATH-stubbed Gemini CLI and the acpx that drives it. `gemini` is a real process speaking ACP

@@ -744,6 +744,38 @@ back from the parent-written settings (`gemini-effort`) — the evidence source 
 `gemini-chat-record+settings-readback`, because the CLI keeps no per-turn record of its thinking level.
 `failure-reason gemini <stderr-file>` classifies a refusal (`rate-limited`, `auth-failed`).
 
+**Reviewer containment, per provider.** `acp.sh containment <agent>` prints `backend<TAB><name>`
+(exit 0) when a MOUNTED review of that agent can be contained on this host, or the reason on stderr:
+exit 1 = no backend exists for this agent/OS, 3 = a backend exists but a prerequisite is missing.
+`doctor` prints the same answer as `reviewer <agent> containment: ...` for codex, claude, gemini and
+grok (UNAVAILABLE is a report, not a failure: an agent you do not use being uncontainable costs
+nothing). `runphase.sh` acts on the same answer, so `doctor` and a refused leg cannot disagree.
+`acp.sh grok-config <config.toml>` and `acp.sh grok-auth <auth.json> [refresh]` print the two files a
+mounted grok turn is staged with (below).
+
+### `box.sh`
+
+Kernel containment for a reviewer whose tools run in its own process — grok on macOS. `runphase.sh`
+calls it; it is documented here because its output is the contract.
+
+| subcommand | effect |
+|---|---|
+| `supports grok` | `backend<TAB>grok-seatbelt` (exit 0); exit 1 = no backend for this OS (anything but Darwin), 3 = `/usr/bin/sandbox-exec`, `python3` or the `grok` CLI is missing (reason last on stderr) |
+| `prepare grok --dir D --home H --mount M [--bin P]` | writes `D/box.sb` (the Seatbelt profile; paths arrive as `-D` parameters, never spliced into the text), `D/bin/box-run` (runs any command inside the profile with an allowlisted environment, `HOME` and `TMPDIR` at a per-mount scratch dir) and `D/bin/grok` (the launcher: logs a `launch ... sha=<profile hash>` line to `D/launch.log`, then execs the real grok through `box-run`), then RUNS the probes below against them. Prints `backend`, `profile_sha`, `path_prefix` (the dir to put first on PATH for every acpx call) and `acpx_flags` (`--no-terminal --no-fs`); exit 3 with the failed probes on stderr unless every probe held |
+| `launched --dir D` | exit 0 iff `D/launch.log` records a launch under the CURRENT profile hash — the runner calls it after the canary and refuses the turn (`reason: containment-unconfirmed`) if the owner never launched the contained grok |
+
+What the profile enforces and what it does not is the header of `helpers/box.sh`; the measured
+evidence is in ROADMAP. `prepare`'s probes: positive — the scratch dir and the isolated grok home are
+writable, the reviewed tree is readable; negative, each ground-truthed against the filesystem or the
+live process rather than the exit status — a write to the reviewed tree, to `/tmp`, to the run directory
+and to the git object store all leave no file; the real home cannot be listed and the operator's grok login
+cannot be read; none of the operator's environment (`GITHUB_TOKEN`, `AWS_*`, ...) reaches the child; a
+process in another session survives a `kill` from inside; `launchctl` cannot run; a loopback TCP
+service on a non-443 port and a unix-domain socket (the acpx owner's control plane is one) cannot be
+reached — with controls proving the tools start in the box and the same connects succeed outside it.
+**acpx must run with `--no-terminal --no-fs`:** by default it advertises ACP terminal and file-system
+capabilities and executes the agent's shell commands and file writes in its own, unsandboxed process.
+
 ### `runphase.sh` (experimental)
 
 Headless peer-turn runner, and the host for ACP turns (`run --via acp`). Loops default to **ACP**; headless is the fallback for grok ONLY (claude and codex refuse a non-ACP turn).

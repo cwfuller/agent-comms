@@ -197,6 +197,11 @@ skip() { # skip <id> <desc> — permitted, CONDITION-BOUND, and single-use
       if command -v zsh >/dev/null 2>&1; then
         fail "$2 (skip id 'zsh-absent' claimed, but zsh IS installed)"; return
       fi ;;
+    # The macOS Seatbelt backend's live checks: cashable only where sandbox-exec cannot run them.
+    seatbelt-*)
+      if [ "$(uname -s)" = Darwin ] && [ -x /usr/bin/sandbox-exec ]; then
+        fail "$2 (skip id '$1' claimed, but this host HAS a usable sandbox-exec)"; return
+      fi ;;
     # TRI-STATE. Defaulting an unset flag to 0 meant "probe failed", so these skips were
     # cashable BEFORE their probe ran — spare capacity again, in a new place. Only a
     # recorded, confirmed failure permits the skip. (codex + grok, panel r6, blocking.)
