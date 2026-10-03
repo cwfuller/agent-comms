@@ -294,6 +294,8 @@ cmd_prepare() {
   BOX_DIR="$(physdir "$BOX_DIR")" || die "the box dir does not resolve"
   [ ! -L "$BOX_DIR/bin" ] && [ ! -L "$BOX_DIR/scratch" ] || die "a box subdirectory is a symlink — refusing"
   SCRATCH="$BOX_DIR/scratch"
+  # The scratch dir is the one place the reviewer could leave things for a LATER round; start each from empty.
+  find "$SCRATCH" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
   HOME_ISO="$(physdir "$HOME_ISO")" || die "the isolated provider home does not exist"
   MOUNT="$(physdir "$MOUNT")" || die "the reviewed tree does not exist"
   GIT_COMMON="$BOX_DIR/no-git-store"

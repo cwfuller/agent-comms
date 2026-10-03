@@ -268,7 +268,10 @@ BXPY
 
   # ---- 4. the runner end to end: stub acpx + stub grok + the real sandbox ----
   BX_GOUT="$BX/grok-saw.txt"; : > "$BX_GOUT"; BX_ALOG="$BX/acpx-argv.log"; : > "$BX_ALOG"
-  BX_T="$(bx_turn live "$BXB:$PATH" AX_LAUNCH_GROK=1 AX_GROK_OUT="$BX_GOUT" AX_CWD_LOG="$BX_ALOG" GITHUB_TOKEN=leak)"
+  # The mount store is placed INSIDE the denied home, as the default one is (~/.local/state/agent-comms): the
+  # allow-backs for the tree, the isolated grok home and the scratch dir must win over the home-wide read deny.
+  BX_HM="$BXH/mbase"; mkdir -p "$BX_HM"; BX_HM="$(cd "$BX_HM" && pwd -P)"
+  BX_T="$(bx_turn live "$BXB:$PATH" COMMS_MOUNT_BASE="$BX_HM" AX_LAUNCH_GROK=1 AX_GROK_OUT="$BX_GOUT" AX_CWD_LOG="$BX_ALOG" GITHUB_TOKEN=leak)"
   BX_SAW="$(cat "$BX_GOUT")"
   BX_BAD=""
   [ "$(bx_field "$BX_T" status)" = completed ] || BX_BAD="$BX_BAD [status=$(bx_field "$BX_T" status) note=$(bx_field "$BX_T" note)]"
@@ -277,7 +280,7 @@ BXPY
   [[ "$BX_SAW" == *'auth={"https://auth.x.ai::id": {"key": "ACCESS-TOKEN"'* && "$BX_SAW" != *REFRESH* ]] || BX_BAD="$BX_BAD [the staged login is wrong]"
   [[ "$BX_SAW" == *'default = "grok-4.7"'* && "$BX_SAW" != *always-approve* ]] || BX_BAD="$BX_BAD [the staged config is wrong]"
   [[ "$BX_SAW" != *GITHUB_TOKEN* && "$BX_SAW" != *ESCAPED* ]] || BX_BAD="$BX_BAD [the child saw a token or escaped: $BX_SAW]"
-  [[ "$BX_SAW" == *"HOME=$(cd "$BXM" && pwd -P)/"*"/box/scratch"* ]] || BX_BAD="$BX_BAD [HOME was not the per-mount scratch]"
+  [[ "$BX_SAW" == *"HOME=$BX_HM/"*"/box/scratch"* ]] || BX_BAD="$BX_BAD [HOME was not the per-mount scratch]"
   [ -z "$(ls /private/tmp/box-test-escape.* 2>/dev/null)" ] || BX_BAD="$BX_BAD [a file escaped to /tmp]"
   [ -z "$BX_BAD" ] && ok "a mounted grok turn completes through the foreground runner under the real sandbox with the isolated login, config, environment and acpx flags" \
     || fail "live runner turn:$BX_BAD"
