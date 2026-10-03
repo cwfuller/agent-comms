@@ -236,13 +236,13 @@ fi
 # ---- 3. reviewer safety -----------------------------------------------------------------------
 say ""
 say "3/5 Reviewer containment"
-say "  codex, claude and gemini reviewers run contained. grok reviews run inside a macOS Seatbelt"
+say "  codex, claude and gemini reviewers run contained. grok reviews are contained by a macOS Seatbelt"
 say "  sandbox that agent-comms applies itself (writes, the keychain, other processes and non-HTTPS"
-say "  network are closed; your login is staged without its refresh token). No override is needed."
-say "  Where grok has no sandbox backend (anything but macOS), a grok REVIEW turn is refused unless"
-say "  you allow uncontained reviews — then it can write outside its mount and reach the network"
-say "  with your git credentials. Fine for your own code on your own machine; not for code you did"
-say "  not write."
+say "  network are closed; your login is staged without its refresh token), so no override is needed"
+say "  there. Where that backend cannot run (any other OS, or a missing prerequisite) a grok REVIEW"
+say "  turn is refused unless you allow uncontained reviews — then it can write outside its mount"
+say "  and reach the network with your git credentials. Fine for your own code on your own machine;"
+say "  not for code you did not write."
 cur_unc="$(yn_of "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-}")"
 # Containment is a property of the PROVIDER. Review twins run on their driver's provider, so the
 # agents line alone decides it: grok-review exists exactly when grok does.

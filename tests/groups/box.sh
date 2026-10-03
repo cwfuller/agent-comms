@@ -54,8 +54,8 @@ bx_setup() {  # <PATH> -> setup --yes output
   ( cd "$BX_SP" && env -u AC_SETTINGS_LOADED -u COMMS_RUNPHASE_ALLOW_UNCONTAINED AGENT_COMMS_HOME="$BX_SH" PATH="$1" "$COMMS" setup --yes </dev/null 2>&1 )
 }
 BX_OUT="$(bx_setup "$BX_DARWIN:/usr/bin:/bin")"
-{ [[ "$BX_OUT" == *"grok containment on this Mac: NOT available"* ]] && [[ "$BX_OUT" == *"allow uncontained (grok) reviews"* ]]; } \
-  && ok "setup on a Mac whose grok backend cannot run names the missing prerequisite and still offers the explicit override" \
+{ [[ "$BX_OUT" == *"grok containment on this Mac: NOT available"* ]] && grep -qx 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=1' "$BX_SH/settings"; } \
+  && ok "setup on a Mac whose grok backend cannot run names the missing prerequisite and keeps the explicit override as the operator left it" \
   || fail "setup with a broken backend: $(printf '%s' "$BX_OUT" | grep -i 'grok' | head -3 | tr '\n' '|')"
 
 # `launched` is the post-canary evidence that the owner ran the CONTAINED grok under THIS profile.
@@ -226,9 +226,9 @@ BXPY
     && [[ "$BX_OUT" == *"profile_sha"$'\t'"$(shasum -a 256 "$BX_BOX/box.sb" | cut -d' ' -f1)"* ]]; } \
     && ok "prepare writes the profile and the contained launcher, runs the probes against them, and prints the launch contract" \
     || fail "prepare (rc=$BX_RC out=$BX_OUT err=$(cat "$BX/prep.err"))"
-  # (setup on this same Mac: ready, and a carried-over override is offered for removal rather than applied)
+  # (setup on this same Mac: ready, and a carried-over override is dropped by the default answer)
   BX_OUT="$(bx_setup "$BXB:$PATH")"
-  { [[ "$BX_OUT" == *"grok containment on this Mac: ready (Seatbelt)"* ]] && [[ "$BX_OUT" == *"COMMS_RUNPHASE_ALLOW_UNCONTAINED is set"* ]] \
+  { [[ "$BX_OUT" == *"grok containment on this Mac: ready (Seatbelt)"* ]] \
     && ! grep -q '^COMMS_RUNPHASE_ALLOW_UNCONTAINED=' "$BX_SH/settings"; } \
     || fail "setup with a ready backend did not report it and drop the stale override: $(printf '%s' "$BX_OUT" | grep -i 'grok\|ALLOW' | head -4 | tr '\n' '|')"
 
