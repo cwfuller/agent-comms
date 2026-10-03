@@ -348,6 +348,34 @@ model of every answered message, and the tokens usage is read from); the thinkin
 CLI cannot be told over ACP and does not record, is bound through the isolated `settings.json`
 and only read back, which is why its policy capability is `fixed` (docs/ROADMAP.md).
 
+**The grok provider's isolation is a kernel sandbox applied from outside (macOS).** grok's own
+sandbox is no help on Darwin, and claude's and gemini's mode pins have no grok analogue, so
+`helpers/box.sh` wraps the grok CLI in a Seatbelt profile. Four design points, each forced by a
+measurement (ROADMAP "grok review restored on macOS"):
+
+- **Where tools run decides what to wrap.** acpx advertises ACP terminal and file-system capabilities
+  by default, and then runs the agent's shell commands and writes in *its own* process. A profile
+  around grok alone contained nothing; the owner is launched `--no-terminal --no-fs` so grok runs its
+  tools in-process. The flags are printed by `box.sh prepare` beside the profile that depends on them.
+- **The contained `grok` must be the one the owner launches, on every call.** The shim directory leads
+  `PATH` in `acp_exec` (the owner is spawned lazily by whichever acpx call comes first), and the shim
+  logs each launch with the profile hash; `box.sh launched` after the canary turns "the self-check
+  passed" into "the owner ran the contained grok". Probes prove the profile, the launch record proves it
+  was used.
+- **Probes are checked against the world and against a control.** Each negative probe also asserts the
+  file did not appear or the process survived, and the socket and tool probes first prove the same call
+  works outside the box and the tool starts inside it — a denied call from a tool that never ran would
+  otherwise read as containment. `tests/groups/box.sh` weakens the profile one rule at a time and
+  requires `prepare` to refuse.
+- **The credential copy is deliberately lesser than the original.** The staged `auth.json` drops the
+  refresh token, so the reviewer's home can never rotate the operator's login, and an access token about
+  to expire is refused (after one renewal by the operator's own `grok models`) instead of dying mid-turn.
+  The operator's `config.toml` is not read; only the default model and reasoning effort are carried.
+
+Backend selection is one table (`backend_for` in `box.sh`); `acp.sh containment <agent>` and `doctor`
+read the same answer the runner acts on. "No backend for this OS" (exit 1) and "a backend that cannot run"
+(exit 3) are different: only the first can be waved through with `COMMS_RUNPHASE_ALLOW_UNCONTAINED`.
+
 ## Grading pilot storage (`.comms/grades/`)
 
 Local, gitignored, per-install — resolved as **per-install only**, not synced. Cross-machine

@@ -3526,7 +3526,8 @@ protect — it is in the Keychain.
 **The item stays OPEN, and the reason is now narrower.** claude is contained against reviewer
 BEHAVIOUR (writes, ground-truthed against five bash evasion shapes), NOT against a hostile
 artifact's reach: the child's network is open and its credential is unscopable. grok on Darwin
-still has no backend at all. A shipped `claude)` arm is not this item closing.
+still has no backend at all *(2026-10-03: grok now has one on macOS — see "grok review restored on macOS";
+it remains uncontained elsewhere)*. A shipped `claude)` arm is not this item closing.
 
 
 *(field-report-9446 round 8, codex. The top open item on this track.)*
@@ -3760,8 +3761,9 @@ STILL OPEN (why the item is not closed):
   treating it as live. (d) A deterministic scan/claim/delete interleaving test would protect the GC
   race fix from later reordering (the current test is structural). (e) A stale `mount_restage`
   comment still calls an ephemeral kdir "its run dir". None gate increment 1; the panel approved.
-- **grok on Darwin has no backend.** Its sandbox is a documented macOS network no-op, so a grok
-  mounted turn is REFUSED by default (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override). The
+- **grok on Darwin has no backend** *(superseded 2026-10-03: `helpers/box.sh` supplies one, see "grok review
+  restored on macOS"; this bullet still describes grok on every other OS).* Its sandbox is a documented macOS
+  network no-op, so a grok mounted turn is REFUSED by default (`COMMS_RUNPHASE_ALLOW_UNCONTAINED=1` to override). The
   default panel therefore loses cross-vendor corroboration on macOS unless reviews run on Linux.
   This is the product decision above, unchanged.
 - **Toolchain is not integrity-pinned.** acpx names codex-acp `^1.1.5`; it resolved to 1.6.2 here.
