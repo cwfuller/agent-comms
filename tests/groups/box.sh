@@ -45,6 +45,19 @@ done
 [ "$BX_N" = 4 ] && ok "doctor reports a containment line for every reviewer, so it cannot disagree with a refused leg" \
   || fail "doctor prints $BX_N of 4 containment lines"
 
+# setup tells the operator where grok stands instead of silently asking a question that no longer applies.
+BX_SP="$BX/setup-proj"; BX_SH="$BX/setup-home"; mkdir -p "$BX_SP/.comms" "$BX_SH"
+git -C "$BX_SP" init -q; git -C "$BX_SP" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
+printf 'agents = claude grok\ndefault-target = claude\nsuite-cmd = bash t.sh\n' > "$BX_SP/.comms/config"
+bx_setup() {  # <PATH> -> setup --yes output
+  printf 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=1\n' > "$BX_SH/settings"
+  ( cd "$BX_SP" && env -u AC_SETTINGS_LOADED -u COMMS_RUNPHASE_ALLOW_UNCONTAINED AGENT_COMMS_HOME="$BX_SH" PATH="$1" "$COMMS" setup --yes </dev/null 2>&1 )
+}
+BX_OUT="$(bx_setup "$BX_DARWIN:/usr/bin:/bin")"
+{ [[ "$BX_OUT" == *"grok containment on this Mac: NOT available"* ]] && [[ "$BX_OUT" == *"allow uncontained (grok) reviews"* ]]; } \
+  && ok "setup on a Mac whose grok backend cannot run names the missing prerequisite and still offers the explicit override" \
+  || fail "setup with a broken backend: $(printf '%s' "$BX_OUT" | grep -i 'grok' | head -3 | tr '\n' '|')"
+
 # `launched` is the post-canary evidence that the owner ran the CONTAINED grok under THIS profile.
 BX_L="$BX/launched"; mkdir -p "$BX_L"; printf '(version 1)\n' > "$BX_L/box.sb"
 BX_SHA="$(shasum -a 256 "$BX_L/box.sb" | cut -d' ' -f1)"
@@ -213,6 +226,11 @@ BXPY
     && [[ "$BX_OUT" == *"profile_sha"$'\t'"$(shasum -a 256 "$BX_BOX/box.sb" | cut -d' ' -f1)"* ]]; } \
     && ok "prepare writes the profile and the contained launcher, runs the probes against them, and prints the launch contract" \
     || fail "prepare (rc=$BX_RC out=$BX_OUT err=$(cat "$BX/prep.err"))"
+  # (setup on this same Mac: ready, and a carried-over override is offered for removal rather than applied)
+  BX_OUT="$(bx_setup "$BXB:$PATH")"
+  { [[ "$BX_OUT" == *"grok containment on this Mac: ready (Seatbelt)"* ]] && [[ "$BX_OUT" == *"COMMS_RUNPHASE_ALLOW_UNCONTAINED is set"* ]] \
+    && ! grep -q '^COMMS_RUNPHASE_ALLOW_UNCONTAINED=' "$BX_SH/settings"; } \
+    || fail "setup with a ready backend did not report it and drop the stale override: $(printf '%s' "$BX_OUT" | grep -i 'grok\|ALLOW' | head -4 | tr '\n' '|')"
 
   # ---- 2. the kernel, from outside the probe battery: a contained process by hand ----
   BX_BAD=""

@@ -1567,12 +1567,16 @@ section "review twins: setup accepts one driver and asks about its provider"
 # is the default, and answering writes it back in canonical form. A hand-written `yes` becomes
 # `1` only if the question ran; the branch that skips it never touches the key. Same fixture and
 # driver (`st`) as the section above.
+# grok's containment is HOST-dependent (macOS has a backend, so setup does not ask the uncontained question
+# there); this section is about the no-backend question, so it pins the OS to one without a backend.
+RS_UN="$WORK/rs-uname"; mkdir -p "$RS_UN"
+printf '#!/bin/bash\ncase "$*" in ""|-s) echo Linux ;; *) exec "$(PATH=/usr/bin:/bin command -v uname)" "$@" ;; esac\n' > "$RS_UN/uname"; chmod +x "$RS_UN/uname"
 rs_setup() { # <agents value> [extra config line] -> setup's output, then "rc=N"
   { printf 'agents = %s\n' "$1"
     [ -z "${2:-}" ] || printf '%s\n' "$2"
     printf 'suite-cmd = bash t.sh\n'; } > "$ST_PROJ/.comms/config"
   printf 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=yes\n' > "$ST_HOME/settings"
-  st -- "$COMMS" setup --yes </dev/null 2>&1; printf 'rc=%s\n' "$?"
+  st PATH="$RS_UN:$PATH" -- "$COMMS" setup --yes </dev/null 2>&1; printf 'rc=%s\n' "$?"
 }
 rs_asked() { # <setup output> — 0 when step 3 ran AND asked the grok question
   printf '%s\n' "$1" | grep -qx 'rc=0' && printf '%s\n' "$1" | grep -q '3/5 Reviewer containment' \
