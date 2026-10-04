@@ -245,18 +245,6 @@ mkdir -p "$GM/home/.acpx/sessions" "$GM/home/.acpx/queues" "$GM/home/.gemini"; :
 printf '{"security":{"auth":{"selectedType":"gemini-api-key"}},"model":{"name":"operator-model"},"mcpServers":{"operator-server":{"command":"x"}}}\n' > "$GM/home/.gemini/settings.json"
 printf '{"refresh_token":"operator-oauth-token"}\n' > "$GM/home/.gemini/oauth_creds.json"
 
-# ---- shared guidance is staged for codex and grok only: a gemini leg gets no AGENTS.md and reports guidance null ----
-GM_GB="$GM/guidance-bundle"; mkdir -p "$GM_GB"; printf '# gemini guidance probe\n' > "$GM_GB/method-guidance.md"
-python3 - "$GM_GB" <<'GMPY'
-import hashlib, json, sys
-d = sys.argv[1]
-json.dump({"format": 1, "revision": "0" * 40, "guidance_file": "method-guidance.md", "guidance_sha256": hashlib.sha256(open(d + "/method-guidance.md", "rb").read()).hexdigest()}, open(d + "/snapshot.json", "w"))
-GMPY
-GM_DG="$(gm_turn gm-thread tg "$GM_A1" COMMS_METHOD_GUIDANCE_DIR="$GM_GB")"
-{ [ "$(gm_res "$GM_DG" status)" = completed ] && [ "$(gm_res "$GM_DG" guidance)" = '<null>' ] && ! grep -q '^guidance' "$GM_DG/turn.tsv" \
-  && ! grep -q '^guidance' "$GM_DG/runner.log"; } \
-  && ok "a mounted gemini leg stages no shared guidance even with a valid bundle configured, and reports guidance null" \
-  || fail "gemini guidance: status=$(gm_res "$GM_DG" status) guidance=$(gm_res "$GM_DG" guidance)"
 printf '{"active":"operator@example.test"}\n' > "$GM/home/.gemini/google_accounts.json"
 GM_OP_SUM="$(cat "$GM/home/.gemini/settings.json" "$GM/home/.gemini/oauth_creds.json" | shasum | cut -d' ' -f1)"
 printf 'agents = claude codex grok gemini\ndefault-target = codex\n' > "$MA_FIX/.comms/config"
@@ -300,6 +288,18 @@ print("<null>" if d is None else d)' "$@" 2>/dev/null; }
 gm_log() { sed -n "s/^$2	//p" "$GM/stub-$1.log" 2>/dev/null | head -1; }      # first value of a stub observation
 gm_events() { (cd "$MA_FIX" && env "$COMMS" events --all --agent gemini --thread "$1" 2>/dev/null); }
 
+# ---- shared guidance is staged for codex and grok only: a gemini leg gets no AGENTS.md and reports guidance null ----
+GM_GB="$GM/guidance-bundle"; mkdir -p "$GM_GB"; printf '# gemini guidance probe\n' > "$GM_GB/method-guidance.md"
+python3 - "$GM_GB" <<'GMPY'
+import hashlib, json, sys
+d = sys.argv[1]
+json.dump({"format": 1, "revision": "0" * 40, "guidance_file": "method-guidance.md", "guidance_sha256": hashlib.sha256(open(d + "/method-guidance.md", "rb").read()).hexdigest()}, open(d + "/snapshot.json", "w"))
+GMPY
+GM_DG="$(gm_turn gm-guide tg "$GM_A1" COMMS_METHOD_GUIDANCE_DIR="$GM_GB")"
+{ [ "$(gm_res "$GM_DG" status)" = completed ] && [ "$(gm_res "$GM_DG" guidance)" = '<null>' ] && ! grep -q '^guidance' "$GM_DG/turn.tsv" \
+  && ! grep -q '^guidance' "$GM_DG/runner.log"; } \
+  && ok "a mounted gemini leg stages no shared guidance even with a valid bundle configured, and reports guidance null" \
+  || fail "gemini guidance: status=$(gm_res "$GM_DG" status) guidance=$(gm_res "$GM_DG" guidance)"
 GM_D1="$(gm_turn gm-thread t1 "$GM_A1")"
 { [ "$(gm_res "$GM_D1" status)" = completed ] && [ "$(gm_res "$GM_D1" provider)" = gemini ] && [ -z "$(gm_res "$GM_D1" reason)" ]; } \
   && ok "a mounted gemini review turn completes and records its result (provider gemini, status completed)" \
@@ -462,4 +462,4 @@ GM_D15="$(gm_turn gm-synth t15 "$GM_A1" GM_SYNTHETIC=1)"
   && ok "a synthetic gemini message in the chat record neither refuses a valid review nor inflates its usage" \
   || fail "synthetic record: status=$(gm_res "$GM_D15" status) usage=$(gm_res "$GM_D15" usage responses)/$(gm_res "$GM_D15" usage total_tokens) note=$(gm_res "$GM_D15" note | cut -c1-200)"
 GM_NREP="$(ls "$MA_FIX/.comms/to-claude/" 2>/dev/null | grep -c 'gemini-reply' || true)"
-[ "$GM_NREP" = 6 ] && ok "no review was published for any refused turn (only the six completed turns reply)" || fail "a refused turn published a reply ($GM_NREP gemini replies)"
+[ "$GM_NREP" = 7 ] && ok "no review was published for any refused turn (only the seven completed turns reply)" || fail "a refused turn published a reply ($GM_NREP gemini replies)"
