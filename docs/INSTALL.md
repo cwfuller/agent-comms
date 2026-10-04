@@ -53,9 +53,13 @@ home directory and `/tmp` for reads, the keychain daemons, signals to other proc
 `open` / `osascript`, unix-domain sockets, and every outbound port but `:443` (HTTPS) and DNS. The
 child gets an allowlisted environment, not yours, and your grok login is staged without its refresh
 token so the reviewer's copy can never rotate yours. Before every turn `box.sh` runs positive and
-negative probes against the profile it just wrote and refuses the turn unless all hold. acpx is launched
-with `--no-terminal --no-fs`: otherwise acpx — outside the sandbox — would execute grok's shell commands
-and file writes for it. Residuals: the network is open on `:443` (Seatbelt cannot filter by host), so
+negative probes against the profile it just wrote and refuses the turn unless all hold. Your grok login
+is closed by its own path too, so a `GROK_HOME` outside your home is no gap. acpx is launched with
+`--no-terminal --no-fs`: otherwise acpx — outside the sandbox — would execute grok's shell commands and
+file writes for it. Those flags only withhold the advertisement and acpx 0.13.1 still ran a request sent
+anyway, so grok turns use acpx `0.17.1` (the first that refuses), and before every turn a fake agent
+sends fs and terminal requests through the launcher actually in use — `ACPX_BIN` included — and the turn
+is refused unless every one is denied. Residuals: the network is open on `:443` (Seatbelt cannot filter by host), so
 the staged login is readable and could be sent out; an `XAI_API_KEY` in your environment is inherited by
 design; reads are a denylist of your home, not an allowlist of the machine. No override is needed, and
 `COMMS_RUNPHASE_ALLOW_UNCONTAINED` is not consulted on a host that has the backend.
@@ -87,7 +91,13 @@ working only if that setting is recreated — which is the wrong fix on macOS. O
 2. Make sure the `grok` CLI is installed and signed in (`grok login`), and that `/usr/bin/sandbox-exec`
    exists (it ships with macOS).
 3. Do **not** carry `COMMS_RUNPHASE_ALLOW_UNCONTAINED` across; `setup` offers to remove a stale one.
-4. Check with `~/.agent-comms/acp.sh doctor` and send one review.
+4. If you set `ACPX_BIN`, point it at acpx `0.17.1` or newer (or unset it): an older client is refused
+   at run time with that instruction, never run uncontained. With `npx` (the default) the pin is
+   fetched on first use, so the first grok turn needs network and a Node of 22.13 or newer.
+5. Check with `~/.agent-comms/acp.sh doctor` (`acp.sh containment grok` is the machine-readable form:
+   exit 1 = no backend for this OS, 3 = a prerequisite is missing, with the reason on stderr) and send
+   one review. A refusal names the missing piece; `COMMS_RUNPHASE_ALLOW_UNCONTAINED` is not the fix
+   and is ignored when the backend exists but cannot run.
 
 ## Interactive install
 

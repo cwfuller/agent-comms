@@ -357,11 +357,18 @@ measurement (ROADMAP "grok review restored on macOS"):
   by default, and then runs the agent's shell commands and writes in *its own* process. A profile
   around grok alone contained nothing; the owner is launched `--no-terminal --no-fs` so grok runs its
   tools in-process. The flags are printed by `box.sh prepare` beside the profile that depends on them.
+  They only change what is *advertised*: acpx 0.13.1 registered the handlers regardless, so a hostile
+  agent could send `terminal/create` anyway. `ACPX_VERSION_ENFORCING` (0.17.1, the first release that
+  registers them only when advertised) is therefore grok's pin, and `box.sh client-check` drives the
+  launcher in use with a fake agent that sends the requests anyway — preceded by a control with the
+  capabilities on — so an `ACPX_BIN` or a future regression cannot slip past on a version string.
 - **The contained `grok` must be the one the owner launches, on every call.** The shim directory leads
   `PATH` in `acp_exec` (the owner is spawned lazily by whichever acpx call comes first), and the shim
   logs each launch with the profile hash; `box.sh launched` after the canary turns "the self-check
   passed" into "the owner ran the contained grok". Probes prove the profile, the launch record proves it
-  was used.
+  was used. The record is per *preparation*: the box dir is durable across rounds and the profile text
+  never changes (paths are `-D` parameters), so `prepare` resets the log and draws a generation nonce
+  that the shim writes into every launch line; a launch from round one cannot vouch for round two.
 - **Probes are checked against the world and against a control.** Each negative probe also asserts the
   file did not appear or the process survived, and the socket and tool probes first prove the same call
   works outside the box and the tool starts inside it — a denied call from a tool that never ran would
@@ -371,6 +378,8 @@ measurement (ROADMAP "grok review restored on macOS"):
   refresh token, so the reviewer's home can never rotate the operator's login, and an access token about
   to expire is refused (after one renewal by the operator's own `grok models`) instead of dying mid-turn.
   The operator's `config.toml` is not read; only the default model and reasoning effort are carried.
+  The original login is denied by its physical path (`GROK_HOME` may live outside the denied home, and
+  the CLI may be installed beside it), and `prepare` probes that same path.
 
 Backend selection is one table (`backend_for` in `box.sh`); `acp.sh containment <agent>` and `doctor`
 read the same answer the runner acts on. "No backend for this OS" (exit 1) and "a backend that cannot run"

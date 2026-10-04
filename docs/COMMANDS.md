@@ -761,8 +761,9 @@ calls it; it is documented here because its output is the contract.
 | subcommand | effect |
 |---|---|
 | `supports grok` | `backend<TAB>grok-seatbelt` (exit 0); exit 1 = no backend for this OS (anything but Darwin), 3 = `/usr/bin/sandbox-exec`, `python3` or the `grok` CLI is missing (reason last on stderr) |
-| `prepare grok --dir D --home H --mount M [--bin P]` | writes `D/box.sb` (the Seatbelt profile; paths arrive as `-D` parameters, never spliced into the text), `D/bin/box-run` (runs any command inside the profile with an allowlisted environment, `HOME` and `TMPDIR` at a per-mount scratch dir) and `D/bin/grok` (the launcher: logs a `launch ... sha=<profile hash>` line to `D/launch.log`, then execs the real grok through `box-run`), then RUNS the probes below against them. Prints `backend`, `profile_sha`, `path_prefix` (the dir to put first on PATH for every acpx call) and `acpx_flags` (`--no-terminal --no-fs`); exit 3 with the failed probes on stderr unless every probe held |
-| `launched --dir D` | exit 0 iff `D/launch.log` records a launch under the CURRENT profile hash — the runner calls it after the canary and refuses the turn (`reason: containment-unconfirmed`) if the owner never launched the contained grok |
+| `prepare grok --dir D --home H --mount M [--bin P] [--cred-dir C]` | resets `D/launch.log`, draws a fresh launch generation (`D/generation`), writes `D/box.sb` (the Seatbelt profile; paths arrive as `-D` parameters, never spliced into the text), `D/bin/box-run` (runs any command inside the profile with an allowlisted environment, `HOME` and `TMPDIR` at a per-mount scratch dir) and `D/bin/grok` (the launcher: logs a `launch ... sha=<profile hash> gen=<generation>` line to `D/launch.log`, then execs the real grok through `box-run`), then RUNS the probes below against them. `C` (default `$GROK_HOME`, else `~/.grok`) is the operator's login store: it is denied by physical path and probed, so a store outside the home is closed as well. Prints `backend`, `profile_sha`, `path_prefix` (the dir to put first on PATH for every acpx call) and `acpx_flags` (`--no-terminal --no-fs`); exit 3 with the failed probes on stderr unless every probe held |
+| `client-check --dir D --flags F -- LAUNCHER...` | runs LAUNCHER (the acpx argv prefix, as `acp.sh launcher grok` prints it) against a fake ACP agent that sends `fs/read_text_file`, `fs/write_text_file` and `terminal/create` whatever was advertised, unsandboxed and under `--approve-all` as the queue owner runs. A control run with the capabilities left on must see all three honoured (else the probe proves nothing: exit 3 `could not run`); the run under F must see all three answered with an error, no file created and no file content returned. Prints `client_check<TAB>ok`; exit 3 otherwise, naming acpx `0.17.1` as the fix. The runner calls it after `prepare`, every turn |
+| `launched --dir D` | exit 0 iff `D/launch.log` records a launch under the CURRENT profile hash AND the generation of THIS preparation — the runner calls it after the canary and refuses the turn (`reason: containment-unconfirmed`) if the owner never launched the contained grok. `prepare` resets the log and the generation each time, so a launch from an earlier round of a durable box dir does not count |
 
 What the profile enforces and what it does not is the header of `helpers/box.sh`; the measured
 evidence is in ROADMAP. `prepare`'s probes: positive — the scratch dir and the isolated grok home are
@@ -773,8 +774,12 @@ cannot be read; none of the operator's environment (`GITHUB_TOKEN`, `AWS_*`, ...
 process in another session survives a `kill` from inside; `launchctl` cannot run; a loopback TCP
 service on a non-443 port and a unix-domain socket (the acpx owner's control plane is one) cannot be
 reached — with controls proving the tools start in the box and the same connects succeed outside it.
-**acpx must run with `--no-terminal --no-fs`:** by default it advertises ACP terminal and file-system
-capabilities and executes the agent's shell commands and file writes in its own, unsandboxed process.
+**acpx must run with `--no-terminal --no-fs` AND be a client that enforces them:** by default it advertises
+ACP terminal and file-system capabilities and executes the agent's shell commands and file writes in its
+own, unsandboxed process. acpx 0.13.1 withheld only the advertisement and still executed a request sent
+anyway; 0.17.1 and later refuse it. `acp.sh launcher grok` / `acp.sh version grok` therefore pin
+`ACPX_VERSION_ENFORCING` (0.17.1) for grok, other agents keep the baseline pin, and `client-check`
+proves the refusal for whatever launcher is in use (an `ACPX_BIN` replaces the pin, not the check).
 
 ### `runphase.sh` (experimental)
 

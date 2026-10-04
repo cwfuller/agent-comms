@@ -108,8 +108,12 @@ profile agent-comms applies itself, in an isolated `GROK_HOME` beside the mount 
 staged without its refresh token, so the reviewer's copy can never rotate it, and is refused if it is
 expired or within ten minutes of expiry after one attempt to renew it with the operator's own `grok
 models`). The queue owner is launched with `--no-terminal --no-fs` and a contained `grok` first on its
-PATH; after the canary the runner requires a launch record under the current profile hash
-(`reason: containment-unconfirmed` otherwise). `box.sh prepare` runs a battery of positive and
+PATH, using an acpx that enforces those flags (pinned `0.17.1` for grok; `box.sh client-check` sends
+the forbidden requests through the launcher actually in use, `ACPX_BIN` included, and the turn is
+refused unless every one is denied); the operator's login store is denied by its physical path even when
+`GROK_HOME` points outside the home. After the canary the runner requires a launch record under the
+current profile hash AND the generation of this turn's preparation, so a launch left by an earlier round
+does not count (`reason: containment-unconfirmed` otherwise). `box.sh prepare` runs a battery of positive and
 negative probes against the exact profile each turn and refuses on any failure. On a host with no
 backend (not macOS) a mounted grok turn is refused unless `COMMS_RUNPHASE_ALLOW_UNCONTAINED=1`; where a
 backend exists but cannot run (no `sandbox-exec`, no `grok`, a failed probe) the turn is refused and the

@@ -3412,7 +3412,8 @@ grok 1.0.46, acpx 0.13.1, and each point was a failure of the obvious version:
   and file write run in the *unsandboxed queue owner* (ACP `terminal/*`, `fs/*`): a Seatbelt around grok left
   `echo x > /tmp/...` succeeding and `ls ~` listing the real home. `--no-terminal --no-fs` makes grok run its
   tools in-process; the same commands then fail with `Operation not permitted`. The flags are part of the
-  boundary and `box.sh prepare` prints them.
+  boundary and `box.sh prepare` prints them. *(Qualified by the panel review below: the flags only withhold
+  the advertisement, and 0.13.1 itself still executed a forbidden request.)*
 - **Seatbelt allow-backs must name the same operation as the deny.** `(allow file-read* ...)` did not
   re-open a path under `(deny file-read-data (subpath HOME))`; `(allow file-read-data ...)` did.
 - **Paths are physical.** `/tmp/...` matched nothing; `/private/tmp/...` did.
@@ -3446,6 +3447,37 @@ and `ls ~` inside the box listed only the scratch directory.
 
 **Open (not done here).** A reviewer under `--no-terminal --no-fs` is still granted `--approve-all`; with a
 kernel boundary that is the codex shape and deliberate, but nothing re-derives it per turn beyond the probes.
+
+**Panel review, round 1 (three blocking findings, all reproduced, all fixed).** The suite was green and each
+of these was real, because the tests exercised the cooperative path.
+- **The client did not enforce the flags.** Reproduced against a fake ACP agent that sends the requests
+  regardless: acpx 0.13.1 answered `terminal/create` with a terminal id under `--no-terminal --no-fs`
+  (the `fs/*` handlers were bounded only by the session cwd, which for a mounted turn is the reviewed
+  tree). That is a path from a contained agent to the unsandboxed owner running under `--approve-all`.
+  acpx 0.17.1 registers the handlers only when advertised and answers `-32601 Method not found`. Fix: grok's
+  pin is `ACPX_VERSION_ENFORCING` = 0.17.1 (other providers keep 0.13.1: their measurements were taken
+  there and they do not depend on the refusal), and `box.sh client-check` replays the forbidden requests
+  through the launcher actually in use every turn — after a control run proving the fake agent can drive
+  the client — so an `ACPX_BIN` or a regression is caught by behaviour, not by a version string. Run
+  against the real clients: 0.13.1 is refused with the fix named, 0.17.1 passes.
+- **Launch evidence leaked across rounds.** `launch.log` outlived a preparation and the profile text is
+  identical every round (paths are `-D` parameters), so round one's launch satisfied round two's check.
+  `prepare` now empties the log and draws a generation nonce the shim writes into each launch line;
+  `launched` requires both. The two-round test on one durable dir launches in round one, bypasses the shim
+  in round two and requires the refusal.
+- **A login store outside the home stayed readable.** The runner stages from `${GROK_HOME:-~/.grok}`
+  while the profile denied only the real home. `prepare` now takes the store (`--cred-dir`, defaulting to
+  `GROK_HOME`), denies it and its `auth.json` by physical path after the allow-backs, and probes that path;
+  a test with a store outside the home removes both rules and requires `prepare` to refuse.
+- Advisory taken: `setup` no longer offers the uncontained override on a Mac whose backend exists but
+  cannot run (the runner ignores it there); it prints the repair instead.
+
+Live check after those fixes (disposable fixture, `comms.sh send --to grok --wait`, no
+`COMMS_RUNPHASE_ALLOW_UNCONTAINED`, acpx 0.17.1, existing subscription): completed, reply bound to the request
+(`in-reply-to`, `artifact_id`, `head_sha`) with verdict APPROVE, `runner.log` recording `grok-seatbelt`. The
+model itself declined to attempt the writes, so that run shows the path works, not that the kernel denies
+them; the denial evidence is the probes and the by-hand tests, and `ls` of the real home from inside the
+box answered `Operation not permitted`.
 
 ## Open security item: the mounted review turn is contained for reviewer behavior, not yet for a hostile artifact
 
