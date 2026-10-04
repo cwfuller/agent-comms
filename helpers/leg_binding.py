@@ -271,14 +271,17 @@ def check_leg(leg, ctx, entries, entries_error, profiles, environ):
         if not isinstance(expected, dict) or any(k not in expected for k in ACCESS_KEYS):
             refuse("access-incomplete", "the expected access object must carry transport, provider, account, billing and credential")
         else:
-            for code, mine, theirs in (("route-mismatch", leg["route_id"], entry["route_id"]),
-                                       ("transport-mismatch", expected["transport"], entry["transport"]),
-                                       ("provider-mismatch", expected["provider"], entry["provider"]),
-                                       ("account-mismatch", expected["account"], entry["account"]),
-                                       ("billing-mismatch", expected["billing"], entry["billing"]),
-                                       ("credential-mismatch", expected["credential"], entry["credential"])):
+            for code, key, mine, theirs in (("route-mismatch", "route_id", leg["route_id"], entry["route_id"]),
+                                            ("transport-mismatch", "transport", expected["transport"], entry["transport"]),
+                                            ("provider-mismatch", "provider", expected["provider"], entry["provider"]),
+                                            ("account-mismatch", "account", expected["account"], entry["account"]),
+                                            ("billing-mismatch", "billing", expected["billing"], entry["billing"]),
+                                            ("credential-mismatch", "credential", expected["credential"], entry["credential"])):
                 if mine != theirs:
-                    refuse(code, f"expected {mine if mine is not None else 'null'}, configured {theirs if theirs is not None else 'null'}")
+                    # A caller-supplied value is echoed only when it has the shape the field can hold: a literal
+                    # secret pasted where a reference belongs must never reach stderr, the plan or a log.
+                    shown = "null" if mine is None else mine if access.expected_shape_ok(key, mine) else "<malformed, not shown>"
+                    refuse(code, f"expected {shown}, configured {theirs if theirs is not None else 'null'}")
         # The configured transport must also be the one the runner would drive: a matching `cli` entry for an
         # agent this runner reaches over ACP is a label that would be stamped and never true.
         actual = ctx.get("transport", "")

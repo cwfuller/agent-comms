@@ -260,6 +260,9 @@ refuses. `transport-mismatch` also covers a configured transport the runner does
 this runner reaches over ACP), and `model-unservable` covers a custom OpenCode runtime whose executable cannot run or
 reports another version than the profile pins (a bounded local `--version` probe with no credentials, before any write).
 A refused dispatch snapshots nothing and writes no event, index row, attempts marker or leg file.
+A refusal prints a caller-supplied expected access value only when it has the shape its field holds (a bare token, a
+`env:NAME`/`keychain:service` reference, a known transport or billing class); anything else, such as a literal key
+pasted as the expected credential, is reported as `<malformed, not shown>` and never echoed.
 
 **Run-time re-check.** Each leg carries a helper-stamped `leg_binding` / `leg_binding_digest` (set only by
 `send --bound-leg`; a hand-typed key is stripped). `runphase` judges the stamp again, before it mounts, launches

@@ -123,6 +123,10 @@ OUT="$(bd "$COMMS" review-route plan --bindings "$BD/bmix.json" 2>"$BD/mix.err")
 { [ "$A" = 1 ] && [ "$(sed -n 1p <<<"$OUT")" = "$BD_PL_CODEX" ] && [ "$(sed -n 3p <<<"$OUT")" = "$BD_PL_GLM" ] \
   && [ "$(sed -n 2p <<<"$OUT" | sed 's/ access_digest=[0-9a-f]* / access_digest=D /')" = "route-plan v2 ref=res-gemini agent=gemini harness=gemini status=refused code=account-mismatch route_id=gemini-api transport=acp provider=google account=metered billing=api credential=env:BD_GEMINI_KEY access_digest=D model=gemini-3.1-pro-preview effort=high model_source=bound effort_source=bound capability=fixed limit_id=- routing=off decision=none phase=- map_version=$BD_MAPV capability_version=1" ]; } \
   && ok "a plan with one refusing leg still prints all three verdicts (the refused leg shows the CONFIGURED account) and exits 1" || fail "mixed plan (rc=$A): $OUT"
+bd_wb "$BD/blit.json" "$(bj "$BD_L_GEMINI" "d['access']['credential']='canary-literal-sk-0123456789'")"
+OUT="$(bd "$COMMS" review-route plan --bindings "$BD/blit.json" 2>&1)"; A=$?
+{ [ "$A" = 1 ] && case "$OUT" in *canary-literal*) false ;; *code=credential-mismatch*) true ;; *) false ;; esac; } \
+  && ok "a plan refuses a literal key supplied as the expected credential, naming the code and never the value" || fail "plan echoed or missed a literal credential (rc=$A): $OUT"
 grep -q '^refused gemini account-mismatch expected someone-else, configured metered' "$BD/mix.err" \
   && ok "the refusal names both sides: what was expected and what is configured" || fail "refusal detail: $(cat "$BD/mix.err")"
 [ "$(bd_tree)" = "$BD_T0" ] && ok "a refusing plan writes nothing either" || fail "refusing plan wrote to the repository"
@@ -146,6 +150,9 @@ bd_refuse "a wrong billing class" "billing-mismatch " "$(bj "$BD_L_CODEX" "d['ac
 bd_refuse "an API credential expected where the agent is on a subscription" "credential-mismatch " "$(bj "$BD_L_CODEX" "d['access']['credential']='env:BD_KEY_CODEXM_REF'")"
 bd_refuse "no credential expected where the agent is on an API route" "credential-mismatch " "$(bj "$BD_L_GEMINI" "d['access']['credential']=None")"
 bd_refuse "a different credential reference" "credential-mismatch " "$(bj "$BD_L_GEMINI" "d['access']['credential']='env:BD_VENICE_KEY'")"
+# A LITERAL SECRET PASTED WHERE A REFERENCE BELONGS is refused and never echoed: not on stderr, not on stdout.
+bd_refuse "a literal key where a credential reference belongs" "credential-mismatch " "$(bj "$BD_L_GEMINI" "d['access']['credential']='canary-literal-sk-0123456789'")"
+case "$(cat "$BD/one.err")" in *canary-literal*) fail "dispatch refusal echoed a literal credential" ;; *) ok "a dispatch refusal never echoes a literal credential supplied as the expected reference" ;; esac
 bd_refuse "an incomplete access object (no account)" "access-incomplete " "$(bj "$BD_L_CODEX" "del d['access']['account']")"
 bd_refuse "no access object at all" "access-incomplete " "$(bj "$BD_L_CODEX" "del d['access']")"
 bd_refuse "several defects at once: every code is collected, not only the first" "account-mismatch billing-mismatch route-mismatch " "$(bj "$BD_L_CODEX" "d['route_id']='x'; d['access'].update(account='y', billing='free')")"

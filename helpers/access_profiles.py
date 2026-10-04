@@ -62,6 +62,17 @@ def validate_entry(name, entry):
     return {key: entry[key] for key in ENTRY_KEYS}
 
 
+def expected_shape_ok(key, value):
+    """Whether a caller-supplied expected access value has the shape its field can hold (safe to print)."""
+    if key == "credential":
+        return isinstance(value, str) and bool(CREDENTIAL.fullmatch(value))
+    if key == "transport":
+        return value in TRANSPORTS
+    if key == "billing":
+        return value in BILLINGS
+    return isinstance(value, str) and bool(TOKEN.fullmatch(value))
+
+
 def digest(entry):
     return hashlib.sha256(canonical({key: entry[key] for key in ENTRY_KEYS}).encode()).hexdigest()
 
