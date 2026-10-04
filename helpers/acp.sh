@@ -31,12 +31,14 @@
 #   supports <agent>
 #       exit 0 iff a consult can run here for that agent (machine-readable —
 #       never parse doctor's prose).
-#   launcher
+#   launcher [agent]
 #       the argv prefix that runs acpx here (honours ACPX_BIN; falls back to a
 #       workspace npm cache when ~/.npm is unwritable). Other helpers ask, never guess.
-#   profile <agent> | version
-#       the acpx launch profile for an agent, and the pinned acpx version. Other
-#       helpers ask for these instead of keeping a second copy of the map.
+#       With an agent whose mounted review relies on acpx REFUSING fs/terminal requests (grok), the
+#       pin is the first release that does (ACPX_VERSION_ENFORCING), not the baseline pin.
+#   profile <agent> | version [agent]
+#       the acpx launch profile for an agent, and the pinned acpx version (the same per-agent pin
+#       as `launcher`). Other helpers ask for these instead of keeping a second copy of the map.
 #   resolve <agent> [--transport acp-mounted|acp|headless] [--tier fast|balanced|strong|none]
 #           [--effort low|medium|high|xhigh|none] [--decision <id>|none] [--routing on|off]
 #       resolve an ABSTRACT routing candidate to the concrete reviewer policy
@@ -114,6 +116,11 @@ set -euo pipefail
 [ -f "$(dirname "${BASH_SOURCE[0]}")/settings.sh" ] && . "$(dirname "${BASH_SOURCE[0]}")/settings.sh"
 
 ACPX_VERSION="0.13.1"
+# The first acpx whose --no-fs / --no-terminal REFUSE the requests rather than only withholding the
+# advertisement: 0.13.1 registered the handlers regardless, so a contained agent that sent a terminal
+# request anyway had it run by the unsandboxed owner. grok's mounted containment (helpers/box.sh) depends
+# on the refusal, and `box.sh client-check` proves it for whatever launcher is actually in use.
+ACPX_VERSION_ENFORCING="0.17.1"
 ACP_SESSION_NAME="agent-comms-ask"
 NODE_MIN_MAJOR=22
 NODE_MIN_MINOR=13
@@ -181,8 +188,12 @@ acpx_prepare_cache() {
   echo "note: ~/.npm is not writable — using $fallback for the acpx download cache" >&2
 }
 
-acpx_launcher() {  # prints the argv prefix that runs acpx
-  if [ -n "${ACPX_BIN:-}" ]; then printf '%s' "$ACPX_BIN"; else printf 'npx -y acpx@%s' "$ACPX_VERSION"; fi
+acpx_version_for() {  # <agent|""> -> the acpx version pinned for it
+  case "${1:-}" in grok) printf '%s' "$ACPX_VERSION_ENFORCING" ;; *) printf '%s' "$ACPX_VERSION" ;; esac
+}
+
+acpx_launcher() {  # [agent] — prints the argv prefix that runs acpx
+  if [ -n "${ACPX_BIN:-}" ]; then printf '%s' "$ACPX_BIN"; else printf 'npx -y acpx@%s' "$(acpx_version_for "${1:-}")"; fi
 }
 
 node_ok() {
@@ -1393,7 +1404,7 @@ case "${1:-}" in
     [ -n "${1:-}" ] || die "profile: an agent name is required"
     printf '%s\n' "$(profile_for "$1")"
     ;;
-  version) printf '%s\n' "$ACPX_VERSION" ;;
+  version) acpx_version_for "${2:-}"; printf '\n' ;;
   resolve) shift; cmd_resolve "$@" ;;
   runtime-check) shift; cmd_runtime_check "$@" ;;
   runtime)
@@ -1545,7 +1556,7 @@ print("%s\t%s\t%s\t%s" % (g("reasoning_effort"), g("model"), dv, dm))
     [ -n "${PA_POS[1]:-}" ] || { echo "undecidable: no observed effort was supplied" >&2; exit 21; }
     policy_verdict "${PA_POS[0]}" "${PA_POS[1]}" "${PA_POS[2]:-}" "$PA_FILE"; exit $?
     ;;
-  launcher) acpx_prepare_cache; acpx_launcher; printf '\n' ;;
+  launcher) acpx_prepare_cache; acpx_launcher "${2:-}"; printf '\n' ;;
   supports)
     # supports <agent> — exit 0 iff a consult can actually run here for that
     # agent. Machine-readable on purpose: callers must never parse doctor's prose.

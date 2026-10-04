@@ -3447,8 +3447,8 @@ cmd_run() {
     # second copy of that recipe here is a second place to get it wrong.
     local -a acp_launch
     # shellcheck disable=SC2206
-    acp_launch=($("$acp_sh" launcher 2>/dev/null))
-    [ "${#acp_launch[@]}" -gt 0 ] || acp_launch=(npx -y "acpx@$("$acp_sh" version)")
+    acp_launch=($("$acp_sh" launcher "$provider" 2>/dev/null))
+    [ "${#acp_launch[@]}" -gt 0 ] || acp_launch=(npx -y "acpx@$("$acp_sh" version "$provider")")
     if [ -n "$RUN_PROFILE_BINDING" ]; then
       acp_launch=(python3 "$HELPER_DIR/agent_profiles.py" acpx "$RUN_PROFILE_BINDING" "$custom_home" "${acp_launch[@]}" --)
     fi
@@ -3456,7 +3456,7 @@ cmd_run() {
       printf 'acp_session\t%s\n' "$acp_session"
       # The PINNED acpx version and the launcher that actually ran: ACPX_BIN can replace the pin,
       # and a constant filed as observed would hide exactly that drift. (code review r1.)
-      printf 'acpx_pinned_version\t%s\n' "$("$acp_sh" version 2>/dev/null || echo unknown)"
+      printf 'acpx_pinned_version\t%s\n' "$("$acp_sh" version "$provider" 2>/dev/null || echo unknown)"
       printf 'acpx_launcher\t%s\n' "${acp_launch[*]:-unknown}"
     } >> "$run_dir/turn.tsv" 2>/dev/null || true
     # --format text is PINNED: `format` is a config scalar, so the ambient default is
@@ -3812,13 +3812,20 @@ cmd_run() {
           acp_stage_dir=""
           # PROVE the sandbox on this host, with this home and this tree, before any model is spoken to.
           ABORT_NOTE="refused: grok's containment self-check did not pass"
-          box_out="$("$box_sh" prepare grok --dir "$mount_kdir/box" --home "$acp_grok_home" --mount "$mount_dir" 2>"$run_dir/box.err")" \
+          box_out="$("$box_sh" prepare grok --dir "$mount_kdir/box" --home "$acp_grok_home" --mount "$mount_dir" --cred-dir "$gk_src" 2>"$run_dir/box.err")" \
             || { box_why="$(tail -1 "$run_dir/box.err" 2>/dev/null)"; ABORT_NOTE="refused: grok containment could not be established: $box_why"; die "run: grok containment could not be established — $box_why"; }
           ABORT_NOTE="runner aborted unexpectedly — see runner.log"
           acp_box_dir="$mount_kdir/box"
           acp_boxpath="$(printf '%s\n' "$box_out" | awk -F'\t' '$1=="path_prefix" {print $2; exit}')"
           box_flags="$(printf '%s\n' "$box_out" | awk -F'\t' '$1=="acpx_flags" {print $2; exit}')"
           [ -n "$acp_boxpath" ] && [ -n "$box_flags" ] || die "run: box.sh prepare returned no launch path or acpx flags"
+          # The flags only withhold the advertisement; whether the CLIENT then refuses a request sent anyway is
+          # a property of the acpx actually in use (the pin, or an ACPX_BIN that replaced it), so it is proved
+          # here, against that launcher, before any model is spoken to.
+          ABORT_NOTE="refused: the ACP client does not enforce the fs/terminal restrictions grok's containment relies on"
+          "$box_sh" client-check --dir "$mount_kdir/box" --flags "$box_flags" -- "${acp_launch[@]}" >/dev/null 2>"$run_dir/box.err" \
+            || { box_why="$(tail -1 "$run_dir/box.err" 2>/dev/null)"; ABORT_NOTE="refused: grok containment could not be established: $box_why"; die "run: grok containment could not be established — $box_why"; }
+          ABORT_NOTE="runner aborted unexpectedly — see runner.log"
           # shellcheck disable=SC2206
           acp_launch+=($box_flags)
           printf 'containment: %s\n' "$(printf '%s' "$box_out" | tr '\t\n' '= ' | cut -c1-300)" >>"$run_dir/runner.log"

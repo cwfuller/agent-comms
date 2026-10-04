@@ -191,6 +191,56 @@ ax_rollout_ok() {  # the DESTINATION must be inside the suite work root
     *) return 1 ;;
   esac
 }
+# A RAW-AGENT run (`--agent CMD ... exec`) is box.sh's client check: a fake ACP agent that sends
+# filesystem and terminal requests whatever was advertised. Answer it as acpx would: refuse them under
+# --no-fs/--no-terminal, or (AX_CLIENT_LAX=1) as 0.13.1 did, honour them anyway. AX_CLIENT_DEAF=1 is a
+# client that never answers. Handled BEFORE the logs below, which describe the review turn.
+case " $* " in *" --agent "*" exec "*)
+  IFS= read -r -d '' ax_client_py <<'AXCLIENT'
+import json, os, shlex, subprocess, sys
+args = sys.argv[1:]
+fs_on, term_on, cmd, cwd = True, True, None, os.getcwd()
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "--no-fs": fs_on = False
+    elif a == "--no-terminal": term_on = False
+    elif a == "--agent": cmd = args[i + 1]; i += 1
+    elif a == "--cwd": cwd = args[i + 1]; i += 1
+    i += 1
+if os.environ.get("AX_CLIENT_DEAF"): sys.exit(0)
+lax = bool(os.environ.get("AX_CLIENT_LAX"))
+p = subprocess.Popen(shlex.split(cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, cwd=cwd)
+def send(o): p.stdin.write(json.dumps(o) + "\n"); p.stdin.flush()
+def request(i, method, params):
+    send({"jsonrpc": "2.0", "id": i, "method": method, "params": params})
+    while True:
+        line = p.stdout.readline()
+        if not line: return None
+        m = json.loads(line)
+        if "method" not in m and m.get("id") == i: return m
+        serve(m)
+def serve(m):
+    meth, id_, prm = m.get("method"), m.get("id"), m.get("params") or {}
+    err = {"jsonrpc": "2.0", "id": id_, "error": {"code": -32601, "message": "Method not found: " + str(meth)}}
+    if meth == "fs/write_text_file" and (fs_on or lax):
+        open(prm["path"], "w").write(prm["content"]); send({"jsonrpc": "2.0", "id": id_, "result": {}})
+    elif meth == "fs/read_text_file" and (fs_on or lax):
+        send({"jsonrpc": "2.0", "id": id_, "result": {"content": open(prm["path"]).read()}})
+    elif meth == "terminal/create" and (term_on or lax):
+        subprocess.Popen([prm["command"]] + prm.get("args", []), cwd=cwd).wait()
+        send({"jsonrpc": "2.0", "id": id_, "result": {"terminalId": "t1"}})
+    elif meth == "terminal/wait_for_exit" and (term_on or lax):
+        send({"jsonrpc": "2.0", "id": id_, "result": {"exitCode": 0}})
+    elif id_ is not None: send(err)
+caps = {"fs": {"readTextFile": fs_on, "writeTextFile": fs_on}, "terminal": term_on}
+request(1, "initialize", {"protocolVersion": 1, "clientCapabilities": caps})
+request(2, "session/new", {"cwd": cwd, "mcpServers": []})
+request(3, "session/prompt", {"sessionId": "s1", "prompt": [{"type": "text", "text": "go"}]})
+p.wait()
+AXCLIENT
+  exec python3 -c "$ax_client_py" "$@" ;;
+esac
 if [ -n "${AX_CWD_LOG:-}" ]; then
   printf '%s\t%s\n' "$(pwd -P)" "$*" >> "$AX_CWD_LOG"
 fi

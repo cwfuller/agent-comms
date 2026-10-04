@@ -1,4 +1,4 @@
-total	2979
+total	2988
 skip_ok	zsh-absent
 skip_ok	group-no-secondary
 skip_ok	acl-report
@@ -11,3 +11,7 @@ skip_ok	seatbelt-mutate
 skip_ok	seatbelt-runner
 skip_ok	seatbelt-nolaunch
 skip_ok	seatbelt-expired
+skip_ok	seatbelt-rounds
+skip_ok	seatbelt-credstore
+skip_ok	seatbelt-credrun
+skip_ok	seatbelt-laxclient

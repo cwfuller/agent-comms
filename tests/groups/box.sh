@@ -54,20 +54,55 @@ bx_setup() {  # <PATH> -> setup --yes output
   ( cd "$BX_SP" && env -u AC_SETTINGS_LOADED -u COMMS_RUNPHASE_ALLOW_UNCONTAINED AGENT_COMMS_HOME="$BX_SH" PATH="$1" "$COMMS" setup --yes </dev/null 2>&1 )
 }
 BX_OUT="$(bx_setup "$BX_DARWIN:/usr/bin:/bin")"
-{ [[ "$BX_OUT" == *"grok containment on this Mac: NOT available"* ]] && grep -qx 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=1' "$BX_SH/settings"; } \
-  && ok "setup on a Mac whose grok backend cannot run names the missing prerequisite and keeps the explicit override as the operator left it" \
+{ [[ "$BX_OUT" == *"grok containment on this Mac: NOT available"* ]] \
+  && [[ "$BX_OUT" == *"does not apply to a backend that cannot run"* ]] && grep -qx 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=1' "$BX_SH/settings"; } \
+  && ok "setup on a Mac whose grok backend cannot run names the missing prerequisite, says the override does not apply there (the runner ignores it) and leaves it as the operator had it" \
   || fail "setup with a broken backend: $(printf '%s' "$BX_OUT" | grep -i 'grok' | head -3 | tr '\n' '|')"
+BX_OUT="$(bx_setup "$BX_LINUX:/usr/bin:/bin")"
+{ [[ "$BX_OUT" != *"NOT available"* && "$BX_OUT" != *"does not apply to a backend that cannot run"* ]] && grep -qx 'COMMS_RUNPHASE_ALLOW_UNCONTAINED=1' "$BX_SH/settings"; } \
+  && ok "setup on a host with no grok backend at all keeps the override question (no repair message), answering from the current setting" \
+  || fail "setup with no backend: $(printf '%s' "$BX_OUT" | grep -i 'grok' | head -3 | tr '\n' '|')"
 
-# `launched` is the post-canary evidence that the owner ran the CONTAINED grok under THIS profile.
+# `launched` is the post-canary evidence that the owner ran the CONTAINED grok under THIS preparation: the profile
+# hash AND the generation prepare drew, so a launch recorded for an earlier round of the same durable dir is not it.
 BX_L="$BX/launched"; mkdir -p "$BX_L"; printf '(version 1)\n' > "$BX_L/box.sb"
 BX_SHA="$(shasum -a 256 "$BX_L/box.sb" | cut -d' ' -f1)"
 "$BXP" launched --dir "$BX_L" >/dev/null 2>&1; BX_R1=$?
-printf 'launch 1 pid=2 sha=%s\n' "0000" > "$BX_L/launch.log"; "$BXP" launched --dir "$BX_L" >/dev/null 2>&1; BX_R2=$?
-printf 'launch 1 pid=2 sha=%s\n' "$BX_SHA" >> "$BX_L/launch.log"; "$BXP" launched --dir "$BX_L" >/dev/null 2>&1; BX_R3=$?
+printf 'gen-now\n' > "$BX_L/generation"; : > "$BX_L/launch.log"
+printf 'launch 1 pid=2 sha=%s gen=gen-now\n' "0000" > "$BX_L/launch.log"; "$BXP" launched --dir "$BX_L" >/dev/null 2>&1; BX_R2=$?
+printf 'launch 1 pid=2 sha=%s gen=gen-old\n' "$BX_SHA" > "$BX_L/launch.log"; "$BXP" launched --dir "$BX_L" >/dev/null 2>&1; BX_R5=$?
+printf 'launch 1 pid=2 sha=%s gen=gen-now\n' "$BX_SHA" >> "$BX_L/launch.log"; "$BXP" launched --dir "$BX_L" >/dev/null 2>&1; BX_R3=$?
 printf 'x\n' >> "$BX_L/box.sb"; "$BXP" launched --dir "$BX_L" >/dev/null 2>&1; BX_R4=$?
-{ [ "$BX_R1" = 1 ] && [ "$BX_R2" = 1 ] && [ "$BX_R3" = 0 ] && [ "$BX_R4" = 1 ]; } \
-  && ok "launched: no log and a log for another profile fail; the current profile's launch passes; an edited profile no longer matches" \
-  || fail "launched rc: none=$BX_R1 other=$BX_R2 current=$BX_R3 edited=$BX_R4"
+{ [ "$BX_R1" = 1 ] && [ "$BX_R2" = 1 ] && [ "$BX_R5" = 1 ] && [ "$BX_R3" = 0 ] && [ "$BX_R4" = 1 ]; } \
+  && ok "launched: no log, another profile's launch and an earlier generation's launch fail; this generation under the current profile passes; an edited profile no longer matches" \
+  || fail "launched rc: none=$BX_R1 other=$BX_R2 old-generation=$BX_R5 current=$BX_R3 edited=$BX_R4"
+
+# The ACP client check drives the launcher with a fake agent that sends fs/terminal requests whatever was
+# advertised (see box.sh). The suite's acpx stub answers it as an enforcing client, as a 0.13.1-style client that
+# honours the requests anyway (AX_CLIENT_LAX), and as one that never answers (AX_CLIENT_DEAF).
+bx_cc() {  # <tag> [env assignments...] -> client-check output (stdout+stderr); sets BX_RC
+  local tag="$1"; shift; local d="$BX/cc-$tag"; rm -rf "$d"; mkdir -p "$d"
+  env "$@" "$BXP" client-check --dir "$d" --flags "--no-terminal --no-fs" -- "$AXB/npx" -y acpx@0.17.1 2>&1; return $?
+}
+BX_OUT="$(bx_cc enforcing)"; BX_RC=$?
+{ [ "$BX_RC" = 0 ] && [[ "$BX_OUT" == *"client_check"$'\t'"ok"* ]]; } \
+  && ok "client-check passes a client that refuses fs and terminal requests under --no-fs --no-terminal, after a control proves the probe agent can drive it" \
+  || fail "client-check enforcing (rc=$BX_RC out=$BX_OUT)"
+BX_OUT="$(bx_cc lax AX_CLIENT_LAX=1)"; BX_RC=$?
+{ [ "$BX_RC" = 3 ] && [[ "$BX_OUT" == *"does not refuse filesystem or terminal requests"* && "$BX_OUT" == *"0.17.1"* ]]; } \
+  && ok "client-check refuses a client that honours fs and terminal requests despite the flags (the acpx 0.13.1 behaviour), and names the fix" \
+  || fail "client-check lax (rc=$BX_RC out=$BX_OUT)"
+BX_OUT="$(bx_cc deaf AX_CLIENT_DEAF=1)"; BX_RC=$?
+{ [ "$BX_RC" = 3 ] && [[ "$BX_OUT" == *"could not run"* ]]; } \
+  && ok "client-check refuses (rather than passes) when the client never drives the probe agent, so a broken probe cannot read as containment" \
+  || fail "client-check deaf (rc=$BX_RC out=$BX_OUT)"
+# The pin: grok's mounted turns need the refusing client; every other provider keeps the baseline; ACPX_BIN replaces both
+# (and is then held to the same check at run time).
+BX_G="$(env -u ACPX_BIN "$BXA" launcher grok)"; BX_C="$(env -u ACPX_BIN "$BXA" launcher codex)"; BX_B="$(env ACPX_BIN=/opt/acpx "$BXA" launcher grok)"
+{ [[ "$BX_G" == *"acpx@0.17.1" ]] && [[ "$BX_C" == *"acpx@0.13.1" ]] && [ "$BX_B" = /opt/acpx ] \
+  && [ "$("$BXA" version grok)" = 0.17.1 ] && [ "$("$BXA" version)" = 0.13.1 ]; } \
+  && ok "acp.sh pins the refusing acpx for grok only, keeps the baseline pin for the rest, and ACPX_BIN replaces either" \
+  || fail "acp.sh launcher pins: grok=$BX_G codex=$BX_C bin=$BX_B"
 
 section "box.sh: the staged grok login and config carry only what a review needs"
 # The operator's config.toml can say `permission_mode = "always-approve"`, carry custom models with API keys, and
@@ -297,6 +332,59 @@ BXPY
   { [ "$(bx_field "$BX_T" status)" = failed ] && [[ "$(bx_field "$BX_T" note)" == *"grok login has expired"* ]]; } \
     && ok "an expired grok login that cannot be renewed refuses the turn and the note says so" \
     || fail "expired-login turn: status=$(bx_field "$BX_T" status) note=$(bx_field "$BX_T" note)"
+
+  # ---- 7. launch evidence belongs to ONE preparation: a durable box dir is reused every round ----
+  BX_RB2="$BX/round-box"; BX_RH2="$BX/round-home"; mkdir -p "$BX_RH2"
+  bx_prep2() { env PATH="$BXB:$PATH" HOME="$BXH" "$BXP" prepare grok --dir "$BX_RB2" --home "$BX_RH2" --mount "$BX_MT" "$@" >/dev/null 2>&1; }
+  bx_via_shim() { env PATH="$BX_RB2/bin:$BXB:$PATH" HOME="$BXH" grok models >/dev/null 2>&1; }
+  bx_prep2 && bx_via_shim; "$BXP" launched --dir "$BX_RB2" >/dev/null 2>&1; BX_R1=$?
+  bx_prep2; "$BXP" launched --dir "$BX_RB2" >/dev/null 2>&1; BX_R2=$?     # round two, nobody went through the shim
+  bx_via_shim; "$BXP" launched --dir "$BX_RB2" >/dev/null 2>&1; BX_R3=$?
+  { [ "$BX_R1" = 0 ] && [ "$BX_R2" = 1 ] && [ "$BX_R3" = 0 ]; } \
+    && ok "a launch recorded in round one does not satisfy round two of the same durable box dir; only a launch after the new preparation does" \
+    || fail "launch evidence across rounds: round1=$BX_R1 round2-bypass=$BX_R2 round2-shim=$BX_R3"
+
+  # ---- 8. a login store OUTSIDE the home (GROK_HOME) is closed by its own path ----
+  BX_CS="$BX/credstore"; mkdir -p "$BX_CS"; printf 'ORIGINAL-LOGIN-SECRET\n' > "$BX_CS/auth.json"
+  BX_CB="$BX/cred-box"; BX_CH="$BX/cred-home"; mkdir -p "$BX_CH"
+  BX_OUT="$(env PATH="$BXB:$PATH" HOME="$BXH" GROK_HOME="$BX_CS" "$BXP" prepare grok --dir "$BX_CB" --home "$BX_CH" --mount "$BX_MT" 2>&1)"; BX_RC=$?
+  BX_SAWC="$(env HOME="$BXH" "$BX_CB/bin/box-run" /bin/cat "$BX_CS/auth.json" 2>&1)"
+  # control: with the credential rules removed the same file IS readable, and prepare says so
+  sed -e '/param "CRED_SRC"))$/d' -e '/param "CRED_FILE"/d' "$BXP" > "$BX/mut-cred.sh"; chmod +x "$BX/mut-cred.sh"
+  BX_MUT="$(env PATH="$BXB:$PATH" HOME="$BXH" GROK_HOME="$BX_CS" "$BX/mut-cred.sh" prepare grok --dir "$BX/mut-cred-box" --home "$BX_CH" --mount "$BX_MT" 2>&1 >/dev/null)"; BX_MRC=$?
+  { [ "$BX_RC" = 0 ] && [[ "$BX_SAWC" != *ORIGINAL-LOGIN-SECRET* ]] && ! cmp -s "$BXP" "$BX/mut-cred.sh" \
+    && [ "$BX_MRC" = 3 ] && [[ "$BX_MUT" == *"READ the operator's grok login"* ]]; } \
+    && ok "a grok login store outside the home is denied by its physical path (checked by prepare and by hand), and prepare refuses once those rules are removed" \
+    || fail "custom credential store: prepare=$BX_RC saw=$BX_SAWC mutated=$BX_MRC/$BX_MUT"
+
+  # ---- 9. the runner end to end with that store: it stages from GROK_HOME and the child cannot reach the original ----
+  BXB2="$BX/live-bin2"; mkdir -p "$BXB2"; cp "$AXB/npx" "$AXB/node" "$BXB2/"
+  cat > "$BXB2/grok" <<BXGROK2
+#!/bin/bash
+[ "\$1" = models ] && exit 0
+echo "orig=\$(cat '$BX_CS/auth.json' 2>&1)"
+echo "staged=\$(cat "\$GROK_HOME/auth.json" 2>&1)"
+exit 0
+BXGROK2
+  chmod +x "$BXB2/grok"
+  python3 - "$BX_CS/auth.json" "$BX_FUT" <<'BXPY'
+import json, sys
+json.dump({"https://auth.x.ai::id": {"key": "ACCESS-TOKEN", "refresh_token": "STORE-REFRESH", "expires_at": sys.argv[2], "auth_mode": "oidc"}}, open(sys.argv[1], "w"))
+BXPY
+  : > "$BX_GOUT"
+  BX_T="$(bx_turn credrun "$BXB2:$PATH" COMMS_MOUNT_BASE="$BX_HM" AX_LAUNCH_GROK=1 AX_GROK_OUT="$BX_GOUT" GROK_HOME="$BX_CS")"
+  BX_SAW="$(cat "$BX_GOUT")"
+  { [ "$(bx_field "$BX_T" status)" = completed ] && [[ "$BX_SAW" == *"staged={"*ACCESS-TOKEN* ]] && [[ "$BX_SAW" != *STORE-REFRESH* ]] \
+    && [[ "$BX_SAW" == *"orig="*"Operation not permitted"* || "$BX_SAW" == *"orig="*"Permission denied"* ]]; } \
+    && ok "with GROK_HOME outside the home the runner stages the login without its refresh token and the contained child cannot read the original" \
+    || fail "custom-store turn: status=$(bx_field "$BX_T" status) note=$(bx_field "$BX_T" note) saw=$BX_SAW"
+
+  # ---- 10. a client that does not enforce the flags refuses the turn before any model is spoken to ----
+  bx_live_auth "$BX_FUT"
+  BX_T="$(bx_turn laxclient "$BXB:$PATH" AX_LAUNCH_GROK=1 AX_CLIENT_LAX=1)"
+  { [ "$(bx_field "$BX_T" status)" = failed ] && [[ "$(bx_field "$BX_T" note)" == *"does not refuse filesystem or terminal requests"* ]]; } \
+    && ok "if the ACP client would honour fs/terminal requests despite the flags, the runner refuses the turn with the fix named" \
+    || fail "lax-client turn: status=$(bx_field "$BX_T" status) note=$(bx_field "$BX_T" note)"
 else
   skip seatbelt-prepare "prepare writes the profile and runs the probes — needs macOS sandbox-exec"
   skip seatbelt-hand "a contained process by hand — needs macOS sandbox-exec"
@@ -304,4 +392,8 @@ else
   skip seatbelt-runner "a mounted grok turn under the real sandbox — needs macOS sandbox-exec"
   skip seatbelt-nolaunch "an unlaunched shim refuses the turn — needs macOS sandbox-exec"
   skip seatbelt-expired "an expired login refuses the turn — needs macOS sandbox-exec"
+  skip seatbelt-rounds "launch evidence is per preparation — needs macOS sandbox-exec"
+  skip seatbelt-credstore "a login store outside the home is denied — needs macOS sandbox-exec"
+  skip seatbelt-credrun "the runner with a custom login store — needs macOS sandbox-exec"
+  skip seatbelt-laxclient "a non-enforcing ACP client refuses the turn — needs macOS sandbox-exec"
 fi

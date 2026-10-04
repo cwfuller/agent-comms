@@ -239,10 +239,11 @@ say "3/5 Reviewer containment"
 say "  codex, claude and gemini reviewers run contained. grok reviews are contained by a macOS Seatbelt"
 say "  sandbox that agent-comms applies itself (writes, the keychain, other processes and non-HTTPS"
 say "  network are closed; your login is staged without its refresh token), so no override is needed"
-say "  there. Where that backend cannot run (any other OS, or a missing prerequisite) a grok REVIEW"
-say "  turn is refused unless you allow uncontained reviews — then it can write outside its mount"
-say "  and reach the network with your git credentials. Fine for your own code on your own machine;"
-say "  not for code you did not write."
+say "  there. Where there is no such backend (any other OS) a grok REVIEW turn is refused unless you"
+say "  allow uncontained reviews — then it can write outside its mount and reach the network with your"
+say "  git credentials. Fine for your own code on your own machine; not for code you did not write."
+say "  On a Mac where the backend exists but a prerequisite is missing, the turn is refused whatever you"
+say "  allow: repair the prerequisite."
 cur_unc="$(yn_of "${COMMS_RUNPHASE_ALLOW_UNCONTAINED:-}")"
 # Containment is a property of the PROVIDER. Review twins run on their driver's provider, so the
 # agents line alone decides it: grok-review exists exactly when grok does.
@@ -256,11 +257,20 @@ case " $AGENTS " in
         if ask_yn "  COMMS_RUNPHASE_ALLOW_UNCONTAINED is set (probably carried over): remove it" y; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi
       fi
     else
-      if [ "$(uname -s)" = Darwin ]; then
-        why="$("$(dirname "${BASH_SOURCE[0]}")/box.sh" supports grok 2>&1 | tail -1)"
-        say "  grok containment on this Mac: NOT available — $why"
+      box_rc=1
+      if [ "$(uname -s)" = Darwin ] && [ -x "$(dirname "${BASH_SOURCE[0]}")/box.sh" ]; then
+        why="$("$(dirname "${BASH_SOURCE[0]}")/box.sh" supports grok 2>&1)"; box_rc=$?
+        why="$(printf '%s\n' "$why" | tail -1)"
       fi
-      if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi
+      if [ "$box_rc" = 3 ]; then
+        # The backend EXISTS here and cannot run; the runner refuses such a turn whatever the override says,
+        # so offering the override would only hide the repair. Leave the setting as the operator had it.
+        say "  grok containment on this Mac: NOT available — $why"
+        say "  Fix that, then re-run 'comms.sh setup' (or 'acp.sh doctor' to re-check). Grok review turns are refused"
+        say "  until then; COMMS_RUNPHASE_ALLOW_UNCONTAINED does not apply to a backend that cannot run."
+      else
+        if ask_yn "  allow uncontained (grok) reviews" "$cur_unc"; then set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED 1; else set_user COMMS_RUNPHASE_ALLOW_UNCONTAINED ""; fi
+      fi
     fi ;;
   *) say "  grok is not registered here — nothing to allow." ;;
 esac
