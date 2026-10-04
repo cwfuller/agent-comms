@@ -155,7 +155,9 @@ stopping at the first:
    below): `model-unservable` (disabled, runtime lacks it, runtime version too old), `model-mismatch`
    (custom profile pins a different model), `effort-refused` / `effort-mismatch` (outside the model's
    `pair` row; non-null effort on a no-scale profile; null on a scaled model), `capability-unsupported`;
-5. `credential-unavailable` for an `api` leg whose referenced variable/keychain item is not present
+5. auth-route checks (section 7a): `auth-login-missing`, `auth-selected-type-conflict`,
+   `auth-route-unsupported`;
+5a. `credential-unavailable` for an `api` leg whose referenced variable/keychain item is not present
    (checked for presence only, never printed or logged);
 6. `pin-conflict`: `COMMS_ACP_<P>_MODEL/EFFORT` set to a different value, or `COMMS_REVIEW_MAX` set,
    in the dispatching environment (an equal pin is accepted). Bound mode never lets an environment pin
@@ -188,9 +190,23 @@ and `effort_source` = `bound`; routing off, decision `none`; the phase exclusion
 binds every phase it dispatches). Bound pairs go through the same `policy_pair_verdict`,
 `policy_model_disabled`, `policy_unservable_reason` and runtime checks as pins, and a failure is a
 refusal, never the baseline substitution a routed value gets. `capability` must be `eligible` or
-`fixed` (applied and attested); `unsupported` refuses. The persisted policy record gains
-`route_id`, `access_digest` and `bound`; `ACP_POLICY_RECORD_VERSION` bumps to 2 and the reader accepts
-exactly the version the writer wrote (current behaviour). The policy digest already keys the warm
+`fixed` (applied and attested) for built-in agents; `unsupported` refuses.
+
+**Custom profiles** (today `resolve` answers `unsupported` for them because they have no map row)
+take a separate bound branch, `--custom-profile`, that reads the profile through the existing
+`agents --profile` path instead of the map: capability is reported as `profile` (model-only), the
+bound model must equal the profile's pinned model (`model-mismatch` otherwise), effort must be null,
+and the pin is verified by the existing `model-check`/OpenCode assistant-record evidence. No row is
+added to `policy-map.tsv`. Only profiles the mounted runner actually supports (today the OpenCode
+adapter, `custom_adapter = opencode`) are bindable; a generic ACP profile, whose existing support is
+consult-only, reports `agent-unbindable reason=consult-only`.
+
+**Record versioning keeps retained records readable.** The writer emits version 2 *only* for bound
+records (adding `route_id`, `access_digest`, `bound`); unbound resolutions keep writing version 1, byte
+for byte. The reader (`provider-config`, `policy`, `policy check`, route views) accepts 1 or 2 and
+validates each against its own field set, so records persisted before an upgrade and recovered after it
+still read; a version-2 record read by an old install is refused (fail closed), which is acceptable
+because bound mode is opt-in and negotiated. The policy digest already keys the warm
 session on model/effort/runtime, so a different bound pair is a fresh session; the access digest is
 added to the session identity so two accounts never share one warm session. No model-to-tier mapping,
 no new `pair`/`tier` row and no default is added: every model id enters from the caller, so nothing in
@@ -200,23 +216,82 @@ this task approves any mapping Basis has not evaluated.
 
 In bound mode the leg's child environment is computed once by a single function (`bound_leg_env`)
 that every launch path uses (runphase ACP launch, direct launch, `agent_profiles.py acpx/serve`,
-OpenCode `environment`/`attest`). Rule: start from the inherited environment, remove (a) every variable
-matching a provider-credential pattern (`*_API_KEY`, `*_TOKEN`, `*_AUTH_TOKEN`, `*_SECRET*`,
-`*_ACCESS_KEY*`) plus an explicit table of non-pattern credential/endpoint selectors
-(`helpers/credential-env.tsv`: `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_GENAI_USE_VERTEXAI`,
-`CLAUDE_CODE_USE_BEDROCK/VERTEX`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `AWS_*`, ...), then (b) add
-back **only** the bound leg's own credential: for an `api` access entry the variable its `credential`
-reference names (and, for custom profiles, the profile's own `credentials` map entries), resolved
-exactly as `agent_profiles.credentials()` resolves them today, minus the full-environment copy. A
-`subscription`/`local`/`free` leg receives no credential variable at all, so there is no API fallback
-for it to find in the environment. The pattern-plus-table is a denylist and so can miss an unknown
-name: the test corpus plants canary variables under both known and pattern-matching unknown names and
-asserts none reaches a stub provider; the table is the single place to extend. Residual, stated in
-the docs and in `result.json` `auth_evidence`: a harness's *own* on-disk login state (for example an
-API key stored in a harness's config) is not an environment variable and is not controlled by the
-scrub; mounted legs already run in isolated homes that copy only login files, and the implementation
-records what each copied login file exposes about its auth mode where it is machine-readable without
-reading a secret, refusing a subscription-bound leg whose observed mode is API.
+OpenCode `environment`/`attest`). `credentials()` and `opencode_adapter.environment()` stop copying
+the full inherited environment in bound mode and take the already-scrubbed one. The **scrub set** is
+the union of three sources, never a pattern list alone, because configured credential names are
+operator-chosen (`CODEX_METERED_KEY`, `MY_INFERENCE_KEY`, `API_KEY` all survive any pattern):
+
+1. **Every configured credential name, from configuration**: the `env:NAME` source of every
+   `access.json` entry for **every** agent (not only this leg's), the source and destination variable
+   of every `credentials` mapping in every `agents.json` profile (keychain references contribute their
+   destination variable), and the destination variable each built-in adapter consumes for its API route
+   (item 3's table). Computed by one reader (`helpers/access_profiles.py scrub-set`) from the same files
+   dispatch validated, so a name that can be configured as a credential cannot be missing from the scrub.
+2. **Patterns**: `*_API_KEY`, `*_TOKEN`, `*_AUTH_TOKEN`, `*_SECRET*`, `*_ACCESS_KEY*`, as a net for
+   credentials nobody configured.
+3. **A static table** (`helpers/credential-env.tsv`, the single place to extend) of non-pattern
+   credential/endpoint selectors (`GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_GENAI_USE_VERTEXAI`,
+   `CLAUDE_CODE_USE_BEDROCK/VERTEX`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `AWS_*`, ...) and, per
+   built-in adapter, the destination variable its API route consumes (section 7a).
+
+Then **only the bound leg's own credential is restored**, after the scrub, under the name the adapter
+consumes: for a built-in adapter the table's destination, fed from the reference's source (`env:X`
+reads `X`; `keychain:S` reads the item, exactly as `credentials()` resolves it today); for a custom
+profile the profile's own `credentials` map. A `subscription`/`local`/`free` leg gets no credential
+variable at all: no API fallback exists for it to find. Another configured leg's credential name is in
+the scrub set, so it is removed even though it is an arbitrary name. A reference named like a pattern
+variable is simply restored again after the scrub, so the order (scrub, then restore) is the contract.
+
+The scrub set is still a denylist plus configuration: a credential name nobody configured and that
+matches no pattern would pass. That residual is stated in the docs and the test corpus plants canaries
+under all four kinds of name (configured arbitrary, configured pattern-shaped, unconfigured
+pattern-shaped, table-listed) and asserts exactly which reach a stub provider. A harness's own on-disk
+login is not an environment variable and is governed by section 7a, not by the scrub.
+
+### 7a. Authentication-route selection per adapter (the credential variable alone selects nothing)
+
+Passing a key into the environment does not make a harness *use* it: Gemini's mounted runner carries
+the operator's `security.auth.selectedType` into the isolated settings and copies login files, and
+Codex stages `auth.json`. So each built-in adapter has a declared **auth-select** contract, in the same
+table, and the bound launch must apply it for **both** billing classes and read it back:
+
+| bound billing | login files staged | selected auth type / mode | credential |
+|---|---|---|---|
+| `subscription` | staged as today (the leg runs on the saved login) | forced to the adapter's login type (Gemini: the OAuth type written into the isolated settings, the operator's carried value is ignored, not forwarded) | none |
+| `api` | **not staged**, and any stale copy from an earlier round is cleared (as the existing stale-credential clear does) | forced to the adapter's API-key type (Gemini: the API-key `selectedType` written into the isolated settings; Codex: API-key mode via the adapter's own mechanism) | the single bound credential, under the adapter's consumed variable |
+
+- **Support is per (adapter, billing), declared, and refused when absent.** The implementing phase
+  verifies against the adapter's real behavior which API-key selection mechanism each of Codex and
+  Gemini actually offers. A (adapter, billing) pair whose API selection cannot be made explicit and
+  read back is reported `unbindable-billing` by the capability verb and refused as `auth-route-unsupported`;
+  it is never bound on the hope that the environment key wins over a saved login. Custom/OpenCode
+  profiles select their route through the profile's `credentials` map (the key is the only auth the
+  adapter has), so they are bound `api` only when the profile declares exactly the bound reference
+  (already a consistency rule, section 2).
+- **Dispatch-time validation (`leg_bind_check`, before any write)** observes what is observable without
+  reading a secret: whether the saved login files exist (presence, and the machine-readable auth-mode
+  field where the harness stores one), and the operator's carried selected type (`acp.sh gemini-auth`).
+  Codes: `auth-login-missing` (subscription leg with no saved login), `auth-selected-type-conflict`
+  (subscription leg while the saved/operator mode is API-key, or an API leg whose saved state cannot be
+  neutralised), `auth-route-unsupported`. For an API leg a saved OAuth login is *not* a conflict
+  because it is not staged; for a subscription leg the operator's API selection is not a conflict that
+  can be fixed by forwarding it, so it refuses rather than silently running an API-billed leg.
+- **Launch-time re-check and read-back.** `runphase` re-runs the check, applies the contract above, then
+  **reads the written isolated config/login directory back** (selected type present, login files
+  present or absent as the billing demands, credential variable present or absent in the computed
+  environment) and refuses the turn (`binding-mismatch`, nothing launched) when it differs from the
+  binding. Only a successful read-back lets `result.json` say `auth_evidence: observed`; otherwise
+  `configured`.
+- **Reference-to-input mapping is explicit**: arbitrary `env:NAME` and `keychain:S` references are
+  resolved by one function and exported under the table's destination for built-in adapters; no
+  adapter ever reads the reference's own variable name.
+- **Tests plant conflicting saved login state**, not only the key: Gemini with an OAuth login and
+  `selectedType` set to the login type, bound `api` (the isolated mount has no login files and the API
+  type, the stub sees only the bound key); Gemini with an API `selectedType` in operator settings,
+  bound `subscription` (refused or forced per the table, never run API-billed); Codex with an API-mode
+  `auth.json` bound `subscription`; a stale staged login from an earlier round cleared for an API leg;
+  a canary key under a configured arbitrary name. Asserting only that the key reaches the environment
+  is explicitly insufficient.
 
 ### 8. `review-route plan` in bound mode (read-only)
 
@@ -277,6 +352,8 @@ stays an unanswered leg for Basis to see as `unbound`.
    one-leg-per-family rule, parent-brokered stamping, profile digest/`check-binding` semantics, session
    naming and the consult path are untouched. Operator profiles remain exact pins; nothing is added to
    `policy-map.tsv`, no model default, no tier mapping.
+3b. Retained v1 policy records, existing warm sessions and in-flight legs remain readable and
+   recoverable after the upgrade; only bound records carry the new version.
 3a. Basis's runner authority, pauses and holds are upstream of this layer: agent-comms never starts a
    leg it was not told to, never retries a refused leg on another route, and has no fallback path
    (API or otherwise). Pausing is Basis's; agent-comms only fails closed.
@@ -317,9 +394,20 @@ New group `binding` (registered in `tests/groups.tsv`; parallel) plus additions 
   edit between dispatch and run makes the leg refuse itself without launching the provider.
 - Plan: all verdicts printed, exit 1 on any refusal, byte-identical output across repeated runs,
   no file or event written, no credential value printed; legacy plan output unchanged.
-- Credential scrub: canary variables under known and pattern-matching unknown names never reach the
-  stub; only the bound `api` leg sees its own reference's value, never another leg's; a subscription
-  leg sees none; custom-profile launch no longer inherits the full environment in bound mode.
+- Credential scrub: canary variables under four kinds of name never reach the stub unless bound:
+  configured arbitrary (`CODEX_METERED_KEY`, `MY_INFERENCE_KEY`, `API_KEY`), configured pattern-shaped,
+  unconfigured pattern-shaped, table-listed; only the bound `api` leg sees its own reference's value
+  (under the adapter's consumed variable), never another leg's; a subscription leg sees none;
+  custom-profile launch no longer inherits the full environment in bound mode.
+- Auth-route selection (section 7a): conflicting saved login state fixtures per adapter and billing,
+  launch-time read-back, stale login clear, `auth-route-unsupported` for a pair with no explicit
+  API selection, config change between dispatch and launch.
+- Record compatibility: a retained version-1 policy record still reads (`provider-config`, `policy`,
+  route view) after the change; unbound resolution output is byte-identical; a custom OpenCode profile
+  resolves through the bound branch with no map row; a generic ACP profile is `consult-only` refused.
+- Installed copy: `install.sh` into a temp scope (test-owned, never the live store) installs the new
+  helper and table; `review-route capability`, bound `plan` and a bound dispatch refusal run from that
+  installed copy.
 - Env pin / `COMMS_REVIEW_MAX` conflicts refuse; equal pin accepted; no classifier call occurs.
 - Roster family semantics: two routes/accounts to one family refuse; a custom family-`glm` leg and a
   codex leg are independent; review-twin entry mismatch refused.
@@ -330,6 +418,13 @@ New group `binding` (registered in `tests/groups.tsv`; parallel) plus additions 
 - Compatibility: the whole pre-existing panel/route/profiles/usage assertions unchanged.
 - Focused runs only (`bash tests/run.sh --group binding|panel|route|profiles|usage`); the full suite
   runs at integrate.
+
+## Installation
+
+`install.sh` enumerates its helpers explicitly (`HELPERS`). The implementation adds
+`access_profiles.py` and `credential-env.tsv` there (and to the upgrade-removal/stamp enumeration that
+derives from the list), and the installed-copy test above proves bound negotiation and planning work
+from an installed tree, not only from the repository.
 
 ## Docs updated in the implementing commits
 
@@ -355,5 +450,9 @@ with COMMANDS.md, per repo rule).
    a selector and is rejected.
 5. **Claude and Grok reported `unbindable`** until applied/attested policy exists for them; Basis
    must treat them as ineligible for bound review, which affects which families can gate under 7.6.
-6. **Quota `refused` limited to providers with a classifier** (Gemini today); extending provider
+6. **Gemini/Codex API routes bind only where an explicit API auth selection exists** (section 7a):
+   recommended is refusing (`auth-route-unsupported`) over trusting that an environment key beats a
+   saved login. Alternative: allow it with `auth_evidence: configured`, which would let an API-labelled
+   leg run on a subscription login and is rejected.
+7. **Quota `refused` limited to providers with a classifier** (Gemini today); extending provider
    classification and any real reset parsing is left to #173/#174 once provider evidence exists.
