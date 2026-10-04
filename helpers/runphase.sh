@@ -2815,7 +2815,7 @@ acp_canary() {
 # is deliberately NOT scrubbed: it is what makes `comms.sh whoami` fail closed inside the turn.
 TURN_CHILD_SCRUB=(-u COMMS_SELF -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE -u COMMS_PRESENCE_PID
                   -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID
-                  -u GEMINI_CLI)
+                  -u GEMINI_CLI -u COMMS_METHOD_GUIDANCE_DIR)
 
 acp_exec() {  # <cwd> [acpx args...]
   local _cwd="$1"; shift

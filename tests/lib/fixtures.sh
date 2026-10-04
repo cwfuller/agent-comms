@@ -261,8 +261,13 @@ fi
 if [ -n "${AX_HOME_LOG:-}" ] && [ -n "${CODEX_HOME:-}${GROK_HOME:-}" ]; then
   ax_home="${CODEX_HOME:-$GROK_HOME}"
   if [ -e "$ax_home/AGENTS.md" ] || [ -L "$ax_home/AGENTS.md" ]; then
+    # GNU form first, each probe's output kept only on success and only if octal: on Linux `stat -f FMT` is a
+    # filesystem query that prints a statfs dump before failing (same rule as ac_file_mode in settings.sh).
+    ax_mode=""
+    if ax_m="$(stat -c '%a' "$ax_home/AGENTS.md" 2>/dev/null)"; then case "$ax_m" in ''|*[!0-7]*) ;; *) ax_mode="$ax_m" ;; esac; fi
+    if [ -z "$ax_mode" ] && ax_m="$(stat -f '%Lp' "$ax_home/AGENTS.md" 2>/dev/null)"; then case "$ax_m" in ''|*[!0-7]*) ;; *) ax_mode="$ax_m" ;; esac; fi
     printf 'agents\t%s\t%s\t%s\n' "$( [ -L "$ax_home/AGENTS.md" ] && echo symlink || echo file )" \
-      "$(stat -f '%Lp' "$ax_home/AGENTS.md" 2>/dev/null || stat -c '%a' "$ax_home/AGENTS.md" 2>/dev/null)" \
+      "$ax_mode" \
       "$(shasum -a 256 "$ax_home/AGENTS.md" 2>/dev/null | cut -c1-64)" >> "$AX_HOME_LOG" 2>/dev/null || true
   else
     printf 'agents\t<absent>\n' >> "$AX_HOME_LOG" 2>/dev/null || true

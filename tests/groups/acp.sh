@@ -1885,7 +1885,7 @@ GD_HOMEDIR="$(find "$GD_MBASE" -maxdepth 4 -type d -name home 2>/dev/null | head
 [ -n "$GD_HOMEDIR" ] && [ -d "$GD_HOMEDIR" ] && ok "the mounted codex home persists between rounds (so a stale AGENTS.md can outlive a round)" || fail "no persisted home under $GD_MBASE"
 
 # A VALID BUNDLE: the staged bytes are the bundle's, at mode 600, beside an unchanged credential and config.
-GD_D1="$(gd_turn gd-th r1 COMMS_METHOD_GUIDANCE_DIR="$GD_B")"
+GD_D1="$(gd_turn gd-th r1 COMMS_METHOD_GUIDANCE_DIR="$GD_B" AX_ENVDUMP_LOG="$GD/envdump-r1.log" AX_ENVDUMP_VARS=COMMS_METHOD_GUIDANCE_DIR)"
 { [ "$(gd_res "$GD_D1" status)" = completed ] && [ "$(gd_seen r1 agents)" = "file	600	$GD_SHA" ]; } \
   && ok "a valid bundle is staged as AGENTS.md, byte-identical to method-guidance.md, at mode 600" \
   || fail "valid bundle: status=$(gd_res "$GD_D1" status) agents=$(gd_seen r1 agents)"
@@ -1899,7 +1899,11 @@ GD_D1="$(gd_turn gd-th r1 COMMS_METHOD_GUIDANCE_DIR="$GD_B")"
   || fail "guidance record: result=$(gd_res "$GD_D1" guidance) tv=$(gd_tv "$GD_D1") log=$(grep '^guidance:' "$GD_D1/runner.log")"
 # The bundle is written only under the isolated home: no file in any mounted tree carries its bytes.
 GD_LEAK=0; while IFS= read -r GD_F; do cmp -s "$GD_F" "$GD_B/method-guidance.md" && GD_LEAK=1; done < <(find "$GD_MBASE" -path '*/tree/*' -type f \( -name AGENTS.md -o -name 'method-guidance*' \) 2>/dev/null)
-[ "$GD_LEAK" = 0 ] && ok "the bundle is written only under the isolated home: nothing in the reviewed tree carries its bytes" || fail "the bundle reached the mounted tree"
+# The setting is read by the parent only: the reviewer child's environment (TURN_CHILD_SCRUB) must not carry it.
+GD_ENVSEEN="$(grep -c 'COMMS_METHOD_GUIDANCE_DIR=' "$GD/envdump-r1.log" 2>/dev/null)"; GD_ENVLEAK="$(grep 'COMMS_METHOD_GUIDANCE_DIR=' "$GD/envdump-r1.log" 2>/dev/null | grep -vc '=<unset>$')"
+{ [ "$GD_LEAK" = 0 ] && [ "${GD_ENVSEEN:-0}" -ge 1 ] && [ "${GD_ENVLEAK:-1}" = 0 ]; } \
+  && ok "the bundle is written only under the isolated home: nothing in the reviewed tree carries its bytes, and the child's environment lacks the setting" \
+  || fail "bundle containment: tree leak=$GD_LEAK, child env observations=$GD_ENVSEEN with the setting set=$GD_ENVLEAK"
 
 # REJECTED bundles stage nothing and never stop the review: each leaves no AGENTS.md for the child, records rejected:<code>
 # in result.json, turn.tsv and runner.log, and the turn still completes. The earlier valid round left a staged copy in the
