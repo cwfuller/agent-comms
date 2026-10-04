@@ -251,7 +251,7 @@ included) refuses the whole dispatch: the caller re-plans and re-submits.
 **Refusal codes** (stable; the detail wording may change): `agent-unbindable`, `no-access-profile`,
 `access-incomplete`, `route-mismatch`, `transport-mismatch`, `provider-mismatch`, `account-mismatch`,
 `billing-mismatch`, `credential-mismatch`, `model-unservable`, `model-mismatch`, `effort-refused`,
-`effort-mismatch`, `capability-unsupported`, `auth-login-missing`, `auth-selected-type-conflict`,
+`effort-mismatch`, `capability-unsupported` (also an OpenCode profile whose connection key variable its credential mapping does not supply), `auth-login-missing`, `auth-selected-type-conflict`,
 `auth-route-unsupported`, `credential-unavailable`, `pin-conflict` (a `COMMS_ACP_<P>_MODEL/EFFORT` pin that
 differs, or `COMMS_REVIEW_MAX`, in the dispatching environment; an equal pin is accepted). Roster rules are the
 panel's own (registered, no duplicates, author never a leg, one leg per family). One function judges a leg for

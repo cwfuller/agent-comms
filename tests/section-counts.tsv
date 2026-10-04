@@ -119,7 +119,7 @@ runphase: a mounted grok turn is refused without a backend, and a broken backend
 box.sh: the Seatbelt backend, proved on a real sandbox-exec (macOS)	10
 binding: access profiles (access.json), agents --access and the capability line	35
 binding: review-route plan --bindings (read-only, every leg's verdict, configured access values)	12
-binding: all-or-nothing validation before the first durable write (panel dispatch --bindings)	51
+binding: all-or-nothing validation before the first durable write (panel dispatch --bindings)	53
 binding: roster family semantics (one leg per family, whatever the route or account)	7
 binding: retained policy records stay readable (versions 1 and 2) and a custom profile binds through no map row	15
 binding: the installed copy negotiates, plans and refuses (install.sh into a test-owned scope)	5

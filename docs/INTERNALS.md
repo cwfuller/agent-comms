@@ -734,7 +734,8 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
 - **Run-time re-check** (`runphase.sh bound_leg_recheck`) judges the stamp from the stamp alone against the configuration as it is now, before mounting, launching
   or prompting, and ends a changed leg `reason=binding-mismatch`. The check also compares the configured transport with the one the runner drives, and for an
   OpenCode profile verifies the runtime executable and version locally (`opencode_adapter.verify_runtime`, no credentials) so a broken final leg refuses the
-  whole panel. Environment and credential preparation re-verify the stamped access digest after the re-check's sleep and mount. The stamp and run state are
+  whole panel; a profile whose `connection.api_key_env` is not a variable its `credentials` mapping supplies (a local route with no mapping, or a mapping to another name)
+  is refused `capability-unsupported` at the same point, because the bound scrub would remove the variable the launch requires. Environment and credential preparation re-verify the stamped access digest after the re-check's sleep and mount. The stamp and run state are
   written to `turn.tsv`, so `load_turn_identity` restores them for a synthesized result after a runner crash.
 - **Quota metadata** (`leg-metadata v1`) has an explicit state because `null` cannot distinguish unsupported from missing: `observed` (a provider ledger
   snapshot; codex), `unsupported` (grok, claude, gemini, custom profiles: no rate-limit source), `unavailable` (supported, nothing in the window), `refused`

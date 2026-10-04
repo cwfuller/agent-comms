@@ -301,6 +301,12 @@ def check_leg(leg, ctx, entries, entries_error, profiles, environ):
         problem = verify_runtime(profiles[provider], preflight_env(environ))
         if problem:
             refuse("model-unservable", problem)
+        # The launch refuses a connection whose key variable is not the one credential the bound environment
+        # restores (every other credential name is scrubbed); judge that here, before sibling legs start.
+        connection = profiles[provider].get("connection")
+        if connection and connection["api_key_env"] not in profiles[provider].get("credentials", {}):
+            refuse("capability-unsupported", f"the profile's connection reads {connection['api_key_env']}, "
+                                             "which its credential mapping does not supply")
     if adapter is not None and entry is not None and not found_codes(found, "billing-mismatch"):
         for code, detail in observe_auth(adapter, entry["billing"], environ):
             refuse(code, detail)

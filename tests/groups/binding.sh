@@ -221,6 +221,21 @@ OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" GM_LOG="$BD_TL" "$COMMS" panel dispat
 [ ! -e "$BD_TL" ] && [ "$(bd_run_dirs)" = 0 ] && ok "and no provider stub (acpx, gemini) was invoked for any of the three legs" || fail "a stub ran: $(cat "$BD_TL" 2>/dev/null | head -3)"
 [ -z "$(git -C "$BD_REPO" for-each-ref refs/agent-comms)" ] && [ ! -e "$BD_REPO/.comms/events.tsv" ] \
   && ok "the artifact was never retained and the coordinator log was never created" || fail "snapshot refs or an event log exist after a refusal"
+# A final OpenCode leg whose connection reads a variable its credential mapping never supplies would pass every
+# other check, then fail at launch after the siblings started: it is judged before anything is written.
+bd_mut agents "d['agents']['glm']['credentials']={'UNUSED_KEY': {'env': 'BD_VENICE_KEY'}}"
+bd_wb "$BD/conn.json" "$BD_L_CODEX" "$BD_L_GEMINI" "$BD_L_GLM"
+OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" GM_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/conn.json" "$(bd_req bd-conn)" 2>"$BD/conn.err")"; A=$?
+{ [ "$A" = 1 ] && [ -z "$OUT" ] && [ "$(bd_codes "$(cat "$BD/conn.err")")" = "capability-unsupported " ] && [ ! -e "$BD_TL" ] && [ "$(bd_run_dirs)" = 0 ] \
+  && [ "$(bd_tree | grep -v 'bd-request-')" = "$(grep -v 'bd-request-' <<<"$BD_T0")" ]; } \
+  && ok "a final OpenCode leg whose connection key variable its credential mapping does not supply refuses the whole panel before any write" || fail "connection key (rc=$A): $OUT $(cat "$BD/conn.err")"
+bd_mut agents "d['agents']['glm']['credentials']={}"
+bd_mut access "d['agents']['glm'].update(route_id='venice-local', billing='local', credential=None)"
+bd_wb "$BD/local.json" "$BD_L_CODEX" "$BD_L_GEMINI" "$(bj "$BD_L_GLM" "d['route_id']='venice-local'; d['access'].update(billing='local', credential=None)")"
+OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" GM_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/local.json" "$(bd_req bd-local)" 2>"$BD/local.err")"; A=$?
+{ [ "$A" = 1 ] && [ -z "$OUT" ] && [ "$(bd_codes "$(cat "$BD/local.err")")" = "capability-unsupported " ] && [ ! -e "$BD_TL" ] && [ "$(bd_run_dirs)" = 0 ]; } \
+  && ok "a final OpenCode leg with a connection and no credential mapping (a local route) refuses the whole panel before any write" || fail "local connection (rc=$A): $OUT $(cat "$BD/local.err")"
+bd_reset
 # An OPTIONAL leg failing validation refuses the dispatch too: which legs exist is the caller's decision, so this
 # tool never drops one.
 bd_wb "$BD/opt.json" "$BD_L_CODEX" "$(bj "$BD_L_GEMINI" "d['model']='gemini-4-pro'")"
