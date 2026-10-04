@@ -54,6 +54,17 @@
 #       map gives it one of its own (a `limit` row), `-` for the provider's shared limit,
 #       `n/a` where no model is applied. --transport mailbox (a leg nobody drives)
 #       resolves to that `unsupported` answer.
+#   resolve <agent> --bound-model <m> --bound-effort <e|-> --route-id <id> --access-digest <sha256>
+#           [--custom-profile] [--transport acp-mounted] [--phase <p>]
+#       BOUND resolution (panel dispatch --bindings): the caller's EXACT model and native effort,
+#       validated and never substituted. No tier, routed candidate, baseline, pin or "use max":
+#       an operator pin or COMMS_REVIEW_MAX that differs from the binding is a CONFLICT (a
+#       refusal), an equal pin is accepted. Built-in agents must be `eligible` or `fixed`
+#       (applied and attested); `--custom-profile` binds an operator profile (OpenCode) to its
+#       pinned model with a null effort, read through agent_profiles.py, never the map. Writes a
+#       version-2 record (route_id, access_digest, bound). A refusal's message starts
+#       `code=<token>` (capability-unsupported, pin-conflict, model-unservable, effort-refused,
+#       effort-mismatch, model-mismatch, agent-unbindable).
 #   route-view <agent> <record-file|-> [--format line|json]
 #       the spend-planning view of a resolved record: transport, capability, model,
 #       effort, limit_id, model_source, effort_source, routing, decision, phase,
@@ -143,6 +154,10 @@ NODE_MIN_MINOR=13
 # cannot appear beside the one the ledger names.
 ACP_POLICY_MAP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/policy-map.tsv"
 ACP_POLICY_RECORD_VERSION=1
+# A BOUND resolution (`resolve --bound-model`, the caller's exact pair) writes version 2, adding route_id,
+# access_digest and bound; unbound resolutions keep writing version 1, byte for byte. Readers accept both
+# and hold each version to its own field set, so a record persisted before an upgrade still reads after it.
+ACP_POLICY_RECORD_VERSION_BOUND=2
 
 # Values reach a TOML file that governs the reviewer's sandbox, so they are ALLOWLISTED, never
 # scrubbed of known-bad characters: docs/advisories.md:363 records that neutralising by
@@ -513,7 +528,7 @@ resolve_policy() {
   local phase="${7:--}" csrc="${8:-none}"
   local base bm be pm pe fb="" route_ok=0
   R_AGENT="$agent"; R_TRANSPORT="$transport"; R_TIER="$tier"; R_EFFORT_IN="$effort"
-  R_DECISION="$decision"; R_ROUTING="$routing"; R_PHASE="$phase"; R_CSRC="$csrc"; R_DIGEST=none
+  R_DECISION="$decision"; R_ROUTING="$routing"; R_PHASE="$phase"; R_CSRC="$csrc"; R_DIGEST=none; R_BOUND=0
   R_MAPV="$(policy_map_check)" || return 1
   R_CAP="$(policy_map_get capability "$agent" "$transport")"; R_CAP="${R_CAP:-unsupported}"
   if [ "$R_CAP" != unsupported ] && ! policy_applied_combo "$agent" "$transport"; then
@@ -656,12 +671,104 @@ resolve_policy() {
   return 0
 }
 
-policy_digest() {  # <model> <effort> <runtime> <runtime-version> -> 12 hex
+# BOUND RESOLUTION — the caller's EXACT model and native effort, validated and never substituted.
+# `panel dispatch --bindings` names, per leg, the pair it wants; this either resolves that pair or
+# refuses it. There is no tier, no routed candidate, no baseline, no pin and no "use max" here: an
+# environment pin or COMMS_REVIEW_MAX that differs from the binding is a CONFLICT (a refusal), never an
+# override in either direction, and nothing is ever swapped for a pair that would run. A refusal's
+# message starts `code=<token>`: callers map it to the refusal code they print, so the wording can change
+# without changing the contract.
+#   resolve_bound <agent> <transport> <model> <effort|-> <route-id> <access-digest> <phase>
+bound_refuse() {  # <code> <detail> — one refusal line on stderr, then return 1 from the caller
+  echo "acp.sh: resolve: code=$1 $2" >&2
+}
+bound_prelude() {  # <agent> <transport> <model> <effort|-> <route-id> <access-digest> <phase>
+  R_AGENT="$1"; R_TRANSPORT="$2"; R_TIER=none; R_EFFORT_IN=none; R_DECISION=none; R_ROUTING=off
+  R_PHASE="${7:--}"; R_CSRC=bound; R_DIGEST=none; R_BOUND=1; R_ROUTE_ID="$5"; R_ACCESS="$6"
+  R_MAPV="$(policy_map_check)" || return 1
+  R_RUNTIME=n/a; R_RUNTIME_VERSION=n/a; R_FALLBACK=none
+  # THE PIN RULE. An operator pin or "use max" in the dispatching environment is a second source of the
+  # pair. Equal to the binding it is harmless and accepted; anything else refuses, so nothing silently
+  # overrides the binding and the binding never silently overrides an operator's standing choice.
+  local pm pe
+  if policy_max_on; then
+    bound_refuse pin-conflict "COMMS_REVIEW_MAX is set: a bound leg runs the caller's model and effort, never the map's ceiling"; return 1
+  fi
+  pm="$(policy_pin_model "$1")"; pe="$(policy_pin_effort "$1")"
+  if [ -n "$pm" ] && [ "$pm" != "$3" ]; then
+    bound_refuse pin-conflict "the operator's model pin '$pm' differs from the bound model '$3'"; return 1
+  fi
+  if [ -n "$pe" ] && [ "$pe" != "$4" ]; then
+    bound_refuse pin-conflict "the operator's effort pin '$pe' differs from the bound effort '$4'"; return 1
+  fi
+  return 0
+}
+resolve_bound() {
+  local agent="$1" transport="$2" bm="$3" be="$4" bad why
+  bound_prelude "$@" || return 1
+  [[ "$bm" =~ $ACP_POLICY_RE ]] || { bound_refuse model-unservable "model '$bm' is not a bare identifier"; return 1; }
+  [ "$be" = - ] || [[ "$be" =~ $ACP_POLICY_RE ]] || { bound_refuse effort-refused "effort '$be' is not a bare identifier"; return 1; }
+  R_CAP="$(policy_map_get capability "$agent" "$transport")"; R_CAP="${R_CAP:-unsupported}"
+  if { [ "$R_CAP" != eligible ] && [ "$R_CAP" != fixed ]; } || ! policy_applied_combo "$agent" "$transport"; then
+    bound_refuse capability-unsupported "$agent/$transport applies and attests no model or effort policy (capability $R_CAP), so nothing can be bound"; return 1
+  fi
+  policy_runtime_for "$agent"
+  [ -z "$RT_ERR" ] || { bound_refuse model-unservable "$RT_ERR"; return 1; }
+  R_RUNTIME="$RT_PATH"; R_RUNTIME_VERSION="$RT_VERSION"
+  # Every codex and gemini model has a native effort scale, so a null effort cannot bind one.
+  [ "$be" != - ] || { bound_refuse effort-mismatch "a bound effort of null cannot bind model '$bm': it has a native effort scale"; return 1; }
+  R_MODEL="$bm"; R_EFFORT="$be"; R_MSRC=bound; R_ESRC=bound
+  # The SAME pair rule the pins go through: a model the map knows must accept the effort; one it does not
+  # know is honoured and labelled (unverified-pin), and the post-turn attestation is what gates it.
+  if ! bad="$(policy_pair_verdict "$agent" "$transport" "$R_MODEL" pin "$R_EFFORT" bound)"; then
+    bound_refuse effort-refused "$(policy_pair_refusal "$bad" "$R_MODEL" bound "$R_EFFORT" bound "$R_MAPV")"; return 1
+  fi
+  R_PAIR="$bad"
+  why="$(policy_model_disabled "$agent" "$transport" "$R_MODEL")"
+  if [ -n "$why" ]; then
+    bound_refuse model-unservable "model '$R_MODEL' is disabled in the policy map ($why; map $R_MAPV)"; return 1
+  fi
+  if ! why="$(policy_unservable_reason "$agent" "$transport" "$R_MODEL" bound)"; then
+    bound_refuse model-unservable "$why"; return 1
+  fi
+  R_LIMIT="$(policy_map_get limit "$agent" "$transport" "$R_MODEL")"; R_LIMIT="${R_LIMIT:--}"
+  R_ETIER="$(policy_map_reverse tier "$agent" "$transport" "$R_MODEL")"
+  R_EEFF="$(policy_map_reverse effort "$agent" "$transport" "$R_EFFORT")"
+  R_VERIFY="model,effort"
+  R_DIGEST="$(policy_digest "$R_MODEL" "$R_EFFORT" "$R_RUNTIME" "$R_RUNTIME_VERSION" "$R_ACCESS")" \
+    || { echo "acp.sh: resolve: no sha256 utility to identify the policy" >&2; return 1; }
+  return 0
+}
+# resolve_bound_custom — an operator profile (an OpenCode adapter today) is an exact model PIN with no
+# effort scale, so it binds its pinned model and a null effort and nothing else. The profile is read
+# through agent_profiles.py, never the policy map: no row is added there for a custom agent.
+resolve_bound_custom() {
+  local agent="$1" transport="$2" bm="$3" be="$4" pm adapter helper
+  helper="$(dirname "${BASH_SOURCE[0]}")/agent_profiles.py"
+  bound_prelude "$@" || return 1
+  adapter="$(python3 "$helper" field "$agent" adapter 2>/dev/null)" \
+    || { bound_refuse agent-unbindable "no operator profile for '$agent'"; return 1; }
+  [ "$adapter" = opencode ] \
+    || { bound_refuse agent-unbindable "consult-only: the '$adapter' adapter has no mounted review runner, so nothing can be bound"; return 1; }
+  pm="$(python3 "$helper" field "$agent" model 2>/dev/null)" || { bound_refuse agent-unbindable "no pinned model for '$agent'"; return 1; }
+  [ "$pm" = "$bm" ] || { bound_refuse model-mismatch "the profile pins model '$pm', not the bound '$bm'"; return 1; }
+  [ "$be" = - ] || { bound_refuse effort-mismatch "profile '$agent' pins a model and has no native effort scale; the bound effort '$be' cannot be applied"; return 1; }
+  R_CAP=profile; R_MODEL="$pm"; R_EFFORT=n/a; R_MSRC=bound; R_ESRC=bound
+  R_ETIER=n/a; R_EEFF=n/a; R_PAIR=profile-pin; R_VERIFY=model; R_LIMIT=n/a
+  R_DIGEST="$(policy_digest "$R_MODEL" "$R_EFFORT" n/a n/a "$R_ACCESS")" \
+    || { echo "acp.sh: resolve: no sha256 utility to identify the policy" >&2; return 1; }
+  return 0
+}
+
+policy_digest() {  # <model> <effort> <runtime> <runtime-version> [<access-digest>] -> 12 hex
   # The RUNTIME is part of the identity: codex fixes a session's runtime when it is created, so a
-  # runtime upgrade must be a fresh session too, never a resume under a different binary.
+  # runtime upgrade must be a fresh session too, never a resume under a different binary. A BOUND
+  # resolution adds the access digest, so two accounts or billing routes never share a warm session;
+  # an unbound one hashes exactly what it always did.
   local d
-  if command -v shasum >/dev/null 2>&1; then d="$(printf '%s\0%s\0%s\0%s' "$1" "$2" "$3" "$4" | shasum -a 256)"
-  elif command -v sha256sum >/dev/null 2>&1; then d="$(printf '%s\0%s\0%s\0%s' "$1" "$2" "$3" "$4" | sha256sum)"
+  policy_digest_payload() { printf '%s\0%s\0%s\0%s' "$1" "$2" "$3" "$4"; [ -z "${5:-}" ] || printf '\0%s' "$5"; }
+  if command -v shasum >/dev/null 2>&1; then d="$(policy_digest_payload "$@" | shasum -a 256)"
+  elif command -v sha256sum >/dev/null 2>&1; then d="$(policy_digest_payload "$@" | sha256sum)"
   else return 1; fi
   d="${d%% *}"; d="${d:0:12}"
   [[ "$d" =~ ^[0-9a-f]{12}$ ]] || return 1
@@ -669,7 +776,7 @@ policy_digest() {  # <model> <effort> <runtime> <runtime-version> -> 12 hex
 }
 
 emit_policy_record() {  # the persisted per-turn expectation; key<TAB>value, fixed order
-  printf 'policy_record\t%s\n'    "$ACP_POLICY_RECORD_VERSION"
+  printf 'policy_record\t%s\n'    "$([ "${R_BOUND:-0}" = 1 ] && echo "$ACP_POLICY_RECORD_VERSION_BOUND" || echo "$ACP_POLICY_RECORD_VERSION")"
   printf 'map_version\t%s\n'      "$R_MAPV"
   printf 'provider\t%s\n'         "$R_AGENT"
   printf 'transport\t%s\n'        "$R_TRANSPORT"
@@ -693,6 +800,11 @@ emit_policy_record() {  # the persisted per-turn expectation; key<TAB>value, fix
   printf 'fallback\t%s\n'         "${R_FALLBACK:-none}"
   printf 'verify\t%s\n'           "$R_VERIFY"
   printf 'policy_digest\t%s\n'    "$R_DIGEST"
+  if [ "${R_BOUND:-0}" = 1 ]; then
+    printf 'route_id\t%s\n'         "$R_ROUTE_ID"
+    printf 'access_digest\t%s\n'    "$R_ACCESS"
+    printf 'bound\t1\n'
+  fi
 }
 
 # policy_from_record <agent> <file> — "<model>\t<effort>" from a PERSISTED record, or exit 1.
@@ -702,7 +814,7 @@ emit_policy_record() {  # the persisted per-turn expectation; key<TAB>value, fix
 policy_from_record() {
   local agent="$1" f="$2" out
   [ -f "$f" ] && [ -r "$f" ] || { echo "acp.sh: policy record '$f' is missing or unreadable" >&2; return 1; }
-  out="$(awk -F'\t' -v want="$ACP_POLICY_RECORD_VERSION" '
+  out="$(awk -F'\t' -v want="$ACP_POLICY_RECORD_VERSION" -v wantb="$ACP_POLICY_RECORD_VERSION_BOUND" '
     { sub(/\r$/, "") }
     NF != 2 || $1 == "" || $2 == "" { bad = 1; next }
     { n[$1]++; v[$1] = $2 }
@@ -710,7 +822,13 @@ policy_from_record() {
       split("policy_record provider capability verify model effort", ks, " ")
       for (i in ks) if (n[ks[i]] != 1) bad = 1
       for (k in n) if (n[k] != 1) bad = 1
-      if (bad || v["policy_record"] != want) exit 1
+      # Each version is held to its OWN field set: a retained version-1 record still reads, and a
+      # version-2 (bound) record must carry the three keys only it has.
+      hasb = (("route_id" in n) && ("access_digest" in n) && ("bound" in n))
+      anyb = (("route_id" in n) || ("access_digest" in n) || ("bound" in n))
+      if (v["policy_record"] == want && anyb) bad = 1
+      if (v["policy_record"] == wantb && !hasb) bad = 1
+      if (bad || (v["policy_record"] != want && v["policy_record"] != wantb)) exit 1
       print v["provider"] "\t" v["capability"] "\t" v["verify"] "\t" v["model"] "\t" v["effort"]
     }' "$f")" || { echo "acp.sh: policy record '$f' is malformed" >&2; return 1; }
   # cut, not `IFS=$'\t' read`: tab is IFS whitespace, so an empty field would collapse and shift
@@ -1041,20 +1159,48 @@ cmd_resolve() {
   shift
   [ -n "$(profile_for "$agent")" ] || { echo "acp.sh: resolve: unknown agent '$agent'" >&2; exit 2; }
   local transport=acp-mounted tier=none effort=none decision=none routing=off phase=- csrc=none
+  local bmodel="" beffort="" broute="" bdigest="" bcustom=0 routed_given=0
   while [ "$#" -gt 0 ]; do
+    [ "$1" != --custom-profile ] || { bcustom=1; shift; continue; }
     [ "$#" -ge 2 ] || { echo "acp.sh: resolve: $1 needs a value" >&2; exit 2; }
     case "$1" in
       --transport) transport="$2" ;;
-      --tier)      tier="$2" ;;
-      --effort)    effort="$2" ;;
-      --decision)  decision="$2" ;;
-      --routing)   routing="$2" ;;
+      --tier)      tier="$2"; routed_given=1 ;;
+      --effort)    effort="$2"; routed_given=1 ;;
+      --decision)  decision="$2"; routed_given=1 ;;
+      --routing)   routing="$2"; routed_given=1 ;;
       --phase)     phase="$2" ;;
-      --candidate-source) csrc="$2" ;;
+      --candidate-source) csrc="$2"; routed_given=1 ;;
+      --bound-model)  bmodel="$2" ;;
+      --bound-effort) beffort="$2" ;;
+      --route-id)     broute="$2" ;;
+      --access-digest) bdigest="$2" ;;
       *) echo "acp.sh: resolve: unknown option '$1'" >&2; exit 2 ;;
     esac
     shift 2
   done
+  if [ -n "$bmodel$beffort$broute$bdigest" ] || [ "$bcustom" = 1 ]; then
+    # BOUND MODE: the caller's exact pair. A routing candidate beside it would be a second source of the
+    # pair, so the combination is a usage error rather than something to rank.
+    [ -n "$bmodel" ] && [ -n "$beffort" ] && [ -n "$broute" ] && [ -n "$bdigest" ] \
+      || { echo "acp.sh: resolve: --bound-model, --bound-effort, --route-id and --access-digest go together" >&2; exit 2; }
+    [ "$routed_given" = 0 ] || { echo "acp.sh: resolve: a bound resolution takes no tier, effort, decision, routing or candidate source" >&2; exit 2; }
+    [ "$transport" = acp-mounted ] || { echo "acp.sh: resolve: a bound resolution is for a mounted ACP turn" >&2; exit 2; }
+    [[ "$bmodel" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}$ ]] || { echo "acp.sh: resolve: bound model '$bmodel' is not a bare token" >&2; exit 2; }
+    [ "$beffort" = - ] || [[ "$beffort" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: resolve: bound effort '$beffort' is not a bare token" >&2; exit 2; }
+    [[ "$broute" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "acp.sh: resolve: route id '$broute' is not a bare token" >&2; exit 2; }
+    [[ "$bdigest" =~ ^[0-9a-f]{64}$ ]] || { echo "acp.sh: resolve: access digest is not a sha256" >&2; exit 2; }
+    [ "$phase" = - ] || [[ "$phase" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: resolve: phase '$phase' is not a bare token" >&2; exit 2; }
+    case "$agent" in
+      codex|gemini) [ "$bcustom" = 0 ] || { echo "acp.sh: resolve: --custom-profile is for an operator profile, not '$agent'" >&2; exit 2; }
+                    resolve_bound "$agent" "$transport" "$bmodel" "$beffort" "$broute" "$bdigest" "$phase" || exit 1 ;;
+      claude|grok)  bound_refuse capability-unsupported "'$agent' applies and attests no model or effort policy, so nothing can be bound"; exit 1 ;;
+      *) [ "$bcustom" = 1 ] || { echo "acp.sh: resolve: a custom profile binds through --custom-profile" >&2; exit 2; }
+         resolve_bound_custom "$agent" "$transport" "$bmodel" "$beffort" "$broute" "$bdigest" "$phase" || exit 1 ;;
+    esac
+    emit_policy_record
+    return 0
+  fi
   # Closed vocabularies. A value outside them is a CALLER defect, reported as usage — never
   # quietly read as `none`, which would turn a typo into a baseline turn nobody asked for.
   # `mailbox` is a leg nobody drives: no turn runs, so nothing is applied (no capability row can
@@ -1079,7 +1225,7 @@ cmd_resolve() {
 ACP_ROUTE_FIELDS="transport capability model effort limit_id model_source effort_source routing decision phase map_version"
 # Every value is a bare token (or `-`, `n/a`): it is printed unquoted in a key=value line and
 # embedded in JSON, so anything else refuses the view rather than being escaped into it.
-ACP_ROUTE_VALUE_RE='^([A-Za-z0-9][A-Za-z0-9._/-]*|-)$'
+ACP_ROUTE_VALUE_RE='^([A-Za-z0-9][A-Za-z0-9._/:@+-]*|-)$'
 cmd_route_view() {  # route-view <agent> <record-file|-> [--format line|json]
   local agent="${1:-}" src="${2:-}" fmt=line
   [ -n "$agent" ] && [ -n "$src" ] || { echo "acp.sh: route-view: usage: route-view <agent> <record-file|-> [--format line|json]" >&2; exit 2; }
@@ -1091,14 +1237,20 @@ cmd_route_view() {  # route-view <agent> <record-file|-> [--format line|json]
   [ "$src" = - ] || [ -f "$src" ] || { echo "acp.sh: route-view: no such record '$src'" >&2; exit 1; }
   # Same reading rule as policy_from_record: every key exactly once, or the record is refused.
   awk -F'\t' -v fields="$ACP_ROUTE_FIELDS" -v agent="$agent" -v fmt="$fmt" -v vre="$ACP_ROUTE_VALUE_RE" \
-      -v want="$ACP_POLICY_RECORD_VERSION" '
+      -v want="$ACP_POLICY_RECORD_VERSION" -v wantb="$ACP_POLICY_RECORD_VERSION_BOUND" '
     { sub(/\r$/, "") }
     NF != 2 || $1 == "" || $2 == "" { bad = 1; next }
     { n[$1]++; v[$1] = $2 }
     END {
       for (k in n) if (n[k] != 1) bad = 1
-      if (bad || v["policy_record"] != want || v["provider"] != agent) exit 1
+      hasb = (("route_id" in n) && ("access_digest" in n) && ("bound" in n))
+      anyb = (("route_id" in n) || ("access_digest" in n) || ("bound" in n))
+      if (v["policy_record"] == want && anyb) bad = 1
+      if (v["policy_record"] == wantb && !hasb) bad = 1
+      if (bad || (v["policy_record"] != want && v["policy_record"] != wantb) || v["provider"] != agent) exit 1
       nf = split(fields, F, " ")
+      # Route-view fields version 2: a bound record also names its route and the digest of its access profile.
+      if (v["policy_record"] == wantb) { F[++nf] = "route_id"; F[++nf] = "access_digest" }
       for (i = 1; i <= nf; i++) if (n[F[i]] != 1 || v[F[i]] !~ vre) exit 1
       if (fmt == "json") printf "{"
       for (i = 1; i <= nf; i++) {

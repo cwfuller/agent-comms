@@ -11,7 +11,8 @@
 #   workspace [set <name>]      print the mailbox identity (repo pin > worktree pin >
 #                               branch > repo dir); `set` pins it repo-scoped in .comms/workspace
 #   agents [default|--drivers|--review|--provider <id>|--others <driver>|
-#           --family <id>|--profile <id>|--roster <driver> [a,b,...]|--supported]
+#           --family <id>|--profile <id>|--access <id> [--json]|
+#           --roster <driver> [a,b,...]|--supported]
 #                                  registered identities: every identity (bare), the
 #                                  drivers (`agents =` in .comms/config), their built-in
 #                                  review twins (<driver>-review, no config), one
@@ -22,6 +23,10 @@
 #                                  --others; a list naming the driver itself swaps in its
 #                                  twin. (zero-config: claude codex grok, target codex;
 #                                  gemini is supported and opt-in: `agents = ... gemini`)
+#                                  --access prints an agent's ONE immutable access profile
+#                                  (access.json: route, transport, hosting provider, account,
+#                                  billing class, credential REFERENCE) and its digest, read
+#                                  together with agents.json; read-only, no secret is read
 #   whoami                      print the driving agent (COMMS_SELF → session env →
 #                               ancestor executable). Fails closed on no signal, on
 #                               conflicting signals, on a review-only identity, and
@@ -204,6 +209,21 @@
 #                               decision= phase= map_version=` line per leg. Decides, records
 #                               and sends nothing; `decision=pending` = dispatch will classify.
 #                               The same fields land in each leg's result.json "route".
+#   review-route plan --bindings FILE [--to a,b]
+#                               READ-ONLY, bound mode: judge every leg of a leg-bindings file
+#                               exactly as `panel dispatch --bindings` will and print ALL the
+#                               verdicts, `route-plan v2 ref= agent= harness= status=ok|refused
+#                               code= route_id= transport= provider= account= billing=
+#                               credential= access_digest= model= effort= model_source=bound
+#                               ... capability_version=1`, with the CONFIGURED access values.
+#                               Exit 0 only if every leg would run exactly as asked, 1 if any
+#                               refuses (lines still print), 2 usage. Writes nothing.
+#   review-route capability [--json]
+#                               READ-ONLY negotiation: `leg-binding-capability v1 leg-bindings=1
+#                               route-view=2 leg-metadata=1`, then one line per registered agent:
+#                               bindable | bindable-model-only | unbindable (claude, grok, a
+#                               mailbox leg, a consult-only profile) | unbindable-billing, with
+#                               the reason. A statement of fact, not a roadmap.
 #   setup [--yes] [--show] [--set KEY=VALUE ...]
 #                               configure agent-comms: agents, reviewer containment, Jev
 #                               routing, codex reviewer runtime, timeouts. Re-runnable; writes
@@ -216,6 +236,17 @@
 #                               request's cwd:/branch: name the tree it runs in, are
 #                               validated before anything is written. Compose with the
 #                               set id it prints.
+#   panel dispatch --bindings FILE [--to a,b] <review-request> [--set ID]
+#                               EXACT PER-LEG BINDING (opt-in). FILE (leg-bindings/1) names, per
+#                               leg, the exact model, native effort and expected access profile;
+#                               its agents ARE the roster. Every listed leg is judged before the
+#                               first durable write, and ANY leg that cannot run exactly as bound
+#                               (an optional one included) refuses the whole dispatch: exit 1
+#                               with a `refused <agent> <code> <detail>` line per refusal, exit 2
+#                               for a malformed file or a roster violation. Nothing is
+#                               snapshotted, logged, indexed or sent. No tier is classified and
+#                               no route chosen. Each leg carries a helper-stamped `leg_binding`
+#                               the runner judges AGAIN before launching anything.
 #   panel status [--set <id>]   with --set: which legs have answered, and with what
 #                               verdict. Bare: every recorded review set, newest first —
 #                               the recovery surface after an await dies with its session.
@@ -429,6 +460,10 @@ REGISTRY_DEFAULT_TARGET="codex"
 registry_file() { echo "$(cmd_root)/config"; }
 
 profile_helper() { python3 "$(dirname "$SELF")/agent_profiles.py" "$@"; }
+# The access profiles (access.json) and the exact per-leg binding judgement. Both are optional files and
+# optional helpers: nothing on an unbound path reads either.
+access_helper() { python3 "$(dirname "$SELF")/access_profiles.py" "$@"; }
+leg_binding_py() { python3 "$(dirname "$SELF")/leg_binding.py" "$@"; }
 custom_profile_names() {
   local f="${AGENT_COMMS_HOME:-$HOME/.agent-comms}/agents.json"
   if [ -e "$f" ] || [ -L "$f" ]; then profile_helper names; else printf '\n'; fi
@@ -769,6 +804,15 @@ cmd_agents() {
       case "$profile_provider" in claude|codex|grok|gemini) return 1 ;; esac
       profile_helper binding "$profile_provider"
       ;;
+    --access)
+      # The one immutable access profile of an agent (access.json, read together with agents.json so a
+      # profile that contradicts its entry is refused here exactly as dispatch refuses it). Read-only:
+      # a credential is a REFERENCE, and its value is never read to print this line.
+      shift
+      [ -n "${1:-}" ] || usage_err "agents --access: an identity is required"
+      registry_has "$1" || die "agents --access: unknown agent '$1' (registered: $(registry_agents))"
+      access_helper show "$1" ${2:+"$2"}
+      ;;
     --others)
       # The default panel for a loop <driver> is driving: every OTHER DRIVER. Its own review twin
       # is opt-in — same-model review is off unless asked for — EXCEPT when no other driver
@@ -828,7 +872,7 @@ cmd_agents() {
       custom_supported="$(custom_profile_names)" || exit 2
       for ca in $custom_supported; do printf '%s\tacp\n' "$ca"; done
       ;;
-    *) die "agents: unknown argument '$1' (expected: default | --drivers | --review | --provider <id> | --family <id> | --profile <id> | --others <driver> | --roster <driver> [a,b,...] | --supported)" ;;
+    *) die "agents: unknown argument '$1' (expected: default | --drivers | --review | --provider <id> | --family <id> | --profile <id> | --access <id> [--json] | --others <driver> | --roster <driver> [a,b,...] | --supported)" ;;
   esac
 }
 
@@ -2031,8 +2075,9 @@ cmd_review_route() {
       python3 "$py" verify --root "$(cmd_root)" --thread "$_vt" --phase "$_vp" ${_vleg:+--leg-agents "$_vleg"} -- "$_vid"
       return ;;
     plan) review_route_plan "$@"; return ;;
+    capability) review_route_capability "$@"; return ;;
     decide|show|lookup) ;;
-    *) usage_err "review-route: expected decide|lookup|show|verify|enabled|plan" ;;
+    *) usage_err "review-route: expected decide|lookup|show|verify|enabled|plan|capability" ;;
   esac
   command -v python3 >/dev/null 2>&1 || die "review-route: python3 is required"
   [ -f "$py" ] || die "review-route: route_review.py is not installed next to comms.sh — re-run install.sh"
@@ -2064,15 +2109,21 @@ cmd_review_route() {
 # the thread yet: dispatch will classify, so the values shown are what a `none` candidate — the
 # fail-open answer — would run. Pass --thread (the BASE thread) to read the one in force.
 review_route_plan() {
-  local to="" phase=implement thread="" acp rc
+  local to="" phase=implement thread="" acp rc bindings="" legacy_opt=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --to)     need_value "review-route plan" $# "$1"; to="$2"; shift 2 ;;
-      --phase)  need_value "review-route plan" $# "$1"; phase="$2"; shift 2 ;;
-      --thread) need_value "review-route plan" $# "$1"; thread="$2"; shift 2 ;;
+      --phase)  need_value "review-route plan" $# "$1"; phase="$2"; legacy_opt=1; shift 2 ;;
+      --thread) need_value "review-route plan" $# "$1"; thread="$2"; legacy_opt=1; shift 2 ;;
+      --bindings) need_value "review-route plan" $# "$1"; bindings="$2"; shift 2 ;;
       *) usage_err "review-route plan: unknown option '$(clip "$1")'" ;;
     esac
   done
+  if [ -n "$bindings" ]; then
+    [ -z "$legacy_opt" ] || usage_err "review-route plan: --bindings names each leg's exact pair; --phase and --thread belong to the routed plan"
+    review_route_plan_bound "$bindings" "$to"
+    return
+  fi
   [ -n "$to" ] || usage_err "review-route plan: --to <agent>[,<agent>...] is required"
   [[ "$phase" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
     || usage_err "review-route plan: phase '$(clip "$phase")' is not a bare token"
@@ -2131,6 +2182,78 @@ review_route_plan() {
 route-plan v1 agent=$ag provider=$prov $view"
   done
   printf '%s\n' "${out#?}"
+}
+
+# ---- EXACT PER-LEG BINDING (capability layer, Slice 7.4) ----
+# `panel dispatch --bindings FILE` runs exactly the model, native effort and expected access profile the
+# caller names per leg, or refuses the WHOLE dispatch before anything is written. leg_bind_check is the
+# one accessor `panel dispatch`, `review-route plan --bindings` and the runner's run-time re-check share
+# (the judgement is helpers/leg_binding.py check_leg), so a plan can never promise what dispatch refuses.
+
+# leg_bind_roster <bindings> <to-or-empty> <author-or-empty> <verb> — the bindings file's agents ARE the
+# roster. --to, when given, must name exactly them, in order (the gating reviewer is the first, as ever);
+# the roster rules every panel shares then run unchanged (panel_roster_check sets PANEL_ROSTER).
+leg_bind_roster() {
+  local file="$1" to="$2" author="$3" verb="$4" listed
+  command -v python3 >/dev/null 2>&1 || die "$verb: python3 is required for --bindings"
+  [ -f "$(dirname "$SELF")/leg_binding.py" ] || die "$verb: leg_binding.py is not installed next to comms.sh — re-run install.sh"
+  listed="$(leg_binding_py agents --bindings "$file")" || exit 2
+  if [ -n "$to" ] && [ "$(printf '%s' "$to" | tr -d ' ')" != "$listed" ]; then
+    usage_err "$verb: --to '$(clip "$to")' must name exactly the bindings file's agents, in order ($listed)"
+  fi
+  panel_roster_check "$listed" "$author" "$verb"
+}
+
+# leg_bind_check <bindings> <verb> [<stamps-out>] — one `route-plan v2` line per leg on stdout, a
+# `refused <agent> <code> <detail>` line per refusal on stderr. Exit 0 every leg would run exactly as
+# asked, 1 any leg refuses, 2 the file is malformed. Reads configuration and the policy map only: it
+# decides nothing, writes no event, reads no credential value and sends nothing. The roster is
+# PANEL_ROSTER, set by leg_bind_roster in the caller's shell.
+leg_bind_check() {
+  local file="$1" verb="$2" stamps="${3:-}" ag prov tr
+  local -a pargs=(check --bindings "$file")
+  for ag in $PANEL_ROSTER; do
+    prov="$(registry_provider "$ag")" || die "$verb: cannot resolve the provider of '$ag'"
+    tr="$(cmd_transport "$ag" --loop)" || die "$verb: no transport for '$ag'"
+    pargs+=(--ctx "$ag:$prov:$tr")
+  done
+  [ -z "$stamps" ] || pargs+=(--stamps-out "$stamps")
+  leg_binding_py "${pargs[@]}"
+}
+
+review_route_plan_bound() {  # <bindings> <to-or-empty>
+  local rc=0
+  require_known_transport
+  leg_bind_roster "$1" "$2" "" "review-route plan"
+  leg_bind_check "$1" "review-route plan" || rc=$?
+  [ "$rc" = 0 ] || echo "comms.sh: review-route plan: not every leg would run exactly as bound (above); dispatch would refuse it too" >&2
+  return "$rc"
+}
+
+# review_route_capability [--json] — the negotiation line Basis reads before it binds legs, then one line
+# per registered agent stating whether it is bindable. A statement of fact, not a roadmap: an agent with no
+# applied and attested policy (claude, grok), a mailbox leg and a consult-only profile are `unbindable` with
+# the reason. Read-only.
+review_route_capability() {
+  local ag prov tr json=""
+  local -a pargs=(capability)
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      *) usage_err "review-route capability: unknown option '$(clip "$1")'" ;;
+    esac
+  done
+  require_known_transport
+  command -v python3 >/dev/null 2>&1 || die "review-route capability: python3 is required"
+  [ -f "$(dirname "$SELF")/leg_binding.py" ] || die "review-route capability: leg_binding.py is not installed next to comms.sh — re-run install.sh"
+  local reg; reg="$(registry_agents)" || exit 2
+  for ag in $reg; do
+    prov="$(registry_provider "$ag")" || die "review-route capability: cannot resolve the provider of '$ag'"
+    tr="$(cmd_transport "$ag" --loop)" || die "review-route capability: no transport for '$ag'"
+    pargs+=(--ctx "$ag:$prov:$tr")
+  done
+  [ -z "$json" ] || pargs+=(--json)
+  leg_binding_py "${pargs[@]}"
 }
 
 # stamp_route_decision <file> <id-or-empty> — the ONLY writer of `route_decision:`. Drops every
@@ -2625,17 +2748,18 @@ $st_p	$ag"
   fi
 
   # ---- dispatch ----
-  local to="" req="" set_id=""
+  local to="" req="" set_id="" bindings=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --to)  need_value "panel dispatch" $# "$1"; shift; to="$1" ;;
       --set) need_value "panel dispatch" $# "$1"; shift; set_id="$1" ;;
+      --bindings) need_value "panel dispatch" $# "$1"; shift; bindings="$1" ;;
       -?*)   usage_err "panel dispatch: unknown option '$(clip "$1")'" ;;
       *)     [ -z "$req" ] || usage_err "panel dispatch: one review-request only"; req="$1" ;;
     esac
     shift
   done
-  [ -n "$to" ] || usage_err "panel dispatch: --to a,b is required"
+  [ -n "$to" ] || [ -n "$bindings" ] || usage_err "panel dispatch: --to a,b is required"
   [ -n "$req" ] || usage_err "panel dispatch: a review-request file is required"
   [ -f "$req" ] || usage_err "panel dispatch: no such file '$(clip "$req")'"
   [ "$(frontmatter_field "$req" type)" = "review-request" ] \
@@ -2654,12 +2778,35 @@ $st_p	$ag"
   # only per leg, after the plan events are written — too late to refuse cleanly).
   [ -n "$author" ] && registry_has "$author" && registry_is_review "$author" \
     && usage_err "panel dispatch: '$author' is a review-only identity — it cannot author a review request"
-  local roster
-  panel_roster_check "$to" "$author" "panel dispatch"
-  roster="$PANEL_ROSTER"
+  local roster LEG_STAMPS=""
+  # EXACT PER-LEG BINDING (opt-in; without --bindings nothing below differs from before). The bindings
+  # file's agents ARE the roster, and every listed leg is judged BEFORE the first durable write: any leg
+  # that cannot run exactly as bound — an optional one included, because which legs exist is the
+  # caller's decision, not this tool's — refuses the whole dispatch, and nothing is snapshotted,
+  # logged, indexed or sent.
+  if [ -n "$bindings" ]; then
+    leg_bind_roster "$bindings" "$to" "$author" "panel dispatch"
+    roster="$PANEL_ROSTER"
+    local stamps_file lrc=0
+    stamps_file="$(mktemp "${TMPDIR:-/tmp}/agent-comms-legs.XXXXXX")" || die "panel dispatch: cannot stage the leg bindings"
+    leg_bind_check "$bindings" "panel dispatch" "$stamps_file" >/dev/null || lrc=$?
+    if [ "$lrc" != 0 ]; then
+      rm -f "$stamps_file" 2>/dev/null || true
+      echo "comms.sh: panel dispatch: refused — a listed leg cannot run exactly as bound (each refusal above); nothing was written and no leg was started" >&2
+      [ "$lrc" = 2 ] && exit 2
+      exit 1
+    fi
+    LEG_STAMPS="$(cat "$stamps_file")"; rm -f "$stamps_file" 2>/dev/null || true
+    [ -n "$LEG_STAMPS" ] || die "panel dispatch: the leg bindings produced no stamps — refusing"
+  else
+    panel_roster_check "$to" "$author" "panel dispatch"
+    roster="$PANEL_ROSTER"
+  fi
   # The request must name the tree this dispatch runs in — checked before the snapshot, so a
   # refusal pins nothing and writes no leg, event or index row.
-  request_tree_check "$req" "panel dispatch" panel dispatch --to "$to" \
+  local -a rerun_legs=(--to "$to")
+  [ -z "$bindings" ] || rerun_legs=(--bindings "$(abs_file "$bindings")")
+  request_tree_check "$req" "panel dispatch" panel dispatch "${rerun_legs[@]}" \
     ${set_id:+--set "$set_id"} "$(abs_file "$req")" || exit 2
 
   local aid pver dispatch_pair dispatch_base synthetic_note=""
@@ -2671,9 +2818,12 @@ $st_p	$ag"
   # decider measures THIS artifact) and before any durable write (so a routing failure refuses
   # the whole panel rather than half of it). Every leg carries the same id and each leg's send
   # validates it without re-deciding; resolution per PROVIDER happens in runphase.
+  # A bound dispatch makes NO routing decision: the caller named the pair, so there is no tier to classify.
   local panel_route_id=""
-  panel_route_id="$(route_decision_for "$req" "$base_thread" "$phase" "$aid" "$dispatch_base")" \
-    || die "panel dispatch: reviewer routing failed — refusing to fan out"
+  if [ -z "$bindings" ]; then
+    panel_route_id="$(route_decision_for "$req" "$base_thread" "$phase" "$aid" "$dispatch_base")" \
+      || die "panel dispatch: reviewer routing failed — refusing to fan out"
+  fi
   # A SYNTHETIC snapshot means the tree was DIRTY at dispatch: the artifact reviewers read is
   # not any commit you made, and every uncommitted file — including work belonging to another
   # session in a shared checkout — is inside it. This needs no knowledge of WHOSE files they
@@ -2746,13 +2896,16 @@ $st_p	$ag"
     # shellcheck disable=SC2086
     record_panel_route "$dispatch_id" "$panel_route_id" "$base_thread" $roster
   fi
-  local plan_ag
+  local plan_ag plan_bound
   for plan_ag in $roster; do
+    # A bound leg's opaque resolution reference, role and requirement are echoed verbatim, never interpreted.
+    plan_bound=""
+    [ -z "$LEG_STAMPS" ] || plan_bound="$(printf '%s\n' "$LEG_STAMPS" | awk -F'\t' -v a="$plan_ag" '$1 == a { printf " bound=1 ref=%s role=%s requirement=%s route_id=%s", $4, $5, $6, $7; exit }')"
     cmd_events append --kind panel-planned --set "$set_id" --dispatch "$dispatch_id" \
       --thread "${base_thread:-panel}" \
       --round "$round" --agent "$plan_ag" --artifact "$aid" \
       --request-id "$(frontmatter_field "$req" message_id)" --status planned \
-      --note "roster=$(printf '%s' "$roster" | tr ' ' ',') legs=$(printf '%s' "$roster" | wc -w | tr -d ' ') phase=${phase:-} gating=$gating" \
+      --note "roster=$(printf '%s' "$roster" | tr ' ' ',') legs=$(printf '%s' "$roster" | wc -w | tr -d ' ') phase=${phase:-} gating=$gating$plan_bound" \
       || die "panel dispatch: could not record the roster in the coordinator log — refusing to fan out a panel whose legs nothing can enumerate"
   done
   echo "panel: dispatching artifact ${aid} to [$roster] as review set $set_id (gating: $gating)"
@@ -2812,7 +2965,17 @@ $st_p	$ag"
       "${dispatch_base:-$(frontmatter_field "$req" head_sha)}" "$gating" "$ag" "dispatched" "" \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$dispatch_id" >> "$idx"
     echo "  leg: $ag  thread=$leg_thread"
-    cmd_send --to "$ag" "$leg_file" || echo "  warning: leg for '$ag' did not deliver — the set is incomplete"
+    local -a bound_send=()
+    if [ -n "$LEG_STAMPS" ]; then
+      # The binding rides with the leg, helper-stamped by `send --bound-leg`, so the runner can judge it
+      # again from the stamp alone before it launches anything.
+      local bound_row
+      bound_row="$(printf '%s\n' "$LEG_STAMPS" | awk -F'\t' -v a="$ag" '$1 == a { print; exit }')"
+      [ -n "$bound_row" ] || die "panel dispatch: no binding stamp for '$ag' — refusing to send an unbound leg of a bound panel"
+      bound_send=(--bound-leg "$(printf '%s' "$bound_row" | cut -f2)" --bound-digest "$(printf '%s' "$bound_row" | cut -f3)")
+      echo "  bound: ref=$(printf '%s' "$bound_row" | cut -f4) route_id=$(printf '%s' "$bound_row" | cut -f7) model=$(printf '%s' "$bound_row" | cut -f8) effort=$(printf '%s' "$bound_row" | cut -f9)"
+    fi
+    cmd_send --to "$ag" ${bound_send[@]+"${bound_send[@]}"} "$leg_file" || echo "  warning: leg for '$ag' did not deliver — the set is incomplete"
     n=$((n + 1))
   done
   echo "panel: $set_id dispatched to $n reviewer(s)$synthetic_note; compose with 'comms.sh panel status --set $set_id'"
@@ -7214,10 +7377,14 @@ cmd_send() {
   # written its attempt marker, roster events, leg files and index rows before delivery failed —
   # and its `cmd_send … || echo` swallowed the failure into "incomplete legs". (codex, r3, blocking.)
   require_known_transport
-  local to="" file="" archive_inbound="" as="" wait_arg=""
+  local to="" file="" archive_inbound="" as="" wait_arg="" bound_leg="" bound_digest=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --to) need_value "send" $# "$1"; shift; to="$1" ;;
+      # INTERNAL: only `panel dispatch --bindings` passes these. The stamp is verified (digest, canonical
+      # form, the leg's own agent) before it is written; a hand-typed leg_binding* key is stripped below.
+      --bound-leg) need_value "send" $# "$1"; shift; bound_leg="$1" ;;
+      --bound-digest) need_value "send" $# "$1"; shift; bound_digest="$1" ;;
       --wait) COMMS_WAIT=1; export COMMS_WAIT; wait_arg="--wait" ;;
       --archive-inbound) need_value "send" $# "$1"; shift; archive_inbound="$1" ;;
       *) file="$1" ;;
@@ -7503,6 +7670,19 @@ cmd_send() {
   route_lines="$(fm_field_lines "$file" route_decision | wc -l | tr -d ' ')"
   if [ -n "$route_id" ] || [ "${route_lines:-0}" != 0 ]; then
     stamp_route_decision "$file" "$route_id" || die "send: could not stamp the routing decision"
+  fi
+
+  # THE LEG BINDING — helper-stamped by `panel dispatch --bindings`, never typed. Any other send, and
+  # any hand-typed value, has the keys REMOVED; a stamp from the panel is verified before it is written.
+  if [ -n "$bound_leg" ]; then
+    [ "$send_type" = "review-request" ] || die "send: a leg binding rides only on a review-request"
+    [ "$(leg_binding_py stamp-field --stamp "$bound_leg" --digest "$bound_digest" --key agent 2>/dev/null)" = "$to" ] \
+      || die "send: the leg binding does not verify for '$to' — refusing to dispatch a leg whose binding cannot be trusted"
+    stamp_fm_key "$file" leg_binding "$bound_leg" && stamp_fm_key "$file" leg_binding_digest "$bound_digest" \
+      || die "send: could not stamp the leg binding"
+  elif [ -n "$(fm_field_lines "$file" leg_binding)$(fm_field_lines "$file" leg_binding_digest)" ] \
+       || grep -qE '^leg_binding(_digest)?:' "$file" 2>/dev/null; then
+    stamp_fm_key "$file" leg_binding "" && stamp_fm_key "$file" leg_binding_digest "" || die "send: could not strip a hand-typed leg binding"
   fi
 
   # PROVIDER PROVENANCE — helper-stamped, never typed. A request to a review identity carries

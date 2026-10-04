@@ -110,7 +110,7 @@ def launcher_revision():
     # a new session and state directory, even when the user profile is unchanged.
     root = Path(__file__).resolve().parent
     hasher = hashlib.sha256()
-    for name in ("agent_profiles.py", "opencode_adapter.py", "profile_io.py", "acp.sh", "runphase.sh"):
+    for name in ("agent_profiles.py", "opencode_adapter.py", "profile_io.py", "access_profiles.py", "credential-env.tsv", "acp.sh", "runphase.sh"):
         hasher.update(name.encode() + b"\0" + (root / name).read_bytes())
     return hasher.hexdigest()
 
@@ -170,6 +170,15 @@ def credentials(profile, environment):
     return result
 
 
+def bound_env(profile, bound):
+    """The environment a custom harness runs with. A BOUND leg gets the credential scrub: every provider
+    credential is removed from what it inherits and only its own profile's credentials are present."""
+    if not bound:
+        return credentials(profile, os.environ)
+    from access_profiles import bound_environment
+    return bound_environment(dict(os.environ), profile)
+
+
 BINDING_FIELDS = ("agent_profile", "agent_profile_digest", "review_family", "review_model")
 
 
@@ -209,8 +218,9 @@ def message_binding(path, request=None):
     return binding
 
 
-def acpx_arguments(binding, state_home, argv):
-    """Translate the existing named-profile call shape to acpx's raw-agent shape."""
+def acpx_arguments(binding, state_home, argv, bound=False):
+    """Translate the existing named-profile call shape to acpx's raw-agent shape. A BOUND leg's server
+    command carries `--bound`, so the harness builds its environment through the credential scrub."""
     marker = "agent-comms-custom"
     if marker not in argv:
         raise ProfileError("custom ACP invocation has no profile marker")
@@ -226,7 +236,8 @@ def acpx_arguments(binding, state_home, argv):
         after = [after[0], *session_args, *after[1:]]
     else:
         after = ["prompt", *session_args, *after]
-    command = shlex.join([sys.executable, str(Path(__file__).resolve()), "serve", encode(binding), state_home])
+    command = shlex.join([sys.executable, str(Path(__file__).resolve()), "serve", encode(binding), state_home,
+                          *(["--bound"] if bound else [])])
     # A raw --agent wins over project/global agent mappings. Never inherit client MCP servers.
     home = Path(state_home)
     from profile_io import private_directory, place
@@ -305,24 +316,30 @@ def main():
                              "adapter": binding["profile"]["adapter"],
                              "observed": json.loads(evidence.read_text()) if evidence.exists() and evidence.stat().st_size else None}))
     elif operation == "attest":
+        bound = bool(args) and args[0] == "--bound"
+        if bound:
+            args = args[1:]
         binding = decode(args[0])
         if binding["profile"]["adapter"] != "opencode":
             raise ProfileError("no runtime model attestation for this adapter")
         from opencode_adapter import attest
-        print(canonical(attest(binding["profile"], args[1], credentials(binding["profile"], os.environ),
+        print(canonical(attest(binding["profile"], args[1], bound_env(binding["profile"], bound),
                                json.load(sys.stdin), args[2], args[3])))
     elif operation == "acpx":
+        bound = bool(args) and args[0] == "--bound"
+        if bound:
+            args = args[1:]
         encoded, state_home, *argv = args
         split = argv.index("--")
         launcher, arguments = argv[:split], argv[split + 1:]
-        command = [*launcher, *acpx_arguments(decode(encoded), state_home, arguments)]
+        command = [*launcher, *acpx_arguments(decode(encoded), state_home, arguments, bound=bound)]
         os.execvpe(command[0], command, {**os.environ, "PWD": os.getcwd()})
     elif operation == "serve":
         binding = decode(args[0])
         profile = binding["profile"]
         if binding["launcher_revision"] != launcher_revision():
             raise ProfileError("launcher changed since dispatch; send a new request")
-        env = credentials(profile, os.environ)
+        env = bound_env(profile, "--bound" in args[2:])
         env["PWD"] = os.getcwd()
         if profile["adapter"] == "opencode":
             from opencode_adapter import launch

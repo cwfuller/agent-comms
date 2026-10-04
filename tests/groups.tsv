@@ -23,3 +23,5 @@ usage	parallel
 profiles	parallel
 gemini	parallel
 box	parallel
+binding	parallel
+bindrun	parallel

@@ -259,6 +259,18 @@ fi
 if [ -n "${AX_ENV_LOG:-}" ]; then
   printf 'CODEX_PATH=%s\n' "${CODEX_PATH-<unset>}" >> "$AX_ENV_LOG" 2>/dev/null || true
 fi
+# AX_ENVDUMP_LOG / AX_ENVDUMP_VARS record, for each NAMED variable, whether the CHILD inherited it and its
+# value (`<unset>` is an explicit observation). The credential-scrub tests plant canary values and read
+# exactly which of them reach a provider process.
+# Each line is prefixed with the acpx profile the call was for (codex, gemini, ...), so a two-leg dispatch's
+# environments can be told apart.
+if [ -n "${AX_ENVDUMP_LOG:-}" ]; then
+  ax_prof=unknown
+  for ax_a in "$@"; do case "$ax_a" in codex|gemini|claude|grok-build|agent-comms-custom) ax_prof="$ax_a"; break ;; esac; done
+  for ax_v in ${AX_ENVDUMP_VARS:-}; do
+    printf '%s:%s=%s\n' "$ax_prof" "$ax_v" "$(printenv "$ax_v" 2>/dev/null || printf '<unset>')" >> "$AX_ENVDUMP_LOG" 2>/dev/null || true
+  done
+fi
 # AX_IDENT_LOG records the IDENTITY environment the CHILD inherited: the reviewer boundary must
 # scrub the driver's session identity and carry the review-turn marker. `<unset>` is recorded
 # explicitly, so an absent variable is an observation rather than a missing line.

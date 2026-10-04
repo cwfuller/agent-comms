@@ -21,6 +21,7 @@ Levers (environment):
   GM_NO_MODEL       write the answered message with no model field
   GM_UNRECORDED     a non-canary prompt streams its answer but writes NO chat record (the CLI's
                     NO_FINISH_REASON path); the canary is still recorded
+  GM_ENV_VARS       space-separated variable names whose inherited value is logged as `envvar_<NAME>`
   GM_SYNTHETIC      a non-canary prompt also writes a synthetic `gemini` message (no model, no tokens,
                     content a list of thought parts), as the CLI does after a binary tool result
 """
@@ -60,6 +61,10 @@ log("env_GEMINI_CLI", os.environ.get("GEMINI_CLI", "<unset>"))
 log("env_GEMINI_CLI_SYSTEM_SETTINGS_PATH", os.environ.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH", "<unset>"))
 log("env_GEMINI_API_KEY", "set" if os.environ.get("GEMINI_API_KEY") else "<unset>")
 log("env_COMMS_SELF", os.environ.get("COMMS_SELF", "<unset>"))
+# GM_ENV_VARS names further variables whose value the CLI inherited (credential-scrub canaries): `<unset>`
+# is recorded explicitly, so an absent variable is an observation.
+for _name in os.environ.get("GM_ENV_VARS", "").split():
+    log("envvar_" + _name, os.environ.get(_name, "<unset>"))
 
 
 def settings():

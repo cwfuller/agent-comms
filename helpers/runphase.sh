@@ -360,6 +360,110 @@ leg_usage_collect() {  # <run-dir> — once per turn; a second call is a no-op
   return 0
 }
 
+# ---------- an EXACT PER-LEG BINDING (panel dispatch --bindings; see leg_binding.py) ----------
+#
+# A leg whose request carries a helper-stamped `leg_binding` runs exactly the model, native effort and
+# access profile its caller bound, or refuses before anything is launched. The stamp is judged AGAIN here,
+# from the stamp alone, against the configuration as it is now: a changed access file, profile, credential
+# reference or map makes the leg refuse itself (reason binding-mismatch) rather than run something else.
+# result.json then states what was bound, what was observed and what auth evidence there is.
+RUN_BIND_STAMP=""; RUN_BIND_DIGEST=""; RUN_BIND_MISMATCHES=""; RUN_BIND_STATE=refused
+RUN_BIND_OBS_MODEL=""; RUN_BIND_OBS_EFFORT=""; RUN_BIND_AUTH=configured; RUN_BIND_ADAPTER=""; RUN_BIND_BILLING=""
+# The bound leg's child environment, computed ONCE by bound_leg_env_prepare and applied by acp_exec at every
+# acpx call: the names to strip, and the single credential (if any) restored under the name its adapter reads.
+BOUND_ENV_ARGS=(); BOUND_CRED_NAME=""; BOUND_CRED_VALUE=""
+
+leg_binding_json() {  # <run-dir> -> one-line JSON object, or null
+  [ -n "$RUN_BIND_STAMP" ] || { printf null; return 0; }
+  local v
+  v="$(python3 "$HELPER_DIR/leg_binding.py" result --stamp "$RUN_BIND_STAMP" --status "$RUN_BIND_STATE" \
+         --observed-model "$RUN_BIND_OBS_MODEL" --observed-effort "$RUN_BIND_OBS_EFFORT" \
+         --evidence-file "$1/profile-evidence.json" --auth-evidence "$RUN_BIND_AUTH" \
+         --mismatches "$RUN_BIND_MISMATCHES" 2>/dev/null)" || v=""
+  leg_usage_json "${v:-null}"
+}
+
+leg_quota_json() {  # <reason> -> one-line JSON object, or null (an unbound leg has none)
+  [ -n "$RUN_BIND_STAMP" ] || { printf null; return 0; }
+  local v hosting
+  hosting="$(python3 "$HELPER_DIR/leg_binding.py" stamp-field --stamp "$RUN_BIND_STAMP" --key access.provider 2>/dev/null)" || hosting=""
+  v="$(python3 "$HELPER_DIR/leg_binding.py" quota --provider "$RUN_PROVIDER" --hosting "$hosting" \
+         --rate-json "$(leg_usage_json "$LEG_RATE_JSON")" --reason "$1" 2>/dev/null)" || v=""
+  leg_usage_json "${v:-null}"
+}
+
+# bound_leg_recheck — the run-time half of the all-or-nothing rule. Reads dynamic scope from cmd_run
+# (agent, provider, via, msg, run_dir, msg_thread, sfield). Returns 0 to go on, or writes the refused
+# result and returns 1; the caller unwinds. Nothing has been mounted, launched or prompted yet.
+bound_leg_recheck() {
+  local out="" rc=0 codes="" note=""
+  RUN_BIND_STAMP="$(frontmatter_field "$msg" leg_binding || true)"
+  [ -n "$RUN_BIND_STAMP" ] || return 0
+  RUN_BIND_DIGEST="$(frontmatter_field "$msg" leg_binding_digest || true)"
+  if [ "$via" != acp ]; then
+    codes=binding-mismatch; note="a bound leg runs over ACP only (this turn was started with --via ${via:-direct}); nothing was launched"
+  else
+    out="$(python3 "$HELPER_DIR/leg_binding.py" recheck --stamp "$RUN_BIND_STAMP" --digest "$RUN_BIND_DIGEST" \
+             --agent "$agent" --provider "$provider" --transport acp 2>>"$run_dir/runner.log")" || rc=$?
+    [ "$rc" != 0 ] || return 0
+    codes="$(printf '%s\n' "$out" | awk -F'\t' '$1=="mismatch"{printf "%s%s", (n++ ? "," : ""), $2}')"
+    [ -n "$codes" ] || codes=binding-mismatch
+    note="the bound configuration no longer holds ($codes: $(printf '%s' "$out" | awk -F'\t' '$1=="mismatch"{printf "%s%s", (n++ ? "; " : ""), $3}' | cut -c1-500)); nothing was launched"
+  fi
+  RUN_BIND_MISMATCHES="$codes"
+  update_thread_state "$msg_thread" failed "" "$sfield" || true
+  write_result "$run_dir" failed 1 "" "$msg" "$note" binding-mismatch
+  return 1
+}
+
+# bound_leg_env_prepare — THE bound-leg environment, from one reader (access_profiles.py env-plan) over the
+# files dispatch validated: every configured credential name (access.json for every agent, every agents.json
+# credentials mapping), the name patterns, and credential-env.tsv are stripped; then only this leg's own
+# credential is restored, after the scrub, under the name its adapter reads. A subscription, local or free
+# leg gets none. Sets RUN_BIND_ADAPTER/BILLING. Returns 1 when it cannot be computed.
+bound_leg_env_prepare() {
+  local cls plan kind val
+  BOUND_ENV_ARGS=(); BOUND_CRED_NAME=""; BOUND_CRED_VALUE=""
+  cls="$(python3 "$HELPER_DIR/leg_binding.py" env-class --stamp "$RUN_BIND_STAMP" --digest "$RUN_BIND_DIGEST" --provider "$provider" 2>>"$RUN_DIR/runner.log")" || return 1
+  RUN_BIND_ADAPTER="${cls%%$'\t'*}"; RUN_BIND_BILLING="${cls#*$'\t'}"
+  plan="$(python3 "$HELPER_DIR/access_profiles.py" env-plan "$provider" "$RUN_BIND_ADAPTER" "$RUN_BIND_BILLING" 2>>"$RUN_DIR/runner.log")" || return 1
+  while IFS=$'\t' read -r kind val; do
+    case "$kind" in
+      unset)      BOUND_ENV_ARGS+=(-u "$val") ;;
+      credential) BOUND_CRED_NAME="$val" ;;
+    esac
+  done <<<"$plan"
+  if [ -n "$BOUND_CRED_NAME" ]; then
+    BOUND_CRED_VALUE="$(python3 "$HELPER_DIR/access_profiles.py" credential-value "$agent" 2>>"$RUN_DIR/runner.log")" || return 1
+  fi
+  return 0
+}
+
+# bound_leg_refuse <note> — a bound leg's launch-time refusal: nothing was launched. Same unwinding as the
+# other pre-launch refusals in cmd_run.
+bound_leg_refuse() {
+  RUN_BIND_MISMATCHES="${RUN_BIND_MISMATCHES:-binding-mismatch}"
+  update_thread_state "$msg_thread" failed "" "$sfield" || true
+  write_result "$run_dir" failed 1 "" "$msg" "$1" binding-mismatch
+  unmount_artifact
+  trap - EXIT
+  exit 1
+}
+
+# bound_leg_readback <iso-home> — READ BACK what the launcher wrote, then compare it with the binding: the
+# selected auth type and the login files in the isolated home, and whether a credential variable is in the
+# computed environment. Only a successful read-back lets result.json say `observed`.
+bound_leg_readback() {
+  local out rc=0
+  out="$(python3 "$HELPER_DIR/leg_binding.py" auth-readback --adapter "$RUN_BIND_ADAPTER" --billing "$RUN_BIND_BILLING" \
+           --home "${1:-}" --credential-set "$([ -n "$BOUND_CRED_NAME" ] && echo 1 || echo 0)" 2>>"$RUN_DIR/runner.log")" || rc=$?
+  if [ "$rc" != 0 ]; then
+    RUN_BIND_MISMATCHES=binding-mismatch
+    bound_leg_refuse "the launcher's authentication route does not read back as bound ($(printf '%s' "$out" | tr '\t\n' '  ' | cut -c1-300)); nothing was launched"
+  fi
+  RUN_BIND_AUTH="$out"
+}
+
 # ---------- the leg's resolved route (acp.sh route-view) ----------
 #
 # The same fields `comms.sh review-route plan` prints for a planned leg, read from THIS turn's
@@ -391,10 +495,11 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
   local dir="$1" status="$2" rc="$3" sid="$4" mf="$5" note="$6" reason="${7:-}"
   [ "$RESULT_WRITTEN" = true ] && return 0
   local RESULT_COMPOSED=1
-  # route / usage / rate_limits are embedded RAW (leg_usage_json admitted only one-line JSON or
-  # null) and come LAST, each on its own line, so json_get's one-key-per-line reads of the string
-  # fields above cannot match a key inside them (no route key shares a top-level name).
-  printf '{\n  "provider": "%s",\n  "agent": "%s",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s",\n  "route": %s,\n  "usage": %s,\n  "rate_limits": %s,\n  "profile": %s\n}\n' \
+  # route / usage / rate_limits / profile / binding / quota are embedded RAW (leg_usage_json admitted
+  # only one-line JSON or null) and come LAST, each on its own line, so json_get's one-key-per-line
+  # reads of the string fields above cannot match a key inside them (no embedded key shares a
+  # top-level name). `binding` and `quota` are null for a leg that was not bound.
+  printf '{\n  "provider": "%s",\n  "agent": "%s",\n  "status": "%s",\n  "reason": "%s",\n  "exit_code": "%s",\n  "session_id": "%s",\n  "message_file": "%s",\n  "run_dir": "%s",\n  "started_at": "%s",\n  "ended_at": "%s",\n  "note": "%s",\n  "route": %s,\n  "usage": %s,\n  "rate_limits": %s,\n  "profile": %s,\n  "binding": %s,\n  "quota": %s\n}\n' \
     "$(json_escape "$RUN_PROVIDER")" "$(json_escape "${RUN_AGENT:-$RUN_PROVIDER}")" \
     "$(json_escape "$status")" "$(json_escape "$reason")" "$(json_escape "$rc")" "$(json_escape "$sid")" \
     "$(json_escape "$mf")" "$(json_escape "$dir")" \
@@ -402,6 +507,7 @@ write_result() {  # write_result <run-dir> <status> <exit-code> <session-id> <me
     "$(json_escape "$note")" "$(leg_route_json "$dir")" \
     "$(leg_usage_json "$LEG_USAGE_JSON")" "$(leg_usage_json "$LEG_RATE_JSON")" \
     "$(if [ -n "$RUN_PROFILE_BINDING" ]; then python3 "$HELPER_DIR/agent_profiles.py" result "$dir" || printf null; else printf null; fi)" \
+    "$(leg_binding_json "$dir")" "$(leg_quota_json "$reason")" \
     > "$dir/result.json.tmp" || RESULT_COMPOSED=0
   # THE TERMINAL EVENT IS DURABLE FIRST. result.json is the signal `await` unblocks on, so
   # a runner that died between publishing it and appending this row left await with a
@@ -2661,10 +2767,15 @@ TURN_CHILD_SCRUB=(-u COMMS_SELF -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANC
 
 acp_exec() {  # <cwd> [acpx args...]
   local _cwd="$1"; shift
-  ( cd "$_cwd" && PATH="${acp_shim:+$acp_shim:}${acp_boxpath:+$acp_boxpath:}$PATH" \
+  # A BOUND leg's credential scrub (BOUND_ENV_ARGS) rides in the same env argv; its one credential is
+  # exported inside this subshell, so a secret is in this process's environment and never in any argv.
+  ( cd "$_cwd" || exit 1
+    [ -z "$BOUND_CRED_NAME" ] || export "$BOUND_CRED_NAME=$BOUND_CRED_VALUE"
+    PATH="${acp_shim:+$acp_shim:}${acp_boxpath:+$acp_boxpath:}$PATH" \
       env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
           -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
           "${TURN_CHILD_SCRUB[@]}" \
+          ${BOUND_ENV_ARGS[@]+"${BOUND_ENV_ARGS[@]}"} \
       ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" "$@" )
 }
 
@@ -2786,6 +2897,10 @@ cmd_run() {
   trap 'kill_codex; unmount_artifact 2>/dev/null || true; update_thread_state "$msg_thread" failed "" "$sfield" || true; write_result "$run_dir" failed "?" "" "$msg" "$ABORT_NOTE"' EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
+
+  # THE LEG BINDING, judged again BEFORE anything is mounted, launched or prompted: dispatch validated
+  # every leg, but legs run detached and later, and the configuration can change in between.
+  bound_leg_recheck || { trap - EXIT; exit 1; }
 
   case "$provider" in claude|codex|grok|gemini) ;;
     *)
@@ -3349,7 +3464,8 @@ cmd_run() {
     # reviewer on the same routed request), so it verifies on the thread alone, as before.
     [ -z "$acp_leg_dispatch" ] || [ "${RUNPHASE_NO_DELIVER:-}" = 1 ] || acp_leg_agent="$agent"
     [[ "$acp_phase" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || acp_phase=-
-    "$COMMS" review-route enabled 2>/dev/null && acp_routing=on
+    # A BOUND leg is never routed: the caller named its pair, so there is no tier and no decision.
+    [ -n "$RUN_BIND_STAMP" ] || { "$COMMS" review-route enabled 2>/dev/null && acp_routing=on; }
     # The stamped id is read ONLY when routing is on — with routing off a leftover id is ignored
     # (fallback routing-disabled), never a reason to refuse a baseline turn — and it must be the
     # decision CURRENTLY in force for its own thread and phase (`review-route verify`, keyed on
@@ -3380,7 +3496,28 @@ cmd_run() {
         fi
       fi
     fi
-    if [ -z "$acp_route_err" ]; then
+    if [ -n "$RUN_BIND_STAMP" ]; then
+      # The caller's EXACT pair, from the stamp: no candidate, no baseline, no pin. A bound leg runs mounted
+      # or not at all, and a failed resolution refuses the turn before any provider is launched.
+      local bound_custom=()
+      [ "$provider" = codex ] || [ "$provider" = gemini ] || bound_custom=(--custom-profile)
+      if [ "$acp_transport" != acp-mounted ]; then
+        bound_leg_refuse "a bound leg runs mounted only (the reviewed artifact could not be mounted); nothing was launched"
+      fi
+      "$acp_sh" resolve "$provider" --transport acp-mounted --phase "$acp_phase" ${bound_custom[@]+"${bound_custom[@]}"} \
+          --bound-model "$(python3 "$HELPER_DIR/leg_binding.py" stamp-field --stamp "$RUN_BIND_STAMP" --digest "$RUN_BIND_DIGEST" --key model)" \
+          --bound-effort "$(python3 "$HELPER_DIR/leg_binding.py" stamp-field --stamp "$RUN_BIND_STAMP" --digest "$RUN_BIND_DIGEST" --key effort | sed 's/^$/-/')" \
+          --route-id "$(python3 "$HELPER_DIR/leg_binding.py" stamp-field --stamp "$RUN_BIND_STAMP" --digest "$RUN_BIND_DIGEST" --key route_id)" \
+          --access-digest "$(python3 "$HELPER_DIR/leg_binding.py" stamp-field --stamp "$RUN_BIND_STAMP" --digest "$RUN_BIND_DIGEST" --key access_digest)" \
+          > "$acp_policy" 2>>"$run_dir/runner.log" \
+        || acp_route_err="the bound reviewer policy could not be resolved (see runner.log)"
+      if [ -n "$acp_route_err" ]; then
+        rm -f "$acp_policy" 2>/dev/null || true
+        bound_leg_refuse "$acp_route_err; nothing was launched"
+      fi
+      bound_leg_env_prepare \
+        || bound_leg_refuse "the bound leg's environment could not be computed (see runner.log); nothing was launched"
+    elif [ -z "$acp_route_err" ]; then
       "$acp_sh" resolve "$provider" --transport "$acp_transport" --tier "$acp_route_tier" \
           --effort "$acp_route_effort" --decision "${acp_route_id:-none}" --routing "$acp_routing" \
           --phase "$acp_phase" --candidate-source "$acp_route_src" \
@@ -3450,7 +3587,7 @@ cmd_run() {
     acp_launch=($("$acp_sh" launcher "$provider" 2>/dev/null))
     [ "${#acp_launch[@]}" -gt 0 ] || acp_launch=(npx -y "acpx@$("$acp_sh" version "$provider")")
     if [ -n "$RUN_PROFILE_BINDING" ]; then
-      acp_launch=(python3 "$HELPER_DIR/agent_profiles.py" acpx "$RUN_PROFILE_BINDING" "$custom_home" "${acp_launch[@]}" --)
+      acp_launch=(python3 "$HELPER_DIR/agent_profiles.py" acpx ${RUN_BIND_STAMP:+--bound} "$RUN_PROFILE_BINDING" "$custom_home" "${acp_launch[@]}" --)
     fi
     { printf 'policy_digest\t%s\n' "${acp_policy_digest:-none}"
       printf 'acp_session\t%s\n' "$acp_session"
@@ -3698,7 +3835,9 @@ cmd_run() {
           # present, cleared when not — so a rotated or removed login (and a token the CLI migrated into
           # this reused home) cannot outlive its source.
           for acp_gm_f in oauth_creds.json google_accounts.json gemini-credentials.json; do
-            if [ -f "$acp_gm_src/$acp_gm_f" ] && [ ! -L "$acp_gm_src/$acp_gm_f" ]; then
+            # An API-billed BOUND leg stages no login at all: the only authentication it may have is its one
+            # bound key, so a saved login (and any stale copy from an earlier round) must not be there.
+            if [ "$RUN_BIND_BILLING" != api ] && [ -f "$acp_gm_src/$acp_gm_f" ] && [ ! -L "$acp_gm_src/$acp_gm_f" ]; then
               ABORT_NOTE="refused: could not stage isolated $acp_gm_f for '$provider'"
               _iso_place "$acp_gm_src/$acp_gm_f" "$acp_gm_dir/$acp_gm_f" 600 \
                 || die "run: cannot stage the isolated $acp_gm_f"
@@ -3723,6 +3862,14 @@ cmd_run() {
           # settings crosses (an extension, hook or MCP server there is exactly what isolation excludes).
           local acp_gm_auth="" acp_iso_cfg=""
           acp_gm_auth="$("$acp_sh" gemini-auth "$acp_gm_src/settings.json" 2>/dev/null || true)"
+          if [ -n "$RUN_BIND_STAMP" ]; then
+            # A BOUND leg's selected auth type is the binding's, never the operator's: forced to the type the
+            # table names for this billing class (credential-env.tsv), and read back before launch.
+            acp_gm_auth="$(python3 "$HELPER_DIR/access_profiles.py" auth-row gemini "$RUN_BIND_BILLING" | cut -f4)"
+            acp_gm_auth="${acp_gm_auth#selectedType=}"
+            [[ "$acp_gm_auth" =~ ^[a-z][a-z0-9-]*$ ]] \
+              || { ABORT_NOTE="refused: no explicit gemini auth selection for billing '$RUN_BIND_BILLING'"; die "run: no explicit gemini auth selection for billing '$RUN_BIND_BILLING'"; }
+          fi
           acp_iso_cfg="$("$acp_sh" provider-config gemini --policy-file "$acp_policy" ${acp_gm_auth:+--auth-type "$acp_gm_auth"})" \
             || die "run: the gemini reviewer policy is invalid — refusing to write an isolated config"
           [ -n "$acp_iso_cfg" ] || die "run: acp.sh returned an empty isolated gemini config"
@@ -3846,6 +3993,9 @@ cmd_run() {
           ;;
       esac
       printf 'isolation: provider=%s backend=%s\n' "$provider" "$acp_iso_backend" >>"$run_dir/runner.log"
+      # A BOUND leg: read back what the launcher wrote before ANY acpx call, and refuse if it is not the route
+      # that was bound. Only a successful read-back lets result.json say `observed`.
+      if [ -n "$RUN_BIND_STAMP" ]; then bound_leg_readback "$acp_iso_home"; fi
     fi
     local acp_ensure_out="" acp_record_id=""
     acp_ensure_out="$( acp_exec "$workdir" --format text "$acp_profile" \
@@ -4063,6 +4213,8 @@ cmd_run() {
     # same session, so it is part of what this leg cost. (The attestation's rollout snapshot below
     # deliberately EXCLUDES it — a different question.) Nothing before this point bills.
     leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$mount_dir" "${acp_iso_home:-$acp_grok_home}")" "$(cd "$workdir" && pwd -P)" "$run_dir"
+    # THE FIRST PROMPT goes out below (the canary): from here a bound leg has RUN, whatever its outcome.
+    [ -z "$RUN_BIND_STAMP" ] || RUN_BIND_STATE=ran
     ACP_CANARY_OPTS=( "${acp_prompt_opts[@]}" )
     ACP_CANARY_PROVIDER="$provider"
     if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
@@ -4105,7 +4257,7 @@ cmd_run() {
     # a completed review look truncated. (codex, plan r3 advisory.)
     if [ "$custom_adapter" = opencode ]; then
       if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
-          | python3 "$HELPER_DIR/agent_profiles.py" attest "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" before \
+          | python3 "$HELPER_DIR/agent_profiles.py" attest ${RUN_BIND_STAMP:+--bound} "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" before \
             > "$run_dir/profile-evidence-before.json"; then
         acp_refuse policy-unapplied "could not snapshot custom runtime model evidence"
         return 1
@@ -4155,7 +4307,7 @@ cmd_run() {
       fi
       if [ "$custom_adapter" = opencode ]; then
         if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
-            | python3 "$HELPER_DIR/agent_profiles.py" attest "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" after \
+            | python3 "$HELPER_DIR/agent_profiles.py" attest ${RUN_BIND_STAMP:+--bound} "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" after \
               > "$run_dir/profile-evidence.json"; then
           acp_refuse policy-unapplied "custom runtime did not attest this turn's model and reviewer mode"
           return 1
@@ -4248,6 +4400,8 @@ cmd_run() {
           att_msg="$("$acp_sh" policy-attest "$provider" "$att_eff" "$att_mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || att_rc=$?
         fi
       fi
+      # What the provider's own record says ran, kept apart from the binding: `observed` is never copied from `expected`.
+      if [ -n "$RUN_BIND_STAMP" ]; then RUN_BIND_OBS_MODEL="$att_mod"; RUN_BIND_OBS_EFFORT="$att_eff"; fi
       turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}" "${att_rtc:-}" \
         "$( [ "$provider" = gemini ] && [ -n "$att_src" ] && printf 'gemini-chat-record+settings-readback')"
       if [ "$att_rc" -ne 0 ]; then
