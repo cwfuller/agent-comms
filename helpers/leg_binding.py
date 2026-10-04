@@ -279,6 +279,11 @@ def check_leg(leg, ctx, entries, entries_error, profiles, environ):
                                        ("credential-mismatch", expected["credential"], entry["credential"])):
                 if mine != theirs:
                     refuse(code, f"expected {mine if mine is not None else 'null'}, configured {theirs if theirs is not None else 'null'}")
+        # The configured transport must also be the one the runner would drive: a matching `cli` entry for an
+        # agent this runner reaches over ACP is a label that would be stamped and never true.
+        actual = ctx.get("transport", "")
+        if adapter is not None and actual and entry["transport"] != actual:
+            refuse("transport-mismatch", f"configured transport {entry['transport']}, but the runner drives {actual} for {agent}")
     # the operator's pins and "use max" are conflicts in every case, whatever the adapter
     if adapter is not None:
         record, resolved = resolve_pair(provider, adapter == "opencode", leg, digest, environ)
@@ -286,6 +291,13 @@ def check_leg(leg, ctx, entries, entries_error, profiles, environ):
             refuse(code, detail)
     else:
         record = None
+    if adapter == "opencode" and not found_codes(found, "model-unservable"):
+        # The pinned runtime, verified locally before anything is written: an executable that is absent,
+        # not executable or reports another version would otherwise fail only after sibling legs started.
+        from opencode_adapter import verify_runtime
+        problem = verify_runtime(profiles[provider], preflight_env(environ))
+        if problem:
+            refuse("model-unservable", problem)
     if adapter is not None and entry is not None and not found_codes(found, "billing-mismatch"):
         for code, detail in observe_auth(adapter, entry["billing"], environ):
             refuse(code, detail)
@@ -302,6 +314,11 @@ def check_leg(leg, ctx, entries, entries_error, profiles, environ):
             "codes": [c for c, _ in found], "details": found, "configured": entry, "digest": digest if entry else None,
             "model": leg["model"], "effort": leg["effort"], "record": record, "stamp": stamp,
             "adapter": adapter}
+
+
+def preflight_env(environ):
+    """The environment a local runtime probe gets: no credentials, nothing but what an executable needs to start."""
+    return {k: environ[k] for k in ("PATH", "HOME", "LANG", "TMPDIR") if k in environ}
 
 
 def found_codes(found, code):
@@ -503,10 +520,14 @@ def main():
     elif operation == "env-class":
         # which adapter and billing a stamped leg runs under, for the runner's environment plan
         stamp = stamp_decode(option(args, "--stamp"), option(args, "--digest"))
-        profiles = load_profiles()
+        profiles, entries, entries_error = load_context()
         adapter, why = classify(option(args, "--provider"), "acp", profiles)
         if adapter is None:
             raise ProfileError(why)
+        # The environment is prepared from the STAMPED access snapshot: drift since the re-check is refused here.
+        entry = None if entries_error else access.effective_entry(stamp["agent"], entries)
+        if entry is None or access.digest(entry) != stamp["access_digest"]:
+            raise ProfileError("the access profile changed since dispatch; refusing to prepare the environment")
         print(f"{adapter}\t{stamp['access']['billing']}")
     elif operation == "auth-readback":
         evidence, detail = auth_readback(option(args, "--adapter"), option(args, "--billing"), option(args, "--home", ""),

@@ -29,9 +29,12 @@ CREDENTIAL = re.compile(r"(env:[A-Z][A-Z0-9_]{0,127}|keychain:[A-Za-z0-9][A-Za-z
 # name (CODEX_METERED_KEY, MY_INFERENCE_KEY, API_KEY) survives any pattern list.
 SCRUB_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in
                        (r".*_API_KEY\Z", r".*_TOKEN\Z", r".*_AUTH_TOKEN\Z", r".*_SECRET.*", r".*_ACCESS_KEY.*"))
-# Variables the runner itself must keep, whatever their name looks like.
-KEEP = re.compile(r"(COMMS_|AGENT_COMMS_)")
 CAPABILITY_VERSION = 1
+# The one name a PREPARED credential travels under, from the runner to a custom harness's launcher. It is
+# deliberately not a credential-shaped name (nothing scrubs it, nothing configured can be it) and it is the
+# only way a bound custom launch obtains its credential: the profile's own source and destination variables
+# are scrubbed like every other, so an inherited value can never stand in for the bound reference.
+PREPARED = "AGENT_COMMS_BOUND_CREDENTIAL"
 
 
 def access_path():
@@ -176,7 +179,7 @@ def adapter_of(agent, provider, profiles):
 def configured_names(entries, profiles):
     """Every credential name configuration can mention. Computed from the files dispatch validated, so a
     name that can be configured as a credential cannot be missing from the scrub."""
-    names = set(table()[0])
+    names = set(table()[0]) | {PREPARED}
     for entry in entries.values():
         if entry["credential"] and entry["credential"].startswith("env:"):
             names.add(entry["credential"][4:])
@@ -204,7 +207,7 @@ def scrub_list(environ, entries, profiles, keep=()):
             continue
         if name in names or (prefixes and name.startswith(prefixes)):
             result.append(name)
-        elif not KEEP.match(name) and any(p.fullmatch(name) for p in SCRUB_PATTERNS):
+        elif any(p.fullmatch(name) for p in SCRUB_PATTERNS):
             result.append(name)
     return result
 
@@ -233,33 +236,23 @@ def credential_present(reference, environ):
 
 
 def bound_environment(environ, profile=None, entries=None, profiles=None):
-    """THE one function that computes a bound leg's child environment (bound_leg_env).
+    """THE one function that computes a bound custom leg's child environment (bound_leg_env).
 
-    Scrub first, then restore only the leg's own credential, under the name its adapter consumes.
-    `profile` is a custom profile: its credentials mapping is the leg's own, resolved from the ORIGINAL
-    environment (or already present under its destination name when the environment was scrubbed by the
-    runner before the harness started). A built-in adapter's own credential is restored by the runner from
-    the table, so a profile of None restores nothing here."""
+    Scrub first (every configured and pattern-shaped credential name, the profile's own source and
+    destination variables included), then restore only the leg's own credential. That credential was
+    resolved ONCE by the runner from the bound reference and arrives under PREPARED; an inherited value
+    under the profile's own variable names is never a substitute, so an ambient key cannot override a
+    bound Keychain reference. `profile` is a custom profile; None restores nothing."""
     if entries is None or profiles is None:
         from agent_profiles import load as load_profiles
         profiles = load_profiles()
         entries = load_checked(profiles)
-    own_sources = set()
-    own = {}
-    if profile is not None:
-        for variable, reference in profile.get("credentials", {}).items():
-            if "env" in reference:
-                value = environ.get(reference["env"], "") or environ.get(variable, "")
-                own_sources.add(reference["env"])
-            else:
-                value = environ.get(variable, "") or resolve_reference("keychain:" + reference["keychain_service"], environ)
-            own[variable] = value
-    result = {k: v for k, v in environ.items()
-              if k not in scrub_list(environ, entries, profiles, keep=())}
-    for variable, value in own.items():
-        if not value:
-            raise ProfileError(f"credential unavailable for {variable}; no value was logged")
-        result[variable] = value
+    prepared = environ.get(PREPARED, "")
+    result = {k: v for k, v in environ.items() if k != PREPARED and k not in scrub_list(environ, entries, profiles)}
+    if profile is not None and profile.get("credentials"):
+        if len(profile["credentials"]) != 1 or not prepared:
+            raise ProfileError("the bound credential was not prepared for this launch; no value was logged")
+        result[next(iter(profile["credentials"]))] = prepared
     return result
 
 
@@ -273,15 +266,14 @@ def env_plan(agent, adapter, billing, environ, profile=None, entries=None, profi
     keep = set()
     destination = None
     if profile is not None:
-        # A custom harness resolves its own credentials mapping when it starts (bound_environment), so the
-        # names that mapping reads and writes stay present for it and no other.
-        for variable, reference in profile.get("credentials", {}).items():
-            if "env" in reference:
-                keep.add(reference["env"])
-            keep.add(variable)
+        # A custom harness receives its one credential under PREPARED; every name its mapping reads or
+        # writes is unset like any other credential.
+        if profile.get("credentials"):
+            destination = PREPARED
+            keep.add(PREPARED)
     elif billing == "api":
-        # A built-in adapter's own credential is exported by the runner under the name the adapter reads;
-        # that name is therefore not unset here, and nothing else configured survives.
+        # A built-in adapter's own credential is exported by the runner under the name the adapter reads,
+        # over whatever the environment held; nothing else configured survives.
         destination = auth_row(adapter, billing)["consumed"]
         if destination:
             keep.add(destination)
@@ -335,11 +327,21 @@ def main():
         if plan["destination"]:
             print(f"credential\t{plan['destination']}")
     elif operation == "credential-value":
-        # The leg's own credential, resolved from the reference its access entry carries. Stdout only.
-        entry = effective_entry(args[0], load_checked())
-        if entry is None or entry["credential"] is None:
-            raise ProfileError("no credential reference for this agent")
-        value = resolve_reference(entry["credential"], os.environ)
+        # credential-value <agent> --stamp S --digest D: the credential the STAMP bound, resolved from the
+        # reference the stamped (validated) access snapshot carries — never from whatever the access file
+        # says now. A current entry that no longer matches the stamp's digest is drift: refuse. Stdout only.
+        import leg_binding
+        stamp = leg_binding.stamp_decode(leg_binding.option(args, "--stamp"), leg_binding.option(args, "--digest"))
+        agent = args[0]
+        if stamp["agent"] != agent:
+            raise ProfileError("the leg binding names a different agent")
+        entry = effective_entry(agent, load_checked())
+        if entry is None or digest(entry) != stamp["access_digest"]:
+            raise ProfileError("the access profile changed since dispatch; refusing to prepare a credential")
+        reference = stamp["access"]["credential"]
+        if reference is None:
+            raise ProfileError("the bound leg carries no credential reference")
+        value = resolve_reference(reference, os.environ)
         if not value:
             raise ProfileError("credential unavailable; no value was logged")
         sys.stdout.write(value)

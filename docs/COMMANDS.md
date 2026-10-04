@@ -256,12 +256,19 @@ included) refuses the whole dispatch: the caller re-plans and re-submits.
 differs, or `COMMS_REVIEW_MAX`, in the dispatching environment; an equal pin is accepted). Roster rules are the
 panel's own (registered, no duplicates, author never a leg, one leg per family). One function judges a leg for
 `panel dispatch`, `review-route plan --bindings` and the runner's re-check, so a plan cannot promise what dispatch
-refuses. A refused dispatch snapshots nothing and writes no event, index row, attempts marker or leg file.
+refuses. `transport-mismatch` also covers a configured transport the runner does not drive (a `cli` entry for an agent
+this runner reaches over ACP), and `model-unservable` covers a custom OpenCode runtime whose executable cannot run or
+reports another version than the profile pins (a bounded local `--version` probe with no credentials, before any write).
+A refused dispatch snapshots nothing and writes no event, index row, attempts marker or leg file.
 
 **Run-time re-check.** Each leg carries a helper-stamped `leg_binding` / `leg_binding_digest` (set only by
 `send --bound-leg`; a hand-typed key is stripped). `runphase` judges the stamp again, before it mounts, launches
 or prompts anything: a changed access file, profile, credential reference, login state or map ends the turn
-`status=failed reason=binding-mismatch` with nothing launched. `binding-mismatch` is not a degradable reason, so
+`status=failed reason=binding-mismatch` with nothing launched. The credential is prepared from the STAMPED access
+snapshot (an entry whose digest no longer matches the stamp is refused), never from whatever the file says later. The
+stamp and what the run established (`bind_state`, `bind_auth`, observed pair) are persisted in the turn record, so a
+runner that dies without a result is recovered by `await` with `binding` and `quota` still present and unknown
+observations still unknown. `binding-mismatch` is not a degradable reason, so
 compose never drops the leg silently.
 
 **Bound environment.** The leg's child environment is scrubbed of every configured credential name (all of
@@ -270,7 +277,8 @@ compose never drops the leg silently.
 `api` credential is then restored, under the variable its adapter reads. A `subscription`, `local` or `free` leg
 gets none. The launcher then reads the authentication route back (selected auth type, staged login files,
 credential variable) and refuses on a difference. **Residual**: a credential nobody configured, matching no
-pattern and not in the table, would still pass; a harness's own on-disk login is governed by the auth-route rows,
+pattern and not in the table, would still pass; no name prefix is exempt (`COMMS_*`/`AGENT_COMMS_*` credential-shaped
+names are removed too); a harness's own on-disk login is governed by the auth-route rows,
 not by the scrub. The auth rows declare support per (adapter, billing): gemini subscription and api, codex
 subscription and custom OpenCode profiles are supported; **codex `api` is `unsupported`** (no explicit, readable
 API-key selection is established for the mounted adapter) and refused as `auth-route-unsupported`.

@@ -42,6 +42,20 @@ def check_runtime_profile(profile):
         raise ValueError(f"opencode containment requires runtime_version {VERSION}")
 
 
+def verify_runtime(profile, env):
+    """None when the profile's executable runs and reports the pinned version, else why not. Bounded
+    and local: it starts the executable's `--version` and nothing else."""
+    if profile["runtime_version"] != VERSION:
+        return f"opencode containment requires runtime_version {VERSION}"
+    try:
+        version = subprocess.run([profile["command"][0], "--version"], env=env, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return "the OpenCode executable cannot be run"
+    if version.returncode or version.stdout.strip() != VERSION:
+        return f"OpenCode reviewer requires verified runtime {VERSION}"
+    return None
+
+
 def check_session(state, wanted, options):
     modes = [o for o in options if o.get("id") == "mode"]
     if (state.get("available_models") != [wanted] or len(modes) != 1
@@ -89,9 +103,9 @@ def environment(profile, state_home, inherited):
         raise ValueError("configured inference credential is unavailable")
     config_dir = private_directory(root / "config" / "opencode")
     place(config_dir / "opencode.json", config(profile))
-    version = subprocess.run([profile["command"][0], "--version"], env=env, capture_output=True, text=True, timeout=15)
-    if version.returncode or version.stdout.strip() != VERSION:
-        raise ValueError(f"OpenCode reviewer requires verified runtime {VERSION}")
+    problem = verify_runtime(profile, env)
+    if problem:
+        raise ValueError(problem)
     return env
 
 

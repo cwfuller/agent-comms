@@ -65,14 +65,14 @@ class Scrub(Configured):
            'VENICE_API_KEY': 'v4',                                                       # configured, pattern-shaped
            'ZZ_UNCONFIGURED_API_KEY': 'v5', 'SOME_TOKEN': 'v6', 'MY_SECRET_THING': 'v7', 'X_ACCESS_KEY_ID': 'v8',   # patterns only
            'GOOGLE_APPLICATION_CREDENTIALS': 'v9', 'OPENAI_BASE_URL': 'v10', 'AWS_PROFILE': 'v11',               # the table
-           'COMMS_ROUTE_API_KEY': 'kept'}                                                # the runner's own, whatever its shape
+           'COMMS_ROUTE_API_KEY': 'v12', 'AGENT_COMMS_SERVICE_TOKEN': 'v13'}            # no prefix is exempt: only credential shapes are removed, nothing is kept by name
 
     def test_every_kind_of_credential_name_is_removed_and_the_rest_kept(self):
         profile_set, entries = self.loaded()
         removed = set(access.scrub_list(self.ENV, entries, profile_set))
         self.assertEqual(removed, {'CFG_GEMINI_KEY', 'CFG_VENICE_KEY', 'CFG_OTHER_KEY', 'VENICE_API_KEY', 'ZZ_UNCONFIGURED_API_KEY',
                                    'SOME_TOKEN', 'MY_SECRET_THING', 'X_ACCESS_KEY_ID', 'GOOGLE_APPLICATION_CREDENTIALS',
-                                   'OPENAI_BASE_URL', 'AWS_PROFILE'})
+                                   'OPENAI_BASE_URL', 'AWS_PROFILE', 'COMMS_ROUTE_API_KEY', 'AGENT_COMMS_SERVICE_TOKEN'})
 
     def test_a_name_configured_as_a_credential_cannot_escape_the_scrub(self):
         profile_set, entries = self.loaded()
@@ -90,21 +90,25 @@ class Scrub(Configured):
         self.assertNotIn('CFG_VENICE_KEY', access.scrub_list(self.ENV, entries, profile_set, keep={'CFG_VENICE_KEY'}))
         self.assertIn('CFG_OTHER_KEY', access.scrub_list(self.ENV, entries, profile_set, keep={'CFG_VENICE_KEY'}))
 
-    def test_a_custom_harness_gets_only_its_own_credential_under_its_own_name(self):
+    PREPARED = access.PREPARED
+
+    def test_a_custom_harness_gets_only_its_prepared_credential_under_its_own_name(self):
         profile_set, entries = self.loaded()
-        environment = access.bound_environment(dict(self.ENV), profile_set['glm'], entries, profile_set)
-        self.assertEqual(environment['VENICE_API_KEY'], 'v2')        # the profile's mapping: BD source -> destination
+        environment = access.bound_environment(dict(self.ENV, **{self.PREPARED: 'prepared'}), profile_set['glm'], entries, profile_set)
+        self.assertEqual(environment['VENICE_API_KEY'], 'prepared')   # the runner's one resolution, under the profile's destination
         for name in ('CFG_GEMINI_KEY', 'CFG_VENICE_KEY', 'CFG_OTHER_KEY', 'ZZ_UNCONFIGURED_API_KEY', 'SOME_TOKEN',
-                     'GOOGLE_APPLICATION_CREDENTIALS', 'AWS_PROFILE'):
+                     'GOOGLE_APPLICATION_CREDENTIALS', 'AWS_PROFILE', 'COMMS_ROUTE_API_KEY', self.PREPARED):
             self.assertNotIn(name, environment)
         self.assertEqual(environment['BD_PLAIN_SETTING'], 'visible')
-        self.assertEqual(environment['COMMS_ROUTE_API_KEY'], 'kept')
 
-    def test_a_scrubbed_environment_still_carries_the_destination_the_runner_kept(self):
+    def test_an_inherited_key_never_stands_in_for_the_bound_reference(self):
         profile_set, entries = self.loaded()
-        scrubbed = {k: v for k, v in self.ENV.items() if k not in access.scrub_list(self.ENV, entries, profile_set)}
-        scrubbed['VENICE_API_KEY'] = 'v2'
-        self.assertEqual(access.bound_environment(scrubbed, profile_set['glm'], entries, profile_set)['VENICE_API_KEY'], 'v2')
+        # the ambient destination variable and the reference's own source are both present, the prepared value is not
+        with self.assertRaises(ValueError):
+            access.bound_environment(dict(self.ENV), profile_set['glm'], entries, profile_set)
+        # and when it is, the ambient values lose to it: a keychain-bound credential is not overridden by VENICE_API_KEY
+        environment = access.bound_environment(dict(self.ENV, **{self.PREPARED: 'from-bound-reference'}), profile_set['glm'], entries, profile_set)
+        self.assertEqual(environment['VENICE_API_KEY'], 'from-bound-reference')
 
     def test_a_credential_that_is_not_there_refuses_rather_than_running_without_it(self):
         profile_set, entries = self.loaded()
@@ -121,7 +125,10 @@ class Scrub(Configured):
         self.assertIsNone(subscription['destination'])
         self.assertIn('GEMINI_API_KEY', subscription['unset'])            # no API fallback exists for a subscription leg
         custom = access.env_plan('glm', 'opencode', 'api', self.ENV, profile_set['glm'], entries, profile_set)
-        self.assertNotIn('CFG_VENICE_KEY', custom['unset'])              # the profile's own source stays for the harness
+        self.assertEqual(custom['destination'], self.PREPARED)           # one prepared credential, under one marker
+        self.assertIn('CFG_VENICE_KEY', custom['unset'])                # the profile's own source and destination are scrubbed too
+        self.assertIn('VENICE_API_KEY', custom['unset'])
+        self.assertNotIn(self.PREPARED, custom['unset'])
         self.assertIn('CFG_OTHER_KEY', custom['unset'])
 
     def test_serve_in_bound_mode_hands_the_harness_only_its_own_credential(self):
@@ -129,7 +136,7 @@ class Scrub(Configured):
         binding_ = profiles.resolve('glm')
         log = self.root / 'seen.log'
         names = 'VENICE_API_KEY CFG_VENICE_KEY CFG_OTHER_KEY CFG_GEMINI_KEY ZZ_UNCONFIGURED_API_KEY BD_PLAIN_SETTING'
-        environ = dict(os.environ, **self.ENV, OC_ENV_LOG=str(log), OC_ENV_VARS=names)
+        environ = dict(os.environ, **self.ENV, OC_ENV_LOG=str(log), OC_ENV_VARS=names, **{self.PREPARED: 'prepared'})
         project = self.root / 'tree'; project.mkdir()
         def serve(*extra):
             log.write_text('')
@@ -137,12 +144,26 @@ class Scrub(Configured):
                             str(self.root / 'state'), *extra], cwd=project, env=environ, check=True, capture_output=True, timeout=60)
             return dict(line.split('=', 1) for line in log.read_text().splitlines())
         bound = serve('--bound')
-        self.assertEqual(bound, {'VENICE_API_KEY': 'v2', 'CFG_VENICE_KEY': '<unset>', 'CFG_OTHER_KEY': '<unset>', 'CFG_GEMINI_KEY': '<unset>',
+        self.assertEqual(bound, {'VENICE_API_KEY': 'prepared', 'CFG_VENICE_KEY': '<unset>', 'CFG_OTHER_KEY': '<unset>', 'CFG_GEMINI_KEY': '<unset>',
                                  'ZZ_UNCONFIGURED_API_KEY': '<unset>', 'BD_PLAIN_SETTING': 'visible'})
         # the control: without --bound the harness inherits the full environment, exactly as before
         unbound = serve()
         self.assertEqual(unbound['CFG_OTHER_KEY'], 'v3')
         self.assertEqual(unbound['ZZ_UNCONFIGURED_API_KEY'], 'v5')
+
+    def test_serve_and_attest_refuse_an_ambient_key_when_nothing_was_prepared_for_the_bound_reference(self):
+        # an ambient VENICE_API_KEY (the destination) and the reference's own source are present; the runner prepared nothing
+        # (e.g. the bound reference is a keychain item it could not resolve): neither launch path may fall back to the ambient value
+        binding_ = profiles.resolve('glm')
+        environ = dict(os.environ, **self.ENV)
+        environ.pop(self.PREPARED, None)
+        project = self.root / 'tree-ambient'; project.mkdir()
+        serve = subprocess.run([sys.executable, str(REPO / 'helpers/agent_profiles.py'), 'serve', profiles.encode(binding_),
+                                str(self.root / 'state-ambient'), '--bound'], cwd=project, env=environ, capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(serve.returncode, 0)
+        self.assertNotIn('v2', serve.stdout + serve.stderr)
+        with patch.dict(os.environ, self.ENV), self.assertRaises(ValueError):
+            profiles.bound_env(binding_['profile'], True)       # the one function attest, serve and acpx all call
 
 
 class Stamp(Configured):

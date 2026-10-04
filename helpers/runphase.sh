@@ -280,6 +280,14 @@ load_turn_identity() {
       artifact) RUN_ARTIFACT="$v" ;;
       provider) [ -n "$v" ] && RUN_PROVIDER="$v" ;;
       agent)    [ -n "$v" ] && RUN_AGENT="$v" ;;
+      # A bound leg's stamp and what is known of its run, so a synthesized result keeps the bound contract.
+      # Unknown observations stay unknown: the observed pair is the provider's own record or nothing.
+      leg_binding)        RUN_BIND_STAMP="$v" ;;
+      leg_binding_digest) RUN_BIND_DIGEST="$v" ;;
+      bind_state)         case "$v" in ran|refused) RUN_BIND_STATE="$v" ;; esac ;;
+      bind_auth)          case "$v" in observed|configured) RUN_BIND_AUTH="$v" ;; esac ;;
+      observed_model)     case "$v" in ""|unknown) ;; *) RUN_BIND_OBS_MODEL="$v" ;; esac ;;
+      observed_effort)    case "$v" in ""|unknown) ;; *) RUN_BIND_OBS_EFFORT="$v" ;; esac ;;
     esac
   done < "$f"
   return 0
@@ -400,6 +408,9 @@ bound_leg_recheck() {
   RUN_BIND_STAMP="$(frontmatter_field "$msg" leg_binding || true)"
   [ -n "$RUN_BIND_STAMP" ] || return 0
   RUN_BIND_DIGEST="$(frontmatter_field "$msg" leg_binding_digest || true)"
+  # Persisted first, before any judgement: a runner that dies from here on is recovered by `await` with
+  # its binding, so the synthesized result still carries `binding` and `quota` instead of null.
+  printf 'leg_binding\t%s\nleg_binding_digest\t%s\n' "$RUN_BIND_STAMP" "$RUN_BIND_DIGEST" >> "$run_dir/turn.tsv" 2>/dev/null || true
   if [ "$via" != acp ]; then
     codes=binding-mismatch; note="a bound leg runs over ACP only (this turn was started with --via ${via:-direct}); nothing was launched"
   else
@@ -434,7 +445,8 @@ bound_leg_env_prepare() {
     esac
   done <<<"$plan"
   if [ -n "$BOUND_CRED_NAME" ]; then
-    BOUND_CRED_VALUE="$(python3 "$HELPER_DIR/access_profiles.py" credential-value "$agent" 2>>"$RUN_DIR/runner.log")" || return 1
+    BOUND_CRED_VALUE="$(python3 "$HELPER_DIR/access_profiles.py" credential-value "$agent" \
+                         --stamp "$RUN_BIND_STAMP" --digest "$RUN_BIND_DIGEST" 2>>"$RUN_DIR/runner.log")" || return 1
   fi
   return 0
 }
@@ -462,6 +474,16 @@ bound_leg_readback() {
     bound_leg_refuse "the launcher's authentication route does not read back as bound ($(printf '%s' "$out" | tr '\t\n' '  ' | cut -c1-300)); nothing was launched"
   fi
   RUN_BIND_AUTH="$out"
+  printf 'bind_auth\t%s\n' "$RUN_BIND_AUTH" >> "$RUN_DIR/turn.tsv" 2>/dev/null || true
+}
+
+# bound_run <cmd...> — run a runner-side helper under the bound leg's environment (the same scrub and the same
+# single prepared credential acp_exec applies), for the calls that are not an acpx launch: the custom
+# runtime's attestation reads the runtime with the leg's credential and must not see the driver's.
+bound_run() {
+  [ -n "$RUN_BIND_STAMP" ] || { "$@"; return; }
+  ( [ -z "$BOUND_CRED_NAME" ] || export "$BOUND_CRED_NAME=$BOUND_CRED_VALUE"
+    exec env ${BOUND_ENV_ARGS[@]+"${BOUND_ENV_ARGS[@]}"} "$@" )
 }
 
 # ---------- the leg's resolved route (acp.sh route-view) ----------
@@ -4214,7 +4236,7 @@ cmd_run() {
     # deliberately EXCLUDES it — a different question.) Nothing before this point bills.
     leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$mount_dir" "${acp_iso_home:-$acp_grok_home}")" "$(cd "$workdir" && pwd -P)" "$run_dir"
     # THE FIRST PROMPT goes out below (the canary): from here a bound leg has RUN, whatever its outcome.
-    [ -z "$RUN_BIND_STAMP" ] || RUN_BIND_STATE=ran
+    if [ -n "$RUN_BIND_STAMP" ]; then RUN_BIND_STATE=ran; printf 'bind_state\tran\n' >> "$run_dir/turn.tsv" 2>/dev/null || true; fi
     ACP_CANARY_OPTS=( "${acp_prompt_opts[@]}" )
     ACP_CANARY_PROVIDER="$provider"
     if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
@@ -4257,7 +4279,7 @@ cmd_run() {
     # a completed review look truncated. (codex, plan r3 advisory.)
     if [ "$custom_adapter" = opencode ]; then
       if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
-          | python3 "$HELPER_DIR/agent_profiles.py" attest ${RUN_BIND_STAMP:+--bound} "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" before \
+          | bound_run python3 "$HELPER_DIR/agent_profiles.py" attest ${RUN_BIND_STAMP:+--bound} "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" before \
             > "$run_dir/profile-evidence-before.json"; then
         acp_refuse policy-unapplied "could not snapshot custom runtime model evidence"
         return 1
@@ -4307,7 +4329,7 @@ cmd_run() {
       fi
       if [ "$custom_adapter" = opencode ]; then
         if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
-            | python3 "$HELPER_DIR/agent_profiles.py" attest ${RUN_BIND_STAMP:+--bound} "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" after \
+            | bound_run python3 "$HELPER_DIR/agent_profiles.py" attest ${RUN_BIND_STAMP:+--bound} "$RUN_PROFILE_BINDING" "$custom_home" "$run_dir/profile-history.json" after \
               > "$run_dir/profile-evidence.json"; then
           acp_refuse policy-unapplied "custom runtime did not attest this turn's model and reviewer mode"
           return 1

@@ -166,6 +166,22 @@ bd_refuse "an environment model pin that differs from the binding" "pin-conflict
 bd_refuse "an environment effort pin that differs from the binding" "pin-conflict " "$BD_L_CODEX" COMMS_ACP_CODEX_EFFORT=high
 bd_refuse "COMMS_REVIEW_MAX (use max) in the dispatching environment" "pin-conflict " "$BD_L_CODEX" COMMS_REVIEW_MAX=1
 bd_refuse "an API credential that is not present" "credential-unavailable " "$BD_L_GEMINI" BD_GEMINI_KEY=
+# THE CONFIGURED TRANSPORT IS CHECKED AGAINST THE ONE THE RUNNER WOULD DRIVE: a `cli` entry the caller also expects as `cli`
+# matches field for field, and would be stamped into a leg this runner reaches over ACP.
+bd_mut access "d['agents']['codex']['transport']='cli'"
+bd_refuse "a configured AND expected transport of cli for an agent the runner drives over ACP" "transport-mismatch " "$(bj "$BD_L_CODEX" "d['access']['transport']='cli'")"
+bd_reset
+# THE CUSTOM RUNTIME IS VERIFIED LOCALLY BEFORE ANYTHING IS WRITTEN: a declared version is a claim, and an executable that
+# cannot run (or runs as another version) would otherwise fail only after its siblings had started.
+printf '#!/bin/sh\nexit 1\n' > "$BD/oc-bad"; chmod +x "$BD/oc-bad"
+bd_mut agents "d['agents']['glm']['command']=['$BD/oc-bad']"
+bd_refuse "a custom runtime that exits non-zero though its profile declares the pinned version" "model-unservable " "$BD_L_GLM"
+bd_wb "$BD/badrt.json" "$BD_L_CODEX" "$BD_L_GEMINI" "$BD_L_GLM"
+OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" GM_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/badrt.json" "$(bd_req bd-badrt)" 2>"$BD/badrt.err")"; A=$?
+{ [ "$A" = 1 ] && [ -z "$OUT" ] && [ "$(bd_codes "$(cat "$BD/badrt.err")")" = "model-unservable " ] \
+  && [ "$(bd_tree | grep -v 'bd-request-')" = "$(grep -v 'bd-request-' <<<"$BD_T0")" ] && [ ! -e "$BD_TL" ]; } \
+  && ok "a three-leg dispatch whose LAST (custom) leg's runtime cannot run is refused whole: no snapshot, event, leg file or provider launch" || fail "bad custom runtime panel (rc=$A): $OUT $(head -c 300 "$BD/badrt.err")"
+bd_reset
 bd_mut access "d['agents']['codex'].update(billing='api', credential='env:BD_KEY_CODEXM_REF', route_id='codex-api')"
 bd_refuse "a (codex, api) pair with no explicit API selection" "auth-route-unsupported " "$(bj "$BD_L_CODEX" "d['route_id']='codex-api'; d['access']['billing']='api'; d['access']['credential']='env:BD_KEY_CODEXM_REF'")" BD_KEY_CODEXM_REF="$BD_KEY_CODEXM"
 bd_reset

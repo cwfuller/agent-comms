@@ -598,7 +598,7 @@ read back per billing class. `result.json` gains `binding` (route id, access dig
 versioned `quota` object with explicit `observed|unsupported|unavailable|refused` states. Unbound callers are unchanged (policy records stay version 1;
 bound ones are version 2 and both read). `acp.sh resolve` has a `bound` candidate source and a custom-profile branch (OpenCode/Venice pinned models, no
 map row). No model-to-tier mapping, default or `policy-map.tsv` row was added. Docs: COMMANDS, PROTOCOL, INTERNALS, AGENT_PROFILES, README, the banner.
-Tests: groups `binding` and `bindrun` (hermetic stubs; +209 assertions against the contract at the base commit).
+Tests: groups `binding` and `bindrun` (hermetic stubs; +217 assertions against the contract at the base commit).
 
 **Honest residuals.**
 

@@ -719,7 +719,10 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
 - **Credential scrub.** The scrub set is the UNION of every configured credential name (all of `access.json`, every `agents.json` `credentials` mapping,
   the table's adapter destinations), the patterns `*_API_KEY`, `*_TOKEN`, `*_AUTH_TOKEN`, `*_SECRET*`, `*_ACCESS_KEY*`, and the table. It is
   applied as `env -u NAME` on every acpx call of the leg; only the bound `api` credential is then restored, under the variable its adapter
-  reads, exported in the launch subshell (a value is in a process environment, never in an argv, file, event or log). Configuration names come first
+  reads, exported in the launch subshell. The credential is resolved ONCE, from the reference the stamped access snapshot carries; a custom harness receives it
+  under the single marker `AGENT_COMMS_BOUND_CREDENTIAL` and its launcher places it under the profile's destination, so an inherited variable of the
+  same name (an ambient key beside a bound Keychain reference) never stands in for it, in `serve`, `attest` or `acpx`. No prefix is exempt from the
+  pattern scrub (a value is in a process environment, never in an argv, file, event or log). Configuration names come first
   because an operator-chosen name (`CODEX_METERED_KEY`, `API_KEY`) survives any pattern list. **Residual**: a credential nobody configured that
   matches no pattern and is not in the table passes through. The harness's own on-disk login is not an environment variable and is governed by the auth rows.
 - **Authentication route.** Passing a key selects nothing by itself. For both billing classes the launcher applies the adapter's `auth` row (gemini: the
@@ -729,7 +732,10 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
   declared `unsupported` in the table and refused (`auth-route-unsupported`) instead of being bound on the hope that an environment key beats a saved login:
   **codex `api` is such a pair today** (`forced_login_method` and `CODEX_API_KEY` exist in the installed binary, but nothing shows the mounted ACP adapter honours them).
 - **Run-time re-check** (`runphase.sh bound_leg_recheck`) judges the stamp from the stamp alone against the configuration as it is now, before mounting, launching
-  or prompting, and ends a changed leg `reason=binding-mismatch`.
+  or prompting, and ends a changed leg `reason=binding-mismatch`. The check also compares the configured transport with the one the runner drives, and for an
+  OpenCode profile verifies the runtime executable and version locally (`opencode_adapter.verify_runtime`, no credentials) so a broken final leg refuses the
+  whole panel. Environment and credential preparation re-verify the stamped access digest after the re-check's sleep and mount. The stamp and run state are
+  written to `turn.tsv`, so `load_turn_identity` restores them for a synthesized result after a runner crash.
 - **Quota metadata** (`leg-metadata v1`) has an explicit state because `null` cannot distinguish unsupported from missing: `observed` (a provider ledger
   snapshot; codex), `unsupported` (grok, claude, gemini, custom profiles: no rate-limit source), `unavailable` (supported, nothing in the window), `refused`
   (the existing classifier named `rate-limited` or `auth-failed`; gemini), with `reset_at` null unless a structured provider record carries one. A reset is

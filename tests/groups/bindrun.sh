@@ -187,6 +187,42 @@ bd_leg_run codex "$BD_FORGED" "$BD/rt-forged"
 bd_reset; bd_leg_pickup codex bd-rt-ctl "$BD_L_CODEX"; bd_leg_run codex "$BD_LEGFILE" "$BD/rt-ctl"
 { [ "$(bd_dir_res "$BD/rt-ctl" status)" = completed ] && [ "$(bd_dir_res "$BD/rt-ctl" binding status)" = ran ] && [ -e "$BD/rt-ctl.stub" ]; } \
   && ok "control: an unchanged configuration runs the stamped leg (binding status ran)" || fail "control run: $(cat "$BD/rt-ctl/result.json" 2>/dev/null | tr '\n' ' ' | cut -c1-300)"
+# THE CREDENTIAL FOLLOWS THE STAMP, NOT THE FILE: the runner re-checks, then sleeps and mounts, and only then prepares the
+# environment. An access entry that changed in between must not substitute another credential (nor another account's route).
+bd_reset; bd_leg_pickup gemini bd-rt-cred "$BD_L_GEMINI"
+BD_CS="$(sed -n 's/^leg_binding: //p' "$BD_LEGFILE" | head -1)"; BD_CD="$(sed -n 's/^leg_binding_digest: //p' "$BD_LEGFILE" | head -1)"
+BD_HELP="$(dirname "$RP")"
+bd_cred() { bd python3 "$BD_HELP/access_profiles.py" credential-value gemini --stamp "$BD_CS" --digest "$BD_CD" 2>"$BD/cred.err"; }
+bd_cls() { bd python3 "$BD_HELP/leg_binding.py" env-class --stamp "$BD_CS" --digest "$BD_CD" --provider gemini 2>>"$BD/cred.err"; }
+[ "$(bd_cred)" = "$BD_KEY_GEMINI" ] && [ "$(bd_cls)" = "$(printf 'gemini\tapi')" ] \
+  && ok "control: an unchanged access entry prepares exactly the credential the stamp bound" || fail "unchanged preparation: $(cat "$BD/cred.err")"
+bd_mut access "d['agents']['gemini'].update(account='other', credential='env:BD_VENICE_KEY')"
+BD_GOT="$(bd_cred)"; A=$?
+{ [ "$A" != 0 ] && [ -z "$BD_GOT" ] && [ "$(bd_cls)" = "" ]; } \
+  && ok "the access entry changed after the re-check: credential preparation and the environment class refuse, no other account's credential is read" || fail "drifted preparation (rc=$A): $BD_GOT"
+bd_reset
+
+# A RUNNER THAT DIES WITHOUT A RESULT keeps the bound contract: await synthesizes the result from the persisted turn record,
+# which carries the stamp, so binding and quota are present and unknown observations stay unknown.
+bd_crash() {  # <name> <extra turn.tsv lines...> -> a run dir as a killed bound runner leaves it, awaited
+  local d="$BD/$1" p; shift; mkdir -p "$d"
+  sh -c 'exit 0' & p=$!; wait "$p" 2>/dev/null || true
+  printf '%s\n' "$p" > "$d/pid"
+  { printf 'thread\tbd-crash\nprovider\tcodex\nagent\tcodex\n'; printf 'leg_binding\t%s\nleg_binding_digest\t%s\n' "$BD_CRS" "$BD_CRD"; printf '%b' "$@"; } > "$d/turn.tsv"
+  bd "$RP" await "$d" --timeout-secs 30 >"$d.out" 2>"$d.err" || true
+}
+bd_reset; bd_leg_pickup codex bd-crash "$BD_L_CODEX"
+BD_CRS="$(sed -n 's/^leg_binding: //p' "$BD_LEGFILE" | head -1)"; BD_CRD="$(sed -n 's/^leg_binding_digest: //p' "$BD_LEGFILE" | head -1)"
+bd_crash crash-early ''
+{ [ "$(bd_dir_res "$BD/crash-early" status)" = failed ] && [ "$(bd_dir_res "$BD/crash-early" binding ref)" = res-codex ] \
+  && [ "$(bd_dir_res "$BD/crash-early" binding status)" = refused ] && [ "$(bd_dir_res "$BD/crash-early" binding observed)" = '{"effort":null,"model":null}' ] \
+  && [ "$(bd_dir_res "$BD/crash-early" quota provider)" = openai ] && [ "$(bd_dir_res "$BD/crash-early" quota state)" = unavailable ]; } \
+  && ok "a bound runner killed before launch: the synthesized result keeps binding (refused, nothing observed) and a quota object" || fail "early crash: $(tr '\n' ' ' < "$BD/crash-early/result.json" | cut -c1-600)"
+bd_crash crash-ran 'bind_state\tran\nbind_auth\tobserved\nobserved_effort\tlow\nobserved_model\tgpt-6-luna\n'
+{ [ "$(bd_dir_res "$BD/crash-ran" binding status)" = ran ] && [ "$(bd_dir_res "$BD/crash-ran" binding auth_evidence)" = observed ] \
+  && [ "$(bd_dir_res "$BD/crash-ran" binding observed model)" = gpt-6-luna ] && [ "$(bd_dir_res "$BD/crash-ran" binding observed effort)" = low ]; } \
+  && ok "a bound runner killed after launch: the synthesized result keeps what the run had established (ran, observed pair, auth evidence)" || fail "late crash: $(tr '\n' ' ' < "$BD/crash-ran/result.json" | cut -c1-600)"
+bd_reset
 # NO FALLBACK AND NO DROP: a refused bound leg is recorded as a failed turn with its own reason, which compose --degrade does
 # not treat as droppable (its evidence is no-output | policy-unapplied only), so the leg stays an unanswered leg for the
 # caller to see, never silently removed from the roster.
