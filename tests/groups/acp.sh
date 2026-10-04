@@ -1822,3 +1822,203 @@ LU_GU="$(run_canary_turn lu-grok-unmounted pong HOME="$LU_H" AX_GROK_USAGE="$REP
   && [ -n "$(find "$LU_H/.grok/sessions" -name usage.json 2>/dev/null)" ] \
   && ok "an unmounted leg reads usage null although its provider wrote records — its cwd is shared" \
   || fail "unmounted leg: status=$(cn_status "$LU_GU") total=$(ru "$LU_GU" usage total_tokens)"
+
+section "reviewer guidance: the shared bundle is staged into a mounted codex home"
+# Through the real mounted codex path. The provider's view is recorded BY THE CHILD (AX_HOME_LOG): the mount is torn
+# down with the turn, so a parent-side re-read would prove less. A durable mount (one thread) keeps its home between
+# rounds, which is what lets a stale AGENTS.md be planted and then seen to be cleared.
+GD="$WORK/gd"; mkdir -p "$GD/home/.acpx/sessions" "$GD/home/.acpx/queues" "$GD/home/.codex" "$GD/home/.agent-comms"
+: > "$GD/home/.acpx-test-store"
+printf '{"tokens":"gd-operator-token"}\n' > "$GD/home/.codex/auth.json"; chmod 600 "$GD/home/.codex/auth.json"
+GD_MBASE="$GD/mbase"; mkdir -p "$GD_MBASE"; GD_MBASE="$(cd "$GD_MBASE" && pwd -P)"
+GD_HEAD="$(git -C "$MA_FIX" rev-parse HEAD)"
+GD_REV="0123456789abcdef0123456789abcdef01234567"
+gd_bundle() {  # <dir> [text] — a bundle exactly as `guidance.py snapshot` writes it
+  mkdir -p "$1"; printf '%s\n' "${2:-# Shared guidance (test bundle)}" > "$1/method-guidance.md"
+  python3 - "$1" "$GD_REV" <<'PY'
+import hashlib, json, sys
+d, rev = sys.argv[1], sys.argv[2]
+sha = hashlib.sha256(open(d + "/method-guidance.md", "rb").read()).hexdigest()
+json.dump({"format": 1, "revision": rev, "guidance_file": "method-guidance.md", "guidance_sha256": sha}, open(d + "/snapshot.json", "w"))
+PY
+}
+gd_edit() {  # <dir> <python expression over d, the snapshot record> — rewrite snapshot.json
+  python3 - "$1/snapshot.json" "$2" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); exec(sys.argv[2]); json.dump(d, open(sys.argv[1], "w"))
+PY
+}
+gd_msg() {  # <thread> <tag> -> a mounted review request for the codex leg
+  local m="$MA_FIX/.comms/to-codex/${MA_WS}_2026-10-04T13-00-00_gd-$2.md"
+  { head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+    printf 'artifact_id: %s\nhead_sha: %s\n' "$GD_HEAD" "$GD_HEAD"
+    tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" \
+      | sed -e "s/^thread: ma-arc-1\$/thread: $1/" -e "s/^from: claude\$/from: grok/"
+  } > "$m"; printf '%s' "$m"
+}
+gd_turn() {  # <thread> <tag> [env assignments...] -> the run dir; the child's view lands in $GD/home-<tag>.log
+  local thr="$1" tag="$2" dir="$GD/run-$2"; shift 2
+  mkdir -p "$dir/.." "$dir"
+  ( cd "$MA_FIX" && env -u COMMS_METHOD_GUIDANCE_DIR PATH="$AXB:$PATH" HOME="$GD/home" COMMS_MOUNT_BASE="$GD_MBASE" \
+      ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=pong COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 AX_HOME_LOG="$GD/home-$tag.log" \
+      "$@" "$RP" run --message "$(gd_msg "$thr" "$tag")" --dir "$dir" --provider codex --via acp --timeout-secs 30 ) >"$dir/stdout.log" 2>"$dir/stderr.log"
+  printf '%s' "$dir"
+}
+gd_res() {  # <run-dir> <key...> -> value, <null> when absent
+  python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]+"/result.json"))
+for k in sys.argv[2:]: d=d.get(k) if isinstance(d,dict) else None
+print("<null>" if d is None else d)' "$@" 2>/dev/null; }
+gd_seen() { sed -n "s/^$2	//p" "$GD/home-$1.log" 2>/dev/null | head -1; }   # first value the child recorded
+gd_tv() { awk -F'\t' '$1=="guidance"{v=$2 "|" $3 "|" $4} END{print v}' "$1/turn.tsv" 2>/dev/null; }
+GD_B="$GD/bundle"; gd_bundle "$GD_B"
+GD_SHA="$(shasum -a 256 "$GD_B/method-guidance.md" | cut -c1-64)"
+
+# CONTROL: no bundle configured. Nothing staged; the credential and config the provider reads are the baseline.
+GD_D0="$(gd_turn gd-th r0)"
+{ [ "$(gd_res "$GD_D0" status)" = completed ] && [ "$(gd_seen r0 agents)" = '<absent>' ] \
+  && [ "$(gd_res "$GD_D0" guidance status)" = absent ] && [ "$(gd_res "$GD_D0" guidance revision)" = '<null>' ] && [ "$(gd_tv "$GD_D0")" = 'absent||' ]; } \
+  && ok "with no bundle configured a mounted codex leg stages no AGENTS.md and records guidance absent" \
+  || fail "control turn: status=$(gd_res "$GD_D0" status) agents=$(gd_seen r0 agents) guidance=$(gd_res "$GD_D0" guidance status) tv=$(gd_tv "$GD_D0")"
+GD_HOMEDIR="$(find "$GD_MBASE" -maxdepth 4 -type d -name home 2>/dev/null | head -1)"
+[ -n "$GD_HOMEDIR" ] && [ -d "$GD_HOMEDIR" ] && ok "the mounted codex home persists between rounds (so a stale AGENTS.md can outlive a round)" || fail "no persisted home under $GD_MBASE"
+
+# A VALID BUNDLE: the staged bytes are the bundle's, at mode 600, beside an unchanged credential and config.
+GD_D1="$(gd_turn gd-th r1 COMMS_METHOD_GUIDANCE_DIR="$GD_B")"
+{ [ "$(gd_res "$GD_D1" status)" = completed ] && [ "$(gd_seen r1 agents)" = "file	600	$GD_SHA" ]; } \
+  && ok "a valid bundle is staged as AGENTS.md, byte-identical to method-guidance.md, at mode 600" \
+  || fail "valid bundle: status=$(gd_res "$GD_D1" status) agents=$(gd_seen r1 agents)"
+{ [ -n "$(gd_seen r1 auth)" ] && [ "$(gd_seen r1 auth)" = "$(gd_seen r0 auth)" ] && [ "$(gd_seen r1 config)" = "$(gd_seen r0 config)" ] \
+  && [ "$(gd_seen r1 auth)" = "$(shasum -a 256 "$GD/home/.codex/auth.json" | cut -c1-64)" ]; } \
+  && ok "staging the bundle leaves the staged credential and the generated config byte-identical to the no-bundle run" \
+  || fail "credential/config changed: auth $(gd_seen r0 auth) -> $(gd_seen r1 auth), config $(gd_seen r0 config) -> $(gd_seen r1 config)"
+{ [ "$(gd_res "$GD_D1" guidance status)" = staged ] && [ "$(gd_res "$GD_D1" guidance revision)" = "$GD_REV" ] && [ "$(gd_res "$GD_D1" guidance sha256)" = "$GD_SHA" ] \
+  && [ "$(gd_tv "$GD_D1")" = "staged|$GD_REV|$GD_SHA" ] && grep -qx "guidance: staged revision=$GD_REV sha256=$GD_SHA" "$GD_D1/runner.log"; } \
+  && ok "result.json guidance, the turn.tsv line and the runner.log line agree on the staged revision and digest" \
+  || fail "guidance record: result=$(gd_res "$GD_D1" guidance) tv=$(gd_tv "$GD_D1") log=$(grep '^guidance:' "$GD_D1/runner.log")"
+# The bundle is written only under the isolated home: no file in any mounted tree carries its bytes.
+GD_LEAK=0; while IFS= read -r GD_F; do cmp -s "$GD_F" "$GD_B/method-guidance.md" && GD_LEAK=1; done < <(find "$GD_MBASE" -path '*/tree/*' -type f \( -name AGENTS.md -o -name 'method-guidance*' \) 2>/dev/null)
+[ "$GD_LEAK" = 0 ] && ok "the bundle is written only under the isolated home: nothing in the reviewed tree carries its bytes" || fail "the bundle reached the mounted tree"
+
+# REJECTED bundles stage nothing and never stop the review: each leaves no AGENTS.md for the child, records rejected:<code>
+# in result.json, turn.tsv and runner.log, and the turn still completes. The earlier valid round left a staged copy in the
+# persisted home, so every case here also proves that copy is cleared.
+gd_reject() {  # <tag> <code> <mutation of a fresh valid bundle: shell snippet over $B>
+  local tag="$1" code="$2" B="$GD/bundle-$1" d
+  gd_bundle "$B"; eval "$3"
+  d="$(gd_turn gd-th "$tag" COMMS_METHOD_GUIDANCE_DIR="$B")"
+  { [ "$(gd_res "$d" status)" = completed ] && [ "$(gd_seen "$tag" agents)" = '<absent>' ] \
+    && [ "$(gd_res "$d" guidance status)" = "rejected:$code" ] && [ "$(gd_res "$d" guidance sha256)" = '<null>' ] \
+    && [ "$(gd_tv "$d")" = "rejected:$code||" ] && grep -qx "guidance: rejected:$code" "$d/runner.log"; } \
+    && return 0
+  printf 'rejected-%s: status=%s agents=%s guidance=%s tv=%s\n' "$tag" "$(gd_res "$d" status)" "$(gd_seen "$tag" agents)" "$(gd_res "$d" guidance status)" "$(gd_tv "$d")"
+  return 1
+}
+GD_BAD=""
+gd_reject r2 hash 'printf "tampered\n" >> "$B/method-guidance.md"' >>"$GD/rej.log" || GD_BAD="$GD_BAD [hash]"
+gd_reject r3 format 'gd_edit "$B" "d[\"format\"] = 2"' >>"$GD/rej.log" || GD_BAD="$GD_BAD [format]"
+gd_reject r4 guidance-file 'gd_edit "$B" "d[\"guidance_file\"] = \"other.md\""' >>"$GD/rej.log" || GD_BAD="$GD_BAD [guidance-file]"
+gd_reject r5 record 'printf "not json" > "$B/snapshot.json"' >>"$GD/rej.log" || GD_BAD="$GD_BAD [record]"
+gd_reject r6 revision 'gd_edit "$B" "d[\"revision\"] = \"abc\""' >>"$GD/rej.log" || GD_BAD="$GD_BAD [revision]"
+gd_reject r7 oversize 'head -c 70000 /dev/zero | tr "\0" x > "$B/method-guidance.md"; gd_edit "$B" "import hashlib; d[\"guidance_sha256\"] = hashlib.sha256(open(\"$B/method-guidance.md\", \"rb\").read()).hexdigest()"' >>"$GD/rej.log" || GD_BAD="$GD_BAD [oversize]"
+gd_reject r8 empty ': > "$B/method-guidance.md"; gd_edit "$B" "import hashlib; d[\"guidance_sha256\"] = hashlib.sha256(b\"\").hexdigest()"' >>"$GD/rej.log" || GD_BAD="$GD_BAD [empty]"
+[ -z "$GD_BAD" ] && ok "a hash mismatch, bad format, wrong guidance_file, unreadable record, bad revision, oversize and empty bundle each stage nothing, record rejected:<code> in result.json, turn.tsv and runner.log, and the review completes" \
+  || fail "rejected bundles:$GD_BAD $(tr '\n' '|' < "$GD/rej.log")"
+
+# ABSENT: setting unset (control above), directory missing, and a symlinked source file are recorded absent, nothing staged.
+GD_SL="$GD/bundle-link"; gd_bundle "$GD_SL"; mv "$GD_SL/method-guidance.md" "$GD/real-guidance.md"; ln -s "$GD/real-guidance.md" "$GD_SL/method-guidance.md"
+GD_BAD=""
+GD_DM="$(gd_turn gd-th r9 COMMS_METHOD_GUIDANCE_DIR="$GD/no-such-bundle-dir")"
+{ [ "$(gd_res "$GD_DM" status)" = completed ] && [ "$(gd_seen r9 agents)" = '<absent>' ] && [ "$(gd_res "$GD_DM" guidance status)" = absent ] && [ "$(gd_tv "$GD_DM")" = 'absent||' ]; } || GD_BAD="$GD_BAD [missing directory: $(gd_res "$GD_DM" status) $(gd_seen r9 agents) $(gd_res "$GD_DM" guidance status)]"
+GD_DL="$(gd_turn gd-th r10 COMMS_METHOD_GUIDANCE_DIR="$GD_SL")"
+{ [ "$(gd_res "$GD_DL" status)" = completed ] && [ "$(gd_seen r10 agents)" = '<absent>' ] && [ "$(gd_res "$GD_DL" guidance status)" = absent ]; } || GD_BAD="$GD_BAD [symlinked source: $(gd_res "$GD_DL" status) $(gd_seen r10 agents) $(gd_res "$GD_DL" guidance status)]"
+[ -z "$GD_BAD" ] && ok "a missing bundle directory and a symlinked bundle file record absent and stage nothing; the review completes" || fail "absent bundles:$GD_BAD"
+
+# STALE copies from an earlier round are removed whenever this round stages nothing — a regular file, a symlink (its target
+# untouched) and a hard link (the other name untouched) — and an AGENTS.md that cannot be removed refuses the turn.
+GD_HOMEDIR="$(find "$GD_MBASE" -maxdepth 4 -type d -name home 2>/dev/null | head -1)"
+GD_BAD=""
+printf 'stale regular\n' > "$GD_HOMEDIR/AGENTS.md"
+GD_S1="$(gd_turn gd-th r11)"
+{ [ "$(gd_res "$GD_S1" status)" = completed ] && [ "$(gd_seen r11 agents)" = '<absent>' ]; } || GD_BAD="$GD_BAD [regular: $(gd_seen r11 agents)]"
+printf 'decoy target\n' > "$GD/symlink-target.md"; ln -s "$GD/symlink-target.md" "$GD_HOMEDIR/AGENTS.md"
+GD_S2="$(gd_turn gd-th r12 COMMS_METHOD_GUIDANCE_DIR="$GD/bundle-r2")"
+{ [ "$(gd_res "$GD_S2" status)" = completed ] && [ "$(gd_seen r12 agents)" = '<absent>' ] && [ "$(cat "$GD/symlink-target.md")" = 'decoy target' ]; } || GD_BAD="$GD_BAD [symlink: $(gd_seen r12 agents) target=$(cat "$GD/symlink-target.md")]"
+printf 'hard link original\n' > "$GD/hardlink-other.md"; ln "$GD/hardlink-other.md" "$GD_HOMEDIR/AGENTS.md"
+GD_S3="$(gd_turn gd-th r13)"
+{ [ "$(gd_res "$GD_S3" status)" = completed ] && [ "$(gd_seen r13 agents)" = '<absent>' ] && [ "$(cat "$GD/hardlink-other.md")" = 'hard link original' ]; } || GD_BAD="$GD_BAD [hard link: $(gd_seen r13 agents) other=$(cat "$GD/hardlink-other.md")]"
+# …and a VALID bundle replaces a stale copy (a symlink at the destination is replaced, never written through).
+ln -s "$GD/symlink-target.md" "$GD_HOMEDIR/AGENTS.md"
+GD_S4="$(gd_turn gd-th r14 COMMS_METHOD_GUIDANCE_DIR="$GD_B")"
+{ [ "$(gd_seen r14 agents)" = "file	600	$GD_SHA" ] && [ "$(cat "$GD/symlink-target.md")" = 'decoy target' ]; } || GD_BAD="$GD_BAD [replace through symlink: $(gd_seen r14 agents) target=$(cat "$GD/symlink-target.md")]"
+[ -z "$GD_BAD" ] && ok "a stale AGENTS.md (regular file, symlink, hard link) is removed when the round stages nothing, never written through, and a valid bundle replaces it" || fail "stale copies:$GD_BAD"
+# An AGENTS.md that cannot be removed (a non-empty directory) leaves the home not what the log would say: the turn is refused.
+rm -f "$GD_HOMEDIR/AGENTS.md"; mkdir -p "$GD_HOMEDIR/AGENTS.md"; : > "$GD_HOMEDIR/AGENTS.md/keep"
+GD_S5="$(gd_turn gd-th r15)"
+{ [ "$(gd_res "$GD_S5" status)" = failed ] && [[ "$(gd_res "$GD_S5" note)" == *"could not stage or clear the isolated AGENTS.md"* ]] && [ ! -e "$GD/home-r15.log" ]; } \
+  && ok "an AGENTS.md that cannot be cleared refuses the turn before any model is spoken to" \
+  || fail "unclearable AGENTS.md: status=$(gd_res "$GD_S5" status) note=$(gd_res "$GD_S5" note) child-ran=$([ -e "$GD/home-r15.log" ] && echo yes || echo no)"
+rm -rf "$GD_HOMEDIR/AGENTS.md"
+
+# NOT STAGED: an unmounted codex turn and a mounted claude leg (gemini: the gemini group), create no AGENTS.md and report guidance null even
+# with a valid bundle configured. (Unmounted turns run on the operator's live home and are out of scope; claude already
+# loads the operator's CLAUDE.md; gemini is a recorded follow-up.)
+GD_BAD=""
+GD_UM="$GD/run-unmounted"; mkdir -p "$GD_UM"
+GD_UMSG="$MA_FIX/.comms/to-codex/${MA_WS}_2026-10-04T13-00-00_gd-unm.md"
+sed -e 's/^thread: ma-arc-1$/thread: gd-unm/' -e 's/^from: claude$/from: grok/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$GD_UMSG"
+( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$GD/home" COMMS_MOUNT_BASE="$GD_MBASE" COMMS_METHOD_GUIDANCE_DIR="$GD_B" ACP_PARITY_PAYLOAD="$CANARY_PAY" \
+    AX_CANARY=pong COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 AX_HOME_LOG="$GD/home-unm.log" "$RP" run --message "$GD_UMSG" --dir "$GD_UM" --provider codex --via acp --timeout-secs 30 ) >/dev/null 2>&1
+{ [ "$(gd_res "$GD_UM" status)" = completed ] && [ "$(gd_res "$GD_UM" guidance)" = '<null>' ] && [ -z "$(grep -h agents "$GD/home-unm.log" 2>/dev/null | grep -v absent)" ]; } || GD_BAD="$GD_BAD [unmounted codex: $(gd_res "$GD_UM" status) $(gd_res "$GD_UM" guidance)]"
+for GD_P in "claude codex"; do
+  set -- $GD_P
+  GD_PD="$WORK/gd-leg-$1"; lu_run "$1" "$2" "gd-$1" "$GD_PD" COMMS_METHOD_GUIDANCE_DIR="$GD_B"
+  { [ "$(cn_status "$GD_PD")" = completed ] && [ "$(gd_res "$GD_PD" guidance)" = '<null>' ] && ! grep -q '^guidance' "$GD_PD/turn.tsv" \
+    && [ -z "$(find "$CN_MBASE" -name AGENTS.md -path "*/home/*" 2>/dev/null)" ]; } || GD_BAD="$GD_BAD [mounted $1: $(cn_status "$GD_PD") guidance=$(gd_res "$GD_PD" guidance)]"
+done
+[ -z "$GD_BAD" ] && ok "an unmounted codex turn and a mounted claude leg stage no AGENTS.md and report guidance null even with a valid bundle configured" || fail "not-staged legs:$GD_BAD"
+
+# (A mounted grok turn needs a containment backend to get an isolated GROK_HOME; with the uncontained override it has none, so the
+# grok arm is exercised against the real sandbox in the box group.)
+
+section "helpers/method_guidance.py: verify the staged bundle against its snapshot record"
+MG="$REPO/helpers/method_guidance.py"; MGD="$WORK/mg"; mkdir -p "$MGD"
+printf '# Guidance\n' > "$MGD/g.md"; MG_SHA="$(shasum -a 256 "$MGD/g.md" | cut -c1-64)"
+mg_rec() {  # <python expression over d> -> writes $MGD/s.json from a valid record
+  python3 - "$MGD/s.json" "$MG_SHA" "${1:-pass}" <<'PY'
+import json, sys
+d = {"format": 1, "revision": "0123456789abcdef0123456789abcdef01234567", "guidance_file": "method-guidance.md", "guidance_sha256": sys.argv[2]}
+exec(sys.argv[3]); json.dump(d, open(sys.argv[1], "w"))
+PY
+}
+mg_try() { python3 "$MG" verify --record "$MGD/s.json" --staged "${1:-$MGD/g.md}" 2>&1; echo "rc=$?"; }
+mg_rec; MG_OUT="$(mg_try)"
+[ "$MG_OUT" = "$(printf '0123456789abcdef0123456789abcdef01234567\t%s\nrc=0' "$MG_SHA")" ] \
+  && ok "a matching bundle verifies: exit 0 and the revision and digest, tab separated" || fail "valid bundle: $MG_OUT"
+MG_BAD=""
+mg_case() {  # <code> <python mutation> [staged file]
+  mg_rec "$2"; local got; got="$(mg_try "${3:-}")"
+  [ "$got" = "$(printf '%s\nrc=1' "$1")" ] || MG_BAD="$MG_BAD [$1: $got]"
+}
+mg_case format 'd["format"] = 2'
+mg_case format 'd["format"] = True'
+mg_case guidance-file 'd["guidance_file"] = "x.md"'
+mg_case revision 'd["revision"] = "ABCDEF" + "0" * 34'
+mg_case revision 'd["revision"] = 5'
+mg_case digest 'd["guidance_sha256"] = "zz"'
+mg_case hash 'd["guidance_sha256"] = "0" * 64'
+mg_case format 'd.clear()'
+printf '[1]' > "$MGD/s.json"; MG_GOT="$(mg_try)"; [ "$MG_GOT" = "$(printf 'record\nrc=1')" ] || MG_BAD="$MG_BAD [array record: $MG_GOT]"
+rm -f "$MGD/s.json"; MG_GOT="$(mg_try)"; [ "$MG_GOT" = "$(printf 'record\nrc=1')" ] || MG_BAD="$MG_BAD [missing record: $MG_GOT]"
+mg_rec; MG_GOT="$(mg_try "$MGD/nope.md")"; [ "$MG_GOT" = "$(printf 'staged\nrc=1')" ] || MG_BAD="$MG_BAD [missing staged: $MG_GOT]"
+ln -s "$MGD/g.md" "$MGD/link.md"; MG_GOT="$(mg_try "$MGD/link.md")"; [ "$MG_GOT" = "$(printf 'staged\nrc=1')" ] || MG_BAD="$MG_BAD [symlink staged: $MG_GOT]"
+: > "$MGD/e.md"; MG_GOT="$(mg_try "$MGD/e.md")"; [ "$MG_GOT" = "$(printf 'empty\nrc=1')" ] || MG_BAD="$MG_BAD [empty: $MG_GOT]"
+head -c 65537 /dev/zero | tr '\0' x > "$MGD/big.md"; MG_GOT="$(mg_try "$MGD/big.md")"; [ "$MG_GOT" = "$(printf 'oversize\nrc=1')" ] || MG_BAD="$MG_BAD [oversize: $MG_GOT]"
+head -c 65536 /dev/zero | tr '\0' x > "$MGD/max.md"
+python3 - "$MGD/s.json" "$(shasum -a 256 "$MGD/max.md" | cut -c1-64)" <<'PY'
+import json, sys
+json.dump({"format": 1, "revision": "0" * 40, "guidance_file": "method-guidance.md", "guidance_sha256": sys.argv[2]}, open(sys.argv[1], "w"))
+PY
+MG_GOT="$(mg_try "$MGD/max.md")"; [ "$MG_GOT" = "$(printf '%s\t%s\nrc=0' "$(printf '0%.0s' $(seq 40))" "$(shasum -a 256 "$MGD/max.md" | cut -c1-64)")" ] || MG_BAD="$MG_BAD [exactly 64 KiB: $MG_GOT]"
+[ -z "$MG_BAD" ] && ok "every reason code is reachable: format (incl. boolean), guidance-file, revision, digest, hash, record, staged (missing and symlink), empty, oversize; exactly 64 KiB is accepted" || fail "verifier cases:$MG_BAD"

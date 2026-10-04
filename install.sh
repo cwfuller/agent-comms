@@ -51,7 +51,7 @@ AGENT_COMMS_HOME="${AGENT_COMMS_HOME:-$HOME/.agent-comms}"
 # the rest, which is harmless for a table nothing executes. credential-env.tsv is DATA the same way
 # (the credential scrub set and each adapter's auth-route rows access_profiles.py reads as a sibling);
 # access_profiles.py and leg_binding.py are the exact-per-leg-binding helpers (`panel dispatch --bindings`).
-HELPERS="comms.sh runphase.sh acp.sh settings.sh setup.sh worktree.sh route.sh route_backend.py route_shadow.py route_review.py route_policy.py route_eval.py route_eval_seed.json policy-map.tsv verify.sh box.sh leg_usage.py agent_profiles.py opencode_adapter.py profile_io.py launch.py access_profiles.py leg_binding.py credential-env.tsv"
+HELPERS="comms.sh runphase.sh acp.sh settings.sh setup.sh worktree.sh route.sh route_backend.py route_shadow.py route_review.py route_policy.py route_eval.py route_eval_seed.json policy-map.tsv verify.sh box.sh leg_usage.py agent_profiles.py opencode_adapter.py profile_io.py launch.py access_profiles.py leg_binding.py credential-env.tsv method_guidance.py"
 # The reviewer's REVIEW BAR, installed as data. It used to be read out of the codex self-send
 # skills at runtime, which made "delete the self-send templates" silently equal to "delete the
 # reviewer's standard". Installed from docs/loopspec/fragments/ — their canonical home, and what

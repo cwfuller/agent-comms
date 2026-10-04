@@ -909,8 +909,8 @@ the operator surface:
 
 Each turn is recorded under `.comms/logs/<message_id>.<epoch>.<pid>/`: `prompt.md`
 (what the peer was told), `events.ndjson` (the full JSONL event stream), `result.json`
-(provider, agent, status, exit code, session id, the leg's resolved `route`, and its `usage` /
-`rate_limits` — below), `usage-snapshot.json` (the provider-record state the usage window opened on), `pid`,
+(provider, agent, status, exit code, session id, the leg's resolved `route`, its `usage` /
+`rate_limits` — below — and its staged `guidance`), `usage-snapshot.json` (the provider-record state the usage window opened on), `pid`,
 `runner.log`, `policy.tsv` (the per-turn policy record resolved BEFORE the session is
 launched; hash-checked before every consumer) and `turn.tsv` (identity, then
 `route_decision`, `policy_*`, `requested_model/effort` at resolution time,
@@ -954,6 +954,25 @@ the run is the one under `logs/<in-reply-to>.*` whose `reply.md` carries the rep
 serialised by a `rounds.tsv.lock` directory, since upgrading an old ledger's header rewrites it. A
 held lock is never broken automatically — its age cannot prove the holder died — so after ~10s
 `round-note` refuses and names it; remove it by hand only when no `round-note` is running.
+
+**Shared guidance for mounted reviewer legs — `COMMS_METHOD_GUIDANCE_DIR`.** A mounted codex or grok leg runs in an
+isolated home that holds only a credential and a generated config, so it reads none of the operator's global
+instructions. Set `COMMS_METHOD_GUIDANCE_DIR` in `~/.agent-comms/settings` (user-only; a project `.comms/settings` is
+refused with the usual message, because a project file must not choose text injected into reviewer instructions) to a
+directory written by the guidance repository's `guidance.py snapshot`: `method-guidance.md` plus `snapshot.json`
+(`format` 1, `guidance_file`, a 40-hex `revision`, `guidance_sha256`). Each mounted codex or grok turn stages that file as
+`AGENTS.md` in the isolated home (`CODEX_HOME` / `GROK_HOME`, mode 600, written fresh and renamed into place like
+`auth.json`), then `helpers/method_guidance.py verify` hashes the STAGED bytes against `guidance_sha256`. Both providers
+read the mounted tree's own `AGENTS.md` files after the global one, so the reviewed project's instructions keep their
+precedence. A missing, unreadable or unverifiable bundle is recorded, never fatal: nothing is staged and a copy left in
+the persisted home by an earlier round is removed. Only an `AGENTS.md` that cannot be placed or removed refuses the
+turn (a stale copy would otherwise keep steering reviews). Each turn appends `guidance<TAB>status<TAB>revision<TAB>sha256`
+to `turn.tsv` (read back by `await` for a runner that died), a `guidance: <status>` line to `runner.log`, and sets the
+`result.json` key `guidance`: `{"status", "revision", "sha256"}` with `status` `staged`, `absent` (setting unset, directory
+or either file missing or not a regular file) or `rejected:<code>` (`record`, `format`, `guidance-file`, `revision`,
+`digest`, `staged`, `empty`, `oversize` over 64 KiB, `hash`), revision and digest null unless staged; `null` for every leg
+that is not a mounted codex or grok turn (unmounted turns, claude, gemini, OpenCode and custom profiles are not staged).
+`comms.sh setup --show` lists the setting. The hash proves integrity against the sibling record, not authenticity.
 
 Thread state mirrors the outcome (`spawned` →
 `completed`/`failed`/`timeout`), records `last_run_dir` (the `stalled` watchdog's pid

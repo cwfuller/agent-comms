@@ -1407,6 +1407,15 @@ N=0; for k in ACPX_BIN COMMS_RUNPHASE_ALLOW_UNCONTAINED COMMS_ACP_CODEX_PATH COM
 [ "$N" = 5 ] && printf '%s\n' "$PSHOW" | grep -qE '^  COMMS_RUNPHASE_TIMEOUT_SECS +77 ' \
   && printf '%s' "$PSHOW" | grep -q "honoured only in" && printf '%s\n' "$PSHOW0" | grep -qE '^  COMMS_ROUTE +0 ' \
   && ok "a project file cannot set a binary, containment or turn routing on; it can tune time and opt out" || fail "project settings trust ($N/5)"
+# COMMS_METHOD_GUIDANCE_DIR chooses text staged into reviewer instructions: user file only, listed by --show.
+printf 'COMMS_METHOD_GUIDANCE_DIR=/tmp/evil-guidance\n' > "$ST_PROJ/.comms/settings"
+PSHOW="$(st -- "$COMMS" setup --show 2>&1)"; rm -f "$ST_PROJ/.comms/settings"
+printf '%s\n' "$PSHOW" | grep -qE '^  COMMS_METHOD_GUIDANCE_DIR +\(unset\)' && printf '%s' "$PSHOW" | grep -q "'COMMS_METHOD_GUIDANCE_DIR' is honoured only in" \
+  && ok "a project .comms/settings cannot choose the guidance bundle (refused with the usual message)" || fail "project guidance dir was honoured or the refusal is silent: $(printf '%s' "$PSHOW" | grep GUIDANCE)"
+printf 'COMMS_METHOD_GUIDANCE_DIR=/tmp/user-guidance\n' > "$ST_HOME/settings"
+PSHOW="$(st -- "$COMMS" setup --show 2>&1)"; : > "$ST_HOME/settings"
+printf '%s\n' "$PSHOW" | grep -qE '^  COMMS_METHOD_GUIDANCE_DIR +/tmp/user-guidance +' \
+  && ok "COMMS_METHOD_GUIDANCE_DIR is honoured from the user settings file and listed by setup --show" || fail "user guidance dir not honoured: $(printf '%s' "$PSHOW" | grep GUIDANCE)"
 # PROVENANCE: an environment override is attributed to the environment, not to a file holding the key.
 printf 'COMMS_REVIEW_ROUTE=1\n' > "$ST_HOME/settings"
 PSHOW="$(st COMMS_REVIEW_ROUTE=0 -- "$COMMS" setup --show 2>&1)"

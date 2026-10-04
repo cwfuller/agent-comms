@@ -24,7 +24,7 @@ compose: cross-severity corroboration	13
 loopspec: conformance fixtures	1
 multi-agent: registry contract	15
 multi-agent: sender enforcement + grok inbox round-trip	2
-multi-agent: grok stub + full-arc runphase legs	102
+multi-agent: grok stub + full-arc runphase legs	106
 runphase: the parent-brokered prompt is provider-neutral	20
 multi-agent: grok arg refusals	13
 multi-agent: archive-owner authority (comms.sh send)	5
@@ -86,7 +86,7 @@ clean mounts --thread: remove ONE retired thread's proven review mounts	85
 any-agent driver surface	40
 comms.sh v2: clean (guarded, dry-run default) — runs last, deletes fixture	5
 harness: complete parallel worker reports	1
-comms.sh: settings and setup	28
+comms.sh: settings and setup	30
 route.sh: implementer decision records	11
 review identities: registry, roles and send	92
 gemini: a supported provider with a driver, a review twin and one reviewer per provider	19
@@ -112,7 +112,7 @@ worktree new: pins the workspace name for the new worktree	11
 profiles: parser, launch and evidence contracts	34
 profiles: registry and family integration	9
 gemini: the ACP profile, runtime, doctor and policy map (PATH-stubbed gemini)	58
-gemini: a mounted review turn (stub acpx driving a stub gemini over real ACP)	33
+gemini: a mounted review turn (stub acpx driving a stub gemini over real ACP)	34
 box.sh: containment backend selection, prerequisites and diagnostics (host-independent)	15
 box.sh: the staged grok login and config carry only what a review needs	6
 runphase: a mounted grok turn is refused without a backend, and a broken backend is not overridable	3
@@ -127,7 +127,9 @@ binding: contract tests (python: scrub set, environment, stamp, quota, auth-rout
 binding: exact model, effort and access reach the provider (end to end, stub providers)	8
 binding: result.json carries binding, route and quota (and the leg's environment held only its own credential)	16
 binding: authentication-route selection, a stale login, and conflicting saved state (gemini, codex)	11
-binding: a configuration change after dispatch makes the leg refuse itself before any provider launch	17
+binding: a configuration change after dispatch makes the leg refuse itself before any provider launch	18
 binding: helper-stamped, never typed (leg_binding), env pins, and no classifier in bound mode	7
 binding: quota states from real turns (observed, unavailable, refused with no manufactured reset)	5
 binding: an unbound dispatch is unchanged, and its result.json marks a legacy leg	3
+reviewer guidance: the shared bundle is staged into a mounted codex home	11
+helpers/method_guidance.py: verify the staged bundle against its snapshot record	2

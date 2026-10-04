@@ -232,6 +232,7 @@ echo "GROK_HOME=$GROK_HOME"
 echo "HOME=$HOME"
 echo "auth=$(cat "$GROK_HOME/auth.json" 2>&1)"
 echo "config<<$(cat "$GROK_HOME/config.toml" 2>&1)>>"
+echo "agents<<$(cat "$GROK_HOME/AGENTS.md" 2>&1)>>"
 echo "env=$(env | cut -d= -f1 | sort | tr '\n' ' ')"
 : > /private/tmp/box-test-escape.$$ 2>/dev/null && echo "ESCAPED-TMP"
 : > "$PWD/box-test-escape" 2>/dev/null && echo "ESCAPED-TREE"
@@ -306,7 +307,13 @@ BXPY
   # The mount store is placed INSIDE the denied home, as the default one is (~/.local/state/agent-comms): the
   # allow-backs for the tree, the isolated grok home and the scratch dir must win over the home-wide read deny.
   BX_HM="$BXH/mbase"; mkdir -p "$BX_HM"; BX_HM="$(cd "$BX_HM" && pwd -P)"
-  BX_T="$(bx_turn live "$BXB:$PATH" COMMS_MOUNT_BASE="$BX_HM" AX_LAUNCH_GROK=1 AX_GROK_OUT="$BX_GOUT" AX_CWD_LOG="$BX_ALOG" GITHUB_TOKEN=leak)"
+  BX_GB="$BX/guidance-bundle"; mkdir -p "$BX_GB"; printf '# box test guidance\n' > "$BX_GB/method-guidance.md"
+  python3 - "$BX_GB" <<'BXGPY'
+import hashlib, json, sys
+d = sys.argv[1]
+json.dump({"format": 1, "revision": "0" * 40, "guidance_file": "method-guidance.md", "guidance_sha256": hashlib.sha256(open(d + "/method-guidance.md", "rb").read()).hexdigest()}, open(d + "/snapshot.json", "w"))
+BXGPY
+  BX_T="$(bx_turn live "$BXB:$PATH" COMMS_MOUNT_BASE="$BX_HM" COMMS_METHOD_GUIDANCE_DIR="$BX_GB" AX_LAUNCH_GROK=1 AX_GROK_OUT="$BX_GOUT" AX_CWD_LOG="$BX_ALOG" GITHUB_TOKEN=leak)"
   BX_SAW="$(cat "$BX_GOUT")"
   BX_BAD=""
   [ "$(bx_field "$BX_T" status)" = completed ] || BX_BAD="$BX_BAD [status=$(bx_field "$BX_T" status) note=$(bx_field "$BX_T" note)]"
@@ -314,10 +321,12 @@ BXPY
   grep -q -- '--no-terminal --no-fs' "$BX_ALOG" || BX_BAD="$BX_BAD [acpx was not launched with --no-terminal --no-fs]"
   [[ "$BX_SAW" == *'auth={"https://auth.x.ai::id": {"key": "ACCESS-TOKEN"'* && "$BX_SAW" != *REFRESH* ]] || BX_BAD="$BX_BAD [the staged login is wrong]"
   [[ "$BX_SAW" == *'default = "grok-4.7"'* && "$BX_SAW" != *always-approve* ]] || BX_BAD="$BX_BAD [the staged config is wrong]"
+  [[ "$BX_SAW" == *'agents<<# box test guidance'*'>>'* ]] || BX_BAD="$BX_BAD [the staged guidance is missing inside the sandbox]"
+  grep -qx "guidance: staged revision=$(printf '0%.0s' $(seq 40)) sha256=$(shasum -a 256 "$BX_GB/method-guidance.md" | cut -c1-64)" "$BX_T/runner.log" || BX_BAD="$BX_BAD [no guidance record]"
   [[ "$BX_SAW" != *GITHUB_TOKEN* && "$BX_SAW" != *ESCAPED* ]] || BX_BAD="$BX_BAD [the child saw a token or escaped: $BX_SAW]"
   [[ "$BX_SAW" == *"HOME=$BX_HM/"*"/box/scratch"* ]] || BX_BAD="$BX_BAD [HOME was not the per-mount scratch]"
   [ -z "$(ls /private/tmp/box-test-escape.* 2>/dev/null)" ] || BX_BAD="$BX_BAD [a file escaped to /tmp]"
-  [ -z "$BX_BAD" ] && ok "a mounted grok turn completes through the foreground runner under the real sandbox with the isolated login, config, environment and acpx flags" \
+  [ -z "$BX_BAD" ] && ok "a mounted grok turn completes through the foreground runner under the real sandbox with the isolated login, config, staged guidance, environment and acpx flags" \
     || fail "live runner turn:$BX_BAD"
 
   # ---- 5. a green self-check is not enough: the owner must actually have launched the contained grok ----

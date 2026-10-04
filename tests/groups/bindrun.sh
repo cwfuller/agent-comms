@@ -56,9 +56,9 @@ BD_R_CR="$(bd_res codex route)"; BD_R_GR="$(bd_res gemini route)"; BD_R_CJ="$(f=
   && ok "a codex leg whose rollout holds no rate-limit snapshot has quota state UNAVAILABLE (a source exists; nothing was recorded)" || fail "codex quota: $BD_R_CQ"
 [ "$BD_R_GQ" = '{"limit_id":null,"provider":"google","refusal":null,"resets_at":null,"schema":1,"source":null,"state":"unsupported","used_percent":null,"window_minutes":null}' ] \
   && ok "a gemini leg's quota is UNSUPPORTED (its collector has no rate-limit source): never null, never presented as equivalent to codex" || fail "gemini quota: $BD_R_GQ"
-[ "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(list(d)[-3:])' "$BD_R_CJ")" = "['profile', 'binding', 'quota']" ] \
+[ "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(list(d)[-4:])' "$BD_R_CJ")" = "['profile', 'binding', 'quota', 'guidance']" ] \
   && [ "$(for k in provider agent status reason exit_code session_id message_file run_dir started_at ended_at note; do printf '%s' "$BD_R_CJ" | sed -n 's/.*"'"$k"'": "\([^"]*\)".*/\1/p' | wc -l | tr -d ' '; done | sort -u | tr '\n' ' ')" = "1 " ] \
-  && ok "binding and quota are appended after the existing keys, and every string field json_get reads still matches exactly one line" || fail "result.json shape: $BD_R_CJ"
+  && ok "binding, quota and guidance are appended after the existing keys, and every string field json_get reads still matches exactly one line" || fail "result.json shape: $BD_R_CJ"
 # no secret reached a durable record: result.json, runner.log, turn.tsv, the leg files, the coordinator log, the inbox.
 { ! grep -rl 'canary-' "$BD_REPO/.comms" >/dev/null 2>&1; } && ok "no credential value appears anywhere under .comms (results, logs, events, legs, replies)" || fail "a canary leaked into: $(grep -rl 'canary-' "$BD_REPO/.comms" | head -3 | tr '\n' ' ')"
 
@@ -222,6 +222,10 @@ bd_crash crash-ran 'bind_state\tran\nbind_auth\tobserved\nobserved_effort\tlow\n
 { [ "$(bd_dir_res "$BD/crash-ran" binding status)" = ran ] && [ "$(bd_dir_res "$BD/crash-ran" binding auth_evidence)" = observed ] \
   && [ "$(bd_dir_res "$BD/crash-ran" binding observed model)" = gpt-6-luna ] && [ "$(bd_dir_res "$BD/crash-ran" binding observed effort)" = low ]; } \
   && ok "a bound runner killed after launch: the synthesized result keeps what the run had established (ran, observed pair, auth evidence)" || fail "late crash: $(tr '\n' ' ' < "$BD/crash-ran/result.json" | cut -c1-600)"
+bd_crash crash-guide 'guidance\tstaged\t0123456789abcdef0123456789abcdef01234567\t'"$(printf 'a%.0s' $(seq 64))"'\n'
+{ [ "$(bd_dir_res "$BD/crash-guide" guidance status)" = staged ] && [ "$(bd_dir_res "$BD/crash-guide" guidance revision)" = 0123456789abcdef0123456789abcdef01234567 ] \
+  && [ "$(bd_dir_res "$BD/crash-guide" guidance sha256)" = "$(printf 'a%.0s' $(seq 64))" ] && [ "$(bd_dir_res "$BD/crash-early" guidance)" = "<null>" ]; } \
+  && ok "a runner killed after staging guidance: the synthesized result keeps the staged status, revision and digest (null when nothing was recorded)" || fail "guidance crash: $(tr '\n' ' ' < "$BD/crash-guide/result.json" | cut -c1-600)"
 bd_reset
 # NO FALLBACK AND NO DROP: a refused bound leg is recorded as a failed turn with its own reason, which compose --degrade does
 # not treat as droppable (its evidence is no-output | policy-unapplied only), so the leg stays an unanswered leg for the

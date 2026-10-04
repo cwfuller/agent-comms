@@ -219,13 +219,15 @@ Files are `KEY=value` lines. They are parsed, never executed, and only known key
 `COMMS_REVIEW_ROUTE`, `COMMS_ROUTE`, `COMMS_ROUTE_BACKEND`, `COMMS_ROUTE_MODEL`,
 `COMMS_ROUTE_TIMEOUT_SECS`, `COMMS_ACP_CODEX_PATH`, `COMMS_ACP_CODEX_MODEL`,
 `COMMS_ACP_CODEX_EFFORT`, `COMMS_ACP_GEMINI_MODEL`, `COMMS_ACP_GEMINI_EFFORT`, `COMMS_ACP_CANARY_SECS`, `COMMS_ACP_RUNTIME_PROBE_SECS`,
-`COMMS_RUNPHASE_TIMEOUT_SECS`, `COMMS_RUNPHASE_ALLOW_UNCONTAINED`, `ACPX_BIN`.
+`COMMS_RUNPHASE_TIMEOUT_SECS`, `COMMS_RUNPHASE_ALLOW_UNCONTAINED`, `ACPX_BIN`, `COMMS_METHOD_GUIDANCE_DIR`.
 
 A project file is repository content, not your consent, so it may only tune depth and time
 (`COMMS_REVIEW_ROUTE`, `COMMS_ACP_CODEX_MODEL`/`_EFFORT`, `COMMS_ACP_GEMINI_MODEL`/`_EFFORT`, the `*_SECS` timeouts) and opt out
 with `COMMS_ROUTE=0`. Anything that runs a binary (`ACPX_BIN`, `COMMS_ACP_CODEX_PATH`), lifts
 containment (`COMMS_RUNPHASE_ALLOW_UNCONTAINED`) or turns classification on
-(`COMMS_ROUTE_BACKEND`, `COMMS_ROUTE=1`, `COMMS_ROUTE_MODEL`) is honoured only from the user file.
+(`COMMS_ROUTE_BACKEND`, `COMMS_ROUTE=1`, `COMMS_ROUTE_MODEL`) is honoured only from the user file, and so is
+`COMMS_METHOD_GUIDANCE_DIR`, the directory of a shared-guidance bundle staged into mounted codex and grok reviewer homes
+(docs/COMMANDS.md, `runphase.sh`).
 
 ```bash
 comms.sh setup                 # interactive

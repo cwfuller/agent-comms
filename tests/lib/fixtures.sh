@@ -255,6 +255,21 @@ fi
 if [ -n "${AX_CFG_LOG:-}" ] && [ -n "${CODEX_HOME:-}" ] && [ -f "$CODEX_HOME/config.toml" ]; then
   cat "$CODEX_HOME/config.toml" >> "$AX_CFG_LOG" 2>/dev/null || true
 fi
+# AX_HOME_LOG records what the isolated provider home (CODEX_HOME, or GROK_HOME) held when the CHILD started: the
+# staged guidance file's kind, mode and bytes (or <absent>), and the credential and config bytes it sits beside. The
+# mount is torn down with the turn, so only the child can say what the provider would have read.
+if [ -n "${AX_HOME_LOG:-}" ] && [ -n "${CODEX_HOME:-}${GROK_HOME:-}" ]; then
+  ax_home="${CODEX_HOME:-$GROK_HOME}"
+  if [ -e "$ax_home/AGENTS.md" ] || [ -L "$ax_home/AGENTS.md" ]; then
+    printf 'agents\t%s\t%s\t%s\n' "$( [ -L "$ax_home/AGENTS.md" ] && echo symlink || echo file )" \
+      "$(stat -f '%Lp' "$ax_home/AGENTS.md" 2>/dev/null || stat -c '%a' "$ax_home/AGENTS.md" 2>/dev/null)" \
+      "$(shasum -a 256 "$ax_home/AGENTS.md" 2>/dev/null | cut -c1-64)" >> "$AX_HOME_LOG" 2>/dev/null || true
+  else
+    printf 'agents\t<absent>\n' >> "$AX_HOME_LOG" 2>/dev/null || true
+  fi
+  printf 'auth\t%s\nconfig\t%s\n' "$(shasum -a 256 "$ax_home/auth.json" 2>/dev/null | cut -c1-64)" \
+    "$(shasum -a 256 "$ax_home/config.toml" 2>/dev/null | cut -c1-64)" >> "$AX_HOME_LOG" 2>/dev/null || true
+fi
 # AX_ENV_LOG records the CODEX_PATH the CHILD inherited (the runtime the adapter would launch).
 if [ -n "${AX_ENV_LOG:-}" ]; then
   printf 'CODEX_PATH=%s\n' "${CODEX_PATH-<unset>}" >> "$AX_ENV_LOG" 2>/dev/null || true

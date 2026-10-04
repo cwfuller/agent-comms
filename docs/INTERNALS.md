@@ -23,6 +23,7 @@ helpers/
                                gate evaluator both list and retire use
   runphase.sh                  peer-turn runner — ACP for every provider, direct headless for grok
                                only (COMMS_DELIVERY=headless): spawn → observe → record
+  method_guidance.py           verifies the staged shared-guidance bundle against its snapshot record
 docs/loopspec/                 the portable review-loop kernel (spec, schemas, fixtures,
                                check.sh, prompt fragments) — vendored by other consumers
 templates/
@@ -744,6 +745,39 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
 
 Not here: choosing models, tiers, efforts, routes, budgets or fallbacks; a model-to-tier mapping or a default (every model id comes from the caller);
 making `claude` or `grok` bindable; verifying a remote bill; an OS-level network or credential sandbox.
+
+## What a reviewer leg is told: shared guidance, lenses and the contract guard
+
+Three prompt-side changes, none of which widens what a leg can do (task 246).
+
+- **Staged guidance (mounted codex and grok only).** A mounted leg's home is parent-built and holds a credential plus a
+  generated config, so the operator's global instruction file never reached it. `stage_method_guidance` (defined beside
+  `_iso_place`, called once per provider arm) stages the bundle in `COMMS_METHOD_GUIDANCE_DIR` as the home's `AGENTS.md`
+  and `helpers/method_guidance.py verify` hashes the STAGED copy against the sibling `snapshot.json`, so the verified
+  bytes are the read bytes (no check-then-copy window). The setting is user-only: a project file is repository content
+  and must not choose text injected into reviewer instructions. Absent and rejected bundles are recorded
+  (`guidance` in `turn.tsv`, `runner.log`, `result.json`), not fatal, because missing guidance must not stop a review;
+  an unplaceable or unremovable `AGENTS.md` refuses the turn, because then the home is not what the log says. The home
+  persists across rounds, so any turn that does not stage a copy removes an earlier one with `auth.json`'s fail-closed
+  rule. **Precedence** needs no code: both providers read the global file first and the mounted tree's `AGENTS.md`
+  files after it, so the reviewed project's instructions win. The bundle is written only under `$mount_kdir/home`,
+  so `mount_tree_matches` still verifies `tree/` alone.
+- **Not staged**, deliberately: claude (it already loads `~/.claude/CLAUDE.md`, and it has no home to stage into),
+  gemini (a `GEMINI.md` analogue is a recorded follow-up in ROADMAP), OpenCode and custom profiles (their own
+  isolation, no verified instruction path), and every unmounted turn (it already runs on the operator's live home).
+  These report `guidance: null`.
+- **Residual: warm sessions.** A codex or grok session that survives across rounds may have read `AGENTS.md` when it
+  started, so a bundle replaced between rounds can reach only a new session. The per-turn record names the revision
+  that was STAGED, not what the session loaded.
+- **Lenses.** `REVIEW_LENSES` (one constant, under 600 characters) is appended to the implement-phase focus only: the
+  plan phase and the generic fallback have no diff to trigger on. The lenses say where to look; what blocks is still
+  decided only by the shared verdict-discipline fragment, so there is no numeric threshold, no new severity and no
+  second source of severity rules, and a pre-existing issue stays Advisory.
+- **Contract guard.** `REVIEW_CONTRACT_GUARD` is one line placed after the opening read-only paragraph in both the
+  review and the consult prompt: the prompt's reply format and read-only contract override any skill, global guidance
+  file or other instruction the leg loads. It exists because a Codex leg once auto-loaded a review skill that imposed
+  its own output format and todo-file writes. It is a contract, not a cage: containment is still the mode and kernel
+  boundary. It also protects the first line (`VERDICT:`) from the staged guidance's own communication rules.
 
 ## Delivery mechanics
 

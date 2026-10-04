@@ -244,6 +244,19 @@ mkdir -p "$GM/home/.acpx/sessions" "$GM/home/.acpx/queues" "$GM/home/.gemini"; :
 # things a review turn must NOT inherit (a different model, an MCP server).
 printf '{"security":{"auth":{"selectedType":"gemini-api-key"}},"model":{"name":"operator-model"},"mcpServers":{"operator-server":{"command":"x"}}}\n' > "$GM/home/.gemini/settings.json"
 printf '{"refresh_token":"operator-oauth-token"}\n' > "$GM/home/.gemini/oauth_creds.json"
+
+# ---- shared guidance is staged for codex and grok only: a gemini leg gets no AGENTS.md and reports guidance null ----
+GM_GB="$GM/guidance-bundle"; mkdir -p "$GM_GB"; printf '# gemini guidance probe\n' > "$GM_GB/method-guidance.md"
+python3 - "$GM_GB" <<'GMPY'
+import hashlib, json, sys
+d = sys.argv[1]
+json.dump({"format": 1, "revision": "0" * 40, "guidance_file": "method-guidance.md", "guidance_sha256": hashlib.sha256(open(d + "/method-guidance.md", "rb").read()).hexdigest()}, open(d + "/snapshot.json", "w"))
+GMPY
+GM_DG="$(gm_turn gm-thread tg "$GM_A1" COMMS_METHOD_GUIDANCE_DIR="$GM_GB")"
+{ [ "$(gm_res "$GM_DG" status)" = completed ] && [ "$(gm_res "$GM_DG" guidance)" = '<null>' ] && ! grep -q '^guidance' "$GM_DG/turn.tsv" \
+  && ! grep -q '^guidance' "$GM_DG/runner.log"; } \
+  && ok "a mounted gemini leg stages no shared guidance even with a valid bundle configured, and reports guidance null" \
+  || fail "gemini guidance: status=$(gm_res "$GM_DG" status) guidance=$(gm_res "$GM_DG" guidance)"
 printf '{"active":"operator@example.test"}\n' > "$GM/home/.gemini/google_accounts.json"
 GM_OP_SUM="$(cat "$GM/home/.gemini/settings.json" "$GM/home/.gemini/oauth_creds.json" | shasum | cut -d' ' -f1)"
 printf 'agents = claude codex grok gemini\ndefault-target = codex\n' > "$MA_FIX/.comms/config"

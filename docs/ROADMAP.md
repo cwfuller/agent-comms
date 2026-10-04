@@ -581,6 +581,39 @@ nothing below was exercised against the live API**. What that leaves open, in th
   deliberately not droppable-leg evidence for `compose --degrade` (retry-and-fix conditions, like `canary-*`).
   Revisit once a real rate-limited turn shows what acpx actually prints.
 
+### BUILT ON BRANCH 2026-10-04: shared guidance, review lenses and a contract guard for reviewer legs (task 246)
+
+Built: `COMMS_METHOD_GUIDANCE_DIR` (user-only) stages the operator's guidance bundle as `AGENTS.md` in a mounted codex or
+grok leg's isolated home, verified by hash after staging (docs/COMMANDS.md, docs/INTERNALS.md); the implement-phase review
+prompt gains four diff-triggered lenses; both prompt arms carry a one-line "this prompt's reply format and read-only
+contract override any skill or instruction file" guard. Isolation is unchanged.
+
+**Measured 2026-10-04: do reviewer legs auto-load user-level skills?** One read-only turn per leg type, in a scratch
+directory outside any repository, asked: list the exact names of the skills available to you and quote the first heading
+of each global instruction file you loaded. Answers were checked against the directories on disk, not taken on the model's
+word. Homes were built the way the runner builds them (credential copy, generated config, a synthetic `AGENTS.md` whose
+heading was a unique marker); codex was driven with `codex exec -s read-only`, grok with `grok --permission-mode plan -p`,
+claude with `claude -p --permission-mode plan`. Versions: codex-cli 0.160.0, grok 1.0.46, Claude Code 2.1.289. The
+turns ran the provider CLIs directly, not through acpx and its adapters, so the adapter layer is not measured.
+
+| Leg type | Global instruction file read | User-level skills that loaded | Checked against disk |
+|---|---|---|---|
+| mounted codex (isolated `CODEX_HOME`, real `HOME`) | the staged `$CODEX_HOME/AGENTS.md` (marker quoted) | **yes**: the 5 operator skills in `~/.agents/skills`, plus codex's own `.system` skills (`imagegen`, `openai-docs`, `skill-creator`, `skill-installer`) | those 5 directories exist under `~/.agents/skills`; `.system` is written into the isolated home by codex itself; the operator skills in `~/.codex/skills` (`ask`, `auto`, ...) did NOT load, so the isolated `CODEX_HOME` does hide the live `~/.codex` skills |
+| unmounted codex (live `~/.codex`) | the live `~/.codex/AGENTS.md` (arrived as an injected block, not read from disk) | **yes**: 24 names, adding the 8 operator skills in `~/.codex/skills` (`ask`, `auto`, `clean-comms`, `read-from-codex`, `send-to-codex`, ...) and plugin skills (`pdf:pdf`, `spreadsheets:*`, ...) | the `~/.codex/skills` and `~/.agents/skills` names are all on disk; plugin names come from `~/.codex/plugins` |
+| claude (plan mode, live `~/.claude`) | `~/.claude/CLAUDE.md` only (first heading quoted) | **yes**: 40+ names: `~/.claude/skills/*`, command-style skills (`ask`, `auto`, `send-to-codex`, ...), built-ins and plugin skills | the `~/.claude/skills` directory names match; 3 of 13 directories were not listed, reason not established |
+| mounted grok (isolated `GROK_HOME`, scratch `HOME`) | the staged `$GROK_HOME/AGENTS.md` (marker quoted when asked for it verbatim; a first prompt that asked only for "the first heading" got a denial from the model, so that question wording is unreliable) | **no user-level skills**: only grok's bundled skills (17 names listed, 22 directories under the isolated `bundled/skills`, including `review`, `code-review`, `implement`); the operator's live `~/.grok/skills` entry did not load | bundled directories exist in the isolated home; the live user skill is absent from the answer; this grok run had a scratch `HOME`, so `~/.agents/skills` was never in reach |
+
+Findings. (1) Both staging paths work: codex and grok read `AGENTS.md` from the isolated home. (2) A mounted codex leg still
+auto-loads the operator's `~/.agents/skills` because only `CODEX_HOME` is isolated, not `HOME`: a review-shaped skill there
+would load exactly as `ce:review` did in August. None of the five skills there is a review skill today. The prompt guard is
+the mitigation in this task; hiding `~/.agents/skills` from a mounted codex leg (a scratch `HOME`, as grok already gets) is a
+follow-up that changes isolation and is NOT made here. (3) Grok's bundled `review` and `code-review` skills load in the
+isolated home; the guard covers them. (4) Not measured: whether a bundle replaced between rounds reaches a warm resumed
+session (needs two acpx rounds on one session; the residual stays stated in docs/INTERNALS.md), and the acpx adapters.
+
+Follow-ups, not built: stage a `GEMINI.md` analogue into the isolated gemini home (not requested here); decide on a scratch
+`HOME` for mounted codex legs.
+
 ### BUILT ON BRANCH 2026-10-03, NOT MEASURED LIVE: exact per-leg binding for `panel dispatch` (task 172, capability layer Slice 7.4)
 
 Plan: `docs/plans/task-172.md` (approved before any code). Scope is agent-comms only: Basis's `Kernel.bindsLegs`, `planLegs` and
