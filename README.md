@@ -122,6 +122,18 @@ Use [operator-owned agent profiles](docs/AGENT_PROFILES.md) to name ACP agents, 
 models, and group reviewers by model family. OpenCode is an optional contained
 review adapter; the guide includes a Venice/GLM example.
 
+### Exact per-leg binding (for a caller that picks the model)
+
+A caller that has already decided each reviewer's exact **model**, **native effort** and
+**expected access profile** (account, billing class, credential reference) can have
+`panel dispatch --bindings FILE` run exactly that — or refuse the whole dispatch, with a code per
+leg, before any snapshot, event or leg file is written. agent-comms never reclassifies a tier or
+chooses a route in this mode. Each agent has one immutable access profile in
+`~/.agent-comms/access.json`; a bound leg's environment is credential-scrubbed and gets only its
+own route's credential. See [AGENT_PROFILES](docs/AGENT_PROFILES.md#access-profiles-accessjson)
+and [COMMANDS](docs/COMMANDS.md): `review-route capability`, `review-route plan --bindings`,
+`agents --access`. Existing invocations are unchanged.
+
 ## License
 
 MIT

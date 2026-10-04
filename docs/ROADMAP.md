@@ -581,6 +581,43 @@ nothing below was exercised against the live API**. What that leaves open, in th
   deliberately not droppable-leg evidence for `compose --degrade` (retry-and-fix conditions, like `canary-*`).
   Revisit once a real rate-limited turn shows what acpx actually prints.
 
+### BUILT ON BRANCH 2026-10-03, NOT MEASURED LIVE: exact per-leg binding for `panel dispatch` (task 172, capability layer Slice 7.4)
+
+Plan: `docs/plans/task-172.md` (approved before any code). Scope is agent-comms only: Basis's `Kernel.bindsLegs`, `planLegs` and
+`dispatchCommand` (7.5) and reviewer resolution (7.6, #174) consume the contract below and are separate tasks. Nothing depends on the
+native-kernel migration (task 89).
+
+**Built.** `panel dispatch --bindings FILE` runs exactly the caller's model, native effort and expected access profile per leg, or refuses the whole
+dispatch with a stable code per leg before any snapshot, event, index row or leg file is written; `review-route plan --bindings` prints every
+leg's verdict read-only (configured access values, exit 1 on any refusal); `review-route capability` is the negotiation line
+(`leg-bindings=1 route-view=2 leg-metadata=1`) plus per-agent bindability; `agents --access` prints an agent's immutable access profile
+(`access.json`, a new operator-owned file cross-checked against `agents.json`). Each leg carries a helper-stamped `leg_binding` the runner judges AGAIN
+before launching, so a changed configuration makes the leg refuse itself (`reason=binding-mismatch`, never degraded). The bound leg's environment is
+credential-scrubbed (configuration names, patterns, `helpers/credential-env.tsv`) and gets only its own route's credential; the authentication route is applied and
+read back per billing class. `result.json` gains `binding` (route id, access digest, expected vs observed, ref/role/requirement, auth evidence) and a
+versioned `quota` object with explicit `observed|unsupported|unavailable|refused` states. Unbound callers are unchanged (policy records stay version 1;
+bound ones are version 2 and both read). `acp.sh resolve` has a `bound` candidate source and a custom-profile branch (OpenCode/Venice pinned models, no
+map row). No model-to-tier mapping, default or `policy-map.tsv` row was added. Docs: COMMANDS, PROTOCOL, INTERNALS, AGENT_PROFILES, README, the banner.
+Tests: groups `binding` and `bindrun` (hermetic stubs; +209 assertions against the contract at the base commit).
+
+**Honest residuals.**
+
+- Not measured on a live provider; a live trial needs separate authorization. The auth-route evidence in `credential-env.tsv` is local and read-only.
+- **Codex `api` is `unsupported`** (refused as `auth-route-unsupported`): no explicit, readable API-key selection is established for the mounted ACP adapter.
+  Gemini subscription and api, codex subscription, and OpenCode profiles bind. Changing the row needs that evidence first.
+- `claude` and `grok` are `unbindable` (no applied and attested policy); Basis must treat them as ineligible for bound review, which affects which families can gate under 7.6.
+- The scrub is configuration names plus patterns plus a table: an unconfigured credential matching none of them would pass. The harness's own login is governed by the auth rows, not the scrub.
+- Dispatch cannot recall an already-running sibling leg: the guarantee is that no leg starts unless every leg was valid at dispatch and a leg whose configuration changed afterwards refuses itself.
+- The access label and provider are operator-declared; no remote account or bill is verified (`auth_evidence: configured` where nothing could be observed).
+- Quota `refused` exists only where a classifier does (gemini); no provider reports a reset time, so `reset_at` is always null. Provider classification and reset parsing are left to #173/#174.
+
+**Recommendations needing operator decision (recommended choices, not assumed approved).** (1) A separate `access.json` rather than a `version` bump of `agents.json`
+(older installs would refuse an unknown key). (2) Env pins and `COMMS_REVIEW_MAX` refuse in bound mode (nothing silently overrides or is overridden). (3) A
+denylist-plus-table scrub rather than an allowlist environment (stricter, but breaks harnesses that need proxy, certificate or node variables). (4) The whole dispatch
+refuses when any listed leg, optional included, is invalid (agent-comms is not a selector; Basis re-plans). (5) Claude and Grok stay `unbindable` until applied and attested
+policy exists. (6) Gemini and Codex API routes bind only where an explicit authentication selection exists, never on the hope that an environment key beats a saved login.
+(7) Quota `refused` stays limited to providers with a classifier. No model mapping in this change is approved by the ticket; every model id enters from the caller.
+
 ### OPEN: the reviewer containment measurement is stale — re-probe on codex-acp 1.12.0 (2026-09-19, sev 2, acpx surface probe)
 
 **Widened 2026-09-22 (codex, reviewer-routing implement r4, advisory):** the routing binding makes

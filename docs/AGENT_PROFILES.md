@@ -193,3 +193,52 @@ mismatched evidence fails the turn before a verdict is published.
 Adding another contained runtime requires an adapter with its own launch isolation,
 mode controls and model-evidence checks. Registry, mailbox, twins, family voting and
 profile bindings remain shared infrastructure.
+
+## Access profiles (`access.json`)
+
+Exact per-leg binding (`panel dispatch --bindings`, see [COMMANDS](COMMANDS.md#exact-per-leg-binding--panel-dispatch---bindings))
+needs to know which **account, billing class and credential** each agent reaches its model by. That is the agent's ONE
+immutable access profile, kept in a separate operator-owned file, `~/.agent-comms/access.json` (or
+`$AGENT_COMMS_HOME/access.json`). It is a new file rather than new keys in `agents.json` because `agents.json` `version: 1` is read
+strictly: an older install would refuse an unknown key, and a separate file leaves every existing profile valid.
+It is loaded like `agents.json` (a regular file, no symlink, not writable by group or others, never read from the reviewed
+project); a project or a leg cannot override it.
+
+```json
+{ "version": 1,
+  "agents": {
+    "codex":     { "route_id": "codex-subscription", "transport": "acp", "provider": "openai",
+                   "account": "primary", "billing": "subscription", "credential": null },
+    "gemini":    { "route_id": "gemini-api", "transport": "acp", "provider": "google",
+                   "account": "metered", "billing": "api", "credential": "env:GEMINI_METERED_KEY" },
+    "glm":       { "route_id": "venice-api", "transport": "acp", "provider": "venice",
+                   "account": "primary", "billing": "api", "credential": "env:VENICE_API_KEY" } } }
+```
+
+`route_id` is an opaque token the caller compares; `transport` is `acp` or `cli`; `provider` is the HOSTING service, not the model
+family; `billing` is `subscription`, `api`, `local` or `free`; `credential` is a reference (`env:NAME` or `keychain:service`), never a
+value, and is present exactly when billing is `api`. Values are bare tokens. Harness, model and family, native effort, hosting
+service, account, billing class and quota pool stay separate identities: **OpenCode or Venice never implies GLM**. A Venice-hosted
+agent runs whatever its `agents.json` profile pins, several pinned-model agents may share one Venice `route_id`, and a custom
+profile's family comes from the profile.
+
+Rules the loader enforces (the same validation backs `agents --access`, dispatch, `review-route plan --bindings` and the runner's re-check):
+
+- One entry per agent; a second account, billing class, hosting service or credential is a SECOND agent (`codex-api` beside `codex`)
+  with its own entry, never a per-dispatch override.
+- A `-review` twin shares its driver's provider and account, so it carries the same entry or none.
+- For a custom profile, `provider` must equal the profile's `api_provider` when it sets one, and `credential` must equal the profile's single
+  `credentials` reference (`{"env":X}` is `env:X`, `{"keychain_service":S}` is `keychain:S`). A subscription, local or free entry on a profile
+  that declares credentials is refused, and so is an `api` entry on a profile that declares none.
+- Agents sharing a `route_id` must agree on every other access field.
+
+`comms.sh agents --access <agent>` prints the entry and its `access_digest` (sha256 of the canonical entry) read-only; no credential
+value is read. **What this establishes**: the account label and provider are operator-declared. agent-comms checks that the caller's
+expectation matches the declaration, that the credential reference is the one passed to the leg, and, for built-in subscription
+agents, the harness's own local auth mode where it is readable without a secret. It does not prove which account a remote service
+billed; where nothing could be observed `result.json` says `auth_evidence: configured`, never `observed`.
+
+Only an agent a mounted runner supports can be bound: `codex` and `gemini` (model and native effort), and OpenCode custom profiles (their
+pinned model, no effort). `claude`, `grok`, mailbox legs and generic ACP profiles (consult-only) are reported `unbindable` by
+`review-route capability`. A custom profile binds its pinned model only (`model-mismatch` otherwise); no row is added to `policy-map.tsv`.
+

@@ -1012,3 +1012,31 @@ long as its reply may be composed. An absent request makes that reply invalid;
 records; they are not signatures.
 
 See [AGENT_PROFILES.md](AGENT_PROFILES.md) for the configuration and evidence contract.
+
+## Leg bindings (exact per-leg binding, capability layer Slice 7.4)
+
+`panel dispatch --bindings FILE` is an opt-in mode negotiated with `review-route capability`
+(`leg-binding-capability v1 leg-bindings=1 route-view=2 leg-metadata=1`). A caller that names, per leg, the exact model,
+native effort and expected access profile gets exactly that or a refusal of the WHOLE dispatch before the first
+durable write; the tool never reclassifies a tier, picks a route or falls back. Without `--bindings` nothing here
+applies and no new frontmatter key is written. The file format, the refusal codes, the run-time re-check and
+the `result.json` contract are in [COMMANDS.md](COMMANDS.md#exact-per-leg-binding--panel-dispatch---bindings); the
+configuration is in [AGENT_PROFILES.md](AGENT_PROFILES.md#access-profiles-accessjson).
+
+Protocol facts:
+
+- **Dispatch-time refusal** writes nothing: no snapshot, event, index row, attempts marker or leg file. Exit 1 lists a
+  `refused <agent> <code> <detail>` line per refusal; exit 2 is a malformed file or roster violation. Which legs exist,
+  and which are optional, is the caller's decision, so a refusing optional leg refuses the dispatch too.
+- **Stamped frontmatter** on each leg's `review-request`: `leg_binding` (URL-safe base64 of the canonical binding: expected
+  model, effort, access, the configured `access_digest`, `ref`, `role`, `requirement`) and `leg_binding_digest`. Both are
+  written only by `send --bound-leg` (internal to `panel dispatch`), verified against the leg's own agent before being
+  written, and stripped from any other message, hand-typed values included. The `panel-planned` event note carries
+  `bound=1 ref= role= requirement= route_id=`; no `route_decision` is stamped in this mode.
+- **Run-time re-check**: the runner judges the stamp again before it mounts, launches or prompts. A changed access file,
+  profile, credential reference, login state, pin or map ends the turn `status=failed reason=binding-mismatch` with nothing
+  launched. `binding-mismatch` is a terminal, non-degradable reason: a refused bound leg stays an unanswered leg and compose never
+  drops it from the roster. The honest guarantee: no leg starts unless every leg was valid at dispatch, and a leg whose
+  configuration changed afterwards refuses itself rather than run something else; an already-running sibling is not recalled.
+- **Authority**: pauses, holds, budgets, fallback and retry on another route belong to the caller. This layer only fails closed.
+

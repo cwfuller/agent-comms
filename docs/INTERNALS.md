@@ -698,6 +698,46 @@ runphase: current decision == stamped id? ─▶ acp.sh resolve ─▶ run_dir/p
 Routing is opt-in and off by default; whether it saves cost at acceptable quality is an
 experiment still to run (docs/ROADMAP.md), not a property this mechanism establishes.
 
+## Exact per-leg binding (capability layer, Slice 7.4)
+
+`panel dispatch --bindings` inverts the routing above: the caller names the pair and the access profile, and the tool runs it or
+refuses; it never classifies, picks a route or substitutes. The pieces, each with one owner:
+
+- **`helpers/access_profiles.py`** reads `access.json` (one immutable entry per agent, cross-checked with `agents.json`) and owns the
+  credential scrub. **`helpers/credential-env.tsv`** is the single place to extend it: non-pattern selectors (cloud route switches, base URLs,
+  `AWS_*`) and one `auth` row per (adapter, billing) declaring the consumed variable, the login files and the route selector.
+- **`helpers/leg_binding.py`** is the judgement (`check_leg`), shared by `panel dispatch`, `review-route plan --bindings` and the runner's
+  re-check, so a plan cannot promise what dispatch refuses. It also builds the stamp, the `binding` object and the `quota` object.
+  `comms.sh` runs it in a single call (`leg_bind_check`) over every leg BEFORE `request_tree_check`, the snapshot, any event or any file.
+- **`acp.sh resolve --bound-model/--bound-effort`** is a new candidate source, `bound`: no tier, routed candidate, baseline, pin or
+  `COMMS_REVIEW_MAX`. An equal pin is accepted, a different one is `pin-conflict`. The pair goes through the same `policy_pair_verdict`,
+  disabled-model and runtime checks as a pin, and a failure is a refusal, never the baseline substitution a routed value gets.
+  `--custom-profile` reads an OpenCode profile through `agent_profiles.py` instead of the map. Bound records are policy-record
+  **version 2** (adds `route_id`, `access_digest`, `bound`); unbound resolutions still write version 1 byte for byte, and the readers
+  accept both, each held to its own field set, so records retained across an upgrade still read. The policy digest, hence the warm session name,
+  adds the access digest only for bound records, so two accounts never share a warm session.
+- **Credential scrub.** The scrub set is the UNION of every configured credential name (all of `access.json`, every `agents.json` `credentials` mapping,
+  the table's adapter destinations), the patterns `*_API_KEY`, `*_TOKEN`, `*_AUTH_TOKEN`, `*_SECRET*`, `*_ACCESS_KEY*`, and the table. It is
+  applied as `env -u NAME` on every acpx call of the leg; only the bound `api` credential is then restored, under the variable its adapter
+  reads, exported in the launch subshell (a value is in a process environment, never in an argv, file, event or log). Configuration names come first
+  because an operator-chosen name (`CODEX_METERED_KEY`, `API_KEY`) survives any pattern list. **Residual**: a credential nobody configured that
+  matches no pattern and is not in the table passes through. The harness's own on-disk login is not an environment variable and is governed by the auth rows.
+- **Authentication route.** Passing a key selects nothing by itself. For both billing classes the launcher applies the adapter's `auth` row (gemini: the
+  isolated settings force the OAuth or API-key `selectedType`, the login files are staged only for subscription and a stale copy is cleared
+  for api; codex: the staged `auth.json` and its `auth_mode`) and READS IT BACK before the first acpx call, refusing with `binding-mismatch` on a
+  difference. Only a successful read-back lets `result.json` say `auth_evidence: observed`. A (adapter, billing) pair with no explicit, readable selection is
+  declared `unsupported` in the table and refused (`auth-route-unsupported`) instead of being bound on the hope that an environment key beats a saved login:
+  **codex `api` is such a pair today** (`forced_login_method` and `CODEX_API_KEY` exist in the installed binary, but nothing shows the mounted ACP adapter honours them).
+- **Run-time re-check** (`runphase.sh bound_leg_recheck`) judges the stamp from the stamp alone against the configuration as it is now, before mounting, launching
+  or prompting, and ends a changed leg `reason=binding-mismatch`.
+- **Quota metadata** (`leg-metadata v1`) has an explicit state because `null` cannot distinguish unsupported from missing: `observed` (a provider ledger
+  snapshot; codex), `unsupported` (grok, claude, gemini, custom profiles: no rate-limit source), `unavailable` (supported, nothing in the window), `refused`
+  (the existing classifier named `rate-limited` or `auth-failed`; gemini), with `reset_at` null unless a structured provider record carries one. A reset is
+  never manufactured and no provider is presented as equivalent to another. Capacity policy and fallback are the caller's.
+
+Not here: choosing models, tiers, efforts, routes, budgets or fallbacks; a model-to-tier mapping or a default (every model id comes from the caller);
+making `claude` or `grok` bindable; verifying a remote bill; an OS-level network or credential sandbox.
+
 ## Delivery mechanics
 
 `deliver` hands the message to a runner: ACP for every provider, or a direct headless turn
