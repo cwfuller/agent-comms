@@ -314,7 +314,7 @@ if [ -n "${CODEX_HOME:-}" ] && [ -f "$CODEX_HOME/config.toml" ]; then
 fi
 ax_sname=""; ax_prev=""
 for ax_a in "$@"; do
-  { [ "$ax_prev" = "-s" ] || [ "$ax_prev" = "show" ] || [ "$ax_prev" = "--name" ]; } && ax_sname="$ax_a"
+  { [ "$ax_prev" = "-s" ] || [ "$ax_prev" = "show" ] || [ "$ax_prev" = "close" ] || [ "$ax_prev" = "--name" ]; } && ax_sname="$ax_a"
   ax_prev="$ax_a"
 done
 ax_rec=""
@@ -363,7 +363,16 @@ case " $* " in
         "$ax_id" "${AX_LIE_CWD:-$(pwd -P)}" "$ax_name" "${ax_keep_m:-${ax_cfg_model:-gpt-6-astra}}" "${ax_keep_e:-${ax_cfg_effort:-xhigh}}" \
         > "$HOME/.acpx/sessions/$ax_id.json" 2>/dev/null || true
     fi
-    printf '%s\t(%s)\n' "$ax_id" "${AX_ENSURE_STATE:-created}"; exit 0 ;;
+    # AX_ENSURE_EXISTING=1 reports a resumed session (`existing`, acpx's word) until `sessions close`
+    # retires it; the next ensure then creates a new one, as acpx does (closed records are not found).
+    ax_state="${AX_ENSURE_STATE:-created}"
+    [ -n "${AX_ENSURE_EXISTING:-}" ] && [ ! -f "$HOME/.acpx/sessions/$ax_id.closed" ] && ax_state=existing
+    printf '%s\t(%s)\n' "$ax_id" "$ax_state"; exit 0 ;;
+  *" sessions close "*)
+    # Retire the session: the next ensure creates a fresh one. AX_CLOSE_RC makes the retire fail.
+    [ -n "${AX_CLOSE_RC:-}" ] && { printf 'stub close failure\n' >&2; exit "$AX_CLOSE_RC"; }
+    [ -n "$ax_rec" ] && : > "${ax_rec%.json}.closed"
+    printf 'closed: %s\n' "$ax_sname"; exit 0 ;;
   *" sessions show "*)
     # --format json is a GLOBAL flag and precedes the profile, so it is matched on the whole
     # argv. The policy preflight reads this shape; the text shape below stays for the cwd
@@ -422,6 +431,19 @@ case " $* " in
       timeout) exit 3 ;;
       exit)    printf 'PONG\n'; printf '[acpx] tokens: input=1 output=1 cache_read=0 total=2\n'; exit "${AX_CANARY_EXIT:-5}" ;;
       junk)    printf 'I cannot return just PONG.\n' ;;
+      # A codex session near its context limit compacts for AX_COMPACT_SECS before it answers. Inside the
+      # --timeout it answers PONG late; past it acpx cancels the turn and exits 0 with NO output (the
+      # 2026-10-05 field shape). A session `sessions close` retired has nothing to compact, unless
+      # AX_COMPACT_STICKY keeps every session slow.
+      compact)
+        ax_to=0; ax_p=""; for ax_a in "$@"; do [ "$ax_p" = --timeout ] && ax_to="$ax_a"; ax_p="$ax_a"; done
+        if [ -z "${AX_COMPACT_STICKY:-}" ] && [ -n "$ax_rec" ] && [ -f "${ax_rec%.json}.closed" ]; then
+          printf 'PONG\n'
+        elif [ "${AX_COMPACT_SECS:-0}" -le "$ax_to" ]; then
+          sleep "${AX_COMPACT_SECS:-0}"; printf 'PONG\n'
+        else
+          sleep "$ax_to"; exit 0
+        fi ;;
     esac
     # THE CANARY IS A PROMPT TOO, so real codex records a turn_context for it. Emitting one
     # here means the snapshot has pre-prompt bytes to exclude: an empty or broken snapshot now

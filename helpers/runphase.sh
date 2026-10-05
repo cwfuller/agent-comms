@@ -2727,9 +2727,10 @@ acp_failure_note() {
   esac
 }
 
-# acp_canary <workdir> <profile> <session> <run-dir> <secs> — prove the session's runtime serves its
-# configured model BEFORE the real prompt, by prompting the SAME session through the SAME argv shape
-# (the caller passes the identical option vector). It sets, never echoes, two globals:
+# acp_canary <workdir> <profile> <session> <run-dir> <secs> [budget-setting] — prove the session's runtime
+# serves its configured model BEFORE the real prompt, by prompting the SAME session through the SAME argv
+# shape (the caller passes the identical option vector). [budget-setting] names the setting the budget came
+# from, for the timeout note (default COMMS_ACP_CANARY_SECS). It sets, never echoes, two globals:
 #   ACP_CANARY_REASON  — "" on pass, else runtime-incompatible|canary-timeout|canary-exit-N|
 #                        canary-unexpected|reply-unverifiable|rate-limited|auth-failed
 #   ACP_CANARY_NOTE    — a human line for result.json / the refusal, wording that MATCHES the evidence
@@ -2739,18 +2740,29 @@ acp_failure_note() {
 # (codex, acp-compat-gate plan r2/r3.) The option vector arrives via ACP_CANARY_OPTS (name-ref-free
 # for bash 3.2): the caller exports it before the call.
 acp_canary() {
-  local wd="$1" prof="$2" sess="$3" rd="$4" secs="$5"
+  local wd="$1" prof="$2" sess="$3" rd="$4" secs="$5" knob="${6:-COMMS_ACP_CANARY_SECS}"
   ACP_CANARY_REASON=""; ACP_CANARY_NOTE=""
-  local out="" rc=0
+  local out="" rc=0 t0 took
+  t0="$(date +%s)"
   # The canary's stderr is kept apart (then appended to runner.log) so a provider REFUSAL can be classified.
   out="$( acp_exec "$wd" ${ACP_CANARY_OPTS[@]+"${ACP_CANARY_OPTS[@]}"} \
           --timeout "$secs" --format quiet "$prof" -s "$sess" \
           "Reply with exactly the single word PONG and nothing else." 2>"$rd/canary.err" )" || rc=$?
+  took=$(( $(date +%s) - t0 ))
   cat "$rd/canary.err" >>"$rd/runner.log" 2>/dev/null || true
-  printf 'canary: rc=%s bytes=%s\n' "$rc" "${#out}" >>"$rd/runner.log"
-  if [ "$rc" -eq 3 ]; then
+  printf 'canary: rc=%s bytes=%s secs=%s budget=%s\n' "$rc" "${#out}" "$took" "$secs" >>"$rd/runner.log"
+  # A TIMEOUT has two shapes. acpx's own exit 3, and a SILENT one: when the budget expires while the
+  # agent is still busy before the model answers (measured 2026-10-05: codex running a pre-turn
+  # auto-compaction of a near-full review session), acpx cancels the turn and exits 0 with NO output.
+  # Calling that an off-script answer sent operators to the runtime; it is the budget. Empty means
+  # nothing but whitespace — any byte of answer, even a wrong one, is still classified below.
+  if [ "$rc" -eq 3 ] || { [ "$rc" -eq 0 ] && [ "$took" -ge "$secs" ] && [ -z "${out//[[:space:]]/}" ]; }; then
     ACP_CANARY_REASON="canary-timeout"
-    ACP_CANARY_NOTE="the compatibility canary timed out after ${secs}s (COMMS_ACP_CANARY_SECS) — the runtime may be slow or unreachable; no compatibility claim is made"
+    if [ "$rc" -eq 3 ]; then
+      ACP_CANARY_NOTE="the compatibility canary timed out after ${secs}s ($knob) — the runtime may be slow or unreachable; no compatibility claim is made"
+    else
+      ACP_CANARY_NOTE="the compatibility canary returned nothing after ${took}s (budget ${secs}s, $knob): acpx cancelled the turn at its timeout — a codex session near its context limit compacts before answering — no compatibility claim is made"
+    fi
     return 1
   fi
   if [ "$rc" -ne 0 ]; then
@@ -3662,6 +3674,9 @@ cmd_run() {
     # ("operation not permitted"), denies child network (curl: could not resolve host), and
     # still permits reads, `git log` and the model's own API call. Five parent-side controls
     # that do NOT work are recorded in docs/ROADMAP.md; do not substitute one of them.
+    # THAT MEASUREMENT NO LONGER HOLDS for writes: from codex-acp 1.12 the adapter's `read-only` mode
+    # sends a workspace-write sandbox on every turn (confirmed in a 2026-10-05 rollout: the tree, /tmp
+    # and $TMPDIR writable, network still denied). Open in docs/ROADMAP.md as its own task.
     if [ -n "$mount_dir" ]; then
       # EVERY file in the reused home is written FRESH and RENAMED into place, never
       # overwritten in situ. The home persists across rounds for warmth, so a prior
@@ -4086,57 +4101,68 @@ cmd_run() {
       # that was bound. Only a successful read-back lets result.json say `observed`.
       if [ -n "$RUN_BIND_STAMP" ]; then bound_leg_readback "$acp_iso_home"; fi
     fi
-    local acp_ensure_out="" acp_record_id=""
-    acp_ensure_out="$( acp_exec "$workdir" --format text "$acp_profile" \
-        sessions ensure --name "$acp_session" 2>"$run_dir/ensure.err" )" || true
-    cat "$run_dir/ensure.err" >>"$run_dir/runner.log" 2>/dev/null || true
-    printf 'sessions ensure: %s\n' "$acp_ensure_out" >>"$run_dir/runner.log"
-    acp_record_id="$(printf '%s' "$acp_ensure_out" | head -1 | cut -f1)"
-    if [ -n "$mount_dir" ]; then
-      # The record id is persisted BESIDE the mount because the next round needs it to
-      # address this owner's lease, and by then the mount may have been vandalised into
-      # something `sessions show` cannot run in.
-      # A mounted prompt MUST NOT start unless this is durable. The next round's
-      # quiescence check reads it, and an empty record there is indistinguishable from
-      # "no turn has ever run here" — which would let a restage proceed under a live owner
-      # whose session cwd string still matches, so nothing downstream could tell.
-      if [ -z "${mount_kdir:-}" ] || [ -z "$acp_record_id" ] || [ -z "${HOME:-}" ] \
-         || ! mount_state_put "$mount_kdir" home "$HOME" \
-         || ! mount_state_put "$mount_kdir" record "$acp_record_id"; then
+    local acp_ensure_out="" acp_record_id="" acp_session_state=""
+    # acp_session_bind — ensure the named session and prove it is bound where the turn runs. ONE
+    # definition, run for the turn's session and again for the one a canary retry re-creates, so a
+    # re-created session passes every gate the first one did. Sets acp_ensure_out, acp_record_id and
+    # acp_session_state (`created` or `existing`, acpx's own word); every refusal here exits the runner.
+    acp_session_bind() {
+      acp_ensure_out="$( acp_exec "$workdir" --format text "$acp_profile" \
+          sessions ensure --name "$acp_session" 2>"$run_dir/ensure.err" )" || true
+      cat "$run_dir/ensure.err" >>"$run_dir/runner.log" 2>/dev/null || true
+      printf 'sessions ensure: %s\n' "$acp_ensure_out" >>"$run_dir/runner.log"
+      acp_record_id="$(printf '%s' "$acp_ensure_out" | head -1 | cut -f1)"
+      acp_session_state="$(printf '%s\n' "$acp_ensure_out" | awk -F'\t' 'NR==1 && $2 ~ /^\([a-z]+\)$/ {gsub(/[()]/, "", $2); print $2}')"
+      if [ -n "$mount_dir" ]; then
+        # The record id is persisted BESIDE the mount because the next round needs it to
+        # address this owner's lease, and by then the mount may have been vandalised into
+        # something `sessions show` cannot run in.
+        # A mounted prompt MUST NOT start unless this is durable. The next round's
+        # quiescence check reads it, and an empty record there is indistinguishable from
+        # "no turn has ever run here" — which would let a restage proceed under a live owner
+        # whose session cwd string still matches, so nothing downstream could tell.
+        if [ -z "${mount_kdir:-}" ] || [ -z "$acp_record_id" ] || [ -z "${HOME:-}" ] \
+           || ! mount_state_put "$mount_kdir" home "$HOME" \
+           || ! mount_state_put "$mount_kdir" record "$acp_record_id"; then
+          leg_usage_collect "$run_dir"   # a no-op before the canary; after it, a retry's first canary was billed
         update_thread_state "$msg_thread" failed "" "$sfield" || true
-        local ens_cls="" ens_note="could not durably record the ACP session id for this mount — refusing, because the next round could not then prove the queue owner had exited"
-        if [ -z "$acp_record_id" ]; then
-          ens_cls="$(acp_failure_reason "$provider" "$run_dir/ensure.err")"
-          [ -z "$ens_cls" ] || ens_note="$(acp_failure_note "$ens_cls" "$provider") (the session could not be created)"
+          local ens_cls="" ens_note="could not durably record the ACP session id for this mount — refusing, because the next round could not then prove the queue owner had exited"
+          if [ -z "$acp_record_id" ]; then
+            ens_cls="$(acp_failure_reason "$provider" "$run_dir/ensure.err")"
+            [ -z "$ens_cls" ] || ens_note="$(acp_failure_note "$ens_cls" "$provider") (the session could not be created)"
+          fi
+          write_result "$run_dir" failed 1 "" "$msg" "$ens_note" "$ens_cls"
+          unmount_artifact
+          trap - EXIT
+          exit 1
         fi
-        write_result "$run_dir" failed 1 "" "$msg" "$ens_note" "$ens_cls"
-        unmount_artifact
-        trap - EXIT
-        exit 1
-      fi
-      # THE BOUND RECORD MUST BE THE MOUNT'S. Read it from `sessions show`, not from the
-      # ensure output: quiet prints only the id and the warm path prints neither. acpx
-      # records process.cwd(), which is physical, so compare against `pwd -P`.
-      local acp_bound_cwd="" acp_phys=""
-      acp_phys="$( cd "$mount_dir" && pwd -P )"
-      acp_bound_cwd="$( acp_exec "$workdir" --format text "$acp_profile" \
-          sessions show "$acp_session" 2>>"$run_dir/runner.log" | sed -n 's/^[[:space:]]*cwd:[[:space:]]*//p' | head -1 )" || true
-      if [ -z "$acp_bound_cwd" ] || [ "$acp_bound_cwd" != "$acp_phys" ]; then
+        # THE BOUND RECORD MUST BE THE MOUNT'S. Read it from `sessions show`, not from the
+        # ensure output: quiet prints only the id and the warm path prints neither. acpx
+        # records process.cwd(), which is physical, so compare against `pwd -P`.
+        local acp_bound_cwd="" acp_phys=""
+        acp_phys="$( cd "$mount_dir" && pwd -P )"
+        acp_bound_cwd="$( acp_exec "$workdir" --format text "$acp_profile" \
+            sessions show "$acp_session" 2>>"$run_dir/runner.log" | sed -n 's/^[[:space:]]*cwd:[[:space:]]*//p' | head -1 )" || true
+        if [ -z "$acp_bound_cwd" ] || [ "$acp_bound_cwd" != "$acp_phys" ]; then
+          leg_usage_collect "$run_dir"   # a no-op before the canary; after it, a retry's first canary was billed
         update_thread_state "$msg_thread" failed "" "$sfield" || true
-        write_result "$run_dir" failed 1 "" "$msg" "the ACP session bound cwd '${acp_bound_cwd:-<unreadable>}' is not the mount '$acp_phys' — the turn would have reviewed a tree outside the pinned artifact"
-        unmount_artifact
-        trap - EXIT
-        exit 1
-      fi
-      # And the mount must still BE the artifact at the moment the prompt goes out.
-      if ! mount_tree_matches "$mount_dir" "$msg_artifact" "$run_dir/runner.log"; then
+          write_result "$run_dir" failed 1 "" "$msg" "the ACP session bound cwd '${acp_bound_cwd:-<unreadable>}' is not the mount '$acp_phys' — the turn would have reviewed a tree outside the pinned artifact"
+          unmount_artifact
+          trap - EXIT
+          exit 1
+        fi
+        # And the mount must still BE the artifact at the moment the prompt goes out.
+        if ! mount_tree_matches "$mount_dir" "$msg_artifact" "$run_dir/runner.log"; then
+          leg_usage_collect "$run_dir"   # a no-op before the canary; after it, a retry's first canary was billed
         update_thread_state "$msg_thread" failed "" "$sfield" || true
-        write_result "$run_dir" failed 1 "" "$msg" "the mount no longer matches artifact $msg_artifact at prompt time — refusing to review a contaminated tree"
-        unmount_artifact
-        trap - EXIT
-        exit 1
+          write_result "$run_dir" failed 1 "" "$msg" "the mount no longer matches artifact $msg_artifact at prompt time — refusing to review a contaminated tree"
+          unmount_artifact
+          trap - EXIT
+          exit 1
+        fi
       fi
-    fi
+    }
+    acp_session_bind
     # Permission profile depends on WHERE the turn runs. A review prompt tells the
     # reviewer to run read-only git commands and compare head_sha — those are terminal
     # requests, not file reads, so --approve-reads denies them and the turn dies after
@@ -4240,64 +4266,85 @@ cmd_run() {
       write_result "$run_dir" failed 1 "acp:$acp_session" "$msg" "$2" "$1"
       unmount_artifact; trap - EXIT
     }
-    if [ -n "$mount_dir" ] && [ -n "$acp_iso_mode" ]; then
-      if ! acp_confirm_mode "$workdir" "$acp_profile" "$acp_session" "$acp_iso_mode" "$run_dir" "pre-canary"; then
-        acp_refuse containment-unconfirmed "could not confirm '$provider' is pinned to '$acp_iso_mode' before the canary — containment unconfirmed"
-        return 1
+    # acp_session_prepare — everything between a bound session and its first prompt: the mode pin, a
+    # custom profile's model pin, and the free policy preflight. A function for the same reason as
+    # acp_session_bind: a session re-created by the canary retry must clear the same gates. Returns 1
+    # after acp_refuse has published the refusal.
+    acp_session_prepare() {
+      if [ -n "$mount_dir" ] && [ -n "$acp_iso_mode" ]; then
+        if ! acp_confirm_mode "$workdir" "$acp_profile" "$acp_session" "$acp_iso_mode" "$run_dir" "pre-canary"; then
+          acp_refuse containment-unconfirmed "could not confirm '$provider' is pinned to '$acp_iso_mode' before the canary — containment unconfirmed"
+          return 1
+        fi
       fi
-    fi
-    if [ -n "$RUN_PROFILE_BINDING" ]; then
-      if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
-          | python3 "$HELPER_DIR/agent_profiles.py" model-check "$RUN_PROFILE_BINDING" > "$run_dir/profile-model-before.json"; then
-        acp_refuse policy-unapplied "custom agent did not confirm its configured model pin"
-        return 1
+      if [ -n "$RUN_PROFILE_BINDING" ]; then
+        if ! acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" \
+            | python3 "$HELPER_DIR/agent_profiles.py" model-check "$RUN_PROFILE_BINDING" > "$run_dir/profile-model-before.json"; then
+          acp_refuse policy-unapplied "custom agent did not confirm its configured model pin"
+          return 1
+        fi
       fi
-    fi
 
-    # PREFLIGHT POLICY READ — free, necessary, and explicitly NOT sufficient.
-    #
-    # `sessions show` is a purely LOCAL record read (no connection, no spawn, no tokens), so
-    # this costs nothing and catches the common case before any spend. It CANNOT be the gate:
-    # acpx replays `desired_config_options` when it creates a REPLACEMENT session
-    # (replayFreshSessionPreferences early-returns only when !createdFreshSession), so a stale
-    # preference can be reinstated AFTER this passes and the billable prompt still runs wrong.
-    # The post-turn attestation below is the control that actually gates. (codex, plan r1 B1.)
-    #
-    # We REFUSE a conflicting saved preference rather than rewriting the record: acpx owns that
-    # file, `connectAndLoadSession` captures the options BEFORE connecting, and a retained queue
-    # owner can overwrite an external edit — so our exclusivity over it is unproven. Retiring the
-    # session is the honest remedy. (codex + grok, plan r3.)
-    if [ -n "$acp_iso_home" ]; then
-      if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
-        acp_refuse policy-unapplied "the resolved policy record changed after resolution — refusing to check a session against an expectation nobody resolved"
-        return 1
+      # PREFLIGHT POLICY READ — free, necessary, and explicitly NOT sufficient.
+      #
+      # `sessions show` is a purely LOCAL record read (no connection, no spawn, no tokens), so
+      # this costs nothing and catches the common case before any spend. It CANNOT be the gate:
+      # acpx replays `desired_config_options` when it creates a REPLACEMENT session
+      # (replayFreshSessionPreferences early-returns only when !createdFreshSession), so a stale
+      # preference can be reinstated AFTER this passes and the billable prompt still runs wrong.
+      # The post-turn attestation below is the control that actually gates. (codex, plan r1 B1.)
+      #
+      # We REFUSE a conflicting saved preference rather than rewriting the record: acpx owns that
+      # file, `connectAndLoadSession` captures the options BEFORE connecting, and a retained queue
+      # owner can overwrite an external edit — so our exclusivity over it is unproven. Retiring the
+      # session is the honest remedy. (codex + grok, plan r3.)
+      if [ -n "$acp_iso_home" ]; then
+        if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
+          acp_refuse policy-unapplied "the resolved policy record changed after resolution — refusing to check a session against an expectation nobody resolved"
+          return 1
+        fi
+        local pol_out="" pol_rc=0
+        pol_out="$( acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" 2>>"$run_dir/runner.log" \
+                    | "$acp_sh" policy-check "$provider" - --policy-file "$acp_policy" 2>>"$run_dir/runner.log" )" || pol_rc=$?
+        # What the ADAPTER reported, kept apart from both the request and the provider's own
+        # rollout: an adapter accepting a value is not proof the billable turn ran it.
+        local pol_verdict=undecidable
+        case "$pol_rc" in 0) pol_verdict=match ;; 20) pol_verdict=mismatch ;; esac
+        { printf 'adapter_check\t%s\n' "$pol_verdict"
+          printf 'adapter_report\t%s\n' "$(printf '%s' "${pol_out:-unknown}" | tr '\t\n' '  ')"
+          printf 'adapter_source\t%s\n' "acpx-config_options"
+        } >> "$run_dir/turn.tsv" 2>/dev/null || true
+        case "$pol_rc" in
+          0)  printf 'policy preflight: %s\n' "$pol_out" >>"$run_dir/runner.log" ;;
+          20) acp_refuse policy-unapplied "the reviewer session will not run the declared model/effort policy ($pol_out) — retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+              return 1 ;;
+          *)  acp_refuse policy-unapplied "could not verify the reviewer model/effort policy before the canary (status $pol_rc) — refusing rather than paying for a review of unknown depth"
+              return 1 ;;
+        esac
       fi
-      local pol_out="" pol_rc=0
-      pol_out="$( acp_exec "$workdir" --format json "$acp_profile" sessions show "$acp_session" 2>>"$run_dir/runner.log" \
-                  | "$acp_sh" policy-check "$provider" - --policy-file "$acp_policy" 2>>"$run_dir/runner.log" )" || pol_rc=$?
-      # What the ADAPTER reported, kept apart from both the request and the provider's own
-      # rollout: an adapter accepting a value is not proof the billable turn ran it.
-      local pol_verdict=undecidable
-      case "$pol_rc" in 0) pol_verdict=match ;; 20) pol_verdict=mismatch ;; esac
-      { printf 'adapter_check\t%s\n' "$pol_verdict"
-        printf 'adapter_report\t%s\n' "$(printf '%s' "${pol_out:-unknown}" | tr '\t\n' '  ')"
-        printf 'adapter_source\t%s\n' "acpx-config_options"
-      } >> "$run_dir/turn.tsv" 2>/dev/null || true
-      case "$pol_rc" in
-        0)  printf 'policy preflight: %s\n' "$pol_out" >>"$run_dir/runner.log" ;;
-        20) acp_refuse policy-unapplied "the reviewer session will not run the declared model/effort policy ($pol_out) — retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
-            return 1 ;;
-        *)  acp_refuse policy-unapplied "could not verify the reviewer model/effort policy before the canary (status $pol_rc) — refusing rather than paying for a review of unknown depth"
-            return 1 ;;
-      esac
-    fi
+    }
+    acp_session_prepare || return 1
 
     # COMPATIBILITY CANARY: prove the session runtime serves its configured model BEFORE the real
     # prompt is spent on it. Same session, same argv shape; the reply is classified by the shared
     # comms.sh reply-check so all three transports agree. Per-turn, no cache: mounted owners are new
     # each round anyway, and a cache needs storage/atomicity/invalidation this slice deliberately
     # avoids. (codex, acp-compat-gate plan r2/r3.)
-    local canary_secs; canary_secs="$(sane_secs "${COMMS_ACP_CANARY_SECS:-60}")"; [ -n "$canary_secs" ] || canary_secs=60
+    local canary_secs canary_knob=COMMS_ACP_CANARY_SECS canary_base canary_compact
+    canary_base="$(sane_secs "${COMMS_ACP_CANARY_SECS:-60}")"; [ -n "$canary_base" ] || canary_base=60
+    canary_secs="$canary_base"
+    # A RESUMED CODEX SESSION MAY COMPACT BEFORE IT ANSWERS. The turn after a near-full review is this
+    # canary, and codex runs its pre-turn auto-compaction on it; measured 2026-10-05 at 62-214s on
+    # gpt-6.1-sol, so a 60s canary cancelled it every time, the compaction was never persisted, and
+    # every retry repeated it. A session acpx reports as `existing` gets a budget that covers one
+    # (COMMS_ACP_CANARY_COMPACT_SECS, default 300); a fresh session has nothing to compact.
+    if [ "$provider" = codex ] && [ "$acp_session_state" = existing ]; then
+      canary_compact="$(sane_secs "${COMMS_ACP_CANARY_COMPACT_SECS:-300}")"; [ -n "$canary_compact" ] || canary_compact=300
+      if [ "$canary_compact" -gt "$canary_secs" ]; then canary_secs="$canary_compact"; canary_knob=COMMS_ACP_CANARY_COMPACT_SECS; fi
+    fi
+    { printf 'session_state\t%s\n' "${acp_session_state:-unknown}"
+      printf 'canary_budget\t%s\n' "$canary_secs"
+    } >> "$run_dir/turn.tsv" 2>/dev/null || true
     # THE LEG'S USAGE WINDOW OPENS HERE, before the canary: the canary is a billed prompt in the
     # same session, so it is part of what this leg cost. (The attestation's rollout snapshot below
     # deliberately EXCLUDES it — a different question.) Nothing before this point bills.
@@ -4306,7 +4353,41 @@ cmd_run() {
     if [ -n "$RUN_BIND_STAMP" ]; then RUN_BIND_STATE=ran; printf 'bind_state\tran\n' >> "$run_dir/turn.tsv" 2>/dev/null || true; fi
     ACP_CANARY_OPTS=( "${acp_prompt_opts[@]}" )
     ACP_CANARY_PROVIDER="$provider"
-    if ! acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs"; then
+    local canary_ok=1
+    acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs" "$canary_knob" || canary_ok=0
+    # STILL TIMING OUT ON AN EXISTING CODEX SESSION: retire it and re-create it, ONCE. The warm context
+    # is lost, and that is the accepted price: the alternative was a session no canary could get past,
+    # which operators could only escape by hand. Only a timeout qualifies — a provider error, a refused
+    # login or an off-script answer would recur in a new session, and re-creating would discard the
+    # context for nothing. The new session clears the same bind and preparation gates as the first and
+    # gets the ordinary budget (nothing to compact). Recorded in turn.tsv either way.
+    if [ "$canary_ok" = 0 ] && [ "$provider" = codex ] && [ "$acp_session_state" = existing ] \
+       && [ "$ACP_CANARY_REASON" = canary-timeout ]; then
+      local retired_record="$acp_record_id" close_rc=0
+      printf 'canary_retry\tretire-recreate\ncanary_retry_cause\t%s\ncanary_retry_retired\t%s\n' \
+        "$ACP_CANARY_REASON" "${retired_record:-unknown}" >> "$run_dir/turn.tsv" 2>/dev/null || true
+      printf 'canary retry: %s on existing session %s — retiring it and re-creating once\n' "$ACP_CANARY_REASON" "$retired_record" >>"$run_dir/runner.log"
+      acp_exec "$workdir" --format text "$acp_profile" sessions close "$acp_session" >>"$run_dir/runner.log" 2>&1 || close_rc=$?
+      if [ "$close_rc" -ne 0 ]; then
+        printf 'canary_retry_result\tclose-failed\n' >> "$run_dir/turn.tsv" 2>/dev/null || true
+        acp_refuse "$ACP_CANARY_REASON" "$ACP_CANARY_NOTE. Retiring the session automatically failed (exit $close_rc, see runner.log): retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+        return 1
+      fi
+      acp_session_bind
+      if [ "$acp_session_state" != created ]; then
+        printf 'canary_retry_result\tnot-recreated\n' >> "$run_dir/turn.tsv" 2>/dev/null || true
+        acp_refuse "$ACP_CANARY_REASON" "$ACP_CANARY_NOTE. The session was retired but acpx did not create a new one (state '${acp_session_state:-unknown}'), so no fresh canary was sent"
+        return 1
+      fi
+      printf 'canary_retry_record\t%s\n' "${acp_record_id:-unknown}" >> "$run_dir/turn.tsv" 2>/dev/null || true
+      acp_session_prepare || return 1
+      canary_secs="$canary_base"; canary_knob=COMMS_ACP_CANARY_SECS
+      canary_ok=1
+      acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs" "$canary_knob" || canary_ok=0
+      printf 'canary_retry_result\t%s\n' "$( [ "$canary_ok" = 1 ] && echo passed || echo failed )" >> "$run_dir/turn.tsv" 2>/dev/null || true
+      [ "$canary_ok" = 1 ] || ACP_CANARY_NOTE="$ACP_CANARY_NOTE (after the session was retired and re-created once)"
+    fi
+    if [ "$canary_ok" = 0 ]; then
       local canary_note="$ACP_CANARY_NOTE"
       if [ "$ACP_CANARY_REASON" = runtime-incompatible ]; then
         # NO `$provider --version` probe here: it is optional diagnostic value, but a hanging or slow

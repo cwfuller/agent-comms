@@ -888,9 +888,19 @@ provider_config_for() {  # <agent> [record] [auth-type] -> the COMPLETE isolated
   pol="$(policy_for "$1" "${2:-}")" || return 1
   m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"
   if [ "$1" = gemini ]; then gemini_config_for "$m" "$e" "${3:--}"; return; fi
+  # COMPACT INSIDE THE REVIEW, not before the next prompt. Once a turn ends at or above this percent of
+  # the model's context window, codex compacts before the turn completes, under the review's long
+  # budget; without it the compaction waits for the next turn's pre-turn check, which is the 60s canary
+  # (docs/ROADMAP.md, 2026-10-05). Probed on codex 0.160.0: a 14,400-token turn in a 258,400 window
+  # compacted at 2 and did not at 10; 0.156.1 (the adapter's bundled codex) accepts the key; codex
+  # refuses a value above 100. COMMS_ACP_CODEX_COMPACT_PERCENT=0 omits the key (codex's own default).
+  local cp="${COMMS_ACP_CODEX_COMPACT_PERCENT:-80}"
+  [[ "$cp" =~ ^(0|[1-9][0-9]?|100)$ ]] \
+    || { echo "acp.sh: provider-config: COMMS_ACP_CODEX_COMPACT_PERCENT must be 0-100, got '$cp'" >&2; return 1; }
   # approval_policy and sandbox_mode are LITERALS, never concatenated from the environment —
   # only the two policy values are interpolated, and both are allowlisted above. (grok, plan r2.)
   printf 'approval_policy = "on-request"\nsandbox_mode = "read-only"\nmodel = "%s"\nmodel_reasoning_effort = "%s"\n' "$m" "$e"
+  [ "$cp" = 0 ] || printf 'model_post_turn_compact_threshold_percent = %s\n' "$cp"
 }
 
 # policy_verdict <agent> <observed-effort> <observed-model> [record] — the ONE comparison, used by

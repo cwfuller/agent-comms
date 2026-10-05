@@ -36,12 +36,12 @@ stamped authorities: workspace pin (#3) + send-time git metadata (#6)	46
 friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	45
-acp.sh: the reviewer model+effort policy	25
+acp.sh: the reviewer model+effort policy	29
 acp.sh: the reviewer policy resolver	54
 reviewer policy: a wrong-depth review is never published	18
 reviewer routing: a routed decision reaches the mounted codex turn	18
 per-leg usage: result.json carries the provider's own records	13
-runphase: the compatibility canary gates every ACP turn	24
+runphase: the compatibility canary gates every ACP turn	33
 runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15
 templates: bare dollar-digit/dollar-star hygiene	1

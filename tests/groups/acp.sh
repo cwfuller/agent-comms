@@ -457,6 +457,81 @@ CN_ORDER="$(awk -F'\t' '$2 ~ / set-mode /{print "M"} $2 ~ /Reply with exactly/{p
 [ "$CN_ORDER" = "MCP" ] \
   && ok "the successful sequence is set-mode -> canary -> real prompt, in that order" || fail "canary sequence order wrong (got: $CN_ORDER)"
 
+# A CODEX SESSION THAT COMPACTS BEFORE ANSWERING (2026-10-05). The turn after a near-full review is the
+# canary, codex compacts on it for minutes, the canary budget cancels the compaction, and acpx exits 0
+# with NO output. The stub's `compact` canary models that: it sleeps AX_COMPACT_SECS before PONG, or
+# sleeps the --timeout and returns nothing. Budgets are seconds-small so the section stays fast.
+run_codex_canary() {  # <tag> [extra env kv...] -> echoes the run dir; argv log at <dir>.argv
+  local tag="$1" msg dir; shift
+  msg="$MA_FIX/.comms/to-codex/${MA_WS}_2026-08-20T12-14-00_canary-cx-$tag.md"
+  { head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+    printf 'artifact_id: %s\nhead_sha: %s\n' "$CN_MHEAD" "$CN_MHEAD"
+    tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" \
+      | sed -e "s/^thread: ma-arc-1\$/thread: ma-canary-cx-$tag/" -e "s/^from: claude\$/from: grok/"
+  } > "$msg"
+  dir="$WORK/canary-cx-$tag"; mkdir -p "$dir"; rm -f "$dir.argv" "$dir.ct"
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="$CN_MHOME" COMMS_MOUNT_BASE="$CN_MBASE" AX_CWD_LOG="$dir.argv" \
+      ACP_PARITY_PAYLOAD="$CANARY_PAY" AX_CANARY=compact AX_SETMODE_CT="$dir.ct" \
+      COMMS_ACP_CANARY_SECS=1 COMMS_ACP_CANARY_COMPACT_SECS=3 COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 "$@" \
+      "$RP" run --message "$msg" --dir "$dir" --provider codex --via acp --timeout-secs 20 ) >/dev/null 2>&1
+  printf '%s' "$dir"
+}
+cx_tsv() { awk -F'\t' -v k="$2" '$1==k {print $2}' "$1/turn.tsv" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
+cx_canary_timeouts() { awk -F'\t' '$2 ~ /Reply with exactly/' "$1.argv" 2>/dev/null | sed -n 's/.* --timeout \([0-9]*\) .*/\1/p' | tr '\n' ' ' | sed 's/ $//'; }
+cx_closes() { awk -F'\t' '$2 ~ / sessions close /' "$1.argv" 2>/dev/null | grep -c .; }
+cx_prompted() { awk -F'\t' '$2 ~ / --file /' "$1.argv" 2>/dev/null | grep -c .; }
+
+# 1. EMPTY AT THE TIMEOUT IS A TIMEOUT. A fresh session is not retried: it had nothing to compact.
+CX_A="$(run_codex_canary silent AX_COMPACT_SECS=5)"
+[ "$(cn_status "$CX_A")" = failed ] && [ "$(cn_reason "$CX_A")" = canary-timeout ] && grep -q 'returned nothing after' "$CX_A/result.json" \
+  && ok "a codex canary that returns nothing at its timeout (rc=0) is canary-timeout, not canary-unexpected" \
+  || fail "silent canary timeout: status=$(cn_status "$CX_A") reason=$(cn_reason "$CX_A")"
+[ "$(cx_closes "$CX_A")" = 0 ] && [ -z "$(cx_tsv "$CX_A" canary_retry)" ] && [ "$(cx_prompted "$CX_A")" = 0 ] \
+  && ok "a fresh codex session that times out is refused without a retire, a retry or the review prompt" || fail "fresh-session timeout retried or prompted"
+
+# 2. A RESUMED codex session gets the compaction budget, and a compaction inside it passes.
+CX_B="$(run_codex_canary budget AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=2)"
+[ "$(cn_status "$CX_B")" = completed ] && [ "$(cx_canary_timeouts "$CX_B")" = 3 ] \
+  && [ "$(cx_tsv "$CX_B" session_state)" = existing ] && [ "$(cx_tsv "$CX_B" canary_budget)" = 3 ] && [ "$(cx_closes "$CX_B")" = 0 ] \
+  && ok "an existing codex session's canary gets COMMS_ACP_CANARY_COMPACT_SECS and survives a compaction without a retire" \
+  || fail "compaction budget: status=$(cn_status "$CX_B") timeouts=[$(cx_canary_timeouts "$CX_B")] budget=$(cx_tsv "$CX_B" canary_budget)"
+
+# 3. STILL TIMING OUT: retire and re-create ONCE; the fresh session passes and the review runs.
+CX_C="$(run_codex_canary recreate AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 COMMS_ACP_CANARY_COMPACT_SECS=2)"
+[ "$(cn_status "$CX_C")" = completed ] && [ "$(cx_closes "$CX_C")" = 1 ] && [ "$(cx_canary_timeouts "$CX_C")" = "2 1" ] \
+  && [ "$(cx_tsv "$CX_C" canary_retry)" = retire-recreate ] && [ "$(cx_tsv "$CX_C" canary_retry_cause)" = canary-timeout ] \
+  && [ "$(cx_tsv "$CX_C" canary_retry_result)" = passed ] && [ -n "$(cx_tsv "$CX_C" canary_retry_record)" ] \
+  && ok "a canary that still times out retires the existing session, re-creates it once and records it in turn.tsv" \
+  || fail "retire-recreate: status=$(cn_status "$CX_C") closes=$(cx_closes "$CX_C") timeouts=[$(cx_canary_timeouts "$CX_C")] result=$(cx_tsv "$CX_C" canary_retry_result)"
+CX_C_ORDER="$(awk -F'\t' '$2 ~ / set-mode /{print "M"} $2 ~ / sessions close /{print "X"} $2 ~ /Reply with exactly/{print "C"} $2 ~ / --file /{print "P"}' "$CX_C.argv" 2>/dev/null | tr -d '\n')"
+[ "$CX_C_ORDER" = MCXMCP ] \
+  && ok "the re-created session is pinned again before its own canary: set-mode, canary, close, set-mode, canary, prompt" || fail "retry sequence wrong (got: $CX_C_ORDER)"
+
+# 4. ONCE ONLY: a re-created session that also times out is refused, never retried again.
+CX_D="$(run_codex_canary sticky AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_COMPACT_STICKY=1 COMMS_ACP_CANARY_COMPACT_SECS=2)"
+[ "$(cn_status "$CX_D")" = failed ] && [ "$(cn_reason "$CX_D")" = canary-timeout ] && [ "$(cx_closes "$CX_D")" = 1 ] \
+  && [ "$(cx_canary_timeouts "$CX_D")" = "2 1" ] && [ "$(cx_prompted "$CX_D")" = 0 ] && [ "$(cx_tsv "$CX_D" canary_retry_result)" = failed ] \
+  && grep -q 're-created once' "$CX_D/result.json" \
+  && ok "a re-created session that still times out is refused after exactly one retire, with no review prompt" \
+  || fail "sticky retry: status=$(cn_status "$CX_D") closes=$(cx_closes "$CX_D") timeouts=[$(cx_canary_timeouts "$CX_D")] result=$(cx_tsv "$CX_D" canary_retry_result)"
+
+# 5. A retire that fails refuses with the manual command; no second canary goes out.
+CX_E="$(run_codex_canary closefail AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_CLOSE_RC=1 COMMS_ACP_CANARY_COMPACT_SECS=2)"
+[ "$(cn_status "$CX_E")" = failed ] && [ "$(cn_reason "$CX_E")" = canary-timeout ] && grep -q 'Retiring the session automatically failed' "$CX_E/result.json" \
+  && [ "$(cx_canary_timeouts "$CX_E")" = 2 ] && [ "$(cx_tsv "$CX_E" canary_retry_result)" = close-failed ] \
+  && ok "a failed automatic retire refuses with the manual retire command and sends no second canary" || fail "close failure: status=$(cn_status "$CX_E") result=$(cx_tsv "$CX_E" canary_retry_result)"
+
+# 6. Only a timeout is retried: an off-script answer from an existing session keeps its context.
+CX_F="$(run_codex_canary junk AX_ENSURE_EXISTING=1 AX_CANARY=junk)"
+[ "$(cn_reason "$CX_F")" = canary-unexpected ] && [ "$(cx_closes "$CX_F")" = 0 ] && [ -z "$(cx_tsv "$CX_F" canary_retry)" ] \
+  && ok "a non-timeout canary failure on an existing codex session is refused without retiring it" || fail "junk canary retried (reason=$(cn_reason "$CX_F") closes=$(cx_closes "$CX_F"))"
+
+# 7. The compaction budget is codex-only: another provider's existing session keeps COMMS_ACP_CANARY_SECS.
+CN_GX="$WORK/canary-grok-existing.argv"; rm -f "$CN_GX"
+run_canary_turn grokexisting pong AX_ENSURE_STATE=existing AX_CWD_LOG="$CN_GX" COMMS_ACP_CANARY_SECS=7 COMMS_ACP_CANARY_COMPACT_SECS=300 >/dev/null
+[ "$(awk -F'\t' '$2 ~ /Reply with exactly/' "$CN_GX" 2>/dev/null | sed -n 's/.* --timeout \([0-9]*\) .*/\1/p')" = 7 ] \
+  && ok "an existing non-codex session's canary keeps COMMS_ACP_CANARY_SECS" || fail "grok canary budget changed"
+
 # NOT DEGRADE EVIDENCE: a canary refusal must never let compose drop the leg. reason=runtime-
 # incompatible / canary-* is a DISTINCT token from reason=no-output, which is the only reason
 # compose accepts as evidence a reviewer could not speak. Assert none of them equals no-output.
@@ -1004,8 +1079,17 @@ printf '%s\n' "$PCFG" | grep -qx 'model_reasoning_effort = "xhigh"' \
   && ok "provider-config writes the effort key the codex binary reads" || fail "provider-config effort key"
 printf '%s\n' "$PCFG" | grep -qx 'model = "gpt-6.1-sol"' \
   && ok "provider-config writes the model key" || fail "provider-config model key"
-[ "$(printf '%s\n' "$PCFG" | wc -l | tr -d ' ')" = 4 ] \
-  && ok "provider-config emits exactly four keys — no stray or duplicated line" || fail "provider-config line count"
+[ "$(printf '%s\n' "$PCFG" | wc -l | tr -d ' ')" = 5 ] \
+  && ok "provider-config emits exactly five keys — no stray or duplicated line" || fail "provider-config line count"
+printf '%s\n' "$PCFG" | grep -qx 'model_post_turn_compact_threshold_percent = 80' \
+  && ok "provider-config compacts after a turn that ends at 80% of the context window by default" || fail "provider-config compaction threshold"
+COMMS_ACP_CODEX_COMPACT_PERCENT=55 "$AP" provider-config codex | grep_full -qx 'model_post_turn_compact_threshold_percent = 55' \
+  && ok "COMMS_ACP_CODEX_COMPACT_PERCENT overrides the compaction threshold" || fail "compaction threshold override"
+PCFG0="$(COMMS_ACP_CODEX_COMPACT_PERCENT=0 "$AP" provider-config codex)"
+[ "$(printf '%s\n' "$PCFG0" | wc -l | tr -d ' ')" = 4 ] && ! printf '%s\n' "$PCFG0" | grep -q compact \
+  && ok "COMMS_ACP_CODEX_COMPACT_PERCENT=0 omits the compaction key" || fail "compaction threshold off"
+PCFGX="$(COMMS_ACP_CODEX_COMPACT_PERCENT=101 "$AP" provider-config codex 2>/dev/null)" && fail "an out-of-range compaction threshold was accepted" \
+  || { [ -z "$PCFGX" ] && ok "an out-of-range compaction threshold is refused before any config is emitted" || fail "partial config emitted for a bad threshold"; }
 printf '%s\n' "$PCFG" | grep -qx 'sandbox_mode = "read-only"' \
   && ok "provider-config keeps approval/sandbox as literals beside the policy" || fail "provider-config literals"
 

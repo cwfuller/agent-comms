@@ -889,6 +889,25 @@ prompts because the mode is persistent owner state a contained canary cannot mov
 with no cache (`COMMS_ACP_CANARY_SECS`, default 60). Consults do not run a separate canary — a
 consult's own reply is its probe, verified by the same `reply-check`.
 
+A canary that comes back empty (exit 0, nothing but whitespace) at or past its budget is
+`canary-timeout`, not `canary-unexpected`: acpx cancels a turn at its `--timeout` and exits 0 with no
+output when the agent has not answered yet. That is what a codex session near its context limit does
+— it compacts before it answers, and the compaction can take minutes. So a codex session that acpx
+reports as `existing` (resumed) gets a canary budget of `COMMS_ACP_CANARY_COMPACT_SECS` (default 300,
+or `COMMS_ACP_CANARY_SECS` if that is larger). If that canary still times out, `run` retires the
+session (`acpx sessions close`), re-creates it, runs the same bind, mode-pin and policy checks on the
+new session, and sends one more canary with the ordinary budget. That happens at most once per turn
+and only for `canary-timeout`; the warm context is lost. `turn.tsv` records `session_state`,
+`canary_budget` and, on a retry, `canary_retry` (`retire-recreate`), `canary_retry_cause`,
+`canary_retry_retired` (the old record id), `canary_retry_record` (the new one) and
+`canary_retry_result` (`passed` / `failed` / `close-failed` / `not-recreated`).
+
+To make that rare, the mounted codex `config.toml` carries
+`model_post_turn_compact_threshold_percent` (`COMMS_ACP_CODEX_COMPACT_PERCENT`, default 80; `0` omits
+the key; values outside 0-100 refuse the turn). A turn that ends at or above that percent of the
+model's context window compacts before it completes, inside the review's own budget, instead of
+leaving the compaction to the next turn's canary.
+
 **`--agent` is WHO reviews; the provider comes from the registry.** `spawn` and `run` take a
 registered identity (default `codex`) and resolve its provider (`comms.sh agents --provider`)
 before anything else reads it; a caller can never name the provider. `--provider` is the older

@@ -36,6 +36,27 @@ orchestration here, and do not revive Symphony for it.
   `comms.sh version`. **Built 2026-09-25:** the last two — `compose-result v1` and
   `version [--json]` over an install stamp (docs/COMMANDS.md defines both).
 
+## DONE (2026-10-05): the canary no longer cancels codex's pre-turn compaction
+
+**Field cause.** On long-lived mounted codex review sessions (gpt-6.1-sol/xhigh, window 258,400) the
+turn after a near-full review is the 60s `PONG` canary. codex runs a pre-turn auto-compaction on it
+(`run_auto_compact{reason=ContextLimit phase=PreTurn}` in the home's `logs_2.sqlite`); those took
+62-214s, the canary budget cancelled them, nothing was persisted, acpx exited 0 with 0 bytes, and the
+turn was refused `canary-unexpected`. Every retry repeated it, and the only way out was a fresh session.
+
+**What changed** (docs/COMMANDS.md, "The compatibility canary"):
+1. Empty output at or past the budget is `canary-timeout`.
+2. A codex session acpx reports as `existing` gets `COMMS_ACP_CANARY_COMPACT_SECS` (default 300). If
+   that still times out, `run` retires the session and re-creates it once, through the same bind,
+   mode-pin and policy gates, and records the retry in `turn.tsv`.
+3. The mounted `config.toml` sets `model_post_turn_compact_threshold_percent = 80`
+   (`COMMS_ACP_CODEX_COMPACT_PERCENT`), so a long review compacts inside its own budget.
+
+**Probe for item 3** (2026-10-05, codex 0.160.0, scratch `CODEX_HOME`, gpt-6-luna/low, `codex exec`):
+the percent is of the model's context window. A 14,400-token turn in a 258,400 window wrote a
+`compacted` record before `task_complete` at threshold 2, and none at threshold 10. codex 0.160.0
+refuses a value above 100 ("must be between 0 and 100"); the adapter's bundled codex 0.156.1 accepts 80.
+
 ## Contraction (2026-08-28) — current program
 
 ### RESOLVED 2026-09-24: codex legs withheld as "a malformed record in the provider's rollout" (sev 3)
@@ -652,6 +673,19 @@ policy exists. (6) Gemini and Codex API routes bind only where an explicit authe
 (7) Quota `refused` stays limited to providers with a classifier. No model mapping in this change is approved by the ticket; every model id enters from the caller.
 
 ### OPEN: the reviewer containment measurement is stale — re-probe on codex-acp 1.12.0 (2026-09-19, sev 2, acpx surface probe)
+
+**Confirmed 2026-10-05 (task 286), split into its own urgent task.** The mounted codex reviewer does
+NOT run read-only. A rollout from a 2026-10-05 mounted review (codex-acp 1.13.1, the newest 1.x, which
+acpx 0.13.1's `^1.1.5` resolves) records `sandbox_policy.type = workspace-write` and a permission
+profile granting WRITE to the mounted tree, `/tmp` and `$TMPDIR` (network restricted). The cause is
+the adapter, not our config: codex-acp 1.13.1's `read-only` mode ("Ask for approval") carries
+`sandboxPolicy: workspaceWrite`, and `runTurn` sends the mode's policy on EVERY turn, overriding
+`sandbox_mode = "read-only"` in `config.toml`. codex reads `requirements.toml` only from system and
+MDM locations, so the isolated `CODEX_HOME` cannot forbid the override. codex-acp 1.6.2 and 2.x
+(2.1.1 checked) define `read-only` as `{type: "readOnly"}`; using 2.x means overriding the adapter
+acpx 0.13.1 launches (a user-level acpx config, a file in the reviewed tree, or `--agent` on every
+acpx call) and re-validating set-mode, `config_options` and the attestation on it. Too large for the
+canary task; the post-turn tree-identity check is what currently refuses a reviewer's writes.
 
 **Widened 2026-09-22 (codex, reviewer-routing implement r4, advisory):** the routing binding makes
 mounted codex reviews run the operator's INSTALLED codex by default (auto-detected; handed to the
