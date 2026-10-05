@@ -105,7 +105,8 @@
 #                               4 the branch moved after the check (left in place).
 #                               integrate never retires anything; the /auto driver
 #                               retires its own worktree after a landing.
-#   integrate <branch>          land on main: lease + ff + suite at the candidate OID
+#   integrate <branch> [--landing-branch <name>]
+#                               land on main (or <name>, a local branch): lease + ff + suite at the candidate OID
 #                               in a detached worktree + CAS update-ref (suite-cmd
 #                               config required). A prose-only tree diff (README.md,
 #                               LICENSE, top-level docs/*.md) skips the suite and
@@ -122,9 +123,9 @@
 #                               15 suite unverified / 16 CAS lost / 17 unreadable env /
 #                               18 suite timed out / 1 other. A landing prints one line
 #                               `integrate-result v1 status=landed cand= main_before=
-#                               main_after= branch= suite=ran|skipped-docs|attested`;
+#                               main_after= branch= suite=ran|skipped-docs|attested landing=`;
 #                               a timeout prints `integrate-result v1 status=refused
-#                               reason=suite_timeout cand= main_before= branch= timeout_secs=`
+#                               reason=suite_timeout cand= main_before= branch= timeout_secs= landing=`
 #   verify init [--yes] [--force] [--update] [--replace-suite-cmd] | fresh [<rev>] | status
 #                               landing suite for any repo: `init` scaffolds a committed
 #                               ci/verify.sh + ci/verify.steps (stack detection, frozen
@@ -5427,7 +5428,8 @@ EOF
 }
 
 cmd_integrate() {
-  # integrate <branch> — land a session branch on main: advisory lease, ff-only,
+  # integrate <branch> [--landing-branch <name>] — land a session branch on the landing branch
+  # (default main; the comments below say "main" for it): advisory lease, ff-only,
   # suite at the CANDIDATE OID in a throwaway detached worktree, then the CAS
   # update-ref. The lease is an economizer; the CAS is the safety. main never
   # holds WORK: it moves by ref, verified first. One clean checkout may idle on
@@ -5435,17 +5437,26 @@ cmd_integrate() {
   # (Plan r3-r6; the idle-console exception 2026-08-27.)
   local branch="${1:-}"; shift 2>/dev/null || true
   [ -n "$branch" ] || usage_err "integrate: a branch is required"
-  local name="${COMMS_PRESENCE_NAME:-}" instance="${COMMS_PRESENCE_INSTANCE:-}"
+  local name="${COMMS_PRESENCE_NAME:-}" instance="${COMMS_PRESENCE_INSTANCE:-}" lb=main
   while [ $# -gt 0 ]; do
     case "$1" in
       # A value-taking flag REQUIRES its value (need_value): an exit 1 with no message reads to a
       # driver as "unclassified" instead of usage. (codex, driver-contract r1.)
       --name) need_value "integrate" $# "$1"; shift; name="$1" ;;
       --instance) need_value "integrate" $# "$1"; shift; instance="$1" ;;
+      --landing-branch) need_value "integrate" $# "$1"; shift; lb="$1" ;;
       -?*) usage_err "integrate: unknown option '$(clip "$1")'" ;;
       *) usage_err "integrate: unexpected argument '$(clip "$1")'" ;;
     esac; shift
   done
+  # The landing branch is baked into the EXIT trap strings below, so its spelling is restricted to
+  # a shell-inert set on top of git's own ref rules; every real branch name fits.
+  case "$lb" in
+    ''|-*|*[!A-Za-z0-9._/-]*) usage_err "integrate: --landing-branch '$(clip "$lb")' is not a plain branch name (A-Z a-z 0-9 . _ / -)" ;;
+  esac
+  git check-ref-format --branch "$lb" >/dev/null 2>&1 \
+    || usage_err "integrate: --landing-branch '$(clip "$lb")' is not a valid branch name"
+  local lref="refs/heads/$lb"
   # The assignment carries its own guard: `main_repo_root` is a git|sed pipeline, and outside a
   # repository (or with an unreadable .git) git exits 128, so under `set -e -o pipefail` the
   # bare assignment aborted with 128 and no message before the empty check below could run.
@@ -5525,11 +5536,11 @@ cmd_integrate() {
   if [ -n "$name" ] && [ -n "$instance" ] && [ -f "$(presence_dir)/$name-$instance.json" ]; then
     "$SELF" presence beat --name "$name" --instance "$instance" --state integrating >/dev/null 2>&1 || true
   fi
-  expected="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: no refs/heads/main"
+  expected="$(git -C "$root" rev-parse --verify "$lref" 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_CONFIG" "integrate: no local branch '$lb' ($lref) to land on — create it or pass --landing-branch <existing branch>"
   cand="$(git -C "$root" rev-parse --verify "$branch^{commit}" 2>/dev/null)" || usage_err "integrate: cannot resolve '$(clip "$branch")'"
-  printf '%s\n' "integrate: candidate $cand (from $(integrate_oneline "$branch")), expected main $expected"
+  printf '%s\n' "integrate: candidate $cand (from $(integrate_oneline "$branch")), expected $lb $expected"
   git -C "$root" merge-base --is-ancestor "$expected" "$cand" \
-    || integrate_fail "$INTEGRATE_RC_NOT_FF" "integrate: $branch is not a descendant of main — rebase first (ff-only)"
+    || integrate_fail "$INTEGRATE_RC_NOT_FF" "integrate: $branch is not a descendant of $lb — rebase first (ff-only)"
   # NEVER-OCCUPY-MAIN, decided BEFORE the suite: refusing after a green
   # 10-minute run is the expensive way to learn main was occupied (user,
   # 2026-08-27 — the arc's own first landing hit exactly that). ONE clean
@@ -5540,14 +5551,14 @@ cmd_integrate() {
   # re-pointing a tree someone is working in corrupts their session.
   local heal_list occ occ_n occ_head occ_status healed=""
   heal_list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_ENV" "integrate: cannot enumerate worktrees — refusing"
-  occ="$(printf '%s\n' "$heal_list" | LC_ALL=C awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/main$/{print p}')"
+  occ="$(printf '%s\n' "$heal_list" | LC_ALL=C awk -v want="branch $lref" '/^worktree /{p=substr($0,10)} $0==want{print p}')"
   if [ -n "$occ" ]; then
     occ_n="$(printf '%s\n' "$occ" | grep -c .)"
-    [ "$occ_n" = 1 ] || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: main is checked out in $occ_n worktrees — refusing (never-occupy-main)"
+    [ "$occ_n" = 1 ] || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: $lb is checked out in $occ_n worktrees — refusing (never-occupy-main)"
     occ_head="$(git -C "$occ" rev-parse --verify HEAD 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_ENV" "integrate: cannot read main occupant's HEAD ($occ) — refusing (never-occupy-main)"
-    [ "$occ_head" = "$expected" ] || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: main occupant $occ sits at $occ_head, not the main tip — refusing (never-occupy-main)"
+    [ "$occ_head" = "$expected" ] || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: $lb occupant $occ sits at $occ_head, not the $lb tip — refusing (never-occupy-main)"
     occ_status="$(git -C "$occ" status --porcelain -uno 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_ENV" "integrate: cannot read main occupant's status ($occ) — refusing (never-occupy-main)"
-    [ -z "$occ_status" ] || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: main occupant $occ has uncommitted changes — refusing (never-occupy-main; commit them or move it off main)"
+    [ -z "$occ_status" ] || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: $lb occupant $occ has uncommitted changes — refusing (never-occupy-main; commit them or move it off $lb)"
     git -C "$occ" checkout --detach >/dev/null 2>&1 || integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: could not detach main occupant $occ — refusing (never-occupy-main)"
     healed="$occ"
     # Re-arm the trap WITH the undo baked in as a literal: a die past this point
@@ -5557,8 +5568,8 @@ cmd_integrate() {
     # tip this run never verified is not the promise "unmoved main" made.
     # (codex, r1.) Leaving it detached is the safe residual; the message says so.
     # shellcheck disable=SC2064
-    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify refs/heads/main 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout main >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — main or the checkout moved during the attempt\" >&2 || true; fi; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$SELF' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
-    printf '%s\n' "integrate: healed — detached clean main occupant $(integrate_oneline "$occ") for the landing"
+    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify $lref 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout $lb >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — $lb or the checkout moved during the attempt\" >&2 || true; fi; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$SELF' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
+    printf '%s\n' "integrate: healed — detached clean $lb occupant $(integrate_oneline "$occ") for the landing"
   fi
   # DOCS-ONLY SKIP. A tree diff that is only README.md, LICENSE, or top-level
   # docs/*.md cannot change helper/protocol behavior. Nested docs (docs/loopspec,
@@ -5597,8 +5608,8 @@ cmd_integrate() {
     # the exit class alone is easy to lose through a wrapper. The EXIT trap still removes the
     # verification tree and drops the integrating lease, exactly as on a red suite.
     if [ "$vrc" = "$INTEGRATE_RC_SUITE_TIMEOUT" ]; then
-      printf 'integrate-result v1 status=refused reason=suite_timeout cand=%s main_before=%s branch=%s timeout_secs=%s\n' \
-        "$cand" "$expected" "$(integrate_kv "$branch")" "$suite_timeout"
+      printf 'integrate-result v1 status=refused reason=suite_timeout cand=%s main_before=%s branch=%s timeout_secs=%s landing=%s\n' \
+        "$cand" "$expected" "$(integrate_kv "$branch")" "$suite_timeout" "$(integrate_kv "$lb")"
     fi
     [ "$vrc" = 0 ] || integrate_fail "$vrc" "$SUITE_VERIFY_REASON"
   fi
@@ -5606,21 +5617,21 @@ cmd_integrate() {
   # suite; the CAS must still never move a ref under a live working tree.
   local wt_list
   wt_list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" || integrate_fail "$INTEGRATE_RC_ENV" "integrate: cannot enumerate worktrees — refusing"
-  printf '%s\n' "$wt_list" | grep -qx 'branch refs/heads/main' \
-    && integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: main is checked out somewhere — refusing (never-occupy-main)"
+  printf '%s\n' "$wt_list" | grep -qxF "branch $lref" \
+    && integrate_fail "$INTEGRATE_RC_OCCUPIED" "integrate: $lb is checked out somewhere — refusing (never-occupy-main)"
   # A refused update-ref is only a LOST COMPARE if main really moved. A lock file, a
   # permissions error or a full disk refuses it too, with main still at the expected tip, and a
   # driver that treats 16 as "re-run against the new tip" would retry a permanent fault that has
   # no new tip. (grok, driver-contract r1, advisory.)
-  if ! git -C "$root" update-ref refs/heads/main "$cand" "$expected"; then
+  if ! git -C "$root" update-ref "$lref" "$cand" "$expected"; then
     local main_now
     # An UNREADABLE ref after the failure is not evidence that main moved: classify it as the
     # environment fault it is. (codex, driver-contract r2, advisory.)
-    main_now="$(git -C "$root" rev-parse --verify refs/heads/main 2>/dev/null)" \
-      || integrate_fail "$INTEGRATE_RC_ENV" "integrate: could not update refs/heads/main, and cannot read it back — nothing landed"
+    main_now="$(git -C "$root" rev-parse --verify "$lref" 2>/dev/null)" \
+      || integrate_fail "$INTEGRATE_RC_ENV" "integrate: could not update $lref, and cannot read it back — nothing landed"
     [ "$main_now" = "$expected" ] \
-      || integrate_fail "$INTEGRATE_RC_CAS_LOST" "integrate: main moved (CAS refused) — nothing landed; re-run to re-verify against the new tip"
-    integrate_fail "$INTEGRATE_RC_ENV" "integrate: could not update refs/heads/main although it is still at $expected (a lock, permissions, or disk fault) — nothing landed"
+      || integrate_fail "$INTEGRATE_RC_CAS_LOST" "integrate: $lb moved (CAS refused) — nothing landed; re-run to re-verify against the new tip"
+    integrate_fail "$INTEGRATE_RC_ENV" "integrate: could not update $lref although it is still at $expected (a lock, permissions, or disk fault) — nothing landed"
   fi
   # Success path: clean up and clear the trap NOW, inside function scope, so the
   # process-exit path has nothing deferred left to evaluate.
@@ -5636,10 +5647,10 @@ cmd_integrate() {
     heal_now="$(git -C "$healed" rev-parse HEAD 2>/dev/null || true)"
     if [ "$heal_now" != "$expected" ]; then
       printf '%s\n' "integrate: warning — $(integrate_oneline "$healed") moved to $heal_now during the landing; left detached (its commits are intact, re-attach by hand)"
-    elif git -C "$healed" checkout main >/dev/null 2>&1; then
-      printf '%s\n' "integrate: healed occupant $(integrate_oneline "$healed") fast-forwarded onto the new main"
+    elif git -C "$healed" checkout "$lb" >/dev/null 2>&1; then
+      printf '%s\n' "integrate: healed occupant $(integrate_oneline "$healed") fast-forwarded onto the new $lb"
     else
-      printf '%s\n' "integrate: warning — could not re-attach $(integrate_oneline "$healed") to main; it is parked detached at $expected"
+      printf '%s\n' "integrate: warning — could not re-attach $(integrate_oneline "$healed") to $lb; it is parked detached at $expected"
     fi
   fi
   # Same rule: only refresh a record that exists. Nothing here manufactures one.
@@ -5650,20 +5661,20 @@ cmd_integrate() {
   local suite_kind
   if [ "$skip_suite" = docs ]; then
     suite_kind=skipped-docs
-    echo "integrate: LANDED $cand as main (was $expected); docs-only skip, suite not run"
+    echo "integrate: LANDED $cand as $lb (was $expected); docs-only skip, suite not run"
   elif [ -n "$skip_suite" ]; then
     suite_kind=attested
-    echo "integrate: LANDED $cand as main (was $expected); green by attestation (${attest_age}s old)"
+    echo "integrate: LANDED $cand as $lb (was $expected); green by attestation (${attest_age}s old)"
   else
     suite_kind=ran
-    echo "integrate: LANDED $cand as main (was $expected); suite green at the landed OID"
+    echo "integrate: LANDED $cand as $lb (was $expected); suite green at the landed OID"
   fi
   # THE RESULT LINE — exactly once, on success only, after the human line. A driver reads
   # this instead of the prose above. main_after is the value THIS landing wrote by CAS, not a
   # later read (another writer may have advanced main since). Versioned so the fields can
   # grow without breaking a parser that reads v1. Format: docs/COMMANDS.md.
-  printf 'integrate-result v1 status=landed cand=%s main_before=%s main_after=%s branch=%s suite=%s\n' \
-    "$cand" "$expected" "$cand" "$(integrate_kv "$branch")" "$suite_kind"
+  printf 'integrate-result v1 status=landed cand=%s main_before=%s main_after=%s branch=%s suite=%s landing=%s\n' \
+    "$cand" "$expected" "$cand" "$(integrate_kv "$branch")" "$suite_kind" "$(integrate_kv "$lb")"
 }
 
 cmd_verify() {

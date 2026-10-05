@@ -225,7 +225,10 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    Migration for a working checkout: `comms.sh workspace set <name>` FIRST
    (pins mailbox identity so the branch switch cannot flap prefixes), then
    `git checkout -b`.
-3. **Landing = `comms.sh integrate <branch>`.** Advisory lease, ff-only, the suite
+3. **Landing = `comms.sh integrate <branch> [--landing-branch <name>]`.** The landing
+   branch is `main` unless `--landing-branch` names another existing local branch
+   (a repo whose default is `master` or `develop`); every rule below that says `main`
+   applies to that branch, and the result line's `landing=` field records it. Advisory lease, ff-only, the suite
    runs at the CANDIDATE OID in a throwaway detached worktree — a FRESH checkout carrying
    tracked content only, so `suite-cmd` must provision its own prerequisites and may leave
    ignored files but no git-visible changes (see the config block above) — and `main` moves by

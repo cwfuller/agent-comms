@@ -1686,26 +1686,26 @@ IX_OUT="$(ix integrate land1 2>/dev/null)"; IX_RC=$?
 [ "$IX_RC" = 0 ] && [ "$(ix_main)" = "$IX_C1" ] \
   && ok "integrate exits 0 when it lands the candidate" || fail "landing rc=$IX_RC"
 [ "$(printf '%s\n' "$IX_OUT" | grep -c '^integrate-result ')" = 1 ] \
-  && [ "$(printf '%s\n' "$IX_OUT" | tail -1)" = "integrate-result v1 status=landed cand=$IX_C1 main_before=$IX_M0 main_after=$IX_C1 branch=land1 suite=ran" ] \
+  && [ "$(printf '%s\n' "$IX_OUT" | tail -1)" = "integrate-result v1 status=landed cand=$IX_C1 main_before=$IX_M0 main_after=$IX_C1 branch=land1 suite=ran landing=main" ] \
   && printf '%s\n' "$IX_OUT" | grep -q '^integrate: LANDED ' \
   && ok "a landing prints exactly one result line, last, naming the OIDs and suite=ran" \
   || fail "result line: $(printf '%s\n' "$IX_OUT" | grep 'integrate-result' | head -2)"
 IX_M1="$(ix_main)"; ix_br docs1 main README.md $'# readme\n'; IX_D1="$(git -C "$IX" rev-parse docs1)"
 IX_OUT="$(ix integrate docs1 2>/dev/null)"
-printf '%s\n' "$IX_OUT" | grep -qx "integrate-result v1 status=landed cand=$IX_D1 main_before=$IX_M1 main_after=$IX_D1 branch=docs1 suite=skipped-docs" \
+printf '%s\n' "$IX_OUT" | grep -qx "integrate-result v1 status=landed cand=$IX_D1 main_before=$IX_M1 main_after=$IX_D1 branch=docs1 suite=skipped-docs landing=main" \
   && ok "a prose-only landing reports suite=skipped-docs" || fail "docs result line: $(printf '%s\n' "$IX_OUT" | grep 'integrate-result')"
 printf 'suite-cmd = bash ./suite.sh\nsuite-attest-secs = 600\n' > "$IX/.comms/config"
 ix_br att1 main c.txt $'c\n'
 mkdir -p "$IX/.comms/cache"
 printf '%s %s 0\n' "$(git -C "$IX" rev-parse att1)" "$(date +%s)" >> "$IX/.comms/cache/suite-attest.log"
 IX_OUT="$(ix integrate att1 2>/dev/null)"
-printf '%s\n' "$IX_OUT" | grep -qE '^integrate-result v1 status=landed cand=[0-9a-f]{40} main_before=[0-9a-f]{40} main_after=[0-9a-f]{40} branch=att1 suite=attested$' \
+printf '%s\n' "$IX_OUT" | grep -qE '^integrate-result v1 status=landed cand=[0-9a-f]{40} main_before=[0-9a-f]{40} main_after=[0-9a-f]{40} branch=att1 suite=attested landing=main$' \
   && ok "an attested landing reports suite=attested" || fail "attested result line: $(printf '%s\n' "$IX_OUT" | grep 'integrate-result')"
 printf 'suite-cmd = bash ./suite.sh\n' > "$IX/.comms/config"
 # A branch argument is escaped so the line stays whitespace-free key=value pairs.
 ix_br "feat-é" main g.txt $'g\n'
 IX_OUT="$(ix integrate "feat-é" 2>/dev/null)"
-printf '%s\n' "$IX_OUT" | grep -q '^integrate-result v1 .* branch=feat-%C3%A9 suite=ran$' \
+printf '%s\n' "$IX_OUT" | grep -q '^integrate-result v1 .* branch=feat-%C3%A9 suite=ran landing=main$' \
   && ok "a non-ASCII branch is %-escaped in the result line" || fail "escaped branch: $(printf '%s\n' "$IX_OUT" | grep 'integrate-result')"
 
 # Refusals: one class, one code. Each uses a candidate only that class can refuse.
@@ -1837,7 +1837,7 @@ IX_MF="$(ix_main)"; IX_R_FUT="$(ix_rc integrate fut1)"
   && ok "a future-dated attestation is not honoured: the red suite runs and refuses (14)" || fail "future attestation rc=$IX_R_FUT"
 printf '%s %s 0\n' "$IX_FUT" "$(date +%s)" >> "$IX/.comms/cache/suite-attest.log"
 IX_OUT="$(ix integrate fut1 2>/dev/null)"
-[ "$(ix_main)" = "$IX_FUT" ] && grep -q ' suite=attested$' <<<"$IX_OUT" \
+[ "$(ix_main)" = "$IX_FUT" ] && grep -q ' suite=attested landing=main$' <<<"$IX_OUT" \
   && ok "control: a current attestation for the same OID does skip the red suite" || fail "attested control: $(grep integrate-result <<<"$IX_OUT")"
 printf 'suite-cmd = bash ./suite.sh\n' > "$IX/.comms/config"
 
@@ -1863,7 +1863,7 @@ IT_EL=$(( $(date +%s) - IT_T0 ))
   && ok "a suite past suite-timeout-secs exits 18 (suite timeout) and main does not move" \
   || fail "timeout rc=$IT_R main=$(ix_main) expected=$IT_M"
 [ "$(printf '%s\n' "$IT_OUT" | grep -c '^integrate-result ')" = 1 ] \
-  && [ "$(printf '%s\n' "$IT_OUT" | tail -1)" = "integrate-result v1 status=refused reason=suite_timeout cand=$IT_C main_before=$IT_M branch=hang1 timeout_secs=2" ] \
+  && [ "$(printf '%s\n' "$IT_OUT" | tail -1)" = "integrate-result v1 status=refused reason=suite_timeout cand=$IT_C main_before=$IT_M branch=hang1 timeout_secs=2 landing=main" ] \
   && ok "a timeout prints exactly one result line: status=refused reason=suite_timeout" \
   || fail "timeout result line: $(printf '%s\n' "$IT_OUT" | grep 'integrate-result')"
 IT_CP="$(cat "$IT/child.pid" 2>/dev/null)"; IT_LP="$(cat "$IT/leader.pid" 2>/dev/null)"
@@ -1895,7 +1895,7 @@ ix presence release --name timeout-lander --instance "$IT_I" >/dev/null 2>&1
 ix_br quick1 main suite.sh $'#!/bin/bash\nsleep 1\ntest -f a.txt\n'; IT_Q="$(git -C "$IX" rev-parse quick1)"
 printf 'suite-cmd = bash ./suite.sh\nsuite-timeout-secs = 60\n' > "$IX/.comms/config"
 IT_OUT="$(ix integrate quick1 2>/dev/null)"; IT_R3=$?
-[ "$IT_R3" = 0 ] && [ "$(ix_main)" = "$IT_Q" ] && grep -q "^integrate-result v1 status=landed cand=$IT_Q .* suite=ran$" <<<"$IT_OUT" \
+[ "$IT_R3" = 0 ] && [ "$(ix_main)" = "$IT_Q" ] && grep -q "^integrate-result v1 status=landed cand=$IT_Q .* suite=ran landing=main$" <<<"$IT_OUT" \
   && ok "a suite that finishes inside suite-timeout-secs lands as before" || fail "inside the bound: rc=$IT_R3"
 ix_br zero1 main z.txt $'z\n'; IT_Z="$(git -C "$IX" rev-parse zero1)"
 printf 'suite-cmd = bash ./suite.sh\nsuite-timeout-secs = 0\n' > "$IX/.comms/config"
@@ -1962,6 +1962,84 @@ IT_U2="$(ix_rc presence others --name wb-timeout --instance 00000000000000000000
 [ "$IT_U1" = 2 ] && [ "$IT_U2" = 2 ] \
   && ok "a bad --timeout-secs, or one given to another presence verb, is a usage error (2)" \
   || fail "timeout flag usage: bad=$IT_U1 other-verb=$IT_U2"
+
+section "integrate: --landing-branch lands on a branch other than main"
+# A repo whose default branch is master (or develop) must land through integrate. Every read and
+# write of the landing ref follows the flag, and the default stays main. This fixture has NO main.
+MX="$WORK/integrate-landing"; mkdir -p "$MX"; MX="$(cd "$MX" && pwd -P)"
+git -C "$MX" init -q -b master
+printf '.comms/\n.claude/worktrees/\n' > "$MX/.gitignore"
+echo base > "$MX/a.txt"
+printf '#!/bin/bash\ntest -f a.txt\n' > "$MX/suite.sh"
+git -C "$MX" add -A >/dev/null 2>&1
+git -C "$MX" -c user.email=t@t -c user.name=t commit -qm init
+git -C "$MX" checkout -q -b session-primary
+mkdir -p "$MX/.comms"; printf 'suite-cmd = bash ./suite.sh\n' > "$MX/.comms/config"
+mx() { (cd "$MX" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE COMMS_PRESENCE_TTL_SECS=60 "$COMMS" "$@"); }
+mx_rc() { local rc=0; mx "$@" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+mx_tip() { git -C "$MX" rev-parse "refs/heads/$1"; }
+mx_br() { # <branch> <base> <path> <content> — one commit on a new branch, primary left on session-primary
+  git -C "$MX" checkout -q -b "$1" "$2" \
+    && printf '%s' "$4" > "$MX/$3" && git -C "$MX" add "$3" \
+    && git -C "$MX" -c user.email=t@t -c user.name=t commit -qm "$1"
+  git -C "$MX" checkout -q session-primary
+}
+MX_M0="$(mx_tip master)"
+mx_br ml1 master b.txt $'one\n'; MX_C1="$(git -C "$MX" rev-parse ml1)"
+mx_br stale1 master s.txt $'s\n'
+MX_R_DEF="$(mx_rc integrate ml1)"
+MX_ERR="$(mx integrate ml1 2>&1 >/dev/null || true)"
+[ "$MX_R_DEF" = 10 ] && [ "$(mx_tip master)" = "$MX_M0" ] && grep -q "no local branch 'main'" <<<"$MX_ERR" \
+  && ok "without the flag a repo that has no main refuses (10) and names the missing branch" \
+  || fail "default branch absent: rc=$MX_R_DEF $MX_ERR"
+MX_R_NOBR="$(mx_rc integrate ml1 --landing-branch nope)"
+MX_ERR="$(mx integrate ml1 --landing-branch nope 2>&1 >/dev/null || true)"
+[ "$MX_R_NOBR" = 10 ] && grep -q "no local branch 'nope'" <<<"$MX_ERR" && [ "$(mx_tip master)" = "$MX_M0" ] \
+  && ok "a landing branch that does not exist locally is refused (10) with a message naming it" \
+  || fail "missing landing branch: rc=$MX_R_NOBR $MX_ERR"
+MX_R_BAD1="$(mx_rc integrate ml1 --landing-branch "bad name")"
+MX_R_BAD2="$(mx_rc integrate ml1 --landing-branch "--x")"
+MX_R_BAD3="$(mx_rc integrate ml1 --landing-branch)"
+[ "$MX_R_BAD1" = 2 ] && [ "$MX_R_BAD2" = 2 ] && [ "$MX_R_BAD3" = 2 ] \
+  && ok "a malformed or valueless --landing-branch is a usage error (2)" \
+  || fail "bad landing branch usage: $MX_R_BAD1 $MX_R_BAD2 $MX_R_BAD3"
+MX_OUT="$(mx integrate ml1 --landing-branch master 2>/dev/null)"; MX_RC=$?
+[ "$MX_RC" = 0 ] && [ "$(mx_tip master)" = "$MX_C1" ] && ! git -C "$MX" rev-parse -q --verify refs/heads/main >/dev/null \
+  && grep -q "^integrate: LANDED $MX_C1 as master (was $MX_M0)" <<<"$MX_OUT" \
+  && ok "integrate --landing-branch master lands on master and prints LANDED ... as master" \
+  || fail "landing on master: rc=$MX_RC tip=$(mx_tip master) $MX_OUT"
+[ "$(printf '%s\n' "$MX_OUT" | grep -c '^integrate-result ')" = 1 ] \
+  && [ "$(printf '%s\n' "$MX_OUT" | tail -1)" = "integrate-result v1 status=landed cand=$MX_C1 main_before=$MX_M0 main_after=$MX_C1 branch=ml1 suite=ran landing=master" ] \
+  && ok "the result line names the landing branch and the before/after tips of that branch" \
+  || fail "master result line: $(printf '%s\n' "$MX_OUT" | grep 'integrate-result')"
+MX_ST="$(git -C "$MX" show "$MX_C1:b.txt" 2>/dev/null)"
+[ -f "$MX/.comms/logs/integrate-${MX_C1}.suite.log" ] && [ "$MX_ST" = one ] \
+  && ok "the suite ran at the candidate commit of the landing branch" || fail "suite log for the master landing missing"
+MX_M1="$(mx_tip master)"
+MX_ERR="$(mx integrate stale1 --landing-branch master 2>&1 >/dev/null)"; MX_R_FF=$?
+[ "$MX_R_FF" = 12 ] && [ "$(mx_tip master)" = "$MX_M1" ] && grep -q 'not a descendant of master' <<<"$MX_ERR" \
+  && ok "a candidate behind the moved landing branch is refused (12) naming master, which stays put" \
+  || fail "moved landing branch: rc=$MX_R_FF $MX_ERR"
+git -C "$MX" branch develop "$MX_M1"
+mx_br dv1 develop d.txt $'d\n'; MX_D1="$(git -C "$MX" rev-parse dv1)"
+MX_OUT="$(mx integrate dv1 --landing-branch develop 2>/dev/null)"; MX_RC=$?
+[ "$MX_RC" = 0 ] && [ "$(mx_tip develop)" = "$MX_D1" ] && [ "$(mx_tip master)" = "$MX_M1" ] \
+  && [ "$(printf '%s\n' "$MX_OUT" | tail -1)" = "integrate-result v1 status=landed cand=$MX_D1 main_before=$MX_M1 main_after=$MX_D1 branch=dv1 suite=ran landing=develop" ] \
+  && ok "landing on develop moves only develop, and the receipt names it" \
+  || fail "landing on develop: rc=$MX_RC master=$(mx_tip master) $(printf '%s\n' "$MX_OUT" | tail -1)"
+# The idle-console self-heal and the occupancy refusals follow the landing branch, not main.
+mx_br ml2 master e.txt $'e\n'; MX_C2="$(git -C "$MX" rev-parse ml2)"
+git -C "$MX" checkout -q master
+MX_OUT="$(mx integrate ml2 --landing-branch master 2>/dev/null)"; MX_RC=$?
+[ "$MX_RC" = 0 ] && [ "$(mx_tip master)" = "$MX_C2" ] && [ "$(git -C "$MX" symbolic-ref -q HEAD)" = refs/heads/master ] \
+  && [ "$(git -C "$MX" rev-parse HEAD)" = "$MX_C2" ] && grep -q 'healed occupant .* fast-forwarded onto the new master' <<<"$MX_OUT" \
+  && ok "a clean checkout idling on master is healed through the landing and re-attached to master" \
+  || fail "master occupant heal: rc=$MX_RC head=$(git -C "$MX" symbolic-ref -q HEAD) $MX_OUT"
+mx_br ml3 master f.txt $'f\n'
+echo dirty >> "$MX/a.txt"; git -C "$MX" checkout -q master 2>/dev/null
+MX_R_OCC="$(mx_rc integrate ml3 --landing-branch master)"
+git -C "$MX" checkout -q -- a.txt && git -C "$MX" checkout -q session-primary
+[ "$MX_R_OCC" = 13 ] && ok "a dirty occupant of the landing branch is refused (13)" || fail "dirty master occupant rc=$MX_R_OCC"
 
 section "verify: a landing suite for any repo (template, init, status, fresh)"
 # integrate runs suite-cmd in a fresh checkout with no shell, so a repo needs a committed script
