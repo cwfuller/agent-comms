@@ -346,6 +346,10 @@ case " $* " in
     if [ -n "${AX_RECORD_ID:-}" ]; then ax_id="$AX_RECORD_ID"
     else ax_id="stub-$(printf '%s' "$ax_name" | shasum -a 256 2>/dev/null | cut -c1-12)"; fi
     [ -n "$ax_id" ] || ax_id=stub-record-1
+    # AX_ENSURE_FAIL_AFTER_CLOSE=1 refuses to re-create a retired session: the canary retry's bind gate.
+    if [ -n "${AX_ENSURE_FAIL_AFTER_CLOSE:-}" ] && [ -f "$HOME/.acpx/sessions/$ax_id.closed" ]; then
+      printf 'stub ensure failure\n' >&2; exit 1
+    fi
     # ONLY into a store the suite marked as its own. Without this the stub wrote into the
     # user's real ~/.acpx/sessions whenever a turn did not override HOME.
     if [ -n "${HOME:-}" ] && [ -f "$HOME/.acpx-test-store" ]; then

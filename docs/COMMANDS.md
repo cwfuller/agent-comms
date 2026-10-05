@@ -900,7 +900,8 @@ new session, and sends one more canary with the ordinary budget. That happens at
 and only for `canary-timeout`; the warm context is lost. `turn.tsv` records `session_state`,
 `canary_budget` and, on a retry, `canary_retry` (`retire-recreate`), `canary_retry_cause`,
 `canary_retry_retired` (the old record id), `canary_retry_record` (the new one) and
-`canary_retry_result` (`passed` / `failed` / `close-failed` / `not-recreated`).
+`canary_retry_result` (`passed` / `failed` / `close-failed` / `not-recreated`, or `bind-refused` /
+`prepare-refused` when the re-created session fails its bind or mode-pin/policy check).
 
 To make that rare, the mounted codex `config.toml` carries
 `model_post_turn_compact_threshold_percent` (`COMMS_ACP_CODEX_COMPACT_PERCENT`, default 80; `0` omits

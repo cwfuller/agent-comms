@@ -3676,7 +3676,7 @@ cmd_run() {
     # that do NOT work are recorded in docs/ROADMAP.md; do not substitute one of them.
     # THAT MEASUREMENT NO LONGER HOLDS for writes: from codex-acp 1.12 the adapter's `read-only` mode
     # sends a workspace-write sandbox on every turn (confirmed in a 2026-10-05 rollout: the tree, /tmp
-    # and $TMPDIR writable, network still denied). Open in docs/ROADMAP.md as its own task.
+    # and $TMPDIR writable, network still denied). Open in docs/ROADMAP.md, to be fixed as its own task.
     if [ -n "$mount_dir" ]; then
       # EVERY file in the reused home is written FRESH and RENAMED into place, never
       # overwritten in situ. The home persists across rounds for warmth, so a prior
@@ -4101,7 +4101,15 @@ cmd_run() {
       # that was bound. Only a successful read-back lets result.json say `observed`.
       if [ -n "$RUN_BIND_STAMP" ]; then bound_leg_readback "$acp_iso_home"; fi
     fi
-    local acp_ensure_out="" acp_record_id="" acp_session_state=""
+    local acp_ensure_out="" acp_record_id="" acp_session_state="" acp_retry_open=""
+    # acp_retry_settle <result> — record the canary retry's outcome in turn.tsv, once. Every exit after
+    # the retry starts (a refusal in the re-created session's bind or preparation gates included) runs
+    # it BEFORE publishing, so a retry is never left in turn.tsv without a result. No-op outside a retry.
+    acp_retry_settle() {
+      [ -n "$acp_retry_open" ] || return 0
+      acp_retry_open=""
+      printf 'canary_retry_result\t%s\n' "$1" >> "$run_dir/turn.tsv" 2>/dev/null || true
+    }
     # acp_session_bind — ensure the named session and prove it is bound where the turn runs. ONE
     # definition, run for the turn's session and again for the one a canary retry re-creates, so a
     # re-created session passes every gate the first one did. Sets acp_ensure_out, acp_record_id and
@@ -4131,6 +4139,7 @@ cmd_run() {
             ens_cls="$(acp_failure_reason "$provider" "$run_dir/ensure.err")"
             [ -z "$ens_cls" ] || ens_note="$(acp_failure_note "$ens_cls" "$provider") (the session could not be created)"
           fi
+          acp_retry_settle bind-refused
           write_result "$run_dir" failed 1 "" "$msg" "$ens_note" "$ens_cls"
           unmount_artifact
           trap - EXIT
@@ -4146,6 +4155,7 @@ cmd_run() {
         if [ -z "$acp_bound_cwd" ] || [ "$acp_bound_cwd" != "$acp_phys" ]; then
           leg_usage_collect "$run_dir"   # a no-op before the canary; after it, a retry's first canary was billed
         update_thread_state "$msg_thread" failed "" "$sfield" || true
+          acp_retry_settle bind-refused
           write_result "$run_dir" failed 1 "" "$msg" "the ACP session bound cwd '${acp_bound_cwd:-<unreadable>}' is not the mount '$acp_phys' — the turn would have reviewed a tree outside the pinned artifact"
           unmount_artifact
           trap - EXIT
@@ -4155,6 +4165,7 @@ cmd_run() {
         if ! mount_tree_matches "$mount_dir" "$msg_artifact" "$run_dir/runner.log"; then
           leg_usage_collect "$run_dir"   # a no-op before the canary; after it, a retry's first canary was billed
         update_thread_state "$msg_thread" failed "" "$sfield" || true
+          acp_retry_settle bind-refused
           write_result "$run_dir" failed 1 "" "$msg" "the mount no longer matches artifact $msg_artifact at prompt time — refusing to review a contaminated tree"
           unmount_artifact
           trap - EXIT
@@ -4259,6 +4270,7 @@ cmd_run() {
     # adapter, so a second confirmation is impossible. (grok, plan r4; codex, plan r2 B1; live
     # finding, 2026-09-08.)
     acp_refuse() {  # <reason> <note> — write the failed result with a reason, unmount, unwind
+      acp_retry_settle prepare-refused   # only reachable mid-retry from the re-created session's gates
       acp_status=failed
       leg_usage_collect "$run_dir"
       ABORT_NOTE="refused: $2"
@@ -4364,18 +4376,19 @@ cmd_run() {
     if [ "$canary_ok" = 0 ] && [ "$provider" = codex ] && [ "$acp_session_state" = existing ] \
        && [ "$ACP_CANARY_REASON" = canary-timeout ]; then
       local retired_record="$acp_record_id" close_rc=0
+      acp_retry_open=1
       printf 'canary_retry\tretire-recreate\ncanary_retry_cause\t%s\ncanary_retry_retired\t%s\n' \
         "$ACP_CANARY_REASON" "${retired_record:-unknown}" >> "$run_dir/turn.tsv" 2>/dev/null || true
       printf 'canary retry: %s on existing session %s — retiring it and re-creating once\n' "$ACP_CANARY_REASON" "$retired_record" >>"$run_dir/runner.log"
       acp_exec "$workdir" --format text "$acp_profile" sessions close "$acp_session" >>"$run_dir/runner.log" 2>&1 || close_rc=$?
       if [ "$close_rc" -ne 0 ]; then
-        printf 'canary_retry_result\tclose-failed\n' >> "$run_dir/turn.tsv" 2>/dev/null || true
+        acp_retry_settle close-failed
         acp_refuse "$ACP_CANARY_REASON" "$ACP_CANARY_NOTE. Retiring the session automatically failed (exit $close_rc, see runner.log): retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
         return 1
       fi
       acp_session_bind
       if [ "$acp_session_state" != created ]; then
-        printf 'canary_retry_result\tnot-recreated\n' >> "$run_dir/turn.tsv" 2>/dev/null || true
+        acp_retry_settle not-recreated
         acp_refuse "$ACP_CANARY_REASON" "$ACP_CANARY_NOTE. The session was retired but acpx did not create a new one (state '${acp_session_state:-unknown}'), so no fresh canary was sent"
         return 1
       fi
@@ -4384,7 +4397,7 @@ cmd_run() {
       canary_secs="$canary_base"; canary_knob=COMMS_ACP_CANARY_SECS
       canary_ok=1
       acp_canary "$workdir" "$acp_profile" "$acp_session" "$run_dir" "$canary_secs" "$canary_knob" || canary_ok=0
-      printf 'canary_retry_result\t%s\n' "$( [ "$canary_ok" = 1 ] && echo passed || echo failed )" >> "$run_dir/turn.tsv" 2>/dev/null || true
+      acp_retry_settle "$( [ "$canary_ok" = 1 ] && echo passed || echo failed )"
       [ "$canary_ok" = 1 ] || ACP_CANARY_NOTE="$ACP_CANARY_NOTE (after the session was retired and re-created once)"
     fi
     if [ "$canary_ok" = 0 ]; then

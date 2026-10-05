@@ -521,6 +521,18 @@ CX_E="$(run_codex_canary closefail AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_CLO
   && [ "$(cx_canary_timeouts "$CX_E")" = 2 ] && [ "$(cx_tsv "$CX_E" canary_retry_result)" = close-failed ] \
   && ok "a failed automatic retire refuses with the manual retire command and sends no second canary" || fail "close failure: status=$(cn_status "$CX_E") result=$(cx_tsv "$CX_E" canary_retry_result)"
 
+# 5b. A re-created session that fails its bind or preparation gate still records the retry's result.
+CX_G="$(run_codex_canary bindfail AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_ENSURE_FAIL_AFTER_CLOSE=1 COMMS_ACP_CANARY_COMPACT_SECS=2)"
+[ "$(cn_status "$CX_G")" = failed ] && [ "$(cx_closes "$CX_G")" = 1 ] && [ "$(cx_canary_timeouts "$CX_G")" = 2 ] \
+  && [ "$(cx_tsv "$CX_G" canary_retry_result)" = bind-refused ] && [ "$(cx_prompted "$CX_G")" = 0 ] \
+  && ok "a re-created session refused at the bind gate records canary_retry_result bind-refused" \
+  || fail "retry bind refusal: status=$(cn_status "$CX_G") closes=$(cx_closes "$CX_G") result=$(cx_tsv "$CX_G" canary_retry_result)"
+CX_H="$(run_codex_canary pinfail AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_SETMODE_FAIL_ON=2 COMMS_ACP_CANARY_COMPACT_SECS=2)"
+[ "$(cn_status "$CX_H")" = failed ] && [ "$(cn_reason "$CX_H")" = containment-unconfirmed ] && [ "$(cx_canary_timeouts "$CX_H")" = 2 ] \
+  && [ "$(cx_tsv "$CX_H" canary_retry_result)" = prepare-refused ] && [ "$(cx_prompted "$CX_H")" = 0 ] \
+  && ok "a re-created session refused at the mode-pin gate records canary_retry_result prepare-refused" \
+  || fail "retry pin refusal: status=$(cn_status "$CX_H") reason=$(cn_reason "$CX_H") result=$(cx_tsv "$CX_H" canary_retry_result)"
+
 # 6. Only a timeout is retried: an off-script answer from an existing session keeps its context.
 CX_F="$(run_codex_canary junk AX_ENSURE_EXISTING=1 AX_CANARY=junk)"
 [ "$(cn_reason "$CX_F")" = canary-unexpected ] && [ "$(cx_closes "$CX_F")" = 0 ] && [ -z "$(cx_tsv "$CX_F" canary_retry)" ] \

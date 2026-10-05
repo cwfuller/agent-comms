@@ -674,7 +674,7 @@ policy exists. (6) Gemini and Codex API routes bind only where an explicit authe
 
 ### OPEN: the reviewer containment measurement is stale — re-probe on codex-acp 1.12.0 (2026-09-19, sev 2, acpx surface probe)
 
-**Confirmed 2026-10-05 (task 286), split into its own urgent task.** The mounted codex reviewer does
+**Confirmed 2026-10-05 (task 286); to be fixed as its own urgent task, not yet filed.** The mounted codex reviewer does
 NOT run read-only. A rollout from a 2026-10-05 mounted review (codex-acp 1.13.1, the newest 1.x, which
 acpx 0.13.1's `^1.1.5` resolves) records `sandbox_policy.type = workspace-write` and a permission
 profile granting WRITE to the mounted tree, `/tmp` and `$TMPDIR` (network restricted). The cause is
