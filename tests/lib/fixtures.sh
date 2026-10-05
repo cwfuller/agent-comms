@@ -375,6 +375,9 @@ case " $* " in
   *" sessions close "*)
     # Retire the session: the next ensure creates a fresh one. AX_CLOSE_RC makes the retire fail.
     [ -n "${AX_CLOSE_RC:-}" ] && { printf 'stub close failure\n' >&2; exit "$AX_CLOSE_RC"; }
+    # AX_CLOSE_HANG=<pidfile> models an owner that acknowledges the close and never answers it: the stub
+    # records its pid and blocks well past any test deadline, so only the runner's own deadline ends it.
+    if [ -n "${AX_CLOSE_HANG:-}" ]; then printf '%s\n' "$$" > "$AX_CLOSE_HANG"; sleep 60; exit 0; fi
     [ -n "$ax_rec" ] && : > "${ax_rec%.json}.closed"
     printf 'closed: %s\n' "$ax_sname"; exit 0 ;;
   *" sessions show "*)

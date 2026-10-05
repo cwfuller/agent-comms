@@ -895,12 +895,13 @@ output when the agent has not answered yet. That is what a codex session near it
 — it compacts before it answers, and the compaction can take minutes. So a codex session that acpx
 reports as `existing` (resumed) gets a canary budget of `COMMS_ACP_CANARY_COMPACT_SECS` (default 300,
 or `COMMS_ACP_CANARY_SECS` if that is larger). If that canary still times out, `run` retires the
-session (`acpx sessions close`), re-creates it, runs the same bind, mode-pin and policy checks on the
+session (`acpx sessions close`, bounded by `COMMS_ACP_RETIRE_SECS`, default 60, because acpx gives
+that call no deadline of its own and an owner can acknowledge it and never answer), re-creates it, runs the same bind, mode-pin and policy checks on the
 new session, and sends one more canary with the ordinary budget. That happens at most once per turn
 and only for `canary-timeout`; the warm context is lost. `turn.tsv` records `session_state`,
 `canary_budget` and, on a retry, `canary_retry` (`retire-recreate`), `canary_retry_cause`,
 `canary_retry_retired` (the old record id), `canary_retry_record` (the new one) and
-`canary_retry_result` (`passed` / `failed` / `close-failed` / `not-recreated`, or `bind-refused` /
+`canary_retry_result` (`passed` / `failed` / `close-failed` / `close-timeout` / `not-recreated`, or `bind-refused` /
 `prepare-refused` when the re-created session fails its bind or mode-pin/policy check).
 
 To make that rare, the mounted codex `config.toml` carries

@@ -48,7 +48,11 @@ turn was refused `canary-unexpected`. Every retry repeated it, and the only way 
 1. Empty output at or past the budget is `canary-timeout`.
 2. A codex session acpx reports as `existing` gets `COMMS_ACP_CANARY_COMPACT_SECS` (default 300). If
    that still times out, `run` retires the session and re-creates it once, through the same bind,
-   mode-pin and policy gates, and records the retry in `turn.tsv`.
+   mode-pin and policy gates, and records the retry in `turn.tsv`. The retire is bounded by
+   `COMMS_ACP_RETIRE_SECS` (default 60): acpx 0.13.1 awaits the owner's close response with no
+   response timer and does not forward `--timeout` to it, so an owner that acknowledged the close and
+   never answered would hold the runner and its mount claim indefinitely. On expiry the close's process
+   group is killed and the turn is refused with `canary_retry_result` `close-timeout`.
 3. The mounted `config.toml` sets `model_post_turn_compact_threshold_percent = 80`
    (`COMMS_ACP_CODEX_COMPACT_PERCENT`), so a long review compacts inside its own budget.
 

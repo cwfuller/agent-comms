@@ -521,6 +521,17 @@ CX_E="$(run_codex_canary closefail AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_CLO
   && [ "$(cx_canary_timeouts "$CX_E")" = 2 ] && [ "$(cx_tsv "$CX_E" canary_retry_result)" = close-failed ] \
   && ok "a failed automatic retire refuses with the manual retire command and sends no second canary" || fail "close failure: status=$(cn_status "$CX_E") result=$(cx_tsv "$CX_E" canary_retry_result)"
 
+# 5a. A retire the owner never answers is bounded by COMMS_ACP_RETIRE_SECS: refused, recorded, the close killed.
+CX_HANG_PID="$WORK/canary-cx-closehang.pid"; rm -f "$CX_HANG_PID"
+CX_HANG_T0="$(date +%s)"
+CX_I="$(run_codex_canary closehang AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_CLOSE_HANG="$CX_HANG_PID" COMMS_ACP_CANARY_COMPACT_SECS=2 COMMS_ACP_RETIRE_SECS=2)"
+CX_HANG_TOOK=$(( $(date +%s) - CX_HANG_T0 ))
+[ "$(cn_status "$CX_I")" = failed ] && [ "$(cn_reason "$CX_I")" = canary-timeout ] && grep -q 'did not finish within 2s' "$CX_I/result.json" \
+  && [ "$(cx_tsv "$CX_I" canary_retry_result)" = close-timeout ] && [ "$(cx_canary_timeouts "$CX_I")" = 2 ] && [ "$(cx_prompted "$CX_I")" = 0 ] \
+  && [ "$CX_HANG_TOOK" -lt 30 ] && [ -s "$CX_HANG_PID" ] && ! kill -0 "$(cat "$CX_HANG_PID")" 2>/dev/null \
+  && ok "an unanswered automatic retire is cut off at COMMS_ACP_RETIRE_SECS, killed, and refused as close-timeout" \
+  || fail "close hang: status=$(cn_status "$CX_I") result=$(cx_tsv "$CX_I" canary_retry_result) took=${CX_HANG_TOOK}s"
+
 # 5b. A re-created session that fails its bind or preparation gate still records the retry's result.
 CX_G="$(run_codex_canary bindfail AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_ENSURE_FAIL_AFTER_CLOSE=1 COMMS_ACP_CANARY_COMPACT_SECS=2)"
 [ "$(cn_status "$CX_G")" = failed ] && [ "$(cx_closes "$CX_G")" = 1 ] && [ "$(cx_canary_timeouts "$CX_G")" = 2 ] \

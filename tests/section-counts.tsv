@@ -41,7 +41,7 @@ acp.sh: the reviewer policy resolver	54
 reviewer policy: a wrong-depth review is never published	18
 reviewer routing: a routed decision reaches the mounted codex turn	18
 per-leg usage: result.json carries the provider's own records	13
-runphase: the compatibility canary gates every ACP turn	35
+runphase: the compatibility canary gates every ACP turn	36
 runphase: parent-brokered claude and codex legs over ACP	41
 scope-dial template source contract	15
 templates: bare dollar-digit/dollar-star hygiene	1

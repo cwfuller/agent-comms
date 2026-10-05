@@ -2843,6 +2843,32 @@ acp_exec() {  # <cwd> [acpx args...]
       ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" "$@" )
 }
 
+# acp_exec_bounded <secs> <log> <cwd> [acpx args...] — acp_exec under a deadline of its own, output appended
+# to <log>. Returns acpx's status, or 124 when the deadline expired and the call's whole process group was
+# killed. For an acpx verb that has no working timeout: `sessions close` awaits the owner's close response
+# with no response timer (acpx 0.13.1 does not forward --timeout to it), and codex-acp can hold that
+# response until an active prompt completes, so an owner that acknowledges the close and never answers it
+# would otherwise hold the runner, and its mount claim, forever.
+acp_exec_bounded() {
+  local secs="$1" log="$2" pid waited_ds=0 rc=0; shift 2
+  set -m   # its own process group, so the deadline reaps acpx and everything it spawned (see kill_codex)
+  acp_exec "$@" >>"$log" 2>&1 &
+  pid=$!
+  set +m
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited_ds" -ge $(( secs * 10 )) ]; then
+      kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.2; waited_ds=$(( waited_ds + 2 ))
+  done
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+
 # ---------- run (spawn's detached child) ----------
 
 cmd_run() {
@@ -4375,12 +4401,20 @@ cmd_run() {
     # gets the ordinary budget (nothing to compact). Recorded in turn.tsv either way.
     if [ "$canary_ok" = 0 ] && [ "$provider" = codex ] && [ "$acp_session_state" = existing ] \
        && [ "$ACP_CANARY_REASON" = canary-timeout ]; then
-      local retired_record="$acp_record_id" close_rc=0
+      local retired_record="$acp_record_id" close_rc=0 retire_secs
+      retire_secs="$(sane_secs "${COMMS_ACP_RETIRE_SECS:-60}")"; [ -n "$retire_secs" ] || retire_secs=60
       acp_retry_open=1
       printf 'canary_retry\tretire-recreate\ncanary_retry_cause\t%s\ncanary_retry_retired\t%s\n' \
         "$ACP_CANARY_REASON" "${retired_record:-unknown}" >> "$run_dir/turn.tsv" 2>/dev/null || true
       printf 'canary retry: %s on existing session %s — retiring it and re-creating once\n' "$ACP_CANARY_REASON" "$retired_record" >>"$run_dir/runner.log"
-      acp_exec "$workdir" --format text "$acp_profile" sessions close "$acp_session" >>"$run_dir/runner.log" 2>&1 || close_rc=$?
+      # Bounded independently (COMMS_ACP_RETIRE_SECS, default 60): the owner being retired is the one that
+      # just failed to answer, and acpx gives `sessions close` no deadline of its own.
+      acp_exec_bounded "$retire_secs" "$run_dir/runner.log" "$workdir" --format text "$acp_profile" sessions close "$acp_session" || close_rc=$?
+      if [ "$close_rc" -eq 124 ]; then
+        acp_retry_settle close-timeout
+        acp_refuse "$ACP_CANARY_REASON" "$ACP_CANARY_NOTE. Retiring the session automatically did not finish within ${retire_secs}s (COMMS_ACP_RETIRE_SECS): retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+        return 1
+      fi
       if [ "$close_rc" -ne 0 ]; then
         acp_retry_settle close-failed
         acp_refuse "$ACP_CANARY_REASON" "$ACP_CANARY_NOTE. Retiring the session automatically failed (exit $close_rc, see runner.log): retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
