@@ -1624,6 +1624,58 @@ POL_SEP="$WORK/pol-separators"; pol_run pol-separators "$POL_SEP" AX_ROLLOUT_APP
   && ok "a mounted turn whose rollout carries raw U+2028/U+2029/U+0085 records attests and publishes" \
   || fail "raw separators in the rollout refused an honest turn: status=$(cn_status "$POL_SEP") inbox=$(pol_inbox_n pol-separators)"
 
+# --- containment: a mounted codex turn runs on the PINNED adapter and attests a read-only sandbox ---
+# MEASURED 2026-10-05: on the floating codex-acp 1.x builtin the `read-only` mode sends a
+# workspace-write sandbox every turn, and under --approve-all a sandbox-refused write was re-run
+# outside the sandbox on approval. The stub models the adapter: the floating builtin's rollout
+# records workspace-write, the pinned 2.x one read-only (tests/lib/fixtures.sh).
+pol_tsv() { awk -F'\t' -v k="$2" '$1==k{v=$2} END{print v}' "$1/turn.tsv" 2>/dev/null; }
+POL_SBX_OK_LOG="$WORK/pol-ok.argv"; POL_SBX_OK="$WORK/pol-sbx-ok"
+pol_run pol-sbx-ok "$POL_SBX_OK" AX_CWD_LOG="$POL_SBX_OK_LOG"
+POL_PIN="$(awk -F'\t' '$2 ~ / --file /' "$POL_SBX_OK_LOG" 2>/dev/null)"
+[ "$(cn_status "$POL_SBX_OK")" = completed ] && [ "$(pol_inbox_n pol-sbx-ok)" = 1 ] \
+  && printf '%s' "$POL_PIN" | grep_full -q -- "--agent npx -y @agentclientprotocol/codex-acp@$("$REPO/helpers/acp.sh" adapter codex | sed 's/.*@//') prompt -s agent-comms+mount+" \
+  && ok "an honest mounted codex turn runs the review prompt on the pinned adapter and publishes" \
+  || fail "pinned honest turn: status=$(cn_status "$POL_SBX_OK") inbox=$(pol_inbox_n pol-sbx-ok) argv=$POL_PIN"
+printf '%s' "$POL_PIN" | grep_full -q -- ' --deny-all ' && ! printf '%s' "$POL_PIN" | grep_full -q -- '--approve-all' \
+  && ok "the mounted codex review prompt runs under --deny-all, so a sandbox escalation is refused by the client" \
+  || fail "mounted codex permission shape is not --deny-all: $POL_PIN"
+[ "$(pol_tsv "$POL_SBX_OK" canary_sandbox)" = read-only ] && [ "$(pol_tsv "$POL_SBX_OK" observed_sandbox)" = read-only ] \
+  && [ -n "$(pol_tsv "$POL_SBX_OK" acp_adapter)" ] \
+  && ok "turn.tsv records the adapter and the read-only sandbox the canary and the review turn ran under" \
+  || fail "turn.tsv sandbox/adapter: canary=$(pol_tsv "$POL_SBX_OK" canary_sandbox) review=$(pol_tsv "$POL_SBX_OK" observed_sandbox) adapter=$(pol_tsv "$POL_SBX_OK" acp_adapter)"
+# The review turn's own rollout reports workspace-write: refused, unpublished, as containment.
+POL_SBX_WW="$WORK/pol-sbx-ww"; pol_run pol-sbx-ww "$POL_SBX_WW" AX_ROLLOUT_SANDBOX=workspace-write
+[ "$(cn_status "$POL_SBX_WW")" = failed ] && [ "$(cn_reason "$POL_SBX_WW")" = containment-unconfirmed ] \
+  && [ "$(pol_inbox_n pol-sbx-ww)" = 0 ] && [ "$(pol_tsv "$POL_SBX_WW" observed_sandbox)" = workspace-write ] \
+  && ok "a review turn whose rollout reports a workspace-write sandbox is refused unpublished (containment-unconfirmed)" \
+  || fail "workspace-write review: status=$(cn_status "$POL_SBX_WW") reason=$(cn_reason "$POL_SBX_WW") inbox=$(pol_inbox_n pol-sbx-ww)"
+# A CHILD context counts too: it runs commands under its own sandbox.
+POL_SBX_CH="$WORK/pol-sbx-child"; pol_run pol-sbx-child "$POL_SBX_CH" AX_ROLLOUT_CHILD_SANDBOX=workspace-write
+[ "$(cn_status "$POL_SBX_CH")" = failed ] && [ "$(cn_reason "$POL_SBX_CH")" = containment-unconfirmed ] && [ "$(pol_inbox_n pol-sbx-child)" = 0 ] \
+  && ok "a writable sandbox on a child turn_context refuses the review even when the root is read-only" \
+  || fail "child workspace-write: status=$(cn_status "$POL_SBX_CH") reason=$(cn_reason "$POL_SBX_CH")"
+# A context with NO sandbox evidence is not read-only.
+POL_SBX_NO="$WORK/pol-sbx-none"; pol_run pol-sbx-none "$POL_SBX_NO" AX_ROLLOUT_SANDBOX=none
+[ "$(cn_status "$POL_SBX_NO")" = failed ] && [ "$(cn_reason "$POL_SBX_NO")" = containment-unconfirmed ] && [ "$(pol_inbox_n pol-sbx-none)" = 0 ] \
+  && ok "a review turn whose rollout carries no sandbox_policy is refused, never assumed read-only" \
+  || fail "missing sandbox: status=$(cn_status "$POL_SBX_NO") reason=$(cn_reason "$POL_SBX_NO")"
+# The CANARY's rollout reports workspace-write: refused BEFORE the review prompt is paid for.
+POL_SBX_CN="$WORK/pol-sbx-canary"; POL_SBX_CN_LOG="$WORK/pol-sbx-canary.argv"
+pol_run pol-sbx-canary "$POL_SBX_CN" AX_CANARY_SANDBOX=workspace-write AX_CWD_LOG="$POL_SBX_CN_LOG"
+[ "$(cn_status "$POL_SBX_CN")" = failed ] && [ "$(cn_reason "$POL_SBX_CN")" = containment-unconfirmed ] \
+  && [ "$(pol_tsv "$POL_SBX_CN" canary_sandbox)" = workspace-write ] \
+  && ! awk -F'\t' '$2 ~ / --file /' "$POL_SBX_CN_LOG" 2>/dev/null | grep_full -q . \
+  && ok "a canary that ran under a workspace-write sandbox refuses the turn before the review prompt is sent" \
+  || fail "canary workspace-write: status=$(cn_status "$POL_SBX_CN") reason=$(cn_reason "$POL_SBX_CN") canary=$(pol_tsv "$POL_SBX_CN" canary_sandbox)"
+# CONTROL for the pin: with no pinned adapter the turn would run acpx's floating builtin, whose
+# rollout records workspace-write — so the stub, not just the runner's flag, distinguishes the two.
+POL_SBX_FH="$WORK/pol-sbx-float-home"; mkdir -p "$POL_SBX_FH"
+( cd "$MA_FIX" && env PATH="$AXB:$PATH" CODEX_HOME="$POL_SBX_FH" npx -y acpx@0.13.1 --format quiet codex -s s --file /dev/null >/dev/null 2>&1 )
+grep -q '"sandbox_policy":{"type":"workspace-write"}' "$POL_SBX_FH"/sessions/*/*/*/rollout-*.jsonl 2>/dev/null \
+  && ok "control: the stub's floating builtin records workspace-write, so the pinned-adapter pass is not vacuous" \
+  || fail "control: the stub's floating builtin does not record workspace-write"
+
 # THE RUNNER'S OWN terminal row for a policy refusal is what `compose --degrade` accepts as
 # evidence. Read it through compose's single definition, so the writer and the reader are
 # proven to agree on the format rather than each matching a hand-written copy of it.

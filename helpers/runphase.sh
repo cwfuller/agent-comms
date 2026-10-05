@@ -2432,8 +2432,9 @@ acp_confirm_mode() {
 }
 
 # acp_rollout_observed <iso-home> <snapshot-file> — print
-# "<effort>\t<model>\t<turn-id>\t<evidence-file>\t<window-origin>" for the ONE root
-# turn_context this turn appended, or exit non-zero.
+# "<effort>\t<model>\t<turn-id>\t<evidence-file>\t<window-origin>\t<runtime>\t<created-runtime>\t
+# <sandbox>" for the root turn_contexts this turn appended, or exit non-zero. <sandbox> is the
+# sandbox_policy type every context in the window agrees on (`mixed` / `unknown` otherwise).
 #
 # THE EVIDENCE THE PROVIDER WROTE ITSELF. codex appends a turn_context per prompt carrying the
 # model and effort it actually ran; that is the only record of the BILLABLE turn, and the only
@@ -2446,10 +2447,12 @@ acp_confirm_mode() {
 # session. Records key on (agent, cwd, name), so the directory must be IN the command, not merely
 # named beside it; and because the operator pastes this, the directory must survive as ONE shell
 # argument. printf %q does that. Rendered in one place so the two refusal sites cannot drift and
-# so a test can exercise the real renderer rather than a copy of it.
+# so a test can exercise the real renderer rather than a copy of it. A PINNED adapter (acp_agent_cmd,
+# dynamic scope) keys its records on that command, so the profile is replaced by `--agent <cmd>`.
 policy_retire_cmd() {
-  local _q; printf -v _q '%q' "$3"
-  printf 'acpx --cwd %s %s sessions close %s' "$_q" "$1" "$2"
+  local _q _a="$1"; printf -v _q '%q' "$3"
+  if [ -n "${acp_agent_cmd:-}" ]; then printf -v _a -- '--agent %q' "$acp_agent_cmd"; fi
+  printf 'acpx --cwd %s %s sessions close %s' "$_q" "$_a" "$2"
 }
 
 # acp_gemini_observed <acp.sh> <iso-home> <attest-snapshot> <cwd> — the gemini analogue of
@@ -2523,6 +2526,7 @@ try:
 except OSError:
     undecidable("the rollout snapshot could not be read")
 roots=[]
+sandboxes=set()
 def _boom(e): raise e
 files=[]
 try:
@@ -2590,6 +2594,11 @@ for f in files:
         # legitimate skip. (codex, implement r2 B2.)
         if not tid or not rid:
             undecidable("a turn_context in the window carries no turn identifiers")
+        # THE SANDBOX of EVERY context in the window, child turns included: a child runs commands
+        # too. A context with no readable sandbox type is `unknown`, never assumed read-only.
+        sp=p.get("sandbox_policy")
+        st_=sp.get("type") if isinstance(sp,dict) else None
+        sandboxes.add(st_ if isinstance(st_,str) and st_ else "unknown")
         if tid!=rid: continue                # a child turn, not the billable root
         roots.append((p.get("effort"),p.get("model"),tid,f,start))
 # ALL ROOTS MUST AGREE — not "exactly one". A real round-2 warm resumed session emitted FOUR
@@ -2605,9 +2614,9 @@ if len(_pairs)!=1:
 eff,mod,tid,src,off=roots[0]
 # THE RUNTIME THAT PRODUCED THE EVIDENCE: the newest session_meta.cli_version in the evidence file
 # (written at session start, so usually BEFORE the window — it is provenance, not turn evidence,
-# and an unreadable or absent one is simply unknown). The adapter floats under a caret range and
-# bundles its own codex, so a map validated on one runtime can otherwise be applied to another
-# with no trace. (design critique r1.)
+# and an unreadable or absent one is simply unknown). The adapter bundles its own codex and the
+# operator's installed one moves independently, so a map validated on one runtime can otherwise be
+# applied to another with no trace. (design critique r1.)
 # codex writes session_meta ONCE, when the session is created, never on resume — so it is the
 # runtime that CREATED the session. It is reported as this turn's runtime only when it falls inside
 # the attested window (the session was created during this turn); otherwise the created value is
@@ -2630,10 +2639,12 @@ except OSError:
     rt_win=""; rt_created=""
 def _tok(v): return v if all(c.isalnum() or c in "._-+" for c in v) else ""
 rt_win=_tok(rt_win); rt_created=_tok(rt_created)
+# One sandbox type when every context in the window agrees, else `mixed`; the caller requires read-only.
+sbx=(_tok(next(iter(sandboxes))) or "unknown") if len(sandboxes)==1 else "mixed"
 # effort, model, backend turn id, rollout path, snapshot byte boundary, runtime of THIS turn (only
-# when evidenced in the window), runtime that created the session -- the evidence a refusal needs
-# to be reconstructable once the isolated home is gone. (codex, live-proof r1.)
-print("%s\t%s\t%s\t%s\t%s\t%s\t%s"%("" if eff is None else eff,"" if mod is None else mod,tid,src,off,rt_win,rt_created))
+# when evidenced in the window), runtime that created the session, the window's sandbox -- the
+# evidence a refusal needs to be reconstructable once the isolated home is gone. (codex, live-proof r1.)
+print("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s"%("" if eff is None else eff,"" if mod is None else mod,tid,src,off,rt_win,rt_created,sbx))
 PY
 }
 
@@ -2829,8 +2840,30 @@ TURN_CHILD_SCRUB=(-u COMMS_SELF -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANC
                   -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID
                   -u GEMINI_CLI -u COMMS_METHOD_GUIDANCE_DIR)
 
+# acp_agent_argv [acpx args...] — THE PINNED ADAPTER. When acp_agent_cmd (dynamic scope) names an
+# adapter command, rewrite the positional profile into acpx's raw-agent shape: the global options,
+# `--agent <cmd>`, then the verb, with `-s <session>` after it (an implicit prompt gets the explicit
+# `prompt` verb). acpx keys records on the agent COMMAND, so a pinned turn never resumes a record or
+# owner the floating builtin created. Sets ACP_ARGV; returns 1 when the profile is not in the argv.
+acp_agent_argv() {
+  ACP_ARGV=("$@")
+  [ -n "${acp_agent_cmd:-}" ] || return 0
+  local -a _pre=() _sess=()
+  local _found=0 _verb=prompt
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "$acp_profile" ]; then _found=1; shift; break; fi
+    _pre+=("$1"); shift
+  done
+  [ "$_found" = 1 ] || return 1
+  if [ "${1:-}" = -s ] && [ "$#" -ge 2 ]; then _sess=(-s "$2"); shift 2; fi
+  case "${1:-}" in sessions|set-mode|set|status|cancel|prompt) _verb="$1"; shift ;; esac
+  ACP_ARGV=(${_pre[@]+"${_pre[@]}"} --agent "$acp_agent_cmd" "$_verb" ${_sess[@]+"${_sess[@]}"} "$@")
+}
+
 acp_exec() {  # <cwd> [acpx args...]
   local _cwd="$1"; shift
+  local -a ACP_ARGV=()
+  acp_agent_argv "$@" || { echo "run: the acpx argv carries no '$acp_profile' profile to pin" >&2; return 2; }
   # A BOUND leg's credential scrub (BOUND_ENV_ARGS) rides in the same env argv; its one credential is
   # exported inside this subshell, so a secret is in this process's environment and never in any argv.
   ( cd "$_cwd" || exit 1
@@ -2840,7 +2873,7 @@ acp_exec() {  # <cwd> [acpx args...]
           -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
           "${TURN_CHILD_SCRUB[@]}" \
           ${BOUND_ENV_ARGS[@]+"${BOUND_ENV_ARGS[@]}"} \
-      ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" "$@" )
+      ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" ${ACP_ARGV[@]+"${ACP_ARGV[@]}"} )
 }
 
 # acp_exec_bounded <secs> <log> <cwd> [acpx args...] — acp_exec under a deadline of its own, output appended
@@ -3516,6 +3549,9 @@ cmd_run() {
     local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim="" acp_reason=""
     local -a acp_iso=()          # isolation env, applied to EVERY owner-spawning invocation
     local acp_iso_backend=none acp_iso_home=""
+    # The pinned adapter command (acp.sh adapter), handed to acpx as `--agent` by acp_exec. Empty runs
+    # acpx's builtin for the profile. Set only where a backend's containment depends on the adapter.
+    local acp_agent_cmd=""
     # grok's kernel containment (helpers/box.sh): the dir holding its profile and launch shim, which is
     # put FIRST on every acpx invocation's PATH so the owner's `grok` is always the contained one; the
     # home it runs in (kept apart from acp_iso_home, which switches on codex/gemini-only policy checks);
@@ -3699,14 +3735,23 @@ cmd_run() {
     # the process that actually runs tools unconfined. (codex, plan r4, blocking.)
     #
     # This is a real boundary, not a cost increase, and only where it was MEASURED to be one.
-    # Measured on Darwin with acpx 0.13.1 / codex-acp 1.6.2: an isolated CODEX_HOME plus
-    # INITIAL_AGENT_MODE=read-only refuses workspace writes AND /tmp writes at the OS
-    # ("operation not permitted"), denies child network (curl: could not resolve host), and
-    # still permits reads, `git log` and the model's own API call. Five parent-side controls
-    # that do NOT work are recorded in docs/ROADMAP.md; do not substitute one of them.
-    # THAT MEASUREMENT NO LONGER HOLDS for writes: from codex-acp 1.12 the adapter's `read-only` mode
-    # sends a workspace-write sandbox on every turn (confirmed in a 2026-10-05 rollout: the tree, /tmp
-    # and $TMPDIR writable, network still denied). Open in docs/ROADMAP.md as task 295.
+    # Measured on Darwin, 2026-10-05, with acpx 0.13.1 / codex-acp 2.1.1 (PINNED: acp.sh adapter) /
+    # installed codex 0.160.0: an isolated CODEX_HOME plus the adapter's `read-only` mode runs every
+    # turn under sandbox_policy `read-only`, which refuses workspace, /tmp and $TMPDIR writes at the
+    # OS ("operation not permitted"), denies child network (curl: could not resolve host), and still
+    # permits reads and `git log`. TWO conditions, both necessary:
+    #   - the adapter: codex-acp 1.12.0 through 1.13.1 (what acpx's `^1.1.5` floats to) map the
+    #     `read-only` mode to a WORKSPACE-WRITE policy and send it every turn, overriding config.toml;
+    #     a 1.13.1 mounted rollout recorded that policy with writes granted to the mount, /tmp and
+    #     $TMPDIR. (1.6.2 was read-only; that older measurement went stale with the float.) Hence the
+    #     pin, and the post-canary and post-turn attestations that refuse any context whose rollout
+    #     sandbox is not read-only.
+    #   - the permission shape: the mode keeps approval_policy `on-request` (sent every turn, also
+    #     overriding config.toml), so the model can ask to re-run a refused command OUTSIDE the
+    #     sandbox. Under --approve-all acpx granted that and the mount write LANDED; under --deny-all
+    #     the client refuses it and the turn ends (acpx exit 5). See acp_perm below.
+    # Five parent-side controls that do NOT work are recorded in docs/ROADMAP.md; do not substitute
+    # one of them.
     if [ -n "$mount_dir" ]; then
       # EVERY file in the reused home is written FRESH and RENAMED into place, never
       # overwritten in situ. The home persists across rounds for warmth, so a prior
@@ -3786,7 +3831,8 @@ cmd_run() {
       case "$provider" in
         codex)
           # The adapter reads INITIAL_AGENT_MODE (not sandbox_mode) and defaults to
-          # AgentMode.Agent, so the home alone is not enough — both are required.
+          # AgentMode.Agent (an unknown id also falls back to it), so the home alone is not enough —
+          # both are required, on the pinned adapter whose `read-only` mode is actually read-only.
           # BESIDE the mount, not under run_dir. run_dir is per-MESSAGE, so a home there is
           # rebuilt every round and the provider's own session state — the thing warm resume
           # is made of — would be cold every time, silently undoing the 1405->442 saving this
@@ -3891,6 +3937,15 @@ cmd_run() {
           else
             acp_iso=(env "CODEX_PATH=$acp_rt" "CODEX_HOME=$acp_iso_home" "INITIAL_AGENT_MODE=read-only")
           fi
+          # THE ADAPTER IS PINNED: on the floating 1.x builtin the `read-only` mode is a workspace-write
+          # sandbox (see the containment note above). The post-canary and post-turn attestations still
+          # read the sandbox from the rollout, so this pin is what makes a turn pass, not what proves it.
+          acp_agent_cmd="$("$acp_sh" adapter codex 2>>"$run_dir/runner.log")" || acp_agent_cmd=""
+          if [ -z "$acp_agent_cmd" ]; then
+            ABORT_NOTE="refused: no pinned codex ACP adapter"
+            die "run: acp.sh names no pinned codex ACP adapter — refusing to run a mounted codex turn on the floating builtin"
+          fi
+          printf 'acp_adapter\t%s\n' "$acp_agent_cmd" >> "$run_dir/turn.tsv" 2>/dev/null || true
           acp_iso_backend="codex-home+read-only"
           acp_iso_mode="read-only"
           ;;
@@ -4203,9 +4258,9 @@ cmd_run() {
     # Inside a MOUNT the child works in a throwaway linked worktree with no .comms in it and
     # its reply is brokered by the parent. --approve-all below grants a shell, so the mount
     # alone is ISOLATION, not enforcement. The ENFORCED boundary is the per-provider kernel
-    # sandbox selected above (acp_iso): for codex, the isolated CODEX_HOME + read-only mode,
-    # MEASURED to deny writes, /tmp, child network, and the owner control-plane socket while
-    # leaving reads and the model API. That is CODEX's shape. claude's backend is NOT this: its
+    # sandbox selected above (acp_iso): for codex, the isolated CODEX_HOME + the pinned adapter's
+    # read-only mode under --deny-all, MEASURED to deny writes, /tmp, child network and sandbox
+    # escalation while leaving reads and the model API. That is CODEX's shape. claude's backend is NOT this: its
     # `acp_iso` is empty, its pin is the in-process `plan` mode, its network stays open, and its
     # permission shape is narrowed below BECAUSE `--approve-all` was measured to auto-approve the
     # child out of that pin via ExitPlanMode. Read "the enforced boundary" here as per-backend,
@@ -4238,6 +4293,15 @@ cmd_run() {
       # it; confirmed here by ground truth.)
       if [ "$acp_iso_backend" = "claude-plan" ] || [ "$acp_iso_backend" = "gemini-plan" ] || [ "$acp_iso_backend" = opencode-read-search ]; then
         acp_perm=(--approve-reads --non-interactive-permissions deny)
+      elif [ "$acp_iso_backend" = "codex-home+read-only" ]; then
+        # codex's kernel sandbox has the same hole one layer down. Its `read-only` mode keeps
+        # approval_policy `on-request`, so a sandbox-refused command can be re-requested OUTSIDE the
+        # sandbox. MEASURED 2026-10-05 (codex-acp 2.1.1): under --approve-all acpx approved that
+        # escalation and the write landed in the mount; under --deny-all it was refused and the turn
+        # ended with acpx exit 5, while sandboxed reads and `git log` ran without any request. Not
+        # --approve-reads: acpx infers a request's kind from its TITLE when the adapter omits the kind
+        # (a started command's escalation does), so a `cat …`-titled escalation would read as a read.
+        acp_perm=(--deny-all)
       fi
       # --approve-all gives the child a shell, so the boundary has to be enforced where
       # the damage would be, not by hoping it behaves. The threat model is deliberately
@@ -4385,6 +4449,13 @@ cmd_run() {
     leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$mount_dir" "${acp_iso_home:-$acp_grok_home}")" "$(cd "$workdir" && pwd -P)" "$run_dir"
     # THE FIRST PROMPT goes out below (the canary): from here a bound leg has RUN, whatever its outcome.
     if [ -n "$RUN_BIND_STAMP" ]; then RUN_BIND_STATE=ran; printf 'bind_state\tran\n' >> "$run_dir/turn.tsv" 2>/dev/null || true; fi
+    # THE CANARY'S OWN SANDBOX is attested before the real prompt is spent, so its window opens here.
+    if [ -n "$acp_iso_home" ] && [ "$provider" = codex ]; then
+      if ! acp_rollout_snapshot "$acp_iso_home" "$run_dir/canary-rollout-snapshot.txt"; then
+        acp_refuse containment-unconfirmed "could not enumerate the provider's rollout files before the canary — its sandbox could not then be attested"
+        return 1
+      fi
+    fi
     ACP_CANARY_OPTS=( "${acp_prompt_opts[@]}" )
     ACP_CANARY_PROVIDER="$provider"
     local canary_ok=1
@@ -4438,7 +4509,7 @@ cmd_run() {
         # runtime need not have a provider CLI on PATH at all. The provider's OWN error message (already
         # in the note) is the authoritative signal; the remediation names session retirement. CODEX_PATH
         # is codex-only and does NOT replace an already-running owner. (codex, impl r1/r2.)
-        local retire_hint="Retire the session (\`acpx $acp_profile sessions close $acp_session\` in $workdir; a fresh send re-creates it against the current adapter — a running owner keeps its runtime until retired"
+        local retire_hint="Retire the session (\`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`; a fresh send re-creates it against the current adapter — a running owner keeps its runtime until retired"
         case "$provider" in codex) retire_hint="$retire_hint, so setting CODEX_PATH alone does not) or set CODEX_PATH" ;; *) retire_hint="$retire_hint)" ;; esac
         canary_note="$canary_note. $retire_hint, then re-send"
       fi
@@ -4454,6 +4525,19 @@ cmd_run() {
       return 1
     fi
 
+    # codex: the canary is the first prompt on this owner, so its rollout is the first evidence of the
+    # sandbox the adapter actually sent. Anything but read-only refuses BEFORE the review is paid for:
+    # set-mode and config.toml both report read-only on an adapter that sends workspace-write.
+    if [ -n "$acp_iso_home" ] && [ "$provider" = codex ]; then
+      local can_sbx=""
+      can_sbx="$(acp_rollout_observed "$acp_iso_home" "$run_dir/canary-rollout-snapshot.txt" 2>>"$run_dir/runner.log" | cut -f8)" || can_sbx=""
+      printf 'canary_sandbox\t%s\n' "${can_sbx:-unattested}" >> "$run_dir/turn.tsv" 2>/dev/null || true
+      if [ "$can_sbx" != read-only ]; then
+        acp_refuse containment-unconfirmed "the canary turn's own rollout reports sandbox '${can_sbx:-unattested}', not read-only — the codex ACP adapter is not containing this reviewer; refusing before the review prompt (retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send)"
+        return 1
+      fi
+    fi
+
     # NO SECOND set-mode. The plan (codex r2 B1) asked to re-pin AFTER the canary too, on the
     # premise that a model turn can move the mode. LIVE VALIDATION refuted the MECHANISM: the codex
     # and claude adapters return "Internal error" on a repeat `set-mode` once any prompt has run in
@@ -4463,7 +4547,8 @@ cmd_run() {
     # The single PRE-canary pin is sufficient: the mode is persistent OWNER state (the very reason
     # the original code re-pins per turn across `--ttl` reuse), so it holds from before the canary
     # through the real prompt; and a CONTAINED canary cannot move it — codex runs under a read-only
-    # kernel sandbox (CODEX_HOME) that holds regardless of mode, and claude runs under `plan` +
+    # kernel sandbox (CODEX_HOME + the pinned adapter's read-only mode, under --deny-all; the canary's
+    # own sandbox is attested from its rollout before the real prompt), and claude runs under `plan` +
     # `--approve-reads --non-interactive-permissions deny`, which REFUSES the ExitPlanMode escalation
     # (the measured claude boundary). So pinning once, before the canary, contains both prompts.
     # THE REAL-TURN TIMER STARTS HERE, after the canary, so a slow-but-successful canary cannot make
@@ -4585,7 +4670,7 @@ cmd_run() {
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
-      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
+      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc="" att_sbx=""
       if [ "$provider" = gemini ]; then
         att_out="$(acp_gemini_observed "$acp_sh" "$acp_iso_home" "$run_dir/attest-snapshot.json" "$(cd "$workdir" && pwd -P)" 2>>"$run_dir/runner.log")" || att_rc=$?
       else
@@ -4604,6 +4689,7 @@ cmd_run() {
         att_off="$(printf '%s' "$att_out" | cut -f5)"
         att_rt="$(printf '%s' "$att_out" | cut -f6)"
         att_rtc="$(printf '%s' "$att_out" | cut -f7)"
+        att_sbx="$(printf '%s' "$att_out" | cut -f8)"
         # The expectation must be the one resolved before launch. The reviewer ran in between, and
         # a record it could rewrite to match its own rollout would turn a mismatch into a pass.
         # Checked AFTER the evidence is parsed, so a refusal still records what actually ran.
@@ -4617,6 +4703,17 @@ cmd_run() {
       if [ -n "$RUN_BIND_STAMP" ]; then RUN_BIND_OBS_MODEL="$att_mod"; RUN_BIND_OBS_EFFORT="$att_eff"; fi
       turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}" "${att_rtc:-}" \
         "$( [ "$provider" = gemini ] && [ -n "$att_src" ] && printf 'gemini-chat-record+settings-readback')"
+      # CONTAINMENT, from the same evidence and ahead of the depth verdict: a review written under a
+      # writable sandbox is refused unpublished whatever model ran it. (Unparsed evidence falls to the
+      # undecidable refusal below, which refuses too.)
+      if [ "$provider" = codex ] && [ -n "$att_out" ]; then
+        printf 'observed_sandbox\t%s\n' "${att_sbx:-unknown}" >> "$run_dir/turn.tsv" 2>/dev/null || true
+        if [ "$att_sbx" != read-only ]; then
+          printf 'sandbox attestation: %s\n' "${att_sbx:-unknown}" >>"$run_dir/runner.log"
+          acp_refuse containment-unconfirmed "the review turn's own rollout reports sandbox '${att_sbx:-unknown}', not read-only — refusing to publish a review written by an uncontained reviewer; retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+          return 1
+        fi
+      fi
       if [ "$att_rc" -ne 0 ]; then
         printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
         if [ "$att_rc" -eq 20 ]; then

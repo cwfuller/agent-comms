@@ -968,7 +968,11 @@ gate is procedural, not authenticated — the CLI cannot tell an operator from a
 "a human chose this" is a rule the driver keeps, not one the tool enforces.
 
 Sandbox: over ACP a Codex turn runs under its own kernel sandbox and a Claude turn under a
-pinned permission mode. For worktree turns, `.comms/` and the main `.git/` are added via
+pinned permission mode. A mounted Codex turn runs on the pinned adapter (`acp.sh adapter codex`,
+handed to acpx as `--agent`) under `--deny-all`, and is refused (`reason: containment-unconfirmed`)
+unless every `turn_context` its canary and its review prompt appended to the rollout records
+`sandbox_policy.type` `read-only` — the canary is checked before the review prompt is sent, the
+review before it is published. For worktree turns, `.comms/` and the main `.git/` are added via
 `--add-dir` so the reply and branch operations succeed. The spawned turn does **not** inherit
 `COMMS_DELIVERY`: exporting `headless` onto the child also landed it on the driver, where it
 tripped the parent's own delivery gate and killed the broker's `send` while the copied reply

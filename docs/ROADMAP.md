@@ -678,72 +678,80 @@ refuses when any listed leg, optional included, is invalid (agent-comms is not a
 policy exists. (6) Gemini and Codex API routes bind only where an explicit authentication selection exists, never on the hope that an environment key beats a saved login.
 (7) Quota `refused` stays limited to providers with a classifier. No model mapping in this change is approved by the ticket; every model id enters from the caller.
 
-### OPEN: the reviewer containment measurement is stale — re-probe on codex-acp 1.12.0 (2026-09-19, sev 2, acpx surface probe)
+### BUILT ON BRANCH 2026-10-05: the mounted codex reviewer runs read-only again — adapter pinned, sandbox attested (task 295)
 
-**Confirmed 2026-10-05 (task 286); split out as its own urgent task, 295.** The mounted codex reviewer does
-NOT run read-only. A rollout from a 2026-10-05 mounted review (codex-acp 1.13.1, the newest 1.x, which
-acpx 0.13.1's `^1.1.5` resolves) records `sandbox_policy.type = workspace-write` and a permission
-profile granting WRITE to the mounted tree, `/tmp` and `$TMPDIR` (network restricted). The cause is
-the adapter, not our config: codex-acp 1.13.1's `read-only` mode ("Ask for approval") carries
-`sandboxPolicy: workspaceWrite`, and `runTurn` sends the mode's policy on EVERY turn, overriding
-`sandbox_mode = "read-only"` in `config.toml`. codex reads `requirements.toml` only from system and
-MDM locations, so the isolated `CODEX_HOME` cannot forbid the override. codex-acp 1.6.2 and 2.x
-(2.1.1 checked) define `read-only` as `{type: "readOnly"}`; using 2.x means overriding the adapter
-acpx 0.13.1 launches (a user-level acpx config, a file in the reviewed tree, or `--agent` on every
-acpx call) and re-validating set-mode, `config_options` and the attestation on it. Too large for the
-canary task; the post-turn tree-identity check is what currently refuses a reviewer's writes.
+*(Was: "OPEN: the reviewer containment measurement is stale — re-probe on codex-acp 1.12.0",
+2026-09-19, sev 2. Re-measured and closed by this entry; the history is kept below.)*
 
-**Widened 2026-09-22 (codex, reviewer-routing implement r4, advisory):** the routing binding makes
-mounted codex reviews run the operator's INSTALLED codex by default (auto-detected; handed to the
-adapter as `CODEX_PATH`), not only the adapter's bundled copy. The live probes established model /
-effort compatibility for installed 0.155.1, not sandbox equivalence. Run the write, `/tmp` and
-network probes against BOTH runtimes (`COMMS_ACP_CODEX_PATH=bundled` and the installed one). A
-mounted routed proof turn also showed the reviewer writing `__pycache__` into the tree on the
-bundled runtime (refused by the tree-identity check, so unpublished) — evidence for this item.
+**What was wrong.** acpx 0.13.1 launches codex as `@agentclientprotocol/codex-acp@^1.1.5`, which
+resolved to 1.12.0 and then 1.13.1 (the newest 1.x). On both, the adapter's `read-only` mode
+("Ask for approval") carries `sandboxPolicy: workspaceWrite` and `runTurn` sends the mode's policy
+on every turn, overriding the isolated `config.toml`'s `sandbox_mode = "read-only"`; `set-mode
+read-only` still succeeds. A mounted review on 1.13.1 (task 286) recorded `sandbox_policy.type =
+workspace-write` with a permission profile granting writes to the mount, `/tmp` and `$TMPDIR`
+(network restricted). The 1.6.2 measurement the runphase comment quoted had gone stale with the float.
 
-**Do not fold this into the effort-pin work. It needs its own round and one live write-probe.**
+**Live probe, 2026-10-05** (Darwin; acpx 0.13.1; codex-acp **2.1.1**; installed codex 0.160.0 via
+`CODEX_PATH`; isolated `CODEX_HOME`, `INITIAL_AGENT_MODE=read-only`, `set-mode read-only`; model
+gpt-6.1-sol, effort xhigh; two real turns in a scratch git tree). The prompt ran, once each: a write into
+the mount cwd, a write into `/tmp`, a write into `$TMPDIR`, `curl https://example.com`, `git log` +
+`cat`, then (if the mount write failed) the same write again requesting escalated permissions.
 
-`helpers/runphase.sh:2780-2786` records the containment measurement: *"Measured on Darwin with
-acpx 0.13.1 / codex-acp **1.6.2**: an isolated CODEX_HOME plus INITIAL_AGENT_MODE=read-only
-refuses workspace writes AND /tmp writes at the OS."* The installed adapter is now **1.12.0**
-(`~/.npm/_npx/bb64e4387f65cc68/node_modules/@agentclientprotocol/codex-acp/package.json`), and on
-1.12.0 the mode named "read-only" is a **workspace-write** policy:
+| | turn 1: `--approve-all` (the old mounted shape) | turn 2: `--deny-all` (the new shape) |
+|---|---|---|
+| rollout `sandbox_policy` | `{"type": "read-only"}` | `{"type": "read-only"}` |
+| write into the mount | `operation not permitted` | `operation not permitted` |
+| write into `/tmp`, `$TMPDIR` | `operation not permitted` | `operation not permitted` |
+| `curl` | `Could not resolve host` | `Could not resolve host` |
+| `git log`, `cat` | work | work |
+| escalated retry of the mount write | **granted; the file landed in the mount** | refused by the client; codex aborted the turn; acpx exit 5 |
 
-```js
-// codex-acp 1.12.0 dist/index.js:27706-27721
-static ReadOnly = new _AgentMode("read-only", …,
-  { type: "workspaceWrite", writableRoots: [], networkAccess: false,
-    excludeTmpdirEnvVar: false, excludeSlashTmp: false },
-  "workspace-write");
-```
+So 2.1.1 restores a read-only sandbox, but **the read-only sandbox alone is not containment under
+`--approve-all`**: the mode also sends `approval_policy: on-request` every turn, and acpx's
+`--approve-all` approves the model's request to re-run a refused command outside the sandbox. That
+is the same class as claude's ExitPlanMode escape. `--approve-reads` was rejected for codex because
+acpx infers a request's kind from its title when the adapter omits it (it does for a started command),
+so a `cat …`-titled escalation could pass as a read.
 
-A live mounted review turn confirms this reaches codex — `turn_context.payload.sandbox_policy` in
-`~/.local/state/agent-comms/mounts/*/*/home/sessions/2026/09/1[789]/rollout-*.jsonl` reads
-`{'type': 'workspace-write', 'network_access': False, 'exclude_tmpdir_env_var': False,
-'exclude_slash_tmp': False}`. Note there is **no** `writable_roots` key in the emitted payload.
+**Model and effort on 2.x.** Unchanged behaviour: the rollout `turn_context` records the configured
+model and effort (gpt-6.1-sol / xhigh), the session's `config_options` report `mode=read-only`,
+`model`, `reasoning_effort`, and `acp.sh policy-check` reads that record as a match. `session_meta`
+records the installed runtime (0.160.0). 2.1.1 bundles `@openai/codex ^0.159.1`.
 
-The open question is narrow and empirical: **under codex's `workspace-write` with an empty
-`writableRoots`, is the mount cwd writable?** Workspace-write normally makes the cwd writable by
-design — that is what distinguishes it from read-only. If it is writable on 1.12.0, then the
-measured OS-level write denial no longer holds and reviewer containment now rests on whatever
-post-hoc check exists, not on the sandbox.
+**What shipped.**
 
-**What this entry does NOT claim.** The code comment is *not* wrong about the mechanism:
-`runphase.sh:2789-2790` already states "The adapter reads INITIAL_AGENT_MODE (not sandbox_mode)",
-which is correct. The staleness is in the **measurement**, not the attribution. (An earlier probe
-report framed this as a mis-attributed comment; that framing was checked and rejected.)
+1. `acp.sh adapter codex` pins `npx -y @agentclientprotocol/codex-acp@2.1.1`; the runner hands it to
+   acpx as `--agent` for every mounted codex invocation (`acp_agent_argv`). acpx keys records on the
+   agent command, so a pinned turn never resumes a 1.x record or owner. `turn.tsv` records `acp_adapter`.
+2. Mounted codex turns run under `--deny-all`.
+3. Fail-closed attestation from the provider's own rollout: `acp_rollout_observed` now also reports
+   the sandbox type every `turn_context` in the window agrees on (child contexts included; a missing
+   or non-object policy is `unknown`). The canary's window is attested before the review prompt is
+   sent, the review's before publication; anything but `read-only` refuses the turn as
+   `containment-unconfirmed`, with no override. `turn.tsv` records `canary_sandbox` and `observed_sandbox`.
 
-Also note `sandbox_mode = "read-only"` in the synthesized config (`runphase.sh:2894-2896`) is
-inert for the sandbox on this adapter, because `AgentMode` supplies an explicit `sandboxPolicy`
-on every turn (`dist/index.js:28857`, `sandboxPolicy: addAdditionalDirectoriesToSandboxPolicy(
-agentMode.sandboxPolicy, …)`). Keep the key — it is harmless and correct for any path that does
-read it — but do not treat its presence as evidence of containment.
+**Residuals.** A model that asks for escalation now ends its own turn (acpx exit 5, a failed leg)
+instead of writing — fail-closed by design. The probe covered the installed runtime only, not the
+adapter's bundled codex (`COMMS_ACP_CODEX_PATH=bundled`); the attestation covers both. The `/ask`
+consult path (unmounted, `--approve-reads`, the operator's own `~/.codex`) still uses acpx's floating
+builtin and is not covered by this pin. The attestation is post-hoc: it refuses to SEND the review
+prompt after a non-read-only canary and to PUBLISH after a non-read-only review, but it cannot undo a
+write either turn made outside the tree (writes inside it are the tree-identity check's).
 
-**To settle it:** one mounted review turn instructed to attempt a write inside the mount cwd, a
-write to `/tmp`, and a network call, with the results recorded. That is the same experiment the
-1.6.2 measurement ran; re-run it and update the comment with the adapter version it was measured
-against, so the next version bump makes the staleness visible.
+**Found while doing this, not fixed here (sev 2, needs its own item).** acpx 0.13.1 reads a project
+config, `<cwd>/.acpxrc.json`, and a mounted turn's cwd is the reviewed tree. Read from acpx's source
+(`resolveInvocationCommand`), not measured: a raw `--agent` wins over that file's agent mapping, so the
+pinned codex path is not redirected by it, but the claude, grok and gemini arms launch by profile name,
+where a tree-supplied mapping would choose the command acpx spawns outside any sandbox. The runner
+refuses a tree carrying `.codex/config.toml`; nothing refuses `.acpxrc.json`.
 
+**History (2026-09-19).** The installed adapter was then 1.12.0, whose `read-only` mode is a
+`workspaceWrite` policy (`dist/index.js` `static ReadOnly = new _AgentMode("read-only", …,
+{ type: "workspaceWrite", writableRoots: [], … }, "workspace-write")`); mounted rollouts read
+`{'type': 'workspace-write', 'network_access': False, …}`. A routed proof turn wrote `__pycache__`
+into the tree on the bundled runtime (refused by the tree-identity check, unpublished).
+`sandbox_mode = "read-only"` in the synthesized config is inert on the adapter, which sends an
+explicit `sandboxPolicy` on every turn; it is kept because it is harmless, not as evidence.
 
 ### OPEN: the mixed-severity class has no suite guard (2026-09-03, sev 3, corroboration r4)
 

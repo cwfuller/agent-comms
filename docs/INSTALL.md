@@ -35,8 +35,13 @@ else.
 A reviewer runs against a mounted copy of your tree, so it has to be contained. `claude` and
 `codex` have verified isolation backends, though not identical ones: `codex` runs under its own
 kernel sandbox; `claude` was measured write-contained but still reaches the network, which is
-behavioural defence rather than a kernel boundary. Both measurements are due a re-probe on
-current adapters and on the installed codex runtime reviewers now use (docs/ROADMAP.md).
+behavioural defence rather than a kernel boundary. The `codex` sandbox was re-measured on
+2026-10-05: a mounted codex review runs on a pinned ACP adapter (`codex-acp 2.1.1`, fetched by `npx`
+on first use; `acp.sh doctor` names it), because the 1.x adapter acpx would otherwise pick ran its
+"read-only" mode with a writable sandbox. Permission requests are denied, so a reviewer cannot ask
+to re-run a command outside the sandbox, and each turn is refused unless codex's own record of the
+canary and of the review says the sandbox was read-only (docs/ROADMAP.md). The `claude` measurement
+is still due a re-probe on its current adapter.
 
 `gemini` (opt-in; needs the Gemini CLI >= 0.39.0) reviews in an isolated `GEMINI_CLI_HOME` under
 Gemini's read-only `plan` mode, pinned and confirmed before the canary, with permissions narrowed to

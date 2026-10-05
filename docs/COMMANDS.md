@@ -869,6 +869,10 @@ own, unsandboxed process. acpx 0.13.1 withheld only the advertisement and still 
 anyway; 0.17.1 and later refuse it. `acp.sh launcher grok` / `acp.sh version grok` therefore pin
 `ACPX_VERSION_ENFORCING` (0.17.1) for grok, other agents keep the baseline pin, and `client-check`
 proves the refusal for whatever launcher is in use (an `ACPX_BIN` replaces the pin, not the check).
+`acp.sh adapter codex` prints the codex ACP adapter a mounted codex review runs
+(`npx -y @agentclientprotocol/codex-acp@2.1.1`; nothing for another agent), which the runner hands acpx
+as `--agent` instead of the `codex` builtin: acpx 0.13.1 floats that builtin under `^1.1.5`, and 1.12.0
+through 1.13.1 send a workspace-write sandbox for the `read-only` mode. `acp.sh doctor` names the pin.
 
 ### `runphase.sh` (experimental)
 
@@ -945,8 +949,11 @@ Each turn is recorded under `.comms/logs/<message_id>.<epoch>.<pid>/`: `prompt.m
 `runner.log`, `policy.tsv` (the per-turn policy record resolved BEFORE the session is
 launched; hash-checked before every consumer) and `turn.tsv` (identity, then
 `route_decision`, `policy_*`, `requested_model/effort` at resolution time,
-`policy_digest`, `acp_session`, `acpx_pinned_version`, `acpx_launcher`,
-`adapter_check/report/source` from the preflight, and `observed_model/effort`, `evidence_*`,
+`policy_digest`, `acp_session`, `acpx_pinned_version`, `acpx_launcher`, `acp_adapter` (a mounted
+codex turn's pinned adapter command), `adapter_check/report/source` from the preflight,
+`canary_sandbox` and `observed_sandbox` (a mounted codex turn's rollout sandbox for the canary and
+the review prompt: `read-only`, another type, `mixed`, `unknown` or `unattested`; anything but
+`read-only` refuses the turn as `containment-unconfirmed`), and `observed_model/effort`, `evidence_*`,
 `observed_runtime` (only when the session was created in this turn's window) and
 `session_created_runtime` from the provider's own rollout — requested, adapter-reported and observed are never conflated). A
 mounted codex session is named `agent-comms+mount+<ident>+p<policy_digest>`, so a

@@ -39,6 +39,9 @@
 #   profile <agent> | version [agent]
 #       the acpx launch profile for an agent, and the pinned acpx version (the same per-agent pin
 #       as `launcher`). Other helpers ask for these instead of keeping a second copy of the map.
+#   adapter <agent>
+#       the pinned ACP adapter command a MOUNTED review turn hands acpx as `--agent` (codex:
+#       codex-acp CODEX_ACP_VERSION); prints nothing for an agent whose acpx builtin is used as is.
 #   resolve <agent> [--transport acp-mounted|acp|headless] [--tier fast|balanced|strong|none]
 #           [--effort low|medium|high|xhigh|none] [--decision <id>|none] [--routing on|off]
 #       resolve an ABSTRACT routing candidate to the concrete reviewer policy
@@ -132,6 +135,13 @@ ACPX_VERSION="0.13.1"
 # request anyway had it run by the unsandboxed owner. grok's mounted containment (helpers/box.sh) depends
 # on the refusal, and `box.sh client-check` proves it for whatever launcher is actually in use.
 ACPX_VERSION_ENFORCING="0.17.1"
+# THE CODEX ACP ADAPTER a MOUNTED review turn runs, pinned rather than floated. acpx 0.13.1 names it
+# `^1.1.5`, and from at least 1.12.0 through 1.13.1 (the newest 1.x) the adapter's `read-only` mode
+# carries a workspace-write sandbox policy that it sends on every turn, overriding config.toml. 2.x
+# restored a read-only policy for that mode (measured on 2.1.1, 2026-10-05: docs/ROADMAP.md). The
+# runner still attests the sandbox each turn from the provider's own rollout, so a pin that drifts
+# is refused, not trusted.
+CODEX_ACP_VERSION="2.1.1"
 ACP_SESSION_NAME="agent-comms-ask"
 NODE_MIN_MAJOR=22
 NODE_MIN_MINOR=13
@@ -205,6 +215,10 @@ acpx_prepare_cache() {
 
 acpx_version_for() {  # <agent|""> -> the acpx version pinned for it
   case "${1:-}" in grok) printf '%s' "$ACPX_VERSION_ENFORCING" ;; *) printf '%s' "$ACPX_VERSION" ;; esac
+}
+
+adapter_command_for() {  # <agent> -> the pinned adapter command for a mounted review turn, or nothing
+  case "${1:-}" in codex) printf 'npx -y @agentclientprotocol/codex-acp@%s' "$CODEX_ACP_VERSION" ;; esac
 }
 
 acpx_launcher() {  # [agent] — prints the argv prefix that runs acpx
@@ -1367,6 +1381,7 @@ cmd_doctor() {
     exit 3
   fi
   echo "acpx: pinned @$ACPX_VERSION via npx (cached after first use)"
+  echo "codex adapter (mounted reviews): pinned $(adapter_command_for codex)"
   echo "agents: codex claude grok gemini supported ($(for a in codex claude grok gemini; do printf '%s=%s ' "$a" "$(profile_for "$a")"; done))"
   # Which codex a MOUNTED reviewer will run, and so which mapped models it can serve.
   RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
@@ -1719,6 +1734,9 @@ print("%s\t%s\t%s\t%s" % (g("reasoning_effort"), g("model"), dv, dm))
     policy_verdict "${PA_POS[0]}" "${PA_POS[1]}" "${PA_POS[2]:-}" "$PA_FILE"; exit $?
     ;;
   launcher) acpx_prepare_cache; acpx_launcher "${2:-}"; printf '\n' ;;
+  adapter)
+    [ -n "${2:-}" ] || die "adapter: an agent name is required"
+    adapter_command_for "$2"; printf '\n' ;;
   supports)
     # supports <agent> — exit 0 iff a consult can actually run here for that
     # agent. Machine-readable on purpose: callers must never parse doctor's prose.

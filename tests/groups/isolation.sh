@@ -102,10 +102,14 @@ sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep_fu
   && ok "a mode-pinned backend narrows the permission shape instead of --approve-all" || fail "claude-plan still runs under --approve-all"
 sed -n '/if \[ "$acp_iso_backend" = "claude-plan" \]/,/fi/p' "$ISO_RP" | grep_full -q 'approve-reads' \
   && ok "the narrowed shape still approves reads, so the reviewer can do its job" || fail "narrowed shape blocks reads too"
-# ...and the DEFAULT must stay --approve-all, or a mistaken indent would silently narrow CODEX
-# too while every claude-plan grep above stayed green. (grok, implement r2, advisory.)
+# ...and the DEFAULT must stay --approve-all, or a mistaken indent would silently narrow the
+# backends that need it (grok's box) while every claude-plan grep above stayed green. (grok,
+# implement r2, advisory.) codex is narrowed by its OWN arm to --deny-all (measured 2026-10-05:
+# --approve-all granted a sandbox escalation); the acp group asserts the argv it actually runs.
 awk '/if \[ -n "\$mount_dir" \]; then/{f=1} f&&/acp_perm=\(--approve-all\)/{print;exit}' "$ISO_RP" | grep_full -q 'approve-all' \
-  && ok "the mounted default is still --approve-all, so codex's shape is unchanged" || fail "the mounted default no longer grants --approve-all"
+  && ok "the mounted default is still --approve-all; only named backends narrow it" || fail "the mounted default no longer grants --approve-all"
+sed -n '/elif \[ "$acp_iso_backend" = "codex-home+read-only" \]/,/fi$/p' "$ISO_RP" | grep_full -q 'acp_perm=(--deny-all)' \
+  && ok "the codex backend runs under --deny-all, so the client refuses a sandbox escalation" || fail "the codex backend is not narrowed to --deny-all"
 grep -qi 'ExitPlanMode' "$ISO_RP" \
   && ok "the escape that forced the narrowed shape is recorded at the site" || fail "the ExitPlanMode escape is undocumented"
 
@@ -441,8 +445,8 @@ iso_observed5() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_AT" "$1" ) 2>/dev
 : > "$WORK/snap-attr.txt"
 iso_ctx t-attr t-attr gpt-6-astra xhigh > "$ISO_AF"
 ISO_AT_OUT="$(iso_observed5 "$WORK/snap-attr.txt")"
-[ "$(printf '%s' "$ISO_AT_OUT" | awk -F'\t' '{print NF}')" = 7 ] \
-  && ok "the attestation returns effort, model, turn id, evidence file, byte offset and both runtimes" || fail "attribution fields missing (got: $ISO_AT_OUT)"
+[ "$(printf '%s' "$ISO_AT_OUT" | awk -F'\t' '{print NF}')" = 8 ] \
+  && ok "the attestation returns effort, model, turn id, evidence file, byte offset, both runtimes and the sandbox" || fail "attribution fields missing (got: $ISO_AT_OUT)"
 # THE RUNTIME. codex writes session_meta ONCE, at session creation, never on resume: it is this
 # turn's runtime only when it falls INSIDE the window; before the window it is the runtime that
 # CREATED the session and is reported under that name only. Absent reads as empty, never a guess.
@@ -621,6 +625,48 @@ ISO_ZR="$WORK/rollout-zeroroot"; rm -rf "$ISO_ZR"; mkdir -p "$ISO_ZR/sessions/20
 iso_ctx t-c t-parent gpt-6-astra xhigh > "$ISO_ZR/sessions/2026/09/20/rollout-z.jsonl"
 ( eval "$ISO_RO"; acp_rollout_observed "$ISO_ZR" "$WORK/snap-mr.txt" ) >/dev/null 2>&1 \
   && fail "a window with no root was accepted" || ok "no root in the window is still undecidable"
+
+# --- the SANDBOX field (8) of the attestation: what the provider recorded, every context counted ---
+ISO_SB="$WORK/rollout-sandbox"; rm -rf "$ISO_SB"; mkdir -p "$ISO_SB/sessions/2026/10/05"
+ISO_SBF="$ISO_SB/sessions/2026/10/05/rollout-s.jsonl"
+iso_sctx() { printf '{"type":"turn_context","payload":{"turn_id":"%s","root_turn_id":"%s","model":"gpt-6-astra","effort":"xhigh"%s}}\n' "$1" "$2" "$3"; }
+iso_sbx() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_SB" "$WORK/snap-sb.txt" ) 2>/dev/null | cut -f8; }
+: > "$WORK/snap-sb.txt"
+{ iso_sctx t-c t-r ',"sandbox_policy":{"type":"read-only"}'; iso_sctx t-r t-r ',"sandbox_policy":{"type":"read-only"}'; } > "$ISO_SBF"
+[ "$(iso_sbx)" = read-only ] && ok "a window whose every context ran read-only attests read-only" || fail "read-only window read as '$(iso_sbx)'"
+{ iso_sctx t-c t-r ',"sandbox_policy":{"type":"workspace-write","network_access":false}'; iso_sctx t-r t-r ',"sandbox_policy":{"type":"workspace-write"}'; } > "$ISO_SBF"
+[ "$(iso_sbx)" = workspace-write ] && ok "a workspace-write window (the codex-acp 1.x read-only mode) is reported as workspace-write" || fail "workspace-write window read as '$(iso_sbx)'"
+{ iso_sctx t-c t-r ',"sandbox_policy":{"type":"workspace-write"}'; iso_sctx t-r t-r ',"sandbox_policy":{"type":"read-only"}'; } > "$ISO_SBF"
+[ "$(iso_sbx)" = mixed ] && ok "a writable CHILD context under a read-only root reads as mixed, not read-only" || fail "child sandbox ignored: '$(iso_sbx)'"
+{ iso_sctx t-c t-r ''; iso_sctx t-r t-r ',"sandbox_policy":{"type":"read-only"}'; } > "$ISO_SBF"
+[ "$(iso_sbx)" = mixed ] && ok "a context with no sandbox_policy is unknown, so the window is not read-only" || fail "missing sandbox ignored: '$(iso_sbx)'"
+iso_sctx t-r t-r ',"sandbox_policy":"read-only"' > "$ISO_SBF"
+[ "$(iso_sbx)" = unknown ] && ok "a sandbox_policy that is not an object reads as unknown" || fail "malformed sandbox read as '$(iso_sbx)'"
+
+# --- the PINNED adapter: one translator, executed, never grepped ---
+ISO_AA="$(sed -n '/^acp_agent_argv() {/,/^}/p' "$ISO_RP")"
+iso_argv() { ( eval "$ISO_AA"; acp_profile=codex; acp_agent_cmd="$1"; shift; acp_agent_argv "$@" || exit 1; printf '%s|' "${ACP_ARGV[@]}" ); }
+ISO_PIN='npx -y @agentclientprotocol/codex-acp@9.9.9'
+[ "$(iso_argv "$ISO_PIN" --format text codex sessions ensure --name N)" = "--format|text|--agent|$ISO_PIN|sessions|ensure|--name|N|" ] \
+  && ok "a pinned sessions verb keeps the global options first and swaps the profile for --agent" || fail "sessions argv: $(iso_argv "$ISO_PIN" --format text codex sessions ensure --name N)"
+[ "$(iso_argv "$ISO_PIN" --format text codex -s S set-mode read-only)" = "--format|text|--agent|$ISO_PIN|set-mode|-s|S|read-only|" ] \
+  && ok "a pinned set-mode carries -s after its verb" || fail "set-mode argv: $(iso_argv "$ISO_PIN" --format text codex -s S set-mode read-only)"
+[ "$(iso_argv "$ISO_PIN" --deny-all --timeout 9 codex -s S --file p.md)" = "--deny-all|--timeout|9|--agent|$ISO_PIN|prompt|-s|S|--file|p.md|" ] \
+  && ok "an implicit prompt gets the explicit prompt verb under a pinned adapter" || fail "prompt argv: $(iso_argv "$ISO_PIN" --deny-all --timeout 9 codex -s S --file p.md)"
+[ "$(iso_argv '' --format text codex -s S set-mode read-only)" = "--format|text|codex|-s|S|set-mode|read-only|" ] \
+  && ok "with no pinned adapter the argv is passed through unchanged" || fail "unpinned argv changed"
+iso_argv "$ISO_PIN" --format text claude sessions show S >/dev/null \
+  && fail "an argv without the profile was translated" || ok "a pinned argv that does not carry the profile fails closed"
+ISO_ADP="$("$REPO/helpers/acp.sh" adapter codex)"
+printf '%s' "$ISO_ADP" | grep -Eq '^npx -y @agentclientprotocol/codex-acp@[0-9]+\.[0-9]+\.[0-9]+$' \
+  && ok "acp.sh pins the codex adapter to an exact version, not a range" || fail "codex adapter is not an exact pin: '$ISO_ADP'"
+[ -z "$("$REPO/helpers/acp.sh" adapter claude)" ] \
+  && ok "an agent with no pinned adapter gets none (acpx's builtin)" || fail "claude got a pinned adapter"
+sed -n '/^        codex)/,/^          ;;/p' "$ISO_RP" | grep_full -q 'acp_agent_cmd="$("$acp_sh" adapter codex' \
+  && ok "the codex mount arm asks acp.sh for the pinned adapter" || fail "the codex arm does not pin the adapter"
+ISO_RTP="$( ( eval "$ISO_RC"; acp_agent_cmd="$ISO_PIN"; policy_retire_cmd codex S '/tmp/a b' ) )"
+[ "$(eval "set -- ${ISO_RTP#acpx }"; printf '%s|%s|%s|%s|%s' "$2" "$3" "$4" "$5" "$6")" = "/tmp/a b|--agent|$ISO_PIN|sessions|close" ] \
+  && ok "the retirement command names the pinned adapter as one --agent argument" || fail "pinned retire command: $ISO_RTP"
 
 # A LARGE SESSION RECORD MUST NOT KILL THE RUNNER. The mount-corroboration read slurped the whole
 # acpx session record and piped it to `sed | head -1`. Records grow every round; once one crossed

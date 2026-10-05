@@ -191,6 +191,13 @@ ax_rollout_ok() {  # the DESTINATION must be inside the suite work root
     *) return 1 ;;
   esac
 }
+# THE SANDBOX the codex adapter sends with every turn, as codex records it in each turn_context. The
+# floating 1.x builtin (`codex` profile) sends workspace-write for its `read-only` mode; the pinned 2.x
+# adapter (`--agent npx -y @agentclientprotocol/codex-acp@2.x`) sends read-only. AX_ROLLOUT_SANDBOX
+# (review prompt), AX_ROLLOUT_CHILD_SANDBOX (its child context) and AX_CANARY_SANDBOX override it;
+# `none` omits the key.
+case " $* " in *"@agentclientprotocol/codex-acp@2."*) ax_sbx=read-only ;; *) ax_sbx=workspace-write ;; esac
+ax_sbx_json() { [ "$1" = none ] || printf ',"sandbox_policy":{"type":"%s"}' "$1"; }
 # A RAW-AGENT run (`--agent CMD ... exec`) is box.sh's client check: a fake ACP agent that sends
 # filesystem and terminal requests whatever was advertised. Answer it as acpx would: refuse them under
 # --no-fs/--no-terminal, or (AX_CLIENT_LAX=1) as 0.13.1 did, honour them anyway. AX_CLIENT_DEAF=1 is a
@@ -286,7 +293,8 @@ fi
 # environments can be told apart.
 if [ -n "${AX_ENVDUMP_LOG:-}" ]; then
   ax_prof=unknown
-  for ax_a in "$@"; do case "$ax_a" in codex|gemini|claude|grok-build|agent-comms-custom) ax_prof="$ax_a"; break ;; esac; done
+  for ax_a in "$@"; do case "$ax_a" in codex|gemini|claude|grok-build|agent-comms-custom) ax_prof="$ax_a"; break ;;
+    *@agentclientprotocol/codex-acp@*) ax_prof=codex; break ;; esac; done
   for ax_v in ${AX_ENVDUMP_VARS:-}; do
     printf '%s:%s=%s\n' "$ax_prof" "$ax_v" "$(printenv "$ax_v" 2>/dev/null || printf '<unset>')" >> "$AX_ENVDUMP_LOG" 2>/dev/null || true
   done
@@ -457,8 +465,8 @@ case " $* " in
     # shows TWO roots and refuses, instead of looking honest. (codex + grok, implement r3.)
     if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ] && [ -z "${AX_NO_CANARY_ROLLOUT:-}" ]; then
       ax_cd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_cd" 2>/dev/null
-      printf '{"type":"turn_context","payload":{"turn_id":"t-canary","root_turn_id":"t-canary","model":"%s","effort":"%s"}}\n' \
-        "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}" >> "$ax_cd/rollout-stub.jsonl" 2>/dev/null || true
+      printf '{"type":"turn_context","payload":{"turn_id":"t-canary","root_turn_id":"t-canary","model":"%s","effort":"%s"%s}}\n' \
+        "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}" "$(ax_sbx_json "${AX_CANARY_SANDBOX:-$ax_sbx}")" >> "$ax_cd/rollout-stub.jsonl" 2>/dev/null || true
     fi
     printf '[acpx] tokens: input=1 output=1 cache_read=0 total=2\n'
     exit 0 ;;
@@ -486,12 +494,13 @@ if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
   ax_rm="${AX_ROLLOUT_MODEL:-${AX_MODEL:-gpt-6-astra}}"
   # A non-root context (turn_id != root_turn_id) must be IGNORED by the reader, so emit one
   # every time: a gate that counted it would see ambiguity on every honest turn.
-  printf '{"type":"turn_context","payload":{"turn_id":"t-child","root_turn_id":"t-root","model":"%s","effort":"%s"}}\n' \
-    "$ax_rm" "$ax_re" >> "$ax_rf" 2>/dev/null || true
-  printf '{"type":"turn_context","payload":{"turn_id":"t-root","root_turn_id":"t-root","model":"%s","effort":"%s"}}\n' \
-    "$ax_rm" "$ax_re" >> "$ax_rf" 2>/dev/null || true
-  [ -n "${AX_ROLLOUT_DOUBLE:-}" ] && printf '{"type":"turn_context","payload":{"turn_id":"t-root2","root_turn_id":"t-root2","model":"%s","effort":"%s"}}\n' \
-    "$ax_rm" "$ax_re" >> "$ax_rf" 2>/dev/null
+  ax_rs="${AX_ROLLOUT_SANDBOX:-$ax_sbx}"
+  printf '{"type":"turn_context","payload":{"turn_id":"t-child","root_turn_id":"t-root","model":"%s","effort":"%s"%s}}\n' \
+    "$ax_rm" "$ax_re" "$(ax_sbx_json "${AX_ROLLOUT_CHILD_SANDBOX:-$ax_rs}")" >> "$ax_rf" 2>/dev/null || true
+  printf '{"type":"turn_context","payload":{"turn_id":"t-root","root_turn_id":"t-root","model":"%s","effort":"%s"%s}}\n' \
+    "$ax_rm" "$ax_re" "$(ax_sbx_json "$ax_rs")" >> "$ax_rf" 2>/dev/null || true
+  [ -n "${AX_ROLLOUT_DOUBLE:-}" ] && printf '{"type":"turn_context","payload":{"turn_id":"t-root2","root_turn_id":"t-root2","model":"%s","effort":"%s"%s}}\n' \
+    "$ax_rm" "$ax_re" "$(ax_sbx_json "$ax_rs")" >> "$ax_rf" 2>/dev/null
   [ -n "${AX_ROLLOUT_APPEND:-}" ] && cat "$AX_ROLLOUT_APPEND" >> "$ax_rf" 2>/dev/null
 fi
 # THE PROVIDER'S OWN USAGE RECORDS for grok and claude, written where each keeps them for this

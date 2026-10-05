@@ -38,7 +38,7 @@ transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	45
 acp.sh: the reviewer model+effort policy	29
 acp.sh: the reviewer policy resolver	54
-reviewer policy: a wrong-depth review is never published	18
+reviewer policy: a wrong-depth review is never published	26
 reviewer routing: a routed decision reaches the mounted codex turn	18
 per-leg usage: result.json carries the provider's own records	13
 runphase: the compatibility canary gates every ACP turn	37
@@ -80,7 +80,7 @@ integrate: an exit status is not proof the suite ran	34
 integrate: the verification tree is a FRESH checkout	11
 integrate: docs-only skip	19
 the coordinator's event log: a durable record that is not the mailbox	169
-reviewer isolation: a mounted turn is contained or it does not run	110
+reviewer isolation: a mounted turn is contained or it does not run	125
 reviewer isolation: mounts live OUTSIDE the repo (relocation increment 1)	21
 clean mounts --thread: remove ONE retired thread's proven review mounts	85
 any-agent driver surface	40
