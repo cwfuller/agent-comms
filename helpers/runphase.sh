@@ -3676,7 +3676,7 @@ cmd_run() {
     # that do NOT work are recorded in docs/ROADMAP.md; do not substitute one of them.
     # THAT MEASUREMENT NO LONGER HOLDS for writes: from codex-acp 1.12 the adapter's `read-only` mode
     # sends a workspace-write sandbox on every turn (confirmed in a 2026-10-05 rollout: the tree, /tmp
-    # and $TMPDIR writable, network still denied). Open in docs/ROADMAP.md, to be fixed as its own task.
+    # and $TMPDIR writable, network still denied). Open in docs/ROADMAP.md as task 295.
     if [ -n "$mount_dir" ]; then
       # EVERY file in the reused home is written FRESH and RENAMED into place, never
       # overwritten in situ. The home persists across rounds for warmth, so a prior
