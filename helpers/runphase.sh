@@ -2849,23 +2849,26 @@ acp_exec() {  # <cwd> [acpx args...]
 # with no response timer (acpx 0.13.1 does not forward --timeout to it), and codex-acp can hold that
 # response until an active prompt completes, so an owner that acknowledges the close and never answers it
 # would otherwise hold the runner, and its mount claim, forever.
+# The group leader is published as codex_pid while it runs, so the runner's EXIT trap (kill_codex) reaps
+# it too: a runner cancelled mid-close must not leave the close client running with no deadline at all.
 acp_exec_bounded() {
   local secs="$1" log="$2" pid waited_ds=0 rc=0; shift 2
   set -m   # its own process group, so the deadline reaps acpx and everything it spawned (see kill_codex)
   acp_exec "$@" >>"$log" 2>&1 &
   pid=$!
   set +m
+  codex_pid="$pid"
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited_ds" -ge $(( secs * 10 )) ]; then
-      kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-      sleep 1
-      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      kill_codex
       wait "$pid" 2>/dev/null || true
+      codex_pid=""
       return 124
     fi
     sleep 0.2; waited_ds=$(( waited_ds + 2 ))
   done
   wait "$pid" || rc=$?
+  codex_pid=""
   return "$rc"
 }
 
@@ -4778,16 +4781,20 @@ cmd_run() {
 }
 
 # kill_codex — reap the codex child and its whole process group (TERM, then
-# KILL). Safe to call when nothing was spawned or it already exited.
+# KILL). Safe to call when nothing was spawned or it already exited. Liveness is judged on the
+# GROUP, not the leader: a leader that died first (a signal aimed at it alone) must not leave the
+# processes it spawned running.
 kill_codex() {
   [ -n "${codex_pid:-}" ] || return 0
-  kill -0 "$codex_pid" 2>/dev/null || return 0
+  kill -0 -- "-$codex_pid" 2>/dev/null || kill -0 "$codex_pid" 2>/dev/null || return 0
   kill -TERM -- "-$codex_pid" 2>/dev/null || kill -TERM "$codex_pid" 2>/dev/null || true
   # Poll for the child to actually die instead of always paying the full grace: a stub-backed
   # turn is gone in milliseconds. Same 2s budget, same KILL fallback — this can only return
   # SOONER than the flat sleep, never later.
   local _kc=0
-  while [ "$_kc" -lt 20 ] && kill -0 "$codex_pid" 2>/dev/null; do sleep 0.1; _kc=$(( _kc + 1 )); done
+  while [ "$_kc" -lt 20 ] && { kill -0 -- "-$codex_pid" 2>/dev/null || kill -0 "$codex_pid" 2>/dev/null; }; do
+    sleep 0.1; _kc=$(( _kc + 1 ))
+  done
   kill -KILL -- "-$codex_pid" 2>/dev/null || kill -KILL "$codex_pid" 2>/dev/null || true
 }
 
