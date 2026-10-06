@@ -1686,12 +1686,27 @@ POL_SBX_RS="$WORK/pol-sbx-residue"; pol_run pol-sbx-residue "$POL_SBX_RS" AX_ROL
   && [ "$(pol_tsv "$POL_SBX_RS" observed_sandbox)" = workspace-write ] \
   && ok "a workspace-write turn that also dirtied the mount is refused as containment-unconfirmed, not generic contamination" \
   || fail "workspace-write turn with residue: status=$(cn_status "$POL_SBX_RS") reason=$(cn_reason "$POL_SBX_RS") review=$(pol_tsv "$POL_SBX_RS" observed_sandbox)"
-# CONTROL for the one exception: a failed turn whose window is EMPTY started no turn, so its own
-# failure reason stands.
+# NO EXCEPTION for a failed turn with an EMPTY window: the canary already ran, so `none` is
+# containment-unconfirmed too. (codex, task 295 r3.)
 POL_SBX_FN="$WORK/pol-sbx-failed-none"; pol_run pol-sbx-failed-none "$POL_SBX_FN" AX_ROLLOUT_NONE=1 AX_FAIL_RC=5
-[ "$(cn_status "$POL_SBX_FN")" = failed ] && [ "$(cn_reason "$POL_SBX_FN")" = no-output ] && [ "$(pol_tsv "$POL_SBX_FN" observed_sandbox)" = none ] \
-  && ok "a failed turn with no turn_context in its window keeps its provider failure reason" \
+[ "$(cn_status "$POL_SBX_FN")" = failed ] && [ "$(cn_reason "$POL_SBX_FN")" = containment-unconfirmed ] && [ "$(pol_inbox_n pol-sbx-failed-none)" = 0 ] \
+  && [ "$(pol_tsv "$POL_SBX_FN" observed_sandbox)" = none ] \
+  && ok "a failed turn with no turn_context in its window is refused as containment-unconfirmed, not its provider reason" \
   || fail "failed empty-window turn: status=$(cn_status "$POL_SBX_FN") reason=$(cn_reason "$POL_SBX_FN") review=$(pol_tsv "$POL_SBX_FN" observed_sandbox)"
+# NEITHER failed uncontained turn leaves degrade evidence on ANY row — read through compose's own
+# definition — while the provider's failure class survives as a diagnostic (`provider-reason=`).
+# A `reason=no-output` provider-result is evidence a later turn-finished cannot clear.
+POL_SBX_EVAWK="$(sed -n "/^DEGRADE_EVIDENCE_AWK='/,/^}'/p" "$REPO/helpers/comms.sh")"
+pol_sbx_ev() {  # <thread> — every degrade reason any of the thread's rows carries
+  ( eval "$POL_SBX_EVAWK"
+    awk -F'\t' "$DEGRADE_EVIDENCE_AWK"' $6==t { r = degrade_reason(); if (r != "") print $3 ":" r }' t="$1" \
+      "$MA_FIX/.comms/events.tsv" 2>/dev/null )
+}
+pol_sbx_diag() { awk -F'\t' -v t="$1" '$6==t && $3=="provider-result" && $15 ~ /(^| )provider-reason=no-output( |$)/' "$MA_FIX/.comms/events.tsv" 2>/dev/null | grep_full -c .; }
+[ -n "$POL_SBX_EVAWK" ] && [ -z "$(pol_sbx_ev pol-sbx-failed)" ] && [ -z "$(pol_sbx_ev pol-sbx-failed-none)" ] \
+  && [ "$(pol_sbx_diag pol-sbx-failed)" = 1 ] && [ "$(pol_sbx_diag pol-sbx-failed-none)" = 1 ] \
+  && ok "failed uncontained turns are not compose --degrade evidence, and keep their provider failure class as provider-reason" \
+  || fail "uncontained degrade evidence: failed='$(pol_sbx_ev pol-sbx-failed)' none='$(pol_sbx_ev pol-sbx-failed-none)' diag=$(pol_sbx_diag pol-sbx-failed)/$(pol_sbx_diag pol-sbx-failed-none)"
 # A review window with NO context at all, after a read-only canary, reports sandbox none.
 [ "$(cn_reason "$POL_NONE")" = containment-unconfirmed ] && [ "$(pol_tsv "$POL_NONE" canary_sandbox)" = read-only ] \
   && [ "$(pol_tsv "$POL_NONE" observed_sandbox)" = none ] \

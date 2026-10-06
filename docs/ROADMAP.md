@@ -734,8 +734,9 @@ records the installed runtime (0.160.0). 2.1.1 bundles `@openai/codex ^0.159.1`.
    be read at all is `unattested`, refused the same way. The review window is judged whatever the
    turn's exit, ahead of the provider-failure classification and the mount-contamination exit, so a
    failed or mount-dirtying turn under workspace-write is containment, not `no-output` (which
-   `compose --degrade` may drop) or generic contamination; only a failed non-timeout turn with an
-   empty window (`none`: no turn started) keeps its provider reason. `turn.tsv` records `canary_sandbox` and `observed_sandbox`.
+   `compose --degrade` may drop) or generic contamination, with no exception for a failed turn with an
+   empty window (`none`). Containment is decided before the `provider-result` event, which then
+   records the provider's failure class as `provider-reason=` so it is never degrade evidence. `turn.tsv` records `canary_sandbox` and `observed_sandbox`.
 
 **Residuals.** A model that asks for escalation now ends its own turn (acpx exit 5, a failed leg)
 instead of writing — fail-closed by design. The probe covered the installed runtime only, not the

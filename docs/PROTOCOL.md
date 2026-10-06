@@ -973,9 +973,9 @@ handed to acpx as `--agent`) under `--deny-all`, and is refused (`reason: contai
 unless every `turn_context` its canary and its review prompt appended to the rollout records
 `sandbox_policy.type` `read-only` — the canary is checked before the review prompt is sent, the
 review whatever its exit, before the provider-failure classification and the mount-contamination
-check, so an uncontained turn is never filed as `no-output` or generic contamination. The one
-exception is a failed (non-zero, non-timeout) turn whose window holds no context at all: no turn
-started, and its own failure reason stands. For worktree turns, `.comms/` and the main `.git/` are added via
+check, so an uncontained turn is never filed as `no-output` or generic contamination — a failed turn
+with an empty window (`none`) included. Its `provider-result` then carries the provider's failure class
+as `provider-reason=`, not `reason=`, so `compose --degrade` never reads it as droppable-leg evidence. For worktree turns, `.comms/` and the main `.git/` are added via
 `--add-dir` so the reply and branch operations succeed. The spawned turn does **not** inherit
 `COMMS_DELIVERY`: exporting `headless` onto the child also landed it on the driver, where it
 tripped the parent's own delivery gate and killed the broker's `send` while the copied reply
