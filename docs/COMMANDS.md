@@ -902,7 +902,8 @@ and only for `canary-timeout`; the warm context is lost. `turn.tsv` records `ses
 `canary_budget` and, on a retry, `canary_retry` (`retire-recreate`), `canary_retry_cause`,
 `canary_retry_retired` (the old record id), `canary_retry_record` (the new one) and
 `canary_retry_result` (`passed` / `failed` / `close-failed` / `close-timeout` / `not-recreated`, or `bind-refused` /
-`prepare-refused` when the re-created session fails its bind or mode-pin/policy check).
+`prepare-refused` when the re-created session fails its bind or mode-pin/policy check, or `aborted` when the
+runner is cancelled or dies mid-retry).
 
 To make that rare, the mounted codex `config.toml` carries
 `model_post_turn_compact_threshold_percent` (`COMMS_ACP_CODEX_COMPACT_PERCENT`, default 80; `0` omits

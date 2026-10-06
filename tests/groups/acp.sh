@@ -533,7 +533,8 @@ CX_HANG_TOOK=$(( $(date +%s) - CX_HANG_T0 ))
   || fail "close hang: status=$(cn_status "$CX_I") result=$(cx_tsv "$CX_I" canary_retry_result) took=${CX_HANG_TOOK}s"
 
 # 5a'. A runner cancelled DURING that retire reaps the close client: the deadline dies with the runner, so
-# the client must die with it rather than keep mutating session state with no bound at all.
+# the client must die with it rather than keep mutating session state with no bound at all, and the
+# retry it opened is still settled in turn.tsv (`aborted`) before the failed result is published.
 CX_CAN_PID="$WORK/canary-cx-closecancel.pid"; rm -f "$CX_CAN_PID"
 CX_CAN_DIR="$WORK/canary-cx-closecancel"
 run_codex_canary closecancel AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_CLOSE_HANG="$CX_CAN_PID" \
@@ -548,10 +549,10 @@ CX_CAN_TOOK=$(( $(date +%s) - CX_CAN_T0 ))
 # The killed client is orphaned, and an orphan answers kill -0 until it is reaped: allow that, bounded.
 CX_CAN_W=0; while [ -s "$CX_CAN_PID" ] && kill -0 "$(cat "$CX_CAN_PID")" 2>/dev/null && [ "$CX_CAN_W" -lt 30 ]; do sleep 0.1; CX_CAN_W=$(( CX_CAN_W + 1 )); done
 [ -s "$CX_CAN_PID" ] && ! kill -0 "$(cat "$CX_CAN_PID")" 2>/dev/null && [ "$CX_CAN_TOOK" -lt 15 ] \
-  && [ "$(cn_status "$CX_CAN_DIR")" = failed ] \
-  && ok "a runner cancelled during the automatic retire reaps the close client and still records a failed result" \
+  && [ "$(cn_status "$CX_CAN_DIR")" = failed ] && [ "$(cx_tsv "$CX_CAN_DIR" canary_retry_result)" = aborted ] \
+  && ok "a runner cancelled during the automatic retire reaps the close client and records the retry as aborted" \
   || { [ -s "$CX_CAN_PID" ] && kill -KILL "$(cat "$CX_CAN_PID")" 2>/dev/null
-       fail "close cancel: status=$(cn_status "$CX_CAN_DIR") took=${CX_CAN_TOOK}s client=$(cat "$CX_CAN_PID" 2>/dev/null)"; }
+       fail "close cancel: status=$(cn_status "$CX_CAN_DIR") result=$(cx_tsv "$CX_CAN_DIR" canary_retry_result) took=${CX_CAN_TOOK}s client=$(cat "$CX_CAN_PID" 2>/dev/null)"; }
 
 # 5b. A re-created session that fails its bind or preparation gate still records the retry's result.
 CX_G="$(run_codex_canary bindfail AX_ENSURE_EXISTING=1 AX_COMPACT_SECS=9 AX_ENSURE_FAIL_AFTER_CLOSE=1 COMMS_ACP_CANARY_COMPACT_SECS=2)"

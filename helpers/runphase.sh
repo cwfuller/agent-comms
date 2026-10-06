@@ -2981,13 +2981,14 @@ cmd_run() {
   # State first, result.json last — everywhere. result.json is the signal
   # `await` unblocks on, so every other record must already be in place.
   codex_pid=""
+  ACP_RETRY_OPEN=""
   # The abort note is a VARIABLE so a deliberate refusal can say WHY. The isolation checks below
   # `die` after this trap is armed, and a bare default would file every one of them under "runner
   # aborted unexpectedly" — sending an operator to runner.log for what is really a one-line policy
   # refusal. Setting ABORT_NOTE just before such a die surfaces the reason in result.json, where
   # `await` reads it. (grok, implement r1, advisory.)
   ABORT_NOTE="runner aborted unexpectedly — see runner.log"
-  trap 'kill_codex; unmount_artifact 2>/dev/null || true; update_thread_state "$msg_thread" failed "" "$sfield" || true; write_result "$run_dir" failed "?" "" "$msg" "$ABORT_NOTE"' EXIT
+  trap 'kill_codex; acp_retry_settle aborted; unmount_artifact 2>/dev/null || true; update_thread_state "$msg_thread" failed "" "$sfield" || true; write_result "$run_dir" failed "?" "" "$msg" "$ABORT_NOTE"' EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
 
@@ -4130,15 +4131,7 @@ cmd_run() {
       # that was bound. Only a successful read-back lets result.json say `observed`.
       if [ -n "$RUN_BIND_STAMP" ]; then bound_leg_readback "$acp_iso_home"; fi
     fi
-    local acp_ensure_out="" acp_record_id="" acp_session_state="" acp_retry_open=""
-    # acp_retry_settle <result> — record the canary retry's outcome in turn.tsv, once. Every exit after
-    # the retry starts (a refusal in the re-created session's bind or preparation gates included) runs
-    # it BEFORE publishing, so a retry is never left in turn.tsv without a result. No-op outside a retry.
-    acp_retry_settle() {
-      [ -n "$acp_retry_open" ] || return 0
-      acp_retry_open=""
-      printf 'canary_retry_result\t%s\n' "$1" >> "$run_dir/turn.tsv" 2>/dev/null || true
-    }
+    local acp_ensure_out="" acp_record_id="" acp_session_state=""
     # acp_session_bind — ensure the named session and prove it is bound where the turn runs. ONE
     # definition, run for the turn's session and again for the one a canary retry re-creates, so a
     # re-created session passes every gate the first one did. Sets acp_ensure_out, acp_record_id and
@@ -4406,7 +4399,7 @@ cmd_run() {
        && [ "$ACP_CANARY_REASON" = canary-timeout ]; then
       local retired_record="$acp_record_id" close_rc=0 retire_secs
       retire_secs="$(sane_secs "${COMMS_ACP_RETIRE_SECS:-60}")"; [ -n "$retire_secs" ] || retire_secs=60
-      acp_retry_open=1
+      ACP_RETRY_OPEN=1
       printf 'canary_retry\tretire-recreate\ncanary_retry_cause\t%s\ncanary_retry_retired\t%s\n' \
         "$ACP_CANARY_REASON" "${retired_record:-unknown}" >> "$run_dir/turn.tsv" 2>/dev/null || true
       printf 'canary retry: %s on existing session %s — retiring it and re-creating once\n' "$ACP_CANARY_REASON" "$retired_record" >>"$run_dir/runner.log"
@@ -4778,6 +4771,17 @@ cmd_run() {
   unmount_artifact
   trap - EXIT
   [ "$status" = completed ]
+}
+
+# acp_retry_settle <result> — record the ACP canary retry's outcome in turn.tsv, once. Every exit after
+# the retry starts runs it BEFORE publishing — a refusal in the re-created session's bind or preparation
+# gates, and the EXIT trap of a runner cancelled mid-retry (`aborted`) — so a retry is never left in
+# turn.tsv without a result. No-op outside a retry. Defined at top level, with ACP_RETRY_OPEN cleared
+# before the trap is armed, so the trap can call it however early the runner aborts.
+acp_retry_settle() {
+  [ -n "${ACP_RETRY_OPEN:-}" ] || return 0
+  ACP_RETRY_OPEN=""
+  printf 'canary_retry_result\t%s\n' "$1" >> "$run_dir/turn.tsv" 2>/dev/null || true
 }
 
 # kill_codex — reap the codex child and its whole process group (TERM, then

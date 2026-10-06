@@ -54,7 +54,7 @@ turn was refused `canary-unexpected`. Every retry repeated it, and the only way 
    never answered would hold the runner and its mount claim indefinitely. On expiry the close's process
    group is killed and the turn is refused with `canary_retry_result` `close-timeout`. A runner
    cancelled during the close reaps the same process group at teardown, so the client never outlives
-   its deadline.
+   its deadline, and records `canary_retry_result` `aborted` before publishing its failed result.
 3. The mounted `config.toml` sets `model_post_turn_compact_threshold_percent = 80`
    (`COMMS_ACP_CODEX_COMPACT_PERCENT`), so a long review compacts inside its own budget.
 
