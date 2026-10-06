@@ -4649,6 +4649,28 @@ cmd_run() {
     fi
     log_event provider-result "$([ "$acp_rc" -eq 0 ] && echo completed || echo failed)" \
       "exit=$acp_rc elapsed=${acp_elapsed}s budget=${timeout}s via=acp${acp_reason:+ reason=$acp_reason}"
+    # CONTAINMENT, judged FIRST and whatever the exit: a review written under a writable sandbox — or a
+    # window with no sandbox evidence at all — is refused unpublished as containment-unconfirmed, ahead
+    # of the provider-failure classification (a failed turn must not read as `no-output`, which
+    # `compose --degrade` may drop), the mount-contamination exit and the depth verdict. Judged from the
+    # window's own sandbox record, NOT from the roots: those can be undecidable while the sandbox is
+    # plainly not read-only. A window that could not be read leaves no record: `unattested`. One
+    # exception, and only for a turn that cannot publish (exit neither 0 nor the timeout 3): an EMPTY
+    # window (`none`) means no turn started, so no command ran under any sandbox, and the provider's
+    # own failure reason stands. (codex, task 295 r1/r2.)
+    local att_out="" att_rc=0 att_sbx=""
+    if [ -n "$acp_iso_home" ] && [ "$provider" = codex ]; then
+      rm -f "$run_dir/review-sandbox.txt"
+      att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" "$run_dir/review-sandbox.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
+      att_sbx="$(cat "$run_dir/review-sandbox.txt" 2>/dev/null)" || att_sbx=""
+      printf 'observed_sandbox\t%s\n' "${att_sbx:-unattested}" >> "$run_dir/turn.tsv" 2>/dev/null || true
+      if [ "$att_sbx" != read-only ] \
+         && { [ "$acp_rc" -eq 0 ] || [ "$acp_rc" -eq 3 ] || [ "$att_sbx" != none ]; }; then
+        printf 'sandbox attestation: %s (exit %s)\n' "${att_sbx:-unattested}" "$acp_rc" >>"$run_dir/runner.log"
+        acp_refuse containment-unconfirmed "the review turn's own rollout reports sandbox '${att_sbx:-unattested}', not read-only — refusing to publish a review written by an uncontained reviewer; retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+        return 1
+      fi
+    fi
     # acpx hands back the answer as TEXT, so the streaming extractor is skipped
     # entirely and only the stamping half of the broker applies.
     # Whether the turn OUTRAN ITS BUDGET is a fact about the turn, not about how many bytes
@@ -4681,13 +4703,10 @@ cmd_run() {
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
-      local att_out="" att_rc=0 att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc="" att_sbx=""
+      local att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
+      # codex's window was read once, for containment, right after the turn; its att_out/att_rc stand.
       if [ "$provider" = gemini ]; then
         att_out="$(acp_gemini_observed "$acp_sh" "$acp_iso_home" "$run_dir/attest-snapshot.json" "$(cd "$workdir" && pwd -P)" 2>>"$run_dir/runner.log")" || att_rc=$?
-      else
-        rm -f "$run_dir/review-sandbox.txt"
-        att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" "$run_dir/review-sandbox.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
-        att_sbx="$(cat "$run_dir/review-sandbox.txt" 2>/dev/null)" || att_sbx=""
       fi
       if [ "$att_rc" -eq 0 ]; then
         # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
@@ -4715,19 +4734,6 @@ cmd_run() {
       if [ -n "$RUN_BIND_STAMP" ]; then RUN_BIND_OBS_MODEL="$att_mod"; RUN_BIND_OBS_EFFORT="$att_eff"; fi
       turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}" "${att_rtc:-}" \
         "$( [ "$provider" = gemini ] && [ -n "$att_src" ] && printf 'gemini-chat-record+settings-readback')"
-      # CONTAINMENT, from the same window and ahead of the depth verdict: a review written under a
-      # writable sandbox — or a window with no sandbox evidence at all — is refused unpublished whatever
-      # model ran it. Judged from the window's own sandbox record, NOT from att_out: the roots can be
-      # undecidable (disagreeing, absent) while the sandbox is plainly not read-only, and that is a
-      # containment refusal. A window that could not be read leaves no record: `unattested`.
-      if [ "$provider" = codex ]; then
-        printf 'observed_sandbox\t%s\n' "${att_sbx:-unattested}" >> "$run_dir/turn.tsv" 2>/dev/null || true
-        if [ "$att_sbx" != read-only ]; then
-          printf 'sandbox attestation: %s\n' "${att_sbx:-unattested}" >>"$run_dir/runner.log"
-          acp_refuse containment-unconfirmed "the review turn's own rollout reports sandbox '${att_sbx:-unattested}', not read-only — refusing to publish a review written by an uncontained reviewer; retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
-          return 1
-        fi
-      fi
       if [ "$att_rc" -ne 0 ]; then
         printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
         if [ "$att_rc" -eq 20 ]; then

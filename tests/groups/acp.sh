@@ -1673,6 +1673,25 @@ POL_SBX_DRO="$WORK/pol-sbx-disagree-ro"; pol_run pol-sbx-disagree-ro "$POL_SBX_D
 [ "$(cn_status "$POL_SBX_DRO")" = failed ] && [ "$(cn_reason "$POL_SBX_DRO")" = policy-unapplied ] && [ "$(pol_tsv "$POL_SBX_DRO" observed_sandbox)" = read-only ] \
   && ok "disagreeing roots under a read-only sandbox are refused as policy-unapplied" \
   || fail "disagreeing read-only roots: status=$(cn_status "$POL_SBX_DRO") reason=$(cn_reason "$POL_SBX_DRO") review=$(pol_tsv "$POL_SBX_DRO" observed_sandbox)"
+# CONTAINMENT IS JUDGED BEFORE THE FAILURE AND CONTAMINATION EXITS: a workspace-write window on a
+# FAILED turn is containment, never `no-output` (which compose --degrade may drop), and on a turn
+# that also dirtied the mount it is containment, never generic contamination. (codex, task 295 r2.)
+POL_SBX_FL="$WORK/pol-sbx-failed"; pol_run pol-sbx-failed "$POL_SBX_FL" AX_ROLLOUT_SANDBOX=workspace-write AX_FAIL_RC=5
+[ "$(cn_status "$POL_SBX_FL")" = failed ] && [ "$(cn_reason "$POL_SBX_FL")" = containment-unconfirmed ] && [ "$(pol_inbox_n pol-sbx-failed)" = 0 ] \
+  && [ "$(pol_tsv "$POL_SBX_FL" canary_sandbox)" = read-only ] && [ "$(pol_tsv "$POL_SBX_FL" observed_sandbox)" = workspace-write ] \
+  && ok "a failed review turn whose rollout reports workspace-write is refused as containment-unconfirmed, not no-output" \
+  || fail "failed workspace-write turn: status=$(cn_status "$POL_SBX_FL") reason=$(cn_reason "$POL_SBX_FL") review=$(pol_tsv "$POL_SBX_FL" observed_sandbox)"
+POL_SBX_RS="$WORK/pol-sbx-residue"; pol_run pol-sbx-residue "$POL_SBX_RS" AX_ROLLOUT_SANDBOX=workspace-write AX_CHILD_WRITE=residue
+[ "$(cn_status "$POL_SBX_RS")" = failed ] && [ "$(cn_reason "$POL_SBX_RS")" = containment-unconfirmed ] && [ "$(pol_inbox_n pol-sbx-residue)" = 0 ] \
+  && [ "$(pol_tsv "$POL_SBX_RS" observed_sandbox)" = workspace-write ] \
+  && ok "a workspace-write turn that also dirtied the mount is refused as containment-unconfirmed, not generic contamination" \
+  || fail "workspace-write turn with residue: status=$(cn_status "$POL_SBX_RS") reason=$(cn_reason "$POL_SBX_RS") review=$(pol_tsv "$POL_SBX_RS" observed_sandbox)"
+# CONTROL for the one exception: a failed turn whose window is EMPTY started no turn, so its own
+# failure reason stands.
+POL_SBX_FN="$WORK/pol-sbx-failed-none"; pol_run pol-sbx-failed-none "$POL_SBX_FN" AX_ROLLOUT_NONE=1 AX_FAIL_RC=5
+[ "$(cn_status "$POL_SBX_FN")" = failed ] && [ "$(cn_reason "$POL_SBX_FN")" = no-output ] && [ "$(pol_tsv "$POL_SBX_FN" observed_sandbox)" = none ] \
+  && ok "a failed turn with no turn_context in its window keeps its provider failure reason" \
+  || fail "failed empty-window turn: status=$(cn_status "$POL_SBX_FN") reason=$(cn_reason "$POL_SBX_FN") review=$(pol_tsv "$POL_SBX_FN" observed_sandbox)"
 # A review window with NO context at all, after a read-only canary, reports sandbox none.
 [ "$(cn_reason "$POL_NONE")" = containment-unconfirmed ] && [ "$(pol_tsv "$POL_NONE" canary_sandbox)" = read-only ] \
   && [ "$(pol_tsv "$POL_NONE" observed_sandbox)" = none ] \

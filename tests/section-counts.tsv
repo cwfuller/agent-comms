@@ -38,7 +38,7 @@ transports emit the child\'s bytes, verbatim and identically	13
 acp.sh: consult transport (stubbed npx)	45
 acp.sh: the reviewer model+effort policy	29
 acp.sh: the reviewer policy resolver	54
-reviewer policy: a wrong-depth review is never published	29
+reviewer policy: a wrong-depth review is never published	32
 reviewer routing: a routed decision reaches the mounted codex turn	18
 per-leg usage: result.json carries the provider's own records	13
 runphase: the compatibility canary gates every ACP turn	37
