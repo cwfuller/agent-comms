@@ -642,6 +642,15 @@ iso_sbx() { ( eval "$ISO_RO"; acp_rollout_observed "$ISO_SB" "$WORK/snap-sb.txt"
 [ "$(iso_sbx)" = mixed ] && ok "a context with no sandbox_policy is unknown, so the window is not read-only" || fail "missing sandbox ignored: '$(iso_sbx)'"
 iso_sctx t-r t-r ',"sandbox_policy":"read-only"' > "$ISO_SBF"
 [ "$(iso_sbx)" = unknown ] && ok "a sandbox_policy that is not an object reads as unknown" || fail "malformed sandbox read as '$(iso_sbx)'"
+# <sbx-out> is written from the scan alone: roots that disagree on effort are undecidable (rc 21,
+# no stdout) but the window's sandbox is still recorded; an unreadable window records nothing.
+iso_sbx_out() { rm -f "$WORK/sbx-out.txt"; ( eval "$ISO_RO"; acp_rollout_observed "$ISO_SB" "$WORK/snap-sb.txt" "$WORK/sbx-out.txt" ) >/dev/null 2>&1; echo "$?:$(cat "$WORK/sbx-out.txt" 2>/dev/null)"; }
+{ iso_sctx t-r t-r ',"sandbox_policy":{"type":"workspace-write"}'; printf '{"type":"turn_context","payload":{"turn_id":"t-r2","root_turn_id":"t-r2","model":"gpt-6-astra","effort":"medium","sandbox_policy":{"type":"workspace-write"}}}\n'; } > "$ISO_SBF"
+[ "$(iso_sbx_out)" = "21:workspace-write" ] && ok "disagreeing roots are undecidable for depth yet still record the window's workspace-write sandbox" || fail "sbx-out on disagreeing roots: $(iso_sbx_out)"
+: > "$ISO_SBF"
+[ "$(iso_sbx_out)" = "21:none" ] && ok "a window with no turn_context records sandbox none" || fail "sbx-out on an empty window: $(iso_sbx_out)"
+printf 'not json\n' > "$ISO_SBF"
+[ "$(iso_sbx_out)" = "21:" ] && ok "an unreadable window records no sandbox at all" || fail "sbx-out on a malformed window: $(iso_sbx_out)"
 
 # --- the PINNED adapter: one translator, executed, never grepped ---
 ISO_AA="$(sed -n '/^acp_agent_argv() {/,/^}/p' "$ISO_RP")"

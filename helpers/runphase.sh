@@ -2431,10 +2431,13 @@ acp_confirm_mode() {
   [ "$rc" -eq 0 ] && [ "$out" = "mode set: $mode" ]
 }
 
-# acp_rollout_observed <iso-home> <snapshot-file> — print
+# acp_rollout_observed <iso-home> <snapshot-file> [<sbx-out>] — print
 # "<effort>\t<model>\t<turn-id>\t<evidence-file>\t<window-origin>\t<runtime>\t<created-runtime>\t
 # <sandbox>" for the root turn_contexts this turn appended, or exit non-zero. <sandbox> is the
-# sandbox_policy type every context in the window agrees on (`mixed` / `unknown` otherwise).
+# sandbox_policy type every context in the window agrees on (`mixed` / `unknown` otherwise, `none`
+# for a window with no context). With <sbx-out>, that sandbox is also written there as soon as the
+# window has been read whole — even when the model/effort roots are then undecidable — and the file
+# is absent when the window itself could not be read.
 #
 # THE EVIDENCE THE PROVIDER WROTE ITSELF. codex appends a turn_context per prompt carrying the
 # model and effort it actually ran; that is the only record of the BILLABLE turn, and the only
@@ -2507,9 +2510,10 @@ PY
 
 acp_rollout_observed() {
   command -v python3 >/dev/null 2>&1 || return 21
-  python3 - "$1" "$2" <<'PY'
+  python3 - "$1" "$2" "${3:-}" <<'PY'
 import json,os,sys
 home,snap=sys.argv[1],sys.argv[2]
+sbx_out=sys.argv[3] if len(sys.argv)>3 else ""
 def undecidable(msg):
     sys.stderr.write(msg+"\n"); sys.exit(21)
 prev={}
@@ -2601,6 +2605,16 @@ for f in files:
         sandboxes.add(st_ if isinstance(st_,str) and st_ else "unknown")
         if tid!=rid: continue                # a child turn, not the billable root
         roots.append((p.get("effort"),p.get("model"),tid,f,start))
+def _tok(v): return v if all(c.isalnum() or c in "._-+" for c in v) else ""
+# THE WINDOW'S SANDBOX, decided from the scan alone: one type when every context agrees, `mixed`
+# when they differ, `none` when the window holds no context. Written to <sbx-out> BEFORE the root
+# checks below, so containment is judged even when model/effort is undecidable — a workspace-write
+# window whose roots disagree is a containment refusal, not a depth one. (codex, task 295 r1.)
+sbx=("none" if not sandboxes else (_tok(next(iter(sandboxes))) or "unknown") if len(sandboxes)==1 else "mixed")
+if sbx_out:
+    try:
+        with open(sbx_out,"w") as fh: fh.write(sbx+"\n")
+    except OSError: undecidable("the window's sandbox could not be recorded")
 # ALL ROOTS MUST AGREE — not "exactly one". A real round-2 warm resumed session emitted FOUR
 # root turn_contexts, all gpt-6-astra/xhigh, and exactly-one-root refused that honest turn in a
 # live project. grok predicted this in the effort-pin arc ("widen the selector rather than
@@ -2637,10 +2651,7 @@ try:
                     if here>=off: rt_win=v
 except OSError:
     rt_win=""; rt_created=""
-def _tok(v): return v if all(c.isalnum() or c in "._-+" for c in v) else ""
 rt_win=_tok(rt_win); rt_created=_tok(rt_created)
-# One sandbox type when every context in the window agrees, else `mixed`; the caller requires read-only.
-sbx=(_tok(next(iter(sandboxes))) or "unknown") if len(sandboxes)==1 else "mixed"
 # effort, model, backend turn id, rollout path, snapshot byte boundary, runtime of THIS turn (only
 # when evidenced in the window), runtime that created the session, the window's sandbox -- the
 # evidence a refusal needs to be reconstructable once the isolated home is gone. (codex, live-proof r1.)
@@ -4674,7 +4685,9 @@ cmd_run() {
       if [ "$provider" = gemini ]; then
         att_out="$(acp_gemini_observed "$acp_sh" "$acp_iso_home" "$run_dir/attest-snapshot.json" "$(cd "$workdir" && pwd -P)" 2>>"$run_dir/runner.log")" || att_rc=$?
       else
-        att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
+        rm -f "$run_dir/review-sandbox.txt"
+        att_out="$(acp_rollout_observed "$acp_iso_home" "$run_dir/rollout-snapshot.txt" "$run_dir/review-sandbox.txt" 2>>"$run_dir/runner.log")" || att_rc=$?
+        att_sbx="$(cat "$run_dir/review-sandbox.txt" 2>/dev/null)" || att_sbx=""
       fi
       if [ "$att_rc" -eq 0 ]; then
         # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
@@ -4689,7 +4702,6 @@ cmd_run() {
         att_off="$(printf '%s' "$att_out" | cut -f5)"
         att_rt="$(printf '%s' "$att_out" | cut -f6)"
         att_rtc="$(printf '%s' "$att_out" | cut -f7)"
-        att_sbx="$(printf '%s' "$att_out" | cut -f8)"
         # The expectation must be the one resolved before launch. The reviewer ran in between, and
         # a record it could rewrite to match its own rollout would turn a mismatch into a pass.
         # Checked AFTER the evidence is parsed, so a refusal still records what actually ran.
@@ -4703,14 +4715,16 @@ cmd_run() {
       if [ -n "$RUN_BIND_STAMP" ]; then RUN_BIND_OBS_MODEL="$att_mod"; RUN_BIND_OBS_EFFORT="$att_eff"; fi
       turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}" "${att_rtc:-}" \
         "$( [ "$provider" = gemini ] && [ -n "$att_src" ] && printf 'gemini-chat-record+settings-readback')"
-      # CONTAINMENT, from the same evidence and ahead of the depth verdict: a review written under a
-      # writable sandbox is refused unpublished whatever model ran it. (Unparsed evidence falls to the
-      # undecidable refusal below, which refuses too.)
-      if [ "$provider" = codex ] && [ -n "$att_out" ]; then
-        printf 'observed_sandbox\t%s\n' "${att_sbx:-unknown}" >> "$run_dir/turn.tsv" 2>/dev/null || true
+      # CONTAINMENT, from the same window and ahead of the depth verdict: a review written under a
+      # writable sandbox — or a window with no sandbox evidence at all — is refused unpublished whatever
+      # model ran it. Judged from the window's own sandbox record, NOT from att_out: the roots can be
+      # undecidable (disagreeing, absent) while the sandbox is plainly not read-only, and that is a
+      # containment refusal. A window that could not be read leaves no record: `unattested`.
+      if [ "$provider" = codex ]; then
+        printf 'observed_sandbox\t%s\n' "${att_sbx:-unattested}" >> "$run_dir/turn.tsv" 2>/dev/null || true
         if [ "$att_sbx" != read-only ]; then
-          printf 'sandbox attestation: %s\n' "${att_sbx:-unknown}" >>"$run_dir/runner.log"
-          acp_refuse containment-unconfirmed "the review turn's own rollout reports sandbox '${att_sbx:-unknown}', not read-only — refusing to publish a review written by an uncontained reviewer; retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+          printf 'sandbox attestation: %s\n' "${att_sbx:-unattested}" >>"$run_dir/runner.log"
+          acp_refuse containment-unconfirmed "the review turn's own rollout reports sandbox '${att_sbx:-unattested}', not read-only — refusing to publish a review written by an uncontained reviewer; retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
           return 1
         fi
       fi

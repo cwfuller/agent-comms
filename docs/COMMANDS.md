@@ -952,7 +952,7 @@ launched; hash-checked before every consumer) and `turn.tsv` (identity, then
 `policy_digest`, `acp_session`, `acpx_pinned_version`, `acpx_launcher`, `acp_adapter` (a mounted
 codex turn's pinned adapter command), `adapter_check/report/source` from the preflight,
 `canary_sandbox` and `observed_sandbox` (a mounted codex turn's rollout sandbox for the canary and
-the review prompt: `read-only`, another type, `mixed`, `unknown` or `unattested`; anything but
+the review prompt: `read-only`, another type, `mixed`, `unknown`, `none` (no context in the window) or `unattested`; anything but
 `read-only` refuses the turn as `containment-unconfirmed`), and `observed_model/effort`, `evidence_*`,
 `observed_runtime` (only when the session was created in this turn's window) and
 `session_created_runtime` from the provider's own rollout — requested, adapter-reported and observed are never conflated). A

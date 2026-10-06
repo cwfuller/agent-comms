@@ -726,9 +726,12 @@ records the installed runtime (0.160.0). 2.1.1 bundles `@openai/codex ^0.159.1`.
 2. Mounted codex turns run under `--deny-all`.
 3. Fail-closed attestation from the provider's own rollout: `acp_rollout_observed` now also reports
    the sandbox type every `turn_context` in the window agrees on (child contexts included; a missing
-   or non-object policy is `unknown`). The canary's window is attested before the review prompt is
-   sent, the review's before publication; anything but `read-only` refuses the turn as
-   `containment-unconfirmed`, with no override. `turn.tsv` records `canary_sandbox` and `observed_sandbox`.
+   or non-object policy is `unknown`, a window with no context `none`). The canary's window is attested
+   before the review prompt is sent, the review's before publication; anything but `read-only` refuses
+   the turn as `containment-unconfirmed`, with no override. The review window's sandbox is judged from
+   the scan alone, before the model/effort roots: a workspace-write window whose roots disagree, or a
+   window with no context, is a containment refusal rather than `policy-unapplied`; a window that cannot
+   be read at all is `unattested`, refused the same way. `turn.tsv` records `canary_sandbox` and `observed_sandbox`.
 
 **Residuals.** A model that asks for escalation now ends its own turn (acpx exit 5, a failed leg)
 instead of writing — fail-closed by design. The probe covered the installed runtime only, not the
@@ -737,13 +740,6 @@ consult path (unmounted, `--approve-reads`, the operator's own `~/.codex`) still
 builtin and is not covered by this pin. The attestation is post-hoc: it refuses to SEND the review
 prompt after a non-read-only canary and to PUBLISH after a non-read-only review, but it cannot undo a
 write either turn made outside the tree (writes inside it are the tree-identity check's).
-
-**Found while doing this, not fixed here (sev 2, needs its own item).** acpx 0.13.1 reads a project
-config, `<cwd>/.acpxrc.json`, and a mounted turn's cwd is the reviewed tree. Read from acpx's source
-(`resolveInvocationCommand`), not measured: a raw `--agent` wins over that file's agent mapping, so the
-pinned codex path is not redirected by it, but the claude, grok and gemini arms launch by profile name,
-where a tree-supplied mapping would choose the command acpx spawns outside any sandbox. The runner
-refuses a tree carrying `.codex/config.toml`; nothing refuses `.acpxrc.json`.
 
 **History (2026-09-19).** The installed adapter was then 1.12.0, whose `read-only` mode is a
 `workspaceWrite` policy (`dist/index.js` `static ReadOnly = new _AgentMode("read-only", …,

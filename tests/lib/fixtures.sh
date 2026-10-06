@@ -463,7 +463,7 @@ case " $* " in
     # THE CANARY IS A PROMPT TOO, so real codex records a turn_context for it. Emitting one
     # here means the snapshot has pre-prompt bytes to exclude: an empty or broken snapshot now
     # shows TWO roots and refuses, instead of looking honest. (codex + grok, implement r3.)
-    if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ] && [ -z "${AX_NO_CANARY_ROLLOUT:-}" ]; then
+    if ax_rollout_ok && [ -z "${AX_NO_CANARY_ROLLOUT:-}" ]; then
       ax_cd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_cd" 2>/dev/null
       printf '{"type":"turn_context","payload":{"turn_id":"t-canary","root_turn_id":"t-canary","model":"%s","effort":"%s"%s}}\n' \
         "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}" "$(ax_sbx_json "${AX_CANARY_SANDBOX:-$ax_sbx}")" >> "$ax_cd/rollout-stub.jsonl" 2>/dev/null || true
@@ -482,8 +482,10 @@ fi
 #     values, i.e. the honest case). Setting only these two reproduces B1: preflight passes
 #     from the record while the billable turn runs something else.
 #   AX_ROLLOUT_NEW_FILE — append to a NEW jsonl, as a replacement session does.
-#   AX_ROLLOUT_NONE     — write nothing (evidence missing -> undecidable).
-#   AX_ROLLOUT_DOUBLE   — two root contexts (ambiguous -> undecidable).
+#   AX_ROLLOUT_NONE     — write nothing for the review prompt (evidence missing -> undecidable);
+#     the canary still writes its own context (AX_NO_CANARY_ROLLOUT suppresses that).
+#   AX_ROLLOUT_DOUBLE   — two root contexts (ambiguous -> undecidable); AX_ROLLOUT_DOUBLE_EFFORT
+#     gives the second root its own effort, so the roots disagree.
 #   AX_ROLLOUT_APPEND   — a file whose bytes are appended after the contexts, verbatim (e.g.
 #     message records carrying raw U+2028, as codex writes them).
 if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
@@ -500,7 +502,7 @@ if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
   printf '{"type":"turn_context","payload":{"turn_id":"t-root","root_turn_id":"t-root","model":"%s","effort":"%s"%s}}\n' \
     "$ax_rm" "$ax_re" "$(ax_sbx_json "$ax_rs")" >> "$ax_rf" 2>/dev/null || true
   [ -n "${AX_ROLLOUT_DOUBLE:-}" ] && printf '{"type":"turn_context","payload":{"turn_id":"t-root2","root_turn_id":"t-root2","model":"%s","effort":"%s"%s}}\n' \
-    "$ax_rm" "$ax_re" "$(ax_sbx_json "$ax_rs")" >> "$ax_rf" 2>/dev/null
+    "$ax_rm" "${AX_ROLLOUT_DOUBLE_EFFORT:-$ax_re}" "$(ax_sbx_json "$ax_rs")" >> "$ax_rf" 2>/dev/null
   [ -n "${AX_ROLLOUT_APPEND:-}" ] && cat "$AX_ROLLOUT_APPEND" >> "$ax_rf" 2>/dev/null
 fi
 # THE PROVIDER'S OWN USAGE RECORDS for grok and claude, written where each keeps them for this

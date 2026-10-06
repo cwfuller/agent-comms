@@ -1660,6 +1660,24 @@ POL_SBX_NO="$WORK/pol-sbx-none"; pol_run pol-sbx-none "$POL_SBX_NO" AX_ROLLOUT_S
 [ "$(cn_status "$POL_SBX_NO")" = failed ] && [ "$(cn_reason "$POL_SBX_NO")" = containment-unconfirmed ] && [ "$(pol_inbox_n pol-sbx-none)" = 0 ] \
   && ok "a review turn whose rollout carries no sandbox_policy is refused, never assumed read-only" \
   || fail "missing sandbox: status=$(cn_status "$POL_SBX_NO") reason=$(cn_reason "$POL_SBX_NO")"
+# CONTAINMENT IS JUDGED APART FROM DEPTH: after a read-only canary, a review window whose roots
+# disagree on effort — undecidable for depth — still reports its sandbox, and workspace-write there
+# is a containment refusal, not a policy one. (codex, task 295 r1.)
+POL_SBX_DR="$WORK/pol-sbx-disagree"; pol_run pol-sbx-disagree "$POL_SBX_DR" AX_ROLLOUT_SANDBOX=workspace-write AX_ROLLOUT_DOUBLE=1 AX_ROLLOUT_DOUBLE_EFFORT=medium
+[ "$(cn_status "$POL_SBX_DR")" = failed ] && [ "$(cn_reason "$POL_SBX_DR")" = containment-unconfirmed ] && [ "$(pol_inbox_n pol-sbx-disagree)" = 0 ] \
+  && [ "$(pol_tsv "$POL_SBX_DR" canary_sandbox)" = read-only ] && [ "$(pol_tsv "$POL_SBX_DR" observed_sandbox)" = workspace-write ] \
+  && ok "a workspace-write review window whose roots disagree on effort is refused as containment-unconfirmed, not policy-unapplied" \
+  || fail "disagreeing workspace-write roots: status=$(cn_status "$POL_SBX_DR") reason=$(cn_reason "$POL_SBX_DR") canary=$(pol_tsv "$POL_SBX_DR" canary_sandbox) review=$(pol_tsv "$POL_SBX_DR" observed_sandbox)"
+# CONTROL: the same disagreement under a read-only sandbox stays a depth refusal.
+POL_SBX_DRO="$WORK/pol-sbx-disagree-ro"; pol_run pol-sbx-disagree-ro "$POL_SBX_DRO" AX_ROLLOUT_DOUBLE=1 AX_ROLLOUT_DOUBLE_EFFORT=medium
+[ "$(cn_status "$POL_SBX_DRO")" = failed ] && [ "$(cn_reason "$POL_SBX_DRO")" = policy-unapplied ] && [ "$(pol_tsv "$POL_SBX_DRO" observed_sandbox)" = read-only ] \
+  && ok "disagreeing roots under a read-only sandbox are refused as policy-unapplied" \
+  || fail "disagreeing read-only roots: status=$(cn_status "$POL_SBX_DRO") reason=$(cn_reason "$POL_SBX_DRO") review=$(pol_tsv "$POL_SBX_DRO" observed_sandbox)"
+# A review window with NO context at all, after a read-only canary, reports sandbox none.
+[ "$(cn_reason "$POL_NONE")" = containment-unconfirmed ] && [ "$(pol_tsv "$POL_NONE" canary_sandbox)" = read-only ] \
+  && [ "$(pol_tsv "$POL_NONE" observed_sandbox)" = none ] \
+  && ok "a review window with no turn_context after a read-only canary is refused as containment-unconfirmed (sandbox none)" \
+  || fail "absent review contexts: reason=$(cn_reason "$POL_NONE") canary=$(pol_tsv "$POL_NONE" canary_sandbox) review=$(pol_tsv "$POL_NONE" observed_sandbox)"
 # The CANARY's rollout reports workspace-write: refused BEFORE the review prompt is paid for.
 POL_SBX_CN="$WORK/pol-sbx-canary"; POL_SBX_CN_LOG="$WORK/pol-sbx-canary.argv"
 pol_run pol-sbx-canary "$POL_SBX_CN" AX_CANARY_SANDBOX=workspace-write AX_CWD_LOG="$POL_SBX_CN_LOG"
