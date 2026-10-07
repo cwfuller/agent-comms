@@ -103,6 +103,15 @@ working only if that setting is recreated — which is the wrong fix on macOS. O
 4. If you set `ACPX_BIN`, point it at acpx `0.17.1` or newer (or unset it): an older client is refused
    at run time with that instruction, never run uncontained. With `npx` (the default) the pin is
    fetched on first use, so the first grok turn needs network and a Node of 22.13 or newer.
+5. Clear the presence records the old machine left behind. A record whose `host` is the old machine
+   can never be proven dead from the new one, so `presence claim`, `presence others` and `worktree
+   retire` treat it as an ambiguous peer and stop at it, and plain `presence expire` never reaps it.
+   In each repository, list them with `grep -l '"host": "<old-hostname>"' .comms/sessions/*.json`
+   (the old hostname is what `hostname` printed there), check each one's `last_heartbeat`, then
+   force-expire it by name: `helpers/comms.sh presence expire --force <name>`, where `<name>` is the
+   file name without the trailing `-<instance>.json`. `claim`, `others` and the `worktree retire`
+   refusal print that exact line for the record they stop at. `--force` removes every record with that
+   exact name, so run it only for sessions that are gone.
 5. Check with `~/.agent-comms/acp.sh doctor` (`acp.sh containment grok` is the machine-readable form:
    exit 1 = no backend for this OS, 3 = a prerequisite is missing, with the reason on stderr) and send
    one review. A refusal names the missing piece; `COMMS_RUNPHASE_ALLOW_UNCONTAINED` is not the fix

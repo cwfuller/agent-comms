@@ -394,9 +394,10 @@ wt_procs_in() {  # <physical path> -> space-separated pids with a cwd or open fi
 # equals the slug. Association can only ADD refusals. A dead record never blocks; a live or
 # ambiguous one does unless it is the caller's own session.
 WT_PRESENCE=""   # none | self | live:<name>-<inst8> | ambig:<name>-<inst8> | ?
+WT_PRESENCE_REC=""; WT_PRESENCE_LINK=""   # the blocking record's path, and how it was linked to the worktree
 wt_presence() {  # <root> <slug>
   local root="$1" slug="$2" dir of oname="" oinst="" f n inst v self_seen=0
-  WT_PRESENCE=none
+  WT_PRESENCE=none; WT_PRESENCE_REC=""; WT_PRESENCE_LINK=""
   [ -n "$slug" ] || { WT_PRESENCE=-; return 0; }
   of="$(wt_owner_file "$root" "$slug")"
   # A directory that exists but cannot be searched hides its files from `[ -f ]`: that is
@@ -420,25 +421,34 @@ wt_presence() {  # <root> <slug>
   # record that became unreadable or malformed is still associated — and presence_eval then
   # reads it as ambiguous, which blocks. Parsing first let an unreadable owner vanish.
   # (codex, impl r1.) The parsed name is a second, additive association.
-  local b rest
+  local b rest link
   for f in "$dir"/*.json; do
     [ "$(wt_probe "$f")" = absent ] && continue      # the unmatched glob; unknown is kept
-    b="$(basename "$f" .json)"; n=""; inst=""
-    if [ -n "$oname" ] && [ "$b" = "$oname-$oinst" ]; then n="$oname"; inst="$oinst"
+    b="$(basename "$f" .json)"; n=""; inst=""; link=""
+    if [ -n "$oname" ] && [ "$b" = "$oname-$oinst" ]; then n="$oname"; inst="$oinst"; link="owner stamp"
     else
       case "$b" in "$slug"-*) rest="${b#"$slug"-}" ;; *) rest="" ;; esac
-      if [ -n "$rest" ] && printf '%s' "$rest" | grep -qE '^[a-z0-9]{8,64}$'; then n="$slug"; inst="$rest"
-      elif [ "$(presence_field "$f" name)" = "$slug" ]; then n="$slug"; inst="$(presence_field "$f" instance)"
+      if [ -n "$rest" ] && printf '%s' "$rest" | grep -qE '^[a-z0-9]{8,64}$'; then n="$slug"; inst="$rest"; link="filename slug"
+      elif [ "$(presence_field "$f" name)" = "$slug" ]; then n="$slug"; inst="$(presence_field "$f" instance)"; link="parsed name"
       else continue
       fi
     fi
     v="$(presence_eval "$f")" || v=ambig             # e.g. a heartbeat bash reads as bad octal
     [ "$v" = dead ] && continue
     if [ "$n" = "${COMMS_PRESENCE_NAME:-}" ] && [ "$inst" = "${COMMS_PRESENCE_INSTANCE:-}" ]; then self_seen=1; continue; fi
-    WT_PRESENCE="$v:$n-$(printf '%.8s' "$inst")"; return 0
+    WT_PRESENCE="$v:$n-$(printf '%.8s' "$inst")"; WT_PRESENCE_REC="$f"; WT_PRESENCE_LINK="$link"; return 0
   done
   [ "$self_seen" = 1 ] && WT_PRESENCE=self
   return 0
+}
+
+# The ` — record <file> host=... clear it with: ...` tail of the presence refusal, for the record wt_presence
+# just blocked on. Empty unless it is ambiguous for a reason only `presence expire --force` clears.
+wt_presence_clear_note() {
+  local note=""
+  case "$WT_PRESENCE" in ambig:*) note="$(presence_clear_note "$WT_PRESENCE_REC" "${COMMS_PRESENCE_NAME:-}")" || note="" ;; esac
+  # The record is named by its FILE: for a parsed-name link the label above carries the slug, not the file's name.
+  [ -z "$note" ] || printf ' — record %s %s' "$(basename "$WT_PRESENCE_REC")" "$note"
 }
 
 # ---------- assessment ----------
@@ -527,7 +537,7 @@ wt_assess() {  # <root> <root-phys> <main> <index> <caller cwd (physical)>
   case "$WT_PRESENCE" in
     none|self|-) ;;
     '?') wt_reason "presence: the sessions dir or owner stamp is unreadable" ;;
-    *)   wt_reason "presence: $WT_PRESENCE" ;;
+    *)   wt_reason "presence: $WT_PRESENCE (linked by $WT_PRESENCE_LINK)$(wt_presence_clear_note)" ;;
   esac
   return 0
 }

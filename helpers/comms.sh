@@ -4576,11 +4576,32 @@ presence_eval() {  # <record> — prints live|dead|ambig. FAIL CLOSED: every unc
   fi
 }
 
+presence_clear_note() {  # <record> <caller-name> — why an ambiguous record never clears itself, and the command that does.
+  # Prints nothing unless the record is ambiguous for one of the two reasons only an operator
+  # can resolve: it was written on another host (its pid means nothing here) or it carries no
+  # pid (nothing can ever prove it dead). `expire` collects only provably dead records, so for
+  # these the explicit `expire --force <name>` is the one way out, and nothing else says so.
+  # The name comes from the FILENAME, the same string `--force` matches (exact name, last
+  # '-'-segment is the instance), so the printed command removes this record and not a lookalike.
+  local f="$1" caller="${2:-}" host pid hb base inst name why
+  host="$(presence_field "$f" host)"; pid="$(presence_field "$f" pid)"; hb="$(presence_field "$f" last_heartbeat)"
+  if [ "$host" != "$(presence_host)" ]; then why="recorded on host '${host:-?}', this host is '$(presence_host)'"
+  else
+    case "$pid" in ''|*[!0-9]*) why="no pid recorded" ;; *) return 0 ;; esac
+  fi
+  base="$(basename "$f" .json)"; inst="${base##*-}"; name="${base%-$inst}"
+  presence_validate_ids "$name" "$inst" || return 0
+  printf 'host=%s last_heartbeat=%s (%s) — if that session is gone, clear it with: %q presence expire --force %s' \
+    "${host:-?}" "${hb:-?}" "$why" "$SELF" "$name"
+  [ "$name" != "$caller" ] \
+    || printf ' (WARNING: that is YOUR OWN session name — --force removes EVERY record named exactly "%s", including yours; re-claim afterwards)' "$name"
+}
+
 presence_peers() {  # <self-name> <self-instance> — prints peers; 0 none / 3 peers / 4 unreadable.
   # Reader protocol (plan r9): RECORDS first, then reap artifacts. The tombstone is
   # written BEFORE its record's unlink, so every expire interleaving shows a reader
   # at least one of the two until the cover legitimately ages out.
-  local dir self="$1-$2.json" found=0 f verdict base tomb tepoch now covered counted=" "
+  local dir self="$1-$2.json" found=0 f verdict base tomb tepoch now covered counted=" " note
   dir="$(presence_dir)"
   [ -d "$dir" ] || return 0
   # Readability is validated HERE, in the shared reader, for records AND covers:
@@ -4601,6 +4622,10 @@ presence_peers() {  # <self-name> <self-instance> — prints peers; 0 none / 3 p
     printf 'peer: %s  state=%s  role=%s  (%s)\n' \
       "$(presence_field "$f" name)-$(printf '%.8s' "$(presence_field "$f" instance)")" \
       "$(presence_field "$f" state)" "$(presence_field "$f" role)" "$verdict"
+    # On stderr so stdout stays exactly the claimed:/peer: rows callers parse.
+    if [ "$verdict" = ambig ] && note="$(presence_clear_note "$f" "$1")" && [ -n "$note" ]; then
+      printf 'presence: %s — %s\n' "$(basename "$f" .json)" "$note" >&2
+    fi
   done
   now="$(date +%s)"
   for tomb in "$dir"/.reap/*.tomb.*; do

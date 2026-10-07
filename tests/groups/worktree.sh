@@ -213,7 +213,7 @@ WR_CL="$(run_wr presence claim --name owner-sess --role "owns pres1")"
 WR_OI="$(printf '%s' "$WR_CL" | sed -n 's/.*instance: //p')"
 (cd "$WR" && env COMMS_PRESENCE_NAME=owner-sess COMMS_PRESENCE_INSTANCE="$WR_OI" "$COMMS" worktree new pres1) >/dev/null 2>&1
 [ -f "$WR/.comms/worktrees/pres1.owner" ] && ok "worktree new stamps the creating session as owner" || fail "no owner stamp"
-wr_refused "refuses while the owning session is live (owner stamp)" pres1 "presence: live:owner-sess"
+wr_refused "refuses while the owning session is live (owner stamp)" pres1 "presence: live:owner-sess-[0-9a-f]* (linked by owner stamp)"
 wr_retired "the owning session itself may retire it" pres1 COMMS_PRESENCE_NAME=owner-sess COMMS_PRESENCE_INSTANCE="$WR_OI"
 [ ! -f "$WR/.comms/worktrees/pres1.owner" ] && ok "a successful retire removes the owner stamp" || fail "owner stamp left behind"
 # "Self" is the exact (name, instance) pair. A caller carrying the owner's NAME with some other
@@ -232,7 +232,7 @@ wr_retired "control: the exact owner pair retires the same worktree" pres5 COMMS
 run_wr presence release --name owner5 --instance "$WR_OI5" >/dev/null 2>&1
 wr_landed pres2
 WR_CL2="$(run_wr presence claim --name pres2 --role "name match")"
-wr_refused "refuses while a live session is named like the slug" pres2 "presence: live:pres2"
+wr_refused "refuses while a live session is named like the slug (and says it matched by filename slug)" pres2 "presence: live:pres2-[0-9a-f]* (linked by filename slug)"
 wr_landed pres4
 WR_CL4="$(run_wr presence claim --name owner4 --role "owns pres4")"
 WR_OI4="$(printf '%s' "$WR_CL4" | sed -n 's/.*instance: //p')"
@@ -242,6 +242,37 @@ wr_refused "an unreadable owner record blocks as ambiguous (associated by filena
 wr_landed pres3
 printf '{\n  "name": "pres3", "instance": "cccccccccccccccccccccccccccccccc", "state": "working", "host": "%s", "pid": "99999999", "pid_started": "gone", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" > "$WR/.comms/sessions/pres3-cccccccccccccccccccccccccccccccc.json"
 wr_retired "a dead presence record does not block" pres3
+# A record left by another host, or with no pid, can never be proven dead here: the refusal names the
+# record, its host and heartbeat, the link that matched, and the `expire --force` line that clears it.
+WR_FI=aaaaaaaa11112222; WR_SELFNAME=wrself
+wr_rec() {  # <file-base> <name> <instance> <host> <pid>
+  printf '{\n  "name": "%s", "instance": "%s", "state": "working", "host": "%s", "pid": "%s", "pid_started": "x", "last_heartbeat": "2026-10-01T22:29:43Z", "last_heartbeat_epoch": "1"\n}\n' \
+    "$2" "$3" "$4" "$5" > "$WR/.comms/sessions/$1.json"
+}
+wr_landed fx1; wr_rec "fx1-$WR_FI" fx1 "$WR_FI" old-mac.local 67476
+wr_refused "a foreign-host record linked by filename slug blocks and says so, with host, heartbeat and the force line" fx1 \
+  "presence: ambig:fx1-aaaaaaaa (linked by filename slug) — record fx1-aaaaaaaa11112222.json host=old-mac.local last_heartbeat=2026-10-01T22:29:43Z (recorded on host 'old-mac.local'.*) — if that session is gone, clear it with: .*presence expire --force fx1\$"
+wr_refused "the force line warns when the record's name is the caller's own (a different instance)" fx1 \
+  "presence: ambig:fx1-aaaaaaaa.*--force fx1 (WARNING: that is YOUR OWN session name — --force removes EVERY record named exactly \"fx1\", including yours" \
+  COMMS_PRESENCE_NAME=fx1 COMMS_PRESENCE_INSTANCE=0123456789abcdef0123456789abcdef
+WR_FX1CMD="$(cd "$WR" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$COMMS" worktree retire worktree-fx1 2>&1 | sed -n 's/.*clear it with: //p')"
+(cd "$WR" && bash -c "$WR_FX1CMD") >/dev/null 2>&1
+wr_retired "the printed line, run verbatim, clears the record and retire then proceeds" fx1
+wr_landed fx2; printf 'fxowner %s\n' "$WR_FI" > "$WR/.comms/worktrees/fx2.owner"
+wr_rec "fxowner-$WR_FI" fxowner "$WR_FI" old-mac.local 67476
+wr_refused "a foreign-host record linked by the owner stamp says so" fx2 "presence: ambig:fxowner-aaaaaaaa (linked by owner stamp) — record fxowner-aaaaaaaa11112222.json host=old-mac.local .*presence expire --force fxowner\$"
+wr_landed fx3; wr_rec "fxfile-$WR_FI" fx3 "$WR_FI" old-mac.local 67476
+wr_refused "a record linked only by its parsed name says so, and the force line names the FILE's name" fx3 "presence: ambig:fx3-aaaaaaaa (linked by parsed name) — record fxfile-aaaaaaaa11112222.json host=old-mac.local .*presence expire --force fxfile\$"
+wr_landed fx4; wr_rec "fx4-$WR_FI" fx4 "$WR_FI" "$(hostname)" ""
+wr_refused "a pid-less record blocks, says so, and prints the force line" fx4 "presence: ambig:fx4-aaaaaaaa (linked by filename slug) — record fx4-aaaaaaaa11112222.json host=$(hostname) last_heartbeat=2026-10-01T22:29:43Z (no pid recorded) — if that session is gone, clear it with: .*presence expire --force fx4\$"
+wr_landed fx5; wr_rec "fx5-$WR_FI" fx5 "$WR_FI" old-mac.local 67476
+WR_FX5="$(run_wr worktree list 2>/dev/null | grep -F ' branch=worktree-fx5 ')"
+printf '%s' "$WR_FX5" | grep -q ' presence=ambig:fx5-aaaaaaaa ' && printf '%s' "$WR_FX5" | grep -q ' retire=blocked:presence ' \
+  && ok "the machine-readable list row keeps its presence=ambig:<name>-<inst8> token" || fail "list row changed: $WR_FX5"
+run_wr worktree retire worktree-fx5 --yes >/dev/null 2>&1; run_wr presence expire >/dev/null 2>&1; run_wr presence expire >/dev/null 2>&1
+[ -f "$WR/.comms/sessions/fx5-$WR_FI.json" ] && wr_kept fx5 \
+  && ok "neither retire nor plain expire ever clears a foreign-host record" || fail "foreign-host record was cleared automatically"
+rm -f "$WR/.comms/sessions/fx5-$WR_FI.json" "$WR/.comms/sessions/fx4-$WR_FI.json" "$WR/.comms/sessions/fxowner-$WR_FI.json" "$WR/.comms/sessions/fxfile-$WR_FI.json"
 
 # ---- the branch CAS, branch-only targets, usage ----
 wr_landed cas1

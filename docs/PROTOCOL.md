@@ -378,7 +378,7 @@ at that moment, and is a dry run unless `--yes`. It refuses unless every gate ho
 | private refs | a per-worktree ref (`refs/worktree/*`, `refs/bisect/*`, `refs/rewritten/*`) names history not on `main` — removal deletes it |
 | backend | the repository's ref storage is not `files` (e.g. reftable): the gates read the files layout and are not guessed elsewhere |
 | unused | a process has its cwd or an open file inside, or processes cannot be listed; or the caller stands in it |
-| unclaimed | a live or ambiguous presence record owns it (the owner stamp `worktree new` writes, or a record named like the slug — matched by filename, so an unreadable record still blocks) and is not the caller's own; or git has it locked |
+| unclaimed | a live or ambiguous presence record owns it (the owner stamp `worktree new` writes, or a record named like the slug — matched by filename, so an unreadable record still blocks) and is not the caller's own — the refusal names the link that matched (owner stamp, filename slug or parsed name) and, for a record from another host or without a pid, its host, last heartbeat and the `presence expire --force <name>` line that clears it; or git has it locked |
 | ref | the branch is a symbolic ref; a paused rebase, bisect or `rebase --update-refs` reservation in any worktree holds it; an am, cherry-pick, revert, merge, sequencer or notes merge is in progress on it; or that operation state exists but cannot be read |
 
 Removal is `git worktree remove` without `--force`, then `update-ref -d` with the checked tip

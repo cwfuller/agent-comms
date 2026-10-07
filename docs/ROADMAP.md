@@ -2954,10 +2954,11 @@ accumulate, every later claim sees peers, and isolation becomes permanent — de
 "no overhead when you are alone" property the claim-then-check design exists to provide.
 
 Candidates, none decided:
-- [ ] Say it at the point of pain: when `others` reports a peer that is past TTL AND
+- [x] Say it at the point of pain: when `others` reports a peer that is past TTL AND
   pid-less, print the `expire --force <name>` line. The escape hatch exists and nobody
-  knows it does. *(Still open, and now the residual case: records predating the pid
-  default, and providers that publish no session pid.)*
+  knows it does. **Done 2026-10-07**, for pid-less and foreign-host records on `claim`,
+  `others` and `worktree retire` alike; see "Ambiguous records name their own way out"
+  below.
 - [ ] Make abandonment self-healing for the pid-less case only: the two-pass
   byte-identical observation over a full TTL is itself evidence that nothing is writing
   the record. Weigh against the founding rule that staleness never implies death — a
@@ -2978,6 +2979,30 @@ Also observed: a session's harness NAME and its presence NAME are unrelated, so 
 cannot map a record to a session. The suite-perf session correctly refused to infer which
 record was mine and asked. That is the declared-beats-inferred principle earning its keep,
 and it is an argument for the role ledger above.
+
+### Ambiguous records name their own way out (2026-10-07, basis task 360)
+
+Observed after moving from one host to another: `worktree list` showed `retire=blocked:presence`
+with `presence=ambig:<name>-<inst8>`, and nothing said why or what to run. The blocking record was
+a leftover from the old host (pid not running here, heartbeat six days old). A session suggested
+plain `presence expire`, which cannot work: `presence_eval` reads a record whose host differs from
+this host as ambiguous, never dead, and `expire` collects only dead records. Only
+`expire --force <name>` clears it. The move left six such records across four repos.
+
+- `claim` and `others` now print, on stderr, one `presence: <record> — host=… last_heartbeat=…
+  (<why>) — if that session is gone, clear it with: … presence expire --force <name>` line for each
+  ambiguous record that is foreign-host or pid-less (the two kinds only an operator resolves). stdout
+  is unchanged, so parsers of `claimed:`/`peer:` are unaffected.
+- `worktree retire` appends the same text to its `presence:` refusal, and says which link matched the
+  record: `owner stamp`, `filename slug` or `parsed name`. `worktree list` keeps its `presence=` token.
+- When the name in the printed line equals the caller's own `COMMS_PRESENCE_NAME`, the line warns that
+  `--force` removes EVERY record of that exact name, the caller's own included.
+- Unchanged on purpose: nothing reaps a foreign-host record automatically, and the filename
+  association in `wt_presence` still links a record to a worktree by filename. The name in the
+  printed command is the record's FILENAME name, the string `--force` matches, which can differ from
+  the worktree slug.
+- INSTALL "Moving to a new machine" gained the step that force-expires the old host's records.
+- Not done: the narrower self-heal for pid-less records (the second candidate above) stays open.
 
 ## Maintainability & implementation-language track (2026-08-26, user direction)
 

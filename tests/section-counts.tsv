@@ -72,7 +72,7 @@ templates: the loop closes its thread state on the terminal approval	2
 ask: the driver-neutral consult verb	28
 review turns may read history, never publish or rewrite it	44
 runphase: warm ACP mounts live at a stable per-(thread,agent) path	47
-presence & worktrees: advisory coordination (plan presence-worktrees-15135)	118
+presence & worktrees: advisory coordination (plan presence-worktrees-15135)	126
 runphase: the state-file wait is DECLARED by the spawner, never guessed	22
 harness: a partial run is never a verdict	55
 harness: grep at the end of a pipe drains its producer (no SIGPIPE)	14
@@ -102,7 +102,7 @@ integrate: --landing-branch lands on a branch other than main	10
 verify: a landing suite for any repo (template, init, status, fresh)	34
 value-taking options: given last with no value, exit 2 naming the option, and write nothing	81
 route-eval: labelled eval set for the classifiers	17
-worktree list/retire: hand-run session-lifecycle retirement	104
+worktree list/retire: hand-run session-lifecycle retirement	112
 route-eval: more than one labeller	5
 compose: exactly one machine-readable compose-result line	22
 comms.sh version: the installed kernel commit and template version	18

@@ -63,6 +63,44 @@ run_pw presence expire --force far >/dev/null 2>&1
   && [ -f "$PW_SD/.reap/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.tomb.beefbeef" ] \
   && ok "--force far leaves far-team's records AND covers untouched (exact-name match)" || fail "force over-matched a hyphenated sibling"
 rm -f "$PW_SD/far-team-e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2.json" "$PW_SD/.reap/far-team"-* 2>/dev/null
+# An ambiguous record only an operator can clear (foreign host, or no pid) is NAMED, with its host and
+# last heartbeat and the exact `expire --force` line, by `others` and by `claim` — on stderr, so stdout
+# keeps the claimed:/peer: rows callers parse. A record under the caller's own name carries a warning.
+PW_FGN=fgnhost-9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a; PW_NOP=nopid-b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8
+PW_SELF=alpha-c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7
+printf '{\n  "name": "fgnhost", "instance": "%s", "state": "working", "host": "old-mac.local", "pid": "67476", "pid_started": "x", "last_heartbeat": "2026-10-01T22:29:43Z", "last_heartbeat_epoch": "1"\n}\n' "${PW_FGN##*-}" > "$PW_SD/$PW_FGN.json"
+printf '{\n  "name": "nopid", "instance": "%s", "state": "working", "host": "%s", "pid": "", "last_heartbeat": "2026-10-01T22:30:00Z", "last_heartbeat_epoch": "1"\n}\n' "${PW_NOP##*-}" "$(hostname)" > "$PW_SD/$PW_NOP.json"
+PW_HO="$(run_pw presence others --name alpha --instance "$PW_I1" 2>&1 >/dev/null)"
+printf '%s\n' "$PW_HO" | grep -F "presence: $PW_FGN" | grep -qF "host=old-mac.local last_heartbeat=2026-10-01T22:29:43Z" \
+  && printf '%s\n' "$PW_HO" | grep -F "presence: $PW_FGN" | grep -qF "$COMMS presence expire --force fgnhost" \
+  && ok "others names a foreign-host record with its host, heartbeat and the exact expire --force line" || fail "others foreign hint: $PW_HO"
+printf '%s\n' "$PW_HO" | grep -F "presence: $PW_NOP" | grep -qF "last_heartbeat=2026-10-01T22:30:00Z (no pid recorded)" \
+  && printf '%s\n' "$PW_HO" | grep -F "presence: $PW_NOP" | grep -qF "$COMMS presence expire --force nopid" \
+  && ok "others names a pid-less record with its heartbeat and the exact expire --force line" || fail "others pid-less hint: $PW_HO"
+! printf '%s\n' "$PW_HO" | grep -q "WARNING" \
+  && ok "no own-name warning when the record's name is not the caller's" || fail "spurious own-name warning"
+PW_HOUT="$(run_pw presence others --name alpha --instance "$PW_I1" 2>/dev/null)"
+! printf '%s\n' "$PW_HOUT" | grep -q '^presence:' && printf '%s\n' "$PW_HOUT" | grep -q '^peer: fgnhost-9a9a9a9a ' \
+  && ok "the hint is on stderr: stdout keeps only the peer: rows" || fail "hint leaked to stdout: $PW_HOUT"
+PW_HC="$(run_pw presence claim --name omega 2>&1 >/dev/null)"
+printf '%s\n' "$PW_HC" | grep -F "presence: $PW_FGN" | grep -qF "presence expire --force fgnhost" \
+  && printf '%s\n' "$PW_HC" | grep -F "presence: $PW_NOP" | grep -qF "presence expire --force nopid" \
+  && ok "claim names both kinds of record and prints their expire --force lines" || fail "claim hints: $PW_HC"
+printf '{\n  "name": "alpha", "instance": "%s", "state": "working", "host": "old-mac.local", "pid": "67476", "pid_started": "x", "last_heartbeat": "2026-10-01T22:29:43Z", "last_heartbeat_epoch": "1"\n}\n' "${PW_SELF##*-}" > "$PW_SD/$PW_SELF.json"
+PW_HS="$(run_pw presence others --name alpha --instance "$PW_I1" 2>&1 >/dev/null | grep -F "presence: $PW_SELF")"
+printf '%s\n' "$PW_HS" | grep -qF "presence expire --force alpha" && printf '%s\n' "$PW_HS" | grep -qF 'WARNING: that is YOUR OWN session name' \
+  && printf '%s\n' "$PW_HS" | grep -qF 'removes EVERY record named exactly "alpha", including yours' \
+  && ok "a record under the caller's own name warns that --force removes the caller's record too" || fail "own-name warning: $PW_HS"
+rm -f "$PW_SD/$PW_SELF.json"
+run_pw presence expire >/dev/null 2>&1; run_pw presence expire >/dev/null 2>&1
+[ -f "$PW_SD/$PW_FGN.json" ] && [ -f "$PW_SD/$PW_NOP.json" ] \
+  && ok "plain expire still reaps neither the foreign-host nor the pid-less record" || fail "plain expire reaped an ambiguous record"
+PW_CMD="$(printf '%s\n' "$PW_HO" | sed -n "s/^presence: $PW_FGN .*clear it with: //p" | sed 's/ (WARNING.*//')"
+(cd "$PW" && env COMMS_PRESENCE_TTL_SECS=60 bash -c "$PW_CMD") >/dev/null 2>&1
+[ ! -f "$PW_SD/$PW_FGN.json" ] && [ -f "$PW_SD/$PW_NOP.json" ] \
+  && ok "the printed line, run verbatim, clears exactly that record" || fail "printed command did not clear it: $PW_CMD"
+rm -f "$PW_SD/$PW_NOP.json"
+run_pw presence release --name omega --instance "$(ls "$PW_SD" | sed -n 's/^omega-\(.*\)\.json$/\1/p')" >/dev/null 2>&1
 PW_MYPID=$$
 PW_MYSTART="$(ps -p $PW_MYPID -o lstart= 2>/dev/null)"
 printf '{\n  "name": "napper", "instance": "dddddddddddddddddddddddddddddddd", "state": "working", "host": "%s", "pid": "%s", "pid_started": "%s", "last_heartbeat_epoch": "1"\n}\n' "$(hostname)" "$PW_MYPID" "$PW_MYSTART" > "$PW_SD/napper-dddddddddddddddddddddddddddddddd.json"
