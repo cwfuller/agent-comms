@@ -123,37 +123,36 @@ disagree; `acp.sh doctor` and `acp.sh containment grok` report the same answer a
 
 **The gemini provider** (a fourth model family, Google's, so it can gate work claude or codex
 wrote). It is **supported but opt-in**: `gemini` is not in the zero-config registry, so an install
-without the Gemini CLI never acquires a reviewer it cannot run — a project enables it with
+without the Antigravity CLI never acquires a reviewer it cannot run — a project enables it with
 `agents = claude codex grok gemini`, which also creates `gemini-review` (`agents --roster claude
 gemini` is then one reviewer, and `gemini,gemini-review` is refused as two on one provider). Its
-family, for the independence rule, is `gemini`. Reviews are **ACP-only** (`gemini --acp`, through
-acpx's own `gemini` profile; there is no headless arm) and need the Gemini CLI on `PATH` at
-**0.39.0 or later** for a mounted review (the first build that writes the `.jsonl` chat record the
-attestation reads; `--acp` itself arrived in 0.33.0): `acp.sh doctor`, `runtime-check gemini`,
-`capabilities` and `resolve` refuse an older build with the same wording, while `consult` and `supports`
-need only 0.33.0. A mounted
-gemini turn gets its own `GEMINI_CLI_HOME` beside the mount (the CLI keeps `.gemini/` inside it), so
-the operator's settings, extensions, hooks and MCP servers never reach a review; the leg's model and
-thinking level are written to that home's `settings.json` from the policy record (the ACP surface has
-no thinking control) and the model is set on the session by acpx (`--model`). The operator's login
-keeps working: an API key or Vertex setting in the environment is inherited, a keychain login needs
-nothing, and the file-backed login (`oauth_creds.json`, `google_accounts.json`, and `gemini-credentials.json`,
-the CLI's own file store when there is no keychain) and the selected auth TYPE (read from the operator's
-`settings.json` with comments allowed, as the CLI reads it) are carried across — all mirrored each round,
-so one the operator rotated or removed, or the CLI migrated into the reused home, does not outlive its source. The containment
-is the in-process **`plan` mode** pin ("Read-only mode") under `--approve-reads
---non-interactive-permissions deny`, the same class as claude's and not a kernel sandbox: the child's
-network stays open and the copied OAuth token is readable. It fails closed where it can be checked (an
-unconfirmed `set-mode plan` refuses the turn) but was not measured against a live gemini turn.
-The CLI's plan policy denies `run_shell_command` outright, so a gemini reviewer **cannot run read-only
-`git diff` / `log` / `show`**: it reads the mounted files, and a review that needs a diff or history must
-carry it in the request body. The model it ran is attested from the CLI's own chat record in the REVIEW
-prompt's window only (a snapshot taken after the canary), so a review the CLI streamed but never recorded
-is withheld rather than published on the canary's evidence, and the CLI's own synthetic `gemini` messages
-(no model, no tokens) are neither counted nor treated as missing evidence;
-a reviewed tree carrying `.gemini/` or `.env` is refused unread, like `.codex/config.toml`. A model pin
-is `COMMS_ACP_GEMINI_MODEL` / `COMMS_ACP_GEMINI_EFFORT`, and a refusal is recorded as a failed turn with
-its reason (`rate-limited`, `auth-failed` — see below). **Residual:** `claude-review` runs under the same `~/.claude` (settings, user
+family, for the independence rule, is `gemini`. The provider keeps that name, but it runs through the
+Antigravity CLI (`agy`), which replaced the Gemini CLI (retired for individual accounts on 2026-06-18) and has
+**no ACP mode**: a gemini turn is a **direct, parent-brokered `agy` run** (like grok's), not an acpx session, so
+`--via acp` for gemini is refused and a consult goes through the mailbox (`comms.sh ask --to gemini`) as one
+cold `agy -p` turn. It needs `agy` on `PATH` at **1.3.1 or later** (the build the print-mode flags were
+exercised on): `acp.sh doctor`, `runtime-check gemini`, `capabilities` and `resolve` refuse an older build
+with the same wording. A turn runs `agy -p --mode plan --input-format stream-json --output-format stream-json
+--model <model>-<effort>` with the prompt on stdin; the leg's model and effort come from the policy record
+(never a literal in the runner), and a review turn is preceded by a canary on the same vector. agy's
+`init` event names the `<model>-<effort>` id it ran, which is the per-turn evidence: a canary served by
+another model refuses the leg, and a review whose own init event does not match the policy, or names no
+model, is withheld as `policy-unapplied`. **agy runs in the operator's real home**, like `claude-review`,
+because its login cannot be staged into an isolated one (a fresh `HOME` drops it): the operator's agy
+settings and login apply, and agy's plan files land in `~/.gemini`. What contains the leg is the
+in-process `--mode plan` pin (agy refuses writes outside its own artifact store and, headless, auto-denies
+every command), a scrubbed environment (the driver's identity, presence and credentials never reach agy),
+the tree-identity check on the mount after the turn (a write that landed in the tree fails it and nothing is
+published), and the refusal of a reviewed tree carrying agy's workspace config — `.gemini`, `.env`,
+`.agents`, `.agent`, `.agy`, `.antigravity`, `.jetski` or `mcp_config.json` — unread, because that config
+can declare hooks or MCP servers that run outside the pin. It is not a kernel sandbox: the child's network is
+open and reads follow the operator's home. Because plan mode refuses every command, a gemini reviewer
+**cannot run `git diff` / `log` / `show`**: a mounted turn carries the change in the prompt (the parent
+computes it), and plan mode's non-answer (a plan and a request for approval, no verdict) is refused by the
+broker rather than published. A model pin is `COMMS_ACP_GEMINI_MODEL` / `COMMS_ACP_GEMINI_EFFORT`, and a
+refusal is recorded as a failed turn with its reason (`rate-limited`, `auth-failed`, `model-unavailable` —
+see below). A bound leg (`review-route`) is refused for gemini (`gemini-unsupported`): binding needs a mounted
+ACP session. **Residual:** `claude-review` runs under the same `~/.claude` (settings, user
 instructions, memory) and keychain credential as a claude driver on the same machine. The twin
 separates the mailbox, not the model's configuration.
 
@@ -896,11 +895,13 @@ zero bytes, and the provider says nothing about why — the case this was built 
 reported only `RUNTIME QUEUE_RUNTIME_PROMPT_FAILED Internal error`. The runner therefore
 records what it OBSERVED, not a diagnosis: `reason: no-output` in `result.json` and on the
 `provider-result` event. One refinement: a provider whose refusals have a stable wording is
-classified from the diagnostics acpx relayed on stderr (never from the reply), and the turn is
-recorded under that reason instead — gemini's are `rate-limited` (a 429 / `RESOURCE_EXHAUSTED` /
-exhausted quota) and `auth-failed` (`Authentication required`, `UNAUTHENTICATED`, an invalid key),
-on a refused canary, a refused review prompt or a session that could not be created, with a note that
-says what to do (wait for the limit to reset; log in again). Like the `canary-*` refusals they are
+classified from the diagnostics the provider relayed (acpx's stderr; for gemini, agy's own events and
+stderr — never from the reply), and the turn is recorded under that reason instead — gemini's are
+`rate-limited` (a 429 / `RESOURCE_EXHAUSTED` / exhausted quota; also reported as quota state `refused`),
+`auth-failed` (`Authentication required`, `UNAUTHENTICATED`, an invalid key) and `model-unavailable`
+(`SUBSCRIPTION_REQUIRED`: the account is not entitled to the model, as some OAuth accounts are not for
+gemini-3.8-flash), on a refused canary, a refused review prompt or a session that could not be created, with a
+note that says what to do (wait for the limit to reset; log in again; pin another model). Like the `canary-*` refusals they are
 retry-and-fix conditions: `compose --degrade` does not treat them as droppable-leg evidence. That is a fact about the ROSTER, distinct from a reply that arrived
 and failed the verdict contract, which is a fact about the REVIEW.
 

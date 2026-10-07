@@ -578,35 +578,41 @@ dynamic routing should survive because it demonstrably improves cost at acceptab
 because three approved arcs already exist.
 
 
-### BUILT ON BRANCH 2026-09-30, NOT MEASURED LIVE: gemini as a fourth review provider (task 163)
+### gemini runs through the Antigravity CLI, not the Gemini CLI (task 336, supersedes task 163's ACP arm)
 
-`gemini` (driver, `gemini-review` twin, provider/family `gemini`) reviews through acpx's own `gemini`
-profile (`gemini --acp`). Built and tested against a PATH-stubbed `gemini` that speaks ACP (tests/fixtures/gemini),
-from the Gemini CLI 0.62.0 bundle's source and docs — **no authenticated Gemini session was available, so
-nothing below was exercised against the live API**. What that leaves open, in the order it matters:
+Google retired the Gemini CLI for individual accounts on 2026-06-18 and `agy` replaced it. `agy` has no ACP mode,
+so task 163's `gemini --acp` arm (acpx profile, isolated `GEMINI_CLI_HOME`, chat-record reader, `fixed`
+capability, the `gemini-4-pro` placeholder row) is **deleted**, not kept beside the new one. The provider keeps
+the name `gemini` (`gemini-review`, the Google family). It is now a direct, parent-brokered `agy -p --mode plan`
+turn, exercised live against agy 1.3.1. Decisions and what they leave open:
 
-- **Containment is unmeasured.** The backend (`gemini-plan`) is the in-process `plan` mode pin under
-  `--approve-reads --non-interactive-permissions deny`, claude's class: network open, the copied OAuth token
-  readable. Fails closed on an unconfirmed `set-mode plan`; the escape that bit claude (a model-requested exit
-  from plan mode auto-approved under `--approve-all`) is closed by the same permission shape, but that is
-  inferred from claude's measurement, not observed for gemini. Probe before relying on it for code the
-  operator did not write: write attempts from plan mode, `ExitPlanMode`-style escalation, and whether
-  `run_shell_command` (the reviewer's `git diff`) is denied or auto-approved there. The CLI's `--sandbox`
-  (seatbelt) is unused: it re-execs the CLI, and nobody measured it under ACP.
-- **The thinking level has no per-turn evidence**, which is why the capability is `fixed`, not `eligible`: the
-  model is attested from the chat record's per-message `model`, the level only read back from the settings the
-  parent wrote. The bundled SDK's enum is LOW | HIGH; `medium` and `xhigh` are deliberately unmapped.
-- **Chat-record format read from source** (message `id`/`type`/`model`/`tokens`, appended again when tokens
-  arrive): usage and the model attestation depend on it; a format drift degrades to null usage and a
-  `policy-unapplied` refusal, never to a wrong number or a published review.
-- **Folder trust** is off by default in the CLI, so the mount is treated as trusted; the defence is refusing a
-  tree that carries `.gemini/` or `.env`, not the CLI's own trust gate (whose ACP behaviour is unknown).
-- **Gemini 4** has a `disabled` policy-map row with a GUESSED id (`gemini-4-pro`); replace it from the CLI's
-  model list and delete the row when it ships.
-- **Refusal reasons** `rate-limited` / `auth-failed` are classified from acpx's stderr wording (429 /
-  RESOURCE_EXHAUSTED; Authentication required / UNAUTHENTICATED), written from the CLI's source; they are
-  deliberately not droppable-leg evidence for `compose --degrade` (retry-and-fix conditions, like `canary-*`).
-  Revisit once a real rate-limited turn shows what acpx actually prints.
+- **agy runs in the operator's real home**, like `claude-review`: a fresh `HOME` drops agy's login and the
+  credentials cannot be staged safely. Plan artifacts land in `~/.gemini` (accepted). The stand-ins are plan
+  mode, a scrubbed environment, refusal of a tree carrying agy's workspace config, and the tree-identity check.
+  This is a **wider blast radius than the old isolated home**: agy's own settings, hooks and MCP servers (the
+  operator's) apply to a review. Revisit if agy gains a way to select a config directory or accept a credential
+  by environment.
+- **Model and effort: gemini-3.8-flash at `high` is the baseline and ceiling** (Artificial Analysis, read
+  2026-10-07: 3.8 Flash High beats 3.1 Pro Preview on Intelligence 40.9 vs 29.7 and Coding 76.3 vs 68.8; there is no
+  3.8 Pro). `fast` = 3.8 Flash `low`, `balanced` = 3.8 Flash `medium`; gemini-3.1-pro (`low`, `high`) is the
+  fallback row. Some OAuth accounts get `SUBSCRIPTION_REQUIRED` for gemini-3.8-flash
+  (google-antigravity/antigravity-cli issue 1180): that is classified `model-unavailable` and the note says to
+  pin `COMMS_ACP_GEMINI_MODEL=gemini-3.1-pro`; there is no automatic fallback, so the baseline is a pin away from a
+  working leg on such an account.
+- **Capability is `eligible`**: the `<model>-<effort>` id agy is launched with is echoed whole in the `init`
+  event of the turn's own stream, so one record evidences both. The old arm was `fixed` because the thinking
+  level had no per-turn evidence.
+- **Plan mode refuses every command**, so a reviewer cannot run `git diff`; the parent puts the diff in the
+  prompt, and a plan-mode non-answer is refused rather than published.
+- **Capacity**: a 429 / quota refusal is `rate-limited` with quota state `refused` (no reset time, as agy gives
+  none); `auth-failed` for a login failure. These are wording-based on agy's diagnostics and not droppable-leg
+  evidence for `compose --degrade`.
+- **Not exercised by the suite**: the live review (opt-in, `COMMS_TEST_AGY_LIVE=1`, from a logged-in GUI session;
+  agy's login is unavailable over SSH). The suite runs a fake agy (tests/fixtures/agy) that speaks the stream
+  vocabulary agy 1.3.1 was observed to emit.
+- **Bound legs**: gemini is `unbindable` (`gemini-unsupported`): binding needs a mounted ACP session, which
+  agy cannot give. Basis's bound-review eligibility for the Google family is therefore off until agy gains an
+  attested bound route.
 
 ### BUILT ON BRANCH 2026-10-04: shared guidance, review lenses and a contract guard for reviewer legs (task 246)
 
@@ -638,7 +644,7 @@ follow-up that changes isolation and is NOT made here. (3) Grok's bundled `revie
 isolated home; the guard covers them. (4) Not measured: whether a bundle replaced between rounds reaches a warm resumed
 session (needs two acpx rounds on one session; the residual stays stated in docs/INTERNALS.md), and the acpx adapters.
 
-Follow-ups, not built: stage a `GEMINI.md` analogue into the isolated gemini home (not requested here); decide on a scratch
+Follow-ups, not built: decide on a scratch
 `HOME` for mounted codex legs.
 
 ### BUILT ON BRANCH 2026-10-03, NOT MEASURED LIVE: exact per-leg binding for `panel dispatch` (task 172, capability layer Slice 7.4)
@@ -664,7 +670,7 @@ Tests: groups `binding` and `bindrun` (hermetic stubs; +217 assertions against t
 
 - Not measured on a live provider; a live trial needs separate authorization. The auth-route evidence in `credential-env.tsv` is local and read-only.
 - **Codex `api` is `unsupported`** (refused as `auth-route-unsupported`): no explicit, readable API-key selection is established for the mounted ACP adapter.
-  Gemini subscription and api, codex subscription, and OpenCode profiles bind. Changing the row needs that evidence first.
+  Codex subscription and OpenCode profiles bind (gemini runs agy directly and is unbindable). Changing the row needs that evidence first.
 - `claude` and `grok` are `unbindable` (no applied and attested policy); Basis must treat them as ineligible for bound review, which affects which families can gate under 7.6.
 - The scrub is configuration names plus patterns plus a table: an unconfigured credential matching none of them would pass. The harness's own login is governed by the auth rows, not the scrub.
 - Dispatch cannot recall an already-running sibling leg: the guarantee is that no leg starts unless every leg was valid at dispatch and a leg whose configuration changed afterwards refuses itself.

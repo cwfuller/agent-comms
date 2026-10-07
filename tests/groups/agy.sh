@@ -18,8 +18,8 @@ AG_MAPV="$(awk -F'\t' '$1=="version"{print $2; exit}' "$REPO/helpers/policy-map.
 # ---- runtime-check: the version, machine-readably; a refusal still names the version it judged ----
 AG_OUT="$(gacp "$AP" runtime-check gemini 2>/dev/null)"; AG_RC=$?
 { [ "$AG_RC" = 0 ] && [ "$(gv "$AG_OUT" runtime_version)" = 1.3.1 ] && [ "$(gv "$AG_OUT" runtime)" = "$AGB/agy" ] \
-  && printf '%s\n' "$AG_OUT" | awk -F'\t' '$1=="baseline" && $2=="gemini-3.1-pro" && $3=="baseline" && $5=="ok" {f=1} END{exit !f}' \
-  && printf '%s\n' "$AG_OUT" | awk -F'\t' '$1=="ceiling" && $2=="gemini-3.1-pro" && $3=="max" && $5=="ok" {f=1} END{exit !f}'; } \
+  && printf '%s\n' "$AG_OUT" | awk -F'\t' '$1=="baseline" && $2=="gemini-3.8-flash" && $3=="baseline" && $5=="ok" {f=1} END{exit !f}' \
+  && printf '%s\n' "$AG_OUT" | awk -F'\t' '$1=="ceiling" && $2=="gemini-3.8-flash" && $3=="max" && $5=="ok" {f=1} END{exit !f}'; } \
   && ok "runtime-check gemini reports the agy path, its version and both rows" || fail "runtime-check gemini (rc=$AG_RC out=$AG_OUT)"
 AG_OUT="$(gacp AGY_VERSION=1.2.16 "$AP" runtime-check gemini 2>"$WORK/ag-rc.err")"; AG_RC=$?
 { [ "$AG_RC" = 1 ] && [ "$(gv "$AG_OUT" runtime_version)" = 1.2.16 ] && grep -qF "agy 1.2.16 is older than 1.3.1" "$WORK/ag-rc.err" \
@@ -37,8 +37,8 @@ gacp AGY_VERSION=1.3.1 "$AP" runtime-check gemini >/dev/null 2>&1 && gacp AGY_VE
 # ---- doctor: reports agy; absent is informational, present-but-old is a failure ----
 AG_OUT="$(gacp "$AP" doctor 2>&1)"; AG_RC=$?
 { [ "$AG_RC" = 0 ] && printf '%s\n' "$AG_OUT" | grep -qF "reviewer gemini runtime: $AGB/agy (version 1.3.1) — runs agy directly (no ACP)" \
-  && printf '%s\n' "$AG_OUT" | grep -qF "default gemini review: gemini-3.1-pro (baseline) — runs on this runtime" \
-  && printf '%s\n' "$AG_OUT" | grep -qF "use-max gemini review (COMMS_REVIEW_MAX=1): gemini-3.1-pro (max) — runs on this runtime" \
+  && printf '%s\n' "$AG_OUT" | grep -qF "default gemini review: gemini-3.8-flash (baseline) — runs on this runtime" \
+  && printf '%s\n' "$AG_OUT" | grep -qF "use-max gemini review (COMMS_REVIEW_MAX=1): gemini-3.8-flash (max) — runs on this runtime" \
   && printf '%s\n' "$AG_OUT" | grep -qF "gemini=agy" \
   && printf '%s\n' "$AG_OUT" | grep -qF "reviewer gemini containment: agy-plan"; } \
   && ok "doctor reports agy's version, that it runs directly, its default and use-max reviews, and its containment" \
@@ -66,7 +66,7 @@ AG_OUT="$(gacp "$AP" capabilities 2>&1)"
   && printf '%s\n' "$AG_OUT" | grep -qx "gemini/acp-mounted: unsupported" \
   && printf '%s\n' "$AG_OUT" | grep -qF "gemini/headless gemini-3.8-flash accepts: low,medium,high" \
   && ! printf '%s\n' "$AG_OUT" | grep -qi 'DISABLED: not-released'; } \
-  && ok "capabilities reports agy's version, headless eligible, no ACP capability, and the 3.1-pro and 3.8-flash pairs" \
+  && ok "capabilities reports agy's version, headless eligible, no ACP capability, and the 3.8-flash pairs" \
   || fail "capabilities lacks the gemini rows: $(printf '%s' "$AG_OUT" | grep -i gemini | head -6 | tr '\n' ' ')"
 AG_OUT="$(env PATH="$AG_ABSENT_PATH" "$AP" capabilities 2>&1)"
 printf '%s\n' "$AG_OUT" | grep -qF "reviewer gemini runtime: none (version unknown) — REFUSED: the Antigravity CLI (agy) was not found on PATH" \
@@ -74,30 +74,30 @@ printf '%s\n' "$AG_OUT" | grep -qF "reviewer gemini runtime: none (version unkno
 
 # ---- resolve: model and effort, from the policy ----
 AG_R="$(gacp "$AP" resolve gemini)"; AG_RC=$?
-{ [ "$AG_RC" = 0 ] && [ "$(gv "$AG_R" model)" = gemini-3.1-pro ] && [ "$(gv "$AG_R" effort)" = high ] && [ "$(gv "$AG_R" transport)" = headless ] \
+{ [ "$AG_RC" = 0 ] && [ "$(gv "$AG_R" model)" = gemini-3.8-flash ] && [ "$(gv "$AG_R" effort)" = high ] && [ "$(gv "$AG_R" transport)" = headless ] \
   && [ "$(gv "$AG_R" capability)" = eligible ] && [ "$(gv "$AG_R" verify)" = "model,effort" ] && [ "$(gv "$AG_R" pair)" = validated ] \
   && [ "$(gv "$AG_R" runtime)" = "$AGB/agy" ] && [ "$(gv "$AG_R" runtime_version)" = 1.3.1 ] \
   && [ "$(gv "$AG_R" map_version)" = "$AG_MAPV" ] && [ "$(gv "$AG_R" effective_tier)" = strong ]; } \
-  && ok "resolve gemini: the baseline gemini-3.1-pro at high, transport headless, with the runtime and map version recorded" \
+  && ok "resolve gemini: the baseline gemini-3.8-flash at high, transport headless, with the runtime and map version recorded" \
   || fail "resolve gemini baseline (rc=$AG_RC): $AG_R"
 AG_OK=1
-for AG_C in "fast low gemini-3.8-flash low" "balanced high gemini-3.8-flash high" "strong high gemini-3.1-pro high" "fast medium gemini-3.8-flash medium"; do
+for AG_C in "fast low gemini-3.8-flash low" "balanced medium gemini-3.8-flash medium" "strong high gemini-3.8-flash high" "fast medium gemini-3.8-flash medium"; do
   set -- $AG_C
   AG_R="$(gacp "$AP" resolve gemini --routing on --decision rd-0 --tier "$1" --effort "$2" --phase implement --candidate-source explicit 2>&1)"
   { [ "$(gv "$AG_R" model)" = "$3" ] && [ "$(gv "$AG_R" effort)" = "$4" ] && [ "$(gv "$AG_R" model_source)" = route ]; } || { AG_OK=0; echo "  route $AG_C: $AG_R" | head -3; }
 done
-[ "$AG_OK" = 1 ] && ok "a routed candidate picks the pair: fast/low and balanced/high are gemini-3.8-flash, strong/high is gemini-3.1-pro" \
+[ "$AG_OK" = 1 ] && ok "a routed candidate picks the pair: fast/low, balanced/medium and strong/high are all gemini-3.8-flash at the candidate's own effort" \
   || fail "routed gemini candidates"
-AG_OUT="$(gacp "$AP" resolve gemini --routing on --decision rd-0 --tier strong --effort medium --phase implement --candidate-source explicit 2>&1 >/dev/null)"; AG_RC=$?
-{ [ "$AG_RC" = 1 ] && printf '%s' "$AG_OUT" | grep -qF "asks for model 'gemini-3.1-pro' with effort 'medium' (unsupported-pair)"; } \
-  && ok "an explicit candidate the model cannot honour (3.1-pro has no medium) is refused, never substituted" || fail "pro/medium (rc=$AG_RC $AG_OUT)"
+AG_OUT="$(gacp "$AP" resolve gemini --routing on --decision rd-0 --tier strong --effort xhigh --phase implement --candidate-source explicit 2>&1 >/dev/null)"; AG_RC=$?
+{ [ "$AG_RC" = 1 ] && printf '%s' "$AG_OUT" | grep -qF "asks for effort 'xhigh', which the map does not define for gemini/headless"; } \
+  && ok "an explicit candidate at an effort the map does not define (xhigh) is refused, never substituted" || fail "strong/xhigh (rc=$AG_RC $AG_OUT)"
 AG_R="$(gacp "$AP" resolve gemini --routing on --decision rd-0 --tier fast --effort xhigh --phase implement --candidate-source auto 2>&1)"
 { [ "$(gv "$AG_R" model)" = gemini-3.8-flash ] && [ "$(gv "$AG_R" effort)" = high ] && [ "$(gv "$AG_R" effort_source)" = baseline ] \
   && printf '%s\n' "$AG_R" | grep -qF "unmapped-effort"; } \
   && ok "an unmapped routed effort (xhigh) falls back to the baseline effort while the routed model stands, recorded" || fail "xhigh routed: $AG_R"
 AG_R="$(gacp COMMS_ACP_GEMINI_MODEL=gemini-3.8-flash COMMS_ACP_GEMINI_EFFORT=low "$AP" resolve gemini)"
 { [ "$(gv "$AG_R" model)" = gemini-3.8-flash ] && [ "$(gv "$AG_R" effort)" = low ] && [ "$(gv "$AG_R" model_source)" = pin ] \
-  && [ "$(gv "$AG_R" effective_tier)" = fast ]; } \
+  && [ "$(gv "$AG_R" effective_tier)" = strong ]; } \
   && ok "the operator's pins (COMMS_ACP_GEMINI_MODEL / _EFFORT) bind the leg and are labelled as pins" || fail "gemini pins: $AG_R"
 AG_OUT="$(gacp COMMS_ACP_GEMINI_MODEL=gemini-3.1-pro COMMS_ACP_GEMINI_EFFORT=medium "$AP" resolve gemini 2>&1 >/dev/null)"; AG_RC=$?
 { [ "$AG_RC" = 1 ] && printf '%s' "$AG_OUT" | grep -qF "does not accept effort 'medium'"; } \
@@ -106,12 +106,12 @@ AG_R="$(gacp COMMS_ACP_GEMINI_MODEL=gemini-3.7-flash "$AP" resolve gemini --rout
 { [ "$AG_RC" = 1 ] && printf '%s' "$AG_R" | grep -qF "does not accept effort 'high'" || [ "$(gv "$AG_R" pair)" = unverified-pin ]; } \
   && ok "a model the map does not know is only ever honoured as a labelled pin" || fail "unknown pin: rc=$AG_RC $AG_R"
 AG_R="$(gacp COMMS_REVIEW_MAX=1 "$AP" resolve gemini)"
-{ [ "$(gv "$AG_R" model)" = gemini-3.1-pro ] && [ "$(gv "$AG_R" effort)" = high ] && [ "$(gv "$AG_R" model_source)" = max ]; } \
-  && ok "COMMS_REVIEW_MAX=1 runs the ceiling (gemini-3.1-pro/high, the strongest agy serves)" || fail "max: $AG_R"
+{ [ "$(gv "$AG_R" model)" = gemini-3.8-flash ] && [ "$(gv "$AG_R" effort)" = high ] && [ "$(gv "$AG_R" model_source)" = max ]; } \
+  && ok "COMMS_REVIEW_MAX=1 runs the ceiling (gemini-3.8-flash/high, the strongest agy serves)" || fail "max: $AG_R"
 AG_R="$(gacp "$AP" resolve gemini --transport acp-mounted --tier fast --effort low --routing on --decision rd-0 --phase implement --candidate-source explicit 2>&1)"
 { [ "$(gv "$AG_R" capability)" = unsupported ] && [ "$(gv "$AG_R" model)" = "n/a" ]; } \
   && ok "gemini over ACP applies and claims no policy (there is no gemini ACP session)" || fail "gemini/acp-mounted claims a policy: $AG_R"
-AG_OUT="$(gacp "$AP" resolve gemini --transport acp-mounted --bound-model gemini-3.1-pro --bound-effort high --route-id r1 --access-digest "$(printf 'x%.0s' $(seq 64) | tr x 0)" 2>&1)"; AG_RC=$?
+AG_OUT="$(gacp "$AP" resolve gemini --transport acp-mounted --bound-model gemini-3.8-flash --bound-effort high --route-id r1 --access-digest "$(printf 'x%.0s' $(seq 64) | tr x 0)" 2>&1)"; AG_RC=$?
 { [ "$AG_RC" = 1 ] && printf '%s' "$AG_OUT" | grep -qF "code=capability-unsupported"; } \
   && ok "a bound resolution for gemini is refused capability-unsupported (a bound leg runs over ACP only)" || fail "bound gemini (rc=$AG_RC $AG_OUT)"
 AG_OUT="$(gacp AGY_VERSION=1.2.16 "$AP" resolve gemini 2>&1 >/dev/null)"; AG_RC=$?
@@ -124,13 +124,13 @@ AG_OUT="$(gacp "$AP" containment gemini 2>&1)"; AG_RC=$?
 # ---- the attestation verdict: the pair the init event names is judged against the persisted record ----
 printf 'x' > /dev/null
 gacp "$AP" resolve gemini > "$WORK/ag-policy.tsv"
-AG_OUT="$(gacp "$AP" policy-attest gemini high gemini-3.1-pro --policy-file "$WORK/ag-policy.tsv" 2>&1)"; AG_RC=$?
-{ [ "$AG_RC" = 0 ] && [ "$AG_OUT" = "effort=high model=gemini-3.1-pro" ]; } \
+AG_OUT="$(gacp "$AP" policy-attest gemini high gemini-3.8-flash --policy-file "$WORK/ag-policy.tsv" 2>&1)"; AG_RC=$?
+{ [ "$AG_RC" = 0 ] && [ "$AG_OUT" = "effort=high model=gemini-3.8-flash" ]; } \
   && ok "policy-attest accepts the declared pair" || fail "attest match (rc=$AG_RC $AG_OUT)"
-AG_OUT="$(gacp "$AP" policy-attest gemini low gemini-3.1-pro --policy-file "$WORK/ag-policy.tsv" 2>&1)"; AG_RC=$?
-{ [ "$AG_RC" = 20 ] && printf '%s' "$AG_OUT" | grep -qF "want effort=high model=gemini-3.1-pro; got effort=low"; } \
+AG_OUT="$(gacp "$AP" policy-attest gemini low gemini-3.8-flash --policy-file "$WORK/ag-policy.tsv" 2>&1)"; AG_RC=$?
+{ [ "$AG_RC" = 20 ] && printf '%s' "$AG_OUT" | grep -qF "want effort=high model=gemini-3.8-flash; got effort=low"; } \
   && ok "policy-attest names a wrong effort (exit 20)" || fail "attest wrong effort (rc=$AG_RC $AG_OUT)"
-AG_OUT="$(gacp "$AP" policy-attest gemini "" gemini-3.1-pro --policy-file "$WORK/ag-policy.tsv" 2>&1)"; AG_RC=$?
+AG_OUT="$(gacp "$AP" policy-attest gemini "" gemini-3.8-flash --policy-file "$WORK/ag-policy.tsv" 2>&1)"; AG_RC=$?
 [ "$AG_RC" = 21 ] && ok "policy-attest with no observed effort is undecidable (exit 21), never a match" || fail "attest empty effort (rc=$AG_RC $AG_OUT)"
 
 # ---- agy_stream.py: the reader of agy's own output ----
@@ -241,22 +241,22 @@ AG_REPLY="$(ls "$MA_FIX/.comms/to-claude/"*gemini-reply*.md 2>/dev/null | head -
 { [ -n "$AG_REPLY" ] && grep -q '^from: gemini$' "$AG_REPLY" && grep -q '^verdict: APPROVE$' "$AG_REPLY"; } \
   && ok "the parent stamps and delivers the review as gemini's, with the verdict the reply carried" || fail "no stamped gemini reply (got: ${AG_REPLY:-none})"
 AG_ARGV="$(ag_all t1 argv | tail -1)"
-{ [ "$AG_ARGV" = "-p= --input-format stream-json --output-format stream-json --mode plan --model gemini-3.1-pro-high" ] \
+{ [ "$AG_ARGV" = "-p= --input-format stream-json --output-format stream-json --mode plan --model gemini-3.8-flash-high" ] \
   && ! printf '%s' "$AG_ARGV" | grep -qE 'dangerously|accept-edits|--sandbox'; } \
   && ok "agy is launched read-only on exactly one vector: plan mode, stream-json in and out, the policy's pair as <model>-<effort>" || fail "agy argv: $AG_ARGV"
 { [ "$(ag_all t1 turn_number | tr '\n' ' ')" = "1 2 " ] && [ "$(ag_all t1 prompt_head | head -1)" = "Reply with exactly the single word PONG and nothing else." ] \
   && [ "$(ag_all t1 prompt_has_runtime_note | tr '\n' ' ')" = "False True " ]; } \
   && ok "a canary turn runs first on the same vector; the review prompt follows on stdin and carries the plan-mode runtime note" \
   || fail "turn sequence: $(ag_all t1 turn_number | tr '\n' ' ') / $(ag_all t1 prompt_has_runtime_note | tr '\n' ' ')"
-{ [ "$(ag_tsv "$AG_D1" requested_model)" = gemini-3.1-pro ] && [ "$(ag_tsv "$AG_D1" requested_effort)" = high ] \
-  && [ "$(ag_tsv "$AG_D1" observed_model)" = gemini-3.1-pro ] && [ "$(ag_tsv "$AG_D1" observed_effort)" = high ] \
-  && [ "$(ag_tsv "$AG_D1" evidence_source)" = agy-init-event ] && [ "$(ag_tsv "$AG_D1" agy_model)" = gemini-3.1-pro-high ] \
+{ [ "$(ag_tsv "$AG_D1" requested_model)" = gemini-3.8-flash ] && [ "$(ag_tsv "$AG_D1" requested_effort)" = high ] \
+  && [ "$(ag_tsv "$AG_D1" observed_model)" = gemini-3.8-flash ] && [ "$(ag_tsv "$AG_D1" observed_effort)" = high ] \
+  && [ "$(ag_tsv "$AG_D1" evidence_source)" = agy-init-event ] && [ "$(ag_tsv "$AG_D1" agy_model)" = gemini-3.8-flash-high ] \
   && [ "$(ag_tsv "$AG_D1" canary_budget)" = 60 ]; } \
   && ok "turn.tsv records the requested pair, the pair agy's init event attested, the evidence source and the canary budget" \
   || fail "turn.tsv: $(grep -E '^(requested|observed|evidence_source|agy_model|canary)' "$AG_D1/turn.tsv" | tr '\t\n' '= ')"
-{ [ "$(ag_res "$AG_D1" route model)" = gemini-3.1-pro ] && [ "$(ag_res "$AG_D1" route effort)" = high ] \
+{ [ "$(ag_res "$AG_D1" route model)" = gemini-3.8-flash ] && [ "$(ag_res "$AG_D1" route effort)" = high ] \
   && [ "$(ag_res "$AG_D1" route capability)" = eligible ] && [ "$(ag_res "$AG_D1" route transport)" = headless ]; } \
-  && ok "result.json's route names what the leg was bound to: gemini-3.1-pro / high, eligible, transport headless" \
+  && ok "result.json's route names what the leg was bound to: gemini-3.8-flash / high, eligible, transport headless" \
   || fail "route: $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]+"/result.json"))["route"])' "$AG_D1")"
 AG_USAGE="$(python3 -c 'import json,sys;u=json.load(open(sys.argv[1]+"/result.json"))["usage"];print(u["input_tokens"],u["cached_input_tokens"],u["output_tokens"],u["total_tokens"],u["turns"],u["cache_write_input_tokens"])' "$AG_D1" 2>&1)"
 [ "$AG_USAGE" = "3000 1000 200 3200 2 None" ] \
@@ -278,14 +278,14 @@ AG_D2="$(ag_turn ag-pin tpin "$AG_A1" COMMS_ACP_GEMINI_MODEL=gemini-3.8-flash CO
 { [ "$(ag_res "$AG_D2" status)" = completed ] && [ "$(ag_all tpin argv | tail -1 | sed 's/.*--model //')" = gemini-3.8-flash-low ] \
   && [ "$(ag_tsv "$AG_D2" observed_model)" = gemini-3.8-flash ] && [ "$(ag_tsv "$AG_D2" observed_effort)" = low ]; } \
   && ok "a pinned pair reaches agy as gemini-3.8-flash-low and is attested as that pair" || fail "pinned turn: argv=$(ag_all tpin argv | tail -1)"
-AG_D3="$(ag_turn ag-drift tdrift "$AG_A1" AGY_INIT_MODEL=gemini-3.1-pro-low AGY_INIT_FROM=2)"
+AG_D3="$(ag_turn ag-drift tdrift "$AG_A1" AGY_INIT_MODEL=gemini-3.8-flash-low AGY_INIT_FROM=2)"
 { [ "$(ag_res "$AG_D3" status)" = failed ] && [ "$(ag_res "$AG_D3" reason)" = policy-unapplied ] && [ "$(ag_tsv "$AG_D3" observed_effort)" = low ]; } \
   && ok "a review whose init event names the right model at the wrong effort is withheld (policy-unapplied), with what ran recorded" \
   || fail "effort drift: $(tr '\n' ' ' < "$AG_D3/result.json" | cut -c1-300)"
 AG_D4="$(ag_turn ag-nomodel tnomodel "$AG_A1" AGY_NO_MODEL=1 AGY_INIT_FROM=2)"
 { [ "$(ag_res "$AG_D4" reason)" = policy-unapplied ] && [ "$(ag_res "$AG_D4" status)" = failed ] && [ "$(ag_all tnomodel turn_number | tr '\n' ' ')" = "1 2 " ]; } \
   && ok "a REVIEW whose init event names no model is withheld (policy-unapplied): absent evidence is not a match" || fail "no-model: $(tr '\n' ' ' < "$AG_D4/result.json" | cut -c1-300)"
-AG_D5="$(ag_turn ag-wrongmodel twrong "$AG_A1" AGY_INIT_MODEL=gemini-3.8-flash-low)"
+AG_D5="$(ag_turn ag-wrongmodel twrong "$AG_A1" AGY_INIT_MODEL=gemini-3.1-pro-high)"
 { [ "$(ag_res "$AG_D5" status)" = failed ] && [ "$(ag_res "$AG_D5" reason)" = runtime-incompatible ] && [ "$(ag_all twrong turn_number | tr '\n' ' ')" = "1 " ]; } \
   && ok "a canary served by another model than the declared one refuses the leg before the review prompt is spent" \
   || fail "wrong model: $(tr '\n' ' ' < "$AG_D5/result.json" | cut -c1-300)"
@@ -364,7 +364,7 @@ AG_D16="$(ag_turn ag-old told "$AG_A1" AGY_VERSION=1.2.16)"
 
 # ---- a consult: a cold agy turn, no canary, the same policy ----
 AG_C1="$(ag_ask_turn c1)"
-{ [ "$(ag_res "$AG_C1" status)" = completed ] && [ "$(ag_all c1 turn_number | tr '\n' ' ')" = "1 " ] && [ "$(ag_tsv "$AG_C1" observed_model)" = gemini-3.1-pro ]; } \
+{ [ "$(ag_res "$AG_C1" status)" = completed ] && [ "$(ag_all c1 turn_number | tr '\n' ' ')" = "1 " ] && [ "$(ag_tsv "$AG_C1" observed_model)" = gemini-3.8-flash ]; } \
   && ok "a consult (type: question) completes as one cold agy turn: no canary, the policy's pair applied and attested" \
   || fail "consult: $(tr '\n' ' ' < "$AG_C1/result.json" | cut -c1-300) | $(tail -4 "$AG_C1/runner.log" | tr '\n' ' ')"
 AG_CR="$(ls "$MA_FIX/.comms/to-claude/"*gemini-reply*.md 2>/dev/null | tail -1)"
@@ -389,7 +389,7 @@ if [ "${COMMS_TEST_AGY_LIVE:-}" = 1 ]; then
   AG_LV="$AGT/run-live"; mkdir -p "$AG_LV"
   ( cd "$MA_FIX" && env PATH="$AXB:$PATH" COMMS_MOUNT_BASE="$AG_STORE" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
       "$RP" run --message "$AG_LMSG" --dir "$AG_LV" --provider gemini --timeout-secs 900 ) >"$AGT/live.out" 2>&1
-  { [ "$(ag_res "$AG_LV" status)" = completed ] && [ "$(ag_tsv "$AG_LV" observed_model)" = gemini-3.1-pro ] && [ "$(ag_tsv "$AG_LV" observed_effort)" = high ]; } \
+  { [ "$(ag_res "$AG_LV" status)" = completed ] && [ "$(ag_tsv "$AG_LV" observed_model)" = gemini-3.8-flash ] && [ "$(ag_tsv "$AG_LV" observed_effort)" = high ]; } \
     && ok "LIVE: a mounted review through the real agy completes, canary included, on the attested pair" \
     || fail "LIVE agy review: $(tr '\n' ' ' < "$AG_LV/result.json" 2>/dev/null | cut -c1-400) | $(tail -5 "$AGT/live.out")"
 else

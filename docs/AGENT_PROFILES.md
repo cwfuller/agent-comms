@@ -2,7 +2,7 @@
 
 Agents can have independent names, ACP harnesses and exact model pins. Built-in
 `claude`, `codex`, `grok`, `gemini` and their review twins continue to work without this file
-(`gemini` is opt-in through the `agents =` line; all four names are reserved).
+(`gemini`, which runs through the Antigravity CLI, is opt-in through the `agents =` line; all four names are reserved).
 No additional harness or inference account is required for built-in agents.
 
 ## Register and enable
@@ -209,8 +209,6 @@ project); a project or a leg cannot override it.
   "agents": {
     "codex":     { "route_id": "codex-subscription", "transport": "acp", "provider": "openai",
                    "account": "primary", "billing": "subscription", "credential": null },
-    "gemini":    { "route_id": "gemini-api", "transport": "acp", "provider": "google",
-                   "account": "metered", "billing": "api", "credential": "env:GEMINI_METERED_KEY" },
     "glm":       { "route_id": "venice-api", "transport": "acp", "provider": "venice",
                    "account": "primary", "billing": "api", "credential": "env:VENICE_API_KEY" } } }
 ```
@@ -238,7 +236,7 @@ expectation matches the declaration, that the credential reference is the one pa
 agents, the harness's own local auth mode where it is readable without a secret. It does not prove which account a remote service
 billed; where nothing could be observed `result.json` says `auth_evidence: configured`, never `observed`.
 
-Only an agent a mounted runner supports can be bound: `codex` and `gemini` (model and native effort), and OpenCode custom profiles (their
-pinned model, no effort). `claude`, `grok`, mailbox legs and generic ACP profiles (consult-only) are reported `unbindable` by
+Only an agent a mounted ACP runner supports can be bound: `codex` (model and native effort), and OpenCode custom profiles (their
+pinned model, no effort). `claude`, `grok`, `gemini` (agy is a direct runner with no ACP session), mailbox legs and generic ACP profiles (consult-only) are reported `unbindable` by
 `review-route capability`. A custom profile binds its pinned model only (`model-mismatch` otherwise); no row is added to `policy-map.tsv`.
 

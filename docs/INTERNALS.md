@@ -179,7 +179,8 @@ bug: `--show-toplevel` for the pin misses `<main>/.agent-comms/` and falls throu
 <id>|--others <driver>|--supported]` is the one read API — templates and runphase both consume
 it, and every mode reads the same single parse). The supported-backend set is
 compiled into the helpers: claude/codex are `interactive,acp` — ACP-only for review turns
-since step 4; **grok is reviewer/consult-only and keeps the direct headless route**.
+since step 4; **grok is reviewer/consult-only and keeps the direct headless route**, and so does
+**gemini** (`headless,reviewer-consult-only`): the Antigravity CLI has no ACP mode.
 `deliver` routes every agent through runphase.
 
 The grok leg is a **read-only child with a trusted parent broker**: the child runs
@@ -336,18 +337,20 @@ override — pointing `CLAUDE_CONFIG_DIR` at the mount breaks authentication —
 credential with a claude driver on the same machine. The twin separates the mailbox and the
 session, not the model's configuration.
 
-**The gemini provider's isolation differs from both.** Unlike claude, the Gemini CLI does honour a
-relocated home: `GEMINI_CLI_HOME` names the directory that CONTAINS `.gemini/`, so a mounted turn
-gets a parent-owned home beside the mount and the operator's settings, extensions, hooks and MCP
-servers never reach it (so `gemini-review` does not share configuration with a gemini driver).
-The operator's login is carried by construction, not by sharing the home: environment credentials
-pass through, a keychain login is home-independent, and only the file-backed OAuth token and the
-selected auth TYPE are copied (and cleared when the source goes away, like codex's `auth.json`).
-What it shares with claude is the class of containment — the in-process `plan` mode pin under the
-narrowed permission shape, network open. Its per-turn evidence is the CLI's own chat record (the
-model of every answered message, and the tokens usage is read from); the thinking level, which the
-CLI cannot be told over ACP and does not record, is bound through the isolated `settings.json`
-and only read back, which is why its policy capability is `fixed` (docs/ROADMAP.md).
+**The gemini provider's isolation differs from all three.** gemini runs through the Antigravity CLI (`agy`),
+which has no ACP mode, so there is no acpx session and no parent-owned home: the leg is a direct, parent-brokered
+`agy -p --mode plan` turn (`run_agy_turn` in `runphase.sh`), the way grok's is. **It runs in the operator's real
+home**, like claude: agy's login cannot be staged into a relocated `HOME` (a fresh one drops it, and copying the
+credentials safely is not possible), so the operator's agy settings and login apply and plan artifacts land in
+`~/.gemini` — a decision recorded here rather than discovered (the Gemini CLI this provider used to launch honoured
+a relocated `GEMINI_CLI_HOME`, and its isolated home, staged login and chat-record reader are gone). What stands in
+place of the home is: plan mode (writes outside agy's own artifact store and every command are refused), a scrubbed
+environment, the refusal of a tree carrying agy's workspace config (`.gemini`, `.env`, `.agents`, `.agent`, `.agy`,
+`.antigravity`, `.jetski`, `mcp_config.json`), and the mount's tree-identity check after the turn, which fails a review
+whose tree changed. Its per-turn evidence is the `init` event of the turn's own stream-json output, which echoes the
+`<model>-<effort>` id agy was launched with, so one record attests model AND effort and the policy capability is
+`eligible`; usage comes from the stream's `result` events, since agy keeps no record on disk. A rate-limit,
+login or entitlement refusal is classified from agy's own diagnostics (`helpers/agy_stream.py`).
 
 **The grok provider's isolation is a kernel sandbox applied from outside (macOS).** grok's own
 sandbox is no help on Darwin, and claude's and gemini's mode pins have no grok analogue, so
@@ -726,9 +729,8 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
   pattern scrub (a value is in a process environment, never in an argv, file, event or log). Configuration names come first
   because an operator-chosen name (`CODEX_METERED_KEY`, `API_KEY`) survives any pattern list. **Residual**: a credential nobody configured that
   matches no pattern and is not in the table passes through. The harness's own on-disk login is not an environment variable and is governed by the auth rows.
-- **Authentication route.** Passing a key selects nothing by itself. For both billing classes the launcher applies the adapter's `auth` row (gemini: the
-  isolated settings force the OAuth or API-key `selectedType`, the login files are staged only for subscription and a stale copy is cleared
-  for api; codex: the staged `auth.json` and its `auth_mode`) and READS IT BACK before the first acpx call, refusing with `binding-mismatch` on a
+- **Authentication route.** Passing a key selects nothing by itself. For both billing classes the launcher applies the adapter's `auth` row (codex: the staged
+  `auth.json` and its `auth_mode`; gemini has no row: it runs agy in the operator's own home, so a bound gemini leg is refused) and READS IT BACK before the first acpx call, refusing with `binding-mismatch` on a
   difference. Only a successful read-back lets `result.json` say `auth_evidence: observed`. A (adapter, billing) pair with no explicit, readable selection is
   declared `unsupported` in the table and refused (`auth-route-unsupported`) instead of being bound on the hope that an environment key beats a saved login:
   **codex `api` is such a pair today** (`forced_login_method` and `CODEX_API_KEY` exist in the installed binary, but nothing shows the mounted ACP adapter honours them).
@@ -739,8 +741,8 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
   is refused `capability-unsupported` at the same point, because the bound scrub would remove the variable the launch requires. Environment and credential preparation re-verify the stamped access digest after the re-check's sleep and mount. The stamp and run state are
   written to `turn.tsv`, so `load_turn_identity` restores them for a synthesized result after a runner crash.
 - **Quota metadata** (`leg-metadata v1`) has an explicit state because `null` cannot distinguish unsupported from missing: `observed` (a provider ledger
-  snapshot; codex), `unsupported` (grok, claude, gemini, custom profiles: no rate-limit source), `unavailable` (supported, nothing in the window), `refused`
-  (the existing classifier named `rate-limited` or `auth-failed`; gemini), with `reset_at` null unless a structured provider record carries one. A reset is
+  snapshot; codex), `unsupported` (grok, claude, gemini, custom profiles: no rate-limit ledger), `unavailable` (supported, nothing in the window), `refused`
+  (the existing classifier named `rate-limited` or `auth-failed`; gemini, from agy's diagnostics), with `reset_at` null unless a structured provider record carries one. A reset is
   never manufactured and no provider is presented as equivalent to another. Capacity policy and fallback are the caller's.
 
 Not here: choosing models, tiers, efforts, routes, budgets or fallbacks; a model-to-tier mapping or a default (every model id comes from the caller);
@@ -763,7 +765,7 @@ Three prompt-side changes, none of which widens what a leg can do (task 246).
   files after it, so the reviewed project's instructions win. The bundle is written only under `$mount_kdir/home`,
   so `mount_tree_matches` still verifies `tree/` alone.
 - **Not staged**, deliberately: claude (it already loads `~/.claude/CLAUDE.md`, and it has no home to stage into),
-  gemini (a `GEMINI.md` analogue is a recorded follow-up in ROADMAP), OpenCode and custom profiles (their own
+  gemini (agy runs in the operator's own home, which already loads its own instructions), OpenCode and custom profiles (their own
   isolation, no verified instruction path), and every unmounted turn (it already runs on the operator's live home).
   These report `guidance: null`.
 - **Residual: warm sessions.** A codex or grok session that survives across rounds may have read `AGENTS.md` when it

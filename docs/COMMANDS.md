@@ -85,7 +85,7 @@ runs as one blocking acpx call (pinned, via npx; Node >= 22.13) and the answer
 lands directly in context, followed by acpx's token-usage line. Warm by default: a
 named per-repo session makes follow-ups pay only the delta (measured 2026-08-20:
 cold one-shot 18,562 fresh input tokens vs warm round-2 146 — ~127x). `--oneshot` forces a stateless
-exec. Every supported agent has an ACP profile (codex, claude, grok via `grok-build`, and gemini via acpx's `gemini` profile, i.e. `gemini --acp`; gemini needs the Gemini CLI >= 0.33.0 on PATH for a consult and >= 0.39.0 for a mounted review).
+exec. Every supported agent has an ACP profile (codex, claude, grok via `grok-build`) except gemini: the Antigravity CLI (`agy`) it runs through has no ACP mode, so `--via acp` for gemini is refused and a gemini consult goes through the mailbox (`comms.sh ask --to gemini`), where it runs as one cold `agy -p` turn.
 On any failure the helper names the fallback: rerun without `--via acp`.
 
 > **Internals.** `/send-to-codex` and `/read-from-codex` are the loop's individual steps.
@@ -764,8 +764,7 @@ can serve, by the minimum runtime on its `pair` row; a skipped preference is rec
 (`runtime-lacks:<model>`). A `disabled <provider> <transport> <model> <reason>` row marks a model the
 provider has announced but nothing can serve yet: a tier skips it (`disabled:<model>`), a pin,
 baseline or ceiling naming it is refused with the reason, and deleting that one row is the whole act
-of enabling it — the map carries one for the not-yet-released Gemini 4 (its id is a placeholder to
-replace from the CLI's model list). The pair is
+of enabling it (the committed map has none now). The pair is
 validated; an invalid routed dimension falls back to the baseline once (recorded), an invalid pin,
 max pair or explicit decision is refused, and so is a pinned/baseline/ceiling model the runtime
 cannot serve. The record also names the usage limit the chosen model spends: `limit_id` from a
@@ -793,10 +792,10 @@ Nothing needs setting on a new machine with a current codex installed; `acp.sh d
 `runtime_version`, runphase passes it as the child's `CODEX_PATH` (and unsets an inherited one for
 `bundled`), and the runtime is part of `policy_digest`, so an upgrade is a fresh session. Capability `eligible` may route,
 `fixed` applies and attests the baseline only, `unsupported` claims nothing (`verify none`) — today
-codex/acp-mounted is eligible and gemini/acp-mounted is fixed (its model has per-turn evidence, its
-thinking level does not, so a routed tier is ignored and recorded `capability-fixed`; the baseline is
-gemini-3.1-pro-preview at `high`, with `low` the only other mapped level, and pins can pick any mapped
-model, e.g. a Flash tier model with effort `low`, `high` or `default`). The printed record (`policy_digest`, sources, `fallback`,
+codex/acp-mounted and gemini/headless are eligible (gemini's model AND effort are evidenced per turn by
+agy's own `init` event, which echoes the `<model>-<effort>` id the leg was launched with; the baseline and
+ceiling are gemini-3.8-flash at `high`, and gemini-3.1-pro, which has only `low` and `high`, is the fallback
+for an account the 3.8 model is not served to, selected by a pin). The printed record (`policy_digest`, sources, `fallback`,
 `map_version`, …) is what runphase persists; `policy`, `provider-config`, `policy-check` and
 `policy-attest` take `--policy-file <record>` and then never re-resolve. `acp.sh capabilities`
 prints the table plus both reviewer runtimes (`acp.sh doctor` also names the reviewer codex runtime and its version, and whether
@@ -807,31 +806,38 @@ machine-readable form: `runtime` and `runtime_version` lines, then one TAB-separ
 `<baseline|ceiling> <model> <baseline|max|pin> <minimum|-> <ok|refused> <reason|->`, the minimum
 read from the model's `pair` row. Exit codes: resolve 0/1/2; check/attest 0 match, 20 mismatch, 21
 undecidable; doctor 0 consults AND the default and use-max codex reviews can run, 3 no usable
-node, 4 a codex review cannot run on the reviewer runtime, the runtime is refused, the Gemini CLI is
-present but too old for `--acp`, or the policy map is missing, unreadable, or defective (the reason is
+node, 4 a codex review cannot run on the reviewer runtime, the runtime is refused, agy is
+present but older than 1.3.1, or the policy map is missing, unreadable, or defective (the reason is
 printed, and a final `result: FAIL` line); runtime-check 0 all ok, 4 a row refused, 1 the runtime is
 refused or the policy map is missing, unreadable, or defective, 2 usage.
 
-**The reviewer's Gemini runtime.** acpx launches the `gemini` it finds on PATH (`gemini --acp`; acpx
-itself falls back to the deprecated `--experimental-acp` below 0.33.0, which this helper refuses
-instead). A mounted review needs **0.39.0 or later**, the first build that writes the append-only
-`.jsonl` chat record the review attestation reads (0.33–0.38 write a rewritten `.json` per session,
-which cannot supply the model evidence), so every reviewer surface refuses 0.33–0.38 up front with that
-reason; `consult` and `supports` need only the `--acp` flag (0.33.0). `acp.sh doctor` reports the path and version — `reviewer gemini runtime: <path> (version
-X) — supports --acp` and the default/use-max gemini review lines — and treats an ABSENT Gemini CLI as
-informational (it is an opt-in reviewer) but a present one below the mounted-review floor (0.39.0) as a failure (exit 4). A model the map marks `disabled` (e.g. `COMMS_ACP_GEMINI_MODEL=gemini-4-pro`) is reported `CANNOT RUN` by `doctor`/`runtime-check`, as `resolve` refuses it.
-`acp.sh runtime-check gemini` is the machine-readable form (same `runtime`, `runtime_version` and row
-lines; an old build exits 1 after printing its version, an absent one exits 1), `capabilities` prints
-the version beside the codex runtime, `supports gemini` exits 1 for either, and `resolve gemini`
-refuses rather than launch a flag the CLI lacks. There is no bundled copy and no path override. The
-mounted policy is bound per leg by an isolated `GEMINI_CLI_HOME` (`provider-config gemini
-[--auth-type T]` prints its `.gemini/settings.json`: `model.name`, a `modelConfigs` thinking-level
-override, plan-mode model routing off, auto-update off, and only the operator's selected auth type);
-the preflight reads acpx's confirmed `current_model_id`, and after the turn the model must be the one
-every answered message in the CLI's own chat record names (`policy-attest`), with the thinking level read
-back from the parent-written settings (`gemini-effort`) — the evidence source is recorded as
-`gemini-chat-record+settings-readback`, because the CLI keeps no per-turn record of its thinking level.
-`failure-reason gemini <stderr-file>` classifies a refusal (`rate-limited`, `auth-failed`).
+**The reviewer's Gemini runtime.** gemini runs through Google's Antigravity CLI, the `agy` it finds on
+PATH (the Gemini CLI it replaced was retired for individual accounts on 2026-06-18). agy has no ACP mode, so
+there is no acpx session and no isolated home: the leg is a direct, parent-brokered `agy` turn, like grok's
+(`runphase.sh`, `run_agy_turn`). It needs **agy 1.3.1 or later**, the build its stream-json input,
+`<model>-<effort>` ids and plan mode were exercised on, and every reviewer surface refuses an older one up
+front with that reason. `acp.sh doctor` reports the path and version — `reviewer gemini runtime: <path>
+(version X) — runs agy directly (no ACP)` and the default/use-max gemini review lines — and treats an ABSENT
+agy as informational (it is an opt-in reviewer) but a present one below 1.3.1 as a failure (exit 4).
+`acp.sh runtime-check gemini` is the machine-readable form (same `runtime`, `runtime_version` and row lines;
+an old build exits 1 after printing its version, an absent one exits 1), `capabilities` prints the version
+beside the codex runtime, and `supports gemini` exits 1 (no ACP session). There is no bundled copy and no
+path override.
+
+The launch vector is `agy -p= --input-format stream-json --output-format stream-json --mode plan --model
+<model>-<effort>`, with the prompt on stdin. The policy is applied as that one combined id (`--model <model>
+--effort <effort>` is the same pair, but agy then echoes only the bare model); agy itself refuses a pair it
+does not know before any turn. The `init` event of the turn's own stream names the id back, and
+`policy-attest` judges it against the persisted policy record for the canary and again for the review prompt,
+whose result gates publication (`evidence_source` `agy-init-event`; `turn.tsv` records `requested_*`,
+`observed_*` and `agy_model`). A review that ran another model or effort is withheld as `policy-unapplied`,
+and so is one whose init event names no model. A consult is one cold turn with the same pair and no canary.
+agy has no on-disk rate-limit record, so a refusal is classified from its own diagnostics
+(`helpers/agy_stream.py classify`): `rate-limited` (a 429, `RESOURCE_EXHAUSTED`, quota or usage refusal),
+`auth-failed` (a login failure) or `model-unavailable` (`SUBSCRIPTION_REQUIRED`: the account is not entitled
+to the model, which some OAuth accounts get for gemini-3.8-flash — pin gemini-3.1-pro). The turn is a failed
+turn with that `reason`, and a `rate-limited` or `auth-failed` refusal is also reported as quota state `refused`
+(no reset time is manufactured); `model-unavailable` is an entitlement fact, not a quota refusal.
 
 **Reviewer containment, per provider.** `acp.sh containment <agent>` prints `backend<TAB><name>`
 (exit 0) when a MOUNTED review of that agent can be contained on this host, or the reason on stderr:
@@ -885,8 +891,8 @@ configured model before the expensive review turn is spent — catching a stale 
 would otherwise return a provider API error. A canary that is an error, times out, exits nonzero,
 answers off-script, or cannot be verified refuses the turn BEFORE the real prompt, with a distinct
 `reason` in `result.json` (`runtime-incompatible` / `canary-timeout` / `canary-exit-N` /
-`canary-unexpected` / `reply-unverifiable`; for gemini also `rate-limited` / `auth-failed`, read from
-the provider's stderr), none of which is `no-output`, so `compose` never reads
+`canary-unexpected` / `reply-unverifiable`; for gemini also `rate-limited` / `auth-failed` /
+`model-unavailable`, read from agy's own diagnostics), none of which is `no-output`, so `compose` never reads
 one as a droppable-leg signal. The mode is pinned ONCE (before the canary): a repeat `set-mode` after
 any prompt returns "Internal error" on the live adapter, and the single pin holds through both
 prompts because the mode is persistent owner state a contained canary cannot move. It runs per turn,
@@ -982,9 +988,8 @@ turn must be unchanged, since grok rewrites the file. claude: the project transc
 leg's cwd, deduplicated by `(message.id, requestId)`, last copy wins. Fields follow codex's convention —
 `input_tokens` (INCLUDING cache reads and writes), `cached_input_tokens`,
 `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens` — plus
-`turns`, `responses` and `source`. gemini: the `gemini` messages of the CLI's own chat record under the
-isolated `.gemini/tmp/*/chats/` (deduplicated by message id, last copy wins; `input_tokens` adds the tool-use
-prompt and `output_tokens` adds the thinking tokens; cache writes, turns and rate limits are null). A codex leg also records `rate_limits`, its newest snapshot
+`turns`, `responses` and `source`. gemini: agy keeps no record of a turn on disk, so the usage is the sum of the `result` events of the leg's own
+stream-json output (canary and review together; cache writes and rate limits are null). A codex leg also records `rate_limits`, its newest snapshot
 (`limit_id`, `window_minutes`, `used_percent`, `resets_at`). **Missing is null, never 0**: no
 records, an unbounded window (a file replaced, truncated or gone mid-turn), or a field some record
 lacks. `round-note` copies the leg's `usage` into the last column of `.comms/grades/rounds.tsv`:

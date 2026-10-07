@@ -16,18 +16,18 @@
 #       a stateless exec.
 #   doctor
 #       report node/acpx availability, the supported agent map, the reviewer codex
-#       runtime and the Gemini CLI; exit 0 iff consults can run here AND that runtime can
-#       run the default (baseline) and use-max (ceiling) codex review AND any installed
-#       Gemini CLI can run `--acp`; 3 no usable node; 4 a codex review cannot run on the
-#       runtime (or the runtime is refused), or the Gemini CLI is too old for `--acp`,
-#       reason printed. A Gemini CLI that is simply absent is reported, not a failure:
+#       runtime and the Antigravity CLI (`agy`); exit 0 iff consults can run here AND that
+#       runtime can run the default (baseline) and use-max (ceiling) codex review AND any
+#       installed agy is at least the exercised build (1.3.1); 3 no usable node; 4 a codex
+#       review cannot run on the runtime (or the runtime is refused), or agy is too old,
+#       reason printed. An agy that is simply absent is reported, not a failure:
 #       gemini is an opt-in reviewer.
 #   runtime-check codex|gemini
 #       machine-readable form of doctor's runtime verdict: `runtime` and
 #       `runtime_version` lines, then per row <baseline|ceiling> <model>
 #       <baseline|max|pin> <minimum|-> <ok|refused> <reason|-> (TAB-separated).
-#       Exit 0 all ok, 4 a row refused, 1 runtime refused (for gemini: absent, or older than
-#       the first release with `--acp`; the version lines still print) or map defect, 2 usage.
+#       Exit 0 all ok, 4 a row refused, 1 runtime refused (for gemini: agy absent, or older than
+#       1.3.1; the version lines still print) or map defect, 2 usage.
 #   supports <agent>
 #       exit 0 iff a consult can run here for that agent (machine-readable —
 #       never parse doctor's prose).
@@ -80,11 +80,6 @@
 #   runtime <agent> --policy-file <record>
 #       the codex binary the record resolved (`bundled`, or an absolute path) —
 #       see policy_runtime_codex for COMMS_ACP_CODEX_PATH and auto-detection.
-#   gemini-auth <settings.json> | gemini-effort <settings.json> | failure-reason <provider> <stderr-file>
-#       gemini's helpers for runphase: the operator's selected auth type (one allowlisted token), the
-#       thinking level an isolated settings.json carries (as a policy effort token), and the
-#       classification of a provider refusal (`rate-limited` | `auth-failed` | nothing) from the
-#       diagnostics acpx relayed.
 #   containment <agent>
 #       whether a MOUNTED review of that agent can be contained on this host, and by what: one
 #       `backend<TAB><name>` line (exit 0), or the reason it cannot be, on stderr (exit 1 no backend
@@ -102,8 +97,7 @@
 #       (<model>\t<effort>); empty + exit 1 where no policy applies.
 #   provider-config <agent> [--policy-file <record>] [--auth-type <type>]
 #       the COMPLETE isolated provider config file text for a mounted review
-#       turn (codex: config.toml; gemini: settings.json, where --auth-type carries the
-#       operator's selected auth type forward). runphase asks for this rather than holding
+#       turn (codex: config.toml). runphase asks for this rather than holding
 #       a literal, so the policy is spelled exactly once.
 #   policy-check <agent> - [--policy-file <record>]
 #   policy-attest <agent> <effort> [model] [--policy-file <record>]
@@ -119,9 +113,9 @@
 # npx -y acpx@$ACPX_VERSION (cached by npm after first use; no global install).
 # Requires Node >= 22.13 (acpx's floor). Enabled agents: codex, claude. acpx
 # 0.13.1 ships builtins for all three registered agents; grok maps to the
-# `grok-build` profile (verified against `acpx --help`, 2026-08-25); gemini maps to acpx's `gemini`
-# builtin, which launches `gemini --acp` (or the deprecated `--experimental-acp` below gemini 0.33.0,
-# which this helper refuses instead). Unsupported agents fail closed naming the fallback.
+# `grok-build` profile (verified against `acpx --help`, 2026-08-25); gemini has no acpx profile: it runs through
+# the Antigravity CLI (`agy`), which has no ACP mode, as a direct turn in runphase.sh. Unsupported agents fail
+# closed naming the fallback.
 set -euo pipefail
 
 # User/project SETTINGS (helpers/settings.sh): fills unset variables from the settings files, so

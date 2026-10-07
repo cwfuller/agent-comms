@@ -131,8 +131,8 @@ BD_MAPV="$(awk -F'\t' '$1=="version"{print $2; exit}' "$REPO/helpers/policy-map.
 bd_dig() { bd "$COMMS" agents --access "$1" | sed -n 's/.* access_digest=//p'; }
 BD_DG_CODEX="$(bd_dig codex)"; BD_DG_GLM="$(bd_dig glm)"; BD_DG_GLM2="$(bd_dig glm2)"
 BD_PL_CODEX="route-plan v2 ref=res-codex agent=codex harness=codex status=ok code=- route_id=codex-subscription transport=acp provider=openai account=primary billing=subscription credential=- access_digest=$BD_DG_CODEX model=gpt-6-luna effort=low model_source=bound effort_source=bound capability=eligible limit_id=- routing=off decision=none phase=- map_version=$BD_MAPV capability_version=1"
-BD_PL_GLM2="$(sed 's/ref=res-glm agent=glm harness=glm /ref=res-glm2 agent=glm2 harness=glm2 /; s/model=venice\/glm-model-a/model=venice\/glm-model-b/' <<<"$BD_PL_GLM")"
 BD_PL_GLM="route-plan v2 ref=res-glm agent=glm harness=glm status=ok code=- route_id=venice-api transport=acp provider=venice account=primary billing=api credential=env:BD_VENICE_KEY access_digest=$BD_DG_GLM model=venice/glm-model-a effort=- model_source=bound effort_source=bound capability=profile limit_id=n/a routing=off decision=none phase=- map_version=$BD_MAPV capability_version=1"
+BD_PL_GLM2="$(sed 's/ref=res-glm agent=glm harness=glm /ref=res-glm2 agent=glm2 harness=glm2 /; s/model=venice\/glm-model-a/model=venice\/glm-model-b/' <<<"$BD_PL_GLM")"
 bd_wb "$BD/b3.json" "$BD_L_CODEX" "$BD_L_GLM2" "$BD_L_GLM"
 BD_T0="$(bd_tree)"
 BD_TL="$BD/test-legs.log"; rm -f "$BD_TL"

@@ -43,12 +43,16 @@ to re-run a command outside the sandbox, and each turn is refused unless codex's
 canary and of the review says the sandbox was read-only (docs/ROADMAP.md). The `claude` measurement
 is still due a re-probe on its current adapter.
 
-`gemini` (opt-in; needs the Gemini CLI >= 0.39.0) reviews in an isolated `GEMINI_CLI_HOME` under
-Gemini's read-only `plan` mode, pinned and confirmed before the canary, with permissions narrowed to
-reads. That is an in-process pin like `claude`'s, not a kernel sandbox: the child's network is open, the
-copied OAuth token (if you log in with Google rather than an API key or the keychain) is readable, and the
-containment has not yet been measured against a live Gemini turn (docs/ROADMAP.md). A reviewed tree
-carrying `.gemini/` or `.env` is refused.
+`gemini` (opt-in; needs the Antigravity CLI `agy` >= 1.3.1) reviews through `agy -p --mode plan`, run directly
+(agy has no ACP mode). Plan mode refuses writes outside agy's own artifact store and, in a headless turn,
+every command; the mount's tree-identity check then fails a review whose tree changed, so a write attempt is
+refused or detected. That is an in-process pin like `claude`'s, not a kernel sandbox: the child's network is
+open. **agy runs in your real home**, not an isolated one: its login cannot be staged into a fresh `HOME`,
+so it reads your own agy login and settings (the same decision as `claude-review`), and agy's plan files land
+in `~/.gemini`. The driver's identity and credentials are scrubbed from its environment, and a reviewed tree
+carrying agy's workspace config (`.gemini`, `.env`, `.agents`, `.agent`, `.agy`, `.antigravity`, `.jetski` or
+`mcp_config.json`) is refused unread, because that config can declare hooks or MCP servers that run outside the
+plan-mode pin.
 
 `grok` (macOS) reviews inside a Seatbelt sandbox that agent-comms applies itself (`helpers/box.sh`),
 because grok's own sandbox does not hold on macOS (its docs: child-network blocking is Linux-only and

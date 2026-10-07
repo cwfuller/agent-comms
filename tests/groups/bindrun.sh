@@ -106,7 +106,8 @@ bd_changed() {  # <label> <expected mismatch codes JSON> <agent> <leg-json> <mut
   bd_reset
 }
 bd_changed "the account in access.json" '["account-mismatch"]' codex "$BD_L_CODEX" "bd_mut access \"d['agents']['codex']['account']='secondary'\""
-bd_changed "the credential reference in access.json" '["credential-mismatch"]' glm2 "$BD_L_GLM2" "bd_mut agents \"d['agents']['glm2']['credentials']['VENICE_API_KEY']['env']='BD_VENICE_OTHER_KEY'\"; bd_mut access \"d['agents']['glm2']['credential']='env:BD_VENICE_OTHER_KEY'\""
+# glm and glm2 share one route and account, so the route only validates when both profiles change together.
+bd_changed "the credential reference in access.json" '["credential-mismatch"]' glm2 "$BD_L_GLM2" "bd_mut agents \"[d['agents'][a]['credentials']['VENICE_API_KEY'].update(env='BD_VENICE_OTHER_KEY') for a in ('glm', 'glm2')]\"; bd_mut access \"[d['agents'][a].update(credential='env:BD_VENICE_OTHER_KEY') for a in ('glm', 'glm2')]\""
 bd_changed "the billing class in access.json" '["billing-mismatch"]' codex "$BD_L_CODEX" "bd_mut access \"d['agents']['codex'].update(billing='free')\""
 bd_changed "access.json removed" '["no-access-profile"]' codex "$BD_L_CODEX" "rm -f \"\$BD_AH/access.json\""
 bd_changed "the credential removed from the environment" '["credential-unavailable"]' glm2 "$BD_L_GLM2" ":" BD_VENICE_KEY=

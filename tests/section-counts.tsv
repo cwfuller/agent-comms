@@ -107,30 +107,29 @@ route-eval: more than one labeller	5
 compose: exactly one machine-readable compose-result line	22
 comms.sh version: the installed kernel commit and template version	18
 leg_usage.py: a leg's tokens come from the provider's own records	46
-leg_usage.py: gemini usage and answering models come from the CLI's own chat record	12
 comms.sh: state idle/legacy (idle threads marked with evidence, never closed by age)	22
 worktree new: pins the workspace name for the new worktree	11
 profiles: parser, launch and evidence contracts	34
 profiles: registry and family integration	9
-gemini: the ACP profile, runtime, doctor and policy map (PATH-stubbed gemini)	58
-gemini: a mounted review turn (stub acpx driving a stub gemini over real ACP)	34
 box.sh: containment backend selection, prerequisites and diagnostics (host-independent)	15
 box.sh: the staged grok login and config carry only what a review needs	6
 runphase: a mounted grok turn is refused without a backend, and a broken backend is not overridable	3
 box.sh: the Seatbelt backend, proved on a real sandbox-exec (macOS)	10
 binding: access profiles (access.json), agents --access and the capability line	35
 binding: review-route plan --bindings (read-only, every leg's verdict, configured access values)	12
-binding: all-or-nothing validation before the first durable write (panel dispatch --bindings)	53
+binding: all-or-nothing validation before the first durable write (panel dispatch --bindings)	51
 binding: roster family semantics (one leg per family, whatever the route or account)	7
 binding: retained policy records stay readable (versions 1 and 2) and a custom profile binds through no map row	15
 binding: the installed copy negotiates, plans and refuses (install.sh into a test-owned scope)	5
 binding: contract tests (python: scrub set, environment, stamp, quota, auth-route read-back)	28
-binding: exact model, effort and access reach the provider (end to end, stub providers)	8
-binding: result.json carries binding, route and quota (and the leg's environment held only its own credential)	16
-binding: authentication-route selection, a stale login, and conflicting saved state (gemini, codex)	11
+binding: exact model, effort and access reach the provider (end to end, stub providers)	7
+binding: result.json carries binding, route and quota (and the leg's environment held only its own credential)	11
+binding: authentication-route selection, a stale login, and conflicting saved state (codex)	1
 binding: a configuration change after dispatch makes the leg refuse itself before any provider launch	18
 binding: helper-stamped, never typed (leg_binding), env pins, and no classifier in bound mode	7
-binding: quota states from real turns (observed, unavailable, refused with no manufactured reset)	5
+binding: quota states from real turns (observed, unavailable, refused with no manufactured reset)	2
 binding: an unbound dispatch is unchanged, and its result.json marks a legacy leg	3
 reviewer guidance: the shared bundle is staged into a mounted codex home	11
 helpers/method_guidance.py: verify the staged bundle against its snapshot record	2
+agy: runtime, doctor, the policy map and the stream reader (PATH-stubbed agy)	32
+agy: a direct review and consult turn (stub agy over the real stream-json framing)	37

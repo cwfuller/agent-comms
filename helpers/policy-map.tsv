@@ -104,8 +104,12 @@
 # - Hence capability `eligible`: control (the combined id) AND per-turn evidence (the echoed id) exist.
 # - Efforts: gemini-3.1-pro has low and high; gemini-3.8-flash has low, medium and high. `xhigh` has no row: a
 #   routed candidate of it falls back to the baseline, recorded.
-# - Tiers: pro = strong (gemini-3.1-pro is the strongest served model; there is no 3.8 Pro as of 2026-10),
-#   flash = fast and balanced (gemini-3.8-flash; a routed candidate's own effort separates the two).
+# - Ranking: Artificial Analysis (API, read 2026-10-07) puts Gemini 3.8 Flash (High) above Gemini 3.1 Pro Preview
+#   on both indices (Intelligence 40.9 vs 29.7, Coding 76.3 vs 68.8), and there is no 3.8 Pro as of 2026-10. So
+#   gemini-3.8-flash at `high` is the baseline and ceiling, and gemini-3.1-pro stays only as the fallback row.
+# - Tiers: one model leads all three; a routed candidate's own effort separates them (fast = low, balanced =
+#   medium, strong = high). gemini-3.1-pro trails `strong` and is what a pin selects for an account the 3.8 model
+#   is not served to.
 # - gemini-3.8-flash is not served to every account (SUBSCRIPTION_REQUIRED, google-antigravity/antigravity-cli
 #   issue 1180). That is an account fact, not a map fact: the turn is recorded `model-unavailable`.
 # - agy has no rate-limit record on disk: a refusal is classified from its own diagnostics (`rate-limited`).
@@ -158,17 +162,19 @@ pair	codex	acp-mounted	gpt-5.6-terra	low,medium,high,xhigh,max,ultra
 pair	codex	acp-mounted	gpt-5.6-luna	low,medium,high,xhigh,max
 
 
-# The ceiling EQUALS the baseline today: gemini-3.1-pro at `high` is the strongest model and effort agy serves
-# (there is no 3.8 Pro as of 2026-10), so COMMS_REVIEW_MAX=1 changes nothing for gemini.
-baseline	gemini	headless	gemini-3.1-pro	high
-ceiling	gemini	headless	gemini-3.1-pro	high
+# The ceiling EQUALS the baseline today: gemini-3.8-flash at `high` is the strongest model and effort agy serves
+# (see the ranking note above), so COMMS_REVIEW_MAX=1 changes nothing for gemini.
+baseline	gemini	headless	gemini-3.8-flash	high
+ceiling	gemini	headless	gemini-3.8-flash	high
 
-# Preference lists, first servable wins. One model leads each of fast and balanced: the routed candidate's own
-# effort (low or high) is what tells them apart, so fast = gemini-3.8-flash at low, balanced = gemini-3.8-flash
-# at high, strong = gemini-3.1-pro at high.
-tier	gemini	headless	fast	gemini-3.8-flash
+# Preference lists, first servable wins. gemini-3.8-flash leads every tier: the routed candidate's own effort
+# tells them apart, so fast = gemini-3.8-flash at low, balanced = gemini-3.8-flash at medium, strong =
+# gemini-3.8-flash at high. gemini-3.1-pro is the fallback row, last in `strong`.
+# The rows run strong first because the reverse lookup (`effective_tier`) takes the first row naming the model, and
+# the baseline, which is the strong pick, is what a leg is normally bound to.
+tier	gemini	headless	strong	gemini-3.8-flash,gemini-3.1-pro
 tier	gemini	headless	balanced	gemini-3.8-flash
-tier	gemini	headless	strong	gemini-3.1-pro
+tier	gemini	headless	fast	gemini-3.8-flash
 
 effort	gemini	headless	low	low
 effort	gemini	headless	medium	medium
