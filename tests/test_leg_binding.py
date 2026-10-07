@@ -117,10 +117,8 @@ class Scrub(Configured):
 
     def test_env_plan_for_each_billing_class(self):
         profile_set, entries = self.loaded()
-        api = access.env_plan('gemini', 'gemini', 'api', dict(self.ENV, GEMINI_API_KEY='ambient'), None, entries, profile_set)
-        self.assertEqual(api['destination'], 'GEMINI_API_KEY')
-        self.assertNotIn('GEMINI_API_KEY', api['unset'])                  # the runner exports the leg's own value over it
-        self.assertIn('CFG_GEMINI_KEY', api['unset'])                    # the source name itself is not handed on
+        with self.assertRaises(profiles.ProfileError):                    # gemini runs agy directly: no auth row, no env plan
+            access.env_plan('gemini', 'gemini', 'api', dict(self.ENV, GEMINI_API_KEY='ambient'), None, entries, profile_set)
         subscription = access.env_plan('codex', 'codex', 'subscription', dict(self.ENV, GEMINI_API_KEY='ambient'), None, entries, profile_set)
         self.assertIsNone(subscription['destination'])
         self.assertIn('GEMINI_API_KEY', subscription['unset'])            # no API fallback exists for a subscription leg
@@ -256,12 +254,13 @@ class AuthRoute(unittest.TestCase):
         return path
 
     def test_the_auth_table_declares_every_adapter_billing_pair(self):
-        for adapter in ('codex', 'gemini', 'opencode'):
+        for adapter in ('codex', 'opencode'):
             for billing in access.BILLINGS:
                 self.assertIn(access.auth_row(adapter, billing)['status'], ('supported', 'unsupported'))
         self.assertEqual(access.auth_row('codex', 'api')['status'], 'unsupported')           # not established for the mounted ACP adapter
-        self.assertEqual(access.auth_row('gemini', 'api')['consumed'], 'GEMINI_API_KEY')
-        self.assertEqual(access.auth_row('gemini', 'api')['selector'], 'selectedType=gemini-api-key')
+        for billing in access.BILLINGS:                                                      # gemini runs agy directly: no isolated login to bind
+            with self.assertRaises(profiles.ProfileError):
+                access.auth_row('gemini', billing)
 
     def test_codex_login_mode_is_read_without_the_secret(self):
         self.assertEqual(binding.login_mode(self.write('a.json', {'auth_mode': 'ChatGPT', 'tokens': {'id_token': 'x'}})), 'chatgpt')
@@ -285,26 +284,15 @@ class AuthRoute(unittest.TestCase):
         (self.root / 'iso/auth.json').unlink()
         self.assertIsNone(binding.auth_readback('codex', 'subscription', self.root / 'iso', False)[0])
 
-    def test_readback_gemini_api_requires_the_api_type_no_login_and_the_key(self):
-        settings = lambda t: self.write('iso/.gemini/settings.json', {'security': {'auth': {'selectedType': t}}})
-        settings('gemini-api-key')
-        self.assertEqual(binding.auth_readback('gemini', 'api', self.root / 'iso', True), ('observed', None))
-        self.assertIsNone(binding.auth_readback('gemini', 'api', self.root / 'iso', False)[0])            # no key in the environment
-        self.write('iso/.gemini/oauth_creds.json', {'refresh_token': 'x'})
-        self.assertIsNone(binding.auth_readback('gemini', 'api', self.root / 'iso', True)[0])             # a login is still staged
-        (self.root / 'iso/.gemini/oauth_creds.json').unlink()
-        settings('oauth-personal')
-        self.assertIsNone(binding.auth_readback('gemini', 'api', self.root / 'iso', True)[0])             # the wrong selected type
-        (self.root / 'iso/.gemini/settings.json').unlink()
-        self.assertIsNone(binding.auth_readback('gemini', 'api', self.root / 'iso', True)[0])             # nothing was written
+    def test_gemini_has_no_auth_route_to_read_back(self):
+        for billing in ('api', 'subscription'):
+            with self.assertRaises(profiles.ProfileError):
+                binding.auth_readback('gemini', billing, self.root / 'iso', False)
 
-    def test_readback_gemini_subscription_is_observed_only_with_a_login_file(self):
-        self.write('iso/.gemini/settings.json', {'security': {'auth': {'selectedType': 'oauth-personal'}}})
-        self.assertEqual(binding.auth_readback('gemini', 'subscription', self.root / 'iso', False), ('configured', None))
-        self.write('iso/.gemini/oauth_creds.json', {'refresh_token': 'x'})
-        self.assertEqual(binding.auth_readback('gemini', 'subscription', self.root / 'iso', False), ('observed', None))
-        self.assertIsNone(binding.auth_readback('gemini', 'subscription', self.root / 'iso', True)[0])    # an API key beside a subscription leg
-        self.assertIsNone(binding.auth_readback('codex', 'api', self.root, True)[0])
+    def test_gemini_is_unbindable_whatever_its_transport(self):
+        adapter, why = binding.classify('gemini', 'acp', {})
+        self.assertIsNone(adapter)
+        self.assertTrue(why.startswith('gemini-unsupported'))
 
     def test_a_custom_profile_selects_its_route_through_its_credentials_so_it_is_only_configured(self):
         self.assertEqual(binding.auth_readback('opencode', 'api', '', True), ('configured', None))

@@ -8,9 +8,9 @@ BD_D_CODEX="$(python3 -c 'import hashlib,json; e={"route_id":"codex-subscription
 OUT="$(bd "$COMMS" agents --access codex 2>&1)"
 [ "$OUT" = "access v1 agent=codex route_id=codex-subscription transport=acp provider=openai account=primary billing=subscription credential=- access_digest=$BD_D_CODEX" ] \
   && ok "agents --access prints the agent's one access entry and the sha256 of its canonical form" || fail "agents --access codex: $OUT"
-OUT="$(bd "$COMMS" agents --access gemini 2>&1)"
-case "$OUT" in *"credential=env:BD_GEMINI_KEY "*) ok "an api entry names its credential REFERENCE" ;; *) fail "agents --access gemini: $OUT" ;; esac
-case "$OUT" in *"$BD_KEY_GEMINI"*) fail "agents --access printed a credential VALUE" ;; *) ok "agents --access never prints, and never needs, the credential value" ;; esac
+OUT="$(bd "$COMMS" agents --access glm2 2>&1)"
+case "$OUT" in *"credential=env:BD_VENICE_KEY "*) ok "an api entry names its credential REFERENCE" ;; *) fail "agents --access glm2: $OUT" ;; esac
+case "$OUT" in *"$BD_KEY_VENICE"*) fail "agents --access printed a credential VALUE" ;; *) ok "agents --access never prints, and never needs, the credential value" ;; esac
 OUT="$(bd "$COMMS" agents --access codex-review 2>&1)"
 [ "$OUT" = "$(bd "$COMMS" agents --access codex | sed 's/agent=codex /agent=codex-review /')" ] \
   && ok "a review twin with no entry of its own runs under its driver's entry" || fail "twin entry: $OUT"
@@ -29,8 +29,8 @@ bd_bad() {  # <label> <python statements> <expected words> -> ok when agents --a
 }
 bd_bad "an unknown field" "d['agents']['codex']['seat']='x'" "unknown fields"
 bd_bad "a missing field" "del d['agents']['codex']['account']" "missing fields"
-bd_bad "a value-shaped credential" "d['agents']['gemini']['credential']='sk-live-0123456789abcdef'" "never a value"
-bd_bad "an api route with no credential reference" "d['agents']['gemini']['credential']=None" "exactly one credential"
+bd_bad "a value-shaped credential" "d['agents']['glm2']['credential']='sk-live-0123456789abcdef'" "never a value"
+bd_bad "an api route with no credential reference" "d['agents']['glm2']['credential']=None" "exactly one credential"
 bd_bad "a subscription route that names a credential" "d['agents']['codex']['credential']='env:SOMETHING'" "exactly one credential"
 bd_bad "an unknown billing class" "d['agents']['codex']['billing']='prepaid'" "billing must be"
 bd_bad "a transport other than acp or cli" "d['agents']['codex']['transport']='mailbox'" "transport must be"
@@ -68,13 +68,13 @@ OUT="$(bd "$COMMS" review-route capability 2>&1)"; A=$?
   && ok "review-route capability prints the pinned negotiation line and exits 0" || fail "capability (rc=$A): $(sed -n 1p <<<"$OUT")"
 cap_line() { grep "^agent=$1 " <<<"$OUT"; }
 [ "$(cap_line codex)" = "agent=codex class=bindable harness=codex reason=- billing=subscription" ] \
-  && [ "$(cap_line gemini)" = "agent=gemini class=bindable harness=gemini reason=- billing=api" ] \
   && [ "$(cap_line glm)" = "agent=glm class=bindable-model-only harness=glm reason=- billing=api" ] \
-  && ok "codex and gemini are bindable (model and effort); an OpenCode profile is bindable-model-only" || fail "capability classes: $(grep '^agent=' <<<"$OUT" | tr '\n' '|')"
+  && ok "codex is bindable (model and effort); an OpenCode profile is bindable-model-only" || fail "capability classes: $(grep '^agent=' <<<"$OUT" | tr '\n' '|')"
 [ "$(cap_line claude)" = "agent=claude class=unbindable harness=claude reason=claude-unsupported billing=-" ] \
   && [ "$(cap_line grok)" = "agent=grok class=unbindable harness=grok reason=grok-unsupported billing=-" ] \
+  && [ "$(cap_line gemini)" = "agent=gemini class=unbindable harness=gemini reason=gemini-unsupported billing=-" ] \
   && [ "$(cap_line gacp)" = "agent=gacp class=unbindable harness=gacp reason=consult-only billing=-" ] \
-  && ok "claude and grok (no applied, attested policy) and a generic ACP profile (consult-only) are unbindable, with the reason" || fail "capability unbindables: $(grep '^agent=' <<<"$OUT" | tr '\n' '|')"
+  && ok "claude and grok (no applied, attested policy), gemini (agy runs directly, no ACP session) and a generic ACP profile (consult-only) are unbindable, with the reason" || fail "capability unbindables: $(grep '^agent=' <<<"$OUT" | tr '\n' '|')"
 [ "$(cap_line codex-review)" = "agent=codex-review class=bindable harness=codex reason=- billing=subscription" ] \
   && ok "a review twin reports its driver's class and billing" || fail "twin capability: $(cap_line codex-review)"
 OUT2="$(bd COMMS_DELIVERY=mailbox "$COMMS" review-route capability 2>&1)"
@@ -97,17 +97,17 @@ bd_reset
 section "binding: review-route plan --bindings (read-only, every leg's verdict, configured access values)"
 OUT="$(bd "$COMMS" review-route plan --bindings "$BD/b3.json" 2>"$BD/plan.err")"; A=$?
 [ "$A" = 0 ] && [ "$OUT" = "$BD_PL_CODEX
-$BD_PL_GEMINI
+$BD_PL_GLM2
 $BD_PL_GLM" ] \
-  && ok "plan prints one route-plan v2 line per leg: codex (gpt-6-luna/low), gemini and an OpenCode/Venice profile (its pinned model, no effort), in file order" \
+  && ok "plan prints one route-plan v2 line per leg: codex (gpt-6-luna/low) and two OpenCode/Venice profiles (their pinned models, no effort), in file order" \
   || fail "bound plan (rc=$A): $OUT $(cat "$BD/plan.err")"
 OUT2="$(bd "$COMMS" review-route plan --bindings "$BD/b3.json" 2>&1)"
 [ "$OUT2" = "$OUT" ] && ok "a repeated plan is byte-identical" || fail "plan output drifted between runs"
 [ "$(bd_tree)" = "$BD_T0" ] && ok "a bound plan writes nothing: no file, event, decision, index row or snapshot ref" || fail "plan wrote to the repository"
-case "$OUT$(cat "$BD/plan.err")" in *"$BD_KEY_GEMINI"*|*"$BD_KEY_VENICE"*|*canary-*) fail "plan output carries a credential value" ;; *) ok "plan output carries credential REFERENCES only, never a value" ;; esac
-OUT="$(bd "$COMMS" review-route plan --bindings "$BD/b3.json" --to codex,gemini,glm 2>&1)"; A=$?
+case "$OUT$(cat "$BD/plan.err")" in *"$BD_KEY_VENICE"*|*canary-*) fail "plan output carries a credential value" ;; *) ok "plan output carries credential REFERENCES only, never a value" ;; esac
+OUT="$(bd "$COMMS" review-route plan --bindings "$BD/b3.json" --to codex,glm2,glm 2>&1)"; A=$?
 [ "$A" = 0 ] && ok "--to is accepted when it names exactly the bindings file's agents, in order" || fail "plan with equal --to (rc=$A)"
-OUT="$(bd "$COMMS" review-route plan --bindings "$BD/b3.json" --to gemini,codex,glm 2>&1)"; A=$?
+OUT="$(bd "$COMMS" review-route plan --bindings "$BD/b3.json" --to glm2,codex,glm 2>&1)"; A=$?
 [ "$A" = 2 ] && ok "--to in a different order is a usage error: the file decides the roster" || fail "reordered --to accepted (rc=$A)"
 OUT="$(bd "$COMMS" review-route plan --bindings "$BD/b3.json" --phase implement 2>&1)"; A=$?
 [ "$A" = 2 ] && ok "a bound plan takes no routed-plan flags (--phase, --thread)" || fail "bound plan accepted --phase (rc=$A)"
@@ -118,16 +118,16 @@ case "$OUT" in "route-plan v1 agent=codex provider=codex transport=acp-mounted c
 route-plan v1 agent=grok provider=grok "*) [ "$A" = 0 ] && ok "the legacy plan still prints route-plan v1 lines with no access fields" || fail "legacy plan rc=$A" ;; *) fail "legacy plan changed: $OUT" ;; esac
 
 # EVERY LEG'S VERDICT IS PRINTED, and a refusal is exit 1: Basis needs each candidate's answer to choose among them.
-bd_wb "$BD/bmix.json" "$BD_L_CODEX" "$(bj "$BD_L_GEMINI" "d['access']['account']='someone-else'")" "$BD_L_GLM"
+bd_wb "$BD/bmix.json" "$BD_L_CODEX" "$(bj "$BD_L_GLM2" "d['access']['account']='someone-else'")" "$BD_L_GLM"
 OUT="$(bd "$COMMS" review-route plan --bindings "$BD/bmix.json" 2>"$BD/mix.err")"; A=$?
 { [ "$A" = 1 ] && [ "$(sed -n 1p <<<"$OUT")" = "$BD_PL_CODEX" ] && [ "$(sed -n 3p <<<"$OUT")" = "$BD_PL_GLM" ] \
-  && [ "$(sed -n 2p <<<"$OUT" | sed 's/ access_digest=[0-9a-f]* / access_digest=D /')" = "route-plan v2 ref=res-gemini agent=gemini harness=gemini status=refused code=account-mismatch route_id=gemini-api transport=acp provider=google account=metered billing=api credential=env:BD_GEMINI_KEY access_digest=D model=gemini-3.1-pro-preview effort=high model_source=bound effort_source=bound capability=fixed limit_id=- routing=off decision=none phase=- map_version=$BD_MAPV capability_version=1" ]; } \
+  && [ "$(sed -n 2p <<<"$OUT" | sed 's/ access_digest=[0-9a-f]* / access_digest=D /')" = "$(sed 's/ access_digest=[0-9a-f]* / access_digest=D /; s/ status=ok code=- / status=refused code=account-mismatch /' <<<"$BD_PL_GLM2")" ]; } \
   && ok "a plan with one refusing leg still prints all three verdicts (the refused leg shows the CONFIGURED account) and exits 1" || fail "mixed plan (rc=$A): $OUT"
-bd_wb "$BD/blit.json" "$(bj "$BD_L_GEMINI" "d['access']['credential']='canary-literal-sk-0123456789'")"
+bd_wb "$BD/blit.json" "$(bj "$BD_L_GLM2" "d['access']['credential']='canary-literal-sk-0123456789'")"
 OUT="$(bd "$COMMS" review-route plan --bindings "$BD/blit.json" 2>&1)"; A=$?
 { [ "$A" = 1 ] && case "$OUT" in *canary-literal*) false ;; *code=credential-mismatch*) true ;; *) false ;; esac; } \
   && ok "a plan refuses a literal key supplied as the expected credential, naming the code and never the value" || fail "plan echoed or missed a literal credential (rc=$A): $OUT"
-grep -q '^refused gemini account-mismatch expected someone-else, configured metered' "$BD/mix.err" \
+grep -q '^refused glm2 account-mismatch expected someone-else, configured primary' "$BD/mix.err" \
   && ok "the refusal names both sides: what was expected and what is configured" || fail "refusal detail: $(cat "$BD/mix.err")"
 [ "$(bd_tree)" = "$BD_T0" ] && ok "a refusing plan writes nothing either" || fail "refusing plan wrote to the repository"
 
@@ -138,7 +138,7 @@ bd_refuse() {  # <label> <expected codes, sorted, space-terminated> <leg-json> [
   local label="$1" want="$2" leg="$3"; shift 3
   bd_wb "$BD/one.json" "$leg"
   local req err="$BD/one.err"; req="$(bd_req)"
-  OUT="$(bd AX_CWD_LOG="$BD_TL" GM_LOG="$BD_TL" "$@" "$COMMS" panel dispatch --bindings "$BD/one.json" "$req" 2>"$err")"; A=$?
+  OUT="$(bd AX_CWD_LOG="$BD_TL" "$@" "$COMMS" panel dispatch --bindings "$BD/one.json" "$req" 2>"$err")"; A=$?
   { [ "$A" = 1 ] && [ "$(bd_codes "$(cat "$err")")" = "$want" ] && [ -z "$OUT" ] && [ "$(bd_tree | grep -v 'bd-request-')" = "$(grep -v 'bd-request-' <<<"$BD_T0")" ]; } \
     && ok "refused: $label ($want)" || fail "refusal: $label (rc=$A, codes '$(bd_codes "$(cat "$err")")', want '$want'; out: $OUT; $(head -c 300 "$err"))"
 }
@@ -148,10 +148,10 @@ bd_refuse "a wrong hosting provider" "provider-mismatch " "$(bj "$BD_L_CODEX" "d
 bd_refuse "a wrong account" "account-mismatch " "$(bj "$BD_L_CODEX" "d['access']['account']='secondary'")"
 bd_refuse "a wrong billing class" "billing-mismatch " "$(bj "$BD_L_CODEX" "d['access']['billing']='api'")"
 bd_refuse "an API credential expected where the agent is on a subscription" "credential-mismatch " "$(bj "$BD_L_CODEX" "d['access']['credential']='env:BD_KEY_CODEXM_REF'")"
-bd_refuse "no credential expected where the agent is on an API route" "credential-mismatch " "$(bj "$BD_L_GEMINI" "d['access']['credential']=None")"
-bd_refuse "a different credential reference" "credential-mismatch " "$(bj "$BD_L_GEMINI" "d['access']['credential']='env:BD_VENICE_KEY'")"
+bd_refuse "no credential expected where the agent is on an API route" "credential-mismatch " "$(bj "$BD_L_GLM2" "d['access']['credential']=None")"
+bd_refuse "a different credential reference" "credential-mismatch " "$(bj "$BD_L_GLM2" "d['access']['credential']='env:BD_VENICE_OTHER_KEY'")"
 # A LITERAL SECRET PASTED WHERE A REFERENCE BELONGS is refused and never echoed: not on stderr, not on stdout.
-bd_refuse "a literal key where a credential reference belongs" "credential-mismatch " "$(bj "$BD_L_GEMINI" "d['access']['credential']='canary-literal-sk-0123456789'")"
+bd_refuse "a literal key where a credential reference belongs" "credential-mismatch " "$(bj "$BD_L_GLM2" "d['access']['credential']='canary-literal-sk-0123456789'")"
 case "$(cat "$BD/one.err")" in *canary-literal*) fail "dispatch refusal echoed a literal credential" ;; *) ok "a dispatch refusal never echoes a literal credential supplied as the expected reference" ;; esac
 bd_refuse "an incomplete access object (no account)" "access-incomplete " "$(bj "$BD_L_CODEX" "del d['access']['account']")"
 bd_refuse "no access object at all" "access-incomplete " "$(bj "$BD_L_CODEX" "del d['access']")"
@@ -161,8 +161,8 @@ bd_refuse "claude (no applied, attested policy; no access entry)" "agent-unbinda
 BD_REQ_FROM=claude
 bd_refuse "grok (no applied, attested policy; no access entry)" "agent-unbindable no-access-profile " "$(bj "$BD_L_CODEX" "d.update(agent='grok', ref='res-grok')")"
 bd_refuse "a generic ACP profile (consult-only)" "agent-unbindable no-access-profile " "$(bj "$BD_L_GLM" "d.update(agent='gacp', ref='res-gacp')")"
+bd_refuse "gemini (agy runs directly with no ACP session, so nothing mounted over ACP can bind it; no access entry)" "agent-unbindable no-access-profile " "$BD_L_GEMINI"
 bd_refuse "a mailbox leg (nobody drives it)" "agent-unbindable " "$BD_L_CODEX" COMMS_DELIVERY=mailbox
-bd_refuse "a model the runtime cannot serve (disabled in the map)" "model-unservable " "$(bj "$BD_L_GEMINI" "d['model']='gemini-4-pro'")"
 printf '#!/bin/sh\necho "codex-cli 0.154.0"\n' > "$BD/old-codex"; chmod +x "$BD/old-codex"
 bd_refuse "a model newer than the reviewer runtime" "model-unservable " "$(bj "$BD_L_CODEX" "d.update(model='gpt-6-sol', effort='high')")" COMMS_ACP_CODEX_PATH="$BD/old-codex"
 bd_refuse "an effort outside the model's accepted set" "effort-refused " "$(bj "$BD_L_CODEX" "d['effort']='ultra'")"
@@ -172,7 +172,7 @@ bd_refuse "a model the profile does not pin" "model-mismatch " "$(bj "$BD_L_GLM"
 bd_refuse "an environment model pin that differs from the binding" "pin-conflict " "$BD_L_CODEX" COMMS_ACP_CODEX_MODEL=gpt-6.1-sol
 bd_refuse "an environment effort pin that differs from the binding" "pin-conflict " "$BD_L_CODEX" COMMS_ACP_CODEX_EFFORT=high
 bd_refuse "COMMS_REVIEW_MAX (use max) in the dispatching environment" "pin-conflict " "$BD_L_CODEX" COMMS_REVIEW_MAX=1
-bd_refuse "an API credential that is not present" "credential-unavailable " "$BD_L_GEMINI" BD_GEMINI_KEY=
+bd_refuse "an API credential that is not present" "credential-unavailable " "$BD_L_GLM2" BD_VENICE_KEY=
 # THE CONFIGURED TRANSPORT IS CHECKED AGAINST THE ONE THE RUNNER WOULD DRIVE: a `cli` entry the caller also expects as `cli`
 # matches field for field, and would be stamped into a leg this runner reaches over ACP.
 bd_mut access "d['agents']['codex']['transport']='cli'"
@@ -183,8 +183,8 @@ bd_reset
 printf '#!/bin/sh\nexit 1\n' > "$BD/oc-bad"; chmod +x "$BD/oc-bad"
 bd_mut agents "d['agents']['glm']['command']=['$BD/oc-bad']"
 bd_refuse "a custom runtime that exits non-zero though its profile declares the pinned version" "model-unservable " "$BD_L_GLM"
-bd_wb "$BD/badrt.json" "$BD_L_CODEX" "$BD_L_GEMINI" "$BD_L_GLM"
-OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" GM_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/badrt.json" "$(bd_req bd-badrt)" 2>"$BD/badrt.err")"; A=$?
+bd_wb "$BD/badrt.json" "$BD_L_CODEX" "$BD_L_GLM2" "$BD_L_GLM"
+OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/badrt.json" "$(bd_req bd-badrt)" 2>"$BD/badrt.err")"; A=$?
 { [ "$A" = 1 ] && [ -z "$OUT" ] && [ "$(bd_codes "$(cat "$BD/badrt.err")")" = "model-unservable " ] \
   && [ "$(bd_tree | grep -v 'bd-request-')" = "$(grep -v 'bd-request-' <<<"$BD_T0")" ] && [ ! -e "$BD_TL" ]; } \
   && ok "a three-leg dispatch whose LAST (custom) leg's runtime cannot run is refused whole: no snapshot, event, leg file or provider launch" || fail "bad custom runtime panel (rc=$A): $OUT $(head -c 300 "$BD/badrt.err")"
@@ -200,47 +200,40 @@ bd_refuse "a subscription codex leg whose saved login is in API-key mode" "auth-
 rm -f "$BD_HOME/.codex/auth.json"
 bd_refuse "a subscription codex leg with no saved login" "auth-login-missing " "$BD_L_CODEX"
 cp "$BD/codex-auth.chatgpt" "$BD_HOME/.codex/auth.json"
-bd_mut access "d['agents']['gemini'].update(billing='subscription', credential=None, route_id='gemini-sub')"
-printf '{"security":{"auth":{"selectedType":"gemini-api-key"}}}\n' > "$BD_HOME/.gemini/settings.json"
-bd_refuse "a subscription gemini leg while the operator's selected auth type is an API key" "auth-selected-type-conflict " "$BD_L_GEMINI_SUB"
-printf '{}\n' > "$BD_HOME/.gemini/settings.json"; mv "$BD_HOME/.gemini/oauth_creds.json" "$BD/gemini-oauth.saved"
-bd_refuse "a subscription gemini leg with no saved login and no OAuth selection" "auth-login-missing " "$BD_L_GEMINI_SUB"
-mv "$BD/gemini-oauth.saved" "$BD_HOME/.gemini/oauth_creds.json"
-printf '{"security":{"auth":{"selectedType":"oauth-personal"}}}\n' > "$BD_HOME/.gemini/settings.json"
 bd_reset
 
 # NO PARTIAL PANEL. Two good legs and a bad third: nothing was snapshotted, logged, indexed or sent, and no provider
 # stub was ever invoked.
-bd_wb "$BD/partial.json" "$BD_L_CODEX" "$BD_L_GEMINI" "$(bj "$BD_L_GLM" "d['access']['account']='nope'")"
+bd_wb "$BD/partial.json" "$BD_L_CODEX" "$BD_L_GLM2" "$(bj "$BD_L_GLM" "d['access']['account']='nope'")"
 PN_REQ="$(bd_req bd-partial)"
-OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" GM_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/partial.json" "$PN_REQ" 2>"$BD/partial.err")"; A=$?
+OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/partial.json" "$PN_REQ" 2>"$BD/partial.err")"; A=$?
 { [ "$A" = 1 ] && [ -z "$OUT" ] && [ "$(bd_codes "$(cat "$BD/partial.err")")" = "account-mismatch " ]; } \
   && ok "a three-leg dispatch whose last leg is bad is refused as a whole, naming the bad leg" || fail "partial panel (rc=$A): $OUT $(cat "$BD/partial.err")"
 [ "$(bd_tree | grep -v 'bd-request-')" = "$(grep -v 'bd-request-' <<<"$BD_T0")" ] \
   && ok "it left no snapshot ref, event, index row, attempts marker, leg file or run directory (directory comparison)" || fail "a refused panel wrote: $(diff <(grep -v 'bd-request-' <<<"$BD_T0") <(bd_tree | grep -v 'bd-request-') | head -6 | tr '\n' ' ')"
-[ ! -e "$BD_TL" ] && [ "$(bd_run_dirs)" = 0 ] && ok "and no provider stub (acpx, gemini) was invoked for any of the three legs" || fail "a stub ran: $(cat "$BD_TL" 2>/dev/null | head -3)"
+[ ! -e "$BD_TL" ] && [ "$(bd_run_dirs)" = 0 ] && ok "and no provider stub (acpx, agy) was invoked for any of the three legs" || fail "a stub ran: $(cat "$BD_TL" 2>/dev/null | head -3)"
 [ -z "$(git -C "$BD_REPO" for-each-ref refs/agent-comms)" ] && [ ! -e "$BD_REPO/.comms/events.tsv" ] \
   && ok "the artifact was never retained and the coordinator log was never created" || fail "snapshot refs or an event log exist after a refusal"
 # A final OpenCode leg whose connection reads a variable its credential mapping never supplies would pass every
 # other check, then fail at launch after the siblings started: it is judged before anything is written.
 bd_mut agents "d['agents']['glm']['credentials']={'UNUSED_KEY': {'env': 'BD_VENICE_KEY'}}"
-bd_wb "$BD/conn.json" "$BD_L_CODEX" "$BD_L_GEMINI" "$BD_L_GLM"
-OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" GM_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/conn.json" "$(bd_req bd-conn)" 2>"$BD/conn.err")"; A=$?
+bd_wb "$BD/conn.json" "$BD_L_CODEX" "$BD_L_GLM2" "$BD_L_GLM"
+OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/conn.json" "$(bd_req bd-conn)" 2>"$BD/conn.err")"; A=$?
 { [ "$A" = 1 ] && [ -z "$OUT" ] && [ "$(bd_codes "$(cat "$BD/conn.err")")" = "capability-unsupported " ] && [ ! -e "$BD_TL" ] && [ "$(bd_run_dirs)" = 0 ] \
   && [ "$(bd_tree | grep -v 'bd-request-')" = "$(grep -v 'bd-request-' <<<"$BD_T0")" ]; } \
   && ok "a final OpenCode leg whose connection key variable its credential mapping does not supply refuses the whole panel before any write" || fail "connection key (rc=$A): $OUT $(cat "$BD/conn.err")"
 bd_mut agents "d['agents']['glm']['credentials']={}"
 bd_mut access "d['agents']['glm'].update(route_id='venice-local', billing='local', credential=None)"
-bd_wb "$BD/local.json" "$BD_L_CODEX" "$BD_L_GEMINI" "$(bj "$BD_L_GLM" "d['route_id']='venice-local'; d['access'].update(billing='local', credential=None)")"
-OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" GM_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/local.json" "$(bd_req bd-local)" 2>"$BD/local.err")"; A=$?
+bd_wb "$BD/local.json" "$BD_L_CODEX" "$BD_L_GLM2" "$(bj "$BD_L_GLM" "d['route_id']='venice-local'; d['access'].update(billing='local', credential=None)")"
+OUT="$(bd COMMS_WAIT=1 AX_CWD_LOG="$BD_TL" "$COMMS" panel dispatch --bindings "$BD/local.json" "$(bd_req bd-local)" 2>"$BD/local.err")"; A=$?
 { [ "$A" = 1 ] && [ -z "$OUT" ] && [ "$(bd_codes "$(cat "$BD/local.err")")" = "capability-unsupported " ] && [ ! -e "$BD_TL" ] && [ "$(bd_run_dirs)" = 0 ]; } \
   && ok "a final OpenCode leg with a connection and no credential mapping (a local route) refuses the whole panel before any write" || fail "local connection (rc=$A): $OUT $(cat "$BD/local.err")"
 bd_reset
 # An OPTIONAL leg failing validation refuses the dispatch too: which legs exist is the caller's decision, so this
 # tool never drops one.
-bd_wb "$BD/opt.json" "$BD_L_CODEX" "$(bj "$BD_L_GEMINI" "d['model']='gemini-4-pro'")"
+bd_wb "$BD/opt.json" "$BD_L_CODEX" "$(bj "$BD_L_GLM2" "d['model']='venice/some-other-model'")"
 OUT="$(bd "$COMMS" panel dispatch --bindings "$BD/opt.json" "$(bd_req)" 2>&1)"; A=$?
-{ [ "$A" = 1 ] && grep -q '^refused gemini model-unservable' <<<"$OUT" && [ "$(bd_run_dirs)" = 0 ]; } \
+{ [ "$A" = 1 ] && grep -q '^refused glm2 model-mismatch' <<<"$OUT" && [ "$(bd_run_dirs)" = 0 ]; } \
   && ok "an optional leg that cannot run refuses the whole dispatch (the gate never starts); agent-comms never drops a leg itself" || fail "optional leg (rc=$A): $OUT"
 
 # MALFORMED BINDINGS are usage errors (exit 2), and write nothing.
@@ -343,12 +336,12 @@ OUT="$(bd "$BD_IC" review-route capability 2>&1)"
   && ok "the INSTALLED copy answers review-route capability" || fail "installed capability: $OUT"
 OUT="$(bd "$BD_IC" review-route plan --bindings "$BD/b3.json" 2>&1)"; A=$?
 [ "$A" = 0 ] && [ "$OUT" = "$BD_PL_CODEX
-$BD_PL_GEMINI
+$BD_PL_GLM2
 $BD_PL_GLM" ] && ok "the INSTALLED copy plans the same three legs identically (policy map and credential table installed beside it)" || fail "installed plan (rc=$A): $OUT"
 bd_wb "$BD/inst-bad.json" "$(bj "$BD_L_CODEX" "d['access']['account']='nope'")"
 OUT="$(bd "$BD_IC" panel dispatch --bindings "$BD/inst-bad.json" "$(bd_req)" 2>&1)"; A=$?
 { [ "$A" = 1 ] && grep -q '^refused codex account-mismatch' <<<"$OUT"; } && ok "the INSTALLED copy refuses a bound dispatch with the leg's code" || fail "installed refusal (rc=$A): $OUT"
-OUT="$(bd "$BD_IC" agents --access gemini 2>&1)"; [ "$(sed -n 's/.*access_digest=//p' <<<"$OUT")" = "$BD_DG_GEMINI" ] && ok "the INSTALLED copy reads access.json: agents --access prints the same digest" || fail "installed agents --access: $OUT"
+OUT="$(bd "$BD_IC" agents --access glm2 2>&1)"; [ "$(sed -n 's/.*access_digest=//p' <<<"$OUT")" = "$BD_DG_GLM2" ] && ok "the INSTALLED copy reads access.json: agents --access prints the same digest" || fail "installed agents --access: $OUT"
 
 section "binding: contract tests (python: scrub set, environment, stamp, quota, auth-route read-back)"
 BD_UNIT_RC=0

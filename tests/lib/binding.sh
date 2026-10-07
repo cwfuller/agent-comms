@@ -2,10 +2,10 @@
 # every provider is a stub, every credential a canary string, and every home is test-owned. Sourced by each group
 # and run once (`fixture_binding`), so the two groups share one definition and own separate repositories.
 fixture_binding() {
-fixture_agy   # acpx and agy stubs (AXB, AGB); fixture_acp underneath
+fixture_agy   # acpx and agy stubs (AXB, AGB); fixture_acp underneath (gemini is no longer bindable: agy is run directly)
 BD="$WORK/bind"; mkdir -p "$BD"
 BD_AH="$BD/ah"; mkdir -p "$BD_AH"                    # the operator's agent-comms home: agents.json, access.json
-BD_HOME="$BD/home"; mkdir -p "$BD_HOME/.acpx/sessions" "$BD_HOME/.acpx/queues" "$BD_HOME/.codex" "$BD_HOME/.gemini"
+BD_HOME="$BD/home"; mkdir -p "$BD_HOME/.acpx/sessions" "$BD_HOME/.acpx/queues" "$BD_HOME/.codex"
 : > "$BD_HOME/.acpx-test-store"                        # the stubs write session records only into a store the suite marked
 BD_MBASE="$BD/mbase"; mkdir -p "$BD_MBASE"; BD_MBASE="$(cd "$BD_MBASE" && pwd -P)"
 BD_REPO="$BD/repo"; mkdir -p "$BD_REPO"; BD_REPO="$(cd "$BD_REPO" && pwd -P)"
@@ -17,12 +17,10 @@ mkdir -p "$BD_REPO/.comms"
 printf 'agents = claude codex grok gemini glm glm2 glmx gacp\ndefault-target = codex\n' > "$BD_REPO/.comms/config"
 # THE REVIEWERS' CANARIES. Every credential below is a recognisable string; each assertion about what reaches a
 # provider process looks for exactly these.
-BD_KEY_GEMINI="canary-gemini-key-0001"; BD_KEY_VENICE="canary-venice-key-0002"; BD_KEY_CODEXM="canary-codex-metered-0003"
+BD_KEY_VENICE="canary-venice-key-0002"; BD_KEY_CODEXM="canary-codex-metered-0003"
 BD_KEY_OTHER="canary-unconfigured-pattern-0004"; BD_KEY_TABLE="canary-table-listed-0005"; BD_KEY_PLAIN="canary-configured-plain-0006"
-# A saved ChatGPT login for codex, an OAuth login for gemini: observable by presence and mode, never printed.
+# A saved ChatGPT login for codex: observable by presence and mode, never printed.
 printf '{"auth_mode":"chatgpt","tokens":{"id_token":"canary-codex-login-0007"}}\n' > "$BD_HOME/.codex/auth.json"
-printf '{"refresh_token":"canary-gemini-login-0008"}\n' > "$BD_HOME/.gemini/oauth_creds.json"
-printf '{"security":{"auth":{"selectedType":"oauth-personal"}}}\n' > "$BD_HOME/.gemini/settings.json"
 # A stand-in OpenCode runtime for the custom (Venice-style) profiles: it reports the pinned version, records
 # the environment it was launched with, and exits.
 BD_OC="$BD/opencode"
@@ -40,7 +38,6 @@ chmod +x "$BD_OC"
 cat > "$BD/access.base.json" <<'JSON'
 {"version": 1, "agents": {
   "codex":  {"route_id": "codex-subscription", "transport": "acp", "provider": "openai", "account": "primary", "billing": "subscription", "credential": null},
-  "gemini": {"route_id": "gemini-api", "transport": "acp", "provider": "google", "account": "metered", "billing": "api", "credential": "env:BD_GEMINI_KEY"},
   "glm":    {"route_id": "venice-api", "transport": "acp", "provider": "venice", "account": "primary", "billing": "api", "credential": "env:BD_VENICE_KEY"},
   "glm2":   {"route_id": "venice-api", "transport": "acp", "provider": "venice", "account": "primary", "billing": "api", "credential": "env:BD_VENICE_KEY"},
   "glmx":   {"route_id": "venice-other", "transport": "acp", "provider": "venice", "account": "other", "billing": "api", "credential": "env:BD_VENICE_OTHER_KEY"}}}
@@ -71,10 +68,10 @@ bd_reset
 # Run comms.sh (or any command) in the binding repo with hermetic homes and the acp transport: a bound leg
 # is a mounted ACP turn, so a mailbox or headless delivery is unbindable by definition. Leading NAME=value
 # words are extra environment.
-bd() { (cd "$BD_REPO" && env AGENT_COMMS_HOME="$BD_AH" HOME="$BD_HOME" CODEX_HOME="$BD_HOME/.codex" GEMINI_CLI_HOME="$BD_HOME" \
+bd() { (cd "$BD_REPO" && env AGENT_COMMS_HOME="$BD_AH" HOME="$BD_HOME" CODEX_HOME="$BD_HOME/.codex" \
           COMMS_DELIVERY=acp COMMS_SELF=claude COMMS_MOUNT_BASE="$BD_MBASE" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
           COMMS_RUNPHASE_OWNER_WAIT_SECS=3 PATH="$AGB:$AXB:$PATH" \
-          BD_GEMINI_KEY="$BD_KEY_GEMINI" BD_VENICE_KEY="$BD_KEY_VENICE" BD_VENICE_OTHER_KEY="$BD_KEY_VENICE" "$@"); }
+          BD_VENICE_KEY="$BD_KEY_VENICE" BD_VENICE_OTHER_KEY="$BD_KEY_VENICE" "$@"); }
 bj() { python3 -c 'import json,sys; d=json.loads(sys.argv[1]); exec(sys.argv[2]); print(json.dumps(d))' "$1" "$2"; }   # edit a leg's JSON
 bd_wb() {  # <file> <leg-json>... — a leg-bindings file
   python3 - "$1" "${@:2}" <<'PY'
@@ -83,8 +80,12 @@ json.dump({"schema": "leg-bindings/1", "legs": [json.loads(a) for a in sys.argv[
 PY
 }
 BD_L_CODEX='{"ref":"res-codex","agent":"codex","role":"gate","requirement":"required","route_id":"codex-subscription","model":"gpt-6-luna","effort":"low","access":{"transport":"acp","provider":"openai","account":"primary","billing":"subscription","credential":null}}'
-BD_L_GEMINI='{"ref":"res-gemini","agent":"gemini","role":"extra","requirement":"optional","route_id":"gemini-api","model":"gemini-3.1-pro-preview","effort":"high","access":{"transport":"acp","provider":"google","account":"metered","billing":"api","credential":"env:BD_GEMINI_KEY"}}'
 BD_L_GLM='{"ref":"res-glm","agent":"glm","role":"extra","requirement":"optional","route_id":"venice-api","model":"venice/glm-model-a","effort":null,"access":{"transport":"acp","provider":"venice","account":"primary","billing":"api","credential":"env:BD_VENICE_KEY"}}'
+# A second OpenCode profile on the same route: the "extra, optional" API leg of the multi-leg cases (gemini cannot be one:
+# it runs agy directly and a bound leg runs mounted over ACP only).
+BD_L_GLM2='{"ref":"res-glm2","agent":"glm2","role":"extra","requirement":"optional","route_id":"venice-api","model":"venice/glm-model-b","effort":null,"access":{"transport":"acp","provider":"venice","account":"primary","billing":"api","credential":"env:BD_VENICE_KEY"}}'
+# gemini, bound anyway: refused as unbindable whatever it is bound to.
+BD_L_GEMINI='{"ref":"res-gemini","agent":"gemini","role":"extra","requirement":"optional","route_id":"gemini-api","model":"gemini-3.1-pro","effort":"high","access":{"transport":"acp","provider":"google","account":"metered","billing":"api","credential":"env:BD_GEMINI_KEY"}}'
 # The whole repository, contents, refs and mailbox included: any file, event, index row or snapshot ref a verb
 # creates, removes or rewrites shows here.
 bd_tree() { ( cd "$BD_REPO" && { find . -path ./.git -prune -o -print | LC_ALL=C sort; find . -path ./.git -prune -o -type f -exec shasum {} + | LC_ALL=C sort
@@ -128,12 +129,11 @@ print("<null>" if d is None else (json.dumps(d,sort_keys=True,separators=(",",":
 bd_run_dirs() { find "$BD_REPO/.comms/logs" -name result.json 2>/dev/null | wc -l | tr -d ' '; }
 BD_MAPV="$(awk -F'\t' '$1=="version"{print $2; exit}' "$REPO/helpers/policy-map.tsv")"
 bd_dig() { bd "$COMMS" agents --access "$1" | sed -n 's/.* access_digest=//p'; }
-BD_DG_CODEX="$(bd_dig codex)"; BD_DG_GEMINI="$(bd_dig gemini)"; BD_DG_GLM="$(bd_dig glm)"
+BD_DG_CODEX="$(bd_dig codex)"; BD_DG_GLM="$(bd_dig glm)"; BD_DG_GLM2="$(bd_dig glm2)"
 BD_PL_CODEX="route-plan v2 ref=res-codex agent=codex harness=codex status=ok code=- route_id=codex-subscription transport=acp provider=openai account=primary billing=subscription credential=- access_digest=$BD_DG_CODEX model=gpt-6-luna effort=low model_source=bound effort_source=bound capability=eligible limit_id=- routing=off decision=none phase=- map_version=$BD_MAPV capability_version=1"
-BD_PL_GEMINI="route-plan v2 ref=res-gemini agent=gemini harness=gemini status=ok code=- route_id=gemini-api transport=acp provider=google account=metered billing=api credential=env:BD_GEMINI_KEY access_digest=$BD_DG_GEMINI model=gemini-3.1-pro-preview effort=high model_source=bound effort_source=bound capability=fixed limit_id=- routing=off decision=none phase=- map_version=$BD_MAPV capability_version=1"
+BD_PL_GLM2="$(sed 's/ref=res-glm agent=glm harness=glm /ref=res-glm2 agent=glm2 harness=glm2 /; s/model=venice\/glm-model-a/model=venice\/glm-model-b/' <<<"$BD_PL_GLM")"
 BD_PL_GLM="route-plan v2 ref=res-glm agent=glm harness=glm status=ok code=- route_id=venice-api transport=acp provider=venice account=primary billing=api credential=env:BD_VENICE_KEY access_digest=$BD_DG_GLM model=venice/glm-model-a effort=- model_source=bound effort_source=bound capability=profile limit_id=n/a routing=off decision=none phase=- map_version=$BD_MAPV capability_version=1"
-bd_wb "$BD/b3.json" "$BD_L_CODEX" "$BD_L_GEMINI" "$BD_L_GLM"
+bd_wb "$BD/b3.json" "$BD_L_CODEX" "$BD_L_GLM2" "$BD_L_GLM"
 BD_T0="$(bd_tree)"
 BD_TL="$BD/test-legs.log"; rm -f "$BD_TL"
-BD_L_GEMINI_SUB="$(bj "$BD_L_GEMINI" "d['route_id']='gemini-sub'; d['access'].update(billing='subscription', credential=None)")"
 }
