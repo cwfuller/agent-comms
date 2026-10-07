@@ -2985,6 +2985,26 @@ agy_refuse() {
   unmount_artifact; trap - EXIT
 }
 
+# agy_change_block — the diff the reviewer cannot compute itself: agy's plan mode refuses every command, git
+# included, so the parent hands over `git diff <base> <artifact>` (stat, then the patch bounded by
+# COMMS_AGY_DIFF_BYTES, default 300000) from the main repo, where the artifact commit is reachable. Written to a
+# file first and cut with head -c on the FILE: an early-exiting reader on a pipe is the SIGPIPE shape banned here.
+agy_change_block() {
+  local base="${mount_base:-}" bytes
+  [ -n "$base" ] && [ -n "${msg_artifact:-}" ] || return 0
+  bytes="$(sane_secs "${COMMS_AGY_DIFF_BYTES:-300000}")"; [ -n "$bytes" ] || bytes=300000
+  mount_git -C "$main_root" diff --no-ext-diff --no-color --stat=160 "$base" "$msg_artifact" > "$run_dir/change.stat" 2>>"$run_dir/runner.log" || return 0
+  mount_git -C "$main_root" diff --no-ext-diff --no-color "$base" "$msg_artifact" > "$run_dir/change.diff" 2>>"$run_dir/runner.log" || return 0
+  printf '\n----- BEGIN CHANGE UNDER REVIEW (git diff %.12s %.12s, computed by the trusted parent) -----\n' "$base" "$msg_artifact"
+  cat "$run_dir/change.stat"
+  printf '\n'
+  head -c "$bytes" "$run_dir/change.diff"
+  if [ "$(wc -c < "$run_dir/change.diff")" -gt "$bytes" ]; then
+    printf '\n[the patch continues past %s bytes and is cut here: read the remaining files directly]\n' "$bytes"
+  fi
+  printf '\n----- END CHANGE UNDER REVIEW -----\n'
+}
+
 # agy_exec <input> <events-out> <stderr-out> <secs> — one agy turn on the prepared launch vector (agy_cmd,
 # child_env, workdir by dynamic scope): the prompt on stdin, stream-json on stdout, diagnostics apart. Its own
 # process group, published as codex_pid so the EXIT trap reaps it. Returns agy's status, or 124 at the deadline.
@@ -3119,6 +3139,8 @@ run_agy_turn() {
       return 1
     fi
   fi
+  # The change itself rides in the prompt of a mounted turn (see agy_change_block).
+  if [ -n "$mount_dir" ]; then agy_change_block >> "$run_dir/prompt.md"; fi
   python3 "$stream" input "$run_dir/prompt.md" > "$run_dir/agy-input.ndjson" 2>>"$run_dir/runner.log" \
     || { agy_refuse policy-unapplied "the prompt could not be encoded for agy"; return 1; }
 
@@ -3192,6 +3214,7 @@ run_agy_turn() {
     else
       status=failed
       note="${GROK_BROKER_NOTE:-gemini broker failed}"
+      [ "$f_denied" = - ] || note="$note (agy refused an action headless mode cannot approve: $f_denied — a refused command ends an agy turn with no answer)"
     fi
   fi
   update_thread_state "$msg_thread" "$status" "$sid" "$sfield" || true
@@ -3843,8 +3866,12 @@ cmd_run() {
 RUNTIME NOTE (this reviewer runs in agy's plan mode, non-interactively): put your COMPLETE answer — for a
 review, everything from the VERDICT line to the last finding — in your FINAL reply text. Do not write it
 into a plan, walkthrough or any other file, do not ask for approval, and do not offer to proceed: nobody
-can approve, and nothing reads a file you write. Reading files and read-only git commands are allowed;
-every other action is refused.
+can approve, and nothing reads a file you write.
+
+YOU CANNOT RUN COMMANDS HERE — no git, no shell, no tests. A command request is refused and ENDS YOUR TURN
+WITH NO ANSWER, so never make one, whatever the instructions above say about read-only git commands.
+Your working directory is the tree under review; read it with your file-viewing, listing and search tools.
+Where this prompt carries a CHANGE UNDER REVIEW section, the trusted parent computed that diff for you.
 AGYNOTE
     run_agy_turn
     return
