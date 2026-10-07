@@ -390,7 +390,7 @@ if [ "${COMMS_TEST_AGY_LIVE:-}" = 1 ]; then
       "$RP" run --message "$AG_LMSG" --dir "$AG_LV" --provider gemini --timeout-secs 900 ) >"$AGT/live.out" 2>&1
   { [ "$(ag_res "$AG_LV" status)" = completed ] && [ "$(ag_tsv "$AG_LV" observed_model)" = gemini-3.1-pro ] && [ "$(ag_tsv "$AG_LV" observed_effort)" = high ]; } \
     && ok "LIVE: a mounted review through the real agy completes, canary included, on the attested pair" \
-    || fail "LIVE agy review: $(tr '\n' ' ' < "$AG_LV/result.json" 2>/dev/null | cut -c1-400) | $(tail -5 "$AGT/live.out")"
+    || { rm -rf /tmp/ag-live-fail; cp -R "$AG_LV" /tmp/ag-live-fail; fail "LIVE agy review: $(tr '\n' ' ' < "$AG_LV/result.json" 2>/dev/null | cut -c1-400) | $(tail -5 "$AGT/live.out")"; }
 else
   skip agy-live-off "LIVE agy review (set COMMS_TEST_AGY_LIVE=1 from a logged-in session to run it)"
 fi
