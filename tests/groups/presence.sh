@@ -71,11 +71,11 @@ PW_SELF=alpha-c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7
 printf '{\n  "name": "fgnhost", "instance": "%s", "state": "working", "host": "old-mac.local", "pid": "67476", "pid_started": "x", "last_heartbeat": "2026-10-01T22:29:43Z", "last_heartbeat_epoch": "1"\n}\n' "${PW_FGN##*-}" > "$PW_SD/$PW_FGN.json"
 printf '{\n  "name": "nopid", "instance": "%s", "state": "working", "host": "%s", "pid": "", "last_heartbeat": "2026-10-01T22:30:00Z", "last_heartbeat_epoch": "1"\n}\n' "${PW_NOP##*-}" "$(hostname)" > "$PW_SD/$PW_NOP.json"
 PW_HO="$(run_pw presence others --name alpha --instance "$PW_I1" 2>&1 >/dev/null)"
-printf '%s\n' "$PW_HO" | grep -F "presence: $PW_FGN" | grep -qF "host=old-mac.local last_heartbeat=2026-10-01T22:29:43Z" \
-  && printf '%s\n' "$PW_HO" | grep -F "presence: $PW_FGN" | grep -qF "$COMMS presence expire --force fgnhost" \
+printf '%s\n' "$PW_HO" | grep -F "presence: $PW_FGN" | grep_full -qF "host=old-mac.local last_heartbeat=2026-10-01T22:29:43Z" \
+  && printf '%s\n' "$PW_HO" | grep -F "presence: $PW_FGN" | grep_full -qF "$COMMS presence expire --force fgnhost" \
   && ok "others names a foreign-host record with its host, heartbeat and the exact expire --force line" || fail "others foreign hint: $PW_HO"
-printf '%s\n' "$PW_HO" | grep -F "presence: $PW_NOP" | grep -qF "last_heartbeat=2026-10-01T22:30:00Z (no pid recorded)" \
-  && printf '%s\n' "$PW_HO" | grep -F "presence: $PW_NOP" | grep -qF "$COMMS presence expire --force nopid" \
+printf '%s\n' "$PW_HO" | grep -F "presence: $PW_NOP" | grep_full -qF "last_heartbeat=2026-10-01T22:30:00Z (no pid recorded)" \
+  && printf '%s\n' "$PW_HO" | grep -F "presence: $PW_NOP" | grep_full -qF "$COMMS presence expire --force nopid" \
   && ok "others names a pid-less record with its heartbeat and the exact expire --force line" || fail "others pid-less hint: $PW_HO"
 ! printf '%s\n' "$PW_HO" | grep -q "WARNING" \
   && ok "no own-name warning when the record's name is not the caller's" || fail "spurious own-name warning"
@@ -83,8 +83,8 @@ PW_HOUT="$(run_pw presence others --name alpha --instance "$PW_I1" 2>/dev/null)"
 ! printf '%s\n' "$PW_HOUT" | grep -q '^presence:' && printf '%s\n' "$PW_HOUT" | grep -q '^peer: fgnhost-9a9a9a9a ' \
   && ok "the hint is on stderr: stdout keeps only the peer: rows" || fail "hint leaked to stdout: $PW_HOUT"
 PW_HC="$(run_pw presence claim --name omega 2>&1 >/dev/null)"
-printf '%s\n' "$PW_HC" | grep -F "presence: $PW_FGN" | grep -qF "presence expire --force fgnhost" \
-  && printf '%s\n' "$PW_HC" | grep -F "presence: $PW_NOP" | grep -qF "presence expire --force nopid" \
+printf '%s\n' "$PW_HC" | grep -F "presence: $PW_FGN" | grep_full -qF "presence expire --force fgnhost" \
+  && printf '%s\n' "$PW_HC" | grep -F "presence: $PW_NOP" | grep_full -qF "presence expire --force nopid" \
   && ok "claim names both kinds of record and prints their expire --force lines" || fail "claim hints: $PW_HC"
 printf '{\n  "name": "alpha", "instance": "%s", "state": "working", "host": "old-mac.local", "pid": "67476", "pid_started": "x", "last_heartbeat": "2026-10-01T22:29:43Z", "last_heartbeat_epoch": "1"\n}\n' "${PW_SELF##*-}" > "$PW_SD/$PW_SELF.json"
 PW_HS="$(run_pw presence others --name alpha --instance "$PW_I1" 2>&1 >/dev/null | grep -F "presence: $PW_SELF")"

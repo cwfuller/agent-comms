@@ -108,7 +108,7 @@ working only if that setting is recreated — which is the wrong fix on macOS. O
    retire` treat it as an ambiguous peer and stop at it, and plain `presence expire` never reaps it.
    In each repository, list them with `grep -l '"host": "<old-hostname>"' .comms/sessions/*.json`
    (the old hostname is what `hostname` printed there), check each one's `last_heartbeat`, then
-   force-expire it by name: `helpers/comms.sh presence expire --force <name>`, where `<name>` is the
+   force-expire it by name: `comms.sh presence expire --force <name>` (`<repo>/.agent-comms/comms.sh` or `~/.agent-comms/comms.sh`), where `<name>` is the
    file name without the trailing `-<instance>.json`. `claim`, `others` and the `worktree retire`
    refusal print that exact line for the record they stop at. `--force` removes every record with that
    exact name, so run it only for sessions that are gone.
