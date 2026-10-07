@@ -3202,21 +3202,21 @@ run_agy_turn() {
   else
     # POST-TURN POLICY ATTESTATION: the review's own init event must name the declared pair. Last gate before
     # publication; a wrong-depth review is withheld rather than published and flagged.
-    local att_out att_eff att_mod att_msg=""
-    att_out="$(python3 "$stream" attest "$run_dir/events.ndjson" 2>>"$run_dir/runner.log")" || ar=21
-    att_eff="$(printf '%s' "$att_out" | cut -f1)"; att_mod="$(printf '%s' "$att_out" | cut -f2)"
+    local agy_att agy_eff agy_mod agy_msg=""
+    agy_att="$(python3 "$stream" attest "$run_dir/events.ndjson" 2>>"$run_dir/runner.log")" || ar=21
+    agy_eff="$(printf '%s' "$agy_att" | cut -f1)"; agy_mod="$(printf '%s' "$agy_att" | cut -f2)"
     if [ "$ar" = 0 ]; then
-      if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then ar=22; att_msg="the resolved policy record changed during the turn"
-      else att_msg="$("$acp_sh" policy-attest gemini "$att_eff" "$att_mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || ar=$?; fi
+      if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then ar=22; agy_msg="the resolved policy record changed during the turn"
+      else agy_msg="$("$acp_sh" policy-attest gemini "$agy_eff" "$agy_mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || ar=$?; fi
     fi
-    turn_observe "$run_dir" "$att_eff" "$att_mod" "" "${sid:-}" "$run_dir/events.ndjson" "" "" "" "$([ -n "$att_mod" ] && printf 'agy-init-event')"
+    turn_observe "$run_dir" "$agy_eff" "$agy_mod" "" "${sid:-}" "$run_dir/events.ndjson" "" "" "" "$([ -n "$agy_mod" ] && printf 'agy-init-event')"
     if [ "$ar" != 0 ]; then
-      printf 'policy attestation: rc=%s %s\n' "$ar" "$att_msg" >>"$run_dir/runner.log"
-      if [ "$ar" = 20 ]; then agy_refuse policy-unapplied "the review turn did not run the declared model/effort policy ($att_msg) — refusing to publish a review of the wrong depth"
-      else agy_refuse policy-unapplied "could not attest the model/effort the review turn actually ran (status $ar${att_msg:+: $att_msg}) — refusing to publish a review of unknown depth"; fi
+      printf 'policy attestation: rc=%s %s\n' "$ar" "$agy_msg" >>"$run_dir/runner.log"
+      if [ "$ar" = 20 ]; then agy_refuse policy-unapplied "agy ran a different model/effort than the declared policy ($agy_msg) — refusing to publish a review of the wrong depth"
+      else agy_refuse policy-unapplied "could not attest the model/effort the review turn actually ran (status $ar${agy_msg:+: $agy_msg}) — refusing to publish a review of unknown depth"; fi
       return 1
     fi
-    printf 'policy attested: %s\n' "$att_msg" >>"$run_dir/runner.log"
+    printf 'policy attested: %s\n' "$agy_msg" >>"$run_dir/runner.log"
     if broker_extract_stream "$run_dir" gemini && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then :
     else
       status=failed

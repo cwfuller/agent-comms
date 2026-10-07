@@ -29,8 +29,9 @@ unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
 # handle. Inherited, it would make every claim below record a pid on a developer's
 # machine and none in CI — the corpus would describe a different system in each. The
 # section that tests adoption sets it explicitly per invocation. (Same class as the
-# scrub above.)
-unset CLAUDE_PID COMMS_PRESENCE_PID COMMS_SELF GROK_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT CODEX_SANDBOX CODEX_THREAD_ID 2>/dev/null || true
+# scrub above.) CLAUDE_CONFIG_DIR joins them: an operator's config home, inherited, moves the claude
+# transcript root the usage collector reads away from the suite's own HOME, so a mounted claude leg reads usage null.
+unset CLAUDE_CONFIG_DIR CLAUDE_PID COMMS_PRESENCE_PID COMMS_SELF GROK_AGENT CLAUDECODE CLAUDE_CODE_ENTRYPOINT CODEX_SANDBOX CODEX_THREAD_ID 2>/dev/null || true
 # THE REVIEW-TURN MARKER, for the same reason: a suite run from INSIDE a reviewer turn (a codex
 # reviewer running this corpus) inherits it, and `whoami` would then refuse every driver fixture.
 # The identity section sets it explicitly per invocation.
