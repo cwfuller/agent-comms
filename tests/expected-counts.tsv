@@ -1,5 +1,6 @@
 total	3291
 skip_ok	zsh-absent
+skip_ok	agy-live-off
 skip_ok	group-no-secondary
 skip_ok	acl-report
 skip_ok	acl-xattr-fixture

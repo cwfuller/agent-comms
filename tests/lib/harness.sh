@@ -210,6 +210,11 @@ skip() { # skip <id> <desc> — permitted, CONDITION-BOUND, and single-use
         0) ;;
         *) fail "$2 (skip id 'group-no-secondary': probe state is '${GRP_PRESERVE_OK:-unrun}', not a confirmed failure)"; return ;;
       esac ;;
+    # The opt-in live agy review: cashable only where the operator has not switched it on.
+    agy-live-off)
+      if [ "${COMMS_TEST_AGY_LIVE:-}" = 1 ]; then
+        fail "$2 (skip id 'agy-live-off' claimed, but COMMS_TEST_AGY_LIVE=1 asks for the live run)"; return
+      fi ;;
     acl-*)
       case "${ACL_PROBE_OK:-unrun}" in
         0) ;;
