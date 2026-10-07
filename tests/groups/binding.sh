@@ -289,7 +289,7 @@ OUT="$(bd "$COMMS" panel dispatch --bindings "$BD/fam6.json" "$(bd_req)" 2>&1)";
 section "binding: retained policy records stay readable (versions 1 and 2) and a custom profile binds through no map row"
 # RETAINED RECORDS. A version-1 policy record written before an upgrade is read after it: provider-config, policy and route-view.
 AP="$REPO/helpers/acp.sh"
-bda() { (cd "$BD_REPO" && env AGENT_COMMS_HOME="$BD_AH" HOME="$BD_HOME" PATH="$GMB:$AXB:$PATH" "$@"); }
+bda() { (cd "$BD_REPO" && env AGENT_COMMS_HOME="$BD_AH" HOME="$BD_HOME" PATH="$AGB:$AXB:$PATH" "$@"); }
 bda "$AP" resolve codex --transport acp-mounted --tier fast --effort low --decision rd-0123456789abcdef0123456789abcdef --routing on --phase implement --candidate-source explicit > "$BD/v1.rec" 2>/dev/null
 { [ "$(sed -n 1p "$BD/v1.rec")" = "policy_record	1" ] && ! grep -q '^\(route_id\|access_digest\|bound\)	' "$BD/v1.rec" && [ "$(awk -F'\t' '{print $1}' "$BD/v1.rec" | tr '\n' ' ')" = "policy_record map_version provider transport capability routing decision candidate_source phase candidate_tier candidate_effort model effort model_source effort_source limit_id effective_tier effective_effort pair runtime runtime_version fallback verify policy_digest " ]; } \
   && ok "an unbound resolution still writes version 1 with exactly its 24 original keys in their original order" || fail "unbound record shape: $(awk -F'\t' '{print $1}' "$BD/v1.rec" | tr '\n' ' ')"

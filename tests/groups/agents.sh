@@ -1452,8 +1452,8 @@ grep -q "inbound from: '<absent>' is not a registered agent" "$RI_NF_DIR/result.
 rm -f "$RI_NOFROM"
 
 section "gemini: a supported provider with a driver, a review twin and one reviewer per provider"
-# gemini is SUPPORTED but opt-in: it is not in the zero-config default, so an install without the Gemini
-# CLI never acquires a reviewer it cannot run. A project enables it with `agents = ... gemini`.
+# gemini is SUPPORTED but opt-in: it is not in the zero-config default, so an install without the Antigravity
+# CLI (agy) never acquires a reviewer it cannot run. A project enables it with `agents = ... gemini`.
 rm -f "$RI_FIX/.comms/config"
 ri_try "$COMMS" agents
 ri_is "zero-config does NOT include gemini (opt-in): the three built-in drivers and their twins" "claude codex grok claude-review codex-review grok-review"
@@ -1469,8 +1469,8 @@ ri_is "a gemini driver is its own provider" "gemini"
 ri_try "$COMMS" agents --family gemini-review
 ri_is "gemini's family (the independence group) is gemini — a third family beside codex, claude and grok" "gemini"
 ri_split "$COMMS" agents --supported
-printf '%s\n' "$RI_OUT" | grep -qx "$(printf 'gemini\tinteractive,acp')" \
-  && ok "the capability table lists gemini as interactive+acp (ACP-only for reviews, no headless arm)" || fail "agents --supported lacks gemini (got: $RI_OUT)"
+printf '%s\n' "$RI_OUT" | grep -qx "$(printf 'gemini\theadless,reviewer-consult-only')" \
+  && ok "the capability table lists gemini as a headless reviewer/consult provider, like grok (agy has no ACP mode)" || fail "agents --supported lacks gemini (got: $RI_OUT)"
 ri_try "$COMMS" agents --others claude
 ri_is "gemini joins a claude driver's default panel (other drivers, one per family)" "codex,grok,gemini"
 ri_try "$COMMS" agents --others gemini

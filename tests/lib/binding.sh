@@ -2,7 +2,7 @@
 # every provider is a stub, every credential a canary string, and every home is test-owned. Sourced by each group
 # and run once (`fixture_binding`), so the two groups share one definition and own separate repositories.
 fixture_binding() {
-fixture_gemini   # acpx and gemini stubs (AXB, GMB); fixture_acp underneath
+fixture_agy   # acpx and agy stubs (AXB, AGB); fixture_acp underneath
 BD="$WORK/bind"; mkdir -p "$BD"
 BD_AH="$BD/ah"; mkdir -p "$BD_AH"                    # the operator's agent-comms home: agents.json, access.json
 BD_HOME="$BD/home"; mkdir -p "$BD_HOME/.acpx/sessions" "$BD_HOME/.acpx/queues" "$BD_HOME/.codex" "$BD_HOME/.gemini"
@@ -73,7 +73,7 @@ bd_reset
 # words are extra environment.
 bd() { (cd "$BD_REPO" && env AGENT_COMMS_HOME="$BD_AH" HOME="$BD_HOME" CODEX_HOME="$BD_HOME/.codex" GEMINI_CLI_HOME="$BD_HOME" \
           COMMS_DELIVERY=acp COMMS_SELF=claude COMMS_MOUNT_BASE="$BD_MBASE" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
-          COMMS_RUNPHASE_OWNER_WAIT_SECS=3 PATH="$GMB:$AXB:$PATH" \
+          COMMS_RUNPHASE_OWNER_WAIT_SECS=3 PATH="$AGB:$AXB:$PATH" \
           BD_GEMINI_KEY="$BD_KEY_GEMINI" BD_VENICE_KEY="$BD_KEY_VENICE" BD_VENICE_OTHER_KEY="$BD_KEY_VENICE" "$@"); }
 bj() { python3 -c 'import json,sys; d=json.loads(sys.argv[1]); exec(sys.argv[2]); print(json.dumps(d))' "$1" "$2"; }   # edit a leg's JSON
 bd_wb() {  # <file> <leg-json>... — a leg-bindings file

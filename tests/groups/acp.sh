@@ -249,7 +249,7 @@ OUT="$(ACP_STUB_NODE_V=v18.0.0 run_acp doctor 2>&1)" && rc=0 || rc=$?
 [ "$rc" -eq 3 ] && ok "doctor exits 3 without a usable node" || fail "doctor node gate (rc=$rc)"
 : > "$ACP_STUB_LOG"
 # mistral has no ACP profile here; grok DOES since 2026-08-25 (acpx `grok-build`, verified against
-# `acpx --help` and one live consult), and gemini since 2026-09-30 (acpx's own `gemini`, `gemini --acp`).
+# `acpx --help` and one live consult), (gemini has no acpx profile since 2026-10-07: it runs through agy directly, see the agy group).
 OUT="$(run_acp consult mistral hello 2>&1)" && rc=0 || rc=$?
 [ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'mailbox path' && [ ! -s "$ACP_STUB_LOG" ] \
   && ok "an agent with no ACP profile fails closed before any acpx call" || fail "unsupported-agent refusal"
@@ -2198,7 +2198,7 @@ GD_S5="$(gd_turn gd-th r15)"
   || fail "unclearable AGENTS.md: status=$(gd_res "$GD_S5" status) note=$(gd_res "$GD_S5" note) child-ran=$([ -e "$GD/home-r15.log" ] && echo yes || echo no)"
 rm -rf "$GD_HOMEDIR/AGENTS.md"
 
-# NOT STAGED: an unmounted codex turn and a mounted claude leg (gemini: the gemini group), create no AGENTS.md and report guidance null even
+# NOT STAGED: an unmounted codex turn and a mounted claude leg (gemini: the agy group), create no AGENTS.md and report guidance null even
 # with a valid bundle configured. (Unmounted turns run on the operator's live home and are out of scope; claude already
 # loads the operator's CLAUDE.md; gemini is a recorded follow-up.)
 GD_BAD=""
