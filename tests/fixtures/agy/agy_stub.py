@@ -111,6 +111,8 @@ for line in raw.splitlines():
 log("stdin_bytes", len(raw))
 log("prompt_head", (prompt or "")[:80])
 log("prompt_has_runtime_note", "RUNTIME NOTE" in (prompt or ""))
+_p = prompt or ""
+log("prompt_change", _p[_p.index("----- BEGIN CHANGE UNDER REVIEW"):_p.index("----- END CHANGE UNDER REVIEW")] if "----- BEGIN CHANGE UNDER REVIEW" in _p and "----- END CHANGE UNDER REVIEW" in _p else "-")
 log("mode", mode)
 canary = prompt is not None and "single word PONG" in prompt
 

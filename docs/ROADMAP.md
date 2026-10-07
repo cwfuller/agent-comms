@@ -588,7 +588,7 @@ turn, exercised live against agy 1.3.1. Decisions and what they leave open:
 
 - **agy runs in the operator's real home**, like `claude-review`: a fresh `HOME` drops agy's login and the
   credentials cannot be staged safely. Plan artifacts land in `~/.gemini` (accepted). The stand-ins are plan
-  mode, a scrubbed environment, refusal of a tree carrying agy's workspace config, and the tree-identity check.
+  mode, an environment scrubbed of the driver's identity (not of credentials), refusal of a tree carrying agy's workspace config, and the tree-identity check.
   This is a **wider blast radius than the old isolated home**: agy's own settings, hooks and MCP servers (the
   operator's) apply to a review. Revisit if agy gains a way to select a config directory or accept a credential
   by environment.

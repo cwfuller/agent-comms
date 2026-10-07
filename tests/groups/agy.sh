@@ -180,15 +180,15 @@ mkdir -p "$MA_FIX/.comms/to-gemini" "$MA_FIX/.comms/to-claude"
 printf '{"trustedWorkspaces":["/"]}\n' > "$AGT/home/.gemini/settings.json"
 AG_OP_SUM="$(cat "$AGT/home/.gemini/settings.json" | shasum | cut -d' ' -f1)"
 # A dangling commit: HEAD's tree plus a marker, plus any extra tracked paths (built in a private index).
-ag_artifact() { # <marker> [extra tracked path...] -> commit sha
+ag_artifact() { # <marker> [extra tracked path...] -> commit sha (a child of $AG_PARENT, default HEAD)
   local marker="$1" idx="$AGT/idx.$1" blob t extra; shift
   rm -f "$idx"
-  GIT_INDEX_FILE="$idx" git -C "$MA_FIX" read-tree HEAD
+  GIT_INDEX_FILE="$idx" git -C "$MA_FIX" read-tree "${AG_PARENT:-HEAD}"
   blob="$(printf '%s\n' "$marker" | git -C "$MA_FIX" hash-object -w --stdin)"
   GIT_INDEX_FILE="$idx" git -C "$MA_FIX" update-index --add --cacheinfo "100644,$blob,ag-marker.txt"
   for extra in "$@"; do GIT_INDEX_FILE="$idx" git -C "$MA_FIX" update-index --add --cacheinfo "100644,$blob,$extra"; done
   t="$(GIT_INDEX_FILE="$idx" git -C "$MA_FIX" write-tree)"
-  git -C "$MA_FIX" -c user.email=t@t -c user.name=t commit-tree "$t" -p HEAD -m "artifact $marker"
+  git -C "$MA_FIX" -c user.email=t@t -c user.name=t commit-tree "$t" -p "${AG_PARENT:-HEAD}" -m "artifact $marker"
 }
 AG_HEAD="$(git -C "$MA_FIX" rev-parse HEAD)"
 AG_A1="$(ag_artifact ag-round-1)"
@@ -197,14 +197,14 @@ ag_run() { # <msgfile> <dir> [env assignments...] -> runs the turn
   ( cd "$MA_FIX" && env PATH="$AGB:$AXB:$PATH" HOME="$AGT/home" COMMS_MOUNT_BASE="$AG_STORE" \
       AGY_LOG="$dir/stub.log" AGY_COUNT="$dir/count" AGY_ENV_VARS="COMMS_SELF CLAUDECODE GEMINI_CLI COMMS_PRESENCE_NAME" \
       COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_SELF=claude CLAUDECODE=1 GEMINI_CLI=1 COMMS_PRESENCE_NAME=drv \
-      "$@" "$RP" run --message "$msg" --dir "$dir" --provider gemini --timeout-secs 30 ) >"$dir/stdout.log" 2>"$dir/stderr.log"
+      "$@" "${AG_RP:-$RP}" run --message "$msg" --dir "$dir" --provider gemini --timeout-secs 30 ) >"$dir/stdout.log" 2>"$dir/stderr.log"
 }
 ag_turn() { # <thread> <tag> <artifact> [env assignments...] -> the run dir of a review-request turn
   local thread="$1" tag="$2" art="$3"; shift 3
   local msg dir
   msg="$MA_FIX/.comms/to-gemini/${MA_WS}_2026-10-07T10-00-00_ag-$tag.md"
   { head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
-    printf 'artifact_id: %s\nhead_sha: %s\n' "$art" "$AG_HEAD"
+    printf 'artifact_id: %s\nhead_sha: %s\n' "$art" "${AG_HEADSHA:-$AG_HEAD}"
     tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" | sed -e "s|^thread: ma-arc-1\$|thread: $thread|"
   } > "$msg"
   dir="$AGT/run-$tag"; mkdir -p "$dir"
@@ -378,6 +378,43 @@ AG_ASK="$( cd "$MA_FIX" && env -u COMMS_DELIVERY PATH="$AGB:$AXB:$PATH" HOME="$A
 [ "$(cd "$MA_FIX" && env -u COMMS_DELIVERY PATH="$AGB:$AXB:$PATH" "$COMMS" transport gemini --loop)" = headless ] && [ "$(cd "$MA_FIX" && env -u COMMS_DELIVERY PATH="$AGB:$AXB:$PATH" "$COMMS" transport gemini)" = headless ] \
   && ok "gemini routes headless for a loop and for a consult (there is no ACP route)" || fail "transport gemini"
 
+# ---- the change the reviewer cannot compute: the whole branch against main, whatever the dispatch's head_sha says ----
+# `main` is the branch integrate lands on; the fixture repo lives on a feature branch, so give it one at the base.
+git -C "$MA_FIX" update-ref refs/heads/main "$AG_HEAD"
+AG_CH1="$(AG_PARENT=$AG_HEAD ag_artifact ag-chain-1 ag-chain-a.txt)"
+AG_CH2="$(AG_PARENT=$AG_CH1 ag_artifact ag-chain-2 ag-chain-b.txt)"
+AG_CH3="$(AG_PARENT=$AG_CH2 ag_artifact ag-chain-3 ag-chain-c.txt)"
+# A CLEAN dispatch of a two-commit branch: the request's head_sha IS the artifact (an empty diff against itself).
+AG_D7="$(AG_HEADSHA=$AG_CH2 ag_turn ag-chain tchain "$AG_CH2")"
+AG_CHG="$(ag_all tchain prompt_change | tail -1)"
+{ [ "$(ag_res "$AG_D7" status)" = completed ] && printf '%s' "$AG_CHG" | grep -qF "git diff ${AG_HEAD:0:12} ${AG_CH2:0:12}" \
+  && printf '%s' "$AG_CHG" | grep -qF ag-chain-a.txt && printf '%s' "$AG_CHG" | grep -qF ag-chain-b.txt; } \
+  && ok "a clean dispatch of a two-commit branch hands agy the whole branch against main (both commits' files), not an empty diff" \
+  || fail "clean multi-commit change block: $(printf '%s' "$AG_CHG" | cut -c1-300)"
+# A DIRTY dispatch: head_sha is the last commit, so it names only the uncommitted part; the branch's commits ride along.
+AG_D8="$(AG_HEADSHA=$AG_CH2 ag_turn ag-chain tdirty "$AG_CH3")"
+AG_CHG="$(ag_all tdirty prompt_change | tail -1)"
+{ [ "$(ag_res "$AG_D8" status)" = completed ] && printf '%s' "$AG_CHG" | grep -qF ag-chain-a.txt && printf '%s' "$AG_CHG" | grep -qF ag-chain-b.txt \
+  && printf '%s' "$AG_CHG" | grep -qF ag-chain-c.txt; } \
+  && ok "a dirty dispatch on top of those commits hands agy the committed work and the uncommitted work together" \
+  || fail "dirty multi-commit change block: $(printf '%s' "$AG_CHG" | cut -c1-300)"
+
+# ---- the INSTALLED copy: install.sh must ship every helper the agy arm resolves beside runphase.sh ----
+AG_INS="$AGT/inst"; mkdir -p "$AG_INS/proj"; git -C "$AG_INS/proj" init -q -b main
+(cd "$AG_INS/proj" && env CODEX_AGENTS_FILE="$AG_INS/gh/AGENTS.md" CLAUDE_COMMANDS_DIR="$AG_INS/gh/commands" CODEX_SKILLS_DIR="$AG_INS/gh/skills" \
+  GROK_COMMANDS_DIR="$AG_INS/gh/grok-commands" AGENT_COMMS_HOME="$AG_INS/gh/ac" AGENT_COMMS_SETUP=0 HOME="$AG_INS/gh/home" \
+  bash "$REPO/install.sh" --scope=global >"$AG_INS/install.out" 2>&1)
+{ [ -f "$AG_INS/gh/ac/agy_stream.py" ] && [ -x "$AG_INS/gh/ac/runphase.sh" ]; } \
+  && ok "install.sh installs agy_stream.py beside runphase.sh" || fail "agy_stream.py not installed: $(ls "$AG_INS/gh/ac" 2>&1 | tr '\n' ' ')"
+AG_D9="$(AG_RP="$AG_INS/gh/ac/runphase.sh" ag_turn ag-inst tinst "$AG_A1")"
+{ [ "$(ag_res "$AG_D9" status)" = completed ] && [ "$(ag_all tinst turn_number | tr '\n' ' ')" = "1 2 " ] && [ "$(ag_tsv "$AG_D9" observed_model)" = gemini-3.8-flash ]; } \
+  && ok "a mounted review (canary and review prompt) completes through the INSTALLED runphase.sh" \
+  || fail "installed review: $(tr '\n' ' ' < "$AG_D9/result.json" | cut -c1-300) | $(tail -4 "$AG_D9/runner.log" | tr '\n' ' ')"
+AG_D10="$(AG_RP="$AG_INS/gh/ac/runphase.sh" ag_ask_turn cinst)"
+{ [ "$(ag_res "$AG_D10" status)" = completed ] && [ "$(ag_all cinst turn_number | tr '\n' ' ')" = "1 " ]; } \
+  && ok "a consult (one cold agy turn) completes through the INSTALLED runphase.sh" \
+  || fail "installed consult: $(tr '\n' ' ' < "$AG_D10/result.json" | cut -c1-300) | $(tail -4 "$AG_D10/runner.log" | tr '\n' ' ')"
+
 # ---- the opt-in live smoke: the real agy, only when COMMS_TEST_AGY_LIVE=1 ----
 if [ "${COMMS_TEST_AGY_LIVE:-}" = 1 ]; then
   # The real agy, found on the operator's own PATH (the stub directory is left out) and run in their real home.
@@ -396,7 +433,7 @@ else
   skip agy-live-off "LIVE agy review (set COMMS_TEST_AGY_LIVE=1 from a logged-in session to run it)"
 fi
 
-AG_WANT_REPLIES=5; [ "${COMMS_TEST_AGY_LIVE:-}" != 1 ] || AG_WANT_REPLIES=6   # the live review publishes one more
+AG_WANT_REPLIES=9; [ "${COMMS_TEST_AGY_LIVE:-}" != 1 ] || AG_WANT_REPLIES=10   # the live review publishes one more
 [ "$(ag_replies)" = "$AG_WANT_REPLIES" ] \
-  && ok "only the completed turns published a reply (three reviews and two consults each replied once; every refused turn replied nothing)" \
+  && ok "only the completed turns published a reply (five reviews and four consults each replied once; every refused turn replied nothing)" \
   || fail "published replies: $(ag_replies), wanted $AG_WANT_REPLIES"

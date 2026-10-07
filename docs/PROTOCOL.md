@@ -141,14 +141,15 @@ model, is withheld as `policy-unapplied`. **agy runs in the operator's real home
 because its login cannot be staged into an isolated one (a fresh `HOME` drops it): the operator's agy
 settings and login apply, and agy's plan files land in `~/.gemini`. What contains the leg is the
 in-process `--mode plan` pin (agy refuses writes outside its own artifact store and, headless, auto-denies
-every command), a scrubbed environment (the driver's identity, presence and credentials never reach agy),
+every command), a scrubbed environment (the driver's identity and presence variables never reach agy; credentials in the operator's environment, such as `GEMINI_API_KEY`, do, because agy may use them),
 the tree-identity check on the mount after the turn (a write that landed in the tree fails it and nothing is
 published), and the refusal of a reviewed tree carrying agy's workspace config — `.gemini`, `.env`,
 `.agents`, `.agent`, `.agy`, `.antigravity`, `.jetski` or `mcp_config.json` — unread, because that config
 can declare hooks or MCP servers that run outside the pin. It is not a kernel sandbox: the child's network is
 open and reads follow the operator's home. Because plan mode refuses every command, a gemini reviewer
 **cannot run `git diff` / `log` / `show`**: a mounted turn carries the change in the prompt (the parent
-computes it), and plan mode's non-answer (a plan and a request for approval, no verdict) is refused by the
+computes `git diff <merge-base with the local main> <artifact>`, so a clean multi-commit branch and a dirty one both show
+the whole branch; the request's `head_sha` is only the fallback when `main` does not resolve), and plan mode's non-answer (a plan and a request for approval, no verdict) is refused by the
 broker rather than published. A model pin is `COMMS_ACP_GEMINI_MODEL` / `COMMS_ACP_GEMINI_EFFORT`, and a
 refusal is recorded as a failed turn with its reason (`rate-limited`, `auth-failed`, `model-unavailable` —
 see below). A bound leg (`review-route`) is refused for gemini (`gemini-unsupported`): binding needs a mounted

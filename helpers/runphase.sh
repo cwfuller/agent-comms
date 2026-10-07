@@ -2987,11 +2987,18 @@ agy_refuse() {
 
 # agy_change_block — the diff the reviewer cannot compute itself: agy's plan mode refuses every command, git
 # included, so the parent hands over `git diff <base> <artifact>` (stat, then the patch bounded by
-# COMMS_AGY_DIFF_BYTES, default 300000) from the main repo, where the artifact commit is reachable. Written to a
-# file first and cut with head -c on the FILE: an early-exiting reader on a pipe is the SIGPIPE shape banned here.
+# COMMS_AGY_DIFF_BYTES, default 300000) from the main repo, where the artifact commit is reachable. The base is
+# the merge-base of the artifact with the local `main` (the branch integrate lands on): the whole branch, committed
+# and uncommitted work both. `mount_base` (the request's head_sha) is NOT that: a clean dispatch makes it the
+# artifact itself (an empty diff) and a dirty one makes it the last commit (the uncommitted part only), so it is only
+# the fallback for when `main` does not resolve or the artifact is already on it. Written to a file first and cut
+# with head -c on the FILE: an early-exiting reader on a pipe is the SIGPIPE shape banned here.
 agy_change_block() {
-  local base="${mount_base:-}" bytes
-  [ -n "$base" ] && [ -n "${msg_artifact:-}" ] || return 0
+  local base="" bytes
+  [ -n "${msg_artifact:-}" ] || return 0
+  base="$(mount_git -C "$main_root" merge-base "$msg_artifact" refs/heads/main 2>/dev/null)" || base=""
+  { [ -n "$base" ] && [ "$base" != "$msg_artifact" ]; } || base="${mount_base:-}"
+  [ -n "$base" ] || return 0
   bytes="$(sane_secs "${COMMS_AGY_DIFF_BYTES:-300000}")"; [ -n "$bytes" ] || bytes=300000
   mount_git -C "$main_root" diff --no-ext-diff --no-color --stat=160 "$base" "$msg_artifact" > "$run_dir/change.stat" 2>>"$run_dir/runner.log" || return 0
   mount_git -C "$main_root" diff --no-ext-diff --no-color "$base" "$msg_artifact" > "$run_dir/change.diff" 2>>"$run_dir/runner.log" || return 0

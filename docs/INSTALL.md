@@ -49,7 +49,7 @@ every command; the mount's tree-identity check then fails a review whose tree ch
 refused or detected. That is an in-process pin like `claude`'s, not a kernel sandbox: the child's network is
 open. **agy runs in your real home**, not an isolated one: its login cannot be staged into a fresh `HOME`,
 so it reads your own agy login and settings (the same decision as `claude-review`), and agy's plan files land
-in `~/.gemini`. The driver's identity and credentials are scrubbed from its environment, and a reviewed tree
+in `~/.gemini`. The driver's identity variables (`COMMS_SELF`, presence, `CLAUDECODE`, `GEMINI_CLI`) are scrubbed from its environment, but credentials in the environment (for example `GEMINI_API_KEY`) are inherited, since agy needs its own login; and a reviewed tree
 carrying agy's workspace config (`.gemini`, `.env`, `.agents`, `.agent`, `.agy`, `.antigravity`, `.jetski` or
 `mcp_config.json`) is refused unread, because that config can declare hooks or MCP servers that run outside the
 plan-mode pin.
