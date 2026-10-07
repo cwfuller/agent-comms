@@ -22,6 +22,7 @@ Levers (environment):
   AGY_ANSWER_FILE  a file whose bytes are the reply to a non-canary prompt
   AGY_INIT_MODEL   the model the init event names (default: the one asked for)
   AGY_NO_MODEL     the init event names no model
+  AGY_INIT_FROM    the turn number from which AGY_INIT_MODEL / AGY_NO_MODEL apply (default 1; 2 spares a review's canary)
   AGY_PLANNY       a non-canary prompt is answered with the plan-mode non-answer agy gives by default
   AGY_REPLY_FIRST  extra text emitted BEFORE the answer in the response (a preamble)
 """
@@ -124,10 +125,11 @@ if count_file:
 log("turn_number", n)
 
 conv = "conv-%d-%d" % (os.getpid(), n)
-init_model = os.environ.get("AGY_INIT_MODEL") or model
+init_from = int(os.environ.get("AGY_INIT_FROM", "1"))
+init_model = (os.environ.get("AGY_INIT_MODEL") if n >= init_from else None) or model
 init = {"model": init_model, "cwd": os.getcwd(), "tools": ["view_file", "grep_search", "write_to_file", "run_command"],
         "permission_mode": "request-review"}
-if os.environ.get("AGY_NO_MODEL"):
+if os.environ.get("AGY_NO_MODEL") and n >= init_from:
     del init["model"]
 emit({"event": "init", "conversation_id": conv, "init": init})
 emit({"event": "step_update", "step_update": {"conversation_id": conv, "step_index": 0, "state": "DONE", "step_type": "user_input"}})

@@ -245,7 +245,7 @@ AG_ARGV="$(ag_all t1 argv | tail -1)"
   && ! printf '%s' "$AG_ARGV" | grep -qE 'dangerously|accept-edits|--sandbox'; } \
   && ok "agy is launched read-only on exactly one vector: plan mode, stream-json in and out, the policy's pair as <model>-<effort>" || fail "agy argv: $AG_ARGV"
 { [ "$(ag_all t1 turn_number | tr '\n' ' ')" = "1 2 " ] && [ "$(ag_all t1 prompt_head | head -1)" = "Reply with exactly the single word PONG and nothing else." ] \
-  && [ "$(ag_all t1 prompt_has_runtime_note | tr '\n' ' ')" = "false true " ]; } \
+  && [ "$(ag_all t1 prompt_has_runtime_note | tr '\n' ' ')" = "False True " ]; } \
   && ok "a canary turn runs first on the same vector; the review prompt follows on stdin and carries the plan-mode runtime note" \
   || fail "turn sequence: $(ag_all t1 turn_number | tr '\n' ' ') / $(ag_all t1 prompt_has_runtime_note | tr '\n' ' ')"
 { [ "$(ag_tsv "$AG_D1" requested_model)" = gemini-3.1-pro ] && [ "$(ag_tsv "$AG_D1" requested_effort)" = high ] \
@@ -278,13 +278,13 @@ AG_D2="$(ag_turn ag-pin tpin "$AG_A1" COMMS_ACP_GEMINI_MODEL=gemini-3.8-flash CO
 { [ "$(ag_res "$AG_D2" status)" = completed ] && [ "$(ag_all tpin argv | tail -1 | sed 's/.*--model //')" = gemini-3.8-flash-low ] \
   && [ "$(ag_tsv "$AG_D2" observed_model)" = gemini-3.8-flash ] && [ "$(ag_tsv "$AG_D2" observed_effort)" = low ]; } \
   && ok "a pinned pair reaches agy as gemini-3.8-flash-low and is attested as that pair" || fail "pinned turn: argv=$(ag_all tpin argv | tail -1)"
-AG_D3="$(ag_turn ag-drift tdrift "$AG_A1" AGY_INIT_MODEL=gemini-3.1-pro-low)"
+AG_D3="$(ag_turn ag-drift tdrift "$AG_A1" AGY_INIT_MODEL=gemini-3.1-pro-low AGY_INIT_FROM=2)"
 { [ "$(ag_res "$AG_D3" status)" = failed ] && [ "$(ag_res "$AG_D3" reason)" = policy-unapplied ] && [ "$(ag_tsv "$AG_D3" observed_effort)" = low ]; } \
   && ok "a review whose init event names the right model at the wrong effort is withheld (policy-unapplied), with what ran recorded" \
   || fail "effort drift: $(tr '\n' ' ' < "$AG_D3/result.json" | cut -c1-300)"
-AG_D4="$(ag_turn ag-nomodel tnomodel "$AG_A1" AGY_NO_MODEL=1)"
-{ [ "$(ag_res "$AG_D4" reason)" = runtime-incompatible ] || [ "$(ag_res "$AG_D4" reason)" = policy-unapplied ]; } && [ "$(ag_res "$AG_D4" status)" = failed ] \
-  && ok "an init event that names no model never passes: absent evidence is not a match" || fail "no-model: $(tr '\n' ' ' < "$AG_D4/result.json" | cut -c1-300)"
+AG_D4="$(ag_turn ag-nomodel tnomodel "$AG_A1" AGY_NO_MODEL=1 AGY_INIT_FROM=2)"
+{ [ "$(ag_res "$AG_D4" reason)" = policy-unapplied ] && [ "$(ag_res "$AG_D4" status)" = failed ] && [ "$(ag_all tnomodel turn_number | tr '\n' ' ')" = "1 2 " ]; } \
+  && ok "a REVIEW whose init event names no model is withheld (policy-unapplied): absent evidence is not a match" || fail "no-model: $(tr '\n' ' ' < "$AG_D4/result.json" | cut -c1-300)"
 AG_D5="$(ag_turn ag-wrongmodel twrong "$AG_A1" AGY_INIT_MODEL=gemini-3.8-flash-low)"
 { [ "$(ag_res "$AG_D5" status)" = failed ] && [ "$(ag_res "$AG_D5" reason)" = runtime-incompatible ] && [ "$(ag_all twrong turn_number | tr '\n' ' ')" = "1 " ]; } \
   && ok "a canary served by another model than the declared one refuses the leg before the review prompt is spent" \
@@ -342,7 +342,7 @@ done
 [ "$AG_OK" = 1 ] && ok "a tree carrying agy's workspace config (.gemini, .env, .agents, .agent, .agy, .antigravity, .jetski, mcp_config.json) is refused before agy is started" \
   || fail "a hostile tree reached agy"
 AG_D13="$(ag_turn ag-plan tplan "$AG_A1" AGY_PLANNY=1)"
-{ [ "$(ag_res "$AG_D13" status)" = failed ] && [ "$(ag_replies)" = 2 ]; } \
+{ [ "$(ag_res "$AG_D13" status)" = failed ] && [ "$(ag_replies)" = 3 ]; } \
   && ok "plan mode's non-answer (a plan and a request for approval) carries no verdict and is refused by the broker, never published" \
   || fail "planny: status=$(ag_res "$AG_D13" status) replies=$(ag_replies)"
 AG_D14="$(ag_turn ag-nsuccess tnsuccess "$AG_A1" AGY_MODE=notsuccess)"
@@ -370,21 +370,24 @@ AG_CR="$(ls "$MA_FIX/.comms/to-claude/"*gemini-reply*.md 2>/dev/null | tail -1)"
 { grep -q '^type: response$' "$AG_CR" && ! grep -q '^verdict:' "$AG_CR"; } \
   && ok "the consult's reply is a response, not a verdict-bearing review" || fail "consult reply: $(head -8 "$AG_CR" | tr '\n' ' ')"
 # `comms.sh ask` over the real routing: gemini is a headless reviewer/consult provider like grok.
-AG_ASK="$( cd "$MA_FIX" && env PATH="$AGB:$AXB:$PATH" HOME="$AGT/home" COMMS_MOUNT_BASE="$AG_STORE" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_SELF=claude \
+AG_ASK="$( cd "$MA_FIX" && env -u COMMS_DELIVERY PATH="$AGB:$AXB:$PATH" HOME="$AGT/home" COMMS_MOUNT_BASE="$AG_STORE" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 COMMS_SELF=claude \
             "$COMMS" ask --from claude --to gemini --wait "Is the policy map sound?" 2>&1 )"; AG_RC=$?
 { [ "$AG_RC" = 0 ] && printf '%s\n' "$AG_ASK" | grep -qF "running gemini in the foreground" && printf '%s\n' "$AG_ASK" | grep -qF "completed: gemini finished"; } \
   && ok "comms.sh ask --to gemini --wait completes a consult through agy" || fail "ask --to gemini (rc=$AG_RC): $AG_ASK"
-[ "$(cd "$MA_FIX" && env PATH="$AGB:$AXB:$PATH" "$COMMS" transport gemini --loop)" = headless ] && [ "$(cd "$MA_FIX" && env PATH="$AGB:$AXB:$PATH" "$COMMS" transport gemini)" = headless ] \
+[ "$(cd "$MA_FIX" && env -u COMMS_DELIVERY PATH="$AGB:$AXB:$PATH" "$COMMS" transport gemini --loop)" = headless ] && [ "$(cd "$MA_FIX" && env -u COMMS_DELIVERY PATH="$AGB:$AXB:$PATH" "$COMMS" transport gemini)" = headless ] \
   && ok "gemini routes headless for a loop and for a consult (there is no ACP route)" || fail "transport gemini"
 
 # ---- the opt-in live smoke: the real agy, only when COMMS_TEST_AGY_LIVE=1 ----
 if [ "${COMMS_TEST_AGY_LIVE:-}" = 1 ]; then
-  AG_LV="$(ag_turn ag-live tlive "$AG_A1")"
-  ( cd "$MA_FIX" && true )
-  AG_LVR="$AGT/run-tlive"
-  # the stub-first PATH of ag_run must not shadow the real agy here
-  AG_LV="$( ( cd "$MA_FIX" && env PATH="$AXB:$PATH" HOME="${HOME}" COMMS_MOUNT_BASE="$AG_STORE" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
-      "$RP" run --message "$MA_FIX/.comms/to-gemini/${MA_WS}_2026-10-07T10-00-00_ag-tlive.md" --dir "$AGT/run-live2" --provider gemini --timeout-secs 600 ) >"$AGT/live.out" 2>&1; printf '%s' "$AGT/run-live2" )"
+  # The real agy, found on the operator's own PATH (the stub directory is left out) and run in their real home.
+  AG_LMSG="$MA_FIX/.comms/to-gemini/${MA_WS}_2026-10-07T10-00-02_ag-live.md"
+  { head -1 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")"
+    printf 'artifact_id: %s\nhead_sha: %s\n' "$AG_A1" "$AG_HEAD"
+    tail -n +2 "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" | sed -e 's|^thread: ma-arc-1$|thread: ag-live|'
+  } > "$AG_LMSG"
+  AG_LV="$AGT/run-live"; mkdir -p "$AG_LV"
+  ( cd "$MA_FIX" && env PATH="$AXB:$PATH" COMMS_MOUNT_BASE="$AG_STORE" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
+      "$RP" run --message "$AG_LMSG" --dir "$AG_LV" --provider gemini --timeout-secs 900 ) >"$AGT/live.out" 2>&1
   { [ "$(ag_res "$AG_LV" status)" = completed ] && [ "$(ag_tsv "$AG_LV" observed_model)" = gemini-3.1-pro ] && [ "$(ag_tsv "$AG_LV" observed_effort)" = high ]; } \
     && ok "LIVE: a mounted review through the real agy completes, canary included, on the attested pair" \
     || fail "LIVE agy review: $(tr '\n' ' ' < "$AG_LV/result.json" 2>/dev/null | cut -c1-400) | $(tail -5 "$AGT/live.out")"
@@ -392,6 +395,6 @@ else
   skip agy-live-off "LIVE agy review (set COMMS_TEST_AGY_LIVE=1 from a logged-in session to run it)"
 fi
 
-[ "$(ag_replies)" = 4 ] \
-  && ok "only the completed turns published a reply (three reviews and the consult each replied once; every refused turn replied nothing)" \
+[ "$(ag_replies)" = 5 ] \
+  && ok "only the completed turns published a reply (three reviews and two consults each replied once; every refused turn replied nothing)" \
   || fail "published replies: $(ag_replies)"
