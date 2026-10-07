@@ -395,6 +395,7 @@ else
   skip agy-live-off "LIVE agy review (set COMMS_TEST_AGY_LIVE=1 from a logged-in session to run it)"
 fi
 
-[ "$(ag_replies)" = 5 ] \
+AG_WANT_REPLIES=5; [ "${COMMS_TEST_AGY_LIVE:-}" != 1 ] || AG_WANT_REPLIES=6   # the live review publishes one more
+[ "$(ag_replies)" = "$AG_WANT_REPLIES" ] \
   && ok "only the completed turns published a reply (three reviews and two consults each replied once; every refused turn replied nothing)" \
-  || fail "published replies: $(ag_replies)"
+  || fail "published replies: $(ag_replies), wanted $AG_WANT_REPLIES"
