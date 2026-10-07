@@ -178,8 +178,8 @@ def auth_row(adapter, billing):
 
 
 def adapter_of(agent, provider, profiles):
-    """`codex` / `gemini` for a built-in provider, `opencode` for a custom profile that runs it, else None."""
-    if provider in ("codex", "gemini"):
+    """`codex` for a built-in provider that binds, `opencode` for a custom profile that runs it, else None."""
+    if provider == "codex":
         return provider
     profile = profiles.get(provider)
     if profile is not None and profile["adapter"] == "opencode":

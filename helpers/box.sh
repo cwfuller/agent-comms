@@ -7,7 +7,7 @@
 #   box.sh client-check --dir D --flags F -- LAUNCHER   prove the ACP client refuses fs/terminal requests under F
 #   box.sh launched --dir D                             did the shim launch the provider under THIS preparation
 #
-# WHY THIS EXISTS. codex ships its own kernel sandbox and claude/gemini a mode pin; grok ships neither
+# WHY THIS EXISTS. codex ships its own kernel sandbox and claude/gemini (agy) a mode pin; grok ships neither
 # that holds on macOS (its docs: child-network blocking is Linux-only, and every profile write-allows
 # /tmp). So the containment is applied from outside, with the OS's own Seatbelt (`sandbox-exec`), around
 # the ONE process that executes a grok reviewer's tools.

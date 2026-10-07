@@ -114,7 +114,9 @@ def classify(provider, transport, profiles):
         return None, f"{transport}: the detached CLI runner applies no attested model policy"
     if provider in ("claude", "grok"):
         return None, f"{provider}-unsupported: no applied and attested model/effort policy exists"
-    if provider in ("codex", "gemini"):
+    if provider == "gemini":
+        return None, "gemini-unsupported: agy is a direct runner (no ACP session), and a bound leg runs mounted over ACP only"
+    if provider == "codex":
         return provider, None
     profile = profiles.get(provider)
     if profile is None:
@@ -145,18 +147,6 @@ def codex_home(environ):
     return Path(environ.get("CODEX_HOME") or (Path(environ.get("HOME", "")) / ".codex"))
 
 
-def gemini_dir(environ):
-    return Path(environ.get("GEMINI_CLI_HOME") or environ.get("HOME", "")) / ".gemini"
-
-
-def operator_gemini_type(environ):
-    settings = gemini_dir(environ) / "settings.json"
-    if not settings.is_file():
-        return None
-    out = subprocess.run([str(acp_path()), "gemini-auth", str(settings)], capture_output=True, text=True, timeout=15)
-    return out.stdout.strip() or None
-
-
 def observe_auth(adapter, billing, environ):
     """Dispatch-time authentication-route checks: what is observable without reading a secret."""
     row = access.auth_row(adapter, billing)
@@ -169,13 +159,6 @@ def observe_auth(adapter, billing, environ):
             found.append(("auth-login-missing", "no saved codex login (auth.json) for a subscription leg"))
         elif login_mode(login) in API_MODES:
             found.append(("auth-selected-type-conflict", "the saved codex login is in API-key mode; a subscription leg would run API-billed"))
-    elif adapter == "gemini" and billing == "subscription":
-        selected = operator_gemini_type(environ)
-        files = [f for f in row["login_files"] if (gemini_dir(environ) / f).is_file() and not (gemini_dir(environ) / f).is_symlink()]
-        if selected and selected != "oauth-personal":
-            found.append(("auth-selected-type-conflict", f"the operator's selected auth type is {selected}; a subscription leg would run on it, not on a login"))
-        elif not files and selected != "oauth-personal":
-            found.append(("auth-login-missing", "no saved gemini login file and no selected OAuth auth type for a subscription leg"))
     return found
 
 
@@ -198,26 +181,7 @@ def auth_readback(adapter, billing, home, credential_set):
         if login_mode(login) in API_MODES:
             return None, "the isolated codex login is in API-key mode for a subscription leg"
         return "observed", None
-    gdir = home / ".gemini"
-    selector = (row["selector"] or "").partition("=")[2]
-    try:
-        settings = json.loads((gdir / "settings.json").read_text())
-        selected = settings["security"]["auth"]["selectedType"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None, "the isolated gemini settings name no auth type"
-    if selected != selector:
-        return None, f"the isolated gemini settings select {clean(selected, 40)}, not {selector}"
-    present = [f for f in ("oauth_creds.json", "google_accounts.json", "gemini-credentials.json")
-               if (gdir / f).exists() or (gdir / f).is_symlink()]
-    if billing == "api":
-        if present:
-            return None, "a saved gemini login is staged for an API leg"
-        if not credential_set:
-            return None, "no credential variable is set for an API leg"
-        return "observed", None
-    if credential_set:
-        return None, "a credential variable is present for a subscription leg"
-    return ("observed" if present else "configured"), None
+    return None, f"{adapter}/{billing} has no read-back"
 
 
 # ------------------------------------------------------------------------------ the one judgement
@@ -461,7 +425,7 @@ def capability(contexts):
         elif entry is not None and access.auth_row(adapter, entry["billing"])["status"] != "supported":
             row.update({"class": "unbindable-billing", "reason": entry["billing"], "billing": entry["billing"]})
         else:
-            row["class"] = "bindable" if adapter in ("codex", "gemini") else "bindable-model-only"
+            row["class"] = "bindable" if adapter == "codex" else "bindable-model-only"
             row["billing"] = entry["billing"] if entry else None
         rows.append(row)
     return rows, entries_error

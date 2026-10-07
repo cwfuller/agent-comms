@@ -552,43 +552,15 @@ AXUNAME
 chmod +x "$AXB/uname"
 }
 
-# A PATH-stubbed Gemini CLI and the acpx that drives it. `gemini` is a real process speaking ACP
-# (tests/fixtures/gemini/gemini_stub.py); the `npx` here is acpx's stand-in for the gemini profile:
-# prompts are a genuine ACP turn against that stub, and everything else (sessions, set-mode) is the
-# shared acpx stub from fixture_acp. Put "$GMB:$AXB" ahead of PATH to use them.
-fixture_gemini() {
+# A PATH-stubbed Antigravity CLI. `agy` is a real process speaking the stream-json print mode the runner
+# drives (tests/fixtures/agy/agy_stub.py). The shared acpx stub from fixture_acp stays underneath, because
+# acp.sh's diagnostics probe node for every provider. Put "$AGB:$AXB" ahead of PATH to use them.
+fixture_agy() {
   fixture_acp
-  GMD="$WORK/gemini-fixture"; GMB="$GMD/bin"; mkdir -p "$GMB"
-  export GM_AX_NPX="$AXB/npx" GM_LITE="$REPO/tests/fixtures/gemini/acpx_lite.py"
-  cat > "$GMB/gemini" <<GMSTUB
+  AGD="$WORK/agy-fixture"; AGB="$AGD/bin"; mkdir -p "$AGB"
+  cat > "$AGB/agy" <<AGSTUB
 #!/bin/bash
-exec python3 "$REPO/tests/fixtures/gemini/gemini_stub.py" "\$@"
-GMSTUB
-  chmod +x "$GMB/gemini"
-  cat > "$GMB/npx" <<'GMNPX'
-#!/bin/bash
-# acpx stand-in for the gemini profile. GM_ACPX_LOG records every gemini-profile call's cwd and argv.
-model=""; pfile=""; prev=""; last=""
-for a in "$@"; do
-  [ "$prev" = --model ] && model="$a"
-  [ "$prev" = --file ] && pfile="$a"
-  prev="$a"; last="$a"
-done
-case " $* " in
-  *" gemini "*)
-    [ -n "${GM_ACPX_LOG:-}" ] && printf '%s\t%s\n' "$(pwd -P)" "$*" >> "$GM_ACPX_LOG"
-    case " $* " in
-      *" sessions show "*)
-        case " $* " in
-          *" --format json "*)
-            printf '{"cwd":"%s","acpx":{"acpx_record_id":"stub","current_model_id":"%s"}}\n' "$(pwd -P)" "${GM_SHOW_MODEL:-$model}"
-            exit 0 ;;
-        esac ;;
-      *" sessions "*|*" set-mode "*) ;;
-      *" -s "*) exec python3 "$GM_LITE" "${model:--}" "${pfile:--}" "$last" ;;
-    esac ;;
-esac
-exec "$GM_AX_NPX" "$@"
-GMNPX
-  chmod +x "$GMB/npx"
+exec python3 "$REPO/tests/fixtures/agy/agy_stub.py" "\$@"
+AGSTUB
+  chmod +x "$AGB/agy"
 }

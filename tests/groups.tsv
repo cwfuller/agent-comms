@@ -21,7 +21,7 @@ route	parallel
 worktree	parallel
 usage	parallel
 profiles	parallel
-gemini	parallel
+agy	parallel
 box	parallel
 binding	parallel
 bindrun	parallel

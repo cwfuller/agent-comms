@@ -322,16 +322,14 @@ LEG_USAGE_PROVIDER=""; LEG_USAGE_ROOT=""; LEG_USAGE_CWD=""
 # MEASURED: its cwd is unique to (thread, agent), so the grok sessions and claude transcripts keyed
 # by that cwd are this leg's alone. An unmounted leg runs in the repo root, which an interactive
 # session or another thread's leg can share, and summing their records would bill their spend to
-# this leg. codex and gemini additionally need the mount's isolated home: the shared ~/.codex and
-# ~/.gemini interleave every session on the machine.
+# this leg. codex additionally needs the mount's isolated home: the shared ~/.codex
+# interleaves every session on the machine. (gemini's usage is read from its own result event: agy_stream.py.)
 leg_usage_root() {
   [ -n "${2:-}" ] || return 0
   case "$1" in
     codex)  printf '%s' "${3:-}" ;;
     claude) [ -n "${HOME:-}${CLAUDE_CONFIG_DIR:-}" ] && printf '%s/projects' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ;;
     grok)   if [ -n "${3:-}" ]; then printf '%s/sessions' "$3"; else [ -n "${HOME:-}" ] && printf '%s/.grok/sessions' "$HOME"; fi ;;
-    # the CLI's own state dir inside the mount's isolated GEMINI_CLI_HOME, so every record there is this leg's
-    gemini) [ -n "${3:-}" ] && printf '%s/.gemini' "$3" ;;
   esac
   return 0
 }
@@ -410,10 +408,13 @@ leg_binding_json() {  # <run-dir> -> one-line JSON object, or null
   leg_usage_json "${v:-null}"
 }
 
-leg_quota_json() {  # <reason> -> one-line JSON object, or null (an unbound leg has none)
-  [ -n "$RUN_BIND_STAMP" ] || { printf null; return 0; }
-  local v hosting
-  hosting="$(python3 "$HELPER_DIR/leg_binding.py" stamp-field --stamp "$RUN_BIND_STAMP" --key access.provider 2>/dev/null)" || hosting=""
+leg_quota_json() {  # <reason> -> one-line JSON object, or null (an unbound leg has one only for a classified refusal)
+  local v hosting=""
+  if [ -n "$RUN_BIND_STAMP" ]; then
+    hosting="$(python3 "$HELPER_DIR/leg_binding.py" stamp-field --stamp "$RUN_BIND_STAMP" --key access.provider 2>/dev/null)" || hosting=""
+  else
+    case "$1" in rate-limited|auth-failed) ;; *) printf null; return 0 ;; esac
+  fi
   v="$(python3 "$HELPER_DIR/leg_binding.py" quota --provider "$RUN_PROVIDER" --hosting "$hosting" \
          --rate-json "$(leg_usage_json "$LEG_RATE_JSON")" --reason "$1" 2>/dev/null)" || v=""
   leg_usage_json "${v:-null}"
@@ -1004,8 +1005,16 @@ grok_broker() {  # <msg> <run-dir> <peer> — extract, then stamp/persist/valida
   broker_stamp_and_deliver "$msg" "$run_dir" "$peer"
 }
 
-broker_extract_stream() {  # <run-dir> — streaming-messages-json -> reply-raw.md
+broker_extract_stream() {  # <run-dir> [provider] — the provider's stream (grok's streaming-messages-json, or agy's stream-json) -> reply-raw.md
   local run_dir="$1"
+  if [ "${2:-}" = gemini ]; then
+    if ! python3 "$HELPER_DIR/agy_stream.py" reply "$run_dir/events.ndjson" > "$run_dir/reply-raw.md" 2>>"$run_dir/runner.log"; then
+      GROK_BROKER_NOTE="reply extraction failed — see events.ndjson / runner.log"
+      return 1
+    fi
+    [ -s "$run_dir/reply-raw.md" ] || { GROK_BROKER_NOTE="the child produced no reply text"; return 1; }
+    return 0
+  fi
   if ! command -v python3 >/dev/null 2>&1; then
     GROK_BROKER_NOTE="python3 is required to extract the reply from events.ndjson"
     return 1
@@ -1449,6 +1458,10 @@ broker_note_refusal() {
 # A second caller able to bypass a validation is the bug shape this repo keeps
 # rediscovering. (grok, S4-2 implement r1, advisory.)
 require_acp_transport() {   # <verb> <provider> <via>
+  if [ "$2" = gemini ]; then
+    [ "$3" != acp ] || die "$1: 'gemini' runs through the Antigravity CLI directly and has no ACP session — drop --via acp"
+    return 0
+  fi
   if [ "$3" != "acp" ] && [ "$2" != "grok" ]; then
     die "$1: '$2' review turns are ACP-only — re-run with --via acp (the self-send path was removed in step 4; a non-ACP turn would produce an unstamped, unmounted reply that still reported success)"
   fi
@@ -2458,23 +2471,6 @@ policy_retire_cmd() {
   printf 'acpx --cwd %s %s sessions close %s' "$_q" "$_a" "$2"
 }
 
-# acp_gemini_observed <acp.sh> <iso-home> <attest-snapshot> <cwd> — the gemini analogue of
-# acp_rollout_observed, printing the same tab layout ("<effort>\t<model>\t<turn-id>\t<evidence-file>\t
-# <window-origin>\t<runtime>\t<created-runtime>"), or exiting non-zero. TWO independent facts:
-#   model   from the CLI's OWN chat record: every answered message in the REVIEW prompt's window (its
-#           snapshot is taken after the canary, so the canary's record cannot stand in) must name one model. Zero messages, a message with no model, or two models is
-#           undecidable — never a match. This is the per-turn evidence.
-#   effort  read back from the parent-written isolated settings.json. The CLI has no per-turn record of
-#           its thinking level, so this proves what the CLI was CONFIGURED to send, not what it ran;
-#           the evidence source below says so, and the map keeps the capability `fixed` for that reason.
-acp_gemini_observed() {
-  local acp="$1" home="$2" snap="$3" cwd="$4" eff models
-  eff="$("$acp" gemini-effort "$home/.gemini/settings.json")" || { echo "gemini: the isolated settings.json could not be read back" >&2; return 21; }
-  models="$(python3 "$HELPER_DIR/leg_usage.py" models gemini "$home/.gemini" "$cwd" "$snap")" || return 21
-  [ "$(printf '%s\n' "$models" | grep -c .)" = 1 ] || { echo "gemini: the turn's responses name more than one model" >&2; return 21; }
-  printf '%s\t%s\t-\t%s\t-\t\t\n' "$eff" "${models#model	}" "$home/.gemini/tmp"
-}
-
 acp_rollout_snapshot() {  # <iso-home> <out> — path, inode and size of every rollout file
   command -v python3 >/dev/null 2>&1 || return 1
   python3 - "$1" "$2" <<'PY'
@@ -2731,21 +2727,23 @@ turn_observe() {
   } | sed 's/\t$/\tunknown/' >> "$1/turn.tsv" 2>/dev/null || true
 }
 
-# acp_failure_reason <provider> <stderr-file> — why a provider REFUSED a turn, read from the diagnostics acpx
+# acp_failure_reason <provider> <stderr-file> — why a provider REFUSED a turn, read from the diagnostics it
 # wrote to stderr (never the reply: a review may legitimately discuss a 429): `rate-limited`,
-# `auth-failed`, or nothing. The vocabulary is acp.sh's (failure-reason); only providers whose refusals
-# have a stable wording are classified (gemini). Recorded as the result's `reason`, it tells the
+# `auth-failed`, `model-unavailable`, or nothing. The vocabulary is agy_stream.py's; only providers whose
+# refusals have a stable wording are classified (gemini). Recorded as the result's `reason`, it tells the
 # operator the two things they can act on — wait for a limit to reset, or log in again — without
 # sending them into runner.log, and it is what keeps a refused turn from reading as a silent empty one.
 acp_failure_reason() {
   [ -s "${2:-}" ] || return 0
-  "$HELPER_DIR/acp.sh" failure-reason "$1" "$2" 2>/dev/null || true
+  [ "$1" = gemini ] || return 0
+  python3 "$HELPER_DIR/agy_stream.py" classify "$2" 2>/dev/null || true
 }
 # acp_failure_note <reason> <provider> — the one sentence for each classified refusal.
 acp_failure_note() {
   case "$1" in
     rate-limited) printf '%s refused the turn: a rate limit or quota is exhausted — wait for it to reset (or review with another agent) and re-send' "$2" ;;
     auth-failed)  printf '%s refused the turn: authentication failed — log in again with its CLI (or set its API key) and re-send' "$2" ;;
+    model-unavailable) printf '%s refused the turn: the declared model is not available to this account (not entitled to it) — pin another model with COMMS_ACP_GEMINI_MODEL, or review with another agent, and re-send' "$2" ;;
   esac
 }
 
@@ -2914,6 +2912,292 @@ acp_exec_bounded() {
   wait "$pid" || rc=$?
   codex_pid=""
   return "$rc"
+}
+
+# route_decision_load — THE ROUTED DECISION in force for this turn, from one reader for every arm that resolves
+# a policy (the ACP block and the direct agy turn). Reads by dynamic scope: msg, msg_thread, run_dir, agent,
+# RUN_BIND_STAMP. Sets the CALLER's locals: acp_phase, acp_leg_dispatch, acp_leg_agent, acp_routing,
+# acp_route_id, acp_route_tier, acp_route_effort, acp_route_src, acp_route_err, acp_route_cur, acp_route_cur_id.
+route_decision_load() {
+  acp_phase="$(frontmatter_field "$msg" phase || true)"
+  acp_leg_dispatch="$(frontmatter_field "$msg" dispatch || true)"
+  # A DELIVERING leg turn is that leg's owner, so its decision is bound to its identity too.
+  # A --no-deliver shadow is never the leg whose request it copied (it measures another
+  # reviewer on the same routed request), so it verifies on the thread alone, as before.
+  [ -z "$acp_leg_dispatch" ] || [ "${RUNPHASE_NO_DELIVER:-}" = 1 ] || acp_leg_agent="$agent"
+  [[ "$acp_phase" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || acp_phase=-
+  # A BOUND leg is never routed: the caller named its pair, so there is no tier and no decision.
+  [ -n "$RUN_BIND_STAMP" ] || { "$COMMS" review-route enabled 2>/dev/null && acp_routing=on; }
+  # The stamped id is read ONLY when routing is on — with routing off a leftover id is ignored
+  # (fallback routing-disabled), never a reason to refuse a baseline turn — and it must be the
+  # decision CURRENTLY in force for its own thread and phase (`review-route verify`, keyed on
+  # the record, not on this runner's cwd): an old or planted id never routes a turn, and only a
+  # panel leg the coordinator log corroborates may carry its base thread's decision.
+  if [ "$acp_routing" = off ]; then
+    # Recorded, never loaded: the ledger says a routed request ran unrouted and why. A value
+    # that is not even a well-formed id is dropped rather than handed to the resolver.
+    acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
+    [[ "$acp_route_id" =~ ^rd-[0-9a-f]{32}$ ]] || acp_route_id=""
+  else
+    acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
+    if [ -n "$acp_route_id" ]; then
+      if acp_route_cur="$("$COMMS" review-route verify "$acp_route_id" --thread "$msg_thread" --phase "$acp_phase" \
+                            ${acp_leg_dispatch:+--leg-dispatch "$acp_leg_dispatch"} ${acp_leg_agent:+--leg-agent "$acp_leg_agent"} 2>>"$run_dir/runner.log")"; then
+        acp_route_cur_id="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="decision"{print $2; exit}')"
+        if [ "$acp_route_cur_id" = "$acp_route_id" ]; then
+          acp_route_tier="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="tier"{print $2; exit}')"
+          acp_route_effort="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="effort"{print $2; exit}')"
+          acp_route_src="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="source"{print $2; exit}')"
+          [ -n "$acp_route_tier" ] && [ -n "$acp_route_effort" ] && [ -n "$acp_route_src" ] \
+            || acp_route_err="routing decision $acp_route_id could not be read"
+        else
+          acp_route_err="the request's routing decision $acp_route_id is not the decision in force for this thread and phase (${acp_route_cur_id:-none})"
+        fi
+      else
+        acp_route_err="routing decision $acp_route_id could not be loaded for thread $msg_thread phase $acp_phase"
+      fi
+    fi
+  fi
+}
+
+# ---------- the gemini leg: a DIRECT `agy` turn, parent-brokered ----------
+#
+# gemini runs through the Antigravity CLI (`agy`), which has no ACP mode, so this leg is the second direct,
+# parent-brokered arm after grok's: the child produces the reply as OUTPUT and THIS process stamps and
+# delivers it. What replaces ACP's session machinery, each part answering one thing the ACP arm answered:
+#   policy      acp.sh resolves the pair once (transport `headless`) and persists it; the launch id is
+#               `<model>-<effort>`, the id agy echoes whole in its `init` event, so one record evidences both.
+#   canary      a throwaway `PONG` turn on the SAME launch vector before a REVIEW prompt is paid for.
+#   containment `--mode plan` (agy refuses writes outside its own artifact store, and in headless mode
+#               auto-denies every command), a scrubbed driver environment, a refusal of trees carrying agy's
+#               workspace config, and a tree-identity check of the mount before and after the turn. It runs in
+#               the operator's REAL home — agy's login cannot be staged into an isolated one — so, like
+#               claude-review, its reads follow that home and its network is open. Decided 2026-10-07.
+#   attestation the review turn's own `init` event must name the declared pair, or the reply is withheld.
+#   capacity    a rate-limit, quota, login or entitlement refusal is classified from agy's own diagnostics.
+
+# agy_refuse <reason> <note> — publish a refusal on this turn and unwind (dynamic scope: cmd_run's locals).
+agy_refuse() {
+  ABORT_NOTE="refused: $2"
+  leg_usage_collect "$run_dir"
+  update_thread_state "$msg_thread" failed "" "$sfield" || true
+  write_result "$run_dir" failed 1 "" "$msg" "$2" "$1"
+  unmount_artifact; trap - EXIT
+}
+
+# agy_exec <input> <events-out> <stderr-out> <secs> — one agy turn on the prepared launch vector (agy_cmd,
+# child_env, workdir by dynamic scope): the prompt on stdin, stream-json on stdout, diagnostics apart. Its own
+# process group, published as codex_pid so the EXIT trap reaps it. Returns agy's status, or 124 at the deadline.
+agy_exec() {
+  local input="$1" out="$2" err="$3" secs="$4" waited_ds=0 poll_ds=1 rc=0
+  set -m
+  ( cd "$workdir" && exec ${child_env[@]+"${child_env[@]}"} "${agy_cmd[@]}" ) < "$input" > "$out" 2> "$err" &
+  codex_pid=$!
+  set +m
+  while kill -0 "$codex_pid" 2>/dev/null; do
+    if [ "$waited_ds" -ge $(( secs * 10 )) ]; then
+      kill_codex
+      wait "$codex_pid" 2>/dev/null || true
+      codex_pid=""
+      return 124
+    fi
+    [ "$waited_ds" -lt 20 ] || poll_ds=10
+    if [ "$poll_ds" = 1 ]; then sleep 0.1; else sleep 1; fi
+    waited_ds=$(( waited_ds + poll_ds ))
+  done
+  wait "$codex_pid" || rc=$?
+  codex_pid=""
+  return "$rc"
+}
+
+# agy_canary <want-model-id> — prove agy serves the declared pair BEFORE the review prompt is spent, on the same
+# launch vector. Sets ACP_CANARY_REASON ("" on pass) and ACP_CANARY_NOTE exactly as acp_canary does, so both
+# arms refuse in one vocabulary; adds `model-unavailable` (the account is not entitled to the model).
+agy_canary() {
+  local want="$1" secs rc=0 facts cls obs reply chk crc=0
+  secs="$(sane_secs "${COMMS_ACP_CANARY_SECS:-60}")"; [ -n "$secs" ] || secs=60
+  ACP_CANARY_REASON=""; ACP_CANARY_NOTE=""
+  printf '%s\n' '{"event":"user","message":{"content":"Reply with exactly the single word PONG and nothing else."}}' > "$run_dir/canary-input.ndjson"
+  agy_exec "$run_dir/canary-input.ndjson" "$run_dir/canary-events.ndjson" "$run_dir/canary.err" "$secs" || rc=$?
+  cat "$run_dir/canary.err" >>"$run_dir/runner.log" 2>/dev/null || true
+  printf 'canary: rc=%s budget=%s\n' "$rc" "$secs" >>"$run_dir/runner.log"
+  printf 'canary_budget\t%s\n' "$secs" >> "$run_dir/turn.tsv" 2>/dev/null || true
+  if [ "$rc" -eq 124 ]; then
+    ACP_CANARY_REASON=canary-timeout
+    ACP_CANARY_NOTE="the compatibility canary timed out after ${secs}s (COMMS_ACP_CANARY_SECS) — agy may be slow or unreachable; no compatibility claim is made"
+    return 1
+  fi
+  facts="$(python3 "$HELPER_DIR/agy_stream.py" facts "$run_dir/canary-events.ndjson" "$run_dir/canary.err" 2>>"$run_dir/runner.log")" || facts=""
+  cls="$(awk -F'\t' '$1=="failure" && $2!="-"{print $2; exit}' <<<"$facts")"
+  if [ "$rc" -ne 0 ] || ! grep -q '^status	SUCCESS$' <<<"$facts"; then
+    if [ -n "$cls" ]; then
+      ACP_CANARY_REASON="$cls"
+      ACP_CANARY_NOTE="$(acp_failure_note "$cls" "$provider") (the compatibility canary was refused before answering; see runner.log)"
+      return 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+      ACP_CANARY_REASON="canary-exit-$rc"
+      ACP_CANARY_NOTE="the compatibility canary exited $rc before answering (see runner.log) — no compatibility claim is made"
+      return 1
+    fi
+    ACP_CANARY_REASON=runtime-incompatible
+    ACP_CANARY_NOTE="agy ended the canary without a successful result ($(awk -F'\t' '$1=="error"{print $2; exit}' <<<"$facts")) — it cannot serve the declared model"
+    return 1
+  fi
+  obs="$(python3 "$HELPER_DIR/agy_stream.py" model "$run_dir/canary-events.ndjson" 2>/dev/null)" || obs=""
+  if [ "$obs" != "$want" ]; then
+    ACP_CANARY_REASON=runtime-incompatible
+    ACP_CANARY_NOTE="the canary ran model '${obs:-<none named>}', not the declared '$want' — no compatibility claim is made"
+    return 1
+  fi
+  reply="$(python3 "$HELPER_DIR/agy_stream.py" reply "$run_dir/canary-events.ndjson" 2>/dev/null)" || reply=""
+  chk="$(printf '%s' "$reply" | "$COMMS" reply-check - 2>"$run_dir/canary-check.err")" || crc=$?
+  cat "$run_dir/canary-check.err" >>"$run_dir/runner.log" 2>/dev/null || true
+  case "$crc" in
+    10) ;;
+    11) ACP_CANARY_REASON=runtime-incompatible
+        ACP_CANARY_NOTE="agy returned a provider API error for the canary ($(printf '%s\n' "$chk" | tail -n +2)) — it cannot serve the declared model"
+        return 1 ;;
+    *)  ACP_CANARY_REASON=reply-unverifiable
+        ACP_CANARY_NOTE="could not verify the canary reply (reply-check status $crc) — no compatibility claim is made"
+        return 1 ;;
+  esac
+  if [ "$(printf '%s' "$reply" | tr -d '[:space:]')" != PONG ]; then
+    ACP_CANARY_REASON=canary-unexpected
+    ACP_CANARY_NOTE="agy answered the canary but not as instructed ($(printf '%.200s' "$reply" | tr '\n' ' ')) — no compatibility claim is made"
+    return 1
+  fi
+  return 0
+}
+
+# run_agy_turn — the whole gemini turn, from policy resolution to the published result. Reads cmd_run's locals
+# by dynamic scope (msg, run_dir, agent, provider, peer, mount_dir, workdir, msg_artifact, msg_thread, sfield,
+# timeout, child_env) and ends the run exactly as the direct grok tail does.
+run_agy_turn() {
+  local acp_sh="$HELPER_DIR/acp.sh" stream="$HELPER_DIR/agy_stream.py"
+  local acp_policy="$run_dir/policy.tsv" acp_policy_sha="" acp_route_id=""
+  local acp_route_tier=none acp_route_effort=none acp_route_src=none acp_routing=off
+  local acp_route_err="" acp_route_cur="" acp_route_cur_id="" acp_phase="" acp_leg_dispatch="" acp_leg_agent=""
+  route_decision_load
+  if [ -z "$acp_route_err" ]; then
+    "$acp_sh" resolve gemini --transport headless --tier "$acp_route_tier" \
+        --effort "$acp_route_effort" --decision "${acp_route_id:-none}" --routing "$acp_routing" \
+        --phase "$acp_phase" --candidate-source "$acp_route_src" \
+        > "$acp_policy" 2>>"$run_dir/runner.log" \
+      || acp_route_err="the reviewer policy could not be resolved (see runner.log)"
+  fi
+  if [ -n "$acp_route_err" ]; then
+    rm -f "$acp_policy" 2>/dev/null || true
+  else
+    acp_policy_sha="$(policy_record_sha "$acp_policy")" || acp_route_err="the resolved policy record could not be hashed"
+    RUN_POLICY_SHA="$acp_policy_sha"
+  fi
+  turn_policy "$run_dir" "$acp_policy" "${acp_route_id:-none}"
+  printf 'policy resolved: %s\n' "$(tr '\t\n' '= ' < "$acp_policy" 2>/dev/null || echo "none ($acp_route_err)")" >>"$run_dir/runner.log"
+  if [ -n "$acp_route_err" ]; then agy_refuse policy-unapplied "$acp_route_err"; return 1; fi
+
+  local pol model effort runtime want
+  pol="$("$acp_sh" policy gemini --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" \
+    || { agy_refuse policy-unapplied "the gemini model could not be read from the resolved policy"; return 1; }
+  model="${pol%%$'\t'*}"; effort="${pol#*$'\t'}"
+  runtime="$("$acp_sh" runtime gemini --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" \
+    || { agy_refuse policy-unapplied "the resolved agy runtime is unusable"; return 1; }
+  want="$model-$effort"
+  # An argument that looks like a flag, or a prompt, would change the launch vector: the id is an allowlisted token.
+  [[ "$want" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { agy_refuse policy-unapplied "the declared model id '$want' is not a bare identifier"; return 1; }
+  local -a agy_cmd=("$runtime" -p= --input-format stream-json --output-format stream-json --mode plan --model "$want")
+  { printf 'agy_runtime\t%s\n' "$runtime"; printf 'agy_model\t%s\n' "$want"; } >> "$run_dir/turn.tsv" 2>/dev/null || true
+
+  if [ -n "$mount_dir" ] && ! mount_tree_matches "$mount_dir" "$msg_artifact" "$run_dir/runner.log"; then
+    agy_refuse containment-unconfirmed "the mount no longer matches artifact $msg_artifact at prompt time — refusing to review a contaminated tree"
+    return 1
+  fi
+  # A REVIEW prompt is gated by the canary; a consult is not (its reply is verified by the broker's own check).
+  if [ "${GROK_RTYPE:-}" = review-feedback ]; then
+    if ! agy_canary "$want"; then
+      agy_refuse "$ACP_CANARY_REASON" "$ACP_CANARY_NOTE"
+      return 1
+    fi
+  fi
+  python3 "$stream" input "$run_dir/prompt.md" > "$run_dir/agy-input.ndjson" 2>>"$run_dir/runner.log" \
+    || { agy_refuse policy-unapplied "the prompt could not be encoded for agy"; return 1; }
+
+  local t0 elapsed rc=0
+  t0="$(date +%s)"
+  agy_exec "$run_dir/agy-input.ndjson" "$run_dir/events.ndjson" "$run_dir/agy.err" "$timeout" || rc=$?
+  elapsed=$(( $(date +%s) - t0 ))
+  cat "$run_dir/agy.err" >>"$run_dir/runner.log" 2>/dev/null || true
+  echo "agy turn finished after ${elapsed}s (budget ${timeout}s)" >>"$run_dir/runner.log"
+  LEG_USAGE_JSON="$(leg_usage_json "$(python3 "$stream" usage "$run_dir/canary-events.ndjson" "$run_dir/events.ndjson" 2>/dev/null)")"
+  local sid facts f_status f_denied f_refused f_fail f_error reason=""
+  sid="$(session_id_from_events "$run_dir" "$provider")"
+  facts="$(python3 "$stream" facts "$run_dir/events.ndjson" "$run_dir/agy.err" 2>>"$run_dir/runner.log")" || facts=""
+  f_status="$(awk -F'\t' '$1=="status"{print $2; exit}' <<<"$facts")"
+  f_denied="$(awk -F'\t' '$1=="denied"{print $2; exit}' <<<"$facts")"
+  f_refused="$(awk -F'\t' '$1=="refused"{print $2; exit}' <<<"$facts")"
+  f_fail="$(awk -F'\t' '$1=="failure"{print $2; exit}' <<<"$facts")"
+  f_error="$(awk -F'\t' '$1=="error"{sub(/^error\t/, ""); print; exit}' <<<"$facts")"
+  { printf 'agy_status\t%s\n' "${f_status:-unknown}"
+    printf 'agy_denied_actions\t%s\nagy_refused_tools\t%s\n' "${f_denied:--}" "${f_refused:--}"
+  } >> "$run_dir/turn.tsv" 2>/dev/null || true
+  [ "$f_denied" = - ] && [ "$f_refused" = - ] || printf 'agy refused: denied_actions=%s refused_tools=%s\n' "${f_denied:--}" "${f_refused:--}" >>"$run_dir/runner.log"
+
+  if [ "$rc" -eq 124 ]; then
+    log_event provider-result timeout "killed at the ${timeout}s budget"
+    update_thread_state "$msg_thread" timeout "$sid" "$sfield" || true
+    write_result "$run_dir" timeout 124 "$sid" "$msg" "killed after ${timeout}s — raise COMMS_RUNPHASE_TIMEOUT_SECS or investigate events.ndjson"
+    unmount_artifact; trap - EXIT
+    return 1
+  fi
+  local ok=1
+  { [ "$rc" -eq 0 ] && [ "$f_status" = SUCCESS ]; } || ok=0
+  [ "$ok" = 1 ] || reason="${f_fail#-}"
+  if [ "$ok" = 0 ] && [ -z "$reason" ] && [ -z "$(python3 "$stream" reply "$run_dir/events.ndjson" 2>/dev/null)" ]; then reason=no-output; fi
+  log_event provider-result "$([ "$ok" = 1 ] && echo completed || echo failed)" \
+    "exit=$rc elapsed=${elapsed}s budget=${timeout}s via=agy${reason:+ reason=$reason}"
+
+  # THE TREE-IDENTITY CHECK, after the turn and whatever its outcome: a write that landed is a containment
+  # fact, ahead of any depth or capacity verdict. It is not `no-output`, so it can never read as a droppable leg.
+  if [ -n "$mount_dir" ] && ! mount_tree_matches "$mount_dir" "$msg_artifact" "$run_dir/runner.log"; then
+    update_thread_state "$msg_thread" failed "$sid" "$sfield" || true
+    write_result "$run_dir" failed 1 "$sid" "$msg" "the mount stopped matching artifact $msg_artifact during the turn — refusing to stamp a verdict over a contaminated tree"
+    unmount_artifact; trap - EXIT
+    return 1
+  fi
+
+  local status=completed note="" ar=0
+  if [ "$ok" = 0 ]; then
+    status=failed
+    note="agy exited $rc with result status '${f_status:-none}'${f_error:+ ($f_error)} — see events.ndjson and runner.log (after ${elapsed}s of a ${timeout}s budget)"
+    [ -z "$reason" ] || [ "$reason" = no-output ] || note="$(acp_failure_note "$reason" "$provider") (agy exited $rc after ${elapsed}s of a ${timeout}s budget)"
+  else
+    # POST-TURN POLICY ATTESTATION: the review's own init event must name the declared pair. Last gate before
+    # publication; a wrong-depth review is withheld rather than published and flagged.
+    local att_out att_eff att_mod att_msg=""
+    att_out="$(python3 "$stream" attest "$run_dir/events.ndjson" 2>>"$run_dir/runner.log")" || ar=21
+    att_eff="$(printf '%s' "$att_out" | cut -f1)"; att_mod="$(printf '%s' "$att_out" | cut -f2)"
+    if [ "$ar" = 0 ]; then
+      if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then ar=22; att_msg="the resolved policy record changed during the turn"
+      else att_msg="$("$acp_sh" policy-attest gemini "$att_eff" "$att_mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || ar=$?; fi
+    fi
+    turn_observe "$run_dir" "$att_eff" "$att_mod" "" "${sid:-}" "$run_dir/events.ndjson" "" "" "" "$([ -n "$att_mod" ] && printf 'agy-init-event')"
+    if [ "$ar" != 0 ]; then
+      printf 'policy attestation: rc=%s %s\n' "$ar" "$att_msg" >>"$run_dir/runner.log"
+      if [ "$ar" = 20 ]; then agy_refuse policy-unapplied "the review turn did not run the declared model/effort policy ($att_msg) — refusing to publish a review of the wrong depth"
+      else agy_refuse policy-unapplied "could not attest the model/effort the review turn actually ran (status $ar${att_msg:+: $att_msg}) — refusing to publish a review of unknown depth"; fi
+      return 1
+    fi
+    printf 'policy attested: %s\n' "$att_msg" >>"$run_dir/runner.log"
+    if broker_extract_stream "$run_dir" gemini && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then :
+    else
+      status=failed
+      note="${GROK_BROKER_NOTE:-gemini broker failed}"
+    fi
+  fi
+  update_thread_state "$msg_thread" "$status" "$sid" "$sfield" || true
+  write_result "$run_dir" "$status" "$rc" "$sid" "$msg" "$note" "$reason"
+  unmount_artifact; trap - EXIT
+  [ "$status" = completed ]
 }
 
 # ---------- run (spawn's detached child) ----------
@@ -3329,17 +3613,19 @@ cmd_run() {
       trap - EXIT
       exit 1
     fi
-    # THE GEMINI ANALOGUE. gemini resolves `.gemini/` (settings.json, .env, extensions, hooks, MCP servers,
-    # custom commands) from the workspace, and a workspace `.env` can set GOOGLE_GEMINI_BASE_URL or an API
-    # key — so a hostile artifact could redirect the reviewer's traffic or start a provider-side process.
-    # Same rule as codex's and claude's: ANY such file is refused and its content is not parsed. This
-    # CLOSES the named vectors; it is a denylist, not a general project-config boundary.
+    # THE GEMINI ANALOGUE. agy resolves workspace config — `.gemini/`, `.agents/` (hooks.json, plugins, skills,
+    # agents, rules, workflows) and its older spellings `.agent`, `.agy`, `.antigravity`, `.jetski`, plus
+    # `mcp_config.json` — and a workspace `.env` can set an API key or an endpoint. Hooks and MCP servers run
+    # OUTSIDE the plan-mode pin, and agy runs in the operator's real home, whose trusted-workspaces list
+    # (observed: the home directory itself) can cover a mount. Same rule as codex's and claude's: ANY such
+    # entry is refused and its content is not parsed. This CLOSES the named vectors; it is a denylist, not a
+    # general project-config boundary.
     if [ "$provider" = gemini ]; then
       local gemini_cfg
-      for gemini_cfg in .gemini .env; do
+      for gemini_cfg in .gemini .env .agents .agent .agy .antigravity .jetski mcp_config.json; do
         if [ -e "$mount_dir/$gemini_cfg" ] || [ -L "$mount_dir/$gemini_cfg" ]; then
           update_thread_state "$msg_thread" failed "" "$sfield" || true
-          write_result "$run_dir" failed 1 "" "$msg" "the reviewed tree carries $gemini_cfg, which gemini reads from the workspace and which can declare MCP servers, hooks or a redirected API endpoint that run outside the plan-mode pin — refusing (any such entry is refused; content is not parsed)"
+          write_result "$run_dir" failed 1 "" "$msg" "the reviewed tree carries $gemini_cfg, which agy reads from the workspace and which can declare MCP servers, hooks or a redirected API endpoint that run outside the plan-mode pin — refusing (any such entry is refused; content is not parsed)"
           unmount_artifact
           trap - EXIT
           exit 1
@@ -3415,7 +3701,7 @@ cmd_run() {
     trap - EXIT
     exit 1
   fi
-  if [ "$provider" = "grok" ] || [ "$via" = "acp" ]; then
+  if [ "$provider" = "grok" ] || [ "$provider" = "gemini" ] || [ "$via" = "acp" ]; then
     if ! build_grok_prompt "$msg" "$run_dir" "$peer" "$main_root" "$agent" "${mount_dir:-}"; then
       update_thread_state "$msg_thread" failed "" "$sfield" || true
       write_result "$run_dir" failed 1 "" "$msg" "${GROK_PROMPT_NOTE:-$provider prompt build refused}"
@@ -3548,6 +3834,22 @@ cmd_run() {
   # Every direct launch crosses the same reviewer environment boundary as an ACP one.
   child_env=(env "${TURN_CHILD_SCRUB[@]}")
 
+  # THE GEMINI LEG: a direct `agy` turn with its own policy, canary and attestation (run_agy_turn). The
+  # addendum below is the one thing the shared prompt cannot say: agy's plan mode makes it WRITE a plan file and
+  # ask for approval, which no one reads and would leave the review empty.
+  if [ "$provider" = gemini ]; then
+    cat >> "$run_dir/prompt.md" <<'AGYNOTE'
+
+RUNTIME NOTE (this reviewer runs in agy's plan mode, non-interactively): put your COMPLETE answer — for a
+review, everything from the VERDICT line to the last finding — in your FINAL reply text. Do not write it
+into a plan, walkthrough or any other file, do not ask for approval, and do not offer to proceed: nobody
+can approve, and nothing reads a file you write. Reading files and read-only git commands are allowed;
+every other action is refused.
+AGYNOTE
+    run_agy_turn
+    return
+  fi
+
   # ACP MODE. A cold `codex exec` rebuilds context from nothing every round —
   # measured on one real loop at 114,688 then 144,975 FRESH input tokens for rounds
   # 1 and 2. The same shape of work in a warm ACP session cost 1,405 then 442. The
@@ -3597,51 +3899,12 @@ cmd_run() {
     local acp_route_tier=none acp_route_effort=none acp_route_src=none acp_routing=off
     local acp_transport=acp acp_route_err="" acp_route_cur="" acp_route_cur_id="" acp_phase=""
     [ -n "$mount_dir" ] && acp_transport=acp-mounted
-    acp_phase="$(frontmatter_field "$msg" phase || true)"
-    local acp_leg_dispatch="" acp_leg_agent=""
-    acp_leg_dispatch="$(frontmatter_field "$msg" dispatch || true)"
-    # A DELIVERING leg turn is that leg's owner, so its decision is bound to its identity too.
-    # A --no-deliver shadow is never the leg whose request it copied (it measures another
-    # reviewer on the same routed request), so it verifies on the thread alone, as before.
-    [ -z "$acp_leg_dispatch" ] || [ "${RUNPHASE_NO_DELIVER:-}" = 1 ] || acp_leg_agent="$agent"
-    [[ "$acp_phase" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || acp_phase=-
-    # A BOUND leg is never routed: the caller named its pair, so there is no tier and no decision.
-    [ -n "$RUN_BIND_STAMP" ] || { "$COMMS" review-route enabled 2>/dev/null && acp_routing=on; }
-    # The stamped id is read ONLY when routing is on — with routing off a leftover id is ignored
-    # (fallback routing-disabled), never a reason to refuse a baseline turn — and it must be the
-    # decision CURRENTLY in force for its own thread and phase (`review-route verify`, keyed on
-    # the record, not on this runner's cwd): an old or planted id never routes a turn, and only a
-    # panel leg the coordinator log corroborates may carry its base thread's decision.
-    if [ "$acp_routing" = off ]; then
-      # Recorded, never loaded: the ledger says a routed request ran unrouted and why. A value
-      # that is not even a well-formed id is dropped rather than handed to the resolver.
-      acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
-      [[ "$acp_route_id" =~ ^rd-[0-9a-f]{32}$ ]] || acp_route_id=""
-    else
-      acp_route_id="$(frontmatter_field "$msg" route_decision || true)"
-      if [ -n "$acp_route_id" ]; then
-        if acp_route_cur="$("$COMMS" review-route verify "$acp_route_id" --thread "$msg_thread" --phase "$acp_phase" \
-                              ${acp_leg_dispatch:+--leg-dispatch "$acp_leg_dispatch"} ${acp_leg_agent:+--leg-agent "$acp_leg_agent"} 2>>"$run_dir/runner.log")"; then
-          acp_route_cur_id="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="decision"{print $2; exit}')"
-          if [ "$acp_route_cur_id" = "$acp_route_id" ]; then
-            acp_route_tier="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="tier"{print $2; exit}')"
-            acp_route_effort="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="effort"{print $2; exit}')"
-            acp_route_src="$(printf '%s\n' "$acp_route_cur" | awk -F'\t' '$1=="source"{print $2; exit}')"
-            [ -n "$acp_route_tier" ] && [ -n "$acp_route_effort" ] && [ -n "$acp_route_src" ] \
-              || acp_route_err="routing decision $acp_route_id could not be read"
-          else
-            acp_route_err="the request's routing decision $acp_route_id is not the decision in force for this thread and phase (${acp_route_cur_id:-none})"
-          fi
-        else
-          acp_route_err="routing decision $acp_route_id could not be loaded for thread $msg_thread phase $acp_phase"
-        fi
-      fi
-    fi
+    route_decision_load
     if [ -n "$RUN_BIND_STAMP" ]; then
       # The caller's EXACT pair, from the stamp: no candidate, no baseline, no pin. A bound leg runs mounted
       # or not at all, and a failed resolution refuses the turn before any provider is launched.
       local bound_custom=()
-      [ "$provider" = codex ] || [ "$provider" = gemini ] || bound_custom=(--custom-profile)
+      [ "$provider" = codex ] || bound_custom=(--custom-profile)
       if [ "$acp_transport" != acp-mounted ]; then
         bound_leg_refuse "a bound leg runs mounted only (the reviewed artifact could not be mounted); nothing was launched"
       fi
@@ -3884,7 +4147,6 @@ cmd_run() {
             ABORT_NOTE="refused: isolated CODEX_HOME for '$provider' resolves outside its mount"
             die "run: the isolated CODEX_HOME resolves outside its mount (want '$acp_iso_home', got '$acp_iso_phys') — refusing"
           fi
-          # (_iso_place is defined above the provider case: the gemini arm places its home the same way.)
           # Credentials only, copied fresh. NOT the broad workspace permission profile an
           # operator may have set globally: such a profile is exactly what makes the agent
           # self-authorise, so no permission request is ever issued and no client-side denial
@@ -3979,113 +4241,6 @@ cmd_run() {
           # defence in depth against reviewer BEHAVIOUR, not containment. Shipped on an explicit
           # owner decision (2026-09-01) to accept write-containment without network-containment.
           acp_iso_backend="claude-plan"
-          acp_iso_mode="plan"
-          ;;
-        gemini)
-          # THE GEMINI ISOLATED HOME. GEMINI_CLI_HOME names the directory that CONTAINS `.gemini/`, so the
-          # CLI's whole user state — settings, extensions, hooks, MCP servers, chat records, credentials
-          # files — lives under $acp_iso_home/.gemini and the operator's ~/.gemini never reaches a review
-          # turn. Beside the mount, like codex's, so the CLI's own session state (what warm resume is made
-          # of) survives the per-round restage.
-          #
-          # CREDENTIALS STAY USABLE, by three routes that need no copy of a secret into the review home:
-          # an API key or Vertex setting in the ENVIRONMENT is inherited as it is; a login kept in the OS
-          # keychain does not depend on the home at all. The file-backed logins (the OAuth token and the CLI's
-          # credential store) are copied fresh exactly as codex's auth.json is, with the
-          # same residual: the reviewer can read it. And the operator's selected auth TYPE is carried into
-          # the isolated settings, because without it a home with no settings asks interactively.
-          #
-          # CONTAINMENT, stated plainly: the backend is the in-process `plan` mode pin ("Read-only mode"),
-          # the same class as claude's, NOT a kernel sandbox — the child's network stays open and the OAuth
-          # token is readable. It fails closed where it can be checked (the pre-canary set-mode must be
-          # confirmed, and the permission shape refuses every approval), but it has NOT been measured
-          # against a live gemini turn the way codex's and claude's were. See docs/ROADMAP.md.
-          acp_iso_home="$mount_kdir/home"
-          if [ -L "$acp_iso_home" ]; then
-            ABORT_NOTE="refused: isolated GEMINI_CLI_HOME for '$provider' is a symlink — refusing to follow it out of the mount"
-            die "run: the isolated GEMINI_CLI_HOME path is a symlink ($acp_iso_home) — refusing to follow it out of the mount"
-          fi
-          ABORT_NOTE="refused: could not create a usable isolated GEMINI_CLI_HOME for '$provider'"
-          mkdir -p "$acp_iso_home" || die "run: cannot create the isolated GEMINI_CLI_HOME"
-          local acp_iso_phys; acp_iso_phys="$( cd "$acp_iso_home" 2>/dev/null && pwd -P )" || true
-          if [ "$acp_iso_phys" != "$acp_iso_home" ]; then
-            ABORT_NOTE="refused: isolated GEMINI_CLI_HOME for '$provider' resolves outside its mount"
-            die "run: the isolated GEMINI_CLI_HOME resolves outside its mount (want '$acp_iso_home', got '$acp_iso_phys') — refusing"
-          fi
-          # The `.gemini` directory itself: a leftover symlink or file there would steer every place below.
-          local acp_gm_dir="$acp_iso_home/.gemini"
-          if [ -L "$acp_gm_dir" ] || { [ -e "$acp_gm_dir" ] && [ ! -d "$acp_gm_dir" ]; }; then
-            ABORT_NOTE="refused: the isolated .gemini for '$provider' is not a plain directory"
-            die "run: the isolated .gemini is not a plain directory ($acp_gm_dir) — refusing"
-          fi
-          mkdir -p "$acp_gm_dir" || die "run: cannot create the isolated .gemini"
-          local acp_gm_phys; acp_gm_phys="$( cd "$acp_gm_dir" 2>/dev/null && pwd -P )" || true
-          if [ "$acp_gm_phys" != "$acp_iso_home/.gemini" ]; then
-            ABORT_NOTE="refused: isolated .gemini for '$provider' resolves outside its mount"
-            die "run: the isolated .gemini resolves outside its mount — refusing"
-          fi
-          rm -f "$acp_iso_home"/.stage.* 2>/dev/null || true
-          local acp_gm_src="${GEMINI_CLI_HOME:-$HOME}/.gemini" acp_gm_f
-          # gemini-credentials.json is the file-backed store the CLI uses when no native keychain is
-          # available (or GEMINI_FORCE_FILE_STORAGE is set), and the one it migrates a copied legacy
-          # token INTO and then prefers. All three are mirrored from the source every round — copied when
-          # present, cleared when not — so a rotated or removed login (and a token the CLI migrated into
-          # this reused home) cannot outlive its source.
-          for acp_gm_f in oauth_creds.json google_accounts.json gemini-credentials.json; do
-            # An API-billed BOUND leg stages no login at all: the only authentication it may have is its one
-            # bound key, so a saved login (and any stale copy from an earlier round) must not be there.
-            if [ "$RUN_BIND_BILLING" != api ] && [ -f "$acp_gm_src/$acp_gm_f" ] && [ ! -L "$acp_gm_src/$acp_gm_f" ]; then
-              ABORT_NOTE="refused: could not stage isolated $acp_gm_f for '$provider'"
-              _iso_place "$acp_gm_src/$acp_gm_f" "$acp_gm_dir/$acp_gm_f" 600 \
-                || die "run: cannot stage the isolated $acp_gm_f"
-            elif [ -e "$acp_gm_dir/$acp_gm_f" ] || [ -L "$acp_gm_dir/$acp_gm_f" ]; then
-              # STALE-CREDENTIAL CLEAR, as for codex: a copy from an earlier round must not outlive the
-              # source's removal or rotation, or the turn would run on a revoked login.
-              ABORT_NOTE="refused: could not clear a stale isolated $acp_gm_f for '$provider' after its source went away"
-              rm -f "$acp_gm_dir/$acp_gm_f" 2>/dev/null || true
-              if [ -e "$acp_gm_dir/$acp_gm_f" ] || [ -L "$acp_gm_dir/$acp_gm_f" ]; then
-                die "run: a stale isolated $acp_gm_f persists after its source credential was removed — refusing to run on a possibly-revoked credential"
-              fi
-            fi
-          done
-          ABORT_NOTE="refused: could not write the isolated gemini settings for '$provider'"
-          if [ -n "$acp_route_err" ]; then
-            ABORT_NOTE="refused: $acp_route_err"
-            die "run: $acp_route_err — refusing to write an isolated config"
-          fi
-          policy_record_intact "$acp_policy" "$acp_policy_sha" \
-            || { ABORT_NOTE="refused: the resolved policy record changed before the config was written"; die "run: the policy record changed after resolution"; }
-          # The operator's selected auth TYPE, read as one allowlisted token — nothing else of their
-          # settings crosses (an extension, hook or MCP server there is exactly what isolation excludes).
-          local acp_gm_auth="" acp_iso_cfg=""
-          acp_gm_auth="$("$acp_sh" gemini-auth "$acp_gm_src/settings.json" 2>/dev/null || true)"
-          if [ -n "$RUN_BIND_STAMP" ]; then
-            # A BOUND leg's selected auth type is the binding's, never the operator's: forced to the type the
-            # table names for this billing class (credential-env.tsv), and read back before launch.
-            acp_gm_auth="$(python3 "$HELPER_DIR/access_profiles.py" auth-row gemini "$RUN_BIND_BILLING" | cut -f4)"
-            acp_gm_auth="${acp_gm_auth#selectedType=}"
-            [[ "$acp_gm_auth" =~ ^[a-z][a-z0-9-]*$ ]] \
-              || { ABORT_NOTE="refused: no explicit gemini auth selection for billing '$RUN_BIND_BILLING'"; die "run: no explicit gemini auth selection for billing '$RUN_BIND_BILLING'"; }
-          fi
-          acp_iso_cfg="$("$acp_sh" provider-config gemini --policy-file "$acp_policy" ${acp_gm_auth:+--auth-type "$acp_gm_auth"})" \
-            || die "run: the gemini reviewer policy is invalid — refusing to write an isolated config"
-          [ -n "$acp_iso_cfg" ] || die "run: acp.sh returned an empty isolated gemini config"
-          _iso_place "" "$acp_gm_dir/settings.json" 600 "$acp_iso_cfg" \
-            || die "run: cannot write the isolated gemini settings"
-          ABORT_NOTE="runner aborted unexpectedly — see runner.log"
-          # The model rides on EVERY acpx call too (a global option, so it precedes the profile): acpx
-          # sets it on the session and records the confirmed `current_model_id` the preflight reads.
-          local acp_gm_model=""
-          acp_gm_model="$("$acp_sh" policy gemini --policy-file "$acp_policy" 2>>"$run_dir/runner.log" | cut -f1)" || acp_gm_model=""
-          [ -n "$acp_gm_model" ] || { ABORT_NOTE="refused: the gemini model could not be read from the resolved policy"; die "run: no gemini model in the resolved policy"; }
-          acp_launch+=(--model "$acp_gm_model")
-          # Precedence traps, scrubbed so the isolated settings are what the CLI reads: GEMINI_MODEL beats
-          # settings.model.name; the two SYSTEM settings paths outrank every user file; GEMINI_SANDBOX
-          # would re-exec the CLI under a sandbox nobody measured; the trust variables would trust the mount.
-          acp_iso=(env -u GEMINI_MODEL -u GEMINI_SANDBOX -u GEMINI_CLI_SYSTEM_SETTINGS_PATH
-                       -u GEMINI_CLI_SYSTEM_DEFAULTS_PATH -u GEMINI_CLI_TRUSTED_FOLDERS_PATH
-                       -u GEMINI_CLI_TRUST_WORKSPACE "GEMINI_CLI_HOME=$acp_iso_home")
-          acp_iso_backend="gemini-plan"
           acp_iso_mode="plan"
           ;;
         grok)
@@ -4302,7 +4457,7 @@ cmd_run() {
       # So for a mode-pinned backend the permission shape IS part of the boundary.
       # (grok, implement r1, BLOCKING — found by reading acpx's option resolution, not by running
       # it; confirmed here by ground truth.)
-      if [ "$acp_iso_backend" = "claude-plan" ] || [ "$acp_iso_backend" = "gemini-plan" ] || [ "$acp_iso_backend" = opencode-read-search ]; then
+      if [ "$acp_iso_backend" = "claude-plan" ] || [ "$acp_iso_backend" = opencode-read-search ]; then
         acp_perm=(--approve-reads --non-interactive-permissions deny)
       elif [ "$acp_iso_backend" = "codex-home+read-only" ]; then
         # codex's kernel sandbox has the same hole one layer down. Its `read-only` mode keeps
@@ -4588,17 +4743,6 @@ cmd_run() {
         return 1
       fi
     fi
-    # GEMINI ATTESTATION WINDOW, opened AFTER the canary for the same reason: the usage snapshot above
-    # predates the canary (it is a cost question), so a model attestation read from it would be
-    # satisfied by the canary's PONG record alone — a review the CLI streamed but never recorded
-    # would publish on the canary's evidence. This second snapshot bounds the window to the review
-    # prompt; the usage snapshot is left alone.
-    if [ -n "$acp_iso_home" ] && [ "$provider" = gemini ]; then
-      if ! python3 "$HELPER_DIR/leg_usage.py" snapshot gemini "$acp_iso_home/.gemini" "$(cd "$workdir" && pwd -P)" "$run_dir/attest-snapshot.json" 2>>"$run_dir/runner.log"; then
-        acp_refuse policy-unapplied "could not snapshot the gemini chat records before the review prompt — refusing rather than paying for a turn whose model could not then be attested"
-        return 1
-      fi
-    fi
     acp_t0="$(date +%s)"
     ( acp_exec "$workdir" \
         ${acp_prompt_opts[@]+"${acp_prompt_opts[@]}"} \
@@ -4705,9 +4849,6 @@ cmd_run() {
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
       local att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
       # codex's window was read once, for containment, right after the turn; its att_out/att_rc stand.
-      if [ "$provider" = gemini ]; then
-        att_out="$(acp_gemini_observed "$acp_sh" "$acp_iso_home" "$run_dir/attest-snapshot.json" "$(cd "$workdir" && pwd -P)" 2>>"$run_dir/runner.log")" || att_rc=$?
-      fi
       if [ "$att_rc" -eq 0 ]; then
         # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
         # field after an empty one shifts left — a context missing its effort was reported as a
@@ -4732,8 +4873,7 @@ cmd_run() {
       fi
       # What the provider's own record says ran, kept apart from the binding: `observed` is never copied from `expected`.
       if [ -n "$RUN_BIND_STAMP" ]; then RUN_BIND_OBS_MODEL="$att_mod"; RUN_BIND_OBS_EFFORT="$att_eff"; fi
-      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}" "${att_rtc:-}" \
-        "$( [ "$provider" = gemini ] && [ -n "$att_src" ] && printf 'gemini-chat-record+settings-readback')"
+      turn_observe "$run_dir" "$att_eff" "$att_mod" "${acp_record_id:-}" "${att_turn:-}" "${att_src:-}" "${att_off:-}" "${att_rt:-}" "${att_rtc:-}"
       if [ "$att_rc" -ne 0 ]; then
         printf 'policy attestation: rc=%s %s\n' "$att_rc" "$att_msg" >>"$run_dir/runner.log"
         if [ "$att_rc" -eq 20 ]; then
@@ -4927,7 +5067,7 @@ session_id_from_events() {  # session_id_from_events <run-dir> <provider>
   # that must yield an empty id, not a set -e abort that records a successful
   # turn as failed.
   local key
-  case "${2:-codex}" in claude|grok) key=session_id ;; *) key=thread_id ;; esac
+  case "${2:-codex}" in claude|grok) key=session_id ;; gemini) key=conversation_id ;; *) key=thread_id ;; esac
   { sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
       "$1/events.ndjson" | head -1; } 2>/dev/null || true
 }

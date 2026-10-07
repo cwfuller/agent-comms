@@ -33,7 +33,8 @@
 #
 # Transports: acp-mounted = a mounted review turn with an isolated provider home (the only
 # place a policy is both APPLIED and ATTESTED); acp = an unmounted ACP turn (the operator's own
-# provider config runs); headless = the detached CLI runner (grok only).
+# provider config runs); headless = the detached, parent-brokered CLI runner (grok: nothing applied; gemini via agy:
+# applied and attested).
 #
 # Capability `eligible` means a routed decision may change the concrete pair. `fixed` means the
 # baseline (plus pins) is applied and attested but routing is ignored. `unsupported` means nothing
@@ -87,26 +88,28 @@
 #   gpt-6.1-sol/xhigh, adapter_check match (acpx config_options), observed_model/effort
 #   gpt-6.1-sol/xhigh from the isolated rollout, session_created_runtime 0.159.0.
 #
-# GEMINI, 2026-09-30 (read-only: @google/gemini-cli 0.62.0 bundle source and its bundled docs, acpx
-# 0.13.1 dist; NOT exercised against the live API — no authenticated Gemini session was available).
-# - ACP surface (gemini --acp): session modes default/autoEdit/yolo/plan (plan = "Read-only mode", on by
-#   default) and `unstable_setSessionModel`; there is NO ACP control for thinking depth. Hence the
-#   model is bound twice (isolated settings.json `model.name` and acpx `--model`, which acpx confirms
-#   as `current_model_id`) and the thinking level ONCE, by a settings.json `modelConfigs` override.
-# - Thinking vocabulary: the CLI's bundled SDK enum is LOW | HIGH, and its own aliases default Gemini 3
-#   to HIGH, so `low` and `high` are the efforts mapped. `medium` and `xhigh` have no row: a routed
-#   candidate of those falls back to the baseline, recorded, rather than sending a level nothing
-#   evidenced. A model the CLI does not describe as thinking-capable accepts `default` (no override).
-# - Tier labels follow the CLI's own model table: pro = strong, flash = balanced, flash-lite = fast.
-# - Capability is `fixed`, not `eligible`: the model has per-turn evidence (the CLI's own chat record
-#   names the model of every response) but the thinking level has none, and the map's own rule is that
-#   a provider is eligible only when controls AND per-turn evidence were both established. The tier and
-#   effort rows are written so promoting it is one capability edit once a live turn shows the level.
-# - GEMINI 4 IS NOT RELEASED. Its row below is DISABLED and its id is a GUESS following the existing
-#   naming (gemini-3-pro-preview, gemini-3.1-pro-preview): replace it with the id the CLI's model list
-#   reports, then delete the `disabled` row and bump `version`. While the row exists a pin of that
-#   id is refused and the `strong` tier skips it to gemini-3.1-pro-preview.
-version	2026-09-30.1
+# GEMINI, 2026-10-07 — the Antigravity CLI (`agy`, 1.3.1), run DIRECTLY (no ACP). Exercised live against the
+# operator's own login; the Gemini CLI this provider used to launch (`gemini --acp`) was retired for
+# individual accounts on 2026-06-18, and its rows, isolated-home arm and chat-record reader are gone.
+# - Transport: `headless` (agy is a detached, parent-brokered CLI turn, like grok). There is no mounted/unmounted
+#   split: agy has no isolated home to apply a policy to, so the policy is a launch argument and the same
+#   `headless` row governs a review and a consult.
+# - Application: `--model <model>-<effort>`. agy lists every variant as its own id (`agy models`:
+#   gemini-3.1-pro-high, gemini-3.1-pro-low, gemini-3.8-flash-low|medium|high, ...). `--model <model> --effort
+#   <effort>` is the same pair, but agy's init event then echoes only the bare model; the combined id is echoed
+#   whole, so ONE per-turn record evidences model AND effort. agy itself refuses a pair it does not know
+#   (`--model gemini-3.1-pro --effort xhigh`: "no xhigh effort (available: low, high)"), before any turn.
+# - Evidence: the `init` event of the turn's own stream-json output (helpers/agy_stream.py `attest`). The
+#   canary and the review prompt each carry one; the review's is what gates publication.
+# - Hence capability `eligible`: control (the combined id) AND per-turn evidence (the echoed id) exist.
+# - Efforts: gemini-3.1-pro has low and high; gemini-3.8-flash has low, medium and high. `xhigh` has no row: a
+#   routed candidate of it falls back to the baseline, recorded.
+# - Tiers: pro = strong (gemini-3.1-pro is the strongest served model; there is no 3.8 Pro as of 2026-10),
+#   flash = fast and balanced (gemini-3.8-flash; a routed candidate's own effort separates the two).
+# - gemini-3.8-flash is not served to every account (SUBSCRIPTION_REQUIRED, google-antigravity/antigravity-cli
+#   issue 1180). That is an account fact, not a map fact: the turn is recorded `model-unavailable`.
+# - agy has no rate-limit record on disk: a refusal is classified from its own diagnostics (`rate-limited`).
+version	2026-10-07.1
 
 # No mapped model has a usage limit of its own yet, so there are no `limit` rows: every mapped codex
 # model spends the shared codex limit. A row is added with the evidence that the model is served
@@ -121,9 +124,9 @@ capability	claude	headless	unsupported	none: claude review turns are ACP-only	no
 capability	grok	acp-mounted	unsupported	none applied; newer builds expose ACP `model` + `reasoning_effort` (older builds: none)	~/.grok/sessions summary.json: effort per SESSION only	grok 1.0.40 (read from --help/docs, not exercised)	effort is dropped silently on models without supportsReasoningEffort; refused on Darwin without an uncontained override
 capability	grok	acp	unsupported	none applied	as acp-mounted	-	-
 capability	grok	headless	unsupported	none: -m / --reasoning-effort exist but are not passed	as acp-mounted	grok 1.0.40	-
-capability	gemini	acp-mounted	fixed	isolated GEMINI_CLI_HOME settings.json (model.name, a modelConfigs customOverride for the thinking level, plan model routing off) plus acpx --model on the session; mode pinned to `plan`	preflight: acpx sessions show current_model_id; gate: the model named by every response in the CLI's own chat record for the turn, with the thinking level read back from the parent-written settings.json (no per-turn evidence of it exists)	gemini 0.62.0 (source and docs read, NOT exercised live); acpx 0.13.1	routing is ignored (fixed) until a live turn evidences the thinking level; the CLI must be >= 0.39.0 for a mounted review (>= 0.33.0 has --acp; the review attestation reads the .jsonl chat record first written by 0.39.0)
-capability	gemini	acp	unsupported	none: an unmounted turn runs the operator's own ~/.gemini settings	none	-	nothing applies or attests a policy
-capability	gemini	headless	unsupported	none: gemini review turns are ACP-only	none	-	-
+capability	gemini	headless	eligible	`agy -p= --input-format stream-json --output-format stream-json --mode plan --model <model>-<effort>`; the prompt is sent on stdin; agy runs in the operator's real home (no isolated home exists to stage a login into)	the `init` event of the turn's own stream names the combined model-effort id (canary and review prompt each); the pair is judged against the persisted record before anything is published	agy 1.3.1 (exercised live)	agy refuses an invalid model/effort pair itself; a model the account is not entitled to ends the turn model-unavailable
+capability	gemini	acp	unsupported	none: agy has no ACP mode, so gemini has no ACP session	none	-	nothing applies or attests a policy
+capability	gemini	acp-mounted	unsupported	none: agy has no ACP mode, so gemini has no mounted ACP session	none	-	nothing applies or attests a policy
 
 baseline	codex	acp-mounted	gpt-6.1-sol	xhigh
 # The ceiling is the FRONTIER model, not the default one: gpt-6-astra, at `ultra`, the highest effort
@@ -154,28 +157,22 @@ pair	codex	acp-mounted	gpt-5.6-sol	low,medium,high,xhigh,max,ultra
 pair	codex	acp-mounted	gpt-5.6-terra	low,medium,high,xhigh,max,ultra
 pair	codex	acp-mounted	gpt-5.6-luna	low,medium,high,xhigh,max
 
-# The ceiling EQUALS the baseline today: `high` is the strongest level mapped and gemini-3.1-pro-preview the
-# strongest served model, so COMMS_REVIEW_MAX=1 changes nothing for gemini. Point it at Gemini 4 when it ships.
-baseline	gemini	acp-mounted	gemini-3.1-pro-preview	high
-ceiling	gemini	acp-mounted	gemini-3.1-pro-preview	high
 
-# Preference lists, first servable wins. `strong` leads with the DISABLED Gemini 4 row, which is skipped
-# (recorded as `disabled:<model>`) until its `disabled` row below is deleted.
-tier	gemini	acp-mounted	fast	gemini-3.5-flash-lite,gemini-3.1-flash-lite
-tier	gemini	acp-mounted	balanced	gemini-3.5-flash,gemini-3-flash-preview
-tier	gemini	acp-mounted	strong	gemini-4-pro,gemini-3.1-pro-preview,gemini-3-pro-preview
+# The ceiling EQUALS the baseline today: gemini-3.1-pro at `high` is the strongest model and effort agy serves
+# (there is no 3.8 Pro as of 2026-10), so COMMS_REVIEW_MAX=1 changes nothing for gemini.
+baseline	gemini	headless	gemini-3.1-pro	high
+ceiling	gemini	headless	gemini-3.1-pro	high
 
-effort	gemini	acp-mounted	low	low
-effort	gemini	acp-mounted	high	high
+# Preference lists, first servable wins. One model leads each of fast and balanced: the routed candidate's own
+# effort (low or high) is what tells them apart, so fast = gemini-3.8-flash at low, balanced = gemini-3.8-flash
+# at high, strong = gemini-3.1-pro at high.
+tier	gemini	headless	fast	gemini-3.8-flash
+tier	gemini	headless	balanced	gemini-3.8-flash
+tier	gemini	headless	strong	gemini-3.1-pro
 
-pair	gemini	acp-mounted	gemini-4-pro	low,high
-pair	gemini	acp-mounted	gemini-3.1-pro-preview	low,high
-pair	gemini	acp-mounted	gemini-3-pro-preview	low,high
-pair	gemini	acp-mounted	gemini-3.5-flash	low,high,default
-pair	gemini	acp-mounted	gemini-3-flash-preview	low,high,default
-pair	gemini	acp-mounted	gemini-3.5-flash-lite	default
-pair	gemini	acp-mounted	gemini-3.1-flash-lite	default
+effort	gemini	headless	low	low
+effort	gemini	headless	medium	medium
+effort	gemini	headless	high	high
 
-# GEMINI 4 — DISABLED until it exists. Not released as of 2026-09-30; the id is a guess (see the GEMINI
-# note above). Delete this row once the real id is in the tier and pair rows.
-disabled	gemini	acp-mounted	gemini-4-pro	not-released-2026-09-30
+pair	gemini	headless	gemini-3.1-pro	low,high
+pair	gemini	headless	gemini-3.8-flash	low,medium,high

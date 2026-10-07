@@ -451,9 +451,10 @@ cmd_workspace() {
 # sharing an inbox, a thread, or awaiting_from. A twin is review-only: it never drives,
 # authors a request, or answers a consult. Everything above the process boundary is keyed on
 # the identity; only the spawn resolves the provider (registry_provider).
-# the PROVIDERS. claude/codex/gemini: interactive+acp; grok: headless reviewer/consult. gemini is supported but
-# NOT a zero-config default: a project opts in with `agents = ... gemini`, so an install without the
-# Gemini CLI never sees a third-family reviewer it cannot run.
+# the PROVIDERS. claude/codex: interactive+acp; grok and gemini: headless reviewer/consult. gemini runs through
+# the Antigravity CLI (`agy`) directly — it has no ACP mode — and is supported but NOT a zero-config default:
+# a project opts in with `agents = ... gemini`, so an install without agy never sees a third-family reviewer
+# it cannot run.
 SUPPORTED_AGENTS="claude codex grok gemini"
 REGISTRY_DEFAULT_AGENTS="claude codex grok"
 REGISTRY_DEFAULT_TARGET="codex"
@@ -736,7 +737,7 @@ whoami_from_ancestors() {
     base="$(basename "$exe")"
     case "$base" in
       grok|grok-*) printf '%s\n' grok; return 0 ;;
-      gemini)      printf '%s\n' gemini; return 0 ;;
+      gemini|agy)  printf '%s\n' gemini; return 0 ;;
       claude)      printf '%s\n' claude; return 0 ;;
       codex)       printf '%s\n' codex; return 0 ;;
     esac
@@ -759,7 +760,8 @@ cmd_whoami() {
     # Two distinct hits fail closed; a single hit wins; none falls through to ancestors.
     local hits="" hit seen="" n=0
     [ "${GROK_AGENT:-}" = "1" ] && hits="$hits grok"
-    # Gemini CLI marks the shells it spawns with GEMINI_CLI=1 (its own identification variable).
+    # The Gemini CLI marked the shells it spawned with GEMINI_CLI=1 (its own identification variable); the
+    # Antigravity CLI that replaced it sets no variable this was exercised against, so `agy` is found by ancestor.
     [ "${GEMINI_CLI:-}" = "1" ] && hits="$hits gemini"
     { [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ -n "${CLAUDE_PID:-}" ]; } && hits="$hits claude"
     { [ -n "${CODEX_SANDBOX:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; } && hits="$hits codex"
@@ -867,7 +869,7 @@ cmd_agents() {
       # (codex, S4-2 r3, blocking.) Do NOT add reviewer-consult-only here — see below.
       printf '%s\tinteractive,acp\n' claude
       printf '%s\tinteractive,acp\n' codex
-      printf '%s\tinteractive,acp\n' gemini
+      printf '%s\theadless,reviewer-consult-only\n' gemini
       printf '%s\theadless,reviewer-consult-only\n' grok
       local ca custom_supported
       custom_supported="$(custom_profile_names)" || exit 2
