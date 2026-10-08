@@ -2269,7 +2269,7 @@ SD_6="$(sd_turn gd-sd6 s6 AX_FILL_PLUGINS=1)"
   && ok "runphase.sh calls codex_seed.py for exactly seed and promote, and promotes only after a no-seed, stale or tampered canonical" || fail "seed wiring in runphase.sh"
 [ "$(awk '/seed_codex_home "\$acp_iso_home"/{a=NR} /stage_method_guidance "\$acp_iso_home"/{b=NR} /"\$acp_sh" runtime codex/{c=NR} END{print (b<a && a<c) ? "ordered" : "wrong"}' "$RP")" = ordered ] \
   && ok "the seed runs after the credential, config and guidance staging and before the runtime is resolved" || fail "seed call order"
-! sed -n '/^      seed_codex_home() {/,/^      }/p' "$RP" | grep -Eq '(^|[^[:alnum:]_])(cp|rsync|ditto|ln|COMMS_[A-Z_]+)([^[:alnum:]_]|$)' \
+! sed -n '/^      seed_codex_home() {/,/^      }/p' "$RP" | grep_full -Eq '(^|[^[:alnum:]_])(cp|rsync|ditto|ln|COMMS_[A-Z_]+)([^[:alnum:]_]|$)' \
   && ok "the runner's seed step uses no copy tool, link and no operator setting: it only calls the helper" || fail "seed_codex_home reaches for a copy tool or a setting"
 
 section "helpers/method_guidance.py: verify the staged bundle against its snapshot record"

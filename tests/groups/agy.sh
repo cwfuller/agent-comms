@@ -406,7 +406,7 @@ AG_INS="$AGT/inst"; mkdir -p "$AG_INS/proj"; git -C "$AG_INS/proj" init -q -b ma
   bash "$REPO/install.sh" --scope=global >"$AG_INS/install.out" 2>&1)
 { [ -f "$AG_INS/gh/ac/agy_stream.py" ] && [ -x "$AG_INS/gh/ac/runphase.sh" ]; } \
   && ok "install.sh installs agy_stream.py beside runphase.sh" || fail "agy_stream.py not installed: $(ls "$AG_INS/gh/ac" 2>&1 | tr '\n' ' ')"
-{ [ -f "$AG_INS/gh/ac/codex_seed.py" ] && python3 -I "$AG_INS/gh/ac/codex_seed.py" seed --root "$AG_INS/none" --key codex-0.0.1 --home "$AG_INS" 2>/dev/null | grep -qx 'skipped:no-seed'; } \
+{ [ -f "$AG_INS/gh/ac/codex_seed.py" ] && python3 -I "$AG_INS/gh/ac/codex_seed.py" seed --root "$AG_INS/none" --key codex-0.0.1 --home "$AG_INS" 2>/dev/null | grep_full -qx 'skipped:no-seed'; } \
   && ok "install.sh installs codex_seed.py beside runphase.sh, and the installed copy runs" || fail "codex_seed.py not installed or not runnable: $(ls "$AG_INS/gh/ac" 2>&1 | tr '\n' ' ')"
 AG_D9="$(AG_RP="$AG_INS/gh/ac/runphase.sh" ag_turn ag-inst tinst "$AG_A1")"
 { [ "$(ag_res "$AG_D9" status)" = completed ] && [ "$(ag_all tinst turn_number | tr '\n' ' ')" = "1 2 " ] && [ "$(ag_tsv "$AG_D9" observed_model)" = gemini-3.8-flash ]; } \
