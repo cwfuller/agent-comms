@@ -282,6 +282,21 @@ if [ -n "${AX_HOME_LOG:-}" ] && [ -n "${CODEX_HOME:-}${GROK_HOME:-}" ]; then
   printf 'auth\t%s\nconfig\t%s\n' "$(shasum -a 256 "$ax_home/auth.json" 2>/dev/null | cut -c1-64)" \
     "$(shasum -a 256 "$ax_home/config.toml" 2>/dev/null | cut -c1-64)" >> "$AX_HOME_LOG" 2>/dev/null || true
 fi
+# AX_SEED_LOG records the plugin cache and catalog the CHILD found in CODEX_HOME when it started (files under plugins/cache, files
+# under cache/remote_plugin_catalog, symlinks and multi-link files anywhere under either): what a seeded home looks like to codex.
+# AX_FILL_PLUGINS=1 then models codex's own first-turn download into a home that has neither tree.
+if [ -n "${AX_SEED_LOG:-}" ] && [ -n "${CODEX_HOME:-}" ]; then
+  printf 'plugins\t%s\t%s\t%s\t%s\n' \
+    "$(find "$CODEX_HOME/plugins/cache" -type f 2>/dev/null | wc -l | tr -d ' ')" \
+    "$(find "$CODEX_HOME/cache/remote_plugin_catalog" -type f 2>/dev/null | wc -l | tr -d ' ')" \
+    "$(find "$CODEX_HOME/plugins" "$CODEX_HOME/cache" -type l 2>/dev/null | wc -l | tr -d ' ')" \
+    "$(find "$CODEX_HOME/plugins" "$CODEX_HOME/cache" -type f -links +1 2>/dev/null | wc -l | tr -d ' ')" >> "$AX_SEED_LOG" 2>/dev/null || true
+fi
+if [ -n "${AX_FILL_PLUGINS:-}" ] && [ -n "${CODEX_HOME:-}" ] && [ ! -e "$CODEX_HOME/plugins" ] && [ ! -e "$CODEX_HOME/cache" ]; then
+  mkdir -p "$CODEX_HOME/plugins/cache/openai-curated-remote/stubplug" "$CODEX_HOME/cache/remote_plugin_catalog" 2>/dev/null
+  printf '{"id":"stubplug"}\n' > "$CODEX_HOME/plugins/cache/openai-curated-remote/stubplug/plugin.json" 2>/dev/null
+  printf '{"rows":[]}\n' > "$CODEX_HOME/cache/remote_plugin_catalog/stub.json" 2>/dev/null
+fi
 # AX_ENV_LOG records the CODEX_PATH the CHILD inherited (the runtime the adapter would launch).
 if [ -n "${AX_ENV_LOG:-}" ]; then
   printf 'CODEX_PATH=%s\n' "${CODEX_PATH-<unset>}" >> "$AX_ENV_LOG" 2>/dev/null || true
@@ -494,6 +509,8 @@ if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
   [ -n "${AX_ROLLOUT_NEW_FILE:-}" ] && ax_rf="$ax_rd/rollout-stub-replacement.jsonl"
   ax_re="${AX_ROLLOUT_EFFORT:-${AX_EFFORT:-xhigh}}"
   ax_rm="${AX_ROLLOUT_MODEL:-${AX_MODEL:-gpt-6-astra}}"
+  # AX_ROLLOUT_CLI_VERSION — the session_meta codex writes when a session is created, naming the runtime that ran it.
+  [ -n "${AX_ROLLOUT_CLI_VERSION:-}" ] && printf '{"type":"session_meta","payload":{"cli_version":"%s"}}\n' "$AX_ROLLOUT_CLI_VERSION" >> "$ax_rf" 2>/dev/null
   # A non-root context (turn_id != root_turn_id) must be IGNORED by the reader, so emit one
   # every time: a gate that counted it would see ambiguity on every honest turn.
   ax_rs="${AX_ROLLOUT_SANDBOX:-$ax_sbx}"

@@ -3896,6 +3896,7 @@ AGYNOTE
     local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim="" acp_reason=""
     local -a acp_iso=()          # isolation env, applied to EVERY owner-spawning invocation
     local acp_iso_backend=none acp_iso_home=""
+    local RUN_SEED_STATUS="" RUN_SEED_KEY="" RUN_SEED_ROOT=""     # the codex plugin-cache seed (seed_codex_home); promoted from after the attestation
     # The pinned adapter command (acp.sh adapter), handed to acpx as `--agent` by acp_exec. Empty runs
     # acpx's builtin for the profile. Set only where a backend's containment depends on the adapter.
     local acp_agent_cmd=""
@@ -4124,6 +4125,29 @@ AGYNOTE
         printf 'guidance\t%s\t%s\t%s\n' "$RUN_GUIDE_STATUS" "$RUN_GUIDE_REV" "$RUN_GUIDE_SHA" >> "$run_dir/turn.tsv" 2>/dev/null || true
         printf 'guidance: %s%s\n' "$RUN_GUIDE_STATUS" "${RUN_GUIDE_REV:+ revision=$RUN_GUIDE_REV sha256=$RUN_GUIDE_SHA}" >> "$run_dir/runner.log"
       }
+      # A fresh isolated codex home's plugins cache and remote plugin catalog, cloned (clonefile(2), never a
+      # byte copy, link or symlink) from one canonical tree keyed by the codex version, so codex does not
+      # download ~64 MB per ident. codex_seed.py owns every check; this only records its one-line answer
+      # (RUN_SEED_STATUS = its first word) in turn.tsv and runner.log. Anything but a verified seed leaves the
+      # home as it was and the turn runs as before; only a home the helper could not restore returns 1.
+      # A warm home is never re-seeded. The five-key config and plugin sync are not touched.
+      seed_codex_home() {  # <home> — sets RUN_SEED_STATUS, RUN_SEED_KEY, RUN_SEED_ROOT
+        local home="$1" ver="" out="" rc=0
+        # `codex-seed/` is a sibling of the mount base, as the persisted profiles are: same volume as the homes.
+        RUN_SEED_ROOT="$(dirname "$mount_store")/codex-seed"
+        RUN_SEED_STATUS=skipped:no-policy; RUN_SEED_KEY=""
+        if policy_record_intact "$acp_policy" "$acp_policy_sha"; then
+          ver="$(awk -F'\t' '$1=="runtime_version"{print $2; exit}' "$acp_policy" 2>/dev/null)" || ver=""
+          RUN_SEED_KEY="codex-${ver:-unknown}"
+          out="$(python3 -I "$HELPER_DIR/codex_seed.py" seed --root "$RUN_SEED_ROOT" --key "$RUN_SEED_KEY" --home "$home" 2>>"$run_dir/runner.log")" || rc=$?
+          if [ "$rc" = 2 ]; then RUN_SEED_STATUS="failed:$out"
+          elif [ "$rc" != 0 ] || [ -z "$out" ]; then RUN_SEED_STATUS=skipped:helper-failed; out=""
+          else RUN_SEED_STATUS="${out%% *}"; fi
+        fi
+        printf 'codex_seed\t%s\t%s\n' "${RUN_SEED_STATUS%% *}" "$RUN_SEED_KEY" >> "$run_dir/turn.tsv" 2>/dev/null || true
+        printf 'codex seed: %s key=%s\n' "${out:-$RUN_SEED_STATUS}" "${RUN_SEED_KEY:-none}" >> "$run_dir/runner.log"
+        [ "$rc" != 2 ]
+      }
       # A provider with NO containment backend on this OS. Refusing is the fail-closed answer; the escape hatch
       # is explicit, it is not the default, and it is only for a provider that has no backend at all — a silent
       # degradation to an uncontained mount is how a security item gets marked done while staying open.
@@ -4232,6 +4256,11 @@ AGYNOTE
           ABORT_NOTE="refused: could not stage or clear the isolated AGENTS.md for '$provider'"
           stage_method_guidance "$acp_iso_home" \
             || die "run: cannot stage, or clear a stale, isolated AGENTS.md"
+          # The seed goes in AFTER the three stagings above and never touches them: it only adds `plugins/`
+          # and `cache/` to a home that has neither.
+          ABORT_NOTE="refused: could not restore the isolated codex home after a failed plugin-cache seed"
+          seed_codex_home "$acp_iso_home" \
+            || die "run: a failed codex plugin-cache seed could not be undone — the isolated home's contents are unexplained"
           ABORT_NOTE="runner aborted unexpectedly — see runner.log"
           # THE RUNTIME the policy was resolved against — its models were checked against THIS
           # binary — handed to the adapter as CODEX_PATH. `bundled` UNSETS an inherited CODEX_PATH,
@@ -4881,7 +4910,7 @@ AGYNOTE
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
-      local att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
+      local seed_msg="" att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
       # codex's window was read once, for containment, right after the turn; its att_out/att_rc stand.
       if [ "$att_rc" -eq 0 ]; then
         # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
@@ -4918,6 +4947,17 @@ AGYNOTE
         return 1
       fi
       printf 'policy attested: %s\n' "$att_msg" >>"$run_dir/runner.log"
+      # Refresh the canonical plugin tree from a home codex populated itself (never a seeded one, and only
+      # when the rollout shows the runtime that ran was the one the key names). A cache: it never changes
+      # the turn's outcome, and what it did is recorded.
+      case "$RUN_SEED_STATUS" in
+        skipped:no-seed|skipped:stale|skipped:canonical-tampered)
+          if [ "$provider" = codex ] && [ "codex-$att_rt" = "$RUN_SEED_KEY" ]; then
+            seed_msg="$(python3 -I "$HELPER_DIR/codex_seed.py" promote --root "$RUN_SEED_ROOT" --key "$RUN_SEED_KEY" --home "$acp_iso_home" 2>>"$run_dir/runner.log")" || seed_msg="skipped:helper-failed"
+          else seed_msg="skipped:runtime-unevidenced"; fi
+          printf 'codex_seed_promote\t%s\t%s\n' "${seed_msg%% *}" "$RUN_SEED_KEY" >> "$run_dir/turn.tsv" 2>/dev/null || true
+          printf 'codex seed promote: %s key=%s\n' "$seed_msg" "$RUN_SEED_KEY" >> "$run_dir/runner.log" ;;
+      esac
     fi
     if [ "$acp_rc" -eq 0 ] && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then
       acp_status=completed

@@ -726,3 +726,30 @@ ok "no helper pipes the worktree listing through head -1"
 ISO_MRR="$(sed -n '/^main_repo_root() {/,/^}/p' "$REPO/helpers/comms.sh")"
 [ -n "$ISO_MRR" ] && [ "$( ( cd "$REPO" && eval "$ISO_MRR"; main_repo_root ) )" = "$(cd "$REPO" && git worktree list --porcelain | sed -n '1s/^worktree //p')" ] \
   && ok "main_repo_root still returns the main checkout after losing the pipe" || fail "main_repo_root changed behaviour"
+
+section "helpers/codex_seed.py: a fresh codex home's plugin cache and catalog are cloned from one canonical tree, or left alone"
+# tests/test_codex_seed.py runs the helper in-process against a double that copies with NEW inodes (what clonefile also does), so the
+# fail-closed paths are exercised on any volume; its one real-clonefile case is skipped where the volume cannot clone.
+CS_UNIT_RC=0
+if git -C "$REPO" ls-files --error-unmatch tests/test_codex_seed.py >/dev/null 2>&1; then
+  python3 -I "$REPO/tests/test_codex_seed.py" --report "$WORK/codex-seed-report.json" > "$WORK/codex-seed-unit.log" 2>&1 || CS_UNIT_RC=$?
+fi
+if python3 -I - "$WORK/codex-seed-report.json" > "$WORK/codex-seed-cases.tsv" <<'REPORT'
+import json,sys
+for case in json.load(open(sys.argv[1])):
+    print(('skip' if case.get('skipped') else 'pass' if case['passed'] else 'fail') + '\t' + case['name'])
+REPORT
+then
+  CS_UNIT_FAILURES=0
+  while IFS=$'\t' read -r status name; do
+    case "$status" in
+      pass) ok "$name" ;;
+      skip) CLONE_PROBE_OK=0; skip clone-unsupported "$name" ;;
+      *) fail "$name"; CS_UNIT_FAILURES=$((CS_UNIT_FAILURES + 1)) ;;
+    esac
+  done < "$WORK/codex-seed-cases.tsv"
+  if [ "${CS_UNIT_RC:-0}" -ne 0 ]; then
+    cat "$WORK/codex-seed-unit.log"
+    [ "$CS_UNIT_FAILURES" -gt 0 ] || fail "codex_seed unit runner aborted without a failed case"
+  fi
+else fail "codex_seed case report missing or invalid"; cat "$WORK/codex-seed-unit.log" 2>/dev/null; fi

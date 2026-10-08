@@ -24,7 +24,7 @@ unset COMMS_DELIVERY COMMS_HEADLESS_PICKUP COMMS_RUNPHASE_VIA \
       COMMS_RUNPHASE_TIMEOUT_SECS 2>/dev/null || true
 # Probe-result flags gate condition-bound skips, so an inherited value would let a skip be
 # cashed before its probe ran. Same class as the scrub above. (grok, panel r7.)
-unset ACL_PROBE_OK GRP_PRESERVE_OK 2>/dev/null || true
+unset ACL_PROBE_OK GRP_PRESERVE_OK CLONE_PROBE_OK 2>/dev/null || true
 # The harness's OWN session pid, which `presence claim` adopts as a record's liveness
 # handle. Inherited, it would make every claim below record a pid on a developer's
 # machine and none in CI — the corpus would describe a different system in each. The
@@ -216,6 +216,12 @@ skip() { # skip <id> <desc> — permitted, CONDITION-BOUND, and single-use
       if [ "${COMMS_TEST_AGY_LIVE:-}" = 1 ]; then
         fail "$2 (skip id 'agy-live-off' claimed, but COMMS_TEST_AGY_LIVE=1 asks for the live run)"; return
       fi ;;
+    # The one real-clonefile case: cashable only where its own probe confirmed this volume cannot clone.
+    clone-unsupported)
+      case "${CLONE_PROBE_OK:-unrun}" in
+        0) ;;
+        *) fail "$2 (skip id 'clone-unsupported': probe state is '${CLONE_PROBE_OK:-unrun}', not a confirmed failure)"; return ;;
+      esac ;;
     acl-*)
       case "${ACL_PROBE_OK:-unrun}" in
         0) ;;
