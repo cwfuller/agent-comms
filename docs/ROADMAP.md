@@ -621,37 +621,56 @@ from one canonical tree keyed by the codex version, and refreshes that tree from
 (docs/INTERNALS.md, docs/COMMANDS.md). Plugin sync stays on, nothing is disabled, existing homes are untouched.
 
 **Canary, codex 0.160.1, gpt-6.1-sol at low effort, through `helpers/runphase.sh` (a mounted ACP turn on a scratch repo,
-`COMMS_MOUNT_BASE` and `XDG_STATE_HOME` under `$TMPDIR`), 2026-10-08.** Each row is one fresh ident. "Tree" is the
-`plugins/cache` manifest (entries, bytes, digest over path/type/mode/size/sha256).
+`COMMS_MOUNT_BASE` and `XDG_STATE_HOME` under `$TMPDIR`), 2026-10-08, this Mac (APFS).** Each row is one fresh ident.
+"Tree" is the `plugins/cache` manifest (entries, bytes, digest over path/type/mode/size/sha256).
 
-| Arm | Tree before the turn | Tree after the turn | Changed by the turn | Catalog |
-|---|---|---|---|---|
-| main 33c4d15, nothing seeded | none | 760 entries, 31,439,077 B | everything is new | 1 file, 32,556,719 B, written after the turn |
-| this branch, no canonical | none (`skipped:no-seed`) | 760 entries, 31,439,077 B, digest 3854a1be8c24 | everything is new; promoted to `codex-seed/` | as above |
-| this branch, seeded | 760 entries, 31,439,077 B, digest 3854a1be8c24 (the verified clone) | 760 entries, 31,439,077 B, digest 3854a1be8c24 | **0 added, 0 removed, 0 changed**, twice (two seeded idents) | fetched by codex as before |
-| first attempt, catalog also seeded | tree as above; catalog 32,564,935 B | tree as above; catalog 32,564,935 B | catalog replaced about 27 s after the seed: same size, only `fetched_at` differs | rewritten every session |
-
-Conclusions. (1) codex does not rewrite the plugin cache each turn: against a current seed it changed nothing, so seeding
-it ships. (2) codex does not keep a seeded catalog: it rewrote it in the same turn, so the clone shares nothing for longer
-than a minute. The earlier scratch canary (a `codex app-server` driven by hand) saw the seeded catalog untouched; the real
-runner is the evidence that decides, and the catalog is not seeded. (3) codex writes the catalog from the session's owner
-about 6 s AFTER the turn's last rollout write, so a promote that required it would have found it missing on every
-attempt (`incomplete-home`, observed on both attempts). (4) The rollout's `session_meta.cli_version` is written when the
-session is created, which on a fresh home is the canary, before the review prompt's window; the runner reads it from
-`session_created_runtime` when the window has none (`observed_runtime` was `unknown` on the real turns checked).
-
-**A fresh home after one review turn, this Mac (APFS), apparent size:**
-
-| | entries | apparent bytes | plugin tree physical |
+| Arm | Tree before the turn | Tree after the turn | Changed by the turn |
 |---|---|---|---|
-| main 33c4d15, nothing seeded (two idents) | 883, 875 | 71,895,561; 71,653,670 | 31.4 MB, downloaded |
-| this branch, seeded (two idents) | 873, 882 | 71,899,226; 71,489,062 | shared with the canonical; 0 files changed |
+| main 33c4d15, nothing seeded | none | 760 entries, 31,439,077 B, digest 3854a1be8c24 | everything is new |
+| this branch, no canonical (`skipped:no-seed`) | none | 760 entries, 31,439,077 B, digest 3854a1be8c24 | everything is new; promoted to `codex-seed/` |
+| this branch, seeded, six idents | 760 entries, 31,439,077 B, digest 3854a1be8c24 (the verified clone) | 760 entries, 31,439,077 B, digest 3854a1be8c24 | **0 added, 0 removed, 0 changed**, every time |
 
-Entries and apparent bytes do not move (a clone looks like the tree it copies); the saving is physical and in the
-download. `df` around single turns cannot resolve it (an idle 33 s control moved 26 MB, turns moved 21 to 139 MB), so the
-physical figure is measured on the helper alone: ten seeded homes grew the volume by 4.7 MB, ten byte copies of the
-same tree by 323 MB. A seeded home therefore costs about 0.5 MB for the plugin tree instead of 31 MB. The catalog (32 MB) is
-still written per home, so a fresh home's physical size falls by roughly the plugin tree's share, not by half.
+The seeded tree's digest equals the one codex wrote on main, so the reviewer reads the same plugins.
+
+**A pre-seeded catalog, through the same runner.** The catalog (`cache/remote_plugin_catalog/<id>.json`) was taken from a
+fresh main-helper turn and cloned into a fresh home next to the plugin tree by a scratch copy of the helper that also
+cloned it (never committed). Two seeded turns, the second with a catalog 6 minutes old:
+
+| | file | entries | bytes | sha256 | rows | `fetched_at` |
+|---|---|---|---|---|---|---|
+| seeded catalog | `f1d89629b9404021.json` | 2 (dir + file) | 32,601,559 | 82b05fe862538d4eb7a19ded49fb4000cd7b119495a2ddfeab337c63b5d864cf | 5,955 | 17:58:58Z |
+| after turn 1 (catalog fetched 75 s before the seed) | same name, new file (born 33 s into the turn) | 2 | 32,601,559 | 7513255295050d06a9b208f9c1998947860a3e62ac816ae33680dbf9f0c1f8f6 | 5,955 | 18:00:16Z |
+| after turn 2 (catalog fetched 6 min before the seed) | same name, new file | 2 | 32,601,559 | a708e3807dc7c4848d0590345810df10ebccb4b654cbf8edf5d834f52dad1b45 | 5,955 | 18:05:38Z |
+
+The only top-level field that differs from the seed is `fetched_at`; the file was replaced in both turns. The plugin tree
+came out of both unchanged (digest above, 0 changed).
+
+Conclusions. (1) codex does not rewrite the plugin cache each turn, so seeding it ships. (2) codex does not keep a seeded
+catalog, at either age: it fetches and rewrites it in the same turn, so a clone of it shares nothing and the catalog is
+not seeded. An earlier hand-driven `codex app-server` canary saw it untouched; the real runner is the evidence that
+decides. (3) codex writes the catalog from the session's owner a few seconds AFTER the turn's last rollout write, so a
+promote that required it found it missing on every attempt (`incomplete-home`, twice). (4) The rollout's
+`session_meta.cli_version` is written when the session is created, which on a fresh home is the canary, before the
+review prompt's window; the runner reads it from `session_created_runtime` when the window has none (`observed_runtime`
+was `unknown` on the real turns checked).
+
+**A fresh home after one review turn, before (main 33c4d15) and after (this branch, seeded).** Physical bytes are counted
+by APFS extent: `fcntl(F_LOG2PHYS_EXT)` gives each file's physical extents, clones share them, and the union over a set of
+directories counts a shared extent once. "Exclusive" is what a home holds that no other measured directory shares, i.e.
+what deleting it would free. Controls on the same tooling: a helper clone of the plugin tree has 0 exclusive bytes against
+the canonical, a `cp -R` byte copy has all 31,439,077.
+
+| | entries | apparent bytes | physical bytes (extents) | exclusive bytes |
+|---|---|---|---|---|
+| main, 5 idents | 871 to 875 | 71,291,030 to 71,610,861 (mean 71,478,513) | same as apparent | same: every byte is its own |
+| this branch, seeded, 4 idents | 870 to 873 | 70,871,178 to 71,760,185 (mean 71,415,923) | same as apparent when counted alone | 39,433,235 to 40,322,242 (mean 39,977,980) |
+| seeded home with the catalog also seeded (scratch variant, 2 idents) | 872, 882 | 71,440,388; 71,545,157 | | 40,002,445; 40,107,214 |
+
+Entries and apparent bytes do not move (a clone looks like the tree it copies). A seeded home holds about 31.5 MB (44%)
+less of its own than a main home, and pre-seeding the catalog adds no saving, as the rewrite above predicts. Over a set:
+4 main homes occupy 285,781,706 B; 4 seeded homes plus the canonical they share occupy 191,470,401 B (33% less, with the
+canonical's 31.4 MB paid once). `df` around single turns could not resolve any of this (turn deltas ran from -330 MB to
++1,008 MB on a busy volume, an idle 33 s control moved 26 MB), which is why the extent count is the measurement.
 
 Findings recorded: `cp -c` is not a usable clone (its man page: it falls back to `copyfile(2)` when cloning is not
 possible); `clonefile(2)` of a directory is all or nothing; the clone has zero symlinks, zero multi-link files and new inodes.
