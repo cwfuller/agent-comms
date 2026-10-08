@@ -15,6 +15,7 @@
 #   .hold.<10-digit epoch>.<kind>.<pid>.<6 hex>/{owner,payload/}   a put still owned by its maker
 #   <10-digit epoch>.<kind>.<pid>.<6 hex>/{owner,payload/}         an entry: the reaper's to delete
 #   .reaper.lock                                                    flock: one reaper per trash
+#   .reaper.next                                                    flock: one queued waiter
 # A reaper never deletes a hold, so nothing a site still reads after its rename can disappear
 # under it. Anything else in a trash dir is left alone.
 
@@ -250,34 +251,52 @@ trash_commit() {
   return 0
 }
 
-# THE START. Takes the trash's lock without blocking — held means a reaper is running, and it rescans
-# before it exits, so there is nothing to do — and hands the locked fd (as fd 9) to a reaper in a NEW
-# SESSION and process group (setsid through start_new_session: macOS has no setsid command), with cwd
-# /, stdin/stdout/stderr on /dev/null, no other inherited descriptor, and no presence identity. It
-# exits once the reaper has exec'd and never waits for it, so the reaper is out of the caller's
-# process group before the launcher leaves it: a keeper that waits on (or kills) that group, and a
-# command substitution that captures the caller's stdout, never wait on the reaper.
+# THE START. Takes the trash's lock without blocking and hands the locked fd (as fd 9) to a reaper in
+# a NEW SESSION and process group (setsid through start_new_session: macOS has no setsid command),
+# with cwd /, stdin/stdout/stderr on /dev/null, no other inherited descriptor, and no presence
+# identity. It exits once the reaper has exec'd and never waits for it, so the reaper is out of the
+# caller's process group before the launcher leaves it: a keeper that waits on (or kills) that group,
+# and a command substitution that captures the caller's stdout, never wait on the reaper.
+# A HELD LOCK QUEUES ONE WAITER. The holder is not always a reaper that will rescan: every child of a
+# reaper inherits fd 9, so a reaper SIGKILLed alone leaves its rm holding the lock with nobody to
+# look again. So a start that finds the lock held takes `.reaper.next` without blocking and hands it
+# (as fd 8) to a waiter, detached the same way, that blocks on the lock, lets go of `.reaper.next`
+# only once it holds the lock, and then execs the same reaper. A start that finds `.reaper.next` held
+# too has nothing to do: that waiter's reaper scans after this start's commit renamed. So at most one
+# reaper runs and at most one waits per trash, and every commit is followed by a reaper's scan
+# whoever holds the lock. The waiter's argv ends with the reaper's, so it reads as one in `ps`.
+TRASH_WAIT_PY='import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600); fcntl.flock(fd, fcntl.LOCK_EX); os.dup2(fd, 9); os.close(8); os.execvp(sys.argv[2], sys.argv[2:])'
 TRASH_LAUNCH_PY='
 import fcntl, os, subprocess, sys
-trash, mode, root, reaper = sys.argv[1:5]
-prefix = sys.argv[5:]
-try:
-    fd = os.open(os.path.join(trash, ".reaper.lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-except OSError:
-    sys.exit(1)
-try:
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except OSError:
+trash, mode, root, reaper, wait = sys.argv[1:6]
+argv = sys.argv[6:] + [reaper, "reap", "--" + mode, root]
+def take(name, slot):
+    try:
+        fd = os.open(os.path.join(trash, name), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        sys.exit(1)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    if fd != slot:
+        os.dup2(fd, slot)
+        os.close(fd)
+    return True
+if take(".reaper.lock", 9):
+    slot = 9
+elif take(".reaper.next", 8):
+    slot = 8
+    argv = [sys.executable, "-I", "-c", wait, os.path.join(trash, ".reaper.lock")] + argv
+else:
     sys.exit(0)
-if fd != 9:
-    os.dup2(fd, 9)
-    os.close(fd)
 env = dict((k, v) for k, v in os.environ.items()
            if not (k.startswith("COMMS_PRESENCE_") or k == "COMMS_SELF" or k.startswith("GIT_")))
 env["COMMS_TRASH_LOCK_FD"] = "9"
-subprocess.Popen(prefix + [reaper, "reap", "--" + mode, root], cwd="/", env=env,
+subprocess.Popen(argv, cwd="/", env=env,
                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                 close_fds=True, pass_fds=(9,), start_new_session=True)
+                 close_fds=True, pass_fds=(slot,), start_new_session=True)
 '
 
 # trash_reap_start store <mount-base> | repo <repo-root> — never waits; always 0. Background QoS on
@@ -298,7 +317,7 @@ trash_reap_start() {
   local -a prefix
   if [ -x /usr/sbin/taskpolicy ]; then prefix=(/usr/sbin/taskpolicy -b)
   else prefix=("$(command -v nice 2>/dev/null || printf nice)" -n 19); fi
-  python3 -I -c "$TRASH_LAUNCH_PY" "$trash" "$mode" "$root" "$reaper" "${prefix[@]}" </dev/null >/dev/null 2>&1 || true
+  python3 -I -c "$TRASH_LAUNCH_PY" "$trash" "$mode" "$root" "$reaper" "$TRASH_WAIT_PY" "${prefix[@]}" </dev/null >/dev/null 2>&1 || true
   return 0
 }
 

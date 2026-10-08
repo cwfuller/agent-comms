@@ -142,13 +142,14 @@ COMMS_TEST_REAP_HOOK="$TS/hook-block" TS_HOOK_LOG="$TS/r6.log" TS_BLOCK_AT=locke
 TS_READY=0; wait_until grep -q '^locked ' "$TS/r6.log" && TS_READY=1
 COMMS_TEST_REAP_HOOK="$TS/hook-block" TS_HOOK_LOG="$TS/r6.log" ts_fn trash_reap_start repo "$TS_R" >/dev/null
 COMMS_TEST_REAP_HOOK="$TS/hook-block" TS_HOOK_LOG="$TS/r6.log" ts_fn trash_reap_start repo "$TS_R" >/dev/null
-TS_NP="$(reaper_count "$TS_T")"
+TS_NP="$(reaper_count "$TS_T")"   # the running reaper and ONE queued waiter (its argv ends with the reaper's)
 TS_NL="$(grep -c '^locked ' "$TS/r6.log")"
 touch "$TS/release6"
 TS_RW=0; reap_wait "$TS_T" && TS_RW=1
-[ "$TS_READY" = 1 ] && [ "$TS_NP" = 1 ] && [ "$TS_NL" = 1 ] && [ "$TS_RW" = 1 ] \
-  && ok "while one reaper holds the lock, a second and third start run nothing: one reaper process, one 'locked'" \
-  || fail "lock: ready=$TS_READY processes=$TS_NP locked=$TS_NL idle=$TS_RW"
+TS_NL2="$(grep -c '^locked ' "$TS/r6.log")"
+[ "$TS_READY" = 1 ] && [ "$TS_NP" = 2 ] && [ "$TS_NL" = 1 ] && [ "$TS_RW" = 1 ] && [ "$TS_NL2" = 2 ] \
+  && ok "while one reaper holds the lock, a second start queues one waiter and a third adds nothing: no second reaper runs until the first lets go, then exactly one" \
+  || fail "lock: ready=$TS_READY processes=$TS_NP locked=$TS_NL then $TS_NL2 idle=$TS_RW"
 cat > "$TS/hook-partial" <<'EOF'
 #!/bin/bash
 printf '%s %s %s\n' "$1" "$2" "$PPID" >> "$TS_HOOK_LOG"
@@ -181,6 +182,44 @@ TS_RW=0; reap_wait "$TS_T" && TS_RW=1
 [ "$TS_RW" = 1 ] && [ -n "$TS_E" ] && [ ! -e "$TS_T/$TS_E" ] && [ ! -e "$TS/victim" ] \
   && ok "the kernel freed the killed reaper's lock, and the next start deletes the rest" \
   || fail "after the kill: idle=$TS_RW entry=$TS_E left=$([ -e "$TS_T/$TS_E" ] && echo y)"
+# KILLED ALONE: SIGKILL only the reaper while a child of it is still running. The child (here the
+# before-delete hook; its rm inherits fd 9 the same way) keeps the lock, so a commit meanwhile
+# cannot start a reaper. Nothing may delete beside the orphan, and once it lets go the commit is
+# still reaped, with no further start.
+cat > "$TS/hook-orphan" <<'EOF'
+#!/bin/bash
+printf '%s %s %s %s\n' "$1" "$2" "$PPID" "$$" >> "$TS_HOOK_LOG"
+[ "$1" = before-delete ] || exit 0
+rm -f "$2/payload/f1"
+n=0; while [ ! -e "$TS_RELEASE" ] && [ "$n" -lt 600 ]; do sleep 0.1; n=$((n + 1)); done
+exit 0
+EOF
+chmod +x "$TS/hook-orphan"
+mkdir -p "$TS/victim2" "$TS/victim3"
+for TS_I in 1 2 3; do printf '%s\n' "$TS_I" > "$TS/victim2/f$TS_I"; printf '%s\n' "$TS_I" > "$TS/victim3/f$TS_I"; done
+: > "$TS/r6c.log"; rm -f "$TS/release6c"
+TS_O="$(ts_fn trash_put "$TS_T" verify "$TS/victim2")"; TS_E2="$(ts_hold "$TS_O")"; TS_E2="${TS_E2##*/.hold.}"
+COMMS_TEST_REAP_HOOK="$TS/hook-orphan" TS_HOOK_LOG="$TS/r6c.log" TS_RELEASE="$TS/release6c" \
+  ts_fn trash_commit "$TS_T" "$(ts_hold "$TS_O")" >/dev/null
+TS_READY=0; wait_until grep -q '^before-delete ' "$TS/r6c.log" && TS_READY=1
+TS_RP="$(awk '$1=="before-delete"{print $3; exit}' "$TS/r6c.log")"; TS_HP="$(awk '$1=="before-delete"{print $4; exit}' "$TS/r6c.log")"
+kill -KILL "${TS_RP:-0}" 2>/dev/null
+TS_GONE=0; wait_until process_stopped "${TS_RP:-0}" && TS_GONE=1
+TS_O="$(ts_fn trash_put "$TS_T" verify "$TS/victim3")"; TS_E3="$(ts_hold "$TS_O")"; TS_E3="${TS_E3##*/.hold.}"
+ts_fn trash_commit "$TS_T" "$(ts_hold "$TS_O")" >/dev/null
+sleep 1   # time for any deleter that wrongly ran beside the orphan to show
+TS_HELD=0; kill -0 "${TS_HP:-0}" 2>/dev/null && lsof -a -p "${TS_HP:-0}" -Fn 2>/dev/null | grep -qx "n$TS_T/.reaper.lock" && TS_HELD=1
+if [ "$TS_READY" = 1 ] && [ "$TS_GONE" = 1 ] && [ "$TS_HELD" = 1 ] && [ -n "$TS_E2" ] && [ -n "$TS_E3" ] \
+   && [ ! -e "$TS_T/$TS_E2/payload/f1" ] && [ -f "$TS_T/$TS_E2/payload/f2" ] && [ -f "$TS_T/$TS_E3/payload/f1" ]; then
+  ok "a reaper SIGKILLed alone leaves its child holding the lock, and nothing deletes beside it, not even a commit made meanwhile"
+else
+  fail "killed alone: ready=$TS_READY gone=$TS_GONE orphan-holds=$TS_HELD entries=$(trash_entries "$TS_T" | tr '\n' ' ')"
+fi
+touch "$TS/release6c"
+TS_RW=0; reap_wait "$TS_T" && TS_RW=1
+[ "$TS_RW" = 1 ] && [ ! -e "$TS_T/$TS_E2" ] && [ ! -e "$TS_T/$TS_E3" ] && [ ! -e "$TS/victim2" ] && [ ! -e "$TS/victim3" ] \
+  && ok "once the orphan lets go, both entries are reaped with no further start" \
+  || fail "after the orphan: idle=$TS_RW left: $(trash_entries "$TS_T" | tr '\n' ' ')"
 # Manual runs cannot share a trash: the reaper refuses (2) unless fd 9 holds the trash's lock.
 TS_M1=0; "$REPO/helpers/runphase.sh" reap --repo "$TS_R" >/dev/null 2>&1 || TS_M1=$?
 TS_M2=0; COMMS_TRASH_LOCK_FD=9 "$REPO/helpers/runphase.sh" reap --repo "$TS_R" 9>"$TS/not-the-lock" >/dev/null 2>&1 || TS_M2=$?

@@ -685,10 +685,10 @@ the reaper is `runphase.sh reap` because it needs that file's claims.
   down its inline delete, so no credential byte the runner wrote ever waits in a trash. The reaper
   clears them again before deleting, as defense in depth.
 - **Detach.** `trash_reap_start` runs a launcher that takes `<trash>/.reaper.lock` with
-  `flock(LOCK_EX|LOCK_NB)` — held means a reaper is running and will rescan, so it exits — and
-  starts the reaper with that fd as fd 9 in a NEW SESSION and process group (`start_new_session`;
-  macOS has no `setsid` command), cwd `/`, stdio on `/dev/null`, no other inherited descriptor, and
-  no presence identity. It exits once the reaper has exec'd and never waits. So the reaper is
+  `flock(LOCK_EX|LOCK_NB)` and starts the reaper with that fd as fd 9 in a NEW SESSION and process
+  group (`start_new_session`; macOS has no `setsid` command), cwd `/`, stdio on `/dev/null`, no
+  other inherited descriptor, and no presence identity. It exits once the reaper has exec'd and
+  never waits. So the reaper is
   outside the caller's process group before the caller can exit: Basis's keeper neither waits for
   it nor reaches it with its `kill(-K)`, `presence with-beat`'s quiescence sweep does not see it,
   and a command substitution capturing integrate's stdout does not wait on it.
@@ -702,6 +702,14 @@ the reaper is `runphase.sh reap` because it needs that file's claims.
   reaper finishes. `reap` refuses (exit 2) unless fd 9 is that lock file and holds its flock,
   checked through `fstat` (on macOS `stat /dev/fd/9` reports devfs's device, so `test -ef` is false
   even for the right file).
+- **A held lock queues one waiter.** The holder is not always a reaper that will rescan: a reaper
+  SIGKILLed alone leaves its `rm` (which inherited fd 9) holding the lock with no reaper left. So a
+  start that finds the lock held takes `<trash>/.reaper.next` with `flock(LOCK_EX|LOCK_NB)` and
+  hands it (as fd 8) to a waiter, detached exactly as a reaper is, that blocks on `.reaper.lock`,
+  releases `.reaper.next` only once it holds the lock, and then execs the reaper. A start that finds
+  `.reaper.next` held too exits: that waiter has not yet let go of it, so its reaper scans after this
+  start's commit renamed. At most one reaper runs and at most one waits per trash, and every commit
+  is followed by a reaper's scan whoever holds the lock. The waiter's argv ends with the reaper's.
 - **One run.** Hold recovery; the domain sweep; the delete pass, oldest first, taking a payload's
   top-level claim first (a throwaway ident's, or the tombstone's) as a mount's is taken — a dead or
   released holder is superseded, a live one defers the entry, retried for up to 30 seconds and then
@@ -709,7 +717,7 @@ the reaper is `runphase.sh reap` because it needs that file's claims.
   next reaper for a name never seen. A commit renames first and starts second, and the reaper
   closes first and rescans second, so every commit is seen by a reaper. Every commit, every
   restage, every `clean mounts --yes` and every integrate and `verify fresh` exit starts one; the
-  lock folds the starts into at most one reaper per trash.
+  two locks fold the starts into at most one running reaper and one queued waiter per trash.
 - **The store sweep (`--store`).** The restaging runner still moves its own ident's expired
   asides under its own claim (deleting one inline only when the trash refuses it), then starts the
   reaper, whose sweep covers every OTHER ident. One `find -P` over the store selects `<key>/<ident>/.aside.*`

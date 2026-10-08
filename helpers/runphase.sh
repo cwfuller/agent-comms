@@ -6534,8 +6534,10 @@ cm_gc() {  # <yes> <orphans>
 #      next reaper. A commit renames first and starts second; the reaper closes first and rescans
 #      second, so every commit is seen by a reaper.
 # Killed mid-delete it leaves a well-named, half-deleted entry, which the next reaper finishes; the
-# kernel drops the lock with its last holder. Its failures are silent: the trash listing is the
-# observable.
+# kernel drops the lock with its last holder. Killed ALONE, its running child (rm) keeps fd 9 and so
+# the lock, with no reaper left to rescan: a commit meanwhile is covered by the one waiter its start
+# queues (trash_reap_start), which takes the lock once the orphan exits and runs this reaper. Its
+# failures are silent: the trash listing is the observable.
 REAP_SEEN=""
 # A TEST SEAM, cm_hook's shape: `<hook> <event> <path>` at `locked` (the trash) and `before-delete`
 # (the entry). Its status is ignored; unset, it costs nothing.
@@ -6544,11 +6546,13 @@ reap_hook() {
   "$COMMS_TEST_REAP_HOOK" "$@" || true
 }
 
-reap_unseen() {  # <trash> — 0 when it holds a name this run never listed; every name is marked seen
+reap_unseen() {  # <trash> — 0 when it holds a name this run never listed; every name is marked seen.
+  # The lock files are not trash: a start creating .reaper.next mid-run must not buy another pass.
   local e n new=1
   for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
     n="${e##*/}"
+    case "$n" in .reaper.lock|.reaper.next) continue ;; esac
     case "$REAP_SEEN" in *"/$n/"*) continue ;; esac
     REAP_SEEN="$REAP_SEEN/$n/"; new=0
   done

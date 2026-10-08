@@ -50,10 +50,11 @@ mkdir -p "$STUB_BIN"
 run_comms() { (cd "$REPO_FIX" && env "$COMMS" "$@"); }
 # DEFERRED DELETION (helpers/trash.sh). A site renames a discarded tree into a trash and a detached
 # reaper deletes it later, so an assertion that bytes are gone from the STORE (not merely from the
-# live namespace) waits for that reaper. reaper_running: a `runphase.sh reap` for this trash is alive
-# (read from the process table, never by touching its lock: probing the lock could make a launcher
-# that raced the probe start nothing). reap_wait: no entry is left and no reaper is running, bounded
-# by wait_until; a caller includes a failure in its assertion.
+# live namespace) waits for that reaper. reaper_running: a `runphase.sh reap` for this trash is alive,
+# or the one waiter queued for it (its argv ends with the reaper's, and it becomes that reaper). Read
+# from the process table, never by touching a lock: probing one could make a launcher that raced the
+# probe start nothing. reap_wait: no entry is left and no reaper is running, bounded by wait_until; a
+# caller includes a failure in its assertion.
 reap_target() {  # <trash> -> "--repo <root>" or "--store <base>"
   local p="${1%/*}"
   case "$p" in */.claude/worktrees) printf -- '--repo %s' "${p%/.claude/worktrees}" ;; *) printf -- '--store %s' "$p" ;; esac
