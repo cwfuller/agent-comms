@@ -1,6 +1,6 @@
 # Task 421: bind a Claude review leg on its mounted ACP runner, attested from Claude's own transcript
 
-Status: plan, not yet implemented. Scope is agent-comms only; the Basis side already accepts a
+Status: plan, not yet implemented; revised after plan round 1 (codex B1, A1, A2). Scope is agent-comms only; the Basis side already accepts a
 `bindable` kernel route (bind-context.ts `kernelRouteProblem`). Settled before this plan: Q3, Q6,
 Q7, Q11, the route id `kernel-claude`, the access key `claude` (inherited by `claude-review`), the
 unchanged containment (`claude-plan`, network open, no config-home override), the unchanged class
@@ -52,6 +52,23 @@ Read for this plan (local, read-only; no provider was called):
 7. FACT, `helpers/access_profiles.py adapter_of` has no caller; `classify` in leg_binding.py is
    the function that decides bindability. This plan changes `classify` and leaves `adapter_of`
    alone (mentioned, not fixed).
+8. FACT (plan round 1, codex B1, then a survey of the 0.60.0-bundled CLI's strings): Claude reads
+   credentials from variables that no scrub pattern (`*_API_KEY`, `*_TOKEN`, `*_AUTH_TOKEN`,
+   `*_SECRET*`, `*_ACCESS_KEY*`) and no `credential-env.tsv` row matches today:
+   `ANTHROPIC_CUSTOM_HEADERS` (headers, which Anthropic documents can carry `Authorization`),
+   `ANTHROPIC_IDENTITY_TOKEN_FILE` and `CLAUDE_SESSION_INGRESS_TOKEN_FILE` (a token read from a
+   file), `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` and
+   `CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR` (a credential read from an inherited descriptor),
+   `CLAUDE_CODE_HOST_AUTH_ENV_VAR` (names another variable to authenticate with),
+   `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY` and `CLAUDE_CODE_CLIENT_KEY_PASSPHRASE`
+   (mTLS client credentials), `CLAUDE_CODE_CUSTOM_OAUTH_URL` and `CLAUDE_LOCAL_OAUTH_*_BASE`
+   (OAuth endpoint selectors, the analogue of the already-scrubbed `ANTHROPIC_BASE_URL`), and
+   `CLAUDE_BG_AUTH_SNAPSHOT_PATH` and `CLAUDE_BG_SOCKET_TOKENS_PATH`. The codex reviewer reports
+   that `claude auth status` derives its three fields from token and key sources without
+   looking at custom headers. So a credential in one of these names can survive the scrub and
+   still read back as `claude.ai` / `firstParty`, and a correct model and effort in the transcript
+   cannot show that the authentication route differed. Neither profile on this machine sets an
+   `env` block or `apiKeyHelper` in `settings.json` (key names checked; no values read).
 
 ## Mechanism
 
@@ -125,11 +142,27 @@ refuses until it has one. `policy_applied_combo` gains `claude/acp-mounted`.
   status --json` is read back and only `loggedIn`, `authMethod`, `apiProvider` are kept; a
   subscription is `true` / `claude.ai` / `firstParty`), and `auth claude api|local|free
   unsupported`.
-- The same table gains `scrub` rows for the Claude model and effort selectors of FACT 6:
+- The same table gains `scrub` rows for **Claude's credential-bearing variables that no pattern
+  matches** (FACT 8): `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_IDENTITY_TOKEN_FILE`,
+  `CLAUDE_SESSION_INGRESS_TOKEN_FILE`, the three `*_FILE_DESCRIPTOR` names,
+  `CLAUDE_CODE_HOST_AUTH_ENV_VAR`, the three `CLAUDE_CODE_CLIENT_*` mTLS names,
+  `CLAUDE_CODE_CUSTOM_OAUTH_URL`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, `CLAUDE_BG_SOCKET_TOKENS_PATH`,
+  and `scrub-prefix CLAUDE_LOCAL_OAUTH_`. The table comment cites the survey that found them and
+  the CLI bundle it read. The implement phase repeats the survey (a strings search for
+  `ANTHROPIC_*` / `CLAUDE_*` names carrying KEY, TOKEN, SECRET, HEADER, CERT, PASS, AUTH or
+  CREDENTIAL) on the 0.88.0 bundle. It fetches that bundle into the same `$TMPDIR` npm cache as
+  the optional probe, and adds a row for any further name that carries or selects a credential.
+  If the bundle cannot be fetched, the 0.60.0 rows ship and the comment says which bundle was
+  surveyed. `ANTHROPIC_CUSTOM_HEADERS` ships whatever the survey finds, because Anthropic documents
+  it.
+- It also gains `scrub` rows for the Claude model and effort selectors of FACT 6:
   `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
   `CLAUDE_CODE_EFFORT_LEVEL`, and `scrub-prefix ANTHROPIC_DEFAULT_`. They are second sources of the
   pair (an `ANTHROPIC_DEFAULT_SONNET_MODEL` silently redefines `sonnet`), so no bound leg of any
   provider inherits them. `CLAUDE_CONFIG_DIR` is not scrubbed.
+- The scrub and the surviving-credential guard below read **one** set:
+  `access_profiles.scrub_list`, which is configured names plus table rows plus patterns. Each new
+  row therefore extends both by construction, and no second list exists to drift.
 - **Dispatch time** (`observe_auth`, so `review-route plan`, `panel dispatch --bindings` and the
   run-time re-check agree): run the installed `claude auth status --json` under the dispatch
   environment minus the same scrub the leg gets, bounded (process-group kill at a deadline, the
@@ -137,10 +170,22 @@ refuses until it has one. `policy_applied_combo` gains `claude/acp-mounted`.
   uses (shim directories skipped; one accessor shared by both). Not logged in, or no CLI, is
   `auth-login-missing`; another `authMethod` or `apiProvider` is `auth-selected-type-conflict`.
 - **Launch time** (`bound_leg_readback`, before the first acpx call): the same read, run under the
-  leg's exact acpx environment (one function builds that environment for `acp_exec` and for this
-  read, so what was checked is what the leg gets), plus a check, in that environment, that no
-  configured or pattern-shaped credential name is present and no credential was restored for the
-  leg. Any failure is `binding-mismatch`, nothing launched. Success is `auth_evidence: observed`.
+  leg's exact acpx environment. One function builds that environment for both `acp_exec` and this
+  read, so what was checked is what the leg gets. Two further checks follow:
+  - In that environment, no name in the scrub set is present and no credential was restored for
+    the leg.
+  - The leg's user settings file (`<config dir>/settings.json`, the file the CLI loads from the
+    same `CLAUDE_CONFIG_DIR`) defines no `apiKeyHelper` and has no `env` key in the scrub set. That
+    is the door the environment scrub cannot close, because the CLI copies settings `env` into its
+    own process. The check reads key names only; no value is printed, logged or compared.
+
+  Any failure is `binding-mismatch`, and nothing is launched. Success is `auth_evidence: observed`.
+  Project settings inside the mount are already refused by the mounted-turn checks (ROADMAP,
+  2026-09-01). Managed (enterprise) settings files are not read and are named as a residual.
+- The read-back's three fields prove a first-party subscription login. They do not prove that no
+  other credential rides along: header-borne and settings-borne credentials are invisible to them
+  (FACT 8), and so is the transcript. Those credentials are excluded by the scrub and the
+  settings-names check, which is why both run before the first acpx call.
 - The CLI's JSON is parsed in memory and only the three fields are kept; its stderr is discarded.
   No email, organisation, account id or token reaches runner.log, turn.tsv, result.json or an
   event. The read-back proves the route (a first-party subscription login), not which account:
@@ -182,13 +227,24 @@ Order of a bound Claude turn (each refusal before the canary bills nothing):
    `desired_config_options.effort`. The adapter's own `model` option value is recorded
    (`adapter_report`) but not gated, because the adapter reports an alias of its choosing
    (FACT 3). Failure: `policy-unapplied`, with the retire command.
-7. Snapshot Claude's records for the mount cwd (`leg_usage.py snapshot claude`, the existing
-   reader); the canary (existing, 60 s budget); attest the canary's window (section 6). A wrong or
+7. Snapshot Claude's records for the mount cwd into `transcript-canary-snapshot.json`. Then run the
+   canary (existing, 60 s budget) and attest the canary's window (section 6). A wrong or
    undecidable canary refuses `policy-unapplied` **before the review prompt is billed**, and its
    observation is what `binding.observed` reports.
-8. Snapshot again; the review prompt; attest the review window. Mismatch or undecidable: refused
-   unpublished (`acp_refuse policy-unapplied`, as codex's at runphase.sh:5000-5045), no verdict
+8. Snapshot again, into `transcript-snapshot.json`. Then send the review prompt and attest the
+   review window. A mismatch or an undecidable reading is refused unpublished
+   (`acp_refuse policy-unapplied`, as codex's at runphase.sh:5000-5045), and no verdict is
    delivered. Otherwise `binding.observed` is the transcript's model and effort.
+
+The two attestation snapshots are their own files (plan round 1, codex A1). The usage snapshot
+(`usage-snapshot.json`, taken before the canary so the leg's spend includes it) is neither reused
+nor overwritten. Each attestation snapshot calls `leg_usage.py snapshot claude` directly, not the
+`leg_usage_snapshot` wrapper, which deliberately never fails (runphase.sh:345-351). The runner
+first removes any file at the snapshot path. It requires exit 0 and a file present afterwards,
+because a failed enumeration leaves an earlier file in place (leg_usage.py:574-579), and that
+earlier file would let the canary's records satisfy the review gate. A snapshot that fails at
+either boundary refuses `policy-unapplied` before that prompt is sent, as codex's rollout
+snapshot does.
 
 The codex-only canary extras stay codex-only: the compaction budget and the retire-and-recreate
 retry (no Claude evidence for either), and the rollout sandbox attestation (Claude has none).
@@ -213,13 +269,21 @@ claude_transcript.py observe <records-root> <cwd> <snapshot-file>
   this leg's.
 - Undecidable (inherited from `window_records`): a file vanished, replaced or truncated, a partial
   last line, a malformed or non-UTF-8 record, an unreadable root.
-- Attested records: every `type: assistant` record in the window, main chain **and** subagent,
-  except `<synthetic>` ones. Each must carry this mount's `cwd` and a `message.model`. Undecidable:
-  none at all; a record with another cwd; a `perTurnEffort` that is set and differs from `effort`;
-  records that disagree on (model, effort), which is how "more than one model" and an SDK model
-  fallback mid-turn surface. Subagents are not skipped the way codex child turn_contexts are,
-  because criterion 4 refuses a window holding more than one model and FACT 2 shows mounted reviews
-  use subagents.
+- Attested records are every `type: assistant` record in the window, main chain **and** subagent.
+  Subagents are not skipped the way codex child turn_contexts are, because criterion 4 refuses a
+  window holding more than one model and FACT 2 shows mounted reviews use subagents.
+- A `<synthetic>` record is exempt only while its usage proves zero tokens (plan round 1, codex
+  A2). This is the usage reader's own rule (`leg_usage.is_zero_usage`, leg_usage.py:461-465),
+  reused rather than restated. A synthetic record with nonzero or missing usage makes the reading
+  undecidable.
+- Attribution follows the usage reader's directory rule. A record in an exact-slug directory
+  belongs to this cwd by the directory's name, and is never skipped for its own `cwd` field, which
+  moves when the reviewer changes directory. In a truncated, prefix-matched directory, only records
+  naming this cwd count, and such a record with no `cwd` is undecidable.
+- Each attested record needs a `message.model`. The reading is undecidable when the window holds
+  no attested record, when a `perTurnEffort` is set and differs from `effort`, or when records
+  disagree on (model, effort). Disagreement is how "more than one model" and an SDK model fallback
+  mid-turn surface.
 - Verdict: `acp.sh policy-attest claude <effort|null> <model> --policy-file` through
   `policy_verdict`, the function codex uses. For a record with `attest_model`, the observed model is
   compared with it; for `verify model` (no effort scale), an observed effort is a mismatch (20) and
@@ -274,6 +338,9 @@ record as `attest_model`) is what joins them; the docs say so.
   and before each attestation, as for codex.
 - No secret, email, organisation or account id is written anywhere; no credential is restored for
   a subscription leg.
+- No credential reaches a bound Claude leg except the login in its own config directory. The
+  environment scrub covers names in the scrub set, and the settings-names check covers the user
+  settings `env` block and `apiKeyHelper`. Both run before the first acpx call.
 - agent-comms names no Claude model: every id comes from the caller; the map only says which ids
   can be attested and how they are recorded.
 
@@ -300,24 +367,46 @@ Hermetic, in the test groups (no provider, account or network):
   `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<slug>/` (main and subagent files), with knobs for a
   wrong model, a wrong or missing effort, two models, a subagent on another model, a synthetic
   record, a replaced or truncated file, and records written to the other config directory. It
-  records `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_EFFORT_LEVEL` per call. A `claude` CLI stub answers
-  `auth status --json` with the three fields plus canary email, organisation and account values and
-  records the config directory it saw. Fixtures stay a few small files.
-- binding: the capability rows with and without an entry in a temporary `AGENT_COMMS_HOME` (text
-  and `--json`); the flips of binding.sh:73-77, :159-161 (the brief's :160-162; codes become `no-access-profile` plus the
-  resolution's code) and :312-314 (claude resolves, grok still refused); resolve cases
-  (`recorded` missing, `none` with an effort, a null effort with a list, an effort outside the
-  list, record keys and digest); map validation of the new rows; `auth-readback` directly with a
-  credential variable present; :278-280 unchanged.
-- bindrun: a codex-authored request, `panel dispatch --bindings` with one `claude-review` leg,
-  completes; the order log reads set model, set effort, set-mode, canary, review;
-  `binding.observed` is the stub transcript's pair; `auth_evidence` is `observed`; the same run
-  with `CLAUDE_CONFIG_DIR` set to a temporary directory and unset (temporary HOME), each showing the
-  launch, the transcript window and the read-back used that directory; refusals for a failed set,
-  a preflight effort mismatch, a canary mismatch (no review prompt sent), a review mismatch, two
-  models, a subagent on another model, an unbounded window, a non-subscription login and a missing
-  login; an effortless model bound with a null effort; no canary string anywhere under `.comms` or
-  the mount logs.
+  records `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_EFFORT_LEVEL` per call. The stub's per-profile
+  environment dump learns the pinned claude adapter command. A `claude` CLI stub answers
+  `auth status --json` with the three fields plus canary email, organisation and account values,
+  and records the config directory and the named variables it saw. Fixtures stay a few small
+  files.
+- binding:
+  - the capability rows with and without an entry in a temporary `AGENT_COMMS_HOME` (text and
+    `--json`);
+  - the flips of binding.sh:73-77, :159-161 (the brief's :160-162; codes become
+    `no-access-profile` plus the resolution's code) and :312-314 (claude resolves, grok still
+    refused); :278-280 stays unchanged;
+  - resolve cases: `recorded` missing, `none` with an effort, a null effort with a list, an effort
+    outside the list, record keys and digest;
+  - map validation of the new rows, and `access_profiles.py scrub-set` listing the new table names;
+  - `auth-readback` called directly. It refuses when `ANTHROPIC_CUSTOM_HEADERS` (and, separately,
+    a pattern-shaped credential) is present, when the user `settings.json` `env` block names a
+    variable in the scrub set, and when it defines `apiKeyHelper`. A settings `env` block holding
+    only unrelated names passes.
+- bindrun:
+  - A codex-authored request, `panel dispatch --bindings` with one `claude-review` leg, completes.
+    The order log reads set model, set effort, set-mode, canary, review. `binding.observed` is the
+    stub transcript's pair, and `auth_evidence` is `observed`.
+  - The same run with `CLAUDE_CONFIG_DIR` set to a temporary directory, and again unset (temporary
+    HOME). Each shows that the launch, the transcript window and the read-back used that directory.
+  - Credential canaries:
+    - `ANTHROPIC_CUSTOM_HEADERS=Authorization: Bearer <canary>` and an mTLS passphrase canary
+      planted in the dispatch environment both read `<unset>` at every acpx call of the Claude leg
+      and in the `claude` stub's environment.
+    - No canary string appears anywhere under `.comms` or the mount logs.
+  - Refusals:
+    - before any prompt: a failed set, a preflight effort mismatch, a non-subscription login, a
+      missing login, and a settings `env` block naming `ANTHROPIC_CUSTOM_HEADERS`;
+    - a canary mismatch, with no review prompt sent;
+    - after the review: a review mismatch, two models, a subagent on another model, a synthetic
+      record that carries tokens, and an unbounded window;
+    - snapshot failure at each boundary: the canary snapshot fails, so no prompt is sent; the review
+      snapshot fails after a passing canary, so no review prompt is sent. A stale snapshot file at
+      the path does not stand in for either.
+  - Passes: an effortless model bound with a null effort, a zero-usage synthetic record, and a
+    record whose `cwd` moved into a subdirectory of the mount.
 - route and usage: unbound `review-route plan` lines for `claude-review` unchanged; the usage
   reader unchanged.
 - `tests/expected-counts.tsv` and `tests/section-counts.tsv` change in the same commit, by the
@@ -347,7 +436,9 @@ drops claude; the Claude residual restated for bound legs: open network, shared 
 login, settings effort and model overridden or attested rather than isolated), docs/COMMANDS.md
 (`review-route capability` and the plan's `capability=bound`, the capability values), the
 `comms.sh` help banner and the comment above `review_route_capability`, the policy-map header
-(new rows and value) and the claude capability cell, the credential-env header, and a
+(new rows and value) and the claude capability cell, the credential-env header (the Claude rows
+and the survey that found them), the INTERNALS credential-scrub and authentication-route bullets
+(the settings-names check, and why the read-back alone cannot see header-borne credentials), and a
 docs/ROADMAP.md entry with what was and was not exercised.
 
 ## Risks the plan carries
@@ -358,5 +449,9 @@ docs/ROADMAP.md entry with what was and was not exercised.
   canary attestation, so a wrong guess refuses for the price of one PONG; it cannot pass a wrong
   pair.
 - Plan-mode containment on 0.88.0 is unmeasured unless the optional probe runs (operator accepted).
+- The scrub is still a list. If a later Claude CLI adds a credential variable that matches no
+  pattern and has no row, it passes until the survey is repeated: this is the existing scrub
+  residual, now with a named survey to repeat on each adapter pin change. Managed (enterprise)
+  settings files are not read.
 - Subagents on another model and SDK fallbacks refuse a paid review. If the live trial shows this
   is common, the remedy is a follow-up with evidence, not a looser verdict here.
