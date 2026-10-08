@@ -893,7 +893,7 @@ EV_LOSTREPLY="$(grep -l '^in-reply-to: ev-grok-4$' "$EV/.comms/to-claude/"*.md 2
 # forwarding comms.sh that drops exactly one kind. Not a shipped knob; nothing in the
 # product can silently drop an event. (grok, implement r1 — the seam it asked for.)
 EV_SHIM="$WORK/ev-shim"; mkdir -p "$EV_SHIM"
-cp "$RUNPHASE" "$EV_SHIM/runphase.sh"; chmod +x "$EV_SHIM/runphase.sh"
+cp "$RUNPHASE" "$EV_SHIM/runphase.sh"; chmod +x "$EV_SHIM/runphase.sh"; cp "$REPO/helpers/trash.sh" "$EV_SHIM/"
 cat > "$EV_SHIM/comms.sh" <<SHIM
 #!/bin/bash
 if [ "\$1" = events ] && [ "\$2" = append ]; then
@@ -918,7 +918,7 @@ awk -F'\t' -v t="$C_TH" -v e="$C_EV" '$t=="ev-logloss2" && $e=="reply-accepted"'
 # looks like to the check that runs next; it also plants a DIFFERENT turn's acceptance on
 # the same thread, so a thread-only join would call this turn clean. (codex + grok, r2.)
 EV_SHIM3="$WORK/ev-shim3"; mkdir -p "$EV_SHIM3"
-cp "$RUNPHASE" "$EV_SHIM3/runphase.sh"; chmod +x "$EV_SHIM3/runphase.sh"
+cp "$RUNPHASE" "$EV_SHIM3/runphase.sh"; chmod +x "$EV_SHIM3/runphase.sh"; cp "$REPO/helpers/trash.sh" "$EV_SHIM3/"
 cat > "$EV_SHIM3/comms.sh" <<SHIM
 #!/bin/bash
 if [ "\$1" = send ]; then
@@ -950,7 +950,7 @@ awk -F'\t' -v t="$C_TH" -v e="$C_EV" -v rq="$C_REQ" -v m="$C_MID" '$t=="ev-losta
 # while the reader rejected the very same row — two rules for one question. The lookup goes
 # through the reader now. (codex, implement r4, blocking.)
 EV_SHIM4="$WORK/ev-shim4"; mkdir -p "$EV_SHIM4"
-cp "$RUNPHASE" "$EV_SHIM4/runphase.sh"; chmod +x "$EV_SHIM4/runphase.sh"
+cp "$RUNPHASE" "$EV_SHIM4/runphase.sh"; chmod +x "$EV_SHIM4/runphase.sh"; cp "$REPO/helpers/trash.sh" "$EV_SHIM4/"
 cat > "$EV_SHIM4/comms.sh" <<SHIM
 #!/bin/bash
 if [ "\$1" = send ]; then

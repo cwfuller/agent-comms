@@ -2378,3 +2378,138 @@ for o in --name --instance; do vo_case comms "$o" integrate some-branch "$o"; do
 for o in --message --agent --provider --sandbox --timeout-secs --via; do vo_case rp "$o" spawn "$o"; done
 for o in --message --dir --agent --provider --sandbox --timeout-secs --via; do vo_case rp "$o" run "$o"; done
 vo_case rp --timeout-secs await --timeout-secs
+
+section "integrate: the verification tree goes to the repo's trash, and a slow reap never delays the exit"
+# The tree is renamed into <root>/.claude/worktrees/.comms-trash (constant time) and a detached,
+# low-priority reaper deletes it. Basis's keeper runs integrate as a session leader and holds the
+# landing slot until no member of that process group is left, then TERMs the group: the reaper must
+# be neither waited for nor killed. Its hook blocks on a file (bounded), which makes the reap slow.
+DX="$WORK/integrate-trash"; mkdir -p "$DX"; DX="$(cd "$DX" && pwd -P)"; DXH="$WORK/integrate-trash-hook"; mkdir -p "$DXH"
+git -C "$DX" init -q -b main
+printf '.comms/\n.claude/worktrees/\n' > "$DX/.gitignore"
+# The suite copies out the owner record integrate wrote beside the tree's registration.
+printf '#!/bin/bash\ncat "$(git rev-parse --absolute-git-dir)/agent-comms-owner" > %q 2>/dev/null\nexit 0\n' "$DXH/owner.seen" > "$DX/suite.sh"
+git -C "$DX" add -A >/dev/null 2>&1; git -C "$DX" -c user.email=t@t -c user.name=t commit -qm init
+git -C "$DX" checkout -q -b session-primary
+mkdir -p "$DX/.comms"; printf 'suite-cmd = bash ./suite.sh\n' > "$DX/.comms/config"
+DX_T="$DX/.claude/worktrees/.comms-trash"
+dx() { (cd "$DX" && env -u COMMS_PRESENCE_NAME -u COMMS_PRESENCE_INSTANCE "$COMMS" "$@"); }
+dx_br() {  # <branch> — one commit off main; the primary stays on session-primary
+  git -C "$DX" checkout -q -b "$1" main && printf '%s\n' "$1" > "$DX/$1.txt" && git -C "$DX" add "$1.txt" \
+    && git -C "$DX" -c user.email=t@t -c user.name=t commit -qm "$1"
+  git -C "$DX" checkout -q session-primary
+}
+dx_tree_gone() { [ -z "$(git -C "$DX" worktree list --porcelain | grep '/\.integrate-')" ] && ! ls -d "$DX/.claude/worktrees/".integrate-* >/dev/null 2>&1; }
+cat > "$DXH/hook" <<'EOF'
+#!/bin/bash
+printf '%s %s\n' "$1" "${2##*/}" >> "$DX_HOOK_DIR/events.log"
+[ "$1" = before-delete ] && [ -n "${DX_HOOK_BLOCK:-}" ] || exit 0
+case "${2##*/}" in *.integrate.*) ;; *) exit 0 ;; esac
+printf '%s\n' "$PPID" > "$DX_HOOK_DIR/reaper.pid"
+n=0; while [ ! -e "$DX_HOOK_DIR/release" ] && [ "$n" -lt 900 ]; do sleep 0.1; n=$((n + 1)); done
+exit 0
+EOF
+chmod +x "$DXH/hook"
+# The keeper's shape: a new session whose leader is integrate (so its pgid K is integrate's pid);
+# the run counts as over only when no member of K is left.
+cat > "$DXH/run.py" <<'PY'
+import os, subprocess, sys, time
+comms, cwd, branch, out = sys.argv[1:5]
+env = {k: v for k, v in os.environ.items() if k not in ("COMMS_PRESENCE_NAME", "COMMS_PRESENCE_INSTANCE")}
+with open(out + ".stdout", "w") as so, open(out + ".stderr", "w") as se:
+    p = subprocess.Popen([comms, "integrate", branch], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                         stdout=so, stderr=se, start_new_session=True)
+    rc = p.wait()
+t_exit = time.time(); empty = "never"
+while time.time() < t_exit + 60:
+    try:
+        os.killpg(p.pid, 0)
+    except ProcessLookupError:
+        empty = "%.2f" % (time.time() - t_exit); break
+    time.sleep(0.05)
+print(rc, p.pid, empty)
+PY
+# What the reaper is attached to, then the keeper's linger-bound TERM to the old group.
+cat > "$DXH/inspect.py" <<'PY'
+import os, signal, subprocess, sys, time
+pid, k = int(sys.argv[1]), int(sys.argv[2])
+def alive(p):
+    try:
+        os.kill(p, 0); return "alive"
+    except OSError:
+        return "gone"
+r = [alive(pid)]
+try:
+    r += ["pgid-other" if os.getpgid(pid) != k else "pgid-K", "sid-other" if os.getsid(pid) != k else "sid-K"]
+except OSError:
+    r += ["pgid-?", "sid-?"]
+fds = {}
+if os.path.isdir("/proc/%d/fd" % pid):
+    for n in ("0", "1", "2"):
+        fds[n] = os.readlink("/proc/%d/fd/%s" % (pid, n))
+    fds["cwd"] = os.readlink("/proc/%d/cwd" % pid)
+else:
+    cur = None
+    for line in subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "0,1,2,cwd", "-Fn"],
+                               capture_output=True, text=True).stdout.splitlines():
+        if line.startswith("f"):
+            cur = line[1:]
+        elif line.startswith("n") and cur:
+            fds[cur] = line[1:]
+r.append("stdio-null" if all(fds.get(n) == "/dev/null" for n in "012") else "stdio=%s" % fds)
+r.append("cwd-root" if fds.get("cwd") == "/" else "cwd=%s" % fds.get("cwd"))
+try:
+    os.killpg(k, signal.SIGTERM); r.append("killpg-sent")
+except ProcessLookupError:
+    r.append("killpg-empty")
+time.sleep(0.5)
+r.append(alive(pid))
+print(" ".join(r))
+PY
+dx_br land1
+DX_RUN="$(DX_HOOK_DIR="$DXH" DX_HOOK_BLOCK=1 COMMS_TEST_REAP_HOOK="$DXH/hook" python3 "$DXH/run.py" "$COMMS" "$DX" land1 "$DXH/run")"
+DX_RC="${DX_RUN%% *}"; DX_K="$(printf '%s' "$DX_RUN" | cut -d' ' -f2)"; DX_EMPTY="${DX_RUN##* }"
+DX_READY=0; wait_until test -s "$DXH/reaper.pid" && DX_READY=1
+DX_RPID="$(cat "$DXH/reaper.pid" 2>/dev/null)"
+DX_SEEN="$(python3 "$DXH/inspect.py" "${DX_RPID:-0}" "${DX_K:-0}")"
+DX_ENTRIES="$(trash_entries "$DX_T")"
+if [ "$DX_RC" = 0 ] && [ "$DX_EMPTY" != never ] && awk -v e="$DX_EMPTY" 'BEGIN { exit !(e < 5) }' \
+   && [ "$DX_READY" = 1 ] && [ "${DX_SEEN%% *}" = alive ] && grep -q '^integrate-result v1 status=landed ' "$DXH/run.stdout"; then
+  ok "integrate lands and its process group is empty ${DX_EMPTY}s after its exit while the reaper is still blocked mid-reap"
+else
+  fail "slow reap delayed the landing slot: rc=$DX_RC empty_after=$DX_EMPTY hook=$DX_READY reaper=$DX_SEEN"
+fi
+[ "$DX_SEEN" = "alive pgid-other sid-other stdio-null cwd-root killpg-empty alive" ] \
+  && ok "the reaper runs in its own session and process group, stdio on /dev/null, cwd /, and the keeper's TERM to the old group never reaches it" \
+  || fail "reaper detachment: $DX_SEEN (integrate group $DX_K)"
+[ "$(printf '%s\n' "$DX_ENTRIES" | grep -c '\.integrate\.')" = 1 ] && dx_tree_gone \
+  && grep -qx "pid=$DX_K" "$DXH/owner.seen" && grep -qx 'fmt=v2' "$DXH/owner.seen" && grep -q '^start=.' "$DXH/owner.seen" \
+  && ok "the tree is one integrate entry in the repo's trash, its path and registration gone; its owner record named integrate" \
+  || fail "trash after the landing: entries=$DX_ENTRIES gone=$(dx_tree_gone && echo y) owner=$(tr '\n' ' ' < "$DXH/owner.seen" 2>/dev/null)"
+touch "$DXH/release"
+DX_RW=0; reap_wait "$DX_T" && DX_RW=1
+[ "$DX_RW" = 1 ] && [ -z "$(trash_entries "$DX_T")" ] && [ -z "$(trash_holds "$DX_T")" ] \
+  && ok "released, the detached reaper empties the trash" || fail "the trash did not empty: $(ls -A "$DX_T" 2>/dev/null | tr '\n' ' ')"
+# FALLBACK: a rename the trash cannot take (a cross-volume EXDEV, or an unwritable trash) removes
+# the tree inline exactly as before; nothing is copied and nothing reaches the trash.
+dx_br land2
+DX_R2=0; COMMS_TEST_TRASH_RENAME_ERRNO=EXDEV dx integrate land2 >/dev/null 2>&1 || DX_R2=$?
+DX_E2="$(trash_entries "$DX_T")$(trash_holds "$DX_T")"
+dx_br land3
+chmod 500 "$DX_T"
+DX_R3=0; dx integrate land3 >/dev/null 2>&1 || DX_R3=$?
+DX_G3=0; dx_tree_gone && DX_G3=1
+DX_E3="$(trash_entries "$DX_T")$(trash_holds "$DX_T")"
+chmod 700 "$DX_T"
+[ "$DX_R2" = 0 ] && [ "$DX_R3" = 0 ] && [ "$DX_G3" = 1 ] && dx_tree_gone && [ -z "$DX_E2" ] && [ -z "$DX_E3" ] \
+  && [ "$(git -C "$DX" rev-parse main)" = "$(git -C "$DX" rev-parse land3)" ] \
+  && ok "with EXDEV, or an unwritable trash, integrate still lands and removes its tree inline; the trash holds nothing" \
+  || fail "fallback: rc=$DX_R2/$DX_R3 gone=$DX_G3 entries=$DX_E2|$DX_E3"
+# verify fresh shares the teardown: its tree reaches the trash as a verify entry.
+: > "$DXH/events.log"
+DX_RV=0; DX_HOOK_DIR="$DXH" COMMS_TEST_REAP_HOOK="$DXH/hook" dx verify fresh land3 >/dev/null 2>&1 || DX_RV=$?
+DX_RW=0; reap_wait "$DX_T" && DX_RW=1
+[ "$DX_RV" = 0 ] && [ "$DX_RW" = 1 ] && grep -qE '^before-delete [0-9]{10}\.verify\.' "$DXH/events.log" \
+  && ! ls -d "$DX/.claude/worktrees/".verify-* >/dev/null 2>&1 \
+  && ok "verify fresh hands its tree to the trash too, and the reaper deletes it" \
+  || fail "verify fresh: rc=$DX_RV idle=$DX_RW events=$(tr '\n' '|' < "$DXH/events.log")"

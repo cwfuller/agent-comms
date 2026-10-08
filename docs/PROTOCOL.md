@@ -231,7 +231,9 @@ Sessions coordinate through ADVISORY presence, not locks. The rule, mechanized b
    applies to that branch, and the result line's `landing=` field records it. Advisory lease, ff-only, the suite
    runs at the CANDIDATE OID in a throwaway detached worktree — a FRESH checkout carrying
    tracked content only, so `suite-cmd` must provision its own prerequisites and may leave
-   ignored files but no git-visible changes (see the config block above) — and `main` moves by
+   ignored files but no git-visible changes (see the config block above); at exit it is renamed
+   into `.claude/worktrees/.comms-trash` and a detached reaper deletes it, so the landing never
+   waits on that delete — and `main` moves by
    compare-and-swap `update-ref` — a race loses cleanly, an untested or non-ff OID
    cannot land, and main never points at a commit the suite has not passed at.
    Integrate small and often: isolation removes collision, but cross-session

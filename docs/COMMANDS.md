@@ -193,7 +193,7 @@ Verbs that a program drives classify further — `integrate`,
 | `state retire \| unretire \| retired <thread>` | the caller's EXPLICIT, durable record that a thread is terminal — the only authority `clean mounts --thread` accepts. `complete`, `idle`, `legacy`, an exited queue owner and an old timestamp never are: each describes an idle round, which is what a paused or resumable loop looks like. Written by whoever owns the loop's lifecycle (Basis retires a terminal task's thread) to `.comms/state/retired/<slug>-<digest>`, keyed on a digest of the RAW thread and holding it for an exact comparison, so `a/b` and `a_b` (one `safe_name`) are retired separately. `retire` is idempotent (keeps the first `retired_at`); `unretire` withdraws it for a reopened task. `retired` prints `retired retired_at=<ts>` (exit 0), `not retired` (exit 3), or refuses a marker that does not name the thread (exit 4); `retire`/`unretire` refuse such a marker (exit 1). A thread that is empty or not one line is a usage error (exit 2) |
 | `stalled [minutes]` | threads awaiting a reply longer than the threshold (default 15) |
 | `clean --as <agent> [workspace\|all\|archive\|<filename>] [--yes]` | guarded delete; without `--yes` it only lists what it would delete. `workspace` (the default): this workspace's messages in `<agent>`'s own inbox and in `archive/`. `all`: every file in every registered inbox (the review twins' included) and in `archive/`, every workspace. `archive`: all of `archive/`. `<filename>`: that basename wherever it sits in a registered inbox or `archive/` (exit 1 when it is nowhere). A second positional argument is a usage error (exit 2) |
-| `clean mounts [--yes] [--orphans]` | GC this repo's EXTERNAL mount store (`${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts`, or `COMMS_MOUNT_BASE`); dry-run without `--yes`; scoped to this repo's `<repo-key>` and refuses the whole key if any owner is live or unprovable; `--orphans` REPORTS moved-checkout keys without deleting. Needs no `--as` |
+| `clean mounts [--yes] [--orphans]` | GC this repo's EXTERNAL mount store (`${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts`, or `COMMS_MOUNT_BASE`: `<repo-key>/<ident>/` per mount, and `.comms-trash/`, where discarded trees wait for the detached reaper); dry-run without `--yes`; scoped to this repo's `<repo-key>` and refuses the whole key if any owner is live or unprovable; `--orphans` REPORTS moved-checkout keys without deleting. Needs no `--as` |
 | `clean mounts --thread <thread> [--yes]` | remove the review mounts ONE retired thread owns, and nothing else; see [clean mounts --thread](#clean-mounts---thread-one-retired-threads-review-copies). Dry-run without `--yes`. Selects nothing (exit 5) unless `state retired <thread>` holds, and refuses a held thread (exit 4). Never falls back to the whole-store GC, and never reads, claims or waits on another thread's mount. `--orphans` or any other argument with `--thread` is a usage error (exit 2) |
 | `lessons [--bytes N] [--surface P] [--file F]` | bounded newest-first tail of the current worktree's `docs/advisories.md` |
 | `archive-search <pattern> [--bytes N] [--limit K]` | bounded newest-first search of `archive/` across workspaces |
@@ -458,7 +458,7 @@ inflate the "constant" and defeat the cap.
 | 15 | the suite result cannot be trusted: the candidate could not be materialized, no completion line, failures despite exit 0, a partial run, or the verification tree moved or was dirtied | investigate; do not retry blindly |
 | 16 | the landing branch moved during the attempt (the compare-and-swap lost); nothing landed | re-run: it re-verifies against the new tip |
 | 17 | a precondition could not be read (the sessions directory, the worktree list, the `main` occupant's state, the pinned `/usr/bin/env`), or the landing ref could not be written although it had not moved (a lock, permissions, or disk fault) | fix the environment |
-| 18 | the suite ran past `suite-timeout-secs`: its whole process group was killed (TERM, then KILL after a 5s grace), nothing landed, the lease is released, the verification tree is removed, and the output so far is kept under `.comms/logs/` | find the hang (or raise the bound if the suite is legitimately that slow); a blind retry will likely hang again |
+| 18 | the suite ran past `suite-timeout-secs`: its whole process group was killed (TERM, then KILL after a 5s grace), nothing landed, the lease is released, the verification tree is removed (handed to the repo's trash, see below), and the output so far is kept under `.comms/logs/` | find the hang (or raise the bound if the suite is legitimately that slow); a blind retry will likely hang again |
 
 On success, after the human `LANDED` line, stdout carries exactly one line:
 
@@ -477,6 +477,7 @@ integrate-result v1 status=landed cand=<oid> main_before=<oid> main_after=<oid> 
   ```
 
   so a driver can tell "the suite hung and was killed" from "the suite is red" without the exit code, which a wrapper can lose. `timeout_secs` is the bound that applied. `verify fresh` prints the same refusal as `verify-result v1 status=refused reason=suite_timeout cand=<oid> timeout_secs=<n>`, with the same exit 18.
+- **The verification tree** is `.claude/worktrees/.integrate-<pid>-<n>`, unique per run (`verify fresh` uses `.verify-<pid>-<n>`). At every exit — landed, refused or killed by a trap — it is renamed into `.claude/worktrees/.comms-trash` in constant time and its own admin registration under `.git/worktrees` is dropped once its back-pointers are re-verified after the rename (never a repo-wide prune). A detached, low-priority reaper in its own session deletes it later, so neither `integrate` nor a driver that waits on its process group waits for the delete. When the trash cannot take the tree (a cross-volume `EXDEV`, an unwritable trash, no `helpers/trash.sh` beside `comms.sh`), it is removed inline as before. Each exit also starts the repo's reaper, which sweeps a leaked `.integrate-*` / `.verify-*` tree only once its owner is proven dead (the owner record beside its registration, or the pid in its name), never by age. Design: [INTERNALS.md](INTERNALS.md#deferred-deletion-trash-and-reaper).
 - `suite-timeout-secs` in `.comms/config` is the bound: a whole number of seconds from `0` (no timeout) to `86400`; absent means 3600. An empty, signed, fractional, leading-zero, out-of-range or duplicate value refuses with exit 10 before any suite runs. The suite always runs in its OWN process group under `presence with-beat`, so the kill never reaches `integrate` or its caller, and its stdin is `/dev/null` (a background process group that reads the terminal is stopped by SIGTTIN, which is a hang of exactly this shape).
 - Parsers must ignore unknown keys; a breaking change bumps `v1`.
 
@@ -604,6 +605,7 @@ verify-result v1 status=verified cand=<oid>
 
 - `cand` is the full commit id that was verified — the resolved `<rev>`, never the working tree. Uncommitted changes are not verified; for the default `HEAD`, tracked ones draw a stderr note saying so.
 - The suite's own output goes to stderr (and whole into the log), so nothing it prints can appear on stdout as a result line. A failure prints no result line, except a suite timeout (exit 18), which prints `verify-result v1 status=refused reason=suite_timeout cand=<oid> timeout_secs=<n>`; anything but `status=verified` means nothing was verified.
+- Its verification tree goes to the repo's trash exactly as `integrate`'s does (see the integrate result line above).
 - `verify fresh` itself lands nothing and records no attestation; a suite that attests its own green run (as this repo's `tests/run.sh` does) still does so. Parsers must ignore unknown keys; a breaking change bumps `v1`.
 
 #### clean mounts --thread: one retired thread's review copies
@@ -665,8 +667,13 @@ and kept.
 
 **Removal** creates `<store>/<repo-key>/.retire.<ident>.XXXXXX`, claims it with the same
 generational claim a mount takes, writes its record, renames the ident into it, drops that one
-admin registration after re-verifying its back-pointer, then deletes the tombstone. No `git
-worktree remove --force`, no repo-wide prune. An interrupted run leaves either the untouched
+admin registration after re-verifying its back-pointer, then unlinks the copy's credentials
+(`home/auth.json` and any staged `home/.stage.*`) and HANDS the whole tombstone to the store's
+trash (`<store>/.comms-trash`) in one rename and returns: a detached reaper takes the tombstone's
+claim and deletes the payload later. When the credentials will not clear or the trash refuses the
+rename, the tombstone is deleted inline as before. Every run with `--yes` starts the store's reaper
+as it exits, whatever its outcome, so re-running is always enough to finish trash work a kill left
+behind. No `git worktree remove --force`, no repo-wide prune. An interrupted run leaves either the untouched
 ident or a tombstone a later run finishes — only after taking its claim, so a cleanup whose
 maker is still alive (or a concurrent replay) is a scoped `busy-cleanup` skip, and only a maker
 proven dead is superseded. The record names its owner — the thread, the use, the agent and, for a
@@ -708,7 +715,7 @@ clean-mounts-result v1 status=<s> mode=dry-run|apply selected=N removed=N absent
 
 | target `status` | `reason` | meaning |
 |---|---|---|
-| `would-remove` / `removed` | `proven`, `interrupted` | selected and (to be) removed; `interrupted` = finishing an earlier run's tombstone |
+| `would-remove` / `removed` | `proven`, `interrupted` | selected and (to be) removed; `interrupted` = finishing an earlier run's tombstone. `removed` means unregistered and moved out of the store's live namespace: the reaper deletes the payload (or it was deleted inline when the trash refused it) |
 | `absent` | `already-absent` | selected and already gone — an idempotent success |
 | `skipped` | `busy-claim`, `busy-owner`, `busy-cleanup`, `claim-unverifiable` | a runner, a queue owner or another cleanup holds it (or `ps` could not say); re-run later |
 | `incomplete` | `remove-failed`, `admin-unverified`, `admin-remove-failed` | removal started and could not finish; the tombstone is kept and the next run resumes it. Never reported as removed |
@@ -726,8 +733,10 @@ clean-mounts-result v1 status=<s> mode=dry-run|apply selected=N removed=N absent
 
 Parsers must ignore unknown keys; a breaking change bumps `v1`. `COMMS_TEST_CLEAN_MOUNTS_HOOK` is
 a test seam (an executable called at each boundary: `prechecked`, `claimed`, `tombstoned`,
-`renamed`, `reclaimed` (a replay holds its tombstone), `unregistered`, `removed`) and is never set
-in normal use.
+`renamed`, `reclaimed` (a replay holds its tombstone), `unregistered`, `handed-off` (the tombstone
+is in a trash hold), `removed` (an inline delete finished)) and is never set in normal use. So are
+`COMMS_TEST_TRASH_HOOK`, `COMMS_TEST_TRASH_RENAME_ERRNO`, `COMMS_TEST_REAP_HOOK` and
+`COMMS_TEST_ISO_STAGE_HOOK` (deferred deletion, [INTERNALS.md](INTERNALS.md#deferred-deletion-trash-and-reaper)).
 
 ### `docs/loopspec/check.sh`
 

@@ -38,6 +38,10 @@
 #   hold [thread]          pause: block new spawns for the thread (all threads
 #                          with no arg); prints attach commands from state
 #   release [thread]       lift a hold
+#   reap --store <mount-base> | --repo <repo-root>
+#                          INTERNAL: the deferred-deletion reaper. Started only by
+#                          trash_reap_start (helpers/trash.sh), detached, holding the trash's lock
+#                          on fd 9; refuses (exit 2) without it. See docs/INTERNALS.md.
 #
 # Env knobs: COMMS_RUNPHASE_SANDBOX (codex sandbox, default workspace-write),
 #            COMMS_RUNPHASE_TIMEOUT_SECS (default 1800),
@@ -100,6 +104,10 @@ HELPER_DIR="$(dirname "$SELF")"
 # a setting works in every shell — including agent tool shells that never read the shell rc.
 # Absent next to this script (an old install, a bare copy) it is simply skipped: env still works.
 [ -f "$HELPER_DIR/settings.sh" ] && . "$HELPER_DIR/settings.sh"
+# DEFERRED DELETION (helpers/trash.sh): the trash, the rename, the reaper start and proc_state. Not
+# optional here, unlike settings: every claim needs proc_state, so a runner without it cannot run.
+[ -f "$HELPER_DIR/trash.sh" ] || die "trash.sh not found next to runphase.sh ($HELPER_DIR) — re-run install.sh"
+. "$HELPER_DIR/trash.sh"
 # Sibling comms.sh is the single source of truth for root/workspace resolution —
 # runphase must derive the SAME names the driver derived, or reply prefixes and
 # state keys split mid-loop (a known field-incident class).
@@ -1665,33 +1673,6 @@ mount_state_get() {  # <kdir> <key> -> 0 value | 1 genuinely absent | 2 present 
 # NOT refuse the turn, and it is not repaired either: repairing would mean deleting whatever
 # the link names. The turn still reviews the pinned artifact, just cold, which is strictly
 # better than following the link and strictly better than failing the round.
-# `ps -o lstart=` renders a LOCALE- and TZ-dependent string, and LC_ALL overrides LC_TIME.
-# Two runners under different environments would otherwise read the same live process as two
-# different processes, each conclude the other's pid was recycled, and both restage one mount.
-# Pin both, so the recorded and compared forms are always the same bytes.
-# PROC_STATE: live | dead | ambig. Deliberately three-valued, because "ps failed" is not
-# "the process is gone": a transient or operational ps error (EPERM, a broken ps, a container
-# without /proc) would otherwise read as positive proof of absence and reclaim a LIVE holder.
-# Only an exit of 1 with NOTHING on stdout AND NOTHING on stderr is absence; anything else
-# that is not a clean success is ambiguous and never licenses a reclaim.
-PROC_START=""; PROC_STATE=""
-proc_state() {  # <pid> -> sets PROC_STATE (live|dead|ambig) and PROC_START. NEVER call this
-                # in a command substitution: the globals would be set in a subshell and the
-                # caller would silently keep its own previous values.
-  PROC_START=""; PROC_STATE="ambig"
-  local pid="${1:-}" out err rc=0 errf
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  errf="$(mktemp 2>/dev/null)" || return 0
-  out="$(LC_ALL=C TZ=UTC ps -p "$pid" -o lstart= 2>"$errf")" || rc=$?
-  err="$(cat "$errf" 2>/dev/null)"; rm -f "$errf" 2>/dev/null || true
-  if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
-    PROC_START="$(printf '%s' "$out" | tr -s ' ' | sed 's/^ *//; s/ *$//')"
-    PROC_STATE="live"; return 0
-  fi
-  if [ "$rc" -eq 1 ] && [ -z "$out" ] && [ -z "$err" ]; then PROC_STATE="dead"; return 0; fi
-  return 0
-}
-
 mount_container() {  # <mounts root> <ident> -> physical container path, or non-zero
   local base="$1" ident="$2" phys_base phys
   case "$ident" in ''|*/*|.|..) return 1 ;; esac
@@ -2101,6 +2082,63 @@ EOF
   return 1
 }
 
+# THE ASIDE HORIZON, defined once: an aside older than this is reaped. A retention policy, not
+# evidence of quiescence (see mount_restage). The restaging runner applies it to its own ident; the
+# reaper's store sweep (cmd_reap) applies it to every other ident.
+MOUNT_ASIDE_HORIZON_MIN=120
+# mount_asides_expired <ident dir> | --store <base> — the expired asides, one path per line: real
+# directories named .aside.* directly in an ident dir, never followed. With --store, every ident of
+# every repo key in the store, from one find that never enters a dot-named entry above the ident
+# level (the trash, a tombstone).
+mount_asides_expired() {
+  if [ "${1:-}" = --store ]; then
+    local base="${2%/}" p rel key ident
+    find -P "$base" -mindepth 1 -maxdepth 3 -name '.*' ! -name '.aside.*' -prune \
+      -o -type d -name '.aside.*' -mmin +"$MOUNT_ASIDE_HORIZON_MIN" -print 2>/dev/null \
+      | while IFS= read -r p; do
+          rel="${p#"$base"/}"
+          case "$rel" in */*/*/*) continue ;; */*/.aside.*) ;; *) continue ;; esac
+          key="${rel%%/*}"; ident="${rel#*/}"; ident="${ident%%/*}"
+          case "$key" in *[!0-9a-f]*) continue ;; esac
+          [ "${#key}" = 64 ] || continue
+          case "$ident" in .*) continue ;; esac
+          printf '%s\n' "$p"
+        done | LC_ALL=C sort || true
+    return 0
+  fi
+  find -P "$1" -mindepth 1 -maxdepth 1 -type d -name '.aside.*' -mmin +"$MOUNT_ASIDE_HORIZON_MIN" -print 2>/dev/null || true
+}
+
+# mount_cred_clear <ident dir> — unlink every credential byte this runner writes into a mount home
+# (home/auth.json, and a home/.stage.* an interrupted _iso_place left beside it), never following a
+# link, then list home/ again: 0 only when neither name is left. A site whose clear fails never moves
+# the ident to trash; it deletes inline as before, so no credential copy ever waits there.
+mount_cred_clear() {
+  local h="$1/home" f
+  [ -e "$h" ] || [ -L "$h" ] || return 0
+  [ -d "$h" ] && [ ! -L "$h" ] || return 1
+  rm -f -- "$h/auth.json" "$h"/.stage.* 2>/dev/null || true
+  cm_listable "$h" || return 1
+  for f in "$h/auth.json" "$h"/.stage.*; do
+    if [ -e "$f" ] || [ -L "$f" ]; then return 1; fi
+  done
+  return 0
+}
+
+# mount_trash_tree <main root> <kind> <dir> [<tree-relpath>] — trash_tree into THIS store's trash,
+# which is derived from the dir's own path (<base>/<repo-key>/<ident>[/...]), never from a cmd_run
+# local: the EXIT trap calls this. Sets MOUNT_TRASH. 0 | 1 | 2, as trash_tree.
+MOUNT_TRASH=""
+mount_trash_tree() {
+  local mr="$1" kind="$2" dir="$3" rel="${4:-}" gd ident
+  MOUNT_TRASH=""
+  ident="$dir"; [ "$kind" != pending ] || ident="$(dirname "$dir")"
+  MOUNT_TRASH="$(trash_dir_for "$(dirname "$(dirname "$ident")")")"
+  gd="$(mount_git -C "$mr" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$gd" in /*) ;; *) gd="$mr/$gd" ;; esac
+  trash_tree "$gd" "$MOUNT_TRASH" "$kind" "$dir" "$rel"
+}
+
 # Rebuild the mount at a STABLE path. Every step is a defect found in review:
 #   - the dirent is moved aside WHATEVER it is (directory, file, symlink, FIFO, socket).
 #     `mv` never follows, so a symlink is relocated and its target untouched; writing or
@@ -2137,7 +2175,23 @@ mount_restage() {  # <main_root> <kdir> <mount> <base> <artifact> <log> -> 0 | 1
   # its owner indefinitely, so an aside older than the horizon may still be in use. The glob
   # cannot match the live tree or follow a symlink, so a survivor is never aliased into the
   # new mount — but it may lose the directory it was writing into. Best-effort, never a gate.
-  find "$kdir" -maxdepth 1 -type d -name '.aside.*' -mmin +120 -exec rm -rf {} + 2>/dev/null || true
+  # Each expired aside is RENAMED into the store's trash (deferred deletion, helpers/trash.sh) and
+  # deleted by the detached reaper; only an aside the trash refuses is deleted inline, as before.
+  # The reaper is started even when nothing here expired: its store sweep applies the same horizon
+  # to every OTHER ident's asides, which no restage of theirs may ever come back to reap.
+  local xa mstore
+  mstore="$(dirname "$(dirname "$kdir")")"
+  while IFS= read -r xa; do
+    [ -n "$xa" ] || continue
+    if trash_put "$(trash_dir_for "$mstore")" aside "$xa"; then
+      trash_commit "$(trash_dir_for "$mstore")" "$TRASH_HOLD"
+    else
+      rm -rf -- "$xa" 2>/dev/null || true
+    fi
+  done <<EOF
+$(mount_asides_expired "$kdir")
+EOF
+  trash_reap_start store "$mstore"
 
   local st_rc=0
   pend="$(mount_state_get "$kdir" pending)" || st_rc=$?
@@ -2345,19 +2399,41 @@ unmount_artifact() {
   # An interrupt between `worktree add` and the rename leaves a REGISTERED worktree at the
   # temp path that no later run can find: $mount_dir still names a path that does not
   # exist, and a throwaway ident dir (removed whole below) is never revisited to replay its journal.
+  # FIRST, and on its own: trashed inside the ident dir it would ride along still registered.
+  local trc=0
   if [ -n "${MOUNT_PENDING_TMP:-}" ] && [ -n "${MOUNT_PENDING_ROOT:-}" ]; then
-    mount_git -C "$MOUNT_PENDING_ROOT" worktree remove --force "$MOUNT_PENDING_TMP" 2>/dev/null || true
-    rm -rf -- "$MOUNT_PENDING_TMP" 2>/dev/null || true
+    mount_trash_tree "$MOUNT_PENDING_ROOT" pending "$MOUNT_PENDING_TMP" || trc=$?
+    if [ "$trc" = 1 ]; then
+      mount_git -C "$MOUNT_PENDING_ROOT" worktree remove --force "$MOUNT_PENDING_TMP" 2>/dev/null || true
+      rm -rf -- "$MOUNT_PENDING_TMP" 2>/dev/null || true
+    else
+      trash_commit "$MOUNT_TRASH" "$TRASH_HOLD"
+    fi
     MOUNT_PENDING_TMP=""
+  fi
+  # A THROWAWAY ident dir (external, disposable) goes WHOLE — tree, home, state and claims — into the
+  # store's trash in one rename, its tree's registration dropped under trash_tree's checks, and the
+  # detached reaper deletes it. Its credentials are cleared FIRST: no auth.json copy ever waits in a
+  # trash. Never-follow, and only ever a throwaway this run allocated: a DURABLE ident dir is never
+  # named here, so a degrade that left the durable mount for `clean mounts` cannot delete it.
+  if [ -n "${mount_throwaway:-}" ] && [ -n "${main_root:-}" ] && [ -d "$mount_throwaway" ] && [ ! -L "$mount_throwaway" ]; then
+    trc=1
+    if mount_cred_clear "$mount_throwaway"; then
+      trc=0; mount_trash_tree "$main_root" throwaway "$mount_throwaway" view/tree || trc=$?
+    fi
+    if [ "$trc" != 1 ]; then
+      # The run's claim moved with the ident dir: release it at its new path, THEN commit, so the
+      # reaper only ever meets a released claim.
+      case "${MOUNT_HOLDER:-}" in "$mount_throwaway"/.claim.*) MOUNT_HOLDER="$TRASH_HOLD/payload/${MOUNT_HOLDER##*/}" ;; esac
+      mount_claim_release
+      trash_commit "$MOUNT_TRASH" "$TRASH_HOLD"
+      mount_dir=""; mount_throwaway=""
+    fi
   fi
   if [ -n "${mount_dir:-}" ] && [ -n "${main_root:-}" ] && [ -z "${mount_durable:-}" ]; then
     mount_git -C "$main_root" worktree remove --force "$mount_dir" 2>/dev/null || true
     mount_dir=""
   fi
-  # A THROWAWAY ident dir (external, disposable) is removed WHOLE after its worktree — its
-  # home/ holds an isolated auth.json copy that would otherwise accumulate under the store.
-  # Never-follow, and only ever a throwaway this run allocated: a DURABLE ident dir is never
-  # named here, so a degrade that left the durable mount for `clean mounts` cannot delete it.
   if [ -n "${mount_throwaway:-}" ] && [ -d "$mount_throwaway" ] && [ ! -L "$mount_throwaway" ]; then
     rm -rf -- "$mount_throwaway" 2>/dev/null || true
     mount_throwaway=""
@@ -4087,6 +4163,9 @@ AGYNOTE
         # chmod fails CLOSED: the mode is part of the contract (600 on a credential), not
         # advisory. (codex, r4, advisory.)
         chmod "$_mode" "$_tmp" || { rm -f "$_tmp"; return 1; }
+        # A TEST SEAM: `<hook> <staged temp> <dest>` between the write and the rename, where an
+        # interrupted runner leaves a credential-bearing .stage.* (mount_cred_clear's second name).
+        [ -z "${COMMS_TEST_ISO_STAGE_HOOK:-}" ] || "$COMMS_TEST_ISO_STAGE_HOOK" "$_tmp" "$_dst" || true
         command mv -f "$_tmp" "$_dst" || { rm -f "$_tmp"; return 1; }
         # VERIFY the rename landed a regular file. This DETECTS (not prevents) a symlink a
         # concurrent actor could re-plant between the precheck and mv; that race is outside
@@ -5847,11 +5926,13 @@ cm_tomb_scan() {
 # cm_finish_tomb <ident> <tombstone> <kind> <raw> <agent> <physical run|-> — complete a removal whose
 # tombstone THIS process has claimed (its own, or a dead maker's it superseded), and only when its
 # record names this target (cm_tomb_match). Sets CM_ST: removed (the tombstone held the ident and
-# is gone), cleared (it never received the ident, so the live ident path is untouched and still to
-# be judged), incomplete, ambiguous or refused.
+# has left the scope: handed to the reaper in a hold, CM_TOMB_AT naming it there, or deleted inline
+# when the trash refused it), cleared (it never received the ident, so the live ident path is
+# untouched and still to be judged), incomplete, ambiguous or refused.
+CM_TOMB_AT=""; CM_TRASH_HOLD=""
 cm_finish_tomb() {
   local ident="$1" tomb="$2" kind="$3" e r_tree r_admin moved=0 have hrc=0
-  CM_ST=refused; CM_WHY=tombstone-unverifiable; CM_NOTE=""
+  CM_ST=refused; CM_WHY=tombstone-unverifiable; CM_NOTE=""; CM_TOMB_AT=""; CM_TRASH_HOLD=""
   if [ -L "$tomb" ] || [ ! -d "$tomb" ] || [ "$(cd "$tomb" 2>/dev/null && pwd -P)" != "$tomb" ]; then
     CM_WHY=unsafe-path; CM_NOTE="$tomb is not a real directory at its own physical path"; return 0
   fi
@@ -5929,6 +6010,18 @@ cm_finish_tomb() {
     CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not record in $tomb that $r_admin is gone"; return 0
   fi
   cm_hook unregistered "$ident" "$tomb"
+  # THE HAND-OFF. Unregistered and journaled, the payload is the reaper's: the whole tombstone
+  # (record, claims and copy) moves into the store's trash in one rename, after the copy's
+  # credentials are cleared, and nothing in it is deleted here. The caller releases the tombstone
+  # claim at its new path (CM_TOMB_AT) and commits. A credential that will not clear, or a put the
+  # trash refuses, deletes inline exactly as before.
+  if [ "$moved" = 1 ] && mount_cred_clear "$tomb/$ident" \
+     && trash_put "$(trash_dir_for "$(dirname "$CM_SCOPE")")" retire "$tomb"; then
+    CM_TOMB_AT="$TRASH_HOLD/payload"; CM_TRASH_HOLD="$TRASH_HOLD"
+    cm_hook handed-off "$ident" "$TRASH_HOLD"
+    CM_ST=removed; CM_WHY=proven
+    return 0
+  fi
   # The run record goes LAST: a throwaway's replay re-proves the copy from it.
   if [ "$moved" = 1 ] && ! cm_rm_last "$tomb/$ident" .state.run; then
     CM_ST=incomplete; CM_WHY=remove-failed; CM_NOTE="could not delete everything under $tomb/$ident; the tombstone is kept so a re-run finishes it"; return 0
@@ -5937,6 +6030,19 @@ cm_finish_tomb() {
   cm_hook removed "$ident" "$tomb"
   CM_ST=removed; CM_WHY=proven
   return 0
+}
+
+# cm_tomb_release <tombstone claim> — release the tombstone's claim where it now lives: at the hand-off
+# path in the store's trash (CM_TOMB_AT), which is then committed to the reaper, or in place (a no-op
+# once the tombstone is gone). Released BEFORE the commit, so the reaper meets a released claim.
+cm_tomb_release() {
+  if [ -n "$CM_TOMB_AT" ]; then
+    MOUNT_HOLDER="$CM_TOMB_AT/${1##*/}"; mount_claim_release
+    trash_commit "${CM_TRASH_HOLD%/*}" "$CM_TRASH_HOLD"
+    CM_TOMB_AT=""; CM_TRASH_HOLD=""
+    return 0
+  fi
+  MOUNT_HOLDER="$1"; mount_claim_release
 }
 
 # cm_replay_tomb <ident> <tombstone> — finish an earlier removal, but only as the tombstone's OWNER.
@@ -5965,7 +6071,7 @@ cm_replay_tomb() {  # <ident> <tombstone> <kind> <raw> <agent> <physical run|-> 
   cm_hook reclaimed "$ident" "$tomb"
   cm_regate "$3" "$4" "$5" "$7"
   [ "$CM_ST" != ok ] || cm_finish_tomb "$1" "$2" "$3" "$4" "$5" "$6"
-  MOUNT_HOLDER="$tclaim"; mount_claim_release   # a no-op once the tombstone is gone
+  cm_tomb_release "$tclaim"
 }
 
 # cm_run_own <throwaway ident> <run dir> — is this throwaway PROVABLY the leftover of that run? Its
@@ -6072,7 +6178,7 @@ cm_remove() {
   # The ident's claim moved with it and is deleted with it; the tombstone's claim is held to the end.
   cm_hook renamed "$ident" "$tomb"
   cm_finish_tomb "$ident" "$tomb" "$kind" "$raw" "$agent" "$prun"
-  MOUNT_HOLDER="$tclaim"; mount_claim_release   # a no-op once the tombstone is gone
+  cm_tomb_release "$tclaim"
 }
 
 cm_emit() {  # <status> <reason> <kind> <use> <agent> <ident>
@@ -6289,11 +6395,38 @@ cmd_clean_mounts() {  # [--yes] [--orphans] | --thread <thread> [--yes]
   if [ "$has_thread" = 1 ]; then
     [ -z "$unknown" ] || usage_err "clean-mounts: unknown argument '$unknown' — a targeted clean takes only --thread <thread> [--yes]"
     [ "$orphans" = 0 ] || usage_err "clean-mounts: --orphans is a whole-store report and does not combine with --thread"
+    [ "$yes" != 1 ] || trap 'cm_reap_kick >/dev/null 2>&1 || true' EXIT
     cm_thread "$thread" "$yes"
     return $?
   fi
   [ -z "$unknown" ] || die "clean-mounts: unknown argument '$unknown'"
-  local root main_root
+  [ "$yes" != 1 ] || trap 'cm_reap_kick >/dev/null 2>&1 || true' EXIT
+  cm_gc "$yes" "$orphans"
+}
+
+# cm_reap_kick — start the store's reaper as a `clean mounts --yes` exits (an EXIT trap, so every
+# return, refusal and `die` is covered), whatever its outcome, so a
+# re-run is always enough to restart deferred or orphaned trash work (a hold whose maker died, an
+# entry deferred past a busy claim) without waiting for an unrelated turn. Uses the base the run
+# already validated; otherwise validates the configured base only when it already exists, so a
+# refused run never creates a store as a side effect.
+cm_reap_kick() {
+  local b="${MOUNT_BASE_DIR:-}" r mr
+  if [ -z "$b" ]; then
+    b="${COMMS_MOUNT_BASE:-}"; [ -n "$b" ] || b="${XDG_STATE_HOME:-$HOME/.local/state}/agent-comms/mounts"
+    [ -d "$b" ] || return 0
+    r="$("$COMMS" root 2>/dev/null)" || return 0
+    mr="$( cd "${r%/.comms}" 2>/dev/null && pwd -P )" || return 0
+    mount_base_root "$mr" || return 0
+    b="$MOUNT_BASE_DIR"
+  fi
+  trash_reap_start store "$b"
+}
+
+# The whole-store GC (`clean mounts` without --thread). Deletes inline: it is an operator command,
+# never on a turn, dispatch or landing path.
+cm_gc() {  # <yes> <orphans>
+  local yes="$1" orphans="$2" root main_root
   root="$("$COMMS" root)"; main_root="${root%/.comms}"
   main_root="$( cd "$main_root" 2>/dev/null && pwd -P )" || die "clean-mounts: cannot resolve the repo root"
   if ! mount_base_root "$main_root"; then
@@ -6379,12 +6512,201 @@ cmd_clean_mounts() {  # [--yes] [--orphans] | --thread <thread> [--yes]
   return 0
 }
 
+# ---------- the reaper: deferred deletion (helpers/trash.sh) ----------
+#
+# `runphase.sh reap --store <mount-base> | --repo <repo-root>` is INTERNAL: only trash_reap_start
+# starts it — detached in its own session and process group, cwd /, stdio on /dev/null, at
+# background priority, holding <trash>/.reaper.lock on fd 9 (and so does every child, rm included,
+# which is what makes the lock hold one deleter per trash). It lives here because it needs this
+# file's claims (mount_claim_take, cm_claims) and mount_cred_clear. One run:
+#   1. hold recovery: a hold whose maker is PROVEN dead is committed, and empty scaffolding of a dead
+#      maker is removed. Any other hold is left alone: a reaper never deletes a hold.
+#   2. the domain sweep, which only ever renames: --store moves every ident's expired asides to
+#      trash, skipping an ident any live or unverifiable claim holds and never taking an ident claim
+#      (a runner that met it would fail its turn); --repo moves a leaked .integrate-*/.verify-* tree
+#      whose owner is proven dead, never by age.
+#   3. the delete pass, oldest entry first. An entry whose payload carries top-level claims (a
+#      throwaway ident, a retired tombstone) is deleted only under that claim, taken as a mount's
+#      is: a dead or released holder is superseded, a live one defers the entry.
+#   4. deferred entries are retried after the others, then every second for up to 30 seconds; an
+#      entry still held waits for the next reaper. Steps 1-4 repeat while new names appear.
+#   5. the lock is closed, and a name this run never saw (a commit that raced its exit) starts the
+#      next reaper. A commit renames first and starts second; the reaper closes first and rescans
+#      second, so every commit is seen by a reaper.
+# Killed mid-delete it leaves a well-named, half-deleted entry, which the next reaper finishes; the
+# kernel drops the lock with its last holder. Its failures are silent: the trash listing is the
+# observable.
+REAP_SEEN=""
+# A TEST SEAM, cm_hook's shape: `<hook> <event> <path>` at `locked` (the trash) and `before-delete`
+# (the entry). Its status is ignored; unset, it costs nothing.
+reap_hook() {
+  [ -n "${COMMS_TEST_REAP_HOOK:-}" ] || return 0
+  "$COMMS_TEST_REAP_HOOK" "$@" || true
+}
+
+reap_unseen() {  # <trash> — 0 when it holds a name this run never listed; every name is marked seen
+  local e n new=1
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    n="${e##*/}"
+    case "$REAP_SEEN" in *"/$n/"*) continue ;; esac
+    REAP_SEEN="$REAP_SEEN/$n/"; new=0
+  done
+  return "$new"
+}
+
+reap_holds() {  # <trash> — step 1
+  local h n p
+  for h in "$1"/.hold.*; do
+    [ -d "$h" ] && [ ! -L "$h" ] || continue
+    n="${h##*/.hold.}"
+    trash_entry_name_ok "$n" || continue
+    if [ -e "$h/owner" ] || [ -L "$h/owner" ]; then
+      if trash_record_dead "$h/owner"; then trash_seal "$h" || true; fi
+    elif [ ! -e "$h/payload" ] && [ ! -L "$h/payload" ]; then
+      p="${n#*.*.}"; p="${p%%.*}"
+      proc_state "$p"
+      if [ "$PROC_STATE" = dead ]; then
+        rm -f -- "$h/owner.tmp" 2>/dev/null || true
+        rmdir -- "$h" 2>/dev/null || true
+      fi
+    fi
+  done
+  return 0
+}
+
+reap_sweep_store() {  # <mount base> <trash> — step 2, --store
+  local a ident last="" skip=0
+  while IFS= read -r a; do
+    [ -n "$a" ] || continue
+    ident="${a%/*}"
+    if [ "$ident" != "$last" ]; then
+      last="$ident"; skip=0
+      cm_claims "$ident" "" || skip=1   # read-only: never an ident claim
+    fi
+    [ "$skip" = 0 ] || continue
+    if trash_put "$2" aside "$a"; then trash_seal "$TRASH_HOLD" || true; fi
+  done <<EOF
+$(mount_asides_expired --store "$1")
+EOF
+  return 0
+}
+
+reap_sweep_repo() {  # <repo root> <trash> — step 2, --repo
+  local root="$1" t n kind pid gd common adm rc
+  gd="$(mount_git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || return 0
+  case "$gd" in /*) ;; *) gd="$root/$gd" ;; esac
+  common="$(cd "$gd" 2>/dev/null && pwd -P)" || return 0
+  for t in "$root/.claude/worktrees"/.integrate-* "$root/.claude/worktrees"/.verify-*; do
+    [ -d "$t" ] && [ ! -L "$t" ] || continue
+    n="${t##*/}"; kind=integrate
+    case "$n" in .verify-*) kind=verify ;; esac
+    pid="$(trash_tree_pid "$n")"
+    adm="$(trash_admin "$common" "$t")" || adm=""
+    # PROVEN DEAD, or kept. With an owner record: it names the pid in the tree's name, and that pid
+    # is dead or now a different process. Without one: the name carries a pid, and it is dead.
+    if [ -n "$adm" ] && { [ -e "$adm/agent-comms-owner" ] || [ -L "$adm/agent-comms-owner" ]; }; then
+      [ -n "$pid" ] && trash_record_dead "$adm/agent-comms-owner" "$pid" || continue
+    else
+      [ -n "$pid" ] || continue
+      proc_state "$pid"
+      [ "$PROC_STATE" = dead ] || continue
+    fi
+    rc=0; trash_tree "$common" "$2" "$kind" "$t" || rc=$?
+    case "$rc" in 0|2) trash_seal "$TRASH_HOLD" || true ;; esac
+  done
+  return 0
+}
+
+reap_entry() {  # <entry> — step 3: 0 handled (deleted, or not the reaper's) | 1 deferred
+  local e="$1" p c d kind
+  [ -d "$e" ] && [ ! -L "$e" ] || return 0
+  trash_entry_name_ok "${e##*/}" || return 0
+  kind="${e##*/}"; kind="${kind#*.}"; kind="${kind%%.*}"
+  p="$e/payload"
+  if [ -d "$p" ] && [ ! -L "$p" ]; then
+    for c in "$p"/.claim.[0-9]*; do
+      [ -e "$c" ] || [ -L "$c" ] || continue
+      MOUNT_HOLDER=""
+      mount_claim_take "$p" "reaper:$$" || return 1
+      MOUNT_HOLDER=""   # the claim goes with the entry
+      break
+    done
+    case "$kind" in
+      throwaway|retire)   # defense in depth: every site cleared these before its put
+        for d in "$p" "$p"/*; do
+          [ -d "$d" ] && [ ! -L "$d" ] && [ -d "$d/home" ] || continue
+          mount_cred_clear "$d" || true
+        done ;;
+    esac
+  fi
+  reap_hook before-delete "$e"
+  rm -rf -- "$e" 2>/dev/null || true
+  return 0
+}
+
+reap_entries() {  # <trash> — steps 3 and 4
+  local e deferred="" left deadline
+  for e in "$1"/[0-9]*; do
+    reap_entry "$e" || deferred="$deferred$e
+"
+  done
+  deadline=$(( $(date +%s) + 30 ))
+  while [ -n "$deferred" ]; do
+    left=""
+    while IFS= read -r e; do
+      [ -n "$e" ] || continue
+      reap_entry "$e" || left="$left$e
+"
+    done <<EOF
+$deferred
+EOF
+    deferred="$left"
+    { [ -n "$deferred" ] && [ "$(date +%s)" -lt "$deadline" ]; } || break
+    sleep 1
+  done
+  return 0
+}
+
+cmd_reap() {  # --store <mount-base> | --repo <repo-root>
+  local mode="" root trash
+  case "${1:-}" in
+    --store) mode=store ;;
+    --repo) mode=repo ;;
+    *) usage_err "reap: expected --store <mount-base> or --repo <repo-root> (internal: started by trash_reap_start)" ;;
+  esac
+  need_value reap $# "$1"
+  [ $# -eq 2 ] || usage_err "reap: takes exactly one of --store or --repo and its path"
+  root="${2%/}"
+  case "$root" in /*) ;; *) usage_err "reap: $1 needs an absolute path" ;; esac
+  case "$mode" in store) trash="$root/$TRASH_LEAF" ;; *) trash="$root/.claude/worktrees/$TRASH_LEAF" ;; esac
+  # The lock IS the exclusion, so a run that did not come through the launcher cannot share a trash.
+  if [ "${COMMS_TRASH_LOCK_FD:-}" != 9 ] || ! trash_lock_held "$trash"; then
+    echo "runphase.sh: reap: fd 9 does not hold $trash/.reaper.lock — refusing (started only by trash_reap_start)" >&2
+    exit 2
+  fi
+  trash_ensure "$trash" || exit 1
+  reap_hook locked "$trash"
+  REAP_SEEN=""
+  reap_unseen "$trash" || true
+  while :; do
+    reap_holds "$trash"
+    case "$mode" in store) reap_sweep_store "$root" "$trash" ;; *) reap_sweep_repo "$root" "$trash" ;; esac
+    reap_entries "$trash"
+    reap_unseen "$trash" || break
+  done
+  exec 9>&-
+  if reap_unseen "$trash"; then trash_reap_start "$mode" "$root"; fi
+  return 0
+}
+
 case "${1:-}" in
   spawn)   shift; cmd_spawn "$@" ;;
   run)     shift; cmd_run "$@" ;;
   await)   shift; cmd_await "$@" ;;
   result)  shift; cmd_result "$@" ;;
   clean-mounts) shift; cmd_clean_mounts "$@" ;;
+  reap)    shift; cmd_reap "$@" ;;
   hold)    shift; cmd_hold "$@" ;;
   release) shift; cmd_release "$@" ;;
   ""|help|-h|--help)

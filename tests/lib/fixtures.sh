@@ -48,6 +48,35 @@ mkdir -p "$STUB_BIN"
 # still live there. The canned tree/list fixtures and CMUX_STUB_* levers went with the
 # transport they served.
 run_comms() { (cd "$REPO_FIX" && env "$COMMS" "$@"); }
+# DEFERRED DELETION (helpers/trash.sh). A site renames a discarded tree into a trash and a detached
+# reaper deletes it later, so an assertion that bytes are gone from the STORE (not merely from the
+# live namespace) waits for that reaper. reaper_running: a `runphase.sh reap` for this trash is alive
+# (read from the process table, never by touching its lock: probing the lock could make a launcher
+# that raced the probe start nothing). reap_wait: no entry is left and no reaper is running, bounded
+# by wait_until; a caller includes a failure in its assertion.
+reap_target() {  # <trash> -> "--repo <root>" or "--store <base>"
+  local p="${1%/*}"
+  case "$p" in */.claude/worktrees) printf -- '--repo %s' "${p%/.claude/worktrees}" ;; *) printf -- '--store %s' "$p" ;; esac
+}
+reaper_count() {  # <trash> -> how many reapers serve it. A reaper's command line ENDS with this text;
+  # matching the end, with the text passed through the environment (BSD awk rewrites a -v value
+  # into its own argv), keeps the matcher's own command line out of the count.
+  ps -A -ww -o command= 2>/dev/null | REAP_WANT="runphase.sh reap $(reap_target "$1")" awk '
+    { sub(/[ \t]+$/, ""); w = ENVIRON["REAP_WANT"] }
+    length($0) >= length(w) && substr($0, length($0) - length(w) + 1) == w { n++ }
+    END { print n + 0 }'
+}
+reaper_running() { [ "$(reaper_count "$1")" -gt 0 ]; }   # <trash>
+trash_entries() {  # <trash> -> the committed entries' names, one per line
+  [ -d "$1" ] || return 0
+  ls -A "$1" 2>/dev/null | grep -E '^[0-9]{10}\.(aside|throwaway|pending|retire|integrate|verify)\.[0-9]+\.[0-9a-f]{6}$' || true
+}
+trash_holds() {  # <trash> -> the holds' names, one per line
+  [ -d "$1" ] || return 0
+  ls -A "$1" 2>/dev/null | grep -E '^\.hold\.' || true
+}
+reap_idle() { [ -z "$(trash_entries "$1")" ] && ! reaper_running "$1"; }
+reap_wait() { wait_until reap_idle "$1"; }
 export CODEX_STUB_LOG="$WORK/codex.log"
 RUNPHASE="$REPO/helpers/runphase.sh"
 

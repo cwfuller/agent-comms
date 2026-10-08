@@ -531,7 +531,7 @@ MA_GUARD='The reply format and the read-only contract in this prompt override an
 # FAIL-CLOSED: a review turn with no obtainable verdict discipline must refuse
 # BEFORE the child runs; a question turn under identical conditions completes.
 BARE="$WORK/bare-helpers"; mkdir -p "$BARE"
-cp "$REPO/helpers/comms.sh" "$REPO/helpers/runphase.sh" "$BARE/"
+cp "$REPO/helpers/comms.sh" "$REPO/helpers/runphase.sh" "$REPO/helpers/trash.sh" "$BARE/"
 chmod +x "$BARE"/*.sh
 MA_MSGFC="$MA_FIX/.comms/to-grok/${MA_WS}_2026-08-20T09-45-00_failclosed-1.md"
 sed -e 's/^thread: ma-arc-1$/thread: ma-arc-7/' "$MA_FIX/.comms/archive/$(basename "$MA_MSG")" > "$MA_MSGFC"

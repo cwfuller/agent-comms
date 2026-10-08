@@ -871,3 +871,85 @@ grep -qF "does not resolve — refusing rather than reviewing an unverifiable lo
 grep -qF 'GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES' "$RP" \
   && ok "acp_exec also scrubs GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY / GIT_ALTERNATE_OBJECT_DIRECTORIES" \
   || fail "the acp wrapper leaves index/object-dir GIT_* vars unscrubbed"
+
+section "deferred deletion: a throwaway mount and an expired aside go to the store's trash"
+# A throwaway ident goes WHOLE into <store>/.comms-trash at teardown, its tree's registration dropped;
+# the restaging runner moves its own ident's expired asides there. A detached reaper deletes both.
+# Its hook blocks at 'locked' (bounded) so what reached the trash can be seen before it is deleted.
+WT_TR="$WM_STORE/.comms-trash"
+cat > "$WM/hook-reap" <<'EOF'
+#!/bin/bash
+printf '%s %s\n' "$1" "${2##*/}" >> "$WM_REAP_LOG"
+[ "$1" = "${WM_REAP_BLOCK:-}" ] || exit 0
+n=0; while [ ! -e "$WM_REAP_RELEASE" ] && [ "$n" -lt 900 ]; do sleep 0.1; n=$((n + 1)); done
+exit 0
+EOF
+chmod +x "$WM/hook-reap"
+wt_last_cwd() { wm_prompt_cwds | sed -n '$p'; }
+wt_reg() { git -C "$MA_FIX" worktree list --porcelain 2>/dev/null | grep_full -qxF "worktree $1"; }
+wt_age() { python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2])*60; os.utime(sys.argv[1],(t,t))' "$1" "$2"; }
+wt_blocked() {  # <tag> <artifact> <thread> [env...] — a turn whose reaper blocks at 'locked'; prints its last cwd
+  local tag="$1" art="$2" thr="$3"; shift 3
+  : > "$WM/cwd.log"; : > "$WM/reap-$tag.log"; rm -f "$WM/release-$tag"
+  wm_turn "$thr" "$tag" "$art" WM_REAP_LOG="$WM/reap-$tag.log" WM_REAP_BLOCK=locked WM_REAP_RELEASE="$WM/release-$tag" \
+    COMMS_TEST_REAP_HOOK="$WM/hook-reap" "$@" >/dev/null
+  wt_last_cwd
+}
+: > "$WM/cwd.log"; wm_turn wm-trash-tw tw0 "$WM_A1" >/dev/null; WT_K="$(wm_kdir_of "$(wt_last_cwd)")"
+[ -n "$WT_K" ] && printf 'bad id!\n' > "$WT_K/.state.record"   # every later turn here degrades
+WT_RQ=0; reap_wait "$WT_TR" && WT_RQ=1
+WT_C1="$(wt_blocked tw1 "$WM_A1" wm-trash-tw)"; WT_E1="$(trash_entries "$WT_TR")"
+WT_B1=0; grep -q '^locked ' "$WM/reap-tw1.log" && reaper_running "$WT_TR" && WT_B1=1
+if [ "$WT_RQ" = 1 ] && [ -n "$WT_K" ] && wm_is_throwaway "$WT_C1" "$WM/run-tw1" && [ "$(wm_status "$WM/run-tw1")" = completed ] \
+   && [ ! -e "${WT_C1%/view/tree}" ] && ! wt_reg "$WT_C1" && [ "$WT_B1" = 1 ] \
+   && [ "$(printf '%s\n' "$WT_E1" | grep -c '\.throwaway\.')" = 1 ] && [ -f "$WT_TR/$WT_E1/payload/view/tree/mount-marker.txt" ] \
+   && [ -d "$WT_TR/$WT_E1/payload/home" ] && [ ! -e "$WT_TR/$WT_E1/payload/home/auth.json" ]; then
+  ok "a throwaway's whole ident dir is one entry in the store's trash at turn end, its path and registration gone"
+else
+  fail "throwaway to trash: cwd=$WT_C1 status=$(wm_status "$WM/run-tw1") blocked=$WT_B1 entries=$WT_E1"
+fi
+touch "$WM/release-tw1"
+WT_RW=0; reap_wait "$WT_TR" && WT_RW=1
+[ "$WT_RW" = 1 ] && [ -n "$WT_E1" ] && [ ! -e "$WT_TR/$WT_E1" ] \
+  && ok "released, the reaper deletes the throwaway" || fail "throwaway reap: idle=$WT_RW"
+# FALLBACK: EXDEV, or an unwritable trash, removes the throwaway inline as before.
+: > "$WM/cwd.log"; wm_turn wm-trash-tw tw2 "$WM_A1" COMMS_TEST_TRASH_RENAME_ERRNO=EXDEV >/dev/null; WT_C2="$(wt_last_cwd)"
+WT_E2="$(trash_entries "$WT_TR")$(trash_holds "$WT_TR")"
+chmod 500 "$WT_TR"
+: > "$WM/cwd.log"; wm_turn wm-trash-tw tw3 "$WM_A1" >/dev/null; WT_C3="$(wt_last_cwd)"
+WT_E3="$(trash_entries "$WT_TR")$(trash_holds "$WT_TR")"
+chmod 700 "$WT_TR"
+if wm_is_throwaway "$WT_C2" "$WM/run-tw2" && [ ! -e "${WT_C2%/view/tree}" ] && ! wt_reg "$WT_C2" && [ -z "$WT_E2" ] \
+   && wm_is_throwaway "$WT_C3" "$WM/run-tw3" && [ ! -e "${WT_C3%/view/tree}" ] && ! wt_reg "$WT_C3" && [ -z "$WT_E3" ]; then
+  ok "with EXDEV, or an unwritable trash, the throwaway is removed inline and nothing reaches the trash"
+else
+  fail "throwaway fallback: c2=$WT_C2 c3=$WT_C3 entries=$WT_E2|$WT_E3"
+fi
+# ASIDES: the restaging runner moves ITS OWN expired asides (past the unchanged 120-minute horizon).
+: > "$WM/cwd.log"; wm_turn wm-trash-as as0 "$WM_A1" >/dev/null; WT_KA="$(wm_kdir_of "$(wt_last_cwd)")"
+wt_old_aside() { mkdir -p "$WT_KA/$1/held" && printf 'old\n' > "$WT_KA/$1/held/x" && wt_age "$WT_KA/$1" 121; }
+wt_old_aside .aside.zzold1
+WT_RQ=0; reap_wait "$WT_TR" && WT_RQ=1
+wt_blocked as1 "$WM_A2" wm-trash-as >/dev/null; WT_EA="$(trash_entries "$WT_TR")"
+if [ "$WT_RQ" = 1 ] && [ -n "$WT_KA" ] && [ "$(wm_status "$WM/run-as1")" = completed ] && [ ! -e "$WT_KA/.aside.zzold1" ] \
+   && [ "$(printf '%s\n' "$WT_EA" | grep -c '\.aside\.')" = 1 ] && [ "$(cat "$WT_TR/$WT_EA/payload/held/x" 2>/dev/null)" = old ] \
+   && [ -n "$(ls -d "$WT_KA"/.aside.* 2>/dev/null)" ]; then
+  ok "a restage moves its own expired aside into the store's trash, and keeps the fresh aside it just made"
+else
+  fail "aside to trash: kdir=$WT_KA status=$(wm_status "$WM/run-as1") entries=$WT_EA"
+fi
+touch "$WM/release-as1"
+WT_RW=0; reap_wait "$WT_TR" && WT_RW=1
+wt_old_aside .aside.zzold2
+: > "$WM/cwd.log"; wm_turn wm-trash-as as2 "$WM_A1" COMMS_TEST_TRASH_RENAME_ERRNO=EXDEV >/dev/null
+WT_E4="$(trash_entries "$WT_TR")$(trash_holds "$WT_TR")"
+wt_old_aside .aside.zzold3
+chmod 500 "$WT_TR"
+: > "$WM/cwd.log"; wm_turn wm-trash-as as3 "$WM_A2" >/dev/null
+WT_E5="$(trash_entries "$WT_TR")$(trash_holds "$WT_TR")"
+chmod 700 "$WT_TR"
+[ "$WT_RW" = 1 ] && [ "$(wm_status "$WM/run-as2")" = completed ] && [ ! -e "$WT_KA/.aside.zzold2" ] && [ -z "$WT_E4" ] \
+  && [ "$(wm_status "$WM/run-as3")" = completed ] && [ ! -e "$WT_KA/.aside.zzold3" ] && [ -z "$WT_E5" ] \
+  && ok "with EXDEV, or an unwritable trash, the restage deletes its expired aside inline and nothing reaches the trash" \
+  || fail "aside fallback: idle=$WT_RW as2=$(wm_status "$WM/run-as2") as3=$(wm_status "$WM/run-as3") entries=$WT_E4|$WT_E5"
+reap_wait "$WT_TR" || true   # leave no reaper of this store running past the group

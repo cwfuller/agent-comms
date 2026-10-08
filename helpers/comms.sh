@@ -320,6 +320,10 @@ esac
 # a setting works in every shell — including agent tool shells that never read the shell rc.
 # Absent next to this script (an old install, a bare copy) it is simply skipped: env still works.
 [ -f "$(dirname "$SELF")/settings.sh" ] && . "$(dirname "$SELF")/settings.sh"
+# DEFERRED DELETION (helpers/trash.sh): a verification tree is renamed into the repo's trash and a
+# detached reaper deletes it, so no landing waits on a recursive delete. Absent next to this script
+# (a bare copy) it is skipped, and every site deletes inline exactly as before.
+[ -f "$(dirname "$SELF")/trash.sh" ] && . "$(dirname "$SELF")/trash.sh"
 
 main_repo_root() {
   # Consumes the WHOLE stream: `head -1` exits early and SIGPIPEs git once the worktree
@@ -5237,6 +5241,34 @@ inert_lines() {
   LC_ALL=C sed "$INERT_LINES_SED"
 }
 
+# integrate_tree_drop <root> <tree> — THE ONE TEARDOWN of an integrate or `verify fresh`
+# verification tree, from every exit path (success, both EXIT traps, the pre-clean). It renames the
+# tree into the repo's trash (<root>/.claude/worktrees/.comms-trash) and drops exactly its own admin
+# registration under trash_tree's checks — never a prune — and a detached reaper deletes it later.
+# When the trash refuses it, or trash.sh is absent, it removes the tree inline as before. Either
+# way (with trash.sh present) it starts the repo reaper, so every exit gives the leaked-tree sweep
+# a run. Writes nothing to stdout and always returns 0: integrate's stdout contract and exit class
+# are never this function's.
+integrate_tree_drop() {
+  local root="$1" tw="$2" kind=integrate gd trash trc=1
+  case "${tw##*/}" in .verify-*) kind=verify ;; esac
+  if declare -F trash_tree >/dev/null 2>&1 && { [ -e "$tw" ] || [ -L "$tw" ]; }; then
+    trash="$(trash_dir_for "$root/.claude/worktrees")"
+    if gd="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)"; then
+      case "$gd" in /*) ;; *) gd="$root/$gd" ;; esac
+      trc=0; trash_tree "$gd" "$trash" "$kind" "$tw" || trc=$?
+    fi
+    if [ "$trc" != 1 ]; then
+      trash_commit "$trash" "$TRASH_HOLD"
+      return 0
+    fi
+  fi
+  git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
+  rm -rf "$tw" 2>/dev/null || true
+  if declare -F trash_reap_start >/dev/null 2>&1; then trash_reap_start repo "$root"; fi
+  return 0
+}
+
 suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <name> <instance> <presence_record> <timeout_secs>
   # THE ONE VERIFICATION ROUTINE. `integrate` and `verify fresh` both call it, so the check that
   # guards a landing and the preflight that promises "this will land" can never drift apart.
@@ -5251,12 +5283,19 @@ suite_verify_candidate() {  # <who> <root> <cand> <tw> <suite_log> <suite_cmd> <
   local timeout_secs="${10:-0}"
   local rc=0
   SUITE_VERIFY_REASON=""
-  # Recover any prior crash's stale registration before adding: remove the entry
-  # if git still knows it, prune dangling metadata, then clear the directory.
-  git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
+  # Recover any prior crash's stale registration before adding: drop a same-named tree (to trash,
+  # or inline), then prune dangling metadata. The prune stays repo-wide on purpose: it is crash
+  # recovery for a registered-but-missing tree, and it also clears a stale registration of main that
+  # the final occupancy guard would otherwise refuse on. No trash step calls it or depends on it.
+  integrate_tree_drop "$root" "$tw"
   git -C "$root" worktree prune >/dev/null 2>&1 || true
-  rm -rf "$tw" 2>/dev/null || true
   git -C "$root" worktree add --detach "$tw" "$cand" >/dev/null 2>&1 || { SUITE_VERIFY_REASON="$who: could not materialize $cand"; return "$INTEGRATE_RC_UNVERIFIED"; }
+  # WHOSE tree this is, beside its registration: the reaper's leaked-tree sweep removes a tree only
+  # once this owner (pid and start time) is proven dead, never by age. Best-effort.
+  if declare -F trash_owner_write >/dev/null 2>&1; then
+    local tw_adm=""
+    tw_adm="$(git -C "$tw" rev-parse --absolute-git-dir 2>/dev/null)" && trash_owner_write "$tw_adm" || true
+  fi
   # Structured argv: whitespace split only, nothing shell-interpreted. An
   # empty/whitespace-only suite-cmd expanded to zero argv and SUCCEEDED as a
   # no-op — the exact unverified landing the config gate exists to refuse.
@@ -5532,9 +5571,13 @@ cmd_integrate() {
   # (grok, impl r2.)
   local presence_record=""
   [ -n "$name" ] && [ -n "$instance" ] && presence_record="$(presence_dir)/$name-$instance.json"
-  tw="$root/.claude/worktrees/.integrate-${instance:-$$}"
+  # UNIQUE PER RUN (pid and a random draw), like verify fresh's: a name reused by every integrate of
+  # one presence instance let an asynchronous sweep take a new live tree for the leaked one it had
+  # judged dead (git also reuses the lowest free admin name). The pid in it is what the reaper's
+  # leaked-tree sweep checks when the owner record is missing.
+  tw="$root/.claude/worktrees/.integrate-$$-$RANDOM"
   # shellcheck disable=SC2064
-  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$SELF' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
+  trap "integrate_tree_drop '$root' '$tw'; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$SELF' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
   # HISTORY, past tense on purpose: the guard is load-bearing, and its absence WAS a
   # silent-death bug. `presence beat` exits 5 when it heals a vanished record, which USED
   # TO happen on every integrate run whose
@@ -5595,7 +5638,7 @@ cmd_integrate() {
     # tip this run never verified is not the promise "unmoved main" made.
     # (codex, r1.) Leaving it detached is the safe residual; the message says so.
     # shellcheck disable=SC2064
-    trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true; if [ \"\$(git -C '$root' rev-parse --verify $lref 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout $lb >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — $lb or the checkout moved during the attempt\" >&2 || true; fi; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$SELF' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
+    trap "integrate_tree_drop '$root' '$tw'; if [ \"\$(git -C '$root' rev-parse --verify $lref 2>/dev/null)\" = '$expected' ] && [ \"\$(git -C '$healed' rev-parse HEAD 2>/dev/null)\" = '$expected' ]; then git -C '$healed' checkout $lb >/dev/null 2>&1 || true; else echo \"integrate: left $healed detached at \$(git -C '$healed' rev-parse --short HEAD 2>/dev/null || true) — $lb or the checkout moved during the attempt\" >&2 || true; fi; if [ -n '$name' ] && [ -f '$presence_record' ]; then '$SELF' presence beat --name '$name' --instance '$instance' --state working >/dev/null 2>&1 || true; fi" EXIT
     printf '%s\n' "integrate: healed — detached clean $lb occupant $(integrate_oneline "$occ") for the landing"
   fi
   # DOCS-ONLY SKIP. A tree diff that is only README.md, LICENSE, or top-level
@@ -5661,8 +5704,8 @@ cmd_integrate() {
     integrate_fail "$INTEGRATE_RC_ENV" "integrate: could not update $lref although it is still at $expected (a lock, permissions, or disk fault) — nothing landed"
   fi
   # Success path: clean up and clear the trap NOW, inside function scope, so the
-  # process-exit path has nothing deferred left to evaluate.
-  git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
+  # process-exit path has nothing deferred left to evaluate. Constant time: the tree goes to trash.
+  integrate_tree_drop "$root" "$tw"
   # A healed occupant goes back ON main, which now points at the landed tip —
   # this is the fast-forward the self-heal promised. Failure to re-attach is not
   # a failed landing: report it and leave the checkout safely detached.
@@ -5909,11 +5952,10 @@ verify_fresh() {
   log="$root/.comms/logs/verify-${cand}-${run_id}.suite.log"
   mkdir -p "$root/.claude/worktrees" 2>/dev/null || true
   # shellcheck disable=SC2064
-  trap "git -C '$root' worktree remove --force '$tw' >/dev/null 2>&1 || true; rm -rf '$tw' 2>/dev/null || true" EXIT
+  trap "integrate_tree_drop '$root' '$tw'" EXIT
   echo "verify: running suite-cmd against $cand in a fresh checkout (nothing will land)"
   suite_verify_candidate verify "$root" "$cand" "$tw" "$log" "$suite_cmd" "$name" "$instance" "$rec" "$suite_timeout" || vrc=$?
-  git -C "$root" worktree remove --force "$tw" >/dev/null 2>&1 || true
-  rm -rf "$tw" 2>/dev/null || true
+  integrate_tree_drop "$root" "$tw"
   trap - EXIT
   [ "$vrc" != "$INTEGRATE_RC_SUITE_TIMEOUT" ] \
     || printf 'verify-result v1 status=refused reason=suite_timeout cand=%s timeout_secs=%s\n' "$cand" "$suite_timeout"

@@ -895,3 +895,135 @@ RT_YE="$(rt_cm --thread rt-yankee --yes)"; RT_YEC=$?
 [ -n "$RT_YT" ] && [ "$RT_YEC" = 0 ] && rt_line "$RT_YE" "$RT_YW" removed interrupted && rt_gone "$RT_YW" && rt_intact "$RT_PEER" \
   && ok "a moved throwaway already emptied down to its directory is finished: nothing is left to prove" \
   || fail "emptied moved throwaway (rc=$RT_YEC): $RT_YE"
+
+section "clean mounts --thread: the retired copy is handed to the store's trash and reaped later"
+# Unregistered and journaled, the tombstone (record, claims and copy) moves into <store>/.comms-trash
+# in one rename and the clean returns; a detached reaper takes the tombstone claim and deletes it.
+RT_TR="$RT_STORE/.comms-trash"
+cat > "$WORK/rt-hook-reap" <<'EOF'
+#!/bin/bash
+# A reap hook: log "<event> <name> [claimed]"; block at $RT_REAP_BLOCK until $RT_REAP_RELEASE (bounded).
+c=""; [ "$1" = before-delete ] && grep -qs '^run=reaper:' "$2"/payload/.claim.[0-9]* && c=" claimed"
+printf '%s %s%s\n' "$1" "${2##*/}" "$c" >> "$RT_REAP_LOG"
+[ "$1" = "${RT_REAP_BLOCK:-}" ] || exit 0
+n=0; while [ ! -e "$RT_REAP_RELEASE" ] && [ "$n" -lt 900 ]; do sleep 0.1; n=$((n + 1)); done
+exit 0
+EOF
+chmod +x "$WORK/rt-hook-reap"
+rt_state retire rt-romeo >/dev/null
+RT_RQ=0; reap_wait "$RT_TR" && RT_RQ=1
+RT_R1="$(rt_turn rt-romeo grok)"
+: > "$WORK/rt-reap.log"; rm -f "$WORK/rt-reap.release"
+RT_RO="$(RT_REAP_LOG="$WORK/rt-reap.log" RT_REAP_BLOCK=locked RT_REAP_RELEASE="$WORK/rt-reap.release" \
+  COMMS_TEST_REAP_HOOK="$WORK/rt-hook-reap" rt_cm --thread rt-romeo --yes)"; RT_ROC=$?
+RT_RB=0; wait_until grep -q '^locked ' "$WORK/rt-reap.log" && RT_RB=1
+RT_RE="$(trash_entries "$RT_TR")"
+if [ "$RT_RQ" = 1 ] && [ -n "$RT_R1" ] && [ "$RT_ROC" = 0 ] && rt_line "$RT_RO" "$RT_R1" removed proven && rt_gone "$RT_R1" \
+   && [ "$RT_RB" = 1 ] && reaper_running "$RT_TR" && [ "$(printf '%s\n' "$RT_RE" | grep -c '\.retire\.')" = 1 ] \
+   && [ -f "$RT_TR/$RT_RE/payload/record" ] && [ -f "$RT_TR/$RT_RE/payload/$(basename "$RT_R1")/view/tree/rt.txt" ]; then
+  ok "clean mounts --thread returns removed while the reaper is blocked: the tombstone has left the scope and waits in the trash"
+else
+  fail "hand-off (rc=$RT_ROC, r1=$RT_R1, blocked=$RT_RB, entries=$RT_RE): $RT_RO"
+fi
+touch "$WORK/rt-reap.release"
+RT_RW=0; reap_wait "$RT_TR" && RT_RW=1
+[ "$RT_RW" = 1 ] && [ -n "$RT_RE" ] && [ ! -e "$RT_TR/$RT_RE" ] && grep -qx "before-delete $RT_RE claimed" "$WORK/rt-reap.log" \
+  && ok "released, the reaper takes the tombstone's claim before it deletes the payload" \
+  || fail "reap of the tombstone: idle=$RT_RW log=$(tr '\n' '|' < "$WORK/rt-reap.log")"
+# FALLBACK: a rename the trash refuses (EXDEV, or an unwritable trash) deletes inline as before.
+RT_R2="$(rt_turn rt-romeo grok)"
+RT_FX="$(COMMS_TEST_TRASH_RENAME_ERRNO=EXDEV rt_cm --thread rt-romeo --yes)"; RT_FXC=$?
+RT_FXE="$(trash_entries "$RT_TR")$(trash_holds "$RT_TR")"
+RT_R3="$(rt_turn rt-romeo grok)"
+chmod 500 "$RT_TR"
+RT_FU="$(rt_cm --thread rt-romeo --yes)"; RT_FUC=$?
+RT_FUE="$(trash_entries "$RT_TR")$(trash_holds "$RT_TR")"
+chmod 700 "$RT_TR"
+if [ -n "$RT_R2" ] && [ "$RT_FXC" = 0 ] && rt_line "$RT_FX" "$RT_R2" removed proven && [ -z "$RT_FXE" ] \
+   && [ -n "$RT_R3" ] && [ "$RT_FUC" = 0 ] && rt_line "$RT_FU" "$RT_R3" removed proven && [ -z "$RT_FUE" ] && rt_gone "$RT_R3"; then
+  ok "with EXDEV, or an unwritable trash, the retired copy is removed inline exactly as before and nothing reaches the trash"
+else
+  fail "hand-off fallback (rc=$RT_FXC/$RT_FUC, entries=$RT_FXE|$RT_FUE): $RT_FX / $RT_FU"
+fi
+# Killed after the hand-off and before its commit, the clean leaves a hold naming a dead maker. A
+# re-run finds nothing left in the scope (absent) and starts the reaper, which proves the maker
+# dead, commits the hold and deletes it — with no mounted turn in between.
+RT_R4="$(rt_turn rt-romeo grok)"
+RT_RQ=0; reap_wait "$RT_TR" && RT_RQ=1
+RT_KILL_AT=handed-off COMMS_TEST_CLEAN_MOUNTS_HOOK="$WORK/rt-hook-kill" rt_cm --thread rt-romeo --yes >/dev/null 2>&1; RT_HKC=$?
+RT_HH="$(trash_holds "$RT_TR")"
+RT_HA="$(rt_cm --thread rt-romeo --yes)"; RT_HAC=$?
+RT_RW=0; reap_wait "$RT_TR" && RT_RW=1
+if [ "$RT_RQ" = 1 ] && [ -n "$RT_R4" ] && [ "$RT_HKC" = 137 ] && [ "$(printf '%s\n' "$RT_HH" | grep -c '\.retire\.')" = 1 ] \
+   && [ "$RT_HAC" = 0 ] && rt_line "$RT_HA" "$RT_R4" absent already-absent && rt_gone "$RT_R4" \
+   && [ "$RT_RW" = 1 ] && [ -z "$(trash_holds "$RT_TR")" ] && [ ! -e "$RT_TR/$RT_HH" ]; then
+  ok "killed at 'handed-off', a re-run reports absent and the reaper it starts commits and deletes the dead maker's hold"
+else
+  fail "kill at handed-off (rc=$RT_HKC then $RT_HAC, hold=$RT_HH, idle=$RT_RW): $RT_HA"
+fi
+
+section "deferred deletion never moves a credential the runner wrote into a trash"
+# The provider login carries a unique marker. COMMS_TEST_ISO_STAGE_HOOK fires inside _iso_place
+# between writing the staged copy and renaming it to auth.json: it records whether the staged file
+# holds the marker (the negative control: the interruption really leaves credential bytes on disk),
+# then interrupts the runner. A trash hook (at the put) and a reap hook (before the delete) grep
+# whatever is about to be trashed or deleted for the marker.
+RT_MARK="rt-credential-marker-$$-$RANDOM"
+mkdir -p "$RT_HOME/.codex"; printf '{"tokens":"%s"}\n' "$RT_MARK" > "$RT_HOME/.codex/auth.json"; chmod 600 "$RT_HOME/.codex/auth.json"
+cat > "$WORK/rt-hook-stage" <<'EOF'
+#!/bin/bash
+case "$2" in */auth.json) ;; *) exit 0 ;; esac
+if grep -qF "$RT_MARK" "$1"; then echo marker >> "$RT_STAGE_LOG"; else echo none >> "$RT_STAGE_LOG"; fi
+kill "-$RT_STAGE_SIG" "$PPID"
+exit 0
+EOF
+cat > "$WORK/rt-hook-cred" <<'EOF'
+#!/bin/bash
+case "$1" in held|before-delete) ;; *) exit 0 ;; esac
+if grep -rqF "$RT_MARK" "$2" 2>/dev/null; then r=found; else r=clean; fi
+printf '%s %s %s\n' "$1" "$r" "${2##*/}" >> "$RT_CRED_LOG"
+exit 0
+EOF
+chmod +x "$WORK/rt-hook-stage" "$WORK/rt-hook-cred"
+export RT_MARK RT_STAGE_LOG="$WORK/rt-stage.log" RT_CRED_LOG="$WORK/rt-cred.log"
+: > "$RT_STAGE_LOG"; : > "$RT_CRED_LOG"
+RT_C1="$(rt_turn rt-sierra codex)"
+[ -n "$RT_C1" ] && grep -qF "$RT_MARK" "$RT_C1/home/auth.json" 2>/dev/null \
+  && ok "fixture: a mounted codex turn stages the marked login into its durable home" \
+  || fail "fixture: no durable codex mount with the staged login (c1=$RT_C1)"
+# THROWAWAY: a malformed session record degrades the next turn to a throwaway; TERM mid-staging
+# runs the runner's EXIT teardown, which clears the credentials and only then trashes the ident.
+cp "$RT_C1/.state.record" "$WORK/rt-c1.record" 2>/dev/null; printf 'bad id!\n' > "$RT_C1/.state.record"
+RT_RQ=0; reap_wait "$RT_TR" && RT_RQ=1
+RT_STAGE_SIG=TERM COMMS_TEST_ISO_STAGE_HOOK="$WORK/rt-hook-stage" COMMS_TEST_TRASH_HOOK="$WORK/rt-hook-cred" \
+  COMMS_TEST_REAP_HOOK="$WORK/rt-hook-cred" rt_turn rt-sierra codex >/dev/null
+RT_RW=0; reap_wait "$RT_TR" && RT_RW=1
+if [ "$RT_RQ" = 1 ] && [ "$(sed -n 1p "$RT_STAGE_LOG")" = marker ] && [ "$RT_RW" = 1 ] \
+   && grep -qE '^held clean \.hold\.[0-9]{10}\.throwaway\.' "$RT_CRED_LOG" && grep -qE '^before-delete clean [0-9]{10}\.throwaway\.' "$RT_CRED_LOG" \
+   && ! grep -q ' found ' "$RT_CRED_LOG" && [ -z "$(ls -d "$(dirname "$RT_C1")"/tmp-* 2>/dev/null)" ]; then
+  ok "a throwaway interrupted mid-staging (TERM) is trashed only after its staged credential is cleared"
+else
+  fail "throwaway credential: stage=$(tr '\n' ' ' < "$RT_STAGE_LOG") idle=$RT_RW cred=$(tr '\n' '|' < "$RT_CRED_LOG")"
+fi
+# DURABLE: SIGKILL mid-staging runs no teardown, so the durable home keeps its auth.json and a
+# credential-bearing .stage.*. Retired through clean mounts, both are cleared before the hand-off.
+cp "$WORK/rt-c1.record" "$RT_C1/.state.record" 2>/dev/null
+RT_STAGE_SIG=KILL COMMS_TEST_ISO_STAGE_HOOK="$WORK/rt-hook-stage" rt_turn rt-sierra codex >/dev/null
+RT_CK="$(ls "$RT_C1/home/".stage.* 2>/dev/null | head -1)"
+RT_CKM=0; [ -n "$RT_CK" ] && grep -qF "$RT_MARK" "$RT_CK" && grep -qF "$RT_MARK" "$RT_C1/home/auth.json" && RT_CKM=1
+rt_state retire rt-sierra >/dev/null
+: > "$RT_CRED_LOG"
+RT_CC="$(COMMS_TEST_TRASH_HOOK="$WORK/rt-hook-cred" COMMS_TEST_REAP_HOOK="$WORK/rt-hook-cred" rt_cm --thread rt-sierra --yes)"; RT_CCC=$?
+RT_RW=0; reap_wait "$RT_TR" && RT_RW=1
+RT_LEFT="$(grep -rlF "$RT_MARK" "$RT_STORE" 2>/dev/null)"
+if [ "$(sed -n 2p "$RT_STAGE_LOG")" = marker ] && [ "$RT_CKM" = 1 ] && [ "$RT_CCC" = 0 ] && rt_line "$RT_CC" "$RT_C1" removed proven \
+   && [ "$RT_RW" = 1 ] && grep -qE '^held clean \.hold\.[0-9]{10}\.retire\.' "$RT_CRED_LOG" \
+   && grep -qE '^before-delete clean [0-9]{10}\.retire\.' "$RT_CRED_LOG" && ! grep -q ' found ' "$RT_CRED_LOG"; then
+  ok "a durable home's auth.json and a killed runner's staged copy are cleared before its tombstone reaches the trash"
+else
+  fail "durable credential (rc=$RT_CCC, stage=$(tr '\n' ' ' < "$RT_STAGE_LOG"), left=$RT_CKM, cred=$(tr '\n' '|' < "$RT_CRED_LOG")): $RT_CC"
+fi
+[ -z "$RT_LEFT" ] && [ "$RT_RW" = 1 ] \
+  && ok "once the reaper finishes, no file in the store or its trash holds the credential" \
+  || fail "credential bytes left in the store: $RT_LEFT"
+rm -f "$RT_HOME/.codex/auth.json"; unset RT_MARK RT_STAGE_LOG RT_CRED_LOG

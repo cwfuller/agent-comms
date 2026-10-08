@@ -358,6 +358,7 @@ runtime, quote the assertion count with it or measure both sides yourself.
 |---|---|
 | `helpers/comms.sh` | the command router: messaging, presence, worktrees, panels, integrate |
 | `helpers/settings.sh`, `helpers/setup.sh` | the settings loader every entry helper sources (env > project `.comms/settings` > `~/.agent-comms/settings` > `secrets`), and the `comms.sh setup` flow that writes them |
+| `helpers/trash.sh` | deferred deletion, sourced by `runphase.sh` and `comms.sh`: a discarded tree is renamed into a same-volume trash and the detached `runphase.sh reap` deletes it (docs/INTERNALS.md "Deferred deletion") |
 | `helpers/worktree.sh` | `worktree new` / `list` / `retire`: session worktrees and their retirement gates (run by the driver after a landing, or by hand) |
 | `helpers/runphase.sh` | spawning and awaiting peer review turns over ACP |
 | `helpers/leg_usage.py` | a review leg's token usage and codex rate-limit snapshot, read from the provider's own records into `result.json` |

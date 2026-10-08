@@ -135,3 +135,11 @@ agy: runtime, doctor, the policy map and the stream reader (PATH-stubbed agy)	32
 agy: a direct review and consult turn (stub agy over the real stream-json framing)	43
 helpers/codex_seed.py: a fresh codex home's plugin cache is cloned from one canonical tree, or left alone	33
 codex plugin-cache seed: a fresh mounted codex home is cloned from one canonical tree, a warm one is left alone	10
+trash: the worktree-aware rename drops exactly the moved tree's registration	9
+trash: one reaper per trash, and a killed reaper's half-done delete is finished by the next	4
+trash: the store sweep applies the 120-minute aside horizon to every ident	2
+trash: a leaked integrate or verify tree is swept only once its owner is proven dead	2
+integrate: the verification tree goes to the repo's trash, and a slow reap never delays the exit	6
+clean mounts --thread: the retired copy is handed to the store's trash and reaped later	4
+deferred deletion never moves a credential the runner wrote into a trash	4
+deferred deletion: a throwaway mount and an expired aside go to the store's trash	5

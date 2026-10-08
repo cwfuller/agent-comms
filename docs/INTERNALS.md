@@ -23,6 +23,10 @@ helpers/
                                gate evaluator both list and retire use
   runphase.sh                  peer-turn runner — ACP for every provider, direct headless for grok
                                only (COMMS_DELIVERY=headless): spawn → observe → record
+                               + the internal `reap` subcommand (deferred deletion)
+  trash.sh                     deferred deletion, sourced by runphase.sh and comms.sh: the trash
+                               paths, the rename, the worktree-aware rename, the reaper start,
+                               proc_state
   method_guidance.py           verifies the staged shared-guidance bundle against its snapshot record
   codex_seed.py                clones a fresh isolated codex home's plugin cache from one canonical tree (clonefile(2))
 docs/loopspec/                 the portable review-loop kernel (spec, schemas, fixtures,
@@ -581,7 +585,9 @@ waits on any other ident. Load-bearing choices:
 - **Removal is a journaled rename.** Under a held claim and after every gate re-runs, a fresh
   `.retire.<ident>.XXXXXX` is claimed (`mount_claim_take`, exactly as a mount is), the record is
   written into it, the ident is renamed into it, the one admin registration whose back-pointer
-  names the tree is dropped, and the tombstone is deleted. A kill at any boundary leaves either
+  names the tree is dropped, and the tombstone — once the copy's credentials are cleared — is
+  HANDED OFF whole to the store's trash, where the reaper deletes it (see "Deferred deletion"
+  below); only when the trash refuses it is it deleted inline. A kill at any boundary leaves either
   the untouched ident or a tombstone a later run finishes; a delete that fails part-way reports
   `incomplete`, never `removed`. The re-run must be able to re-prove what is left, so the delete
   is ordered around its own evidence: once the registration is dropped the record is rewritten
@@ -629,6 +635,111 @@ provider records go with it. The per-turn usage callers read was extracted into 
 before recording its session leaves a tree with no record; that copy refuses (`state-missing`)
 exactly as the runner itself refuses to trust it, and needs a human or the whole-store GC. (5) A
 throwaway made by a runner that predates `.state.run` records no run and is report-only.
+
+## Deferred deletion: trash and reaper
+
+No review turn, panel dispatch or landing waits on a recursive delete of a checkout or a provider
+home. A recursive delete of a 165k-entry tree measured 11-54 s on macOS, with fseventsd, Spotlight
+and Time Machine adding load for every file, and it ran inline in the restage, the throwaway
+teardown, `clean mounts --thread` (which Basis calls during dispatch) and integrate (which holds
+Basis's single landing slot). Now each discarded bulk tree is renamed into a trash dir on the same
+volume, which takes constant time, and one detached, low-priority reaper deletes it later. What is
+kept, and for how long, is unchanged, with one exception: the 120-minute aside horizon now applies
+across the whole store, not only when the same ident restages. `helpers/trash.sh` owns all of it;
+the reaper is `runphase.sh reap` because it needs that file's claims.
+
+- **Paths.** One trash per mount store, `<base>/.comms-trash` (beside the 64-hex repo-key dirs),
+  and one per repo, `<main root>/.claude/worktrees/.comms-trash`. Each shares a parent with every
+  tree it receives, so a rename into it never crosses a volume. The name is dot-prefixed, so the
+  store globs, the orphan report, the whole-store GC, Basis's relocate inspection and the worktree
+  slug grammar never see it, and it belongs to agent-comms alone (no other tool's trash shares it).
+  `trash_ensure` creates it mode 700 and requires a real directory at its own physical path, owned
+  by the current uid; nothing is written to or reaped from one that fails.
+- **Holds and entries.** A put moves the tree into `.hold.<10-digit epoch>.<kind>.<pid>.<6 hex>/`
+  as `payload/`, beside an `owner` record (pid, `fmt=v2`, start time from `proc_state`) written
+  BEFORE anything moves in. The caller finishes its own bookkeeping — drops the admin dir, releases
+  the claim that moved with the tree — and only then `trash_commit` renames the hold to the entry
+  name (the same name without `.hold.`) and starts the reaper, even if that rename failed. A reaper
+  never deletes a hold, so nothing a site still reads after its rename disappears under it; it
+  commits a hold only when the owner's pid is dead or now a different process, and removes empty
+  scaffolding (no owner, no payload, dead pid). It deletes only direct children whose name matches
+  the entry grammar exactly; anything else in a trash is left alone.
+- **The rename never copies.** `trash_put` moves with `os.rename` in a short `python3 -I` program,
+  which can fail with `EXDEV` but never falls back to copy-and-delete the way `mv` does. It moves
+  only a real directory whose parent sits at its own physical path. Any failure moves nothing, and
+  every site then runs its previous inline delete unchanged. `COMMS_TEST_TRASH_RENAME_ERRNO` makes
+  the move raise a chosen errno, so the fallback is tested on every host.
+- **The worktree-aware rename.** `trash_tree` handles a git tree (an integrate or `verify fresh`
+  tree, a throwaway's `view/tree`, a pending generation) without running git: before the move the
+  tree's `.git` must name an admin dir directly under `<common>/worktrees/` (absolute, real, at its
+  physical path, not locked) whose `gitdir` names the tree's physical `.git`; after the move the
+  moved `.git` must still name that admin AND the admin must still name the pre-rename path. Only
+  then is that one admin dir deleted, `gitdir` last. Otherwise it is left (result 2: the tree is
+  held, its registration registered-but-missing, which git lists as prunable). A relative gitfile
+  is not judged (result 1). No repo-wide `git worktree prune` is part of this; integrate's existing
+  pre-clean prune stays where it was, as crash recovery.
+- **Credentials.** `mount_cred_clear` unlinks `home/auth.json` and any `home/.stage.*` (the copy
+  `_iso_place` writes before renaming it to `auth.json`, which an interrupted runner leaves behind)
+  and succeeds only when a fresh listing shows neither. A throwaway is cleared before its rename,
+  and a retired ident's copy before its tombstone is handed off; a clear that fails sends the site
+  down its inline delete, so no credential byte the runner wrote ever waits in a trash. The reaper
+  clears them again before deleting, as defense in depth.
+- **Detach.** `trash_reap_start` runs a launcher that takes `<trash>/.reaper.lock` with
+  `flock(LOCK_EX|LOCK_NB)` — held means a reaper is running and will rescan, so it exits — and
+  starts the reaper with that fd as fd 9 in a NEW SESSION and process group (`start_new_session`;
+  macOS has no `setsid` command), cwd `/`, stdio on `/dev/null`, no other inherited descriptor, and
+  no presence identity. It exits once the reaper has exec'd and never waits. So the reaper is
+  outside the caller's process group before the caller can exit: Basis's keeper neither waits for
+  it nor reaches it with its `kill(-K)`, `presence with-beat`'s quiescence sweep does not see it,
+  and a command substitution capturing integrate's stdout does not wait on it.
+- **Priority.** `taskpolicy -b` on macOS (background QoS: throttled CPU and I/O, inherited by
+  `rm`), `nice -n 19` elsewhere. Background QoS throttles I/O hard: on a machine busy enough that
+  deletes fall behind creation the trash grows, and its listing shows it. The prefix is chosen in
+  one place, `trash_reap_start`.
+- **The lock.** fd 9 holds the flock in the reaper and every child, `rm` included, so at most one
+  deleter runs per trash; the kernel drops it with the last holder, SIGKILL included, so a killed
+  reaper leaves no stale lock and its half-deleted entry is still a well-named entry the next
+  reaper finishes. `reap` refuses (exit 2) unless fd 9 is that lock file and holds its flock,
+  checked through `fstat` (on macOS `stat /dev/fd/9` reports devfs's device, so `test -ef` is false
+  even for the right file).
+- **One run.** Hold recovery; the domain sweep; the delete pass, oldest first, taking a payload's
+  top-level claim first (a throwaway ident's, or the tombstone's) as a mount's is taken — a dead or
+  released holder is superseded, a live one defers the entry, retried for up to 30 seconds and then
+  left for the next reaper; repeat while new names appear; close the lock and rescan, starting the
+  next reaper for a name never seen. A commit renames first and starts second, and the reaper
+  closes first and rescans second, so every commit is seen by a reaper. Every commit, every
+  restage, every `clean mounts --yes` and every integrate and `verify fresh` exit starts one; the
+  lock folds the starts into at most one reaper per trash.
+- **The store sweep (`--store`).** The restaging runner still moves its own ident's expired
+  asides under its own claim (deleting one inline only when the trash refuses it), then starts the
+  reaper, whose sweep covers every OTHER ident. One `find -P` over the store selects `<key>/<ident>/.aside.*`
+  past `MOUNT_ASIDE_HORIZON_MIN` (120, the restage's own test), never entering a dot-named entry
+  above the ident level (the trash, a tombstone). It reads each ident's claims with `cm_claims`
+  (read-only) and skips an ident any live or unverifiable process holds. It never TAKES an ident
+  claim: a runner that met one would fail its turn. It only renames; a put that fails leaves the
+  aside where it is. A `clean mounts --thread` that claims the ident in between sees the aside
+  gone, or skips it, or fails its content scan closed; a concurrent restage only makes fresh asides.
+- **The repo sweep (`--repo`).** A `.integrate-*` or `.verify-*` tree is swept only when its owner
+  is PROVEN dead, never by age: with an owner record (`<admin>/agent-comms-owner`, written by
+  `suite_verify_candidate` right after `worktree add`, outside the checked-out tree), the record
+  names the pid in the tree's name and that pid is dead or a different process; without one, the
+  name carries a pid (`.integrate-<pid>-<n>`, `.verify-<pid>-<n>`, or the legacy
+  `.integrate-<1-7 digits>`) and it is dead. A live, unverifiable or legacy instance-named tree is
+  kept. The verification tree is now `.integrate-$$-$RANDOM`: the old per-instance name was reused
+  by every integrate of one presence instance, so an asynchronous sweep could have taken a new live
+  tree for the leaked one it judged dead.
+- **`clean mounts --thread` hands off.** After the admin drop and its journal, the whole tombstone
+  (record, claims, copy) goes to the store's trash and the clean reports `removed`; the caller
+  releases the tombstone claim at its new path, then commits. Every `clean mounts --yes` starts the
+  store reaper as it exits, whatever its outcome, so a re-run is always enough to restart deferred
+  or orphaned trash work. An interruption before the put leaves the tombstone the replay finishes;
+  after it, a hold naming the dead clean, which the next reaper commits and deletes.
+- **Partial failure.** The reaper's own failures are silent (its stdio is `/dev/null`); the trash
+  listing is the observable. An entry `rm -rf` cannot fully delete, or whose claim cannot be judged,
+  stays and every later reaper retries it. A hold stays until its maker commits it or is proven
+  dead (`ambig` keeps it, the claims' fail-closed reading). Still inline, because none is on a turn,
+  dispatch or landing path: the whole-store GC, the restage's pending-generation reclaim, the
+  symlink-deposit cleanup and `worktree retire`.
 
 ## ACP consult transport (acp.sh)
 
