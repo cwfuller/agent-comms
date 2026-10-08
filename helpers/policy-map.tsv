@@ -12,14 +12,21 @@
 #
 # Rows (TAB-separated; `#` starts a comment line):
 #   version     <id>
-#   capability  <provider> <transport> <eligible|fixed|unsupported> <application mechanism>
+#   capability  <provider> <transport> <eligible|fixed|bound|unsupported> <application mechanism>
 #               <evidence source> <versions tested> <notes>
 #   baseline    <provider> <transport> <model> <effort>
 #   tier        <provider> <transport> <fast|balanced|strong> <model>[,<fallback model>...]
 #               an ORDERED preference: the first model the reviewer runtime can serve
 #   effort      <provider> <transport> <low|medium|high|xhigh> <provider-effort>
-#   pair        <provider> <transport> <model> <comma-separated efforts the model accepts>
-#               [<minimum codex runtime version that can serve it>]
+#   pair        <provider> <transport> <model> <comma-separated efforts the model accepts | none>
+#               [<minimum runtime version that can serve it: codex's, or claude's ACP adapter>]
+#               `none` (alone, never among efforts) declares a model with NO effort scale: it binds
+#               only with a null effort and is attested on the model alone.
+#   recorded    <provider> <transport> <launch id> <transcript model id>   the model id the provider's
+#               own transcript records for a launch id (an alias such as `sonnet`, or a full id with an
+#               identity row). claude only: a launch id with no row is REFUSED (model-unservable) and can
+#               never count as matched. A row is written only from a transcript record whose request named
+#               that launch id, cited below.
 #   ceiling     <provider> <transport> <model> <effort>   the operator's "use max" pair
 #               (COMMS_REVIEW_MAX=1): the strongest model at its highest accepted effort
 #   disabled    <provider> <transport> <model> <reason>   a model the provider has announced but nothing
@@ -37,7 +44,10 @@
 # applied and attested).
 #
 # Capability `eligible` means a routed decision may change the concrete pair. `fixed` means the
-# baseline (plus pins) is applied and attested but routing is ignored. `unsupported` means nothing
+# baseline (plus pins) is applied and attested but routing is ignored. `bound` means applied and
+# attested for a BOUND leg only (`panel dispatch --bindings`, the caller's exact pair): an unbound
+# resolution reads it as `unsupported`, so it has no baseline, tier, effort or ceiling row, and an
+# unbound turn's record is what it was before. `unsupported` means nothing
 # is applied, so nothing may be claimed. Only a provider/transport whose controls AND per-turn
 # evidence were established is eligible; a control that merely exists in an adapter is recorded
 # in the mechanism text, not enabled.
@@ -113,7 +123,29 @@
 # - gemini-3.8-flash is not served to every account (SUBSCRIPTION_REQUIRED, google-antigravity/antigravity-cli
 #   issue 1180). That is an account fact, not a map fact: the turn is recorded `model-unavailable`.
 # - agy has no rate-limit record on disk: a refusal is classified from its own diagnostics (`rate-limited`).
-version	2026-10-07.1
+#
+# CLAUDE, 2026-10-08 — a BOUND claude review leg (task 421). agent-comms names no Claude model: every id comes
+# from the caller, and the rows below say only which launch ids can be attested and how the transcript records
+# them. Hence capability `bound` for acp-mounted, and no baseline, tier, effort or ceiling row.
+# - Application: on the pinned adapter (acp.sh CLAUDE_ACP_VERSION, @agentclientprotocol/claude-agent-acp 0.88.0),
+#   `acpx set model <launch id>` then `set effort <effort>` (skipped for a null effort) before the first prompt,
+#   each confirmed from acpx's own output, then `set-mode plan`; and CLAUDE_CODE_EFFORT_LEVEL from the persisted
+#   record (acp.sh claude-env), because the adapter re-seeds effort from the operator's settings.json at every
+#   session load and the CLI reads that variable as overriding effort for the session.
+# - Evidence: Claude's own transcript under ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<mount slug>[-*]/,
+#   main chain and subagent files, bounded by a snapshot before the canary and another before the review prompt
+#   (helpers/claude_transcript.py): every assistant record's `message.model` and `effort` must agree with the
+#   record's attest_model and effort. The canary's window gates the review prompt; the review's gates publication.
+# - Versions: STUB ONLY. Hermetic test stubs exercised the mechanism; no live claude turn has run through it.
+#   The cell below changes when the operator's live trial is recorded.
+# - recorded rows: from local transcripts whose `requestedModel` names the launch id (Claude CLI 2.1.295,
+#   2026-10-08): claude-opus-5-5 -> claude-opus-5-5 and claude-sonnet-5-5 -> claude-sonnet-5-5. No record was
+#   found whose request named `sonnet`, `haiku` or `claude-fable-5-1`, so they have no row and refuse.
+# - pair efforts: the adapter's own effort list was NOT observed (no probe ran); low..max is the operator policy
+#   route `claude`'s effort list. The 0.88.0 minimum is the adapter these rows were written for (0.60.0's CLI
+#   cannot serve claude-opus-5-5, operator): a pin moved below it refuses them by name rather than letting the
+#   adapter's fuzzy model match pick a sibling.
+version	2026-10-08.1
 
 # No mapped model has a usage limit of its own yet, so there are no `limit` rows: every mapped codex
 # model spends the shared codex limit. A row is added with the evidence that the model is served
@@ -122,8 +154,8 @@ version	2026-10-07.1
 capability	codex	acp-mounted	eligible	isolated CODEX_HOME config.toml (model, model_reasoning_effort), read at thread start/resume, with CODEX_PATH naming the runtime; a changed policy or runtime is a new session	preflight: acpx config_options + saved preferences; gate: the provider's own rollout turn_context (model, effort) per turn, behind the canary and reply-check	codex-acp 1.12.0; codex 0.154.0 (bundled) and 0.155.1, 0.159.0 (installed, via CODEX_PATH); acpx 0.13.1; codex-acp 2.1.1 with codex 0.160.0 (installed), 2026-10-05	the adapter is pinned (acp.sh adapter codex; acpx alone floats it under ^1.1.5); policy.tsv records the runtime resolved, turn.tsv the adapter and the runtime that created the session
 capability	codex	acp	unsupported	none: an unmounted turn runs the operator's own ~/.codex config	none	-	nothing applies or attests a policy
 capability	codex	headless	unsupported	none: codex review turns are ACP-only	none	-	-
-capability	claude	acp-mounted	unsupported	none applied; the adapter exposes ACP config options `model` (aliases) and `effort` (default,low..max)	transcripts in the shared ~/.claude (message.model, effort); not isolated per turn	claude-agent-acp 0.60.0; live-probed 2026-09-22 outside agent-comms	`acpx claude set model|effort` BEFORE the first prompt was honoured (transcript: claude-sonnet-5, effort low); after a prompt, or effort on a model without it (haiku), fails "Internal error"; eligibility needs per-turn transcript attestation wired in
-capability	claude	acp	unsupported	none applied (operator settings)	as acp-mounted	-	-
+capability	claude	acp-mounted	bound	BOUND legs only, on the pinned adapter: `acpx set model <launch id>` then `set effort <effort>` (none for a model without an effort scale) before the first prompt, confirmed from acpx's output, plus CLAUDE_CODE_EFFORT_LEVEL from the persisted record; then `set-mode plan`	Claude's own transcript (message.model, effort), main chain and subagents, under ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<mount slug>[-*]: the canary's window gates the review prompt, the review's gates publication; the preflight reads sessions show (saved model preference, effort option)	stub only (hermetic test stubs; no live turn recorded)	unbound claude turns read this row as unsupported and run as before; the 2026-09-22 probe (claude-agent-acp 0.60.0, outside agent-comms) saw `set model|effort` honoured before the first prompt and "Internal error" after one, or for effort on a model without it
+capability	claude	acp	unsupported	none: an unmounted turn has no transcript window bounded to the leg	none	-	-
 capability	claude	headless	unsupported	none: claude review turns are ACP-only	none	-	-
 capability	grok	acp-mounted	unsupported	none applied; newer builds expose ACP `model` + `reasoning_effort` (older builds: none)	~/.grok/sessions summary.json: effort per SESSION only	grok 1.0.40 (read from --help/docs, not exercised)	effort is dropped silently on models without supportsReasoningEffort; refused on Darwin without an uncontained override
 capability	grok	acp	unsupported	none applied	as acp-mounted	-	-
@@ -182,3 +214,9 @@ effort	gemini	headless	high	high
 
 pair	gemini	headless	gemini-3.1-pro	low,high
 pair	gemini	headless	gemini-3.8-flash	low,medium,high
+
+# Bound claude legs (see the CLAUDE note above): which launch ids can be attested, and their efforts.
+pair	claude	acp-mounted	claude-opus-5-5	low,medium,high,xhigh,max	0.88.0
+pair	claude	acp-mounted	claude-sonnet-5-5	low,medium,high,xhigh,max	0.88.0
+recorded	claude	acp-mounted	claude-opus-5-5	claude-opus-5-5
+recorded	claude	acp-mounted	claude-sonnet-5-5	claude-sonnet-5-5

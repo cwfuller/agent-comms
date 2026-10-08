@@ -204,7 +204,7 @@ Verbs that a program drives classify further — `integrate`,
 | `review-route decide (--request <file> \| --thread T --phase P) [--tier T] [--effort E] [--replace]` | record the reviewer routing decision for (workspace, base thread, phase): an abstract candidate `tier` (`fast\|balanced\|strong\|none`) and `effort` (`low..xhigh\|none`; `none` = keep the baseline). Made ONCE and reused every round (sticky pointer); an existing decision is returned unchanged, explicit flags against one are refused without `--replace`, and `--replace` mints a NEW id. `--tier/--effort` = an explicit OPERATOR decision (strict: the resolver refuses it rather than substituting). Otherwise it classifies the request with the reviewer rubric (`reviewer-v1`, no bump, split/tied answers go deeper, low confidence or a malformed answer = `none`), but only for a project in `route-shadow-allow` (else `not-permitted`, nothing sent), only with a measurable artifact diff (risk signals come from `git diff --numstat`, never the author's stat), and a `stub` answer is recorded but never applied. Records live in `.comms/route-decisions/<id>.json` with the bounded input, omissions, raw answer and who decided. |
 | `review-route plan --to <agent>[,<agent>...] [--phase P] [--thread T]` | **read-only**: each leg's resolved route BEFORE dispatch, so a planner can tell which usage limits a panel (or a single `send`) will spend. The roster is checked by the rule `panel dispatch` uses (registered names, no repeats, one leg per provider). Per leg it asks `transport --loop` (an ACP leg runs mounted), reads — never makes — the decision in force for the BASE `--thread` (routing on and phase `implement` only, the same condition under which `send`/`panel dispatch` stamp one), and runs the same `acp.sh resolve` runphase runs. Prints one line per leg in roster order: `route-plan v1 agent=<a> provider=<p> transport=<acp-mounted\|headless\|mailbox> capability=<eligible\|fixed\|unsupported> model=<m> effort=<e> limit_id=<id> model_source=<s> effort_source=<s> routing=<on\|off> decision=<id\|none\|pending> phase=<p> map_version=<v>`. `limit_id` is the usage limit the model spends when the policy map gives it one of its own (a `limit` row — a Spark model, say), `-` for the provider's shared limit, `n/a` where agent-comms applies no model (claude, grok: the provider's own configured model runs). `decision=pending` = routing is on but no decision is in force yet; dispatch will classify, so the values shown are the fail-open baseline. Decides, records, sends and classifies nothing (no request text leaves the machine). All or nothing: a leg whose policy would be refused at run time exits 1 before any line prints; usage errors exit 2. Pins (`COMMS_ACP_CODEX_*`) and `COMMS_REVIEW_MAX` apply exactly as they will at run time. The same fields are recorded per turn in `result.json` `"route"`. |
 | `review-route plan --bindings FILE [--to a,b]` | **read-only, bound mode** (see [Exact per-leg binding](#exact-per-leg-binding--panel-dispatch---bindings)): judges every leg of a `leg-bindings/1` file exactly as `panel dispatch --bindings` will and prints ALL the verdicts, one `route-plan v2 ref= agent= harness= status=ok\|refused code= route_id= transport= provider= account= billing= credential= access_digest= model= effort= model_source=bound … capability_version=1` line per leg, with the **configured** (not the expected) access values so a mismatch shows both sides. Exit 0 only when every leg would run exactly as asked, 1 when any refuses (the lines still print on stdout, unlike the all-or-nothing legacy plan), 2 usage. Decides nothing, writes no event or file, reads no credential value. `--phase`/`--thread` belong to the routed plan and are refused with it |
-| `review-route capability [--json]` | **read-only negotiation**: `leg-binding-capability v1 leg-bindings=1 route-view=2 leg-metadata=1`, then one `agent=<a> class=bindable\|bindable-model-only\|unbindable\|unbindable-billing harness=<provider> reason=<why\|-> billing=<class\|->` line per registered agent. A statement of fact: `claude`, `grok`, a mailbox leg and a consult-only profile are `unbindable` (no applied and attested policy exists for them), a custom OpenCode profile is `bindable-model-only` (its pin, no effort). A caller binds legs only when it has read this line; without it every existing path is unchanged |
+| `review-route capability [--json]` | **read-only negotiation**: `leg-binding-capability v1 leg-bindings=1 route-view=2 leg-metadata=1`, then one `agent=<a> class=bindable\|bindable-model-only\|unbindable\|unbindable-billing harness=<provider> reason=<why\|-> billing=<class\|->` line per registered agent. A statement of fact: `codex` and `claude` (and their twins) are `bindable` (model and native effort; claude on its mounted ACP runner, attested from its transcript), `grok`, `gemini`, a mailbox leg and a consult-only profile are `unbindable` (no applied and attested policy exists for them), a custom OpenCode profile is `bindable-model-only` (its pin, no effort). `billing` is the access entry's, `-` with no entry. A caller binds legs only when it has read this line; without it every existing path is unchanged |
 | `review-route lookup --thread T --phase P` / `verify <id> --thread <msg thread> --phase P [--leg-dispatch D [--leg-agent A]]` / `show <id> [--thread T] [--phase P]` / `enabled` | `lookup`: the decision in force for this workspace's thread+phase. `verify`: the id a request CARRIES must be the decision in force for the record's own thread+phase (keyed on the record, so the caller's cwd or branch cannot change the answer); only a routed panel leg its panel RECORDED (`panel dispatch` writes `.comms/route-decisions/legs/<hash>`: dispatch, the stamped decision, the raw base thread, the agents — before any leg is sent) may be that thread plus `-<agent>`, compared byte for byte — a thread merely named `x-grok`, bare or with a typed `dispatch:`, never borrows `x`'s decision. `show` refuses a foreign thread or phase. `enabled` exits 0 iff `COMMS_REVIEW_ROUTE=1` and `COMMS_ROUTE` is not `0`. `send` and `panel dispatch` call `decide` after the snapshot and stamp `route_decision:` (helper-only: every other send strips it). |
 | `findings [--out F [--rebuild]] [--role gating\|shadow] [--review-set ID] [--artifact ID] [--base-sha S] [--reviewer-version V] [--prompt-version V] [--header] [<message>...]` | extract review findings to TSV (default: the whole archive, oldest first); `--out` appends and is idempotent by `finding_id`, and refuses (exit 1) a ledger whose rows carry another schema version. `--rebuild` regenerates `--out` from the archive plus the shadow store into a temporary file and moves it into place only once it is complete and well-formed. `--review-set`, `--artifact`, `--base-sha`, `--reviewer-version` and `--prompt-version` stamp those columns on the extracted rows; `--header` prints only the header. `--raw` (a body with no frontmatter) and `--probe` (per-reply counts instead of rows) are the modes the runphase broker calls; they are not a reporting surface |
 | `shadow --to <agent> <review-request> [--review-set ID] [--out F] [--timeout-secs N]` | run a SECOND reviewer on the same artifact; the reply is stored but never delivered and never written to thread state. `--to` may be a review twin: capability is checked on its provider, and the private request copy is stamped with the shadow target's own `review_provider` (the original request is untouched) |
@@ -282,9 +282,32 @@ gets none. The launcher then reads the authentication route back (selected auth 
 credential variable) and refuses on a difference. **Residual**: a credential nobody configured, matching no
 pattern and not in the table, would still pass; no name prefix is exempt (`COMMS_*`/`AGENT_COMMS_*` credential-shaped
 names are removed too); a harness's own on-disk login is governed by the auth-route rows,
-not by the scrub. The auth rows declare support per (adapter, billing): gemini subscription and api, codex
-subscription and custom OpenCode profiles are supported; **codex `api` is `unsupported`** (no explicit, readable
-API-key selection is established for the mounted adapter) and refused as `auth-route-unsupported`.
+not by the scrub. The auth rows declare support per (adapter, billing): codex subscription, claude subscription
+and custom OpenCode profiles are supported; **codex `api` is `unsupported`** (no explicit, readable
+API-key selection is established for the mounted adapter) and refused as `auth-route-unsupported`, and so are
+claude `api`, `local` and `free`. The table also lists Claude's credential names no pattern matches (custom
+headers, token files and descriptors, mTLS client credentials, OAuth endpoints, gateway and cloud routes, other
+settings paths) and its model and effort selectors (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*`,
+`CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL`, ...); `CLAUDE_CONFIG_DIR` is never scrubbed.
+
+**A bound claude leg** (`claude`, or `claude-review` under the `claude` entry; `subscription` only) runs on the
+mounted `claude-plan` arm with unchanged containment, on the pinned adapter (`acp.sh adapter claude --bound`),
+and on the login of the dispatch's own `CLAUDE_CONFIG_DIR` (or `~/.claude`). Before the first acpx call the
+runner reads that login back with `claude auth status --json`, under the leg's exact environment, keeping only
+`loggedIn`, `authMethod` and `apiProvider`; it refuses `binding-mismatch` when the login is not a claude.ai
+first-party subscription, when any scrubbed name survives other than the runner's own `CLAUDE_CODE_EFFORT_LEVEL`
+(which must hold the record's effort), or when the user `settings.json` defines `apiKeyHelper` or an `env` key in
+the scrub set (key names only are read). Dispatch makes the same login read (`auth-login-missing`,
+`auth-selected-type-conflict`). The runner then sets the model and the effort over ACP (`acpx set model`, `set
+effort`, skipped for a null effort), pins `plan`, and preflights the session (the saved model preference and the
+effort option; a session whose effort option disagrees with the map is refused `effort-mismatch`, any other
+difference `policy-unapplied`). The canary's transcript window must show the bound pair before the review prompt
+is sent, and the review's window before the reply is published; a mismatch, a window with more than one model or
+effort, no record, a replaced or truncated file, or a mount whose transcript directory Claude would truncate is
+refused `policy-unapplied` and nothing is delivered. `binding.expected` keeps the caller's launch id and
+`binding.observed` the id the transcript recorded (the map's `recorded` row joins them; for a full id they are
+equal); `turn.tsv` records `evidence_source claude-transcript` and the CLI version the records carry as
+`observed_runtime`.
 
 **`result.json` for a bound leg** (each key on its own line, after the string fields; `null` for a legacy leg):
 `binding` `{schema, capability_version, ref, role, requirement, status: ran|refused, route_id, access_digest,
@@ -800,13 +823,22 @@ Nothing needs setting on a new machine with a current codex installed; `acp.sh d
 `acp.sh capabilities` print which runtime reviewers will use. The record carries `runtime` /
 `runtime_version`, runphase passes it as the child's `CODEX_PATH` (and unsets an inherited one for
 `bundled`), and the runtime is part of `policy_digest`, so an upgrade is a fresh session. Capability `eligible` may route,
-`fixed` applies and attests the baseline only, `unsupported` claims nothing (`verify none`) — today
+`fixed` applies and attests the baseline only, `bound` applies and attests a bound leg's pair only, `unsupported` claims nothing (`verify none`) — today
 codex/acp-mounted and gemini/headless are eligible (gemini's model AND effort are evidenced per turn by
 agy's own `init` event, which echoes the `<model>-<effort>` id the leg was launched with; the baseline and
 ceiling are gemini-3.8-flash at `high`, and gemini-3.1-pro, which has only `low` and `high`, is the fallback
 for an account the 3.8 model is not served to, selected by a pin). The printed record (`policy_digest`, sources, `fallback`,
 `map_version`, …) is what runphase persists; `policy`, `provider-config`, `policy-check` and
-`policy-attest` take `--policy-file <record>` and then never re-resolve. `acp.sh capabilities`
+`policy-attest` take `--policy-file <record>` and then never re-resolve. `bound` (claude/acp-mounted) is applied and
+attested for a bound leg only: an unbound resolution reads it as `unsupported`, so it has no baseline, tier or
+ceiling. A claude launch id binds only with a `pair` row (`none` for a model with no effort scale, which binds a
+null effort and is verified on the model alone) and a `recorded <provider> <transport> <launch id> <transcript id>`
+row; the bound record adds `attest_model` (that transcript id), and `runtime`/`runtime_version` name the pinned
+adapter (`CLAUDE_ACP_VERSION`), so an adapter bump is a fresh session. `acp.sh claude-env --policy-file <record>`
+prints what the runner injects into such a leg (`CLAUDE_CODE_EFFORT_LEVEL<TAB><effort>`, or nothing), `acp.sh
+cli-path <name>` the installed CLI the shared PATH walk finds, `policy-check claude` also exits 23 when the
+session's effort option disagrees with the map, and `policy-attest` takes `null` for an observed effort of none.
+`acp.sh capabilities`
 prints the table plus both reviewer runtimes (`acp.sh doctor` also names the reviewer codex runtime and its version, and whether
 that runtime can run the default (baseline) and use-max (ceiling) codex review, each with the
 operator's model and effort pins applied, and the resulting (model, effort) pair judged by the same rule resolve uses, so a row is refused for a pair the model does not accept as well as for a runtime too old: a `default codex review:` and a `use-max codex review …:` line ending
@@ -887,7 +919,10 @@ proves the refusal for whatever launcher is in use (an `ACPX_BIN` replaces the p
 `acp.sh adapter codex` prints the codex ACP adapter a mounted codex review runs
 (`npx -y @agentclientprotocol/codex-acp@2.1.1`; nothing for another agent), which the runner hands acpx
 as `--agent` instead of the `codex` builtin: acpx 0.13.1 floats that builtin under `^1.1.5`, and 1.12.0
-through 1.13.1 send a workspace-write sandbox for the `read-only` mode. `acp.sh doctor` names the pin.
+through 1.13.1 send a workspace-write sandbox for the `read-only` mode. `acp.sh adapter claude --bound` prints
+the claude adapter a BOUND claude leg runs (`npx -y @agentclientprotocol/claude-agent-acp@0.88.0`); `acp.sh
+adapter claude` alone prints nothing, so an unbound claude review stays on acpx's builtin. `acp.sh doctor`
+names both pins.
 
 ### `runphase.sh` (experimental)
 

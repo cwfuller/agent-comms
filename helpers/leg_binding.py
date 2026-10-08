@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 
@@ -112,11 +113,11 @@ def classify(provider, transport, profiles):
         return None, "mailbox: nobody drives a mailbox leg"
     if transport != "acp":
         return None, f"{transport}: the detached CLI runner applies no attested model policy"
-    if provider in ("claude", "grok"):
+    if provider == "grok":
         return None, f"{provider}-unsupported: no applied and attested model/effort policy exists"
     if provider == "gemini":
         return None, "gemini-unsupported: agy is a direct runner (no ACP session), and a bound leg runs mounted over ACP only"
-    if provider == "codex":
+    if provider in ("codex", "claude"):
         return provider, None
     profile = profiles.get(provider)
     if profile is None:
@@ -147,7 +148,105 @@ def codex_home(environ):
     return Path(environ.get("CODEX_HOME") or (Path(environ.get("HOME", "")) / ".codex"))
 
 
-def observe_auth(adapter, billing, environ):
+# THE CLAUDE LOGIN READ-BACK. A bound claude leg runs on the login of its own CLAUDE_CONFIG_DIR (there is no
+# isolated home: pointing CLAUDE_CONFIG_DIR at the mount breaks authentication). `claude auth status --json`
+# is read back under the environment the leg gets, and only three fields are kept: a subscription login is
+# loggedIn true, authMethod claude.ai, apiProvider firstParty. The email, organisation and account fields are
+# parsed in memory and dropped; the CLI's stderr is discarded; nothing it printed is ever logged.
+CLAUDE_SUBSCRIPTION = {"authMethod": "claude.ai", "apiProvider": "firstParty"}
+CLAUDE_LOGIN_SECS = 20
+
+
+def claude_cli(environ):
+    """The installed claude CLI, from acp.sh's one PATH walk (`cli-path`, shared with codex's runtime
+    auto-detection), or None."""
+    done = subprocess.run([str(acp_path()), "cli-path", "claude"], capture_output=True, text=True, timeout=60, env=environ)
+    found = done.stdout.strip()
+    return found if done.returncode == 0 and found else None
+
+
+def claude_login(environ):
+    """-> ("ok" | "missing" | "conflict", detail). Bounded: the CLI runs in its own process group, killed whole
+    at the deadline."""
+    cli = claude_cli(environ)
+    if cli is None:
+        return "missing", "no claude CLI on PATH to read the login back"
+    try:
+        proc = subprocess.Popen([cli, "auth", "status", "--json"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=environ, start_new_session=True)
+    except OSError:
+        return "missing", "the claude CLI could not be run to read the login back"
+    try:
+        out, _ = proc.communicate(timeout=CLAUDE_LOGIN_SECS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()
+        return "missing", f"`claude auth status` did not answer within {CLAUDE_LOGIN_SECS}s"
+    try:
+        status = json.loads(out.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        status = None
+    if not isinstance(status, dict):
+        return "missing", "`claude auth status --json` printed no readable status"
+    kept = {key: status.get(key) for key in ("loggedIn", "authMethod", "apiProvider")}
+    del status, out
+    if kept["loggedIn"] is not True:
+        return "missing", "the claude login is not logged in (claude auth status: loggedIn is not true)"
+    if any(kept[key] != value for key, value in CLAUDE_SUBSCRIPTION.items()):
+        shown = " ".join(f"{key}={value if isinstance(value, str) and access.TOKEN.fullmatch(value) else '<other>'}"
+                         for key, value in kept.items() if key != "loggedIn")
+        return "conflict", f"the claude login is {shown}, not a claude.ai first-party subscription; the leg would run on another route"
+    return "ok", None
+
+
+def claude_config_dir(environ):
+    return Path(environ.get("CLAUDE_CONFIG_DIR") or (Path(environ.get("HOME", "")) / ".claude"))
+
+
+def claude_settings_problem(environ, entries, profiles):
+    """The door the environment scrub cannot close: the CLI copies its user settings' `env` block into its own
+    process and runs an `apiKeyHelper`. Key NAMES only are read; no value is printed, logged or compared."""
+    path = claude_config_dir(environ) / "settings.json"
+    if not path.exists():
+        return None
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return "the leg's user settings.json could not be read, so its env block and apiKeyHelper could not be checked"
+    if not isinstance(settings, dict):
+        return "the leg's user settings.json is not a JSON object"
+    if "apiKeyHelper" in settings:
+        return "the leg's user settings.json defines apiKeyHelper, a credential source the environment scrub cannot remove"
+    block = settings.get("env")
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        return "the leg's user settings.json env is not an object"
+    named = access.scrub_list({key: "" for key in block if isinstance(key, str)}, entries, profiles)
+    if named:
+        return f"the leg's user settings.json env sets {', '.join(named)}, which a bound leg is scrubbed of"
+    return None
+
+
+def claude_injected(policy_file, environ):
+    """What the runner injects into the leg (acp.sh claude-env, THE one definition), as {name: value}."""
+    done = subprocess.run([str(acp_path()), "claude-env", "--policy-file", str(policy_file)], capture_output=True,
+                          text=True, timeout=60, env=environ)
+    if done.returncode != 0:
+        raise ProfileError("the bound policy record could not be read for the runner's own injection")
+    return dict(row.split("\t", 1) for row in done.stdout.splitlines() if "\t" in row)
+
+
+def without_scrub(environ, entries, profiles):
+    """`environ` minus the credential scrub a bound leg gets (env_plan with nothing kept)."""
+    names = set(access.scrub_list(environ, entries, profiles))
+    return {key: value for key, value in environ.items() if key not in names}
+
+
+def observe_auth(adapter, billing, environ, entries=None, profiles=None):
     """Dispatch-time authentication-route checks: what is observable without reading a secret."""
     row = access.auth_row(adapter, billing)
     if row["status"] != "supported":
@@ -159,14 +258,21 @@ def observe_auth(adapter, billing, environ):
             found.append(("auth-login-missing", "no saved codex login (auth.json) for a subscription leg"))
         elif login_mode(login) in API_MODES:
             found.append(("auth-selected-type-conflict", "the saved codex login is in API-key mode; a subscription leg would run API-billed"))
+    if adapter == "claude" and billing == "subscription":
+        # the same read the launch makes, under the dispatch environment minus the same scrub the leg gets
+        status, detail = claude_login(without_scrub(environ, entries or {}, profiles or {}))
+        if status != "ok":
+            found.append(("auth-login-missing" if status == "missing" else "auth-selected-type-conflict", detail))
     return found
 
 
-def auth_readback(adapter, billing, home, credential_set):
+def auth_readback(adapter, billing, home, credential_set, policy_file=None, environ=None):
     """Launch-time read-back of what the launcher wrote. -> ('observed'|'configured', None) or (None, detail)."""
     row = access.auth_row(adapter, billing)
     if row["status"] != "supported":
         return None, f"{adapter}/{billing} has no explicit route selection"
+    if adapter == "claude":
+        return claude_readback(billing, policy_file, dict(os.environ if environ is None else environ))
     home = Path(home)
     if adapter == "opencode":
         return "configured", None
@@ -182,6 +288,36 @@ def auth_readback(adapter, billing, home, credential_set):
             return None, "the isolated codex login is in API-key mode for a subscription leg"
         return "observed", None
     return None, f"{adapter}/{billing} has no read-back"
+
+
+def claude_readback(billing, policy_file, environ):
+    """Run INSIDE the leg's exact environment (runphase acp_leg_env), before the first acpx call. Three checks,
+    each of which refuses the leg: no name in the scrub set survives except the runner's own injection (acp.sh
+    claude-env), holding exactly the value the persisted record gives it; the user settings define no
+    apiKeyHelper and no env name in the scrub set; and the login reads back as a first-party subscription."""
+    if billing != "subscription":
+        return None, "claude binds a subscription route only"
+    if not policy_file:
+        return None, "the claude read-back needs the leg's persisted policy record"
+    profiles, entries, error = load_context()
+    if error:
+        return None, f"the access profiles are unusable: {error}"
+    injected = claude_injected(policy_file, environ)
+    for name in access.scrub_list(environ, entries, profiles):
+        if name not in injected:
+            return None, f"{name} survived the scrub into the leg's environment"
+        if environ[name] != injected[name]:
+            return None, f"{name} does not hold the value the bound record gives it"
+    for name in injected:
+        if name not in environ:
+            return None, f"the runner's own {name} is missing from the leg's environment"
+    problem = claude_settings_problem(environ, entries, profiles)
+    if problem:
+        return None, problem
+    status, detail = claude_login(environ)
+    if status != "ok":
+        return None, detail
+    return "observed", None
 
 
 # ------------------------------------------------------------------------------ the one judgement
@@ -272,7 +408,7 @@ def check_leg(leg, ctx, entries, entries_error, profiles, environ):
             refuse("capability-unsupported", f"the profile's connection reads {connection['api_key_env']}, "
                                              "which its credential mapping does not supply")
     if adapter is not None and entry is not None and not found_codes(found, "billing-mismatch"):
-        for code, detail in observe_auth(adapter, entry["billing"], environ):
+        for code, detail in observe_auth(adapter, entry["billing"], environ, entries, profiles):
             refuse(code, detail)
         if entry["billing"] == "api" and entry["credential"] and not access.credential_present(entry["credential"], environ):
             refuse("credential-unavailable", f"the credential {entry['credential']} is not present")
@@ -425,7 +561,8 @@ def capability(contexts):
         elif entry is not None and access.auth_row(adapter, entry["billing"])["status"] != "supported":
             row.update({"class": "unbindable-billing", "reason": entry["billing"], "billing": entry["billing"]})
         else:
-            row["class"] = "bindable" if adapter == "codex" else "bindable-model-only"
+            # codex and claude bind a model AND its native effort; an OpenCode profile pins a model only
+            row["class"] = "bindable" if adapter in ("codex", "claude") else "bindable-model-only"
             row["billing"] = entry["billing"] if entry else None
         rows.append(row)
     return rows, entries_error
@@ -503,8 +640,9 @@ def main():
             raise ProfileError("the access profile changed since dispatch; refusing to prepare the environment")
         print(f"{adapter}\t{stamp['access']['billing']}")
     elif operation == "auth-readback":
+        # codex/opencode: --home --credential-set. claude: --policy-file, run INSIDE the leg's environment.
         evidence, detail = auth_readback(option(args, "--adapter"), option(args, "--billing"), option(args, "--home", ""),
-                                         option(args, "--credential-set", "0") == "1")
+                                         option(args, "--credential-set", "0") == "1", option(args, "--policy-file"))
         if evidence is None:
             print(f"mismatch\t{clean(detail)}")
             sys.exit(1)

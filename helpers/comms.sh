@@ -222,9 +222,11 @@
 #   review-route capability [--json]
 #                               READ-ONLY negotiation: `leg-binding-capability v1 leg-bindings=1
 #                               route-view=2 leg-metadata=1`, then one line per registered agent:
-#                               bindable | bindable-model-only | unbindable (claude, grok, a
-#                               mailbox leg, a consult-only profile) | unbindable-billing, with
-#                               the reason. A statement of fact, not a roadmap.
+#                               bindable (codex, claude: model and native effort) |
+#                               bindable-model-only (an OpenCode profile) | unbindable (grok,
+#                               gemini, a mailbox leg, a consult-only profile) | unbindable-billing,
+#                               with the reason and the access entry's billing (`-` with no entry).
+#                               A statement of fact, not a roadmap.
 #   setup [--yes] [--show] [--set KEY=VALUE ...]
 #                               configure agent-comms: agents, reviewer containment, Jev
 #                               routing, codex reviewer runtime, timeouts. Re-runnable; writes
@@ -2238,9 +2240,10 @@ review_route_plan_bound() {  # <bindings> <to-or-empty>
 }
 
 # review_route_capability [--json] — the negotiation line Basis reads before it binds legs, then one line
-# per registered agent stating whether it is bindable. A statement of fact, not a roadmap: an agent with no
-# applied and attested policy (claude, grok), a mailbox leg and a consult-only profile are `unbindable` with
-# the reason. Read-only.
+# per registered agent stating whether it is bindable. A statement of fact, not a roadmap: codex and claude
+# (on its mounted ACP runner, attested from its transcript) are `bindable`; an agent with no applied and
+# attested policy (grok), gemini (no ACP session), a mailbox leg and a consult-only profile are `unbindable`
+# with the reason. Read-only.
 review_route_capability() {
   local ag prov tr json=""
   local -a pargs=(capability)

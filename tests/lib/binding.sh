@@ -21,6 +21,34 @@ BD_KEY_VENICE="canary-venice-key-0002"; BD_KEY_CODEXM="canary-codex-metered-0003
 BD_KEY_OTHER="canary-unconfigured-pattern-0004"; BD_KEY_TABLE="canary-table-listed-0005"; BD_KEY_PLAIN="canary-configured-plain-0006"
 # A saved ChatGPT login for codex: observable by presence and mode, never printed.
 printf '{"auth_mode":"chatgpt","tokens":{"id_token":"canary-codex-login-0007"}}\n' > "$BD_HOME/.codex/auth.json"
+# A stand-in claude CLI, first on every bd() PATH so no test can reach a real one. `auth status --json` prints the
+# login recorded in the config directory it was handed (${CLAUDE_CONFIG_DIR:-$HOME/.claude}/stub-login.json),
+# with canary email, organisation and account values beside the three fields a read-back may keep. CL_LOG records
+# the config directory it saw and, for each name in CL_VARS, the value it inherited (`<unset>` explicitly).
+BD_CB="$BD/claude-bin"; mkdir -p "$BD_CB" "$BD_HOME/.claude"
+cat > "$BD_CB/claude" <<'CLSTUB'
+#!/bin/bash
+cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+if [ -n "${CL_LOG:-}" ]; then
+  printf 'cfg=%s\n' "${CLAUDE_CONFIG_DIR-<unset>}" >> "$CL_LOG"
+  for v in ${CL_VARS:-}; do printf '%s=%s\n' "$v" "$(printenv "$v" 2>/dev/null || printf '<unset>')" >> "$CL_LOG"; done
+fi
+if [ "$*" = "auth status --json" ]; then
+  if [ -f "$cfg/stub-login.json" ]; then cat "$cfg/stub-login.json"; exit 0; fi
+  printf '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}\n'; exit 1
+fi
+exit 2
+CLSTUB
+chmod +x "$BD_CB/claude"
+bd_claude_login() {  # <config-dir> <subscription|console|none> — the login `claude auth status` reads back there
+  mkdir -p "$1"
+  case "$2" in
+    none) rm -f "$1/stub-login.json" ;;
+    subscription) printf '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"canary-email-0021@example.invalid","orgId":"canary-org-id-0022","orgName":"canary-org-name-0023","subscriptionType":"max"}\n' > "$1/stub-login.json" ;;
+    *) printf '{"loggedIn":true,"authMethod":"%s","apiProvider":"firstParty","email":"canary-email-0021@example.invalid","orgId":"canary-org-id-0022"}\n' "$2" > "$1/stub-login.json" ;;
+  esac
+}
+bd_claude_login "$BD_HOME/.claude" subscription
 # A stand-in OpenCode runtime for the custom (Venice-style) profiles: it reports the pinned version, records
 # the environment it was launched with, and exits.
 BD_OC="$BD/opencode"
@@ -70,7 +98,7 @@ bd_reset
 # words are extra environment.
 bd() { (cd "$BD_REPO" && env AGENT_COMMS_HOME="$BD_AH" HOME="$BD_HOME" CODEX_HOME="$BD_HOME/.codex" \
           COMMS_DELIVERY=acp COMMS_SELF=claude COMMS_MOUNT_BASE="$BD_MBASE" COMMS_RUNPHASE_SPAWN_DELAY_SECS=0 \
-          COMMS_RUNPHASE_OWNER_WAIT_SECS=3 PATH="$AGB:$AXB:$PATH" \
+          COMMS_RUNPHASE_OWNER_WAIT_SECS=3 PATH="$BD_CB:$AGB:$AXB:$PATH" \
           BD_VENICE_KEY="$BD_KEY_VENICE" BD_VENICE_OTHER_KEY="$BD_KEY_VENICE" "$@"); }
 bj() { python3 -c 'import json,sys; d=json.loads(sys.argv[1]); exec(sys.argv[2]); print(json.dumps(d))' "$1" "$2"; }   # edit a leg's JSON
 bd_wb() {  # <file> <leg-json>... — a leg-bindings file
@@ -84,6 +112,10 @@ BD_L_GLM='{"ref":"res-glm","agent":"glm","role":"extra","requirement":"optional"
 # A second OpenCode profile on the same route: the "extra, optional" API leg of the multi-leg cases (gemini cannot be one:
 # it runs agy directly and a bound leg runs mounted over ACP only).
 BD_L_GLM2='{"ref":"res-glm2","agent":"glm2","role":"extra","requirement":"optional","route_id":"venice-api","model":"venice/glm-model-b","effort":null,"access":{"transport":"acp","provider":"venice","account":"primary","billing":"api","credential":"env:BD_VENICE_KEY"}}'
+# claude-review on its subscription (access key `claude`, which the twin inherits), and the access entry it needs.
+BD_L_CLAUDE='{"ref":"res-claude","agent":"claude-review","role":"gate","requirement":"required","route_id":"kernel-claude","model":"claude-opus-5-5","effort":"low","access":{"transport":"acp","provider":"anthropic","account":"main","billing":"subscription","credential":null}}'
+BD_CL_ENTRY="d['agents']['claude']=dict(route_id='kernel-claude', transport='acp', provider='anthropic', account='main', billing='subscription', credential=None)"
+bd_claude_on() { bd_mut access "$BD_CL_ENTRY${1:+; $1}"; }   # [extra python] — access.json with the claude entry
 # gemini, bound anyway: refused as unbindable whatever it is bound to.
 BD_L_GEMINI='{"ref":"res-gemini","agent":"gemini","role":"extra","requirement":"optional","route_id":"gemini-api","model":"gemini-3.1-pro","effort":"high","access":{"transport":"acp","provider":"google","account":"metered","billing":"api","credential":"env:BD_GEMINI_KEY"}}'
 # The whole repository, contents, refs and mailbox included: any file, event, index row or snapshot ref a verb

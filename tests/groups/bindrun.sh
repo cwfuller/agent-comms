@@ -234,3 +234,159 @@ OUT="$(bd COMMS_WAIT=1 ACP_PARITY_PAYLOAD="$BD_PAY" AX_CFG_LOG="$BD/unbound.cfg"
   && ok "its result.json has binding null, quota null and a route with no route id: a legacy leg is recognisable" || fail "legacy result: binding=$(bd_res codex binding) route=$(bd_res codex route)"
 { ! grep -q '^leg_binding' "$(ls -t "$BD_REPO/.comms/to-codex/"*panel-codex-* "$BD_REPO/.comms/archive/"*panel-codex-* 2>/dev/null | head -1)"; } && ok "its leg request carries no binding stamp" || fail "an unbound leg carried a binding"
 
+
+section "binding: a bound claude-review leg on codex-authored work (pinned adapter, ACP set before the canary, transcript attestation)"
+# Codex-written work reviewed by a bound Claude leg, end to end through stub providers. The leg runs on the login of its
+# own config directory; its model and effort are set over ACP before the canary and proved from Claude's transcript.
+# A claude leg's mount base is short: Claude names a project directory after the cwd and truncates a name over 200
+# characters, which attestation refuses (the long-base case is below), and $WORK alone is ~70 characters on macOS.
+BD_REQ_FROM=codex
+BD_CMB="$WORK/m"; mkdir -p "$BD_CMB"; BD_CMB="$(cd "$BD_CMB" && pwd -P)"
+bd_cl() { bd COMMS_MOUNT_BASE="$BD_CMB" "$@"; }
+bd_order() { [ ! -f "$1" ] || tr '\n' "$2" < "$1"; }   # <stub order log> <separator> -> the recorded calls, joined
+bd_claude_on
+BD_DG_CLAUDE="$(bd_dig claude-review)"
+BD_CL_VARS="$BD_VARS CLAUDE_CONFIG_DIR CLAUDE_CODE_EFFORT_LEVEL ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_CLIENT_KEY_PASSPHRASE ANTHROPIC_DEFAULT_OPUS_MODEL"
+BD_CL_CAN="ANTHROPIC_CUSTOM_HEADERS=Authorization:Bearer-canary-hdr-0031 CLAUDE_CODE_CLIENT_KEY_PASSPHRASE=canary-mtls-0032 ANTHROPIC_DEFAULT_OPUS_MODEL=canary-alias-0036 CLAUDE_CODE_EFFORT_LEVEL=max"
+BD_CLO="$BD/cl-order.log"; BD_CLE="$BD/cl-env.log"; BD_CLL="$BD/cl-cli.log"; rm -f "$BD_CLO" "$BD_CLE" "$BD_CLL"
+bd_wb "$BD/cl.json" "$BD_L_CLAUDE"
+OUT="$(bd_cl $BD_CAN $BD_CL_CAN COMMS_WAIT=1 ACP_PARITY_PAYLOAD="$BD_PAY" AX_ORDER_LOG="$BD_CLO" AX_ENVDUMP_LOG="$BD_CLE" AX_ENVDUMP_VARS="$BD_CL_VARS" \
+        CL_LOG="$BD_CLL" CL_VARS="$BD_CL_VARS" "$COMMS" panel dispatch --bindings "$BD/cl.json" --set bd-cl-set "$(bd_req c1)" 2>&1)"; A=$?
+{ [ "$A" = 0 ] && [ "$(bd_res claude-review status)" = completed ]; } \
+  && ok "a codex-authored request dispatched with --bindings to one claude-review leg completes" || fail "claude bound dispatch (rc=$A, $(bd_res claude-review status): $(bd_res claude-review note)): $OUT"
+[ "$(bd_order "$BD_CLO" '|')" = "set model claude-opus-5-5|set effort low|set-mode plan|canary|review|" ] \
+  && ok "the leg sets the model, then the effort, then the plan mode, before the canary and then the review prompt" || fail "claude order: $(bd_order "$BD_CLO" '|')"
+[ "$(bd_res claude-review binding)" = '{"access_digest":"'"$BD_DG_CLAUDE"'","account":"main","auth_evidence":"observed","billing":"subscription","capability_version":1,"credential_ref":null,"expected":{"effort":"low","model":"claude-opus-5-5"},"mismatches":[],"observed":{"effort":"low","model":"claude-opus-5-5"},"provider":"anthropic","ref":"res-claude","requirement":"required","role":"gate","route_id":"kernel-claude","schema":1,"status":"ran","transport":"acp"}' ] \
+  && ok "result.json binding: the OBSERVED pair is what Claude's transcript recorded, auth evidence observed (the login read back), status ran" || fail "claude binding: $(bd_res claude-review binding)"
+BD_CLRD="$(bd_res claude-review run_dir)"
+{ [ "$(bd_res claude-review route capability) $(bd_res claude-review route model_source) $(bd_res claude-review route effort_source)" = "bound bound bound" ] \
+  && grep -qx 'acp_adapter	npx -y @agentclientprotocol/claude-agent-acp@0.88.0' "$BD_CLRD/turn.tsv" && grep -qx 'evidence_source	claude-transcript' "$BD_CLRD/turn.tsv" \
+  && grep -qx 'observed_runtime	2.1.293' "$BD_CLRD/turn.tsv" && grep -qx 'adapter_check	match' "$BD_CLRD/turn.tsv"; } \
+  && ok "it ran on the pinned claude adapter, its preflight matched, and turn.tsv names the transcript as its evidence with the CLI version the records carry" || fail "claude turn record: $(grep -E 'adapter|evidence|observed' "$BD_CLRD/turn.tsv" 2>/dev/null | tr '\t\n' '= ')"
+bd_cl_seen() { sed -n "s/^claude:$2=//p" "$1" | LC_ALL=C sort -u | tr '\n' ' '; }
+{ [ "$(bd_cl_seen "$BD_CLE" CLAUDE_CODE_EFFORT_LEVEL)" = "low " ] && [ "$(grep -c '^claude:CLAUDE_CODE_EFFORT_LEVEL=' "$BD_CLE")" -ge 6 ]; } \
+  && ok "the runner's own effort reaches every acpx call of the leg: an inherited CLAUDE_CODE_EFFORT_LEVEL=max is replaced by the bound low" || fail "claude effort env: $(bd_cl_seen "$BD_CLE" CLAUDE_CODE_EFFORT_LEVEL)"
+bd_all_unset bd_cl_seen "$BD_CLE" ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_CLIENT_KEY_PASSPHRASE ANTHROPIC_DEFAULT_OPUS_MODEL BD_VENICE_KEY MY_INFERENCE_KEY API_KEY VENICE_API_KEY ZZ_UNCONFIGURED_API_KEY SOME_SERVICE_TOKEN MY_SECRET_THING GOOGLE_APPLICATION_CREDENTIALS OPENAI_BASE_URL AWS_PROFILE GEMINI_API_KEY CODEX_API_KEY \
+  && [ "$(bd_cl_seen "$BD_CLE" BD_HARMLESS_SETTING)" = "harmless-visible " ] \
+  && ok "claude leg: a header credential, an mTLS passphrase, an alias redefinition and every BD_CAN canary are unset at every acpx call; an ordinary variable still arrives" || fail "claude leg env: $(bd_all_unset bd_cl_seen "$BD_CLE" ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_CLIENT_KEY_PASSPHRASE ANTHROPIC_DEFAULT_OPUS_MODEL BD_VENICE_KEY MY_INFERENCE_KEY API_KEY VENICE_API_KEY ZZ_UNCONFIGURED_API_KEY SOME_SERVICE_TOKEN MY_SECRET_THING GOOGLE_APPLICATION_CREDENTIALS OPENAI_BASE_URL AWS_PROFILE GEMINI_API_KEY CODEX_API_KEY)"
+{ [ "$(grep -c '^cfg=' "$BD_CLL")" -ge 2 ] && [ -z "$(grep -E '^(ANTHROPIC_CUSTOM_HEADERS|CLAUDE_CODE_CLIENT_KEY_PASSPHRASE|ANTHROPIC_DEFAULT_OPUS_MODEL|MY_INFERENCE_KEY|ZZ_UNCONFIGURED_API_KEY|SOME_SERVICE_TOKEN)=' "$BD_CLL" | grep -v '=<unset>$')" ]; } \
+  && ok "the claude CLI that read the login back (at dispatch and at launch) saw none of those credentials either" || fail "claude CLI env: $(grep -v '=<unset>$' "$BD_CLL" | tr '\n' ' ')"
+{ ! grep -rl 'canary-' "$BD_REPO/.comms" "$BD_CMB" >/dev/null 2>&1; } \
+  && ok "no credential, email, organisation or account canary appears under .comms (results, turn.tsv, runner.log, events, replies) or the mount base" || fail "a canary leaked into: $(grep -rl 'canary-' "$BD_REPO/.comms" "$BD_CMB" | head -3 | tr '\n' ' ')"
+
+section "binding: a bound claude leg uses the dispatch's CLAUDE_CONFIG_DIR, set or unset, for its launch, login read-back and transcript window"
+# UNSET (the run above): every acpx call and the CLI saw no CLAUDE_CONFIG_DIR, and the window it attested is HOME's.
+{ [ "$(bd_cl_seen "$BD_CLE" CLAUDE_CONFIG_DIR)" = "<unset> " ] && [ "$(grep '^cfg=' "$BD_CLL" | LC_ALL=C sort -u)" = "cfg=<unset>" ] \
+  && [ -n "$(find "$BD_HOME/.claude/projects" -path "*$(printf '%s' "$BD_CMB" | sed 's/[^a-zA-Z0-9]/-/g')*" -name '*.jsonl' 2>/dev/null)" ]; } \
+  && ok "CLAUDE_CONFIG_DIR unset: the leg launched without it, the read-back read HOME's login and the attested records are under HOME/.claude/projects" || fail "unset config dir: $(bd_cl_seen "$BD_CLE" CLAUDE_CONFIG_DIR) $(grep '^cfg=' "$BD_CLL" | sort -u | tr '\n' ' ')"
+# SET to a temporary directory whose login is the subscription, while HOME's says otherwise: a leg that read HOME's
+# login or HOME's records would be refused, so completing is the proof, beside what every call recorded.
+BD_CCD="$BD/ccd"; bd_claude_login "$BD_CCD" subscription; bd_claude_login "$BD_HOME/.claude" console
+rm -f "$BD/ccd-env.log" "$BD/ccd-cli.log"
+OUT="$(bd_cl CLAUDE_CONFIG_DIR="$BD_CCD" COMMS_WAIT=1 ACP_PARITY_PAYLOAD="$BD_PAY" AX_ENVDUMP_LOG="$BD/ccd-env.log" AX_ENVDUMP_VARS=CLAUDE_CONFIG_DIR \
+        CL_LOG="$BD/ccd-cli.log" "$COMMS" panel dispatch --bindings "$BD/cl.json" --set bd-ccd-set "$(bd_req c2)" 2>&1)"; A=$?
+{ [ "$A" = 0 ] && [ "$(bd_res claude-review status)" = completed ] && [ "$(bd_cl_seen "$BD/ccd-env.log" CLAUDE_CONFIG_DIR)" = "$BD_CCD " ] \
+  && [ "$(grep '^cfg=' "$BD/ccd-cli.log" | LC_ALL=C sort -u)" = "cfg=$BD_CCD" ] && [ -n "$(find "$BD_CCD/projects" -name '*.jsonl' 2>/dev/null)" ]; } \
+  && ok "CLAUDE_CONFIG_DIR set: every acpx call and the read-back used it unchanged, and the attested records are under it" || fail "set config dir (rc=$A, $(bd_res claude-review status): $(bd_res claude-review note)): $(bd_cl_seen "$BD/ccd-env.log" CLAUDE_CONFIG_DIR)"
+bd_claude_login "$BD_HOME/.claude" subscription
+
+section "binding: a bound claude leg refuses before any prompt, before the review, or unpublished"
+# Each case stamps one claude-review leg (delivery suppressed), may change ONE thing, then runs the runner by hand. The
+# stub records the order of every set and prompt it saw; no case may deliver a review to the author.
+bd_cl_pickup() {  # <thread> [leg-json] -> sets BD_LEGFILE, the stamped leg left in the inbox
+  bd_wb "$BD/clpk.json" "${2:-$BD_L_CLAUDE}"
+  bd_cl COMMS_HEADLESS_PICKUP=claude-review "$COMMS" panel dispatch --bindings "$BD/clpk.json" "$(bd_req "$1")" >"$BD/clpk.out" 2>&1
+  BD_LEGFILE="$(ls -t "$BD_REPO/.comms/to-claude-review/"*panel-claude-review-* 2>/dev/null | head -1)"
+}
+bd_cl_run() {  # <thread> [env...] -> runs the stamped leg; sets BD_CD (its run dir) and BD_REPLIED (replies it added)
+  local thr="$1" n0; shift
+  BD_CD="$BD/clr-$thr"; mkdir -p "$BD_CD"; n0="$(ls "$BD_REPO/.comms/to-codex" 2>/dev/null | wc -l | tr -d ' ')"
+  bd_cl ACP_PARITY_PAYLOAD="$BD_PAY" AX_ORDER_LOG="$BD_CD.order" AX_CWD_LOG="$BD_CD.stub" "$@" \
+    "$RP" run --message "$BD_LEGFILE" --dir "$BD_CD" --agent claude-review --via acp --timeout-secs 30 >"$BD_CD.out" 2>&1
+  BD_REPLIED=$(( $(ls "$BD_REPO/.comms/to-codex" 2>/dev/null | wc -l | tr -d ' ') - n0 ))
+}
+bd_cl_case() { local thr="$1"; shift; bd_cl_pickup "$thr"; bd_cl_run "$thr" "$@"; }
+bd_cl_got() { printf '%s|%s|%s|%s|%s' "$(bd_dir_res "$BD_CD" status)" "$(bd_dir_res "$BD_CD" reason)" "$(bd_dir_res "$BD_CD" binding status)" "$(bd_order "$BD_CD.order" ,)" "$BD_REPLIED"; }
+BD_CL_PRE="set model claude-opus-5-5,set effort low,set-mode plan,"
+bd_cl_expect() {  # <label> <status|reason|binding status|order|replies> [text the result's note must carry: the cause]
+  [ "$(bd_cl_got)" = "$2" ] && case "$(bd_dir_res "$BD_CD" note)" in *"${3:-}"*) true ;; *) false ;; esac \
+    && ok "claude leg: $1" || fail "claude leg: $1 — got $(bd_cl_got); $(bd_dir_res "$BD_CD" note | cut -c1-300)"
+}
+bd_cl_case t01 AX_SET_FAIL=effort
+bd_cl_expect "a set the adapter rejects refuses policy-unapplied before any prompt" "failed|policy-unapplied|refused|set model claude-opus-5-5,set effort low,|0" "did not confirm the bound effort 'low'"
+bd_cl_case t02 AX_CLAUDE_SHOW_EFFORT=high
+bd_cl_expect "a session reporting another effort fails the preflight before any prompt" "failed|policy-unapplied|refused|$BD_CL_PRE|0" "will not run the declared model/effort policy"
+bd_cl_case t03 AX_CLAUDE_NO_EFFORT_OPT=1
+{ bd_cl_expect "a session with no effort option for a model the map gives efforts refuses effort-mismatch before any prompt" "failed|effort-mismatch|refused|$BD_CL_PRE|0" "effort option disagrees with the policy map" ; } 
+[ "$(bd_dir_res "$BD_CD" binding mismatches)" = '["effort-mismatch"]' ] && ok "and binding.mismatches names effort-mismatch" || fail "effort-mismatch binding: $(bd_dir_res "$BD_CD" binding)"
+bd_cl_pickup t04; bd_claude_login "$BD_HOME/.claude" console; bd_cl_run t04
+{ bd_cl_expect "a login that is no longer a subscription refuses binding-mismatch, nothing launched" "failed|binding-mismatch|refused||0" "authMethod=console"; }
+[ ! -e "$BD_CD.stub" ] && ok "and no acpx call was made for it" || fail "the console-login leg called acpx: $(head -2 "$BD_CD.stub")"
+bd_cl_pickup t05; bd_claude_login "$BD_HOME/.claude" none; bd_cl_run t05
+bd_cl_expect "a login that has gone refuses binding-mismatch, nothing launched" "failed|binding-mismatch|refused||0" "not logged in"
+bd_claude_login "$BD_HOME/.claude" subscription
+bd_cl_pickup t06; printf '{"env":{"ANTHROPIC_CUSTOM_HEADERS":"Authorization: Bearer canary-hdr-0037"}}\n' > "$BD_HOME/.claude/settings.json"; bd_cl_run t06; rm -f "$BD_HOME/.claude/settings.json"
+bd_cl_expect "user settings whose env block names ANTHROPIC_CUSTOM_HEADERS refuse binding-mismatch, nothing launched" "failed|binding-mismatch|refused||0" "settings.json env sets ANTHROPIC_CUSTOM_HEADERS"
+bd_cl_case t07 AX_CLAUDE_CANARY_MODEL=claude-sonnet-5-5
+{ bd_cl_expect "a canary that ran another model refuses before the review prompt is sent" "failed|policy-unapplied|ran|${BD_CL_PRE}canary,|0" "the canary turn did not run the bound model/effort"; }
+[ "$(bd_dir_res "$BD_CD" binding observed)" = '{"effort":"low","model":"claude-sonnet-5-5"}' ] && ok "and binding.observed is what the canary's transcript said, not the expectation" || fail "canary observed: $(bd_dir_res "$BD_CD" binding observed)"
+bd_claude_login "$BD_CCD" subscription
+bd_cl_case t08 CLAUDE_CONFIG_DIR="$BD_CCD" AX_CLAUDE_TX_ROOT="$BD_HOME/.claude/projects"
+{ bd_cl_expect "records written to ANOTHER config directory leave the leg's window empty: undecidable, refused before the review" "failed|policy-unapplied|ran|${BD_CL_PRE}canary,|0" "could not attest the model/effort the canary turn ran"; }
+[ "$(bd_dir_res "$BD_CD" binding observed)" = '{"effort":null,"model":null}' ] && ok "and an undecidable reading observes nothing (null), never the expected pair" || fail "undecidable observed: $(bd_dir_res "$BD_CD" binding observed)"
+BD_CL_ALL="${BD_CL_PRE}canary,review,"
+bd_cl_case t09 AX_CLAUDE_REVIEW_EFFORT=high
+{ bd_cl_expect "a review that ran another effort is refused unpublished" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "the review turn did not run the bound model/effort"; }
+[ "$(bd_dir_res "$BD_CD" binding observed)" = '{"effort":"high","model":"claude-opus-5-5"}' ] && ok "and binding.observed reports the review's own effort" || fail "review observed: $(bd_dir_res "$BD_CD" binding observed)"
+bd_cl_case t10 AX_CLAUDE_REVIEW_EXTRA=second:claude-sonnet-5-5
+bd_cl_expect "a review window holding records of two models is refused unpublished" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
+bd_cl_case t11 AX_CLAUDE_REVIEW_EXTRA=subagent:claude-sonnet-5-5
+bd_cl_expect "a subagent on another model is refused unpublished (subagent files are in the window)" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
+bd_cl_case t12 AX_CLAUDE_REVIEW_EXTRA=synthetic-billed
+bd_cl_expect "a synthetic record that carries tokens makes the window undecidable: refused unpublished" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
+bd_cl_case t13 AX_CLAUDE_REVIEW_EXTRA=replace
+bd_cl_expect "a transcript file replaced during the review (an unbounded window) is refused unpublished" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
+bd_cl_case t14 AX_CLAUDE_REVIEW_MODEL=skip
+bd_cl_expect "a review that left no record (an absent window) is refused unpublished" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
+# SNAPSHOT FAILURES at each boundary: a stale snapshot file at the path never stands in for a fresh one.
+bd_cl_pickup t15; BD_CD="$BD/clr-t15"; mkdir -p "$BD_CD"; printf '{"files": {}}' > "$BD_CD/transcript-canary-snapshot.json"
+chmod 000 "$BD_HOME/.claude/projects"; bd_cl_run t15; chmod 755 "$BD_HOME/.claude/projects"
+bd_cl_expect "a transcript that cannot be snapshotted before the canary refuses with no prompt sent, though a stale snapshot file sat at the path" "failed|policy-unapplied|refused|$BD_CL_PRE|0" "could not snapshot Claude's transcript for the mount before the canary"
+bd_cl_case t16 AX_CLAUDE_CANARY_BLOCK="$BD/clr-t16/transcript-snapshot.json"
+bd_cl_expect "a review-window snapshot that cannot be made after a passing canary refuses with no review prompt sent" "failed|policy-unapplied|ran|${BD_CL_PRE}canary,|0" "could not snapshot Claude's transcript before the review prompt"
+
+section "binding: a bound claude leg's transcript window is attributed by directory (subagents, a cd, a subdirectory's project, a truncated mount)"
+bd_cl_case t17 AX_CLAUDE_REVIEW_EXTRA=synthetic-zero,cd:,subagent:claude-opus-5-5
+{ bd_cl_expect "a zero-usage synthetic record, a record whose cwd moved into a subdirectory and a subagent on the bound pair all pass" "completed||ran|$BD_CL_ALL|1"; }
+[ "$(bd_dir_res "$BD_CD" binding observed)" = '{"effort":"low","model":"claude-opus-5-5"}' ] && ok "and the passing window observed the bound pair" || fail "passing window observed: $(bd_dir_res "$BD_CD" binding observed)"
+bd_cl_case t18 AX_CLAUDE_REVIEW_EXTRA=cd:claude-sonnet-5-5
+bd_cl_expect "the same cd with the second record on another model is refused as two models (no record is filtered by its cwd)" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
+bd_cl_case t19 AX_CLAUDE_REVIEW_EXTRA=subproject:claude-sonnet-5-5
+bd_cl_expect "another model's record in the project directory named for a SUBDIRECTORY of the mount is refused, not missed" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
+# A MOUNT BASE long enough that Claude would truncate the project directory: refused before the canary, though every
+# record the stub would have written matches, so no filtering path exists for a truncated directory.
+BD_CMB_LONG="$BD_CMB/$(printf 'l%.0s' $(seq 1 100))"; mkdir -p "$BD_CMB_LONG"
+bd_cl_case t20 COMMS_MOUNT_BASE="$BD_CMB_LONG"
+bd_cl_expect "a mount whose transcript directory name Claude would truncate is refused before the canary, nothing prompted" "failed|policy-unapplied|refused|$BD_CL_PRE|0" "could not snapshot Claude's transcript for the mount before the canary"
+BD_TXP="$BD/tx-prefix"; BD_TXC="$BD_CMB_LONG/$(printf 'x%.0s' $(seq 1 100))/view/tree"; BD_TXS="$(printf '%s' "$BD_TXC" | sed 's/[^a-zA-Z0-9]/-/g')"
+mkdir -p "$BD_TXP/${BD_TXS:0:200}-0a1b2c"; printf '{"type":"assistant","effort":"low","message":{"model":"claude-opus-5-5"}}\n' > "$BD_TXP/${BD_TXS:0:200}-0a1b2c/s.jsonl"
+printf '{"files": {}}' > "$BD/tx-prefix.json"
+python3 -I "$REPO/helpers/claude_transcript.py" observe "$BD_TXP" "$BD_TXC" "$BD/tx-prefix.json" >/dev/null 2>&1; A=$?
+[ "$A" = 21 ] && ok "claude_transcript.py observe given only a prefix-matched (truncated) directory is undecidable (21)" || fail "prefix-matched observe returned $A"
+
+section "binding: a bound claude model with no effort scale binds with a null effort and is attested on the model alone"
+# The shipped map declares no such model yet (no transcript evidence for one), so a copy of the helpers carries a map that
+# does: `pair ... none` and the id its transcript records. It sits beside a link to the checkout's docs/, where the
+# runner finds the review bar (loopspec fragments) for a helpers directory that is not installed.
+BD_HC="$BD/hc/helpers"; mkdir -p "$BD_HC"; cp -R "$REPO/helpers/." "$BD_HC/"; ln -s "$REPO/docs" "$BD/hc/docs"
+printf 'pair\tclaude\tacp-mounted\ttest-haiku\tnone\nrecorded\tclaude\tacp-mounted\ttest-haiku\tclaude-test-haiku\n' >> "$BD_HC/policy-map.tsv"
+bd_wb "$BD/cl0.json" "$(bj "$BD_L_CLAUDE" "d.update(model='test-haiku', effort=None)")"
+rm -f "$BD/cl0-order.log" "$BD/cl0-env.log"
+OUT="$(bd_cl COMMS_WAIT=1 CLAUDE_CODE_EFFORT_LEVEL=max ACP_PARITY_PAYLOAD="$BD_PAY" AX_ORDER_LOG="$BD/cl0-order.log" AX_CLAUDE_NO_EFFORT_OPT=1 \
+        AX_CLAUDE_CANARY_MODEL=claude-test-haiku AX_CLAUDE_REVIEW_MODEL=claude-test-haiku AX_ENVDUMP_LOG="$BD/cl0-env.log" AX_ENVDUMP_VARS=CLAUDE_CODE_EFFORT_LEVEL \
+        "$BD_HC/comms.sh" panel dispatch --bindings "$BD/cl0.json" --set bd-cl0-set "$(bd_req c3)" 2>&1)"; A=$?
+{ [ "$A" = 0 ] && [ "$(bd_res claude-review status)" = completed ] && [ "$(bd_order "$BD/cl0-order.log" '|')" = "set model test-haiku|set-mode plan|canary|review|" ] \
+  && [ "$(bd_res claude-review binding expected)" = '{"effort":null,"model":"test-haiku"}' ] && [ "$(bd_res claude-review binding observed)" = '{"effort":null,"model":"claude-test-haiku"}' ] \
+  && [ "$(bd_cl_seen "$BD/cl0-env.log" CLAUDE_CODE_EFFORT_LEVEL)" = "<unset> " ]; } \
+  && ok "an effortless model: no effort is set or injected (an inherited one is scrubbed), and the transcript's model id is attested against the recorded row" || fail "effortless leg (rc=$A, $(bd_res claude-review status): $(bd_res claude-review note)): $(bd_order "$BD/cl0-order.log" '|') $(bd_res claude-review binding)"
+bd_reset; BD_REQ_FROM=claude

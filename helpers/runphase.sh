@@ -493,10 +493,24 @@ bound_leg_refuse() {
 # bound_leg_readback <iso-home> — READ BACK what the launcher wrote, then compare it with the binding: the
 # selected auth type and the login files in the isolated home, and whether a credential variable is in the
 # computed environment. Only a successful read-back lets result.json say `observed`.
+# A claude leg has no isolated home: its read-back (leg_binding.py claude_readback) runs INSIDE the leg's
+# exact acpx environment (acp_leg_env) against the persisted record, and checks that no scrubbed name
+# survived except the runner's own effort injection, that the user settings carry no credential the scrub
+# cannot reach, and that the login of the leg's own CLAUDE_CONFIG_DIR is a first-party subscription. Reads
+# acp_policy, acp_policy_sha and workdir by dynamic scope.
 bound_leg_readback() {
   local out rc=0
-  out="$(python3 "$HELPER_DIR/leg_binding.py" auth-readback --adapter "$RUN_BIND_ADAPTER" --billing "$RUN_BIND_BILLING" \
-           --home "${1:-}" --credential-set "$([ -n "$BOUND_CRED_NAME" ] && echo 1 || echo 0)" 2>>"$RUN_DIR/runner.log")" || rc=$?
+  if [ "$RUN_BIND_ADAPTER" = claude ]; then
+    if policy_record_intact "$acp_policy" "$acp_policy_sha"; then
+      out="$(acp_leg_env "$workdir" python3 "$HELPER_DIR/leg_binding.py" auth-readback --adapter claude \
+               --billing "$RUN_BIND_BILLING" --policy-file "$acp_policy" 2>>"$RUN_DIR/runner.log")" || rc=$?
+    else
+      out="the resolved policy record changed before the read-back"; rc=1
+    fi
+  else
+    out="$(python3 "$HELPER_DIR/leg_binding.py" auth-readback --adapter "$RUN_BIND_ADAPTER" --billing "$RUN_BIND_BILLING" \
+             --home "${1:-}" --credential-set "$([ -n "$BOUND_CRED_NAME" ] && echo 1 || echo 0)" 2>>"$RUN_DIR/runner.log")" || rc=$?
+  fi
   if [ "$rc" != 0 ]; then
     RUN_BIND_MISMATCHES=binding-mismatch
     bound_leg_refuse "the launcher's authentication route does not read back as bound ($(printf '%s' "$out" | tr '\t\n' '  ' | cut -c1-300)); nothing was launched"
@@ -2945,10 +2959,13 @@ acp_agent_argv() {
   ACP_ARGV=(${_pre[@]+"${_pre[@]}"} --agent "$acp_agent_cmd" "$_verb" ${_sess[@]+"${_sess[@]}"} "$@")
 }
 
-acp_exec() {  # <cwd> [acpx args...]
+# acp_leg_env <cwd> <cmd...> — run <cmd> in <cwd> under THE environment every acpx call of this leg gets:
+# the git scrub, the reviewer boundary (TURN_CHILD_SCRUB), a bound leg's credential scrub and its one
+# credential, the shim and containment PATH, then the per-provider isolation env (acp_iso). ONE definition:
+# acp_exec runs acpx through it, and a bound claude leg's launch-time read-back runs through it, so what that
+# read-back checks is what the leg is handed. Reads its inputs by dynamic scope, as acp_exec always did.
+acp_leg_env() {
   local _cwd="$1"; shift
-  local -a ACP_ARGV=()
-  acp_agent_argv "$@" || { echo "run: the acpx argv carries no '$acp_profile' profile to pin" >&2; return 2; }
   # A BOUND leg's credential scrub (BOUND_ENV_ARGS) rides in the same env argv; its one credential is
   # exported inside this subshell, so a secret is in this process's environment and never in any argv.
   ( cd "$_cwd" || exit 1
@@ -2958,7 +2975,14 @@ acp_exec() {  # <cwd> [acpx args...]
           -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
           "${TURN_CHILD_SCRUB[@]}" \
           ${BOUND_ENV_ARGS[@]+"${BOUND_ENV_ARGS[@]}"} \
-      ${acp_iso[@]+"${acp_iso[@]}"} "${acp_launch[@]}" ${ACP_ARGV[@]+"${ACP_ARGV[@]}"} )
+      ${acp_iso[@]+"${acp_iso[@]}"} "$@" )
+}
+
+acp_exec() {  # <cwd> [acpx args...]
+  local _cwd="$1"; shift
+  local -a ACP_ARGV=()
+  acp_agent_argv "$@" || { echo "run: the acpx argv carries no '$acp_profile' profile to pin" >&2; return 2; }
+  acp_leg_env "$_cwd" "${acp_launch[@]}" ${ACP_ARGV[@]+"${ACP_ARGV[@]}"}
 }
 
 # acp_exec_bounded <secs> <log> <cwd> [acpx args...] — acp_exec under a deadline of its own, output appended
@@ -3972,6 +3996,11 @@ AGYNOTE
     local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim="" acp_reason=""
     local -a acp_iso=()          # isolation env, applied to EVERY owner-spawning invocation
     local acp_iso_backend=none acp_iso_home=""
+    # WHAT ATTESTS THE MODEL AND EFFORT a policy-bearing turn ran, by provider: `rollout` (codex: its isolated
+    # home's rollout turn_contexts) or `transcript` (a BOUND claude leg: Claude's own transcript, read through
+    # claude_transcript.py from acp_tx_root for the mount cwd acp_tx_cwd). Empty: nothing is applied, so the
+    # preflight and the post-turn attestation do not run.
+    local acp_attest="" acp_tx_root="" acp_tx_cwd=""
     local RUN_SEED_STATUS="" RUN_SEED_KEY="" RUN_SEED_ROOT="" RUN_SEED_RT=""     # the codex plugin-cache seed (seed_codex_home); promoted from after the attestation
     # The pinned adapter command (acp.sh adapter), handed to acpx as `--agent` by acp_exec. Empty runs
     # acpx's builtin for the profile. Set only where a backend's containment depends on the adapter.
@@ -4015,7 +4044,7 @@ AGYNOTE
       # The caller's EXACT pair, from the stamp: no candidate, no baseline, no pin. A bound leg runs mounted
       # or not at all, and a failed resolution refuses the turn before any provider is launched.
       local bound_custom=()
-      [ "$provider" = codex ] || bound_custom=(--custom-profile)
+      case "$provider" in codex|claude) ;; *) bound_custom=(--custom-profile) ;; esac
       if [ "$acp_transport" != acp-mounted ]; then
         bound_leg_refuse "a bound leg runs mounted only (the reviewed artifact could not be mounted); nothing was launched"
       fi
@@ -4379,6 +4408,7 @@ AGYNOTE
           printf 'acp_adapter\t%s\n' "$acp_agent_cmd" >> "$run_dir/turn.tsv" 2>/dev/null || true
           acp_iso_backend="codex-home+read-only"
           acp_iso_mode="read-only"
+          acp_attest=rollout
           ;;
         claude)
           # MEASURED 2026-08-31 (acpx 0.13.1, claude-agent-acp ^0.60.0, Darwin); the table and the
@@ -4400,6 +4430,37 @@ AGYNOTE
           # owner decision (2026-09-01) to accept write-containment without network-containment.
           acp_iso_backend="claude-plan"
           acp_iso_mode="plan"
+          # A BOUND leg (panel dispatch --bindings) runs the caller's exact model and effort, and proves it from
+          # Claude's own transcript. Three things change for it, and containment is not one of them (same mode,
+          # permission shape, open network, no config-home override):
+          #   - the PINNED adapter (acp.sh adapter claude --bound), so acpx keys these sessions apart from the
+          #     unbound ones on its floating builtin, and the model ids the map attests are served;
+          #   - the effort the persisted record names, injected as CLAUDE_CODE_EFFORT_LEVEL after the scrub
+          #     (acp.sh claude-env, the one definition the read-back guard also reads): the adapter re-seeds
+          #     effort from the operator's settings.json at every session load, and the CLI reads this variable
+          #     as overriding effort for the session. The ACP `set effort` stays (acp_claude_set); the
+          #     transcript decides whether either took effect;
+          #   - transcript attestation (acp_attest), of the canary's window and then the review's.
+          if [ -n "$RUN_BIND_STAMP" ]; then
+            acp_agent_cmd="$("$acp_sh" adapter claude --bound 2>>"$run_dir/runner.log")" || acp_agent_cmd=""
+            [ -n "$acp_agent_cmd" ] \
+              || bound_leg_refuse "acp.sh names no pinned claude ACP adapter for a bound leg; nothing was launched"
+            printf 'acp_adapter\t%s\n' "$acp_agent_cmd" >> "$run_dir/turn.tsv" 2>/dev/null || true
+            policy_record_intact "$acp_policy" "$acp_policy_sha" \
+              || bound_leg_refuse "the resolved policy record changed before the leg's environment was built; nothing was launched"
+            local acp_cl_env="" acp_cl_name="" acp_cl_val=""
+            acp_cl_env="$("$acp_sh" claude-env --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" \
+              || bound_leg_refuse "the bound record's effort injection could not be computed (see runner.log); nothing was launched"
+            while IFS=$'\t' read -r acp_cl_name acp_cl_val; do
+              if [ -n "$acp_cl_name" ]; then acp_iso+=("$acp_cl_name=$acp_cl_val"); fi
+            done <<<"$acp_cl_env"
+            [ "${#acp_iso[@]}" = 0 ] || acp_iso=(env "${acp_iso[@]}")
+            acp_attest=transcript
+            # The SAME records root the usage reader uses (the leg's own CLAUDE_CONFIG_DIR, unchanged), and the
+            # mount's physical cwd, which is what Claude names its project directory after.
+            acp_tx_root="$(leg_usage_root claude "$mount_dir")"
+            acp_tx_cwd="$(cd "$workdir" && pwd -P)"
+          fi
           ;;
         grok)
           # grok's containment is applied from OUTSIDE it, with the OS's own Seatbelt (helpers/box.sh): grok
@@ -4692,7 +4753,76 @@ AGYNOTE
     # custom profile's model pin, and the free policy preflight. A function for the same reason as
     # acp_session_bind: a session re-created by the canary retry must clear the same gates. Returns 1
     # after acp_refuse has published the refusal.
+    # acp_claude_set — a BOUND claude leg's model, then its effort (none for a model without an effort scale),
+    # set over ACP BEFORE the first prompt from the persisted record and each confirmed from acpx's own stdout
+    # (the acp_confirm_mode pattern: a rejected set interpolates the requested value into its error, so only
+    # the exact success line passes). Model first: a model switch rebuilds the effort option. acpx persists
+    # both as saved preferences, which the preflight then reads. Returns 1 after acp_refuse has published.
+    acp_claude_set() {
+      local pol m e out rc=0
+      if ! policy_record_intact "$acp_policy" "$acp_policy_sha" \
+         || ! pol="$("$acp_sh" policy claude --policy-file "$acp_policy" 2>>"$run_dir/runner.log")"; then
+        acp_refuse policy-unapplied "the resolved policy record changed or became unreadable before the bound model was set — nothing was prompted"
+        return 1
+      fi
+      m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"
+      out="$( acp_exec "$workdir" --format text "$acp_profile" -s "$acp_session" set model "$m" 2>>"$run_dir/runner.log" )" || rc=$?
+      printf 'set model %s: rc=%s out=[%s]\n' "$m" "$rc" "$out" >>"$run_dir/runner.log"
+      if [ "$rc" -ne 0 ] || [ "$out" != "model set: $m" ]; then
+        acp_refuse policy-unapplied "the claude session did not confirm the bound model '$m' before the canary (set model rc=$rc) — nothing was prompted; retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+        return 1
+      fi
+      [ "$e" != n/a ] || return 0
+      out=""; rc=0
+      out="$( acp_exec "$workdir" --format text "$acp_profile" -s "$acp_session" set effort "$e" 2>>"$run_dir/runner.log" )" || rc=$?
+      printf 'set effort %s: rc=%s out=[%s]\n' "$e" "$rc" "$out" >>"$run_dir/runner.log"
+      case "$rc:$out" in
+        "0:config set: effort=$e ("*" options)") return 0 ;;
+      esac
+      acp_refuse policy-unapplied "the claude session did not confirm the bound effort '$e' before the canary (set effort rc=$rc) — nothing was prompted; retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+      return 1
+    }
+    # acp_transcript_snapshot <out> — the claude transcript's state for the mount cwd, the start of a window
+    # (claude_transcript.py snapshot, which refuses a project directory Claude would truncate). Any file at the
+    # path is removed first and a fresh one is required afterwards: an earlier snapshot left in place would let
+    # an earlier window's records stand in for this one's.
+    acp_transcript_snapshot() {
+      rm -f "$1" 2>/dev/null || true
+      [ ! -e "$1" ] && [ -n "$acp_tx_root" ] && [ -n "$acp_tx_cwd" ] || return 1
+      python3 -I "$HELPER_DIR/claude_transcript.py" snapshot "$acp_tx_root" "$acp_tx_cwd" "$1" 2>>"$run_dir/runner.log" \
+        && [ -f "$1" ]
+    }
+    # acp_transcript_attest <snapshot> <canary|review> — what the window's records say ran, judged against the
+    # PERSISTED record through policy_verdict (acp.sh policy-attest), the function codex's attestation uses.
+    # binding.observed is what the transcript says, never the expectation; an undecidable reading is never a
+    # pass. Returns 1 after acp_refuse has published the refusal (nothing of the review is delivered).
+    acp_transcript_attest() {
+      local out="" rc=0 msg="" eff="" mod="" ver=""
+      out="$(python3 -I "$HELPER_DIR/claude_transcript.py" observe "$acp_tx_root" "$acp_tx_cwd" "$1" 2>>"$run_dir/runner.log")" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        # cut, not `IFS=$'\t' read`: an empty effort must not shift the model into its column
+        eff="$(printf '%s' "$out" | cut -f1)"; mod="$(printf '%s' "$out" | cut -f2)"; ver="$(printf '%s' "$out" | cut -f5)"
+        if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
+          rc=22; msg="the resolved policy record changed during the turn"
+        else
+          msg="$("$acp_sh" policy-attest claude "${eff:-null}" "$mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || rc=$?
+        fi
+      fi
+      RUN_BIND_OBS_MODEL="$mod"; RUN_BIND_OBS_EFFORT="$eff"
+      turn_observe "$run_dir" "$eff" "$mod" "${acp_record_id:-}" "" "" "" "$ver" "" claude-transcript
+      if [ "$rc" -ne 0 ]; then
+        printf 'policy attestation (%s): rc=%s %s\n' "$2" "$rc" "$msg" >>"$run_dir/runner.log"
+        if [ "$rc" -eq 20 ]; then
+          acp_refuse policy-unapplied "the $2 turn did not run the bound model/effort ($msg) — refusing $( [ "$2" = canary ] && echo 'before the review prompt' || echo 'to publish the review'); retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+        else
+          acp_refuse policy-unapplied "could not attest the model/effort the $2 turn ran from Claude's transcript (status $rc${msg:+: $msg}; see runner.log) — refusing $( [ "$2" = canary ] && echo 'before the review prompt' || echo 'to publish a review of unknown depth')"
+        fi
+        return 1
+      fi
+      printf 'policy attested (%s): %s\n' "$2" "$msg" >>"$run_dir/runner.log"
+    }
     acp_session_prepare() {
+      if [ "$acp_attest" = transcript ]; then acp_claude_set || return 1; fi
       if [ -n "$mount_dir" ] && [ -n "$acp_iso_mode" ]; then
         if ! acp_confirm_mode "$workdir" "$acp_profile" "$acp_session" "$acp_iso_mode" "$run_dir" "pre-canary"; then
           acp_refuse containment-unconfirmed "could not confirm '$provider' is pinned to '$acp_iso_mode' before the canary — containment unconfirmed"
@@ -4719,8 +4849,10 @@ AGYNOTE
       # We REFUSE a conflicting saved preference rather than rewriting the record: acpx owns that
       # file, `connectAndLoadSession` captures the options BEFORE connecting, and a retained queue
       # owner can overwrite an external edit — so our exclusivity over it is unproven. Retiring the
-      # session is the honest remedy. (codex + grok, plan r3.)
-      if [ -n "$acp_iso_home" ]; then
+      # session is the honest remedy. (codex + grok, plan r3.) Every turn with an attestation source has one:
+      # codex reads acpx's config_options, a bound claude leg also its saved model preference (acp.sh
+      # policy_check_claude).
+      if [ -n "$acp_attest" ]; then
         if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
           acp_refuse policy-unapplied "the resolved policy record changed after resolution — refusing to check a session against an expectation nobody resolved"
           return 1
@@ -4731,7 +4863,7 @@ AGYNOTE
         # What the ADAPTER reported, kept apart from both the request and the provider's own
         # rollout: an adapter accepting a value is not proof the billable turn ran it.
         local pol_verdict=undecidable
-        case "$pol_rc" in 0) pol_verdict=match ;; 20) pol_verdict=mismatch ;; esac
+        case "$pol_rc" in 0) pol_verdict=match ;; 20|23) pol_verdict=mismatch ;; esac
         { printf 'adapter_check\t%s\n' "$pol_verdict"
           printf 'adapter_report\t%s\n' "$(printf '%s' "${pol_out:-unknown}" | tr '\t\n' '  ')"
           printf 'adapter_source\t%s\n' "acpx-config_options"
@@ -4739,6 +4871,10 @@ AGYNOTE
         case "$pol_rc" in
           0)  printf 'policy preflight: %s\n' "$pol_out" >>"$run_dir/runner.log" ;;
           20) acp_refuse policy-unapplied "the reviewer session will not run the declared model/effort policy ($pol_out) — retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+              return 1 ;;
+          23) # a bound claude session whose effort option disagrees with the map: the effort cannot be what was bound
+              RUN_BIND_MISMATCHES=effort-mismatch
+              acp_refuse effort-mismatch "the claude session's effort option disagrees with the policy map for the bound model ($pol_out) — nothing was prompted"
               return 1 ;;
           *)  acp_refuse policy-unapplied "could not verify the reviewer model/effort policy before the canary (status $pol_rc) — refusing rather than paying for a review of unknown depth"
               return 1 ;;
@@ -4771,6 +4907,12 @@ AGYNOTE
     # same session, so it is part of what this leg cost. (The attestation's rollout snapshot below
     # deliberately EXCLUDES it — a different question.) Nothing before this point bills.
     leg_usage_snapshot "$provider" "$(leg_usage_root "$provider" "$mount_dir" "${acp_iso_home:-$acp_grok_home}")" "$(cd "$workdir" && pwd -P)" "$run_dir"
+    # A bound claude leg's CANARY WINDOW opens here: its own snapshot file, never the usage snapshot (which
+    # deliberately never fails). A snapshot that cannot be made refuses before anything is billed.
+    if [ "$acp_attest" = transcript ] && ! acp_transcript_snapshot "$run_dir/transcript-canary-snapshot.json"; then
+      acp_refuse policy-unapplied "could not snapshot Claude's transcript for the mount before the canary (see runner.log; a mount path long enough for Claude to truncate its project directory is refused — use a shorter COMMS_MOUNT_BASE) — nothing was prompted"
+      return 1
+    fi
     # THE FIRST PROMPT goes out below (the canary): from here a bound leg has RUN, whatever its outcome.
     if [ -n "$RUN_BIND_STAMP" ]; then RUN_BIND_STATE=ran; printf 'bind_state\tran\n' >> "$run_dir/turn.tsv" 2>/dev/null || true; fi
     # THE CANARY'S OWN SANDBOX is attested before the real prompt is spent, so its window opens here.
@@ -4862,6 +5004,12 @@ AGYNOTE
       fi
     fi
 
+    # claude: the canary is the first prompt on this session, so its transcript window is the first evidence of
+    # the model and effort it serves. A wrong or undecidable reading refuses BEFORE the review is paid for.
+    if [ "$acp_attest" = transcript ]; then
+      acp_transcript_attest "$run_dir/transcript-canary-snapshot.json" canary || return 1
+    fi
+
     # NO SECOND set-mode. The plan (codex r2 B1) asked to re-pin AFTER the canary too, on the
     # premise that a model turn can move the mode. LIVE VALIDATION refuted the MECHANISM: the codex
     # and claude adapters return "Internal error" on a repeat `set-mode` once any prompt has run in
@@ -4900,6 +5048,12 @@ AGYNOTE
         acp_refuse policy-unapplied "could not enumerate the provider's rollout files before the prompt — refusing rather than paying for a turn whose depth could not then be attested"
         return 1
       fi
+    fi
+    # claude: the REVIEW WINDOW, its own snapshot taken immediately before the billable prompt, so the canary's
+    # records can never satisfy the review's gate.
+    if [ "$acp_attest" = transcript ] && ! acp_transcript_snapshot "$run_dir/transcript-snapshot.json"; then
+      acp_refuse policy-unapplied "could not snapshot Claude's transcript before the review prompt — refusing rather than paying for a review whose model/effort could not then be attested"
+      return 1
     fi
     acp_t0="$(date +%s)"
     ( acp_exec "$workdir" \
@@ -5004,7 +5158,10 @@ AGYNOTE
     # (a throwaway mount deletes home/). A wrong-depth review is REFUSED UNPUBLISHED rather than
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
-    if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
+    # A bound claude leg's review window is judged the same way, from Claude's own transcript.
+    if [ "$acp_rc" -eq 0 ] && [ "$acp_attest" = transcript ]; then
+      acp_transcript_attest "$run_dir/transcript-snapshot.json" review || return 1
+    elif [ "$acp_rc" -eq 0 ] && [ "$acp_attest" = rollout ]; then
       local att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
       # codex's window was read once, for containment, right after the turn; its att_out/att_rc stand.
       if [ "$att_rc" -eq 0 ]; then

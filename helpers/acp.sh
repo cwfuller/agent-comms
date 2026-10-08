@@ -39,9 +39,18 @@
 #   profile <agent> | version [agent]
 #       the acpx launch profile for an agent, and the pinned acpx version (the same per-agent pin
 #       as `launcher`). Other helpers ask for these instead of keeping a second copy of the map.
-#   adapter <agent>
+#   adapter <agent> [--bound]
 #       the pinned ACP adapter command a MOUNTED review turn hands acpx as `--agent` (codex:
 #       codex-acp CODEX_ACP_VERSION); prints nothing for an agent whose acpx builtin is used as is.
+#       `--bound` asks for a BOUND leg's pin: claude's (claude-agent-acp CLAUDE_ACP_VERSION) applies to
+#       bound legs only, so `adapter claude` alone prints nothing.
+#   cli-path <name>
+#       the operator's installed CLI <name>, from the one PATH walk (shim directories skipped) that
+#       codex's runtime auto-detection and the claude login read-back share; exit 1 when none.
+#   claude-env --policy-file <record>
+#       what the runner injects into a BOUND claude leg's environment, from the persisted record:
+#       `CLAUDE_CODE_EFFORT_LEVEL<TAB><effort>`, or nothing for a model with no effort scale. The one
+#       definition the claude arm and the launch-time read-back guard both read.
 #   resolve <agent> [--transport acp-mounted|acp|headless] [--tier fast|balanced|strong|none]
 #           [--effort low|medium|high|xhigh|none] [--decision <id>|none] [--routing on|off]
 #       resolve an ABSTRACT routing candidate to the concrete reviewer policy
@@ -62,8 +71,10 @@
 #       BOUND resolution (panel dispatch --bindings): the caller's EXACT model and native effort,
 #       validated and never substituted. No tier, routed candidate, baseline, pin or "use max":
 #       an operator pin or COMMS_REVIEW_MAX that differs from the binding is a CONFLICT (a
-#       refusal), an equal pin is accepted. Built-in agents must be `eligible` or `fixed`
-#       (applied and attested); `--custom-profile` binds an operator profile (OpenCode) to its
+#       refusal), an equal pin is accepted. Built-in agents must be `eligible`, `fixed` or `bound`
+#       (applied and attested; claude is `bound`: its model needs a `pair` and a `recorded` row, a
+#       `pair ... none` model binds only a null effort, and the record adds `attest_model`, the id the
+#       transcript records); `--custom-profile` binds an operator profile (OpenCode) to its
 #       pinned model with a null effort, read through agent_profiles.py, never the map. Writes a
 #       version-2 record (route_id, access_digest, bound). A refusal's message starts
 #       `code=<token>` (capability-unsupported, pin-conflict, model-unservable, effort-refused,
@@ -100,10 +111,12 @@
 #       turn (codex: config.toml). runphase asks for this rather than holding
 #       a literal, so the policy is spelled exactly once.
 #   policy-check <agent> - [--policy-file <record>]
-#   policy-attest <agent> <effort> [model] [--policy-file <record>]
+#   policy-attest <agent> <effort|null> [model] [--policy-file <record>]
 #       compare an `acpx sessions show --format json` record on stdin, or an
 #       observed effort/model pair, against the policy. Exit 0 match,
-#       20 mismatch, 21 undecidable. Undecidable is never "it matched".
+#       20 mismatch, 21 undecidable. Undecidable is never "it matched". `policy-check claude`
+#       (a bound record only) also exits 23 when the session's effort option disagrees with the
+#       map; `null` is an observed effort of none (it matches only a model-only record).
 #   With --policy-file every accessor reads the PERSISTED per-turn record and
 #   never re-resolves, so a pin, map or install changed mid-turn cannot make the
 #   config, the preflight and the attestation describe different policies.
@@ -136,6 +149,14 @@ ACPX_VERSION_ENFORCING="0.17.1"
 # runner still attests the sandbox each turn from the provider's own rollout, so a pin that drifts
 # is refused, not trusted.
 CODEX_ACP_VERSION="2.1.1"
+# THE CLAUDE ACP ADAPTER a BOUND claude review leg runs (panel dispatch --bindings), pinned. The adapter
+# version is the claude leg's runtime: it bundles the Claude CLI that serves the turn, and 0.60.0's (what an
+# unbound claude review still floats to through acpx's builtin profile) cannot serve claude-opus-5-5 or
+# claude-fable-5-1 (operator, 2026-10-08). It is part of the policy digest (policy_runtime_for), so a bump
+# is a fresh session. Unbound claude reviews are untouched: `adapter claude` alone prints nothing. On every
+# change of this pin, repeat the credential-variable survey recorded in credential-env.tsv.
+CLAUDE_ACP_VERSION="0.88.0"
+CLAUDE_ACP_PACKAGE="@agentclientprotocol/claude-agent-acp"
 ACP_SESSION_NAME="agent-comms-ask"
 NODE_MIN_MAJOR=22
 NODE_MIN_MINOR=13
@@ -211,8 +232,11 @@ acpx_version_for() {  # <agent|""> -> the acpx version pinned for it
   case "${1:-}" in grok) printf '%s' "$ACPX_VERSION_ENFORCING" ;; *) printf '%s' "$ACPX_VERSION" ;; esac
 }
 
-adapter_command_for() {  # <agent> -> the pinned adapter command for a mounted review turn, or nothing
-  case "${1:-}" in codex) printf 'npx -y @agentclientprotocol/codex-acp@%s' "$CODEX_ACP_VERSION" ;; esac
+adapter_command_for() {  # <agent> [bound] -> the pinned adapter command for a mounted review turn, or nothing
+  case "${1:-}/${2:-}" in
+    codex/*)      printf 'npx -y @agentclientprotocol/codex-acp@%s' "$CODEX_ACP_VERSION" ;;
+    claude/bound) printf 'npx -y %s@%s' "$CLAUDE_ACP_PACKAGE" "$CLAUDE_ACP_VERSION" ;;
+  esac
 }
 
 acpx_launcher() {  # [agent] — prints the argv prefix that runs acpx
@@ -265,7 +289,7 @@ policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic o
     /^[[:space:]]*(#|$)/ { next }
     $1 == "version" { if (NF != 2 || $2 !~ re) bad("malformed version"); nv++; ver = $2; next }
     $1 == "capability" {
-      if (NF != 8 || !tok($2) || !tok($3) || $4 !~ /^(eligible|fixed|unsupported)$/) bad("malformed capability")
+      if (NF != 8 || !tok($2) || !tok($3) || $4 !~ /^(eligible|fixed|bound|unsupported)$/) bad("malformed capability")
       once("c" SUBSEP $2 SUBSEP $3); next }
     $1 == "baseline" || $1 == "ceiling" {
       if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 !~ re) bad("malformed " $1)
@@ -281,7 +305,12 @@ policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic o
       if ((NF != 5 && NF != 6) || !tok($2) || !tok($3) || $4 !~ re || $5 == "") bad("malformed pair")
       if (NF == 6 && $6 !~ /^[0-9]+(\.[0-9]+)*$/) bad("malformed pair minimum runtime")
       n = split($5, a, ","); for (i = 1; i <= n; i++) if (a[i] !~ re) bad("malformed pair effort")
+      # `none` declares a model with NO effort scale; it is the whole list or a defect, never one effort among others
+      for (i = 1; i <= n; i++) if (a[i] == "none" && n != 1) bad("pair effort none mixed with efforts")
       once("p" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
+    $1 == "recorded" {
+      if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 !~ re) bad("malformed recorded")
+      once("r" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
     $1 == "limit" {
       if (NF != 5 || !tok($2) || !tok($3) || $4 !~ re || $5 !~ re) bad("malformed limit")
       once("l" SUBSEP $2 SUBSEP $3 SUBSEP $4); next }
@@ -296,9 +325,10 @@ policy_map_check() {  # -> the map version on stdout; exit 1 with a diagnostic o
     }' "$ACP_POLICY_MAP"
 }
 # policy_map_get <kind> <provider> <transport> [key] — the value column(s) of ONE row, or nothing.
-#   capability -> <eligible|fixed|unsupported>   baseline -> <model>\t<effort>
-#   tier <t> -> <model>   effort <e> -> <provider-effort>   pair <model> -> <comma list>
+#   capability -> <eligible|fixed|bound|unsupported>   baseline -> <model>\t<effort>
+#   tier <t> -> <model>   effort <e> -> <provider-effort>   pair <model> -> <comma list | none>
 #   ceiling -> <model>\t<effort>   limit <model> -> <limit_id>   disabled <model> -> <reason>
+#   recorded <launch id> -> <the model id the provider's transcript records for it>
 # Only ever called after policy_map_check has passed for this invocation.
 policy_map_get() {
   awk -F'\t' -v k="$1" -v p="$2" -v t="$3" -v key="${4:-}" '
@@ -320,12 +350,20 @@ policy_map_reverse() {
   printf '%s\n' "${r:-unmapped}"
 }
 
-# THE COMBINATIONS WITH AN APPLY-AND-ATTEST PATH IN CODE. The map may only mark these `eligible` or
-# `fixed`; any other row claiming either is downgraded to `unsupported` (fallback
+# THE COMBINATIONS WITH AN APPLY-AND-ATTEST PATH IN CODE. The map may only mark these `eligible`,
+# `fixed` or `bound`; any other row claiming one is downgraded to `unsupported` (fallback
 # capability-unimplemented), so a map edit alone can never make the ledger claim a policy that no
 # code applies or checks. Adding a provider here requires its runphase arm to write the config,
-# preflight it and attest it. (code review r1.)
-policy_applied_combo() { case "$1/$2" in codex/acp-mounted|gemini/headless) return 0 ;; esac; return 1; }
+# preflight it and attest it. (code review r1.) claude/acp-mounted applies and attests a BOUND pair only
+# (runphase's claude arm: ACP set before the canary, transcript attestation of the canary and the review),
+# so for it only `bound` counts: an `eligible` or `fixed` claude row has no unbound apply path.
+policy_applied_combo() {  # <provider> <transport> <capability>
+  case "$1/$2" in
+    codex/acp-mounted|gemini/headless) return 0 ;;
+    claude/acp-mounted) [ "${3:-}" = bound ]; return ;;
+  esac
+  return 1
+}
 
 # ver_ge <a> <b> — dotted numeric version a >= b. A non-numeric side is "not known to be >=".
 ver_ge() {
@@ -348,8 +386,20 @@ ver_ge() {
 # Sets RT_PATH (absolute path, or `bundled`) and RT_VERSION (x.y.z, or `unknown`). Never fails:
 # an unusable explicit path is REFUSED by resolve, not silently swapped for another runtime.
 ACP_RUNTIME_PATH_RE='^/[A-Za-z0-9._/+@-]+$'
+# cli_on_path <name> — the operator's installed CLI <name>: the first executable on PATH with a plain
+# absolute path, skipping per-session wrapper shims. THE ONE PATH WALK: codex's runtime auto-detection and
+# the claude login read-back (`cli-path claude`, leg_binding.py) both use it, so they cannot find different
+# binaries for the same PATH.
+cli_on_path() {
+  local IFS=: d
+  for d in ${PATH:-}; do
+    case "$d" in ""|*cmux-cli-shims*|*/.asdf/shims|*/node_modules/.bin) continue ;; esac
+    if [ -x "$d/$1" ] && [ ! -d "$d/$1" ] && [[ "$d/$1" =~ $ACP_RUNTIME_PATH_RE ]]; then printf '%s' "$d/$1"; return 0; fi
+  done
+  return 1
+}
 policy_runtime_codex() {
-  local want="${COMMS_ACP_CODEX_PATH:-}" d cand="" v
+  local want="${COMMS_ACP_CODEX_PATH:-}" cand="" v
   RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""
   if [ "$want" = bundled ]; then return 0; fi
   if [ -n "$want" ]; then
@@ -358,12 +408,7 @@ policy_runtime_codex() {
     fi
     cand="$want"
   else
-    local IFS=:
-    for d in ${PATH:-}; do
-      case "$d" in ""|*cmux-cli-shims*|*/.asdf/shims|*/node_modules/.bin) continue ;; esac
-      if [ -x "$d/codex" ] && [ ! -d "$d/codex" ] && [[ "$d/codex" =~ $ACP_RUNTIME_PATH_RE ]]; then cand="$d/codex"; break; fi
-    done
-    [ -n "$cand" ] || return 0
+    cand="$(cli_on_path codex)" || return 0
   fi
   # BOUNDED. This runs on EVERY codex resolution — baseline turns included — before the canary and
   # before the turn budget starts, while the runner holds its mount claim, so a CLI or wrapper that
@@ -433,10 +478,15 @@ policy_runtime_gemini() {
 }
 
 # policy_runtime_for <agent> — the ONE dispatch from an agent to its runtime probe; sets RT_*.
-# Only codex and gemini have a runtime a policy is resolved against.
+# codex and gemini have a runtime a policy is resolved against; a bound claude leg's runtime is the pinned
+# adapter (CLAUDE_ACP_VERSION), named rather than probed: npx runs exactly that version.
 policy_runtime_for() {
   RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""
-  case "$1" in codex) policy_runtime_codex ;; gemini) policy_runtime_gemini ;; esac
+  case "$1" in
+    codex)  policy_runtime_codex ;;
+    gemini) policy_runtime_gemini ;;
+    claude) RT_PATH="$CLAUDE_ACP_PACKAGE"; RT_VERSION="$CLAUDE_ACP_VERSION" ;;
+  esac
 }
 
 # policy_model_disabled <agent> <transport> <model> — the reason a model is DISABLED (a `disabled` row),
@@ -463,6 +513,11 @@ policy_unservable_reason() {
     return 1
   fi
   policy_model_available "$1" "$2" "$3" && return 0
+  if [ "$1" = claude ]; then
+    printf "model '%s' (%s) needs %s >= %s, but the pinned adapter is %s — move CLAUDE_ACP_VERSION in acp.sh\n" \
+      "$3" "$4" "$CLAUDE_ACP_PACKAGE" "$(policy_map_get pairmin "$1" "$2" "$3")" "$RT_VERSION"
+    return 1
+  fi
   printf "model '%s' (%s) needs %s >= %s, but the reviewer runtime is %s (%s) — install a newer %s%s\n" \
     "$3" "$4" "$1" "$(policy_map_get pairmin "$1" "$2" "$3")" "$RT_PATH" "$RT_VERSION" "$1" \
     "$( [ "$1" = codex ] && printf ' or set COMMS_ACP_CODEX_PATH')"
@@ -520,10 +575,13 @@ resolve_policy() {
   local phase="${7:--}" csrc="${8:-none}"
   local base bm be pm pe fb="" route_ok=0
   R_AGENT="$agent"; R_TRANSPORT="$transport"; R_TIER="$tier"; R_EFFORT_IN="$effort"
-  R_DECISION="$decision"; R_ROUTING="$routing"; R_PHASE="$phase"; R_CSRC="$csrc"; R_DIGEST=none; R_BOUND=0
+  R_DECISION="$decision"; R_ROUTING="$routing"; R_PHASE="$phase"; R_CSRC="$csrc"; R_DIGEST=none; R_BOUND=0; R_ATTEST=""
   R_MAPV="$(policy_map_check)" || return 1
   R_CAP="$(policy_map_get capability "$agent" "$transport")"; R_CAP="${R_CAP:-unsupported}"
-  if [ "$R_CAP" != unsupported ] && ! policy_applied_combo "$agent" "$transport"; then
+  # `bound` is applied and attested for a BOUND leg only: to an unbound resolution it is `unsupported`, read
+  # here before the applied-combination check, so an unbound record is what it was before the row changed.
+  [ "$R_CAP" != bound ] || R_CAP=unsupported
+  if [ "$R_CAP" != unsupported ] && ! policy_applied_combo "$agent" "$transport" "$R_CAP"; then
     R_CAP=unsupported; fb="${fb:+$fb;}capability-unimplemented"
   fi
   R_RUNTIME=n/a; R_RUNTIME_VERSION=n/a
@@ -676,7 +734,7 @@ bound_refuse() {  # <code> <detail> — one refusal line on stderr, then return 
 }
 bound_prelude() {  # <agent> <transport> <model> <effort|-> <route-id> <access-digest> <phase>
   R_AGENT="$1"; R_TRANSPORT="$2"; R_TIER=none; R_EFFORT_IN=none; R_DECISION=none; R_ROUTING=off
-  R_PHASE="${7:--}"; R_CSRC=bound; R_DIGEST=none; R_BOUND=1; R_ROUTE_ID="$5"; R_ACCESS="$6"
+  R_PHASE="${7:--}"; R_CSRC=bound; R_DIGEST=none; R_BOUND=1; R_ROUTE_ID="$5"; R_ACCESS="$6"; R_ATTEST=""
   R_MAPV="$(policy_map_check)" || return 1
   R_RUNTIME=n/a; R_RUNTIME_VERSION=n/a; R_FALLBACK=none
   # THE PIN RULE. An operator pin or "use max" in the dispatching environment is a second source of the
@@ -701,21 +759,26 @@ resolve_bound() {
   [[ "$bm" =~ $ACP_POLICY_RE ]] || { bound_refuse model-unservable "model '$bm' is not a bare identifier"; return 1; }
   [ "$be" = - ] || [[ "$be" =~ $ACP_POLICY_RE ]] || { bound_refuse effort-refused "effort '$be' is not a bare identifier"; return 1; }
   R_CAP="$(policy_map_get capability "$agent" "$transport")"; R_CAP="${R_CAP:-unsupported}"
-  if { [ "$R_CAP" != eligible ] && [ "$R_CAP" != fixed ]; } || ! policy_applied_combo "$agent" "$transport"; then
-    bound_refuse capability-unsupported "$agent/$transport applies and attests no model or effort policy (capability $R_CAP), so nothing can be bound"; return 1
-  fi
+  case "$R_CAP" in eligible|fixed|bound) policy_applied_combo "$agent" "$transport" "$R_CAP" || R_CAP=unsupported ;; esac
+  case "$R_CAP" in eligible|fixed|bound) ;; *)
+    bound_refuse capability-unsupported "$agent/$transport applies and attests no model or effort policy (capability $R_CAP), so nothing can be bound"; return 1 ;;
+  esac
   policy_runtime_for "$agent"
   [ -z "$RT_ERR" ] || { bound_refuse model-unservable "$RT_ERR"; return 1; }
   R_RUNTIME="$RT_PATH"; R_RUNTIME_VERSION="$RT_VERSION"
-  # Every codex and gemini model has a native effort scale, so a null effort cannot bind one.
-  [ "$be" != - ] || { bound_refuse effort-mismatch "a bound effort of null cannot bind model '$bm': it has a native effort scale"; return 1; }
-  R_MODEL="$bm"; R_EFFORT="$be"; R_MSRC=bound; R_ESRC=bound
-  # The SAME pair rule the pins go through: a model the map knows must accept the effort; one it does not
-  # know is honoured and labelled (unverified-pin), and the post-turn attestation is what gates it.
-  if ! bad="$(policy_pair_verdict "$agent" "$transport" "$R_MODEL" pin "$R_EFFORT" bound)"; then
-    bound_refuse effort-refused "$(policy_pair_refusal "$bad" "$R_MODEL" bound "$R_EFFORT" bound "$R_MAPV")"; return 1
+  R_MODEL="$bm"; R_EFFORT="$be"; R_MSRC=bound; R_ESRC=bound; R_VERIFY="model,effort"
+  if [ "$agent" = claude ]; then
+    bound_pair_claude || return 1
+  else
+    # Every codex and gemini model has a native effort scale, so a null effort cannot bind one.
+    [ "$be" != - ] || { bound_refuse effort-mismatch "a bound effort of null cannot bind model '$bm': it has a native effort scale"; return 1; }
+    # The SAME pair rule the pins go through: a model the map knows must accept the effort; one it does not
+    # know is honoured and labelled (unverified-pin), and the post-turn attestation is what gates it.
+    if ! bad="$(policy_pair_verdict "$agent" "$transport" "$R_MODEL" pin "$R_EFFORT" bound)"; then
+      bound_refuse effort-refused "$(policy_pair_refusal "$bad" "$R_MODEL" bound "$R_EFFORT" bound "$R_MAPV")"; return 1
+    fi
+    R_PAIR="$bad"
   fi
-  R_PAIR="$bad"
   why="$(policy_model_disabled "$agent" "$transport" "$R_MODEL")"
   if [ -n "$why" ]; then
     bound_refuse model-unservable "model '$R_MODEL' is disabled in the policy map ($why; map $R_MAPV)"; return 1
@@ -726,10 +789,35 @@ resolve_bound() {
   R_LIMIT="$(policy_map_get limit "$agent" "$transport" "$R_MODEL")"; R_LIMIT="${R_LIMIT:--}"
   R_ETIER="$(policy_map_reverse tier "$agent" "$transport" "$R_MODEL")"
   R_EEFF="$(policy_map_reverse effort "$agent" "$transport" "$R_EFFORT")"
-  R_VERIFY="model,effort"
+  [ "$R_VERIFY" = "model,effort" ] || R_EEFF=n/a
   R_DIGEST="$(policy_digest "$R_MODEL" "$R_EFFORT" "$R_RUNTIME" "$R_RUNTIME_VERSION" "$R_ACCESS")" \
     || { echo "acp.sh: resolve: no sha256 utility to identify the policy" >&2; return 1; }
   return 0
+}
+# bound_pair_claude — THE CLAUDE PAIR RULE, for a bound leg (R_MODEL, R_EFFORT set; `-` is a null effort).
+# Claude's own transcript is the attestation, so a model binds only where the map says how the transcript
+# records it (a `recorded` row) and which efforts it takes (a `pair` row). There is no unverified pin: an
+# unmapped id would be matched fuzzily by the adapter and could never count as matched. A `none` pair is a
+# model with no effort scale: it binds with a null effort only, and is attested on the model alone. Sets
+# R_ATTEST (the transcript's model id), R_PAIR and, for an effortless model, R_EFFORT=n/a and R_VERIFY=model.
+bound_pair_claude() {
+  local accepted
+  accepted="$(policy_map_get pair "$R_AGENT" "$R_TRANSPORT" "$R_MODEL")"
+  R_ATTEST="$(policy_map_get recorded "$R_AGENT" "$R_TRANSPORT" "$R_MODEL")"
+  if [ -z "$accepted" ] || [ -z "$R_ATTEST" ]; then
+    bound_refuse model-unservable "model '$R_MODEL' has no $( [ -z "$accepted" ] && echo pair || echo recorded ) row in the policy map (map $R_MAPV): what the transcript records for it is unknown, so the turn could not be attested"
+    return 1
+  fi
+  if [ "$accepted" = none ]; then
+    [ "$R_EFFORT" = - ] || { bound_refuse effort-mismatch "model '$R_MODEL' has no native effort scale; the bound effort '$R_EFFORT' cannot be applied"; return 1; }
+    R_EFFORT=n/a; R_VERIFY=model
+  else
+    [ "$R_EFFORT" != - ] || { bound_refuse effort-mismatch "a bound effort of null cannot bind model '$R_MODEL': it has a native effort scale"; return 1; }
+    case ",$accepted," in *",$R_EFFORT,"*) ;; *)
+      bound_refuse effort-refused "$(policy_pair_refusal unsupported-pair "$R_MODEL" bound "$R_EFFORT" bound "$R_MAPV")"; return 1 ;;
+    esac
+  fi
+  R_PAIR=validated
 }
 # resolve_bound_custom — an operator profile (an OpenCode adapter today) is an exact model PIN with no
 # effort scale, so it binds its pinned model and a null effort and nothing else. The profile is read
@@ -792,6 +880,9 @@ emit_policy_record() {  # the persisted per-turn expectation; key<TAB>value, fix
   printf 'fallback\t%s\n'         "${R_FALLBACK:-none}"
   printf 'verify\t%s\n'           "$R_VERIFY"
   printf 'policy_digest\t%s\n'    "$R_DIGEST"
+  # A claude record names the model id its transcript records for the launch id (a `recorded` row): what
+  # the attestation compares the observation with. No other provider writes this key.
+  [ -z "${R_ATTEST:-}" ] || printf 'attest_model\t%s\n' "$R_ATTEST"
   if [ "${R_BOUND:-0}" = 1 ]; then
     printf 'route_id\t%s\n'         "$R_ROUTE_ID"
     printf 'access_digest\t%s\n'    "$R_ACCESS"
@@ -817,9 +908,11 @@ policy_from_record() {
       # Each version is held to its OWN field set: a retained version-1 record still reads, and a
       # version-2 (bound) record must carry the three keys only it has.
       hasb = (("route_id" in n) && ("access_digest" in n) && ("bound" in n))
-      anyb = (("route_id" in n) || ("access_digest" in n) || ("bound" in n))
+      anyb = (("route_id" in n) || ("access_digest" in n) || ("bound" in n) || ("attest_model" in n))
       if (v["policy_record"] == want && anyb) bad = 1
       if (v["policy_record"] == wantb && !hasb) bad = 1
+      # a claude record is bound, and names the model id its transcript records (attest_model)
+      if (v["provider"] == "claude" && (v["policy_record"] != wantb || !("attest_model" in n))) bad = 1
       if (bad || (v["policy_record"] != want && v["policy_record"] != wantb)) exit 1
       print v["provider"] "\t" v["capability"] "\t" v["verify"] "\t" v["model"] "\t" v["effort"]
     }' "$f")" || { echo "acp.sh: policy record '$f' is malformed" >&2; return 1; }
@@ -830,12 +923,19 @@ policy_from_record() {
   vf="$(printf '%s' "$out" | cut -f3)"; m="$(printf '%s' "$out" | cut -f4)"; e="$(printf '%s' "$out" | cut -f5)"
   [ "$p" = "$agent" ] || { echo "acp.sh: policy record is for '$p', not '$agent'" >&2; return 1; }
   # Gate on WHAT IS VERIFIED, not on whether routing was eligible: a `fixed` combination still
-  # applies and attests its baseline; an `unsupported` one claims nothing and is refused here.
-  [ "$vf" = "model,effort" ] || { echo "acp.sh: policy record for '$p' ($c) applies no policy" >&2; return 1; }
+  # applies and attests its baseline; an `unsupported` one claims nothing and is refused here. The one
+  # other shape is a bound claude model with no effort scale: model only, effort n/a.
+  if [ "$p" = claude ] && [ "$vf" = model ] && [ "$e" = n/a ]; then :
+  else
+    [ "$vf" = "model,effort" ] || { echo "acp.sh: policy record for '$p' ($c) applies no policy" >&2; return 1; }
+    [[ "$e" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: policy record effort '$e' is not a bare identifier" >&2; return 1; }
+  fi
   [[ "$m" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: policy record model '$m' is not a bare identifier" >&2; return 1; }
-  [[ "$e" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: policy record effort '$e' is not a bare identifier" >&2; return 1; }
   printf '%s\t%s\n' "$m" "$e"
 }
+# policy_record_key <file> <key> — one more field of a record policy_from_record has ALREADY validated
+# (every key exactly once), or nothing when the record does not carry it.
+policy_record_key() { awk -F'\t' -v k="$2" '$1 == k { print $2; exit }' "$1"; }
 
 # policy_transport_for <agent> — the transport its applied policy is resolved under: codex's mounted ACP
 # turn, gemini's direct `agy` turn (policy-map.tsv has the rows under each name).
@@ -879,9 +979,24 @@ provider_config_for() {  # <agent> [record] [auth-type] -> the COMPLETE isolated
 # With a record, the expectation is the persisted one: an attestation that reloaded a changed
 # default would relabel the expectation to fit the turn, which is the one thing it may never do.
 policy_verdict() {
-  local agent="$1" oe="$2" om="${3:-}" rec="${4:-}" pol m e
+  local agent="$1" oe="$2" om="${3:-}" rec="${4:-}" pol m e vf="model,effort" am=""
   pol="$(policy_for "$agent" "$rec")" || return 21
   m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"
+  # A claude record names the model id its transcript records (attest_model) beside the launch id the
+  # caller bound, and an effortless one verifies the model alone; codex records carry neither key.
+  if [ -n "$rec" ]; then
+    vf="$(policy_record_key "$rec" verify)"; am="$(policy_record_key "$rec" attest_model)"
+    if [ -n "$am" ]; then [[ "$am" =~ $ACP_POLICY_RE ]] || { printf 'undecidable: the record names no attestable model\n'; return 21; }; m="$am"; fi
+  fi
+  if [ "$vf" = model ]; then
+    [ -n "$om" ] && [ "$om" != null ] || { printf 'undecidable: no observed model\n'; return 21; }
+    # NO EFFORT IS THE EVIDENCE here: a model without an effort scale records none, so one that does was
+    # not the bound model (or not run without an effort).
+    if [ -n "$oe" ] && [ "$oe" != null ] || [ "$om" != "$m" ]; then
+      printf 'want no effort, model=%s; got effort=%s model=%s\n' "$m" "${oe:-null}" "$om"; return 20
+    fi
+    printf 'effort=none model=%s\n' "$om"; return 0
+  fi
   [ -n "$oe" ] && [ "$oe" != null ] || { printf 'undecidable: no observed effort\n'; return 21; }
   # BOTH keys are policy, so BOTH must be evidenced. provider-config writes the model into the
   # isolated toml, so an observation that cannot show the model is missing evidence for half the
@@ -1015,6 +1130,59 @@ json.dump(strip(doc), sys.stdout)
 GSA
 }
 
+# policy_check_claude <record> — THE BOUND CLAUDE PREFLIGHT, on an `acpx sessions show --format json`
+# record on stdin, against the PERSISTED bound record. Free (a local read) and, like codex's, necessary but
+# not sufficient: the transcript attestation of the canary and the review is what gates. It reads what acpx
+# will RE-APPLY, not only what the adapter reports now:
+#   - the saved model preference (`session_options.model`) must be the bound launch id: acpx re-applies it
+#     on every reconnect. The adapter's own `model` option is reported, never gated: the adapter resolves a
+#     value fuzzily and reports an alias of its choosing.
+#   - the `effort` option must exist exactly when the map gives the model efforts, and read the bound effort,
+#     as must a saved `desired_config_options.effort` (replayed onto a replacement session); an effortless
+#     model must carry neither.
+# Exit 0 match, 20 mismatch, 21 undecidable, 23 the session's effort option disagrees with the map (present
+# for a model without an effort scale, or absent for one with it): the runner refuses that as effort-mismatch.
+policy_check_claude() {
+  local rec="$1" pol m e vf out has ev mv dv sm
+  [ -n "$rec" ] || { echo "undecidable: a claude preflight reads a persisted bound record (--policy-file)" >&2; return 21; }
+  pol="$(policy_from_record claude "$rec")" || return 21
+  m="${pol%%$'\t'*}"; e="${pol#*$'\t'}"; vf="$(policy_record_key "$rec" verify)"
+  command -v python3 >/dev/null 2>&1 || { echo "undecidable: python3 is unavailable" >&2; return 21; }
+  out="$(python3 -c '
+import json,sys
+def s(v): return "" if v is None else str(v)
+try: r=json.load(sys.stdin)
+except Exception: print("BAD"); sys.exit(0)
+ax=r.get("acpx") if isinstance(r,dict) else None
+opts=ax.get("config_options") if isinstance(ax,dict) else None
+if not isinstance(opts,list): print("BAD"); sys.exit(0)
+d={}
+for o in opts:
+    if isinstance(o,dict) and o.get("id") is not None: d[str(o["id"])]=o.get("currentValue")
+des=ax.get("desired_config_options"); so=ax.get("session_options")
+if des is not None and not isinstance(des,dict): print("BAD"); sys.exit(0)
+if so is not None and not isinstance(so,dict): print("BAD"); sys.exit(0)
+print("\t".join(["1" if "effort" in d else "0", s(d.get("effort")), s(d.get("model")),
+                 s((des or {}).get("effort")), s((so or {}).get("model"))]))
+' 2>/dev/null)" || out=BAD
+  [ "$out" != BAD ] || { echo "undecidable: the session record or its saved preferences are unreadable" >&2; return 21; }
+  # cut, not `read`: an empty field must not shift the rest left
+  has="$(printf '%s' "$out" | cut -f1)"; ev="$(printf '%s' "$out" | cut -f2)"; mv="$(printf '%s' "$out" | cut -f3)"
+  dv="$(printf '%s' "$out" | cut -f4)"; sm="$(printf '%s' "$out" | cut -f5)"
+  if [ "$sm" != "$m" ]; then
+    printf 'the saved model preference (%s) is not the bound launch id (%s), and acpx re-applies it on every reconnect\n' "${sm:-none}" "$m"; return 20
+  fi
+  if [ "$vf" = model ]; then
+    [ "$has" = 0 ] || { printf 'the session offers an effort option (%s) for model %s, which the map gives no effort scale\n' "${ev:-unset}" "$m"; return 23; }
+    [ -z "$dv" ] || { printf 'a saved effort preference (%s) would be replayed onto a replacement session of an effortless model\n' "$dv"; return 20; }
+    printf 'model=%s saved_model=%s effort=none\n' "${mv:-unset}" "$sm"; return 0
+  fi
+  [ "$has" = 1 ] || { printf 'the session offers no effort option for model %s, which the map gives efforts\n' "$m"; return 23; }
+  [ "$ev" = "$e" ] || { printf 'want effort=%s; the session reports effort=%s\n' "$e" "${ev:-unset}"; return 20; }
+  [ -z "$dv" ] || [ "$dv" = "$e" ] || { printf 'a saved effort preference (%s) conflicts with the bound effort (%s) and would be replayed onto a replacement session\n' "$dv" "$e"; return 20; }
+  printf 'model=%s saved_model=%s effort=%s\n' "${mv:-unset}" "$sm" "$ev"; return 0
+}
+
 cmd_resolve() {
   local agent="${1:-}"; [ -n "$agent" ] || { echo "acp.sh: resolve: an agent name is required" >&2; exit 2; }
   shift
@@ -1054,9 +1222,9 @@ cmd_resolve() {
     [[ "$bdigest" =~ ^[0-9a-f]{64}$ ]] || { echo "acp.sh: resolve: access digest is not a sha256" >&2; exit 2; }
     [ "$phase" = - ] || [[ "$phase" =~ $ACP_POLICY_RE ]] || { echo "acp.sh: resolve: phase '$phase' is not a bare token" >&2; exit 2; }
     case "$agent" in
-      codex)        [ "$bcustom" = 0 ] || { echo "acp.sh: resolve: --custom-profile is for an operator profile, not '$agent'" >&2; exit 2; }
+      codex|claude) [ "$bcustom" = 0 ] || { echo "acp.sh: resolve: --custom-profile is for an operator profile, not '$agent'" >&2; exit 2; }
                     resolve_bound "$agent" "$transport" "$bmodel" "$beffort" "$broute" "$bdigest" "$phase" || exit 1 ;;
-      claude|grok|gemini)  bound_refuse capability-unsupported "'$agent' applies and attests no model or effort policy, so nothing can be bound"; exit 1 ;;
+      grok|gemini)  bound_refuse capability-unsupported "'$agent' applies and attests no model or effort policy, so nothing can be bound"; exit 1 ;;
       *) [ "$bcustom" = 1 ] || { echo "acp.sh: resolve: a custom profile binds through --custom-profile" >&2; exit 2; }
          resolve_bound_custom "$agent" "$transport" "$bmodel" "$beffort" "$broute" "$bdigest" "$phase" || exit 1 ;;
     esac
@@ -1131,18 +1299,20 @@ cmd_capabilities() {
   printf 'reviewer codex runtime: %s (version %s)%s\n' "$RT_PATH" "$RT_VERSION" "${RT_ERR:+ — REFUSED: $RT_ERR}"
   policy_runtime_gemini
   printf 'reviewer gemini runtime: %s (version %s)%s\n' "${RT_PATH:-none}" "$RT_VERSION" "${RT_ERR:+ — REFUSED: $RT_ERR}"
+  printf 'bound claude reviewer adapter: %s\n' "$(adapter_command_for claude bound)"
   # Two passes, so a routing-eligible combination's rows print whatever order the map lists them in.
   awk -F'\t' '
     { sub(/\r$/, "") }
     /^[[:space:]]*(#|$)/ { next }
     FNR == NR { if ($1 == "capability") cap[$2 SUBSEP $3] = $4; next }
-    # the concrete rows print for every combination that APPLIES a policy (eligible or fixed)
+    # the concrete rows print for every combination that APPLIES a policy (eligible, fixed or bound)
     $1 == "capability" { printf "%s/%s: %s\n  mechanism: %s\n  evidence: %s\n  versions tested: %s\n  notes: %s\n", $2, $3, $4, $5, $6, $7, $8; next }
     $1 == "baseline" && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s baseline: model=%s effort=%s\n", $2, $3, $4, $5; next }
     $1 == "ceiling"  && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s ceiling (use max): model=%s effort=%s\n", $2, $3, $4, $5; next }
     $1 == "tier"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s tier %s -> first servable of %s\n", $2, $3, $4, $5; next }
     $1 == "effort"   && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s effort %s -> %s\n", $2, $3, $4, $5; next }
-    $1 == "pair"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s accepts: %s%s\n", $2, $3, $4, $5, (NF == 6 ? " (needs " $2 " >= " $6 ")" : ""); next }
+    $1 == "pair"     && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s accepts: %s%s\n", $2, $3, $4, $5, (NF == 6 ? " (needs " ($2 == "claude" ? "claude-agent-acp" : $2) " >= " $6 ")" : ""); next }
+    $1 == "recorded" && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s is recorded in the transcript as %s\n", $2, $3, $4, $5; next }
     $1 == "limit"    && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s spends its own usage limit: %s\n", $2, $3, $4, $5; next }
     $1 == "disabled" && cap[$2 SUBSEP $3] != "unsupported" { printf "  %s/%s %s is DISABLED: %s\n", $2, $3, $4, $5; next }' "$ACP_POLICY_MAP" "$ACP_POLICY_MAP"
 }
@@ -1220,6 +1390,7 @@ cmd_doctor() {
   fi
   echo "acpx: pinned @$ACPX_VERSION via npx (cached after first use)"
   echo "codex adapter (mounted reviews): pinned $(adapter_command_for codex)"
+  echo "claude adapter (bound reviews only): pinned $(adapter_command_for claude bound); unbound claude reviews use acpx's builtin profile"
   echo "agents: codex claude grok gemini supported ($(for a in codex claude grok; do printf '%s=%s ' "$a" "$(profile_for "$a")"; done)gemini=agy)"
   # Which codex a MOUNTED reviewer will run, and so which mapped models it can serve.
   RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
@@ -1469,6 +1640,7 @@ case "${1:-}" in
     [ -n "${PA_POS[0]:-}" ] || die "policy-check: an agent name is required"
     _pc_agent="${PA_POS[0]}"
     [ "${PA_POS[1]:-}" = "-" ] || die "policy-check: the record is read from stdin — pass '-'"
+    if [ "$_pc_agent" = claude ]; then _pc_rc=0; policy_check_claude "$PA_FILE" || _pc_rc=$?; exit "$_pc_rc"; fi
     command -v python3 >/dev/null 2>&1 || { echo "undecidable: python3 is unavailable" >&2; exit 21; }
     # THE SAVED PREFERENCES ARE READ TOO, and this is the point of the check. acpx replays
     # `desired_config_options` (effort) and `session_options.model` (a model set with `acpx set
@@ -1554,8 +1726,27 @@ print("%s\t%s\t%s\t%s" % (g("reasoning_effort"), g("model"), dv, dm))
     ;;
   launcher) acpx_prepare_cache; acpx_launcher "${2:-}"; printf '\n' ;;
   adapter)
+    # adapter <agent> [--bound] — the pinned adapter command; `--bound` asks for a bound leg's (claude's pin
+    # applies to bound legs only, so `adapter claude` alone still prints nothing).
     [ -n "${2:-}" ] || die "adapter: an agent name is required"
-    adapter_command_for "$2"; printf '\n' ;;
+    case "${3:-}" in "") adapter_command_for "$2" ;; --bound) adapter_command_for "$2" bound ;; *) die "adapter: unknown option '$3'" ;; esac
+    printf '\n' ;;
+  cli-path)
+    # cli-path <name> — the operator's installed CLI the one PATH walk finds (cli_on_path), or exit 1.
+    [[ "${2:-}" =~ ^[a-z][a-z0-9-]*$ ]] || die "cli-path: a bare CLI name is required"
+    cli_on_path "$2" || exit 1
+    printf '\n' ;;
+  claude-env)
+    # claude-env --policy-file <record> — THE ONE DEFINITION of what the runner injects into a bound claude
+    # leg's environment: `CLAUDE_CODE_EFFORT_LEVEL<TAB><effort>` for a record with an effort, nothing for an
+    # effortless one. The claude arm builds the leg's environment from this output and the launch-time
+    # read-back guard compares the leg's environment with it, so the guard can never refuse the runner's own
+    # injection and admits no other value. The caller checks the record's hash first.
+    shift; policy_args "$@"
+    [ -n "$PA_FILE" ] && [ "${#PA_POS[@]}" = 0 ] || die "claude-env: usage: claude-env --policy-file <record>"
+    _ce_pol="$(policy_from_record claude "$PA_FILE")" || exit 1
+    [ "$(policy_record_key "$PA_FILE" verify)" = model ] || printf 'CLAUDE_CODE_EFFORT_LEVEL\t%s\n' "${_ce_pol#*$'\t'}"
+    ;;
   supports)
     # supports <agent> — exit 0 iff a consult can actually run here for that
     # agent. Machine-readable on purpose: callers must never parse doctor's prose.

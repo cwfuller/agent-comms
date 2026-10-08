@@ -236,7 +236,15 @@ expectation matches the declaration, that the credential reference is the one pa
 agents, the harness's own local auth mode where it is readable without a secret. It does not prove which account a remote service
 billed; where nothing could be observed `result.json` says `auth_evidence: configured`, never `observed`.
 
-Only an agent a mounted ACP runner supports can be bound: `codex` (model and native effort), and OpenCode custom profiles (their
-pinned model, no effort). `claude`, `grok`, `gemini` (agy is a direct runner with no ACP session), mailbox legs and generic ACP profiles (consult-only) are reported `unbindable` by
-`review-route capability`. A custom profile binds its pinned model only (`model-mismatch` otherwise); no row is added to `policy-map.tsv`.
+Only an agent a mounted ACP runner supports can be bound: `codex` and `claude` (model and native effort; `claude-review` runs under
+the `claude` entry), and OpenCode custom profiles (their pinned model, no effort). `grok`, `gemini` (agy is a direct runner with no ACP
+session), mailbox legs and generic ACP profiles (consult-only) are reported `unbindable` by `review-route capability`. A custom
+profile binds its pinned model only (`model-mismatch` otherwise); no row is added to `policy-map.tsv`.
+
+A bound claude leg needs an entry such as `"claude": {"route_id": "kernel-claude", "transport": "acp", "provider": "anthropic",
+"account": "main", "billing": "subscription", "credential": null}`; only `subscription` is supported. It runs on the login of the
+dispatch's own `CLAUDE_CONFIG_DIR` (or `~/.claude`), read back before launch; `account` is the operator's label and is not
+verified. Its model must be a launch id the policy map can attest (a `pair` and a `recorded` row: `claude-opus-5-5` and
+`claude-sonnet-5-5` today; an alias such as `sonnet` refuses `model-unservable` until it has rows), and `binding.observed` is the
+id Claude's transcript recorded.
 

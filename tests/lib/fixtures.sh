@@ -281,6 +281,21 @@ esac
 if [ -n "${AX_CWD_LOG:-}" ]; then
   printf '%s\t%s\n' "$(pwd -P)" "$*" >> "$AX_CWD_LOG"
 fi
+# THE PINNED CLAUDE ADAPTER (`--agent npx -y @agentclientprotocol/claude-agent-acp@...`), which a BOUND claude leg
+# runs: it answers `set model|effort`, reports a claude session record, and writes Claude transcript records.
+ax_claude=0
+case " $* " in *"@agentclientprotocol/claude-agent-acp@"*) ax_claude=1 ;; esac
+# AX_ORDER_LOG records, one line each, the calls that set, pin or prompt a session, in the order they came:
+# `set <key> <value>`, `set-mode <mode>`, `canary`, `review`.
+if [ -n "${AX_ORDER_LOG:-}" ]; then
+  case " $* " in
+    *" sessions "*) ;;
+    *" set-mode "*) ax_last=""; for ax_a in "$@"; do ax_last="$ax_a"; done; printf 'set-mode %s\n' "$ax_last" >> "$AX_ORDER_LOG" ;;
+    *" set "*) printf 'set %s %s\n' "${@:$(($# - 1)):1}" "${@:$#:1}" >> "$AX_ORDER_LOG" ;;
+    *" --file "*) printf 'review\n' >> "$AX_ORDER_LOG" ;;
+    *" -s "*) printf 'canary\n' >> "$AX_ORDER_LOG" ;;
+  esac
+fi
 # AX_KDIR_RUN_LOG records the run a THROWAWAY mount says it was made for (<ident>/.state.run, two
 # levels above the cwd). The throwaway is removed when its turn ends, so only the child sees it.
 if [ -n "${AX_KDIR_RUN_LOG:-}" ] && [ -f "$(pwd -P)/../../.state.run" ]; then
@@ -339,7 +354,8 @@ fi
 if [ -n "${AX_ENVDUMP_LOG:-}" ]; then
   ax_prof=unknown
   for ax_a in "$@"; do case "$ax_a" in codex|gemini|claude|grok-build|agent-comms-custom) ax_prof="$ax_a"; break ;;
-    *@agentclientprotocol/codex-acp@*) ax_prof=codex; break ;; esac; done
+    *@agentclientprotocol/codex-acp@*) ax_prof=codex; break ;;
+    *@agentclientprotocol/claude-agent-acp@*) ax_prof=claude; break ;; esac; done
   for ax_v in ${AX_ENVDUMP_VARS:-}; do
     printf '%s:%s=%s\n' "$ax_prof" "$ax_v" "$(printenv "$ax_v" 2>/dev/null || printf '<unset>')" >> "$AX_ENVDUMP_LOG" 2>/dev/null || true
   done
@@ -442,6 +458,20 @@ case " $* " in
     case " $* " in
       *" --format json "*)
         if [ -n "${AX_SHOW_JSON_GARBAGE:-}" ]; then printf 'not json at all\n'; exit 0; fi
+        # A claude session record: the `mode`, `model` and (unless AX_CLAUDE_NO_EFFORT_OPT, a model with no
+        # effort scale) `effort` options, and the saved preferences acpx persisted for `set model|effort`.
+        # AX_CLAUDE_SHOW_EFFORT reports another current effort; AX_CLAUDE_SAVED_MODEL another saved model.
+        if [ "$ax_claude" = 1 ]; then
+          ax_sm="$(sed -n 's/^model=//p' "${ax_rec%.json}.set" 2>/dev/null | tail -1)"
+          ax_se="$(sed -n 's/^effort=//p' "${ax_rec%.json}.set" 2>/dev/null | tail -1)"
+          ax_sm="${AX_CLAUDE_SAVED_MODEL:-$ax_sm}"
+          ax_opts='{"id":"mode","currentValue":"plan"},{"id":"model","currentValue":"stub-alias"}'
+          [ -n "${AX_CLAUDE_NO_EFFORT_OPT:-}" ] || ax_opts="$ax_opts,{\"id\":\"effort\",\"currentValue\":\"${AX_CLAUDE_SHOW_EFFORT:-${ax_se:-default}}\"}"
+          printf '{"cwd":"%s","acpx":{"acpx_record_id":"stub","config_options":[%s]%s%s}}\n' "${AX_LIE_CWD:-$(pwd -P)}" "$ax_opts" \
+            "$( [ -z "$ax_sm" ] || printf ',"session_options":{"model":"%s"}' "$ax_sm")" \
+            "$( [ -z "$ax_se" ] || printf ',"desired_config_options":{"effort":"%s"}' "$ax_se")"
+          exit 0
+        fi
         if [ -n "${AX_SHOW_NO_OPTS:-}" ]; then
           printf '{"acpx":{"acpx_record_id":"stub"},"cwd":"%s"}\n' "${AX_LIE_CWD:-$(pwd -P)}"; exit 0
         fi
@@ -460,6 +490,15 @@ case " $* " in
     printf 'name: stub\n'
     printf 'cwd: %s\n' "${AX_LIE_CWD:-$(pwd -P)}"
     exit 0 ;;
+  *" set "*)
+    # set <key> <value> — acpx's success lines (`model set: <id>`, `config set: <key>=<value> (<n> options)`),
+    # kept beside the session record so `sessions show` and the transcript records report what was set.
+    # AX_SET_FAIL=<key> rejects that key, as the claude adapter does after a prompt ("Internal error").
+    ax_key="${@:$(($# - 1)):1}"; ax_val="${@:$#:1}"
+    if [ -n "${AX_SET_FAIL:-}" ] && [ "$AX_SET_FAIL" = "$ax_key" ]; then printf 'Internal error\n' >&2; exit 1; fi
+    [ -n "$ax_rec" ] && printf '%s=%s\n' "$ax_key" "$ax_val" >> "${ax_rec%.json}.set"
+    case "$ax_key" in model) printf 'model set: %s\n' "$ax_val" ;; *) printf 'config set: %s=%s (4 options)\n' "$ax_key" "$ax_val" ;; esac
+    exit 0 ;;
   *" set-mode "*)
     # set-mode <mode> — echo acpx's success line. AX_SETMODE_CT counts calls; AX_SETMODE_FAIL_ON
     # names the 1-based call that must REJECT (2 = the post-canary re-pin), and a rejection
@@ -474,6 +513,75 @@ case " $* " in
     fi
     printf 'mode set: %s\n' "$ax_mode"; exit 0 ;;
 esac
+# CLAUDE'S OWN TRANSCRIPT for a prompt on the pinned claude adapter: assistant records appended where Claude
+# keeps them, ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<cwd slug>/<session>.jsonl (only under the suite's
+# work root, never a real ~/.claude), carrying the model and effort `set` asked for. Knobs, per prompt kind
+# (CANARY or REVIEW): AX_CLAUDE_<KIND>_MODEL / _EFFORT replace what was set (`none` = no effort key, `skip` =
+# no record at all); AX_CLAUDE_TX_ROOT writes them under another root; AX_CLAUDE_REVIEW_EXTRA adds, to the
+# review window, comma-separated `second:<model>` (another main-chain record), `subagent:<model>` (a
+# <session>/subagents record), `cd:<model>` (a record whose cwd is a subdirectory), `subproject:<model>` (a
+# record in the project directory named for a subdirectory), `synthetic-zero`, `synthetic-billed`,
+# `perturn:<effort>` and `replace` (the session file replaced: an unbounded window). AX_CLAUDE_CANARY_BLOCK=<path>
+# makes <path> a directory during the canary, so a snapshot the runner writes there next cannot be made.
+if [ "$ax_claude" = 1 ] && [ -n "$ax_sname" ]; then
+  case " $* " in *" sessions "*|*" set "*|*" set-mode "*) ;; *" --file "*|*" -s "*)
+    ax_kind=CANARY; case " $* " in *" --file "*) ax_kind=REVIEW ;; esac
+    ax_tx_cfg="${CLAUDE_CONFIG_DIR:-${HOME:-/nonexistent}/.claude}"
+    ax_tx_root="${AX_CLAUDE_TX_ROOT:-$ax_tx_cfg/projects}"
+    [ -f "${HOME:-/nonexistent}/.acpx-test-store" ] && [ -d "${AX_CLAUDE_TX_ROOT:-$ax_tx_cfg}" ] || ax_tx_root=/nonexistent
+    case "$(cd "${AX_CLAUDE_TX_ROOT:-$ax_tx_cfg}" 2>/dev/null && pwd -P)" in "$ax_test_root"/*)
+      IFS= read -r -d '' ax_tx_py <<'AXTX'
+import json, os, re, sys
+root, cwd, sess, kind, model, effort = sys.argv[1:7]
+slug = lambda p: re.sub(r"[^a-zA-Z0-9]", "-", p)
+def rec(m, e, cwd_=cwd, side=False, usage=None, turn=None):
+    r = {"type": "assistant", "sessionId": sess, "version": "2.1.293", "cwd": cwd_, "isSidechain": side,
+         "message": {"model": m, "usage": usage or {"input_tokens": 3, "cache_creation_input_tokens": 0,
+                                                    "cache_read_input_tokens": 0, "output_tokens": 1}}}
+    if e != "none":
+        r["effort"] = e
+    if turn is not None:
+        r["perTurnEffort"] = turn
+    return json.dumps(r) + "\n"
+def put(path, line, mode="a"):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, mode) as fh:
+        fh.write(line)
+main = os.path.join(root, slug(cwd), sess + ".jsonl")
+model = os.environ.get("AX_CLAUDE_%s_MODEL" % kind) or model
+effort = os.environ.get("AX_CLAUDE_%s_EFFORT" % kind) or effort or "none"
+extras = [x for x in os.environ.get("AX_CLAUDE_REVIEW_EXTRA", "").split(",") if x] if kind == "REVIEW" else []
+turn = next((x.split(":", 1)[1] for x in extras if x.startswith("perturn:")), None)
+if model != "skip":
+    put(main, rec(model, effort, turn=turn))
+for x in extras:
+    k, _, v = x.partition(":")
+    if k == "second":
+        put(main, rec(v, effort))
+    elif k == "subagent":
+        put(os.path.join(root, slug(cwd), sess, "subagents", "agent-1.jsonl"), rec(v, effort, side=True))
+    elif k == "cd":
+        put(main, rec(v or model, effort, cwd_=os.path.join(cwd, "sub")))
+    elif k == "subproject":
+        put(os.path.join(root, slug(os.path.join(cwd, "sub")), sess + ".jsonl"), rec(v, effort, cwd_=os.path.join(cwd, "sub")))
+    elif k == "synthetic-zero":
+        put(main, rec("<synthetic>", "none", usage={"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0}))
+    elif k == "synthetic-billed":
+        put(main, rec("<synthetic>", "none", usage={"input_tokens": 9, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 1}))
+    elif k == "replace":
+        body = open(main).read() if os.path.exists(main) else ""
+        tmp = main + ".tmp"
+        put(tmp, body, "w")
+        os.replace(tmp, main)
+AXTX
+      [ "$ax_kind" = CANARY ] && [ -n "${AX_CLAUDE_CANARY_BLOCK:-}" ] && mkdir -p "$AX_CLAUDE_CANARY_BLOCK" 2>/dev/null
+      ax_cs="$(sed -n 's/^model=//p' "${ax_rec%.json}.set" 2>/dev/null | tail -1)"
+      ax_ce="$(sed -n 's/^effort=//p' "${ax_rec%.json}.set" 2>/dev/null | tail -1)"
+      python3 -c "$ax_tx_py" "$ax_tx_root" "$(pwd -P)" "claude-$(printf '%s' "$ax_sname" | shasum -a 256 | cut -c1-12)" \
+        "$ax_kind" "${ax_cs:-unset-model}" "$ax_ce" 2>/dev/null || true ;;
+    esac ;;
+  esac
+fi
 # AX_LAUNCH_GROK models acpx's queue owner spawning its agent: real acpx runs `grok agent stdio` found
 # on PATH, which under a containment backend is the shim box.sh put first. The stub's `grok` exits at once.
 # AX_GROK_OUT collects what that stub grok reported from inside the box.

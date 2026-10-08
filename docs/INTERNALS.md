@@ -342,6 +342,13 @@ override — pointing `CLAUDE_CONFIG_DIR` at the mount breaks authentication —
 credential with a claude driver on the same machine. The twin separates the mailbox and the
 session, not the model's configuration.
 
+**The same residual holds for a BOUND claude leg** (`panel dispatch --bindings`, below): open network, the
+dispatch's own `CLAUDE_CONFIG_DIR` (or `~/.claude`) settings, instructions, memory and login, no isolation.
+What binding adds is that those settings cannot decide what ran without it being seen. The effort is
+injected over the settings' `effortLevel` (`CLAUDE_CODE_EFFORT_LEVEL`) and the model set over ACP, and both are
+ATTESTED from Claude's own transcript rather than isolated. The user settings' `env` block and `apiKeyHelper`
+are checked by key name before launch. Managed (enterprise) settings files are not read.
+
 **The gemini provider's isolation differs from all three.** gemini runs through the Antigravity CLI (`agy`),
 which has no ACP mode, so there is no acpx session and no parent-owned home: the leg is a direct, parent-brokered
 `agy -p --mode plan` turn (`run_agy_turn` in `runphase.sh`), the way grok's is. **It runs in the operator's real
@@ -840,6 +847,22 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
   **version 2** (adds `route_id`, `access_digest`, `bound`); unbound resolutions still write version 1 byte for byte, and the readers
   accept both, each held to its own field set, so records retained across an upgrade still read. The policy digest, hence the warm session name,
   adds the access digest only for bound records, so two accounts never share a warm session.
+- **A bound claude leg** (`claude`, and `claude-review` under the same access key) runs on the existing mounted `claude-plan` arm with
+  its containment unchanged, but on the PINNED adapter (`acp.sh adapter claude --bound`, claude-agent-acp `CLAUDE_ACP_VERSION`, part
+  of the policy digest; unbound claude reviews stay on acpx's builtin). The map row is capability `bound`: applied and attested for a
+  bound leg only, read as `unsupported` by an unbound resolution, and the only capability `policy_applied_combo` accepts for
+  claude, so no Claude baseline, tier or ceiling exists. A launch id binds only with a `pair` row (its efforts, or `none` for a model
+  without an effort scale, which then binds a null effort only) and a `recorded` row (the model id the transcript records for it,
+  persisted as `attest_model`); an alias or id without both refuses `model-unservable`. Before the first prompt the runner sets the
+  model, then the effort, over ACP (each confirmed from acpx's output), pins `plan`, and runs the preflight (`policy_check_claude`:
+  the saved model preference acpx re-applies, the effort option and its saved replay). `CLAUDE_CODE_EFFORT_LEVEL` comes from
+  `acp.sh claude-env`, the one definition the arm and the read-back guard both read. **Attestation** (`helpers/claude_transcript.py`)
+  reads every assistant record, main chain and subagent files alike, appended under the mount cwd's project directories between a
+  snapshot and the prompt's end: the canary's window gates the review prompt, the review's gates publication, each its own snapshot
+  file (never the usage snapshot). The window is attributed by DIRECTORY and file (the slug, or the slug followed by `-`), never by a
+  record's own `cwd`, and a slug Claude would truncate (over 200 characters) is refused before the canary rather than filtered. A
+  zero-usage `<synthetic>` record is exempt (the usage reader's rule); records disagreeing on (model, effort), a `perTurnEffort` that
+  differs, no record, or an unbounded window are undecidable. The verdict is `policy_verdict`, codex's.
 - **Credential scrub.** The scrub set is the UNION of every configured credential name (all of `access.json`, every `agents.json` `credentials` mapping,
   the table's adapter destinations), the patterns `*_API_KEY`, `*_TOKEN`, `*_AUTH_TOKEN`, `*_SECRET*`, `*_ACCESS_KEY*`, and the table. It is
   applied as `env -u NAME` on every acpx call of the leg; only the bound `api` credential is then restored, under the variable its adapter
@@ -847,13 +870,24 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
   under the single marker `AGENT_COMMS_BOUND_CREDENTIAL` and its launcher places it under the profile's destination, so an inherited variable of the
   same name (an ambient key beside a bound Keychain reference) never stands in for it, in `serve`, `attest` or `acpx`. No prefix is exempt from the
   pattern scrub (a value is in a process environment, never in an argv, file, event or log). Configuration names come first
-  because an operator-chosen name (`CODEX_METERED_KEY`, `API_KEY`) survives any pattern list. **Residual**: a credential nobody configured that
+  because an operator-chosen name (`CODEX_METERED_KEY`, `API_KEY`) survives any pattern list. The table carries Claude's credential-bearing names
+  that no pattern matches (custom headers, token files and descriptors, mTLS client credentials, OAuth endpoints, gateway and cloud route
+  switches, other settings paths) and its model and effort selectors, found by a strings survey of the CLI the bound adapter bundles; the
+  survey is repeated on every change of that pin. **Residual**: a credential nobody configured that
   matches no pattern and is not in the table passes through. The harness's own on-disk login is not an environment variable and is governed by the auth rows.
 - **Authentication route.** Passing a key selects nothing by itself. For both billing classes the launcher applies the adapter's `auth` row (codex: the staged
   `auth.json` and its `auth_mode`; gemini has no row: it runs agy in the operator's own home, so a bound gemini leg is refused) and READS IT BACK before the first acpx call, refusing with `binding-mismatch` on a
   difference. Only a successful read-back lets `result.json` say `auth_evidence: observed`. A (adapter, billing) pair with no explicit, readable selection is
   declared `unsupported` in the table and refused (`auth-route-unsupported`) instead of being bound on the hope that an environment key beats a saved login:
   **codex `api` is such a pair today** (`forced_login_method` and `CODEX_API_KEY` exist in the installed binary, but nothing shows the mounted ACP adapter honours them).
+  **claude `subscription`** has no file to stage: the leg runs on the login of its own `CLAUDE_CONFIG_DIR`. Its read-back
+  (`leg_binding.py claude_readback`) runs INSIDE the leg's exact acpx environment (`acp_leg_env`, the function `acp_exec` uses):
+  no scrubbed name may survive except the runner's own `CLAUDE_CODE_EFFORT_LEVEL` holding the record's value; the user `settings.json`
+  may define no `apiKeyHelper` and no `env` key in the scrub set; and `claude auth status --json` must read `loggedIn` true,
+  `authMethod` `claude.ai`, `apiProvider` `firstParty` (the email, organisation and account fields are dropped unread). Those three
+  fields cannot see a header-, file- or settings-borne credential, and neither can the transcript, which is why the scrub and the
+  settings-names check run before the first acpx call. Dispatch makes the same login read under the dispatch environment minus the
+  scrub. The read proves the route, not which account: `account` stays operator-declared. claude `api`, `local` and `free` are `unsupported`.
 - **Run-time re-check** (`runphase.sh bound_leg_recheck`) judges the stamp from the stamp alone against the configuration as it is now, before mounting, launching
   or prompting, and ends a changed leg `reason=binding-mismatch`. The check also compares the configured transport with the one the runner drives, and for an
   OpenCode profile verifies the runtime executable and version locally (`opencode_adapter.verify_runtime`, no credentials) so a broken final leg refuses the
@@ -866,7 +900,7 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
   never manufactured and no provider is presented as equivalent to another. Capacity policy and fallback are the caller's.
 
 Not here: choosing models, tiers, efforts, routes, budgets or fallbacks; a model-to-tier mapping or a default (every model id comes from the caller);
-making `claude` or `grok` bindable; verifying a remote bill; an OS-level network or credential sandbox.
+making `grok` bindable; a Claude baseline, tier, ceiling or "use max"; verifying a remote bill; an OS-level network or credential sandbox.
 
 ## Seeding a fresh codex home's plugin cache (task 401)
 

@@ -254,10 +254,11 @@ class AuthRoute(unittest.TestCase):
         return path
 
     def test_the_auth_table_declares_every_adapter_billing_pair(self):
-        for adapter in ('codex', 'opencode'):
+        for adapter in ('codex', 'opencode', 'claude'):
             for billing in access.BILLINGS:
                 self.assertIn(access.auth_row(adapter, billing)['status'], ('supported', 'unsupported'))
         self.assertEqual(access.auth_row('codex', 'api')['status'], 'unsupported')           # not established for the mounted ACP adapter
+        self.assertEqual([b for b in access.BILLINGS if access.auth_row('claude', b)['status'] == 'supported'], ['subscription'])
         for billing in access.BILLINGS:                                                      # gemini runs agy directly: no isolated login to bind
             with self.assertRaises(profiles.ProfileError):
                 access.auth_row('gemini', billing)
@@ -293,6 +294,18 @@ class AuthRoute(unittest.TestCase):
         adapter, why = binding.classify('gemini', 'acp', {})
         self.assertIsNone(adapter)
         self.assertTrue(why.startswith('gemini-unsupported'))
+
+    def test_claude_binds_over_acp_and_grok_still_does_not(self):
+        self.assertEqual(binding.classify('claude', 'acp', {}), ('claude', None))
+        self.assertIsNone(binding.classify('claude', 'cli', {})[0])
+        adapter, why = binding.classify('grok', 'acp', {})
+        self.assertIsNone(adapter)
+        self.assertTrue(why.startswith('grok-unsupported'))
+
+    def test_a_claude_route_other_than_subscription_is_refused_before_any_read(self):
+        for billing in ('api', 'local', 'free'):
+            self.assertEqual([c for c, _ in binding.observe_auth('claude', billing, {})], ['auth-route-unsupported'])
+            self.assertIsNone(binding.auth_readback('claude', billing, '', False)[0])
 
     def test_a_custom_profile_selects_its_route_through_its_credentials_so_it_is_only_configured(self):
         self.assertEqual(binding.auth_readback('opencode', 'api', '', True), ('configured', None))

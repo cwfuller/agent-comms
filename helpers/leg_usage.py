@@ -186,21 +186,27 @@ def grok_state(f):
 def snapshot(provider, root, cwd):
     if provider == "grok":
         return {"grok": {f: grok_state(f) for f in grok_files(root, cwd)}}
-    files = {}
-    for f in jsonl_files(provider, root, cwd):
+    return snapshot_files(jsonl_files(provider, root, cwd))
+
+
+def snapshot_files(files):
+    """The (inode, size) of each append-only record file, the state a window is measured from."""
+    state = {}
+    for f in files:
         st = os.stat(f)
-        files[f] = [st.st_ino, st.st_size]
-    return {"files": files}
+        state[f] = [st.st_ino, st.st_size]
+    return {"files": state}
 
 
 # ---------- the window ----------
 
-def window_records(provider, root, cwd, snap):
-    """(file, window_start_offset, [records appended during the turn]) per file with growth."""
+def window_records(files, snap):
+    """(file, window_start_offset, [records appended during the turn]) per file with growth. `files` is
+    every record file the caller attributes to the window NOW (the usage reader and claude_transcript.py
+    each enumerate their own); the window rules below are the same for both."""
     prev = snap.get("files")
     if not isinstance(prev, dict):
         raise Undecidable("the snapshot does not describe any record files")
-    files = jsonl_files(provider, root, cwd)
     seen = set(files)
     for f in prev:
         if f not in seen:
@@ -552,7 +558,7 @@ def grok_usage(root, cwd, snap):
 def collect(provider, root, cwd, snap):
     if provider == "grok":
         return grok_usage(root, cwd, snap), None
-    windows = window_records(provider, root, cwd, snap)
+    windows = window_records(jsonl_files(provider, root, cwd), snap)
     if provider == "codex":
         # The rate-limit snapshot is its own fact: a window whose spend cannot be bounded still
         # carries a readable latest snapshot, so an unmeasurable usage does not null it.

@@ -70,11 +70,28 @@ cap_line() { grep "^agent=$1 " <<<"$OUT"; }
 [ "$(cap_line codex)" = "agent=codex class=bindable harness=codex reason=- billing=subscription" ] \
   && [ "$(cap_line glm)" = "agent=glm class=bindable-model-only harness=glm reason=- billing=api" ] \
   && ok "codex is bindable (model and effort); an OpenCode profile is bindable-model-only" || fail "capability classes: $(grep '^agent=' <<<"$OUT" | tr '\n' '|')"
-[ "$(cap_line claude)" = "agent=claude class=unbindable harness=claude reason=claude-unsupported billing=-" ] \
-  && [ "$(cap_line grok)" = "agent=grok class=unbindable harness=grok reason=grok-unsupported billing=-" ] \
+[ "$(cap_line claude)" = "agent=claude class=bindable harness=claude reason=- billing=-" ] \
+  && [ "$(cap_line claude-review)" = "agent=claude-review class=bindable harness=claude reason=- billing=-" ] \
+  && ok "claude and its review twin are bindable (model and native effort, on the mounted ACP runner); with no access entry their billing is -" || fail "claude capability: $(grep '^agent=claude' <<<"$OUT" | tr '\n' '|')"
+[ "$(cap_line grok)" = "agent=grok class=unbindable harness=grok reason=grok-unsupported billing=-" ] \
   && [ "$(cap_line gemini)" = "agent=gemini class=unbindable harness=gemini reason=gemini-unsupported billing=-" ] \
   && [ "$(cap_line gacp)" = "agent=gacp class=unbindable harness=gacp reason=consult-only billing=-" ] \
-  && ok "claude and grok (no applied, attested policy), gemini (agy runs directly, no ACP session) and a generic ACP profile (consult-only) are unbindable, with the reason" || fail "capability unbindables: $(grep '^agent=' <<<"$OUT" | tr '\n' '|')"
+  && ok "grok (no applied, attested policy), gemini (agy runs directly, no ACP session) and a generic ACP profile (consult-only) are unbindable, with the reason" || fail "capability unbindables: $(grep '^agent=' <<<"$OUT" | tr '\n' '|')"
+# WITH THE OPERATOR'S ENTRY (key `claude`, which the twin inherits): billing is the entry's, the versions and the
+# class vocabulary are unchanged, in the text and the JSON form alike.
+bd_claude_on
+OUT6="$(bd "$COMMS" review-route capability 2>&1)"; OUT7="$(bd "$COMMS" review-route capability --json 2>&1)"
+[ "$(grep '^agent=claude' <<<"$OUT6")" = "agent=claude class=bindable harness=claude reason=- billing=subscription
+agent=claude-review class=bindable harness=claude reason=- billing=subscription" ] && [ "$(sed -n 1p <<<"$OUT6")" = "leg-binding-capability v1 leg-bindings=1 route-view=2 leg-metadata=1" ] \
+  && ok "with the operator's claude entry, claude and claude-review are bindable with billing subscription" || fail "claude capability with an entry: $OUT6"
+[ "$(python3 -c '
+import json,sys
+d=json.loads(sys.argv[1]); rows={a["agent"]: a for a in d["agents"]}
+print(d["capability_version"], d["leg_bindings"], d["route_view"], d["leg_metadata"],
+      [(rows[a]["class"], rows[a]["reason"], rows[a]["billing"]) for a in ("claude", "claude-review")],
+      {a["class"] for a in d["agents"]} <= {"bindable", "bindable-model-only", "unbindable", "unbindable-billing"})' "$OUT7")" = "1 1 2 1 [('bindable', None, 'subscription'), ('bindable', None, 'subscription')] True" ] \
+  && ok "capability --json says the same, with versions 1 1 2 1 and no class outside the closed vocabulary" || fail "claude capability --json: $OUT7"
+bd_reset
 [ "$(cap_line codex-review)" = "agent=codex-review class=bindable harness=codex reason=- billing=subscription" ] \
   && ok "a review twin reports its driver's class and billing" || fail "twin capability: $(cap_line codex-review)"
 OUT2="$(bd COMMS_DELIVERY=mailbox "$COMMS" review-route capability 2>&1)"
@@ -157,7 +174,21 @@ bd_refuse "an incomplete access object (no account)" "access-incomplete " "$(bj 
 bd_refuse "no access object at all" "access-incomplete " "$(bj "$BD_L_CODEX" "del d['access']")"
 bd_refuse "several defects at once: every code is collected, not only the first" "account-mismatch billing-mismatch route-mismatch " "$(bj "$BD_L_CODEX" "d['route_id']='x'; d['access'].update(account='y', billing='free')")"
 BD_REQ_FROM=codex   # claude cannot be both the author and a leg
-bd_refuse "claude (no applied, attested policy; no access entry)" "agent-unbindable no-access-profile " "$(bj "$BD_L_CODEX" "d.update(agent='claude', ref='res-claude')")"
+bd_refuse "claude with no access entry, bound to a model the map cannot attest for it" "model-unservable no-access-profile " "$(bj "$BD_L_CODEX" "d.update(agent='claude', ref='res-claude')")"
+# A BOUND CLAUDE LEG with the operator's entry: the resolution's codes and the login read-back, each before any write.
+bd_claude_on
+bd_refuse "claude: a launch id with no pair or recorded row (an alias the map cannot attest)" "model-unservable " "$(bj "$BD_L_CLAUDE" "d['model']='sonnet'")"
+bd_refuse "claude: a null effort for a model with an effort scale" "effort-mismatch " "$(bj "$BD_L_CLAUDE" "d['effort']=None")"
+bd_refuse "claude: an effort outside the model's list" "effort-refused " "$(bj "$BD_L_CLAUDE" "d['effort']='ultra'")"
+bd_refuse "claude: COMMS_REVIEW_MAX in the dispatching environment" "pin-conflict " "$BD_L_CLAUDE" COMMS_REVIEW_MAX=1
+bd_claude_login "$BD_HOME/.claude" console
+bd_refuse "claude: a login that is not a claude.ai first-party subscription" "auth-selected-type-conflict " "$BD_L_CLAUDE"
+bd_claude_login "$BD_HOME/.claude" none
+bd_refuse "claude: no login in the leg's config directory" "auth-login-missing " "$BD_L_CLAUDE"
+bd_claude_login "$BD_HOME/.claude" subscription
+bd_claude_on "d['agents']['claude'].update(billing='api', credential='env:BD_CL_KEY')"
+bd_refuse "claude: an api route, which has no explicit, readable selection" "auth-route-unsupported " "$(bj "$BD_L_CLAUDE" "d['access'].update(billing='api', credential='env:BD_CL_KEY')")" BD_CL_KEY=canary-claude-api-0024
+bd_reset
 BD_REQ_FROM=claude
 bd_refuse "grok (no applied, attested policy; no access entry)" "agent-unbindable no-access-profile " "$(bj "$BD_L_CODEX" "d.update(agent='grok', ref='res-grok')")"
 bd_refuse "a generic ACP profile (consult-only)" "agent-unbindable no-access-profile " "$(bj "$BD_L_GLM" "d.update(agent='gacp', ref='res-gacp')")"
@@ -309,9 +340,54 @@ bda "$AP" resolve codex --transport acp-mounted --bound-model gpt-6-luna --bound
 for BD_BADARGS in "--bound-model gpt-6-luna" "--bound-model gpt-6-luna --bound-effort low --route-id r --access-digest abc" "--bound-model gpt-6-luna --bound-effort low --route-id r --access-digest $BD_DG_CODEX --tier fast" "--bound-model gpt-6-luna --bound-effort low --route-id r --access-digest $BD_DG_CODEX --custom-profile"; do
   bda "$AP" resolve codex --transport acp-mounted $BD_BADARGS >/dev/null 2>&1; [ $? = 2 ] && ok "acp.sh resolve usage error (exit 2): ${BD_BADARGS%% --access*}" || fail "resolve accepted: $BD_BADARGS"
 done
-OUT="$(bda "$AP" resolve claude --transport acp-mounted --bound-model x --bound-effort high --route-id r --access-digest "$BD_DG_CODEX" 2>&1)"
+OUT="$(bda "$AP" resolve grok --transport acp-mounted --bound-model x --bound-effort high --route-id r --access-digest "$BD_DG_CODEX" 2>&1)"
 grep -q 'code=capability-unsupported' <<<"$OUT" \
-  && ok "a bound resolution for claude (no applied policy) is refused as capability-unsupported" || fail "claude bound resolve"
+  && ok "a bound resolution for grok (no applied policy) is still refused as capability-unsupported" || fail "grok bound resolve: $OUT"
+# CLAUDE RESOLVES BOUND: version 2, capability bound, the transcript's model id beside the launch id, and a policy
+# digest over the pair, the pinned adapter and its version, and the access digest.
+bda "$AP" resolve claude --transport acp-mounted --bound-model claude-opus-5-5 --bound-effort low --route-id kernel-claude --access-digest "$BD_DG_CODEX" > "$BD/cl.rec" 2>"$BD/cl.err"; A=$?
+BD_CL_DG="$(printf 'claude-opus-5-5\0low\0@agentclientprotocol/claude-agent-acp\0%s\0%s' "$(sed -n 's/^CLAUDE_ACP_VERSION="\(.*\)"$/\1/p' "$AP")" "$BD_DG_CODEX" | shasum -a 256 | cut -c1-12)"
+{ [ "$A" = 0 ] && [ "$(awk -F'\t' '$1~/^(policy_record|capability|model|effort|verify|attest_model|runtime|runtime_version|pair)$/{printf "%s=%s ", $1, $2}' "$BD/cl.rec")" = "policy_record=2 capability=bound model=claude-opus-5-5 effort=low pair=validated runtime=@agentclientprotocol/claude-agent-acp runtime_version=0.88.0 verify=model,effort attest_model=claude-opus-5-5 " ] \
+  && [ "$(awk -F'\t' '$1=="policy_digest"{print $2}' "$BD/cl.rec")" = "$BD_CL_DG" ] && [ "$(awk -F'\t' '{print $1}' "$BD/cl.rec" | tail -3 | tr '\n' ' ')" = "route_id access_digest bound " ]; } \
+  && ok "acp.sh resolve claude --bound-* resolves: capability bound, attest_model, the pinned adapter as the runtime, and a digest that covers the adapter version" || fail "claude bound resolve (rc=$A): $(cat "$BD/cl.err") $(tr '\t\n' '= ' < "$BD/cl.rec")"
+[ "$(bda "$AP" resolve claude 2>/dev/null | awk -F'\t' '$1~/^(policy_record|capability|verify|fallback|runtime)$/{printf "%s=%s ", $1, $2}')" = "policy_record=1 capability=unsupported runtime=n/a fallback=capability-unsupported verify=none " ] \
+  && [ -z "$(bda "$AP" adapter claude)" ] && [ "$(bda "$AP" adapter claude --bound)" = "npx -y @agentclientprotocol/claude-agent-acp@0.88.0" ] \
+  && ok "an UNBOUND claude resolution is unchanged (version 1, unsupported), and only a bound leg gets the pinned adapter" || fail "unbound claude: $(bda "$AP" resolve claude 2>&1 | tr '\t\n' '= ')"
+[ "$(bda "$AP" claude-env --policy-file "$BD/cl.rec")" = "CLAUDE_CODE_EFFORT_LEVEL	low" ] \
+  && ok "acp.sh claude-env names the one variable the runner injects, with the record's effort" || fail "claude-env: $(bda "$AP" claude-env --policy-file "$BD/cl.rec" 2>&1)"
+# THE PREFLIGHT reads what acpx re-applies: the saved model preference and the effort option (acp.sh policy_check_claude).
+bd_pc() {  # <effort option|''> <saved model|''> <saved effort|''> [record] -> the claude preflight's exit status
+  python3 -c '
+import json,sys
+e,m,d=sys.argv[1:4]
+ax={"config_options":[{"id":"model","currentValue":"opus"}]+([{"id":"effort","currentValue":e}] if e else [])}
+if m: ax["session_options"]={"model":m}
+if d: ax["desired_config_options"]={"effort":d}
+print(json.dumps({"acpx":ax}))' "$1" "$2" "$3" | bda "$AP" policy-check claude - --policy-file "${4:-$BD/cl.rec}" >/dev/null 2>&1; echo $?
+}
+[ "$(bd_pc low claude-opus-5-5 low) $(bd_pc low sonnet low) $(bd_pc high claude-opus-5-5 low) $(bd_pc low claude-opus-5-5 high) $(bd_pc '' claude-opus-5-5 low) $(bd_pc low '' low)" = "0 20 20 20 23 20" ] \
+  && ok "the claude preflight passes only the bound saved model and effort; a missing effort option is 23 (effort-mismatch)" || fail "claude preflight codes: $(bd_pc low claude-opus-5-5 low) $(bd_pc low sonnet low) $(bd_pc high claude-opus-5-5 low) $(bd_pc low claude-opus-5-5 high) $(bd_pc '' claude-opus-5-5 low) $(bd_pc low '' low)"
+[ "$(bda "$AP" policy-attest claude low claude-opus-5-5 --policy-file "$BD/cl.rec" >/dev/null 2>&1; echo $?) $(bda "$AP" policy-attest claude null claude-opus-5-5 --policy-file "$BD/cl.rec" >/dev/null 2>&1; echo $?) $(bda "$AP" policy-attest claude low claude-sonnet-5-5 --policy-file "$BD/cl.rec" >/dev/null 2>&1; echo $?) $(bda "$AP" policy-attest claude low claude-opus-5-5 --policy-file "$BD/v2.rec" >/dev/null 2>&1; echo $?)" = "0 21 20 21" ] \
+  && ok "the claude verdict compares the transcript's pair with attest_model and the effort; no effort is undecidable, never a pass" || fail "claude attest verdicts"
+# A MODEL WITH NO EFFORT SCALE (`pair ... none`): a copy of acp.sh beside a map that declares one.
+BD_PM="$BD/pm-none"; mkdir -p "$BD_PM"; cp "$AP" "$BD_PM/acp.sh"; chmod +x "$BD_PM/acp.sh"
+{ cat "$REPO/helpers/policy-map.tsv"; printf 'pair\tclaude\tacp-mounted\ttest-haiku\tnone\nrecorded\tclaude\tacp-mounted\ttest-haiku\tclaude-test-haiku\n'; } > "$BD_PM/policy-map.tsv"
+bda "$BD_PM/acp.sh" resolve claude --transport acp-mounted --bound-model test-haiku --bound-effort - --route-id kernel-claude --access-digest "$BD_DG_CODEX" > "$BD/cl0.rec" 2>/dev/null; A=$?
+OUT="$(bda "$BD_PM/acp.sh" resolve claude --transport acp-mounted --bound-model test-haiku --bound-effort low --route-id kernel-claude --access-digest "$BD_DG_CODEX" 2>&1)"
+{ [ "$A" = 0 ] && [ "$(awk -F'\t' '$1~/^(effort|verify|attest_model|effective_effort)$/{printf "%s=%s ", $1, $2}' "$BD/cl0.rec")" = "effort=n/a effective_effort=n/a verify=model attest_model=claude-test-haiku " ] \
+  && grep -q 'code=effort-mismatch' <<<"$OUT" && [ -z "$(bda "$BD_PM/acp.sh" claude-env --policy-file "$BD/cl0.rec")" ]; } \
+  && ok "an effortless model binds only with a null effort (verify model, no injection); any effort for it is effort-mismatch" || fail "effortless resolve (rc=$A): $OUT"
+[ "$(bda "$BD_PM/acp.sh" policy-attest claude null claude-test-haiku --policy-file "$BD/cl0.rec" >/dev/null 2>&1; echo $?) $(bda "$BD_PM/acp.sh" policy-attest claude low claude-test-haiku --policy-file "$BD/cl0.rec" >/dev/null 2>&1; echo $?) $(bd_pc '' test-haiku '' "$BD/cl0.rec") $(bd_pc default test-haiku '' "$BD/cl0.rec")" = "0 20 0 23" ] \
+  && ok "an effortless model is attested on the model alone (an observed effort is a mismatch) and its session must offer no effort option" || fail "effortless verdicts"
+for BD_BADROW in 'pair\tclaude\tacp-mounted\tm-x\tnone,low' 'recorded\tclaude\tacp-mounted\tm-x' 'capability\tclaude\tacp-x\tboundish\tm\te\tv\tn'; do
+  { cat "$REPO/helpers/policy-map.tsv"; printf "$BD_BADROW\n"; } > "$BD_PM/policy-map.tsv"
+  bda "$BD_PM/acp.sh" capabilities >/dev/null 2>&1 && fail "a malformed map row was accepted: $BD_BADROW" || ok "the policy map refuses a malformed row: $(printf "$BD_BADROW" | tr '\t' ' ')"
+done
+# A map row cannot make an unbound claude turn claim a policy: only `bound` counts for claude/acp-mounted.
+{ grep -v '^capability	claude	acp-mounted	' "$REPO/helpers/policy-map.tsv"; printf 'capability\tclaude\tacp-mounted\tfixed\tm\te\tv\tn\nbaseline\tclaude\tacp-mounted\tclaude-opus-5-5\thigh\n'; } > "$BD_PM/policy-map.tsv"
+OUT="$(bda "$BD_PM/acp.sh" resolve claude --transport acp-mounted --bound-model claude-opus-5-5 --bound-effort low --route-id kernel-claude --access-digest "$BD_DG_CODEX" 2>&1)"
+grep -q 'code=capability-unsupported' <<<"$OUT" && [ "$(bda "$BD_PM/acp.sh" resolve claude 2>/dev/null | awk -F'\t' '$1=="fallback"{print $2}')" = "capability-unimplemented;capability-unsupported" ] \
+  && ok "a claude row marked fixed is downgraded for unbound and bound resolutions alike (claude applies a bound pair only)" || fail "claude fixed row: $OUT"
 
 # CUSTOM PROFILES bind through their pinned model, and through no map row.
 bda "$AP" resolve glm --transport acp-mounted --bound-model venice/glm-model-a --bound-effort - --route-id venice-api --access-digest "$BD_DG_GLM" --custom-profile > "$BD/glm.rec" 2>"$BD/glm.err"; A=$?
@@ -322,6 +398,56 @@ bda "$AP" resolve glm --transport acp-mounted --bound-model venice/glm-model-a -
 OUT="$(bda "$AP" resolve gacp --transport acp-mounted --bound-model vendor/generic-model --bound-effort - --route-id r --access-digest "$BD_DG_GLM" --custom-profile 2>&1)"
 grep -q 'code=agent-unbindable consult-only' <<<"$OUT" \
   && ok "a generic ACP profile is refused as consult-only: it has no mounted review runner" || fail "generic ACP bound resolve"
+
+section "binding: a bound claude leg's launch-time read-back (scrub set, the runner's own injection, user settings, login)"
+# THE SCRUB SET gains claude's credential-bearing names no pattern matches, and its model and effort selectors; the
+# leg's config directory is NOT in it (the leg runs on its own CLAUDE_CONFIG_DIR's login).
+OUT="$(bd python3 "$REPO/helpers/access_profiles.py" scrub-set 2>&1)"; BD_MISS=""
+for BD_N in ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_IDENTITY_TOKEN_FILE CLAUDE_SESSION_INGRESS_TOKEN_FILE CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR \
+            CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR CLAUDE_CODE_HOST_AUTH_ENV_VAR CLAUDE_CODE_CLIENT_CERT \
+            CLAUDE_CODE_CLIENT_KEY CLAUDE_CODE_CLIENT_KEY_PASSPHRASE CLAUDE_CODE_CUSTOM_OAUTH_URL CLAUDE_CODE_USE_GATEWAY CLAUDE_CODE_MANAGED_SETTINGS_PATH \
+            ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL CLAUDE_EFFORT; do
+  grep -qx "$BD_N" <<<"$OUT" || BD_MISS="$BD_MISS $BD_N"
+done
+[ -z "$BD_MISS" ] && ! grep -qx CLAUDE_CONFIG_DIR <<<"$OUT" \
+  && ok "access_profiles.py scrub-set lists claude's header, file, descriptor, mTLS and OAuth-endpoint credentials and its model/effort selectors, never CLAUDE_CONFIG_DIR" || fail "scrub set missing:$BD_MISS"
+OUT="$(bd ANTHROPIC_DEFAULT_SONNET_MODEL=x CLAUDE_LOCAL_OAUTH_API_BASE=x CLAUDE_BG_AUTH_SNAPSHOT_PATH=x CLAUDE_CONFIG_DIR="$BD/none" python3 "$REPO/helpers/access_profiles.py" env-plan claude claude subscription 2>&1)"
+{ grep -qx 'unset	ANTHROPIC_DEFAULT_SONNET_MODEL' <<<"$OUT" && grep -qx 'unset	CLAUDE_LOCAL_OAUTH_API_BASE' <<<"$OUT" && grep -qx 'unset	CLAUDE_BG_AUTH_SNAPSHOT_PATH' <<<"$OUT" \
+  && ! grep -q 'CLAUDE_CONFIG_DIR' <<<"$OUT" && ! grep -q '^credential' <<<"$OUT"; } \
+  && ok "a claude subscription leg's environment plan strips the prefixed alias, OAuth-endpoint and background-auth names, keeps CLAUDE_CONFIG_DIR and restores no credential" || fail "claude env plan: $OUT"
+# THE GUARD, called directly in an exact environment (env -i), as the runner calls it inside the leg's acpx environment.
+BD_GD="$BD/guard"; mkdir -p "$BD_GD/home/.claude"; bd_claude_login "$BD_GD/home/.claude" subscription
+bd_guard() {  # <record> [NAME=value...] -> the guard's one line (`observed`, or `mismatch<TAB>detail`)
+  local rec="$1"; shift
+  (cd "$BD_REPO" && env -i PATH="$BD_CB:$PATH" HOME="$BD_GD/home" AGENT_COMMS_HOME="$BD_AH" "$@" \
+     python3 "$REPO/helpers/leg_binding.py" auth-readback --adapter claude --billing subscription --policy-file "$rec" 2>&1)
+}
+[ "$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low)" = observed ] \
+  && ok "the guard passes the leg whose only scrubbed name is the runner's own effort, holding the record's value, on a subscription login" || fail "guard control: $(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low)"
+BD_G1="$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low "ANTHROPIC_CUSTOM_HEADERS=Authorization: Bearer canary-hdr-0031")"
+BD_G2="$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low ZZ_SERVICE_API_KEY=canary-pattern-0033)"
+{ [ "${BD_G1%%	*}" = mismatch ] && grep -q ANTHROPIC_CUSTOM_HEADERS <<<"$BD_G1" && [ "${BD_G2%%	*}" = mismatch ] && grep -q ZZ_SERVICE_API_KEY <<<"$BD_G2" \
+  && ! grep -q canary <<<"$BD_G1$BD_G2"; } \
+  && ok "the guard refuses a surviving header credential and a pattern-shaped one, naming the variable and never its value" || fail "guard credentials: $BD_G1 / $BD_G2"
+BD_G3="$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=max)"; BD_G4="$(bd_guard "$BD/cl.rec")"
+sed -e 's/^verify	model,effort$/verify	model/' -e 's/^effort	low$/effort	n\/a/' "$BD/cl.rec" > "$BD/cl-noeffort.rec"
+BD_G5="$(bd_guard "$BD/cl-noeffort.rec" CLAUDE_CODE_EFFORT_LEVEL=low)"; BD_G6="$(bd_guard "$BD/cl-noeffort.rec")"
+{ [ "${BD_G3%%	*}" = mismatch ] && [ "${BD_G4%%	*}" = mismatch ] && [ "${BD_G5%%	*}" = mismatch ] && [ "$BD_G6" = observed ]; } \
+  && ok "the runner's own effort must hold exactly the record's value: another value, a missing one, or one present for an effortless record refuses" || fail "guard injection: $BD_G3 / $BD_G4 / $BD_G5 / $BD_G6"
+printf '{"effortLevel":"high","env":{"BD_HARMLESS_SETTING":"1"}}\n' > "$BD_GD/home/.claude/settings.json"; BD_G7="$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low)"
+printf '{"env":{"BD_HARMLESS_SETTING":"1","ANTHROPIC_CUSTOM_HEADERS":"Authorization: Bearer canary-hdr-0034"}}\n' > "$BD_GD/home/.claude/settings.json"; BD_G8="$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low)"
+printf '{"apiKeyHelper":"/bin/echo canary-helper-0035"}\n' > "$BD_GD/home/.claude/settings.json"; BD_G9="$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low)"
+rm -f "$BD_GD/home/.claude/settings.json"
+{ [ "$BD_G7" = observed ] && [ "${BD_G8%%	*}" = mismatch ] && grep -q ANTHROPIC_CUSTOM_HEADERS <<<"$BD_G8" && [ "${BD_G9%%	*}" = mismatch ] && grep -q apiKeyHelper <<<"$BD_G9" \
+  && ! grep -q canary <<<"$BD_G8$BD_G9"; } \
+  && ok "the guard reads the user settings' key names: an env block naming a scrubbed variable, or an apiKeyHelper, refuses; unrelated names pass" || fail "guard settings: $BD_G7 / $BD_G8 / $BD_G9"
+mkdir -p "$BD_GD/ccd"; bd_claude_login "$BD_GD/ccd" console
+BD_G10="$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low CLAUDE_CONFIG_DIR="$BD_GD/ccd")"
+bd_claude_login "$BD_GD/ccd" subscription; bd_claude_login "$BD_GD/home/.claude" none
+BD_G11="$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low CLAUDE_CONFIG_DIR="$BD_GD/ccd")"; BD_G12="$(bd_guard "$BD/cl.rec" CLAUDE_CODE_EFFORT_LEVEL=low)"
+{ [ "${BD_G10%%	*}" = mismatch ] && grep -q 'authMethod=console' <<<"$BD_G10" && [ "$BD_G11" = observed ] && [ "${BD_G12%%	*}" = mismatch ] \
+  && ! grep -q canary <<<"$BD_G10$BD_G11$BD_G12"; } \
+  && ok "the login is read back from the leg's own config directory (CLAUDE_CONFIG_DIR set, or HOME's), keeping only its three route fields" || fail "guard login: $BD_G10 / $BD_G11 / $BD_G12"
 
 section "binding: the installed copy negotiates, plans and refuses (install.sh into a test-owned scope)"
 BD_INS="$BD/inst"; mkdir -p "$BD_INS/proj"; git -C "$BD_INS/proj" init -q -b main

@@ -128,6 +128,10 @@ AGX="$WORK/agents-scope"; mkdir -p "$AGX"; git -C "$AGX" init -q -b main
   bash "$REPO/install.sh" --scope=global >/dev/null 2>&1)
 grep -q 'agent-comms:begin' "$AGX/gh/AGENTS.md" 2>/dev/null \
   && ok "global scope installs the Codex protocol note once, at the global path" || fail "global scope did not write the note"
+# The bound claude leg's attestation reader is in the manifest, and the installed copy runs beside the leg_usage.py it imports.
+{ [ -f "$AGX/gh/ac/claude_transcript.py" ] && python3 -I "$AGX/gh/ac/claude_transcript.py" snapshot "$AGX/no-records" "$AGX" "$AGX/ct-snapshot.json" 2>/dev/null \
+  && [ "$(cat "$AGX/ct-snapshot.json" 2>/dev/null)" = '{"files": {}}' ]; } \
+  && ok "install.sh installs claude_transcript.py, and the installed copy runs (an empty transcript root snapshots as no files)" || fail "claude_transcript.py not installed or not runnable: $(ls "$AGX/gh/ac" 2>&1 | tr '\n' ' ')"
 for AGX_S in project local; do
   AGX_D="$WORK/agents-$AGX_S"; mkdir -p "$AGX_D"; git -C "$AGX_D" init -q -b main
   (cd "$AGX_D" && env CODEX_AGENTS_FILE="$AGX_D/gh/AGENTS.md" CLAUDE_COMMANDS_DIR="$AGX_D/gh/commands" \

@@ -796,6 +796,7 @@ Tests: groups `binding` and `bindrun` (hermetic stubs; +217 assertions against t
 - **Codex `api` is `unsupported`** (refused as `auth-route-unsupported`): no explicit, readable API-key selection is established for the mounted ACP adapter.
   Codex subscription and OpenCode profiles bind (gemini runs agy directly and is unbindable). Changing the row needs that evidence first.
 - `claude` and `grok` are `unbindable` (no applied and attested policy); Basis must treat them as ineligible for bound review, which affects which families can gate under 7.6.
+  (claude: superseded 2026-10-08 by task 421, below; grok still holds.)
 - The scrub is configuration names plus patterns plus a table: an unconfigured credential matching none of them would pass. The harness's own login is governed by the auth rows, not the scrub.
 - Dispatch cannot recall an already-running sibling leg: the guarantee is that no leg starts unless every leg was valid at dispatch and a leg whose configuration changed afterwards refuses itself.
 - The access label and provider are operator-declared; no remote account or bill is verified (`auth_evidence: configured` where nothing could be observed).
@@ -807,6 +808,49 @@ denylist-plus-table scrub rather than an allowlist environment (stricter, but br
 refuses when any listed leg, optional included, is invalid (agent-comms is not a selector; Basis re-plans). (5) Claude and Grok stay `unbindable` until applied and attested
 policy exists. (6) Gemini and Codex API routes bind only where an explicit authentication selection exists, never on the hope that an environment key beats a saved login.
 (7) Quota `refused` stays limited to providers with a classifier. No model mapping in this change is approved by the ticket; every model id enters from the caller.
+
+### BUILT ON BRANCH 2026-10-08, STUB ONLY: a bound claude review leg, attested from Claude's own transcript (task 421)
+
+**Why.** Codex-written work needs a bound cross-family reviewer before the repo pins are deleted (operator, Q6). `review-route
+capability` now reports `claude` and `claude-review` `bindable` (billing `subscription` with the operator's `claude` entry, `-`
+without one); versions and the class vocabulary are unchanged, so Basis's `kernelRouteProblem` accepts a `kernel-claude` route
+once the operator adds it. grok and gemini are unchanged.
+
+**What was built.** The claude/acp-mounted map row is capability `bound` (applied and attested for a bound leg only; an unbound
+claude record is what it was). A launch id binds only with a `pair` row and a `recorded` row (the id the transcript records), so
+agent-comms still names no Claude model of its own. The bound leg runs the existing `claude-plan` arm with unchanged containment,
+on the pinned claude-agent-acp 0.88.0 (`acp.sh adapter claude --bound`; unbound reviews stay on acpx's builtin). Before the first acpx
+call the login of the leg's own `CLAUDE_CONFIG_DIR` is read back (three fields of `claude auth status --json`) inside the leg's exact
+environment, together with a check that no scrubbed name survived but the runner's own `CLAUDE_CODE_EFFORT_LEVEL` and that the user
+settings carry no `apiKeyHelper` and no scrubbed `env` name. The model, then the effort, are set over ACP before the canary, the
+mode pinned, the session preflighted, and the canary's and the review's transcript windows attested through `policy_verdict`
+(`helpers/claude_transcript.py`, by directory and file, subagents included; a truncated project directory is refused). The
+credential table gained Claude's non-pattern credential names and its model/effort selectors.
+
+**What was exercised, and what was not.**
+
+- Exercised: hermetic stubs only (groups `binding`, `bindrun`; `install` for the manifest): order of the sets, prompts and refusals,
+  the scrub and read-back with credential, email and organisation canaries, `CLAUDE_CONFIG_DIR` set and unset, every window refusal.
+- Local and read-only: a strings survey of the CLI the 0.88.0 adapter bundles (claude-agent-sdk 0.3.293) and the 0.60.0 one
+  (0.3.215) for the credential rows; local transcripts whose `requestedModel` names a launch id for the two `recorded` rows
+  (`claude-opus-5-5`, `claude-sonnet-5-5`). No record named `sonnet`, `haiku` or `claude-fable-5-1`, so those refuse
+  `model-unservable` until a row has evidence.
+- NOT exercised: no live claude turn has run through this code. 0.88.0's behaviour is inferred from 0.60.0's source: whether `set
+  effort` survives a session load, whether `CLAUDE_CODE_EFFORT_LEVEL` outranks the adapter's own setting and accepts `max`, the
+  `sessions show` shape and the transcript fields. Each is checked per turn by the canary's attestation, so a wrong guess refuses for
+  the price of one PONG; it cannot pass a wrong pair. The pair efforts are the operator route's list, not the adapter's observed list.
+  Plan-mode containment on 0.88.0 is unmeasured. The map's versions cell says `stub only` until the operator's trial is recorded.
+
+**Residuals, stated.** The INTERNALS claude residual holds for bound legs (open network, the shared config directory's settings and
+login). Managed (enterprise) settings files are not read. The scrub is still a list: repeat the survey on each adapter pin change.
+A subagent on another model or an SDK fallback is refused, not prevented. Claude truncates a project-directory name over 200
+characters, so a long `COMMS_MOUNT_BASE` (or a long home path) refuses bound claude legs with that remedy named; the default base is
+well under it.
+
+**Operator steps (not part of this change).** (1) Add the `claude` entry to `~/.agent-comms/access.json` (route `kernel-claude`,
+transport `acp`, provider `anthropic`, account `main`, billing `subscription`, credential null). (2) Add the `kernel-claude` policy
+route in Basis with the attested launch ids. (3) Run one bound `claude-review` leg on codex-authored work in a throwaway repo and compare
+`binding.expected` with `binding.observed`; record it here and in the map's versions cell.
 
 ### BUILT ON BRANCH 2026-10-05: the mounted codex reviewer runs read-only again — adapter pinned, sandbox attested (task 295)
 
