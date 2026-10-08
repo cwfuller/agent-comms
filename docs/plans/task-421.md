@@ -1,6 +1,7 @@
 # Task 421: bind a Claude review leg on its mounted ACP runner, attested from Claude's own transcript
 
-Status: plan, not yet implemented; revised after plan round 1 (codex B1, A1, A2). Scope is agent-comms only; the Basis side already accepts a
+Status: plan, not yet implemented; revised after plan round 1 (codex B1, A1, A2) and round 2
+(codex B1, B2, A1). Scope is agent-comms only; the Basis side already accepts a
 `bindable` kernel route (bind-context.ts `kernelRouteProblem`). Settled before this plan: Q3, Q6,
 Q7, Q11, the route id `kernel-claude`, the access key `claude` (inherited by `claude-review`), the
 unchanged containment (`claude-plan`, network open, no config-home override), the unchanged class
@@ -172,8 +173,16 @@ refuses until it has one. `policy_applied_combo` gains `claude/acp-mounted`.
 - **Launch time** (`bound_leg_readback`, before the first acpx call): the same read, run under the
   leg's exact acpx environment. One function builds that environment for both `acp_exec` and this
   read, so what was checked is what the leg gets. Two further checks follow:
-  - In that environment, no name in the scrub set is present and no credential was restored for
-    the leg.
+  - In that environment, no credential was restored for the leg. No name in the scrub set is
+    present, except the names the runner itself injects (plan round 2, codex B1). Each injected
+    name must hold exactly the value the intact persisted record gives it. The injection is
+    defined once: `acp.sh claude-env --policy-file <record>` (the record's hash checked first)
+    prints `CLAUDE_CODE_EFFORT_LEVEL<TAB><effort>` for a record with an effort, and nothing for an
+    effortless one. The claude arm builds `acp_iso` from that output, and the guard compares the
+    leg's environment against the same output, so the guard can never refuse the runner's own
+    effort and never admits any other value. An inherited `CLAUDE_CODE_EFFORT_LEVEL` is still
+    scrubbed first. Any other scrub-set name, an injected name holding another value, or an
+    injected name present for an effortless record is `binding-mismatch`.
   - The leg's user settings file (`<config dir>/settings.json`, the file the CLI loads from the
     same `CLAUDE_CONFIG_DIR`) defines no `apiKeyHelper` and has no `env` key in the scrub set. That
     is the door the environment scrub cannot close, because the CLI copies settings `env` into its
@@ -198,8 +207,9 @@ arm, for a bound leg only:
 
 - `acp_agent_cmd` is the pinned adapter from `acp.sh adapter claude --bound` (refuse if empty;
   `acp_adapter` recorded in turn.tsv), so acpx keys these sessions apart from unbound ones.
-- `acp_iso=(env CLAUDE_CODE_EFFORT_LEVEL=<bound effort>)` when the effort is not null. It follows
-  the scrub in `acp_exec`, so it reaches every adapter process the leg spawns (each direct-connect
+- `acp_iso=(env CLAUDE_CODE_EFFORT_LEVEL=<bound effort>)` when the effort is not null, built from
+  `acp.sh claude-env` (section 4), the accessor the read-back guard also reads. It follows the
+  scrub in `acp_exec`, so it reaches every adapter process the leg spawns (each direct-connect
   `set` and the queue owner) and outranks the operator's `settings.json` effort that the adapter
   re-seeds at every session load (FACT 3-6). The ACP `set effort` stays: it is what the adapter
   reports to the preflight and what acpx replays onto a replacement session. Both come from the
@@ -227,7 +237,9 @@ Order of a bound Claude turn (each refusal before the canary bills nothing):
    `desired_config_options.effort`. The adapter's own `model` option value is recorded
    (`adapter_report`) but not gated, because the adapter reports an alias of its choosing
    (FACT 3). Failure: `policy-unapplied`, with the retire command.
-7. Snapshot Claude's records for the mount cwd into `transcript-canary-snapshot.json`. Then run the
+7. Snapshot Claude's records for the mount cwd into `transcript-canary-snapshot.json`
+   (`claude_transcript.py snapshot`, section 6; it refuses a mount whose project directory name
+   Claude would truncate, so that case is refused before any prompt). Then run the
    canary (existing, 60 s budget) and attest the canary's window (section 6). A wrong or
    undecidable canary refuses `policy-unapplied` **before the review prompt is billed**, and its
    observation is what `binding.observed` reports.
@@ -238,7 +250,8 @@ Order of a bound Claude turn (each refusal before the canary bills nothing):
 
 The two attestation snapshots are their own files (plan round 1, codex A1). The usage snapshot
 (`usage-snapshot.json`, taken before the canary so the leg's spend includes it) is neither reused
-nor overwritten. Each attestation snapshot calls `leg_usage.py snapshot claude` directly, not the
+nor overwritten. Each attestation snapshot calls `claude_transcript.py snapshot` directly, which
+applies the directory rule and then `leg_usage.snapshot`. It does not go through the
 `leg_usage_snapshot` wrapper, which deliberately never fails (runphase.sh:345-351). The runner
 first removes any file at the snapshot path. It requires exit 0 and a file present afterwards,
 because a failed enumeration leaves an earlier file in place (leg_usage.py:574-579), and that
@@ -254,14 +267,21 @@ adapter is a fresh session and an unchanged one stays warm.
 
 ### 6. The transcript window and the verdict
 
-New `helpers/claude_transcript.py` (stdlib, `python3 -I`), one operation, reusing
-`leg_usage.window_records` so the window rules exist once:
+New `helpers/claude_transcript.py` (stdlib, `python3 -I`), two operations, reusing
+`leg_usage.snapshot` and `leg_usage.window_records` so the window rules exist once, and owning the
+one attribution rule below:
 
 ```
+claude_transcript.py snapshot <records-root> <cwd> <out-file>
+  exit 0  -> the snapshot written
+  exit 21 -> refused: the cwd's project directory would be truncated, or the root is unreadable
 claude_transcript.py observe <records-root> <cwd> <snapshot-file>
   exit 0  -> "<effort or empty>\t<model>\t<sessions>\t<records>\t<cli version or empty>"
   exit 21 -> undecidable; the reason on stderr, never record content
 ```
+
+The helper joins the explicit `HELPERS` manifest in `install.sh` (line 54; plan round 2, codex
+A1), so an installed copy carries it, and the install group asserts that the installed helper runs.
 
 - Records root: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects`, from the accessor
   `leg_usage_root` already uses, so usage, attestation and the read-back read the same directory.
@@ -276,10 +296,33 @@ claude_transcript.py observe <records-root> <cwd> <snapshot-file>
   A2). This is the usage reader's own rule (`leg_usage.is_zero_usage`, leg_usage.py:461-465),
   reused rather than restated. A synthetic record with nonzero or missing usage makes the reading
   undecidable.
-- Attribution follows the usage reader's directory rule. A record in an exact-slug directory
-  belongs to this cwd by the directory's name, and is never skipped for its own `cwd` field, which
-  moves when the reviewer changes directory. In a truncated, prefix-matched directory, only records
-  naming this cwd count, and such a record with no `cwd` is undecidable.
+- Attribution is by directory and file, never by a record's own `cwd` field, which moves when the
+  reviewer changes directory (plan round 2, codex B2). The window is every `.jsonl` file, subagent
+  files included, under each project directory whose name is the mount cwd's slug, or that slug
+  followed by `-`. The second form is the slug of any path under the mount, including a truncated
+  one, since its first 200 characters still start with the mount's slug. No record in those
+  directories is filtered out.
+  - INFERENCE: Claude Code keeps a session's file in the project directory it started in. The
+    second form covers the case where it does not and a reviewer that changed directory writes
+    elsewhere. The mount layout (`<base>/<ident>/view/tree`) puts no other agent-comms path under
+    that prefix.
+  - Including too much can only add records and so refuse. Including too little could hide a
+    second model, so the rule includes.
+  - The same enumeration feeds `snapshot` and `observe`: `leg_usage.window_records` takes the file
+    list as an argument, and the usage reader keeps its own.
+- A **truncated** mount directory is refused, never filtered. Claude truncates a slug longer than
+  200 characters and appends a hash this code does not reproduce (`leg_usage.CLAUDE_SLUG_MAX`;
+  `claude_dirs`, leg_usage.py:89-106). The truncated prefix can be shared with another mount, so
+  the usage reader keeps only records whose `cwd` names the mount, which is acceptable for an
+  advisory spend figure. For attestation it would drop a record written after a `cd`, possibly one
+  from another model. So when any form of the mount cwd (logical or physical) has a slug over the
+  limit:
+  - `snapshot` exits 21, and the runner refuses `policy-unapplied` before the canary;
+  - `observe` also exits 21 if it ever finds only a prefix-matched directory.
+
+  Mount slugs on this machine measure 124 characters, so only a long `COMMS_MOUNT_BASE` or home
+  path reaches this refusal, and its note names the remedy (a shorter mount base). The usage
+  reader's own prefix rule is unchanged.
 - Each attested record needs a `message.model`. The reading is undecidable when the window holds
   no attested record, when a `perTurnEffort` is set and differs from `effort`, or when records
   disagree on (model, effort). Disagreement is how "more than one model" and an SDK model fallback
@@ -305,7 +348,10 @@ record as `attest_model`) is what joins them; the docs say so.
   bound Claude adapter pin.
 - `leg_binding.py auth-readback --adapter claude --billing subscription` (no `--home`: the
   environment carries the config directory).
-- credential-env.tsv rows above; `claude_transcript.py observe`.
+- credential-env.tsv rows above; `claude_transcript.py snapshot|observe` (in the `install.sh`
+  manifest); `leg_usage.window_records` takes the file list it reads; `acp.sh claude-env
+  --policy-file <record>`, the one definition of what the runner injects into a bound Claude leg's
+  environment, read by the arm and by the read-back guard.
 
 ## How errors propagate and what a partial failure leaves
 
@@ -407,13 +453,33 @@ Hermetic, in the test groups (no provider, account or network):
       the path does not stand in for either.
   - Passes: an effortless model bound with a null effort, a zero-usage synthetic record, and a
     record whose `cwd` moved into a subdirectory of the mount.
+  - The effort injection under the guard (plan round 2, B1):
+    - The successful end-to-end run binds a non-null effort, so the read-back guard sees
+      `CLAUDE_CODE_EFFORT_LEVEL` present and passes.
+    - With `CLAUDE_CODE_EFFORT_LEVEL=max` inherited from the dispatch environment and `low`
+      bound, the leg passes, and the stub records `low` at every acpx call.
+    - Calling the guard directly refuses the variable holding another value than the record's,
+      and refuses the variable present for an effortless record.
+  - Attribution after a `cd` (plan round 2, B2), in the exact mount directory, main chain and
+    subagent file alike:
+    - a matching record at the mount root followed by a matching record whose `cwd` is a
+      subdirectory passes;
+    - the same pair with the second record on another model is refused as two models;
+    - a record of another model written to a project directory named for a subdirectory of the
+      mount is refused, not missed.
+
+    With a mount base long enough to truncate the slug, the leg is refused before the canary
+    with no prompt sent, even when every record would have matched, which proves no filtering
+    path exists. `observe` given only a prefix-matched directory returns 21.
+- install: the installed copy of `claude_transcript.py` exists and runs (plan round 2, A1).
 - route and usage: unbound `review-route plan` lines for `claude-review` unchanged; the usage
   reader unchanged.
 - `tests/expected-counts.tsv` and `tests/section-counts.tsv` change in the same commit, by the
   delta against the contract at the commit under test.
 
 Checks the implement phase runs: `bash tests/run.sh --group binding`, `--group bindrun`,
-`--group route`, `--group usage` (and `--group isolation`, which reads the claude arm). Then
+`--group route`, `--group usage`, `--group install` (the manifest), and `--group isolation`, which
+reads the claude arm. Then
 `comms.sh review-route capability --json` against a temporary `AGENT_COMMS_HOME` holding the
 operator entry, to see the two rows.
 
