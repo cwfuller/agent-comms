@@ -2505,11 +2505,13 @@ chmod 700 "$DX_T"
   && [ "$(git -C "$DX" rev-parse main)" = "$(git -C "$DX" rev-parse land3)" ] \
   && ok "with EXDEV, or an unwritable trash, integrate still lands and removes its tree inline; the trash holds nothing" \
   || fail "fallback: rc=$DX_R2/$DX_R3 gone=$DX_G3 entries=$DX_E2|$DX_E3"
-# verify fresh shares the teardown: its tree reaches the trash as a verify entry.
+# verify fresh shares the teardown: its tree reaches the trash as a verify entry. The reapers the
+# two landings above started carry no hook; one still running would delete the entry unlogged.
+DX_RQ=0; reap_wait "$DX_T" && DX_RQ=1
 : > "$DXH/events.log"
 DX_RV=0; DX_HOOK_DIR="$DXH" COMMS_TEST_REAP_HOOK="$DXH/hook" dx verify fresh land3 >/dev/null 2>&1 || DX_RV=$?
 DX_RW=0; reap_wait "$DX_T" && DX_RW=1
-[ "$DX_RV" = 0 ] && [ "$DX_RW" = 1 ] && grep -qE '^before-delete [0-9]{10}\.verify\.' "$DXH/events.log" \
+[ "$DX_RQ" = 1 ] && [ "$DX_RV" = 0 ] && [ "$DX_RW" = 1 ] && grep -qE '^before-delete [0-9]{10}\.verify\.' "$DXH/events.log" \
   && ! ls -d "$DX/.claude/worktrees/".verify-* >/dev/null 2>&1 \
   && ok "verify fresh hands its tree to the trash too, and the reaper deletes it" \
-  || fail "verify fresh: rc=$DX_RV idle=$DX_RW events=$(tr '\n' '|' < "$DXH/events.log")"
+  || fail "verify fresh: quiet=$DX_RQ rc=$DX_RV idle=$DX_RW events=$(tr '\n' '|' < "$DXH/events.log")"

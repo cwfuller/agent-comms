@@ -911,8 +911,8 @@ exit 0
 EOF
 chmod +x "$WORK/rt-hook-reap"
 rt_state retire rt-romeo >/dev/null
-RT_RQ=0; reap_wait "$RT_TR" && RT_RQ=1
 RT_R1="$(rt_turn rt-romeo grok)"
+RT_RQ=0; reap_wait "$RT_TR" && RT_RQ=1   # the turn's restage started a reaper with no hook
 : > "$WORK/rt-reap.log"; rm -f "$WORK/rt-reap.release"
 RT_RO="$(RT_REAP_LOG="$WORK/rt-reap.log" RT_REAP_BLOCK=locked RT_REAP_RELEASE="$WORK/rt-reap.release" \
   COMMS_TEST_REAP_HOOK="$WORK/rt-hook-reap" rt_cm --thread rt-romeo --yes)"; RT_ROC=$?
@@ -1012,16 +1012,17 @@ RT_STAGE_SIG=KILL COMMS_TEST_ISO_STAGE_HOOK="$WORK/rt-hook-stage" rt_turn rt-sie
 RT_CK="$(ls "$RT_C1/home/".stage.* 2>/dev/null | head -1)"
 RT_CKM=0; [ -n "$RT_CK" ] && grep -qF "$RT_MARK" "$RT_CK" && grep -qF "$RT_MARK" "$RT_C1/home/auth.json" && RT_CKM=1
 rt_state retire rt-sierra >/dev/null
+RT_RQ=0; reap_wait "$RT_TR" && RT_RQ=1   # the killed turn's restage started a reaper with no hook
 : > "$RT_CRED_LOG"
 RT_CC="$(COMMS_TEST_TRASH_HOOK="$WORK/rt-hook-cred" COMMS_TEST_REAP_HOOK="$WORK/rt-hook-cred" rt_cm --thread rt-sierra --yes)"; RT_CCC=$?
 RT_RW=0; reap_wait "$RT_TR" && RT_RW=1
 RT_LEFT="$(grep -rlF "$RT_MARK" "$RT_STORE" 2>/dev/null)"
-if [ "$(sed -n 2p "$RT_STAGE_LOG")" = marker ] && [ "$RT_CKM" = 1 ] && [ "$RT_CCC" = 0 ] && rt_line "$RT_CC" "$RT_C1" removed proven \
+if [ "$RT_RQ" = 1 ] && [ "$(sed -n 2p "$RT_STAGE_LOG")" = marker ] && [ "$RT_CKM" = 1 ] && [ "$RT_CCC" = 0 ] && rt_line "$RT_CC" "$RT_C1" removed proven \
    && [ "$RT_RW" = 1 ] && grep -qE '^held clean \.hold\.[0-9]{10}\.retire\.' "$RT_CRED_LOG" \
    && grep -qE '^before-delete clean [0-9]{10}\.retire\.' "$RT_CRED_LOG" && ! grep -q ' found ' "$RT_CRED_LOG"; then
   ok "a durable home's auth.json and a killed runner's staged copy are cleared before its tombstone reaches the trash"
 else
-  fail "durable credential (rc=$RT_CCC, stage=$(tr '\n' ' ' < "$RT_STAGE_LOG"), left=$RT_CKM, cred=$(tr '\n' '|' < "$RT_CRED_LOG")): $RT_CC"
+  fail "durable credential (rc=$RT_CCC, quiet=$RT_RQ, stage=$(tr '\n' ' ' < "$RT_STAGE_LOG"), left=$RT_CKM, cred=$(tr '\n' '|' < "$RT_CRED_LOG")): $RT_CC"
 fi
 [ -z "$RT_LEFT" ] && [ "$RT_RW" = 1 ] \
   && ok "once the reaper finishes, no file in the store or its trash holds the credential" \

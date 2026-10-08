@@ -208,7 +208,7 @@ TS_GONE=0; wait_until process_stopped "${TS_RP:-0}" && TS_GONE=1
 TS_O="$(ts_fn trash_put "$TS_T" verify "$TS/victim3")"; TS_E3="$(ts_hold "$TS_O")"; TS_E3="${TS_E3##*/.hold.}"
 ts_fn trash_commit "$TS_T" "$(ts_hold "$TS_O")" >/dev/null
 sleep 1   # time for any deleter that wrongly ran beside the orphan to show
-TS_HELD=0; kill -0 "${TS_HP:-0}" 2>/dev/null && lsof -a -p "${TS_HP:-0}" -Fn 2>/dev/null | grep -qx "n$TS_T/.reaper.lock" && TS_HELD=1
+TS_HELD=0; kill -0 "${TS_HP:-0}" 2>/dev/null && lsof -a -p "${TS_HP:-0}" -Fn 2>/dev/null | grep_full -qx "n$TS_T/.reaper.lock" && TS_HELD=1
 if [ "$TS_READY" = 1 ] && [ "$TS_GONE" = 1 ] && [ "$TS_HELD" = 1 ] && [ -n "$TS_E2" ] && [ -n "$TS_E3" ] \
    && [ ! -e "$TS_T/$TS_E2/payload/f1" ] && [ -f "$TS_T/$TS_E2/payload/f2" ] && [ -f "$TS_T/$TS_E3/payload/f1" ]; then
   ok "a reaper SIGKILLed alone leaves its child holding the lock, and nothing deletes beside it, not even a commit made meanwhile"
