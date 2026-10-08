@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Seed a fresh isolated codex home's plugin cache and remote plugin catalog from one canonical tree.
+"""Seed a fresh isolated codex home's plugin cache from one canonical tree.
 
-codex fills a new CODEX_HOME with ~760 plugin files and a ~32 MB remote plugin catalog on its first turn.
-This helper puts those two trees there with clonefile(2) (copy-on-write, new inodes, shared blocks) from a
-canonical copy beside the mount store, and refreshes that copy from a home codex itself populated.
+codex fills a new CODEX_HOME with ~760 plugin files (31 MB) on its first turn. This helper puts that tree there
+with clonefile(2) (copy-on-write, new inodes, shared blocks) from a canonical copy beside the mount store, and
+refreshes that copy from a home codex itself populated. The remote plugin catalog (cache/remote_plugin_catalog)
+is deliberately NOT seeded: measured through the real runner, codex rewrites a seeded catalog every session
+(only `fetched_at` differs), so a clone of it shares nothing for longer than a minute.
 
 Usage:
   codex_seed.py seed    --root DIR --key codex-X.Y.Z --home DIR
   codex_seed.py promote --root DIR --key codex-X.Y.Z --home DIR
 
-seed prints one line, `seeded`, `partial` or `skipped:<why>`, then ` <detail>`; promote prints `promoted` or
-`skipped:<why>`, then ` <detail>`. Exit 0 whenever the home is seeded and verified or untouched. Exit 1 is a
-usage error. Exit 2 (seed only) means a clone that failed verification could not be removed, so the home's
-contents are unexplained and the caller must not run a turn in it.
+seed prints one line, `seeded` or `skipped:<why>`, then ` <detail>`; promote prints `promoted` or `skipped:<why>`,
+then ` <detail>`. Exit 0 whenever the home is seeded and verified or untouched. Exit 1 is a usage error. Exit 2
+(seed only) means a clone that failed verification could not be removed, so the home's contents are unexplained
+and the caller must not run a turn in it.
 
 There is NO byte-copy fallback anywhere in this file: a clone that fails for any reason (another volume, a
 filesystem without clones, a missing symbol) leaves the home as it was, and codex downloads as before.
@@ -36,8 +38,9 @@ KEY_RE = re.compile(r"codex-[0-9]+(\.[0-9]+)*\Z")
 MAX_AGE_SECS = 7 * 24 * 3600     # codex does not refresh an old catalog by itself, so the canonical expires
 SKEW_SECS = 3600                 # a creation epoch further in the future than this is not ours
 CLONE_NOFOLLOW = 0x0001
-# The two trees, as (canonical name, path under a codex home).
-TREES = (("plugins-cache", ("plugins", "cache")), ("remote_plugin_catalog", ("cache", "remote_plugin_catalog")))
+TREE = "plugins-cache"           # the canonical tree's name
+HOME_PARTS = ("plugins", "cache")   # where codex keeps it under a codex home
+FRESH_ABSENT = ("plugins", "cache")  # a home holding either of these is warm
 MANIFEST = "MANIFEST"
 
 
@@ -138,16 +141,6 @@ def _guard(fn, *args):
         raise Refused("unreadable:" + _errname(e))
 
 
-def home_trees(home):
-    """(canonical name, path) for each tree present in a codex home, by lstat."""
-    out = []
-    for name, parts in TREES:
-        p = os.path.join(home, *parts)
-        if _lstat(p) is not None:
-            out.append((name, p))
-    return out
-
-
 def read_manifest(path):
     """(header dict, entry lines) from a canonical MANIFEST, or Refused."""
     st = _lstat(path)
@@ -226,81 +219,48 @@ def seed(root, key, home, now=None):
         return "skipped:no-key", 0
     try:
         # 1. fresh only; a symlink counts as present
-        for _n, parts in TREES:
-            if _lstat(os.path.join(home, parts[0])) is not None:
+        for name in FRESH_ABSENT:
+            if _lstat(os.path.join(home, name)) is not None:
                 raise Refused("warm")
         _check_root(root, home, create=False)
         # 2-3. the canonical is usable and intact
         cdir, hdr, body = _canonical(root, key, now)
-        canon = []
-        for name, _parts in TREES:
-            if os.path.lexists(os.path.join(cdir, name)):
-                canon += _guard(walk, os.path.join(cdir, name), name)
+        src = os.path.join(cdir, TREE)
+        canon = _guard(walk, src, TREE) if os.path.lexists(src) else []
         if digest(lines(canon)) != hdr["digest"] or lines(canon) != body or not canon:
             raise Refused("canonical-tampered")
     except Refused as r:
         return "skipped:%s" % r, 0
     canon_ids = {(e[5], e[6]) for e in canon}
 
-    # 4. clone each tree that exists in the canonical; the parents are ours to create and to remove
-    made, results = [], {}
-    for name, parts in TREES:
-        src = os.path.join(cdir, name)
-        if _lstat(src) is None:
-            results[name] = "absent"
-            continue
-        dst = os.path.join(home, *parts)
-        try:
-            for i in range(1, len(parts)):
-                parent = os.path.join(home, *parts[:i])
-                if _lstat(parent) is None:
-                    os.mkdir(parent, 0o700)
-                    made.append(parent)
-            _clonefile(src, dst)
-            results[name] = "cloned"
-        except OSError as e:
-            results[name] = "clone-failed:" + _errname(e)
-
-    # 5. verify exactly what was cloned, on the home side
-    ok = [n for n, v in results.items() if v == "cloned"]
+    # 4. clone the tree; the parent is ours to create and to remove
+    parent, dst = os.path.join(home, HOME_PARTS[0]), os.path.join(home, *HOME_PARTS)
     try:
-        got = []
-        for name, parts in TREES:
-            if name in ok:
-                got += _guard(walk, os.path.join(home, *parts), name)
-        want = [ln for ln in body if ln.split("\t", 1)[0].split("/", 1)[0] in ok]
-        if lines(got) != want or any((e[5], e[6]) in canon_ids for e in got):
-            raise Refused("clone-unverified")
-    except Refused as r:
-        results = {n: "clone-unverified" for n in results}
-        ok = []
-        why = str(r)
+        os.mkdir(parent, 0o700)
+    except OSError as e:
+        return "skipped:mkdir-failed:%s" % _errname(e), 0
+    try:
+        _clonefile(src, dst)
+    except OSError as e:
+        why = "clone-failed:" + _errname(e)
     else:
+        # 5. verify exactly what was cloned, on the home side
         why = ""
-    if not ok:
-        # remove exactly what this call created: the cloned trees' top directories, then the empty parents
         try:
-            for name, parts in TREES:
-                if results[name] in ("cloned", "clone-unverified"):
-                    _remove(os.path.join(home, *parts))
-            for p in sorted(made, key=len, reverse=True):
-                if _lstat(p) is not None:
-                    os.rmdir(p)
+            got = _guard(walk, dst, TREE)
+            if lines(got) != body or any((e[5], e[6]) in canon_ids for e in got):
+                raise Refused("clone-unverified")
+        except Refused as r:
+            why = str(r) if str(r) == "clone-unverified" else "clone-unverified %s" % r
+    if why:
+        # remove exactly what this call created: the cloned tree, then its empty parent
+        try:
+            _remove(dst)
+            os.rmdir(parent)
         except OSError as e:
             return "cleanup-failed %s" % _errname(e), 2
-        bad = next((v for v in results.values() if v.startswith("clone-failed")), "")
-        if why:
-            return "skipped:%s %s" % ("clone-unverified", why), 0
-        return "skipped:%s" % (bad or "clone-failed:none"), 0
-    # a tree that failed to clone leaves its empty parents behind only when another tree needs them
-    try:
-        for p in sorted(made, key=len, reverse=True):
-            if _lstat(p) is not None and not os.listdir(p):
-                os.rmdir(p)
-    except OSError:
-        pass
-    detail = " ".join("%s=%s" % (n, results[n]) for n, _p in TREES)
-    return "%s %s %s" % ("seeded" if len(ok) == len(TREES) else "partial", detail, _summary(got)), 0
+        return "skipped:%s" % why, 0
+    return "seeded %s" % _summary(got), 0
 
 
 def _prune_and_reap(root, key, now):
@@ -336,26 +296,22 @@ def promote(root, key, home, now=None):
         return "skipped:no-key", 0
     tmp = old = None
     try:
-        trees = home_trees(home)
-        if [n for n, _p in trees] != [n for n, _p in TREES]:
+        path = os.path.join(home, *HOME_PARTS)
+        if _lstat(path) is None:
             raise Refused("incomplete-home")
-        src = []
-        for name, path in trees:
-            src += _guard(walk, path, name)
-        if not any(e[1] == "f" for e in src if e[0].startswith("plugins-cache")):
+        src = _guard(walk, path, TREE)
+        if not any(e[1] == "f" for e in src):
             raise Refused("incomplete-home")
         _check_root(root, home, create=True)   # only now: a home with nothing to promote creates nothing
         tmp = os.path.join(root, ".tmp.%d.%s" % (os.getpid(), secrets.token_hex(4)))
         os.mkdir(tmp, 0o700)
-        for (name, path) in trees:
-            try:
-                _clonefile(path, os.path.join(tmp, name))
-            except OSError as e:
-                raise Refused("clone-failed:" + _errname(e))
-        got = []
-        for name, _p in trees:
-            got += _guard(walk, os.path.join(tmp, name), name)
-        if any((e[5], e[6]) in {(s[5], s[6]) for s in src} for e in got):
+        try:
+            _clonefile(path, os.path.join(tmp, TREE))
+        except OSError as e:
+            raise Refused("clone-failed:" + _errname(e))
+        got = _guard(walk, os.path.join(tmp, TREE), TREE)
+        src_ids = {(s[5], s[6]) for s in src}
+        if any((e[5], e[6]) in src_ids for e in got):
             raise Refused("clone-unverified")
         body = lines(got)
         fd = os.open(os.path.join(tmp, MANIFEST), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

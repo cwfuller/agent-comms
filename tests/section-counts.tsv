@@ -133,5 +133,5 @@ reviewer guidance: the shared bundle is staged into a mounted codex home	11
 helpers/method_guidance.py: verify the staged bundle against its snapshot record	2
 agy: runtime, doctor, the policy map and the stream reader (PATH-stubbed agy)	32
 agy: a direct review and consult turn (stub agy over the real stream-json framing)	43
-helpers/codex_seed.py: a fresh codex home's plugin cache and catalog are cloned from one canonical tree, or left alone	33
+helpers/codex_seed.py: a fresh codex home's plugin cache is cloned from one canonical tree, or left alone	32
 codex plugin-cache seed: a fresh mounted codex home is cloned from one canonical tree, a warm one is left alone	10

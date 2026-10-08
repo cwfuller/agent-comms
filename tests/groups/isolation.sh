@@ -727,7 +727,7 @@ ISO_MRR="$(sed -n '/^main_repo_root() {/,/^}/p' "$REPO/helpers/comms.sh")"
 [ -n "$ISO_MRR" ] && [ "$( ( cd "$REPO" && eval "$ISO_MRR"; main_repo_root ) )" = "$(cd "$REPO" && git worktree list --porcelain | sed -n '1s/^worktree //p')" ] \
   && ok "main_repo_root still returns the main checkout after losing the pipe" || fail "main_repo_root changed behaviour"
 
-section "helpers/codex_seed.py: a fresh codex home's plugin cache and catalog are cloned from one canonical tree, or left alone"
+section "helpers/codex_seed.py: a fresh codex home's plugin cache is cloned from one canonical tree, or left alone"
 # tests/test_codex_seed.py runs the helper in-process against a double that copies with NEW inodes (what clonefile also does), so the
 # fail-closed paths are exercised on any volume; its one real-clonefile case is skipped where the volume cannot clone.
 CS_UNIT_RC=0

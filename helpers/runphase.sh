@@ -3896,7 +3896,7 @@ AGYNOTE
     local acp_sh acp_profile acp_session acp_rc=0 acp_status acp_note="" acp_shim="" acp_reason=""
     local -a acp_iso=()          # isolation env, applied to EVERY owner-spawning invocation
     local acp_iso_backend=none acp_iso_home=""
-    local RUN_SEED_STATUS="" RUN_SEED_KEY="" RUN_SEED_ROOT=""     # the codex plugin-cache seed (seed_codex_home); promoted from after the attestation
+    local RUN_SEED_STATUS="" RUN_SEED_KEY="" RUN_SEED_ROOT="" RUN_SEED_RT=""     # the codex plugin-cache seed (seed_codex_home); promoted from after the attestation
     # The pinned adapter command (acp.sh adapter), handed to acpx as `--agent` by acp_exec. Empty runs
     # acpx's builtin for the profile. Set only where a backend's containment depends on the adapter.
     local acp_agent_cmd=""
@@ -4125,12 +4125,12 @@ AGYNOTE
         printf 'guidance\t%s\t%s\t%s\n' "$RUN_GUIDE_STATUS" "$RUN_GUIDE_REV" "$RUN_GUIDE_SHA" >> "$run_dir/turn.tsv" 2>/dev/null || true
         printf 'guidance: %s%s\n' "$RUN_GUIDE_STATUS" "${RUN_GUIDE_REV:+ revision=$RUN_GUIDE_REV sha256=$RUN_GUIDE_SHA}" >> "$run_dir/runner.log"
       }
-      # A fresh isolated codex home's plugins cache and remote plugin catalog, cloned (clonefile(2), never a
-      # byte copy, link or symlink) from one canonical tree keyed by the codex version, so codex does not
-      # download ~64 MB per ident. codex_seed.py owns every check; this only records its one-line answer
-      # (RUN_SEED_STATUS = its first word) in turn.tsv and runner.log. Anything but a verified seed leaves the
-      # home as it was and the turn runs as before; only a home the helper could not restore returns 1.
-      # A warm home is never re-seeded. The five-key config and plugin sync are not touched.
+      # A fresh isolated codex home's plugin cache, cloned (clonefile(2), never a byte copy, link or symlink) from
+      # one canonical tree keyed by the codex version, so codex does not download ~31 MB per ident. The remote
+      # plugin catalog is NOT seeded: codex rewrites it every session. codex_seed.py owns every check; this only
+      # records its one-line answer (RUN_SEED_STATUS = its first word) in turn.tsv and runner.log. Anything but
+      # a verified seed leaves the home as it was and the turn runs as before; only a home the helper could not
+      # restore returns 1. A warm home is never re-seeded. The five-key config and plugin sync are not touched.
       seed_codex_home() {  # <home> — sets RUN_SEED_STATUS, RUN_SEED_KEY, RUN_SEED_ROOT
         local home="$1" ver="" out="" rc=0
         # `codex-seed/` is a sibling of the mount base, as the persisted profiles are: same volume as the homes.
@@ -4147,6 +4147,22 @@ AGYNOTE
         printf 'codex_seed\t%s\t%s\n' "${RUN_SEED_STATUS%% *}" "$RUN_SEED_KEY" >> "$run_dir/turn.tsv" 2>/dev/null || true
         printf 'codex seed: %s key=%s\n' "${out:-$RUN_SEED_STATUS}" "${RUN_SEED_KEY:-none}" >> "$run_dir/runner.log"
         [ "$rc" != 2 ]
+      }
+      # Refresh the canonical plugin tree from this turn's home, after the reply has been published. Only from a
+      # home codex populated itself (the seed found no usable canonical: never a seeded or warm home), and only
+      # when the rollout evidenced the runtime the key names. A cache: it never changes the turn's outcome.
+      promote_codex_seed() {
+        local out="" rc=0
+        case "$RUN_SEED_STATUS" in
+          skipped:no-seed|skipped:stale|skipped:canonical-tampered) ;;
+          *) return 0 ;;
+        esac
+        if [ "codex-$RUN_SEED_RT" != "$RUN_SEED_KEY" ]; then out=skipped:runtime-unevidenced
+        else
+          out="$(python3 -I "$HELPER_DIR/codex_seed.py" promote --root "$RUN_SEED_ROOT" --key "$RUN_SEED_KEY" --home "$acp_iso_home" 2>>"$run_dir/runner.log")" || out=skipped:helper-failed
+        fi
+        printf 'codex_seed_promote\t%s\t%s\n' "${out%% *}" "$RUN_SEED_KEY" >> "$run_dir/turn.tsv" 2>/dev/null || true
+        printf 'codex seed promote: %s key=%s\n' "$out" "$RUN_SEED_KEY" >> "$run_dir/runner.log"
       }
       # A provider with NO containment backend on this OS. Refusing is the fail-closed answer; the escape hatch
       # is explicit, it is not the default, and it is only for a provider that has no backend at all — a silent
@@ -4910,7 +4926,7 @@ AGYNOTE
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
     if [ "$acp_rc" -eq 0 ] && [ -n "$acp_iso_home" ]; then
-      local seed_msg="" att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
+      local att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
       # codex's window was read once, for containment, right after the turn; its att_out/att_rc stand.
       if [ "$att_rc" -eq 0 ]; then
         # NOT `IFS=$'\t' read`: tab is IFS WHITESPACE, so consecutive tabs collapse and every
@@ -4947,17 +4963,9 @@ AGYNOTE
         return 1
       fi
       printf 'policy attested: %s\n' "$att_msg" >>"$run_dir/runner.log"
-      # Refresh the canonical plugin tree from a home codex populated itself (never a seeded one, and only
-      # when the rollout shows the runtime that ran was the one the key names). A cache: it never changes
-      # the turn's outcome, and what it did is recorded.
-      case "$RUN_SEED_STATUS" in
-        skipped:no-seed|skipped:stale|skipped:canonical-tampered)
-          if [ "$provider" = codex ] && [ "codex-$att_rt" = "$RUN_SEED_KEY" ]; then
-            seed_msg="$(python3 -I "$HELPER_DIR/codex_seed.py" promote --root "$RUN_SEED_ROOT" --key "$RUN_SEED_KEY" --home "$acp_iso_home" 2>>"$run_dir/runner.log")" || seed_msg="skipped:helper-failed"
-          else seed_msg="skipped:runtime-unevidenced"; fi
-          printf 'codex_seed_promote\t%s\t%s\n' "${seed_msg%% *}" "$RUN_SEED_KEY" >> "$run_dir/turn.tsv" 2>/dev/null || true
-          printf 'codex seed promote: %s key=%s\n' "$seed_msg" "$RUN_SEED_KEY" >> "$run_dir/runner.log" ;;
-      esac
+      # The runtime the rollout evidences, kept for promote_codex_seed: this turn's, or else the one that created
+      # the session, which on a fresh home is the canary's (before the review prompt's window opens).
+      RUN_SEED_RT="${att_rt:-$att_rtc}"
     fi
     if [ "$acp_rc" -eq 0 ] && broker_stamp_and_deliver "$msg" "$run_dir" "$peer"; then
       acp_status=completed
@@ -5024,6 +5032,7 @@ AGYNOTE
     fi
     update_thread_state "$msg_thread" "$acp_status" "acp:$acp_session" "$sfield" || true
     write_result "$run_dir" "$acp_status" "$acp_rc" "acp:$acp_session" "$msg" "$acp_note" "${acp_reason:-}"
+    if [ "$acp_status" = completed ] && [ "$provider" = codex ] && [ -n "$acp_iso_home" ]; then promote_codex_seed; fi
     unmount_artifact
     trap - EXIT
     [ "$acp_status" = completed ]

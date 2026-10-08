@@ -41,7 +41,7 @@ class Case(unittest.TestCase):
         self.write(self.src / 'plugins/cache/openai-curated-remote/figma/plugin.json', '{"id":"figma"}\n')
         self.write(self.src / 'plugins/cache/openai-curated-remote/figma/.codex-remote-plugin-install.json', '{"p":"figma"}\n')
         self.write(self.src / 'plugins/cache/tools/a/b/c.txt', 'c\n')
-        self.write(self.src / 'cache/remote_plugin_catalog/id.json', '{"rows":[1,2,3]}\n')
+        self.write(self.src / 'cache/remote_plugin_catalog/id.json', '{"rows":[1,2,3]}\n')   # codex's catalog: present, never staged
         self.home = self.base / 'home'
         self.home.mkdir()
         patcher = patch.object(cs, '_clonefile', double_clone)
@@ -71,16 +71,17 @@ class Case(unittest.TestCase):
 
 
 class SeedFresh(Case):
-    def test_seeds_both_trees_with_new_inodes_and_no_links(self):
+    def test_seeds_the_plugin_cache_with_new_inodes_and_no_links(self):
         self.promote()
         line, rc = self.seed()
         self.assertEqual((line.split()[0], rc), ('seeded', 0), line)
-        canon = self.root / KEY
-        for tree, rel in (('plugins-cache', 'plugins/cache'), ('remote_plugin_catalog', 'cache/remote_plugin_catalog')):
-            got = cs.walk(str(self.home / rel), tree)
-            self.assertEqual(cs.lines(got), cs.lines(cs.walk(str(canon / tree), tree)))
-            self.assertFalse(self.ids(self.home / rel) & self.ids(canon / tree))
-            self.assertTrue(all(e[1] == 'd' or os.lstat(self.home / rel / e[0].split('/', 1)[1]).st_nlink == 1 for e in got if '/' in e[0]))
+        canon = self.root / KEY / 'plugins-cache'
+        got = cs.walk(str(self.home / 'plugins/cache'), 'plugins-cache')
+        self.assertEqual(cs.lines(got), cs.lines(cs.walk(str(canon), 'plugins-cache')))
+        self.assertFalse(self.ids(self.home / 'plugins/cache') & self.ids(canon))
+        self.assertTrue(all(e[1] == 'd' or os.lstat(self.home / 'plugins/cache' / e[0].split('/', 1)[1]).st_nlink == 1 for e in got if '/' in e[0]))
+        self.assertFalse(any(os.path.islink(os.path.join(d, n)) for d, ds, fs in os.walk(self.home) for n in ds + fs))
+        self.assertEqual(sorted(os.listdir(self.home)), ['plugins'], 'the catalog and every other path is left to codex')
 
     def test_no_canonical_leaves_the_home_untouched(self):
         self.assertEqual(self.seed(), ('skipped:no-seed', 0))
@@ -130,7 +131,6 @@ class SeedFresh(Case):
         (self.home / 'plugins').mkdir()
         self.assertEqual(self.seed(), ('skipped:warm', 0))
         self.assertEqual(os.listdir(self.home / 'plugins'), [])
-        self.assertFalse((self.home / 'cache').exists())
 
     def test_a_symlinked_cache_counts_as_warm(self):
         self.promote()
@@ -177,20 +177,6 @@ class SeedFailsClosed(Case):
         with patch.object(cs, '_clonefile', REAL_CLONE), patch.object(cs.ctypes, 'CDLL', return_value=object()):
             self.assertEqual(self.seed(), ('skipped:clone-failed:ENOSYS', 0))
         self.assertTrue(self.untouched())
-
-    def test_one_tree_cloning_is_reported_partial(self):
-        self.promote()
-
-        def second_fails(src, dst, *_a):
-            if dst.endswith('remote_plugin_catalog'):
-                raise OSError(errno.EPERM, 'unsupported')
-            double_clone(src, dst)
-        with patch.object(cs, '_clonefile', second_fails):
-            line, rc = self.seed()
-        self.assertEqual((line.split()[0], rc), ('partial', 0), line)
-        self.assertIn('remote_plugin_catalog=clone-failed:EPERM', line)
-        self.assertTrue((self.home / 'plugins/cache/tools/a/b/c.txt').is_file())
-        self.assertFalse((self.home / 'cache').exists(), 'an empty parent seed made for the failed tree is removed')
 
     def test_a_clone_that_differs_from_the_canonical_is_removed(self):
         self.promote()
@@ -259,16 +245,17 @@ class Promote(Case):
 
     def test_a_home_with_nothing_to_promote_creates_nothing(self):
         line, rc = cs.promote(str(self.root), KEY, str(self.home), now=NOW)
-        self.assertEqual((line, rc), ('skipped:incomplete-home', 0))
+        self.assertEqual((line.split()[0], rc), ('skipped:incomplete-home', 0))
         self.assertFalse(self.root.exists())
         shutil.rmtree(self.src / 'plugins/cache')
         (self.src / 'plugins/cache').mkdir()
-        self.assertEqual(cs.promote(str(self.root), KEY, str(self.src), now=NOW)[0], 'skipped:incomplete-home')
+        self.assertEqual(cs.promote(str(self.root), KEY, str(self.src), now=NOW)[0].split()[0], 'skipped:incomplete-home')
         self.assertFalse(self.root.exists())
 
-    def test_a_home_with_only_the_plugins_tree_is_not_promoted(self):
-        shutil.rmtree(self.src / 'cache')
-        self.assertEqual(cs.promote(str(self.root), KEY, str(self.src), now=NOW)[0], 'skipped:incomplete-home')
+    def test_the_catalog_is_never_promoted(self):
+        self.promote()
+        self.assertEqual(sorted(os.listdir(self.root / KEY)), ['MANIFEST', 'plugins-cache'])
+        self.assertNotIn('remote_plugin_catalog', (self.root / KEY / 'MANIFEST').read_text())
 
     def test_a_symlink_in_the_home_is_not_promoted(self):
         os.symlink('/etc/hosts', self.src / 'plugins/cache/tools/link')
@@ -309,9 +296,7 @@ class Promote(Case):
             pids.append(pid)
         self.assertEqual([os.waitpid(p, 0)[1] for p in pids], [0, 0])
         hdr, body = cs.read_manifest(str(self.root / KEY / 'MANIFEST'))
-        walked = []
-        for name, _parts in cs.TREES:
-            walked += cs.walk(str(self.root / KEY / name), name)
+        walked = cs.walk(str(self.root / KEY / 'plugins-cache'), 'plugins-cache')
         self.assertEqual(cs.lines(walked), body)
         self.assertEqual(self.leftovers(), [])
         self.assertEqual(self.seed()[0].split()[0], 'seeded')
@@ -341,6 +326,8 @@ class Entrypoint(Case):
         self.assertEqual(self.run_cli('seed', '--root', str(self.root), '--key', KEY, '--home', str(self.home)), (0, 'skipped:no-seed'))
         self.assertEqual(self.run_cli('seed', '--root', str(self.root))[0], 1)
         self.assertEqual(self.run_cli('frob', '--root', 'a', '--key', 'b', '--home', 'c')[0], 1)
+        self.assertEqual(self.run_cli('seed', '--root', 'a', '--key', 'b', '--home', 'c', '--wait-secs', '5')[0], 1)
+        self.assertEqual(self.run_cli('promote', '--root', 'a', '--key', 'b', '--home', 'c', '--wait-secs', '601')[0], 1)
 
     def test_no_byte_copy_link_process_or_environment_use_exists_in_the_helper(self):
         tree = ast.parse((REPO / 'helpers/codex_seed.py').read_text())
@@ -377,7 +364,7 @@ class RealClone(unittest.TestCase):
             canon_ids = {(e[5], e[6]) for e in cs.walk(str(root / KEY / 'plugins-cache'), 'p')}
             home_walk = cs.walk(str(home / 'plugins/cache'), 'p')
             self.assertFalse(canon_ids & {(e[5], e[6]) for e in home_walk})
-            self.assertFalse(any(stat.S_ISLNK(os.lstat(p).st_mode) for p in (home / 'plugins/cache/p/f.json', home / 'cache/remote_plugin_catalog/c.json')))
+            self.assertFalse(stat.S_ISLNK(os.lstat(home / 'plugins/cache/p/f.json').st_mode))
             self.assertEqual((home / 'plugins/cache/p/f.json').read_text(), '{"a":1}\n')
 
 

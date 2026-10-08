@@ -480,6 +480,10 @@ case " $* " in
     # shows TWO roots and refuses, instead of looking honest. (codex + grok, implement r3.)
     if ax_rollout_ok && [ -z "${AX_NO_CANARY_ROLLOUT:-}" ]; then
       ax_cd="$CODEX_HOME/sessions/2026/09/19"; mkdir -p "$ax_cd" 2>/dev/null
+      # AX_ROLLOUT_CLI_VERSION — the session_meta codex writes ONCE, when the session is created (here, by the canary, before the
+      # review prompt's window opens), naming the runtime that ran it.
+      [ -n "${AX_ROLLOUT_CLI_VERSION:-}" ] && [ ! -s "$ax_cd/rollout-stub.jsonl" ] \
+        && printf '{"type":"session_meta","payload":{"cli_version":"%s"}}\n' "$AX_ROLLOUT_CLI_VERSION" >> "$ax_cd/rollout-stub.jsonl" 2>/dev/null
       printf '{"type":"turn_context","payload":{"turn_id":"t-canary","root_turn_id":"t-canary","model":"%s","effort":"%s"%s}}\n' \
         "${AX_MODEL:-gpt-6-astra}" "${AX_EFFORT:-xhigh}" "$(ax_sbx_json "${AX_CANARY_SANDBOX:-$ax_sbx}")" >> "$ax_cd/rollout-stub.jsonl" 2>/dev/null || true
     fi
@@ -509,8 +513,6 @@ if ax_rollout_ok && [ -z "${AX_ROLLOUT_NONE:-}" ]; then
   [ -n "${AX_ROLLOUT_NEW_FILE:-}" ] && ax_rf="$ax_rd/rollout-stub-replacement.jsonl"
   ax_re="${AX_ROLLOUT_EFFORT:-${AX_EFFORT:-xhigh}}"
   ax_rm="${AX_ROLLOUT_MODEL:-${AX_MODEL:-gpt-6-astra}}"
-  # AX_ROLLOUT_CLI_VERSION — the session_meta codex writes when a session is created, naming the runtime that ran it.
-  [ -n "${AX_ROLLOUT_CLI_VERSION:-}" ] && printf '{"type":"session_meta","payload":{"cli_version":"%s"}}\n' "$AX_ROLLOUT_CLI_VERSION" >> "$ax_rf" 2>/dev/null
   # A non-root context (turn_id != root_turn_id) must be IGNORED by the reader, so emit one
   # every time: a gate that counted it would see ambiguity on every honest turn.
   ax_rs="${AX_ROLLOUT_SANDBOX:-$ax_sbx}"

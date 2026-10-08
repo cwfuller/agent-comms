@@ -2236,9 +2236,9 @@ SD_1="$(sd_turn gd-sd1 s1 AX_FILL_PLUGINS=1)"
   && ok "with no canonical tree the first fresh home runs unseeded (codex downloads as before), and its attested turn promotes what codex wrote" \
   || fail "unseeded first turn: status=$(gd_res "$SD_1" status) seed=$(sd_tv "$SD_1" codex_seed) saw=$(sd_saw s1) promote=$(sd_tv "$SD_1" codex_seed_promote) store=$(ls "$GD_SEEDROOT" 2>&1 | tr '\n' ' ')"
 SD_2="$(sd_turn gd-sd2 s2)"
-{ [ "$(gd_res "$SD_2" status)" = completed ] && [ "$(sd_tv "$SD_2" codex_seed)" = 'seeded|codex-0.159.0' ] && [ "$(sd_saw s2)" = 'plugins 1 1 0 0' ] \
-  && grep -q '^codex seed: seeded plugins-cache=cloned remote_plugin_catalog=cloned entries=' "$SD_2/runner.log"; } \
-  && ok "a second fresh ident's codex starts with the plugin cache and the catalog already in place: no symlink and no multi-link file in either tree" \
+{ [ "$(gd_res "$SD_2" status)" = completed ] && [ "$(sd_tv "$SD_2" codex_seed)" = 'seeded|codex-0.159.0' ] && [ "$(sd_saw s2)" = 'plugins 1 0 0 0' ] \
+  && grep -q '^codex seed: seeded entries=' "$SD_2/runner.log"; } \
+  && ok "a second fresh ident's codex starts with the plugin cache already in place and no catalog staged: no symlink and no multi-link file" \
   || fail "seeded turn: status=$(gd_res "$SD_2" status) seed=$(sd_tv "$SD_2" codex_seed) saw=$(sd_saw s2) log=$(grep '^codex seed' "$SD_2/runner.log")"
 [ -z "$(sd_tv "$SD_2" codex_seed_promote)" ] \
   && ok "a seeded home is never promoted: the canonical's provenance stays a home codex wrote itself" || fail "a seeded home was promoted: $(sd_tv "$SD_2" codex_seed_promote)"
