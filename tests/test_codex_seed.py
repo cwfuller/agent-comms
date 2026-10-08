@@ -105,7 +105,7 @@ class SeedFresh(Case):
     def test_a_planted_symlink_in_the_canonical_is_refused_and_left_in_place(self):
         self.promote()
         os.symlink('/etc/hosts', self.root / KEY / 'plugins-cache/planted')
-        self.assertEqual(self.seed(), ('skipped:symlink', 0))
+        self.assertEqual(self.seed(), ('skipped:canonical-tampered symlink', 0))
         self.assertTrue(self.untouched())
         self.assertTrue((self.root / KEY / 'MANIFEST').exists())
 
@@ -123,7 +123,7 @@ class SeedFresh(Case):
     def test_a_hard_link_in_the_canonical_is_refused(self):
         self.promote()
         os.link(self.root / KEY / 'plugins-cache/tools/a/b/c.txt', self.base / 'outside-link')
-        self.assertEqual(self.seed(), ('skipped:link-or-special', 0))
+        self.assertEqual(self.seed(), ('skipped:canonical-tampered link-or-special', 0))
         self.assertTrue(self.untouched())
 
     def test_a_warm_home_is_never_reseeded(self):
@@ -261,6 +261,14 @@ class Promote(Case):
         os.symlink('/etc/hosts', self.src / 'plugins/cache/tools/link')
         self.assertEqual(cs.promote(str(self.root), KEY, str(self.src), now=NOW)[0], 'skipped:symlink')
         self.assertFalse(self.root.exists())
+
+    def test_a_canonical_holding_a_planted_link_is_repaired_by_the_next_promote(self):
+        self.promote()
+        os.symlink('/etc/hosts', self.root / KEY / 'plugins-cache/planted')
+        self.assertTrue(self.seed()[0].startswith('skipped:canonical-tampered'))
+        self.promote(now=NOW + 5)
+        self.assertEqual(self.seed(now=NOW + 60)[0].split()[0], 'seeded')
+        self.assertEqual(self.leftovers(), [])
 
     def test_a_failed_clone_leaves_the_previous_canonical_and_no_temp(self):
         self.promote()

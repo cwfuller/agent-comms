@@ -1,4 +1,4 @@
-total	3299
+total	3300
 skip_ok	zsh-absent
 skip_ok	agy-live-off
 skip_ok	group-no-secondary
@@ -17,3 +17,7 @@ skip_ok	seatbelt-credstore
 skip_ok	seatbelt-credrun
 skip_ok	seatbelt-laxclient
 skip_ok	clone-unsupported
+skip_ok	clone-acp-promote
+skip_ok	clone-acp-seeded
+skip_ok	clone-acp-warm
+skip_ok	clone-acp-stale

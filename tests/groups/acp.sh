@@ -2230,16 +2230,34 @@ sd_turn() {  # <thread> <tag> [env assignments...] -> run dir
 }
 sd_tv() { awk -F'\t' -v k="$2" '$1==k{print $2 "|" $3}' "$1/turn.tsv" 2>/dev/null; }   # codex_seed or codex_seed_promote
 sd_saw() { head -1 "$GD/seed-$1.log" 2>/dev/null | tr '\t' ' '; }                       # plugin files, catalog files, symlinks, multi-link files
+# Cloning needs an APFS-like volume. Where this volume cannot clone, the helper correctly answers `skipped:clone-failed:<errno>` and
+# the four assertions that need a real clone are named skips, each bound to this probe having CONFIRMED the failure.
+if python3 -I - "$REPO/helpers" "$GD" <<'PY'
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import codex_seed
+a = os.path.join(sys.argv[2], "clone-probe-a")
+open(a, "w").write("x")
+try:
+    codex_seed._clonefile(a, os.path.join(sys.argv[2], "clone-probe-b"))
+except OSError:
+    sys.exit(1)
+PY
+then CLONE_PROBE_OK=1; else CLONE_PROBE_OK=0; fi
 SD_1="$(sd_turn gd-sd1 s1 AX_FILL_PLUGINS=1)"
+if [ "$CLONE_PROBE_OK" = 1 ]; then
 { [ "$(gd_res "$SD_1" status)" = completed ] && [ "$(sd_tv "$SD_1" codex_seed)" = 'skipped:no-seed|codex-0.159.0' ] && [ "$(sd_saw s1)" = 'plugins 0 0 0 0' ] \
   && [ "$(sd_tv "$SD_1" codex_seed_promote)" = 'promoted|codex-0.159.0' ] && [ -f "$GD_SEEDROOT/codex-0.159.0/MANIFEST" ] && [ -d "$GD_SEEDROOT/codex-0.159.0/plugins-cache" ]; } \
   && ok "with no canonical tree the first fresh home runs unseeded (codex downloads as before), and its attested turn promotes what codex wrote" \
   || fail "unseeded first turn: status=$(gd_res "$SD_1" status) seed=$(sd_tv "$SD_1" codex_seed) saw=$(sd_saw s1) promote=$(sd_tv "$SD_1" codex_seed_promote) store=$(ls "$GD_SEEDROOT" 2>&1 | tr '\n' ' ')"
+else skip clone-acp-promote "with no canonical tree the first fresh home runs unseeded, and its attested turn promotes what codex wrote (needs a volume that can clone)"; fi
 SD_2="$(sd_turn gd-sd2 s2)"
+if [ "$CLONE_PROBE_OK" = 1 ]; then
 { [ "$(gd_res "$SD_2" status)" = completed ] && [ "$(sd_tv "$SD_2" codex_seed)" = 'seeded|codex-0.159.0' ] && [ "$(sd_saw s2)" = 'plugins 1 0 0 0' ] \
   && grep -q '^codex seed: seeded entries=' "$SD_2/runner.log"; } \
   && ok "a second fresh ident's codex starts with the plugin cache already in place and no catalog staged: no symlink and no multi-link file" \
   || fail "seeded turn: status=$(gd_res "$SD_2" status) seed=$(sd_tv "$SD_2" codex_seed) saw=$(sd_saw s2) log=$(grep '^codex seed' "$SD_2/runner.log")"
+else skip clone-acp-seeded "a second fresh ident starts with the plugin cache already in place (needs a volume that can clone)"; fi
 [ -z "$(sd_tv "$SD_2" codex_seed_promote)" ] \
   && ok "a seeded home is never promoted: the canonical's provenance stays a home codex wrote itself" || fail "a seeded home was promoted: $(sd_tv "$SD_2" codex_seed_promote)"
 { [ -n "$(gd_seen s2 auth)" ] && [ "$(gd_seen s2 auth)" = "$(gd_seen s1 auth)" ] && [ "$(gd_seen s2 config)" = "$(gd_seen s1 config)" ] && [ -s "$GD/cfg-s2.log" ] \
@@ -2247,23 +2265,27 @@ SD_2="$(sd_turn gd-sd2 s2)"
   && ok "seeding leaves the credential and the generated config byte-identical to an unseeded home's, and the config disables nothing about plugins" \
   || fail "staging changed: auth $(gd_seen s1 auth) -> $(gd_seen s2 auth), config $(gd_seen s1 config) -> $(gd_seen s2 config)"
 SD_3="$(sd_turn gd-sd2 s3)"
+if [ "$CLONE_PROBE_OK" = 1 ]; then
 { [ "$(gd_res "$SD_3" status)" = completed ] && [ "$(sd_tv "$SD_3" codex_seed)" = 'skipped:warm|codex-0.159.0' ] && [ -z "$(sd_tv "$SD_3" codex_seed_promote)" ]; } \
   && ok "a warm resumed home is never re-seeded and never promoted" || fail "warm home: seed=$(sd_tv "$SD_3" codex_seed) promote=$(sd_tv "$SD_3" codex_seed_promote)"
+else skip clone-acp-warm "a warm resumed home is never re-seeded and never promoted (needs a volume that can clone)"; fi
 rm -rf "$GD_SEEDROOT/codex-0.159.0"
 SD_4="$(sd_turn gd-sd4 s4 AX_FILL_PLUGINS=1 AX_ROLLOUT_CLI_VERSION=0.158.0)"
 { [ "$(gd_res "$SD_4" status)" = completed ] && [ "$(sd_tv "$SD_4" codex_seed_promote)" = 'skipped:runtime-unevidenced|codex-0.159.0' ] && [ ! -e "$GD_SEEDROOT/codex-0.159.0" ]; } \
   && ok "a rollout naming a different codex than the policy's promotes nothing" || fail "unevidenced runtime: promote=$(sd_tv "$SD_4" codex_seed_promote) store=$(ls "$GD_SEEDROOT" 2>&1 | tr '\n' ' ')"
 SD_5="$(sd_turn gd-sd5 s5 AX_FILL_PLUGINS=1)"
-python3 - "$GD_SEEDROOT/codex-0.159.0/MANIFEST" <<'PY'
+[ "$CLONE_PROBE_OK" = 1 ] && python3 - "$GD_SEEDROOT/codex-0.159.0/MANIFEST" <<'PY'
 import re, sys
 t = open(sys.argv[1]).read()
 open(sys.argv[1], "w").write(re.sub(r"(?m)^created\t.*$", "created\t1", t, count=1))
 PY
 SD_6="$(sd_turn gd-sd6 s6 AX_FILL_PLUGINS=1)"
+if [ "$CLONE_PROBE_OK" = 1 ]; then
 { [ "$(sd_tv "$SD_6" codex_seed)" = 'skipped:stale|codex-0.159.0' ] && [ "$(sd_saw s6)" = 'plugins 0 0 0 0' ] && [ "$(sd_tv "$SD_6" codex_seed_promote)" = 'promoted|codex-0.159.0' ] \
   && [ "$(awk -F'\t' '$1=="created"{print $2; exit}' "$GD_SEEDROOT/codex-0.159.0/MANIFEST")" -gt 1000000000 ]; } \
   && ok "a canonical past its age cap is not used, and the next fresh home's turn replaces it" \
   || fail "stale canonical: seed=$(sd_tv "$SD_6" codex_seed) saw=$(sd_saw s6) promote=$(sd_tv "$SD_6" codex_seed_promote)"
+else skip clone-acp-stale "a canonical past its age cap is not used, and the next fresh home replaces it (needs a volume that can clone)"; fi
 # The wiring is the only caller: promote runs after the attested turn and only for the three skips that mean "no usable canonical".
 { grep -q 'skipped:no-seed|skipped:stale|skipped:canonical-tampered)' "$RP" && [ "$(grep -c 'python3 -I "$HELPER_DIR/codex_seed.py" \(seed\|promote\) --root' "$RP")" = 2 ] ; } \
   && ok "runphase.sh calls codex_seed.py for exactly seed and promote, and promotes only after a no-seed, stale or tampered canonical" || fail "seed wiring in runphase.sh"

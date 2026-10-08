@@ -226,7 +226,11 @@ def seed(root, key, home, now=None):
         # 2-3. the canonical is usable and intact
         cdir, hdr, body = _canonical(root, key, now)
         src = os.path.join(cdir, TREE)
-        canon = _guard(walk, src, TREE) if os.path.lexists(src) else []
+        try:
+            canon = _guard(walk, src, TREE) if os.path.lexists(src) else []
+        except Refused as r:
+            # whatever is wrong with the canonical (a planted link, an unreadable entry), it is one state: promote may repair it
+            raise Refused("canonical-tampered %s" % r)
         if digest(lines(canon)) != hdr["digest"] or lines(canon) != body or not canon:
             raise Refused("canonical-tampered")
     except Refused as r:

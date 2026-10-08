@@ -216,11 +216,11 @@ skip() { # skip <id> <desc> — permitted, CONDITION-BOUND, and single-use
       if [ "${COMMS_TEST_AGY_LIVE:-}" = 1 ]; then
         fail "$2 (skip id 'agy-live-off' claimed, but COMMS_TEST_AGY_LIVE=1 asks for the live run)"; return
       fi ;;
-    # The one real-clonefile case: cashable only where its own probe confirmed this volume cannot clone.
-    clone-unsupported)
+    # The assertions that need a real clonefile(2): cashable only where a probe confirmed this volume cannot clone.
+    clone-*)
       case "${CLONE_PROBE_OK:-unrun}" in
         0) ;;
-        *) fail "$2 (skip id 'clone-unsupported': probe state is '${CLONE_PROBE_OK:-unrun}', not a confirmed failure)"; return ;;
+        *) fail "$2 (skip id '$1': probe state is '${CLONE_PROBE_OK:-unrun}', not a confirmed failure)"; return ;;
       esac ;;
     acl-*)
       case "${ACL_PROBE_OK:-unrun}" in
