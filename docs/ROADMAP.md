@@ -63,6 +63,67 @@ the percent is of the model's context window. A 14,400-token turn in a 258,400 w
 `compacted` record before `task_complete` at threshold 2, and none at threshold 10. codex 0.160.0
 refuses a value above 100 ("must be between 0 and 100"); the adapter's bundled codex 0.156.1 accepts 80.
 
+## BUILT ON BRANCH 2026-10-08: bulk deletes leave the turn, dispatch and landing paths (task 394)
+
+**Field report** (2026-10-08, the operator's Mac). The external mount store held 44.0 GB in
+1,650,014 entries across 442 ident dirs: homes 22.3 GB, views 14.5 GB, and 296 asides 7.2 GB. 288 of
+those asides were past the 120-minute horizon and 232 were older than 24 h, because a restage reaped
+only its own ident's asides and those idents never restaged. An `rm -rf` of a 165k-entry tree took
+11-54 s, and fseventsd, Spotlight and Time Machine added load for every file. Every recursive delete
+ran inline on a hot path:
+
+- the restage's aside reap;
+- a throwaway's teardown in the runner's EXIT trap (its checkout, then its whole ident dir with its
+  home);
+- `clean mounts --thread`, which Basis calls inline in dispatch on session rotation (232 retire
+  events in its logs);
+- integrate's verification tree, removed before integrate returns while integrate holds Basis's single
+  landing slot. A basis tree is about 2k entries / 80 MB, and a larger client's is 8.4k entries /
+  91 MB. Basis made 2-82 such trees a day per repo, whether or not they landed.
+
+Two leaked `.integrate-*` trees (115 MB) were still registered. A third one was a live integrate, not
+a leak, which is why the sweep below needs proof of death and never uses age.
+
+**What changed** ([INTERNALS.md](INTERNALS.md#deferred-deletion-trash-and-reaper)). Each of those
+sites now renames the discarded tree into a trash dir on the same volume: `<store>/.comms-trash` or
+`<repo>/.claude/worktrees/.comms-trash`. The rename takes constant time. One detached, low-priority
+reaper per trash (`runphase.sh reap`: its own session, `taskpolicy -b`, flock on fd 9) deletes the
+tree later. A git tree drops only its own admin dir, after both back-pointers are re-checked against
+the pre-rename path. Credentials are unlinked before any put. If a rename fails, the site falls back
+to its old inline delete and never copies. The reaper's store sweep applies the unchanged 120-minute
+aside horizon to every ident. Its repo sweep removes a leaked `.integrate-*` or `.verify-*` tree only
+when its owner is proven dead. The verification tree is now `.integrate-<pid>-<n>`, unique per run.
+Retention is otherwise unchanged. These still delete inline because none of them is on a turn,
+dispatch or landing path: the whole-store GC, the pending-generation reclaim, the symlink-deposit
+cleanup and `worktree retire`.
+
+**Measured** (this Mac, load average 25-30 throughout, so read these figures as noisy). The setup:
+
+- a scratch shallow clone of basis in `$TMPDIR`;
+- a `suite-cmd` that provisions the tree the way the real one does (mise Node, `npm ci`) and then
+  passes without running tests, which gives a verification tree of 2,153 entries / 82 MB;
+- a `reference-transaction` hook that timestamps the `main` update.
+
+Three landings ran with the 33c4d15 helpers and three with the branch's, interleaved. The time from
+update-ref to integrate's exit was:
+
+| helpers | runs (s) | median |
+|---|---|---|
+| 33c4d15 (inline delete) | 0.540, 0.644, 0.263 | 0.540 s |
+| branch (trash + reaper) | 0.590, 0.441, 0.447 | 0.447 s |
+
+In all six runs, integrate's process group was empty at the moment integrate exited. Timing the
+teardown step alone on the same tree: `git worktree remove --force` took 0.151-0.522 s (median
+0.169 s over 5) and `integrate_tree_drop` took 0.251-0.503 s (median 0.333 s). With 50,000 extra
+files in the tree, the old step took 3.33 s and 4.28 s and the new one 0.40 s and 0.34 s.
+
+Reading: a basis-sized tree in `$TMPDIR` already deleted in under a second, so the change does not
+measurably shorten that landing. The two medians are within run-to-run noise. The new step's fixed
+cost, mostly two `python3` starts and a `ps` under this load, is about 0.2-0.4 s. The gain grows with
+tree size, because the inline delete scales with entries and the rename does not. `$TMPDIR` is
+excluded from Time Machine and the real basis checkout is not, so the "before" figures understate a
+field landing. The live checkout was not measured, by design.
+
 ## Contraction (2026-08-28) — current program
 
 ### RESOLVED 2026-09-24: codex legs withheld as "a malformed record in the provider's rollout" (sev 3)
