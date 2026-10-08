@@ -52,14 +52,21 @@ the process-liveness probe. No delete site renames, unregisters or starts a reap
 TRASH_LEAF=.comms-trash
 trash_dir_for <parent>                         # <parent>/.comms-trash
 trash_ensure <trash>                           # 0 usable | 1 (+TRASH_NOTE)
-trash_put <trash> <kind> <src>                 # 0 + TRASH_ENTRY | 1, nothing moved
+trash_put <trash> <kind> <src>                 # 0 + TRASH_HOLD (<src> is now $TRASH_HOLD/payload)
+                                               # 1, nothing moved
 trash_tree <git-common-dir> <trash> <kind> <dir> [<tree-relpath>]
-                                               # 0 moved and unregistered | 1 nothing moved
-                                               # 2 moved, registration left in place
+                                               # 0 held and unregistered | 1 nothing moved
+                                               # 2 held, registration left in place
+trash_commit <trash> <hold>                    # hold -> entry, then trash_reap_start; always 0
 trash_reap_start store <mount-base> | repo <repo-root>   # never waits; always returns 0
 trash_owner_write <admin-dir>                  # best-effort owner record (section 4)
 proc_state <pid>                               # moved here verbatim from runphase.sh
 ```
+
+Every put is two steps: `trash_put` (or `trash_tree`) moves the tree into a hold, and the caller
+finishes its own bookkeeping and then calls `trash_commit`. No reaper can delete a hold (see
+"Holds and entries" below). So nothing a site still has to read after the rename can disappear
+under it.
 
 **Sourcing.** `runphase.sh` sources `trash.sh` next to itself and dies at startup with a "reinstall"
 message if it is missing, because every claim needs `proc_state`. `comms.sh` sources it like
@@ -85,17 +92,33 @@ creates the trash dir mode 700. It then requires a real directory, not a symlink
 physical path, owned by the current uid. No one writes to or reaps from a trash that fails this
 check.
 
-**Entry names.** An entry is named `<10-digit epoch>.<kind>.<pid>.<6 hex>`. `<kind>` is one of
-`aside`, `throwaway`, `pending`, `retire`, `integrate` or `verify`. The names sort by age. None
-matches `tmp-*`, `.retire.*`, `.integrate-*` or `.verify-*`. The reaper deletes only direct
-children whose name matches this grammar exactly. Dot-names (`.reaper.lock`) are control files.
-Anything else in a trash dir is left alone. If a generated name already exists, the put draws a
-new one.
+**Holds and entries.** Every put lands in a wrapper directory, never as a bare tree:
 
-**The rename.** `trash_put` runs a short `python3 -I` program owned by `trash.sh`, which calls
-`os.rename`. That call can fail with `EXDEV`, but it never copies. `mv` is not used, because on
-`EXDEV` it falls back to copy-and-delete, which criterion 2 forbids. The program moves `<src>` only
-when all of these hold:
+- A hold is `.hold.<10-digit epoch>.<kind>.<pid>.<6 hex>/`. It holds `owner` (`pid=`, `fmt=v2`,
+  `start=` of the maker, rendered by `proc_state`) and `payload/`, which is the moved tree. The
+  maker creates the wrapper and writes `owner` (temp file and rename) before it moves anything in.
+- An entry is the same wrapper after `trash_commit` renames it to
+  `<10-digit epoch>.<kind>.<pid>.<6 hex>`. That rename is within one directory, so it takes
+  constant time. `trash_commit` then calls `trash_reap_start`, even if the rename failed.
+
+`<kind>` is one of `aside`, `throwaway`, `pending`, `retire`, `integrate` or `verify`. Entry names
+sort by age. None matches `tmp-*`, `.retire.*`, `.integrate-*` or `.verify-*`. The reaper deletes
+only direct children whose name matches the entry grammar exactly. It never deletes a hold.
+`.reaper.lock` is a control file. Anything else in a trash dir is left alone. If a generated name
+already exists, the put draws a new one.
+
+A hold whose maker has died is committed by the reaper, but only on proof of death: the `owner`
+record's pid, judged by `proc_state`, is `dead`, or `live` with a start time other than the
+recorded one. A hold that has no `owner` and no `payload`, and whose name's pid is dead, is empty
+scaffolding, and the reaper removes it with `rmdir`. Any other hold is left alone. A hold never
+holds a credential, because every site clears credentials before its put.
+
+**The rename.** `trash_put` runs a short `python3 -I` program owned by `trash.sh`. The program
+creates the hold, writes `owner` from values the bash side passes in (so `proc_state` stays the only
+start-time rendering), and moves `<src>` to `<hold>/payload` with `os.rename`. That call can fail
+with `EXDEV`, but it never copies. `mv` is not used, because on `EXDEV` it falls back to
+copy-and-delete, which criterion 2 forbids. If the move fails, the program removes the empty hold.
+The program moves `<src>` only when all of these hold:
 
 - `<src>` is a real directory (lstat, not a symlink).
 - `<src>`'s parent sits at its own physical path, so no symlinked ancestor can redirect the move
@@ -118,9 +141,9 @@ command:
      the dir is moved plainly.
    - Any other mismatch returns 1, including relative pointers (`worktree.useRelativePaths`). The
      site then keeps today's path.
-2. `trash_put` the whole `<dir>`.
+2. `trash_put` the whole `<dir>` into a hold.
 3. Check both pointers again after the move:
-   - `<entry>/<rel>/.git` must still be `gitdir: <A>`.
+   - `<hold>/payload/<rel>/.git` must still be `gitdir: <A>`.
    - `<A>/gitdir` must still name the pre-rename path.
 
    The second check stops it from deleting an admin dir that git freed and gave to another tree in
@@ -128,13 +151,27 @@ command:
    `gitdir` last, so a partial delete leaves a registration that git lists as prunable. Otherwise
    it leaves `<A>` and returns 2.
 
-No `git worktree repair` and no repo-wide `git worktree prune` is part of this step.
+`trash_tree` does not commit. The tree is still a hold when it returns, so a reaper that is already
+running cannot delete the moved `.git` before step 3 reads it. The caller commits after its own
+remaining steps (section 3). No `git worktree repair` and no repo-wide `git worktree prune` is part
+of this step.
 
-**Credentials (criterion 4).** One runphase function, `mount_cred_clear <ident-dir>`, unlinks
-`<ident-dir>/home/auth.json`. That file is the only credential the runner stages into a mount home
-(the codex and grok arms, `runphase.sh:4196` and `:4333`). The function succeeds only if the file is
-gone afterwards. A site that cannot clear it does not trash the ident. It runs today's inline delete
-instead, so no credential copy ever enters a trash.
+**Credentials (criterion 4).** One runphase function, `mount_cred_clear <ident-dir>`, owns this.
+`_iso_place` (`runphase.sh:4072-4095`) is the only code that writes credential bytes into a mount
+home, for both the codex and grok arms (`:4196`, `:4333`). It writes the bytes to
+`home/.stage.XXXXXX` first (`mktemp` in `${acp_stage_dir:-$acp_iso_home}`, which is `home/` for
+both arms). Then it renames that file to `home/auth.json`. A runner interrupted between the write
+and the rename leaves a credential-bearing `.stage.*`. The next round's startup reaps it
+(`:4188-4189`, `:4318`), but a throwaway has no next round, and a retired durable ident has none
+either. So `mount_cred_clear`:
+
+1. unlinks `home/auth.json` and every `home/.stage.*`, never following a link;
+2. then lists `home/` again and succeeds only if neither name is left.
+
+These two names cover every credential byte the runner writes. A site whose clear fails does not
+trash the ident. It runs today's inline delete instead, so no credential copy ever enters a trash.
+Custom-profile homes (`profile-home/`) get their credentials through the environment
+(`agent_profiles.py`), so no runner-written credential file exists there.
 
 ### 2. The reaper: `runphase.sh reap --store <base> | --repo <root>`
 
@@ -174,52 +211,62 @@ So a manual run cannot bypass the lock.
 
 **One run.**
 
-1. Domain sweep (section 3b for `--store`, section 4 for `--repo`).
-2. Delete pass, oldest entry first. If an entry has top-level `.claim.*` files (`retire` and
-   `throwaway` entries), the reaper takes the entry's claim with `mount_claim_take` (holder
+1. Hold recovery: commit every hold whose maker is proven dead, and remove empty scaffolding (see
+   "Holds and entries").
+2. Domain sweep (section 3b for `--store`, section 4 for `--repo`).
+3. Delete pass, oldest entry first. If an entry's `payload/` has top-level `.claim.*` files
+   (`retire` and `throwaway` entries), the reaper takes that claim with `mount_claim_take` (holder
    `reaper:<pid>`).
    - A claim held by a live process defers the entry.
    - A dead or released holder is superseded exactly as today. This is the tombstone claim of
      criterion 9.
 
-   The reaper then unlinks any `home/auth.json` left in the entry, as defense in depth (the site
-   already cleared it). Then it runs `rm -rf -- <entry>`. Taking a claim on a trash entry can
-   never fail a turn, because no runner contends for a trash entry.
-3. Deferred entries are retried after the others, then polled every second for up to 30 seconds.
-   An entry still held after that waits for the next reaper. Repeat steps 2-3 while new names
+   Every site releases its own claim before it commits, so a live holder here is rare. The reaper
+   then unlinks any `home/auth.json` and `home/.stage.*` left in the payload, as defense in depth
+   (the site already cleared them). Then it runs `rm -rf -- <entry>`. Taking a claim on a trash
+   entry can never fail a turn, because no runner contends for a trash entry.
+4. Deferred entries are retried after the others, then polled every second for up to 30 seconds.
+   An entry still held after that waits for the next reaper. Repeat steps 1-4 while new names
    appear.
-4. Close fd 9. If the trash now holds a name this run never saw (a put that raced its exit), call
-   `trash_reap_start` again. That call either takes the lock or finds another reaper holding it.
-   A put renames first and starts second, and the reaper closes first and rescans second. So every
-   put is seen by a reaper.
+5. Close fd 9. If the trash now holds a name this run never saw (a commit that raced its exit),
+   call `trash_reap_start` again. That call either takes the lock or finds another reaper holding
+   it. A commit renames first and starts second, and the reaper closes first and rescans second.
+   So every commit is seen by a reaper.
 
-Test seam: `COMMS_TEST_REAP_HOOK`, called as `<hook> <event> <entry>` at `locked` and
-`before-delete`. It has the same shape as `cm_hook`.
+Test seams:
 
-**Per delete or per run.** Every successful put calls `trash_reap_start`, and so does every
-`mount_restage` (section 3b). So the store-wide sweep runs at least once per mounted turn. The lock
-folds these calls into at most one reaper per trash, and a running reaper absorbs puts that arrive
-while it runs. A launch costs one Python process, about 30 ms. Everything else happens in the
-detached reaper.
+- `COMMS_TEST_REAP_HOOK`, called as `<hook> <event> <entry>` at `locked` and `before-delete`.
+- `COMMS_TEST_TRASH_HOOK`, called as `<hook> held <hold>` after a put's rename and before
+  `trash_tree`'s post-rename checks.
+
+Both have the same shape as `cm_hook`.
+
+**Per delete or per run.** Every `trash_commit` calls `trash_reap_start`. So does every
+`mount_restage` (section 3b), every `clean mounts --yes` run (section 3c), and every integrate and
+`verify fresh` exit (section 3d). So the store-wide sweep runs at least once per mounted turn. The
+lock folds these calls into at most one reaper per trash, and a running reaper absorbs commits that
+arrive while it runs. A launch costs one Python process, about 30 ms. Everything else happens in
+the detached reaper.
 
 ### 3. The sites
 
 **a. Throwaway teardown (`unmount_artifact`).**
 
-1. A pending generation goes through `trash_tree <common> <store trash> pending <tmp>`. This step
-   runs first, so the pending tree does not ride inside the ident dir with its registration still
-   in place. Its fallback is today's two lines. A return of 2 leaves a registered-but-missing
-   `.new.*`. For a durable ident, the next restage's existing pending recovery removes it with
-   `worktree remove --force` (git accepts a missing tree).
+1. A pending generation goes through `trash_tree <common> <store trash> pending <tmp>`, then
+   `trash_commit`. This step runs first, so the pending tree does not ride inside the ident dir
+   with its registration still in place. Its fallback is today's two lines. A return of 2 leaves a
+   registered-but-missing `.new.*`, which now can only mean its pointers really changed, not that a
+   reaper raced the check. For a durable ident, the next restage's existing pending recovery
+   removes it with `worktree remove --force` (git accepts a missing tree).
 2. A throwaway (always a real dir allocated by this run, as today) has `mount_cred_clear` run first.
    Then `trash_tree <common> <store trash> throwaway <ident-dir> view/tree` moves the whole ident
-   dir (tree, home, state, claims) in one rename. It drops the tree's admin under the criterion 3
-   checks.
+   dir (tree, home, state, claims) into a hold in one rename. It drops the tree's admin under the
+   criterion 3 checks.
 3. The runner's claim moved with the ident dir. `MOUNT_HOLDER` is re-pointed at
-   `<entry>/.claim.N` before `mount_claim_release`, so the reaper can take it at once.
+   `<hold>/payload/.claim.N` and released. Only then does the runner call `trash_commit`, which
+   starts the store reaper.
 4. On return 1, or a credential that would not clear, today's `worktree remove --force` and
    `rm -rf` run unchanged.
-5. The store reaper is started.
 
 `<common>` is `mount_git -C "$main_root" rev-parse --git-common-dir`, made absolute. The store base
 comes from the ident dir's path (`<base>/<key>/<ident>`), not from a `cmd_run` local, because the
@@ -231,18 +278,19 @@ selects asides. It finds real directories named `.aside.*` directly in the ident
 test is exactly today's `-mmin +120`. Two callers use it:
 
 - **The restaging runner, for its own ident.** At `:2140`, the inline `find … -exec rm -rf` becomes
-  one `trash_put <store trash> aside <aside>` per expired aside. The runner holds its ident's claim,
-  as today. If a put fails, the runner runs today's `rm -rf` on that aside, which is criterion 2's
-  fallback. Then it calls `trash_reap_start store <base>`.
+  one `trash_put <store trash> aside <aside>` and `trash_commit` per expired aside. The runner holds
+  its ident's claim, as today. If a put fails, the runner runs today's `rm -rf` on that aside, which
+  is criterion 2's fallback. Then it calls `trash_reap_start store <base>`, so the sweep runs even
+  when its own ident had nothing expired.
 - **The store sweep, for every other ident.** One `find -P` over the store selects
   `<base>/<64-hex key>/<ident>/.aside.*` past the horizon. It prunes dot-named entries at depths 1
   and 2, so trash entries and `.retire.*` tombstones are never entered. For each ident with a
   match, the sweep reads the ident's claims with `cm_claims` (read-only) and skips the ident if any
   claim is held by a live or unverifiable process. The sweep never takes an ident claim, because a
-  runner that met that claim would fail its turn (`:3480-3486`). It then calls `trash_put` on each
-  aside. A failed put leaves that aside where it is, which is today's state for an ident that never
-  restages. The sweep never deletes in place. This covers the 288 expired asides on idents that
-  never restage.
+  runner that met that claim would fail its turn (`:3480-3486`). It then calls `trash_put` and
+  `trash_commit` on each aside. A failed put leaves that aside where it is, which is today's state
+  for an ident that never restages. The sweep never deletes in place. This covers the 288 expired
+  asides on idents that never restage.
 
 A race remains: a `clean mounts --thread` can claim the ident between the sweep's read-only check
 and its rename. The rename is atomic, so `cm_check` either never sees the aside, skips it
@@ -254,26 +302,33 @@ excludes. The retention note at `:2133-2139` (a detached holder may lose its cwd
 tombstone rename (`:6018`). `cm_finish_tomb` does not change through the admin drop, the journal of
 `admin=` (`:5875-5882`) and the `unregistered` hook. Then, when the tombstone holds the ident:
 
-1. `mount_cred_clear "$tomb/$ident"`.
+1. `mount_cred_clear "$tomb/$ident"`. This also clears a credential-bearing `.stage.*` that a
+   runner killed mid-staging left in a durable home.
 2. `trash_put <store trash> retire "$tomb"` moves the whole tombstone (record, claims and payload)
-   into the store trash in one rename. A new `handed-off` hook fires. The result is `CM_ST=removed`,
+   into a hold in one rename. A new `handed-off` hook fires. The result is `CM_ST=removed`,
    `CM_WHY=proven`.
-3. The callers (`cm_remove`, `cm_replay_tomb`) release the tombstone claim at its new path, set in
-   `CM_TOMB_AT`. They start the store reaper. The clean returns. Nothing in the payload has been
-   deleted.
+3. The callers (`cm_remove`, `cm_replay_tomb`) release the tombstone claim at its new path,
+   `<hold>/payload/.claim.N`, set in `CM_TOMB_AT`. Then they call `trash_commit`. The clean returns.
+   Nothing in the payload has been deleted.
 
 If the credential will not clear, or the put fails, today's `cm_rm_last` and `cm_drop_tomb` run
 inline with today's statuses.
 
-An interruption leaves only states that already exist:
+Every `clean mounts` run with `--yes`, targeted or whole-store, calls `trash_reap_start store
+<base>` before it returns, whatever its outcome, `absent` included. So re-running the clean is
+always enough to restart deferred or orphaned trash work. It never depends on an unrelated later
+turn.
+
+An interruption leaves only these states:
 
 - Before the put, the tombstone is still at `<scope>/.retire.<ident>.XXXXXX`. The existing replay
   (claim, regate, `cm_finish_tomb`) finishes it through the same hand-off.
-- After the put and before the release, the entry's claim names a dead pid, which the reaper
-  supersedes.
+- After the put and before the commit, a hold names the dead clean as its maker. The next reaper
+  proves that death, commits the hold and supersedes the dead tombstone claim. That reaper is
+  started by the next `clean mounts --yes`, turn or put.
 - A handed-off tombstone has left the scope, so `cm_target` and `cm_tomb_scan` no longer see it. A
-  re-run reports `absent`, exactly as after a full inline removal today. The record format,
-  `cm_tomb_match` and the replay logic do not change.
+  re-run reports `absent`, exactly as after a full inline removal today, and starts the store
+  reaper. The record format, `cm_tomb_match` and the replay logic do not change.
 
 `status=removed` keeps its field set. Its meaning becomes "unregistered and moved out of the
 store's live namespace; the reaper deletes the payload". `docs/COMMANDS.md` says so.
@@ -287,9 +342,10 @@ replaces every teardown of these trees:
 - `verify_fresh` at `:5912-5916`,
 - the tree part of the pre-clean at `:5256` and `:5258`.
 
-It runs `trash_tree <common> <repo trash> integrate|verify <tree>`. On 0 or 2 it starts the repo
-reaper. On 1, or when `trash.sh` is absent, it runs today's `git worktree remove --force` and
-`rm -rf`.
+It runs `trash_tree <common> <repo trash> integrate|verify <tree>`. On 0 or 2 it calls
+`trash_commit`. On 1, or when `trash.sh` is absent, it runs today's `git worktree remove --force`
+and `rm -rf`. When `trash.sh` is present it then starts the repo reaper in every case, so every
+integrate and `verify fresh` exit gives the repo sweep (section 4) a run.
 
 The verification tree becomes `.integrate-$$-$RANDOM`, unique per run like `.verify-$$-$RANDOM`.
 This removes the name-reuse race described in "What the code does today". It does not change what
@@ -327,10 +383,10 @@ or `.verify-*`, the owner is proven dead only by one of these:
 Everything else is kept: `live`, `ambig`, a malformed record, or a legacy instance-named tree with
 no record. Age is never consulted.
 
-- A tree proven dead goes through `trash_tree`.
+- A tree proven dead goes through `trash_tree` and `trash_commit`.
 - On return 1 the tree is left alone. The sweep never deletes in place or falls back to `--force`.
-- On return 2 the tree is in trash and its stale registration is left for integrate's existing
-  pre-clean prune.
+- On return 2 the tree is committed to trash and its stale registration is left for integrate's
+  existing pre-clean prune.
 
 The live integrate tree seen on 10-08 (`.integrate-43273`) is kept by this rule. The first repo
 reap after deploy sweeps the two leaked basis trees from 10-02 and 10-06, if their pids are dead,
@@ -338,14 +394,18 @@ as they are expected to be.
 
 ## Invariants this must not break
 
-- Deletion is delayed, never skipped. Everything that is put has a reaper started for it, or is
-  already covered by a running reaper that rescans before it exits.
+- Deletion is delayed, never skipped. Every commit starts a reaper, or is covered by a running
+  reaper that rescans before it exits. A hold is committed by its maker, or by a reaper once its
+  maker is proven dead.
+- A reaper never deletes a hold. Nothing a site still reads after its rename (the moved `.git`, the
+  claim it releases) can be deleted before that site commits.
 - What is retained, and for how long, does not change, except the store-wide aside horizon.
 - Nothing new ever holds a durable ident's claim. The only claims the reaper takes are on trash
   entries.
 - The restage still builds a new generation per turn. The small inline deletes at `:2215` (the
   previous admin dir) and `:2225` (the empty tmp) stay.
-- No credential copy is ever moved into a trash.
+- No credential byte the runner wrote is ever moved into a trash: neither `home/auth.json` nor a
+  `home/.stage.*` left by an interrupted `_iso_place`.
 - An admin dir is removed only when the tree's `.git` and the admin's `gitdir` name each other,
   checked after the move against the pre-rename path. Nothing runs a repo-wide prune for this
   purpose.
@@ -368,6 +428,11 @@ the observable. Some entries stay in the trash and every later reaper retries th
 - an entry that `rm -rf` cannot fully delete (for example a read-only directory, the same limit as
   today),
 - an entry whose claim cannot be judged (unreadable, or a live holder past 30 seconds).
+
+A hold stays until its maker commits it or a reaper proves the maker dead. A maker whose liveness
+reads `ambig` keeps its hold, which is the same fail-closed reading the claims use. If the maker
+dies after its rename and before dropping the admin dir, the reaper commits the hold anyway, and
+the registration is left registered-but-missing, as in the next paragraph.
 
 When `trash_tree` returns 2, the old registration is left registered-but-missing, which is what a
 crashed integrate leaves today. Git lists it as prunable. For an integrate tree, integrate's
@@ -409,8 +474,24 @@ same commit, by delta.
   - When a hook makes the admin's `gitdir` name another tree after the rename, the admin is kept and
     the result is 2.
   - A relative gitfile returns 1.
-- **Criterion 4.** At the reap hook's `before-delete`, no `auth.json` exists anywhere in a
-  `throwaway` or `retire` entry.
+  - **A pause between the rename and the checks.** `COMMS_TEST_TRASH_HOOK` blocks at `held`, and
+    meanwhile a reaper runs to completion. The hold and its moved `.git` are untouched. After the
+    hook is released, `trash_tree` returns 0, the admin dir is gone, and the committed entry is
+    reaped.
+  - **A maker that dies holding.** The hook SIGKILLs the maker at `held`. The next reaper commits
+    and deletes that hold, and leaves alone a hold whose maker is still alive.
+- **Criterion 4, credential bytes, not names.** The fixture's provider login holds a unique marker
+  string. A new seam, `COMMS_TEST_ISO_STAGE_HOOK`, runs inside `_iso_place` after the temp file is
+  written and before its rename. The test's hook first records whether the temp file holds the
+  marker. This negative control proves the interruption really left credential bytes on disk. Then
+  the hook interrupts the runner in one of two ways:
+  - **Throwaway.** The hook sends TERM to the runner on a turn that degraded to a throwaway. The
+    runner's TERM trap exits 143, and its EXIT trap tears down (`runphase.sh:3349-3351`).
+  - **Durable.** The hook SIGKILLs the runner on a durable ident, so no teardown runs. The test
+    then retires the thread and runs `clean mounts --thread --yes`.
+
+  In both cases, at the reap hook's `before-delete`, `grep -rF <marker>` over the whole entry finds
+  nothing. After the reaper finishes, no file in the store or its trash holds the marker.
 - **Criterion 5 (core group).**
   1. Start `comms.sh integrate` in a fixture repo from Python as a session leader, the way the
      keeper runs it. Set `COMMS_TEST_REAP_HOOK` to a hook that blocks on a file, with a bounded
@@ -441,7 +522,9 @@ same commit, by delta.
   - The existing mountclean replay and kill-boundary tests keep passing.
   - A new test asserts that `clean mounts --thread --yes` returns `removed` while the reap hook
     blocks, with the tombstone gone from the scope and the payload in trash.
-  - A kill at `handed-off` leaves an entry that the reaper finishes.
+  - A kill at `handed-off` leaves a hold. A re-run of `clean mounts --thread --yes` reports
+    `absent` and starts the store reaper. That reaper commits the hold and deletes it, with no
+    mounted turn in between.
 - Existing tests that assert bytes are gone from the store, rather than gone from the live
   namespace, wait for the reaper through a test-lib `reap_wait <trash>` (lock free, no entries,
   bounded).
@@ -466,9 +549,9 @@ The docs record only the anonymized tree size.
 
 ## Docs updated in the same commit
 
-- `docs/INTERNALS.md`: a new section, "Deferred deletion: trash and reaper". It covers paths, names,
-  lock, detach, priority, the sweeps and their claim rule, the owner record and partial-failure
-  states. The mount-cleanup section notes the hand-off.
+- `docs/INTERNALS.md`: a new section, "Deferred deletion: trash and reaper". It covers paths, holds
+  and entries, lock, detach, priority, the sweeps and their claim rule, the owner record, credential
+  clearing and partial-failure states. The mount-cleanup section notes the hand-off.
 - `docs/COMMANDS.md`:
   - `clean mounts --thread` (`removed` now means handed to the reaper).
   - Integrate's verification-tree naming and cleanup, including exit 18's "the verification tree is
