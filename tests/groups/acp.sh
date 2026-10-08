@@ -2258,8 +2258,10 @@ if [ "$CLONE_PROBE_OK" = 1 ]; then
   && ok "a second fresh ident's codex starts with the plugin cache already in place and no catalog staged: no symlink and no multi-link file" \
   || fail "seeded turn: status=$(gd_res "$SD_2" status) seed=$(sd_tv "$SD_2" codex_seed) saw=$(sd_saw s2) log=$(grep '^codex seed' "$SD_2/runner.log")"
 else skip clone-acp-seeded "a second fresh ident starts with the plugin cache already in place (needs a volume that can clone)"; fi
+if [ "$CLONE_PROBE_OK" = 1 ]; then
 [ -z "$(sd_tv "$SD_2" codex_seed_promote)" ] \
   && ok "a seeded home is never promoted: the canonical's provenance stays a home codex wrote itself" || fail "a seeded home was promoted: $(sd_tv "$SD_2" codex_seed_promote)"
+else skip clone-acp-nopromote "a seeded home is never promoted (needs a volume that can clone: without one the second home is unseeded and legitimately tries to promote)"; fi
 { [ -n "$(gd_seen s2 auth)" ] && [ "$(gd_seen s2 auth)" = "$(gd_seen s1 auth)" ] && [ "$(gd_seen s2 config)" = "$(gd_seen s1 config)" ] && [ -s "$GD/cfg-s2.log" ] \
   && cmp -s "$GD/cfg-s1.log" "$GD/cfg-s2.log" && ! grep -qi 'plugin' "$GD/cfg-s2.log" && [ "$(grep -c '=' "$GD/cfg-s2.log")" -ge 4 ]; } \
   && ok "seeding leaves the credential and the generated config byte-identical to an unseeded home's, and the config disables nothing about plugins" \

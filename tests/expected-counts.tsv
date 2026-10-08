@@ -21,3 +21,4 @@ skip_ok	clone-acp-promote
 skip_ok	clone-acp-seeded
 skip_ok	clone-acp-warm
 skip_ok	clone-acp-stale
+skip_ok	clone-acp-nopromote
