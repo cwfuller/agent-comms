@@ -24,6 +24,7 @@ helpers/
   runphase.sh                  peer-turn runner — ACP for every provider, direct headless for grok
                                only (COMMS_DELIVERY=headless): spawn → observe → record
   method_guidance.py           verifies the staged shared-guidance bundle against its snapshot record
+  codex_seed.py                clones a fresh isolated codex home's plugin cache from one canonical tree (clonefile(2))
 docs/loopspec/                 the portable review-loop kernel (spec, schemas, fixtures,
                                check.sh, prompt fragments) — vendored by other consumers
 templates/
@@ -747,6 +748,55 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
 
 Not here: choosing models, tiers, efforts, routes, budgets or fallbacks; a model-to-tier mapping or a default (every model id comes from the caller);
 making `claude` or `grok` bindable; verifying a remote bill; an OS-level network or credential sandbox.
+
+## Seeding a fresh codex home's plugin cache (task 401)
+
+A mounted codex leg runs in `$mount_kdir/home`, one isolated `CODEX_HOME` per ident, and codex fills a new one with a
+760-entry, 31 MB `plugins/cache` tree and, a few seconds after the turn ends, a 32 MB `cache/remote_plugin_catalog`
+file. 247 homes held 7.9 GB of it on 2026-10-08. `helpers/codex_seed.py` puts the plugin tree there by `clonefile(2)`
+from one canonical copy, so the bytes are shared copy-on-write and nothing is downloaded. Sync stays on, the tool surface
+is codex's own, and `_iso_place`, `stage_method_guidance` and the five-key config are untouched.
+
+- **Where.** `codex-seed/` is a sibling of the mount base (`<state>/agent-comms/codex-seed`, beside `mounts/`), so a
+  `COMMS_MOUNT_BASE` override moves it with the mounts and a test never touches the live store. It must be a real
+  directory of the current uid at mode 700 on the SAME volume as the homes; the helper creates it and refuses anything
+  else. `codex-seed/codex-<version>/` holds `plugins-cache/` and a `MANIFEST` (version, creation epoch, a digest over
+  one `path, type, mode, size, sha256` line per entry, then those lines).
+- **Key.** The codex runtime version in the persisted policy record. A `bundled` runtime reports `unknown`: no key, so
+  no seed and no promotion. The tree holds no credential (a marker file carries only a plugin id) and codex reconciles
+  any difference itself, so the key is the version and nothing account-specific.
+- **Seed (before the turn).** Called from the codex arm after the three stagings and the existing symlink and realpath
+  checks. A home that has `plugins` or `cache` (a symlink counts) is warm and is never re-seeded: swapping a tree under
+  a live queue owner is unsafe and the cost being removed is the first turn's. Otherwise the canonical must exist, be ours
+  at 700, be at most 7 days old, and re-walk (lstat, no symlink followed, no file with a second link) to the digest it
+  recorded; then `clonefile(canonical/plugins-cache, home/plugins/cache, CLONE_NOFOLLOW)`, then the same walk on the home
+  side (no symlink, no multi-link file, no inode shared with the canonical, manifest equal). Every failure is "no seed":
+  the home is left as it was and the turn runs as before. The one refusal is a failed clone that cannot be removed
+  (exit 2): a home whose contents are unexplained does not run. There is NO copy fallback: `cp -c` is unusable because
+  its man page says it falls back to `copyfile(2)` (a real byte copy) when cloning is not possible, so the helper calls
+  `clonefile(2)` through `ctypes` and treats any error, including a missing symbol, as "no seed".
+- **Promote (after the reply is published).** Only when this turn's seed was a skip meaning "no usable canonical"
+  (`skipped:no-seed`, `skipped:stale`, `skipped:canonical-tampered`), so the source is always a home codex populated
+  itself and the age clock cannot be reset by copying a copy; and only when the attested rollout's `cli_version` (this
+  turn's, or else the one that created the session, which on a fresh home is the canary's) equals the key. The home's
+  tree is walked, cloned into `.tmp.<pid>.<random>/`, the manifest is taken from the CLONE, and the directory is published
+  by `rename(2)` onto `codex-<version>` (an existing one is renamed aside first). A caller that loses a rename discards its
+  own temp. Other versions' canonicals are pruned only when older than 7 days, and temp directories of dead pids are
+  reaped. A failed promote never changes the turn's outcome. A codex upgrade is a new key: the first turn on it runs
+  unseeded and promotes; the 7-day cap handles a long-lived version.
+- **Recorded.** `codex_seed<TAB>status<TAB>key` and `codex_seed_promote<TAB>status<TAB>key` in `turn.tsv`, a line each in
+  `runner.log`. `result.json` is unchanged.
+- **The catalog is not seeded** (decided on measurement, not by assumption). Driven through the real runner, a seeded
+  catalog was rewritten during the turn (a new file about half a minute after the seed, same size, only `fetched_at` different), so its
+  clone shares no blocks for longer than a minute and costs nothing to skip. It is also written after the turn has ended,
+  which would have made every promote wait for it. The plugin tree, in contrast, came out of a seeded turn with the same
+  digest as it went in (760 entries, 0 added, 0 removed, 0 changed). docs/ROADMAP.md holds the numbers.
+- **Known limit.** The queue owner may still be writing into the home when promote clones it, so the snapshot is not
+  atomic across files. The manifest is taken from the clone, so the canonical is self-consistent for its digest, and a
+  torn tree only costs extra incremental sync in later homes.
+- **Not done here.** Existing homes are not changed, and a warm home is not re-seeded (their deletion belongs to other
+  tasks). There is no setting: the version key, the 7-day cap and the root are fixed, so a project file cannot choose
+  what is staged into a reviewer's home.
 
 ## What a reviewer leg is told: shared guidance, lenses and the contract guard
 

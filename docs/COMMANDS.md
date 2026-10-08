@@ -1018,6 +1018,18 @@ or either file missing or not a regular file) or `rejected:<code>` (`record`, `f
 that is not a mounted codex or grok turn (unmounted turns, claude, gemini, OpenCode and custom profiles are not staged).
 `comms.sh setup --show` lists the setting. The hash proves integrity against the sibling record, not authenticity.
 
+A mounted codex leg's FRESH isolated home (neither `plugins/` nor `cache/` yet) gets its `plugins/cache` tree by
+`clonefile(2)` from `codex-seed/codex-<version>/`, a sibling of the mount base, instead of codex downloading ~31 MB per
+ident (`helpers/codex_seed.py`; docs/INTERNALS.md). Each such turn appends `codex_seed<TAB>status<TAB>key` to `turn.tsv`
+and a `codex seed: ...` line to `runner.log`, where `status` is `seeded`, or `skipped:<why>` with `why` one of `no-seed`,
+`stale` (canonical older than 7 days), `canonical-tampered`, `symlink`, `link-or-special`, `warm` (the home already had
+`plugins` or `cache`), `no-key` (bundled runtime, version unknown), `bad-root`, `other-volume`, `clone-failed:<errno>`,
+`clone-unverified` or `unreadable:<errno>`; a clone that fails verification and cannot be removed refuses the turn. After a
+completed turn whose seed was `no-seed`, `stale` or `canonical-tampered`, and whose rollout names the policy's codex
+version, `codex_seed_promote<TAB>promoted|skipped:<why>|...<TAB>key` records the refresh of the canonical (`incomplete-home`,
+`runtime-unevidenced`, `clone-failed:<errno>`, `lost-race`, ...). The remote plugin catalog is not seeded. There is no
+setting for any of this, and neither line changes `result.json`.
+
 Thread state mirrors the outcome (`spawned` →
 `completed`/`failed`/`timeout`), records `last_run_dir` (the `stalled` watchdog's pid
 target), and records the provider session id (`codex_thread_id` /

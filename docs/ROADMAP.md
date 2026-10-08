@@ -614,6 +614,50 @@ turn, exercised live against agy 1.3.1. Decisions and what they leave open:
   agy cannot give. Basis's bound-review eligibility for the Google family is therefore off until agy gains an
   attested bound route.
 
+### BUILT ON BRANCH 2026-10-08: a fresh mounted codex home's plugin cache is cloned, not downloaded (task 401)
+
+Built: `helpers/codex_seed.py` clones the 31 MB `plugins/cache` tree into a fresh isolated `CODEX_HOME` by `clonefile(2)`
+from one canonical tree keyed by the codex version, and refreshes that tree from a home codex populated itself
+(docs/INTERNALS.md, docs/COMMANDS.md). Plugin sync stays on, nothing is disabled, existing homes are untouched.
+
+**Canary, codex 0.160.1, gpt-6.1-sol at low effort, through `helpers/runphase.sh` (a mounted ACP turn on a scratch repo,
+`COMMS_MOUNT_BASE` and `XDG_STATE_HOME` under `$TMPDIR`), 2026-10-08.** Each row is one fresh ident. "Tree" is the
+`plugins/cache` manifest (entries, bytes, digest over path/type/mode/size/sha256).
+
+| Arm | Tree before the turn | Tree after the turn | Changed by the turn | Catalog |
+|---|---|---|---|---|
+| main 33c4d15, nothing seeded | none | 760 entries, 31,439,077 B | everything is new | 1 file, 32,556,719 B, written after the turn |
+| this branch, no canonical | none (`skipped:no-seed`) | 760 entries, 31,439,077 B, digest 3854a1be8c24 | everything is new; promoted to `codex-seed/` | as above |
+| this branch, seeded | 760 entries, 31,439,077 B, digest 3854a1be8c24 (the verified clone) | 760 entries, 31,439,077 B, digest 3854a1be8c24 | **0 added, 0 removed, 0 changed**, twice (two seeded idents) | fetched by codex as before |
+| first attempt, catalog also seeded | tree as above; catalog 32,564,935 B | tree as above; catalog 32,564,935 B | catalog replaced about 27 s after the seed: same size, only `fetched_at` differs | rewritten every session |
+
+Conclusions. (1) codex does not rewrite the plugin cache each turn: against a current seed it changed nothing, so seeding
+it ships. (2) codex does not keep a seeded catalog: it rewrote it in the same turn, so the clone shares nothing for longer
+than a minute. The earlier scratch canary (a `codex app-server` driven by hand) saw the seeded catalog untouched; the real
+runner is the evidence that decides, and the catalog is not seeded. (3) codex writes the catalog from the session's owner
+about 6 s AFTER the turn's last rollout write, so a promote that required it would have found it missing on every
+attempt (`incomplete-home`, observed on both attempts). (4) The rollout's `session_meta.cli_version` is written when the
+session is created, which on a fresh home is the canary, before the review prompt's window; the runner reads it from
+`session_created_runtime` when the window has none (`observed_runtime` was `unknown` on the real turns checked).
+
+**A fresh home after one review turn, this Mac (APFS), apparent size:**
+
+| | entries | apparent bytes | plugin tree physical |
+|---|---|---|---|
+| main 33c4d15, nothing seeded (two idents) | 883, 875 | 71,895,561; 71,653,670 | 31.4 MB, downloaded |
+| this branch, seeded (two idents) | 873, 882 | 71,899,226; 71,489,062 | shared with the canonical; 0 files changed |
+
+Entries and apparent bytes do not move (a clone looks like the tree it copies); the saving is physical and in the
+download. `df` around single turns cannot resolve it (an idle 33 s control moved 26 MB, turns moved 21 to 139 MB), so the
+physical figure is measured on the helper alone: ten seeded homes grew the volume by 4.7 MB, ten byte copies of the
+same tree by 323 MB. A seeded home therefore costs about 0.5 MB for the plugin tree instead of 31 MB. The catalog (32 MB) is
+still written per home, so a fresh home's physical size falls by roughly the plugin tree's share, not by half.
+
+Findings recorded: `cp -c` is not a usable clone (its man page: it falls back to `copyfile(2)` when cloning is not
+possible); `clonefile(2)` of a directory is all or nothing; the clone has zero symlinks, zero multi-link files and new inodes.
+Not done: existing homes, a warm home's re-seed, and the per-session catalog rewrite (a 32 MB file per home that this change
+cannot share; a fix would have to stop codex fetching it).
+
 ### BUILT ON BRANCH 2026-10-04: shared guidance, review lenses and a contract guard for reviewer legs (task 246)
 
 Built: `COMMS_METHOD_GUIDANCE_DIR` (user-only) stages the operator's guidance bundle as `AGENTS.md` in a mounted codex or
