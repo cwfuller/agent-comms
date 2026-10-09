@@ -1116,11 +1116,11 @@ section "acp.sh: the reviewer model+effort policy"
 AP="$REPO/helpers/acp.sh"
 
 POL="$("$AP" policy codex)"
-[ "$POL" = "$(printf 'gpt-6.1-sol\txhigh')" ] \
+[ "$POL" = "$(printf 'gpt-6.1-sol\thigh')" ] \
   && ok "policy codex prints the declared model and effort, tab-separated" || fail "policy codex (got: $(printf '%q' "$POL"))"
 
 PCFG="$("$AP" provider-config codex)"
-printf '%s\n' "$PCFG" | grep -qx 'model_reasoning_effort = "xhigh"' \
+printf '%s\n' "$PCFG" | grep -qx 'model_reasoning_effort = "high"' \
   && ok "provider-config writes the effort key the codex binary reads" || fail "provider-config effort key"
 printf '%s\n' "$PCFG" | grep -qx 'model = "gpt-6.1-sol"' \
   && ok "provider-config writes the model key" || fail "provider-config model key"
@@ -1138,7 +1138,7 @@ PCFGX="$(COMMS_ACP_CODEX_COMPACT_PERCENT=101 "$AP" provider-config codex 2>/dev/
 printf '%s\n' "$PCFG" | grep -qx 'sandbox_mode = "read-only"' \
   && ok "provider-config keeps approval/sandbox as literals beside the policy" || fail "provider-config literals"
 
-COMMS_ACP_CODEX_EFFORT=high "$AP" provider-config codex | grep_full -qx 'model_reasoning_effort = "high"' \
+COMMS_ACP_CODEX_EFFORT=xhigh "$AP" provider-config codex | grep_full -qx 'model_reasoning_effort = "xhigh"' \
   && ok "COMMS_ACP_CODEX_EFFORT overrides the written effort" || fail "effort env override"
 
 # TOML INJECTION. The values are interpolated into the file that governs the reviewer's
@@ -1159,11 +1159,11 @@ COMMS_ACP_CODEX_MODEL='a b' "$AP" policy codex >/dev/null 2>&1 \
 # policy-check: the PREFLIGHT record read. 0 match / 20 mismatch / 21 undecidable, and
 # undecidable is never "model matched, effort optional".
 pc() { printf '%s' "$1" | "$AP" policy-check codex - >/dev/null 2>&1; printf '%s' "$?"; }
-[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"xhigh"}]}}')" = 0 ] \
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"high"}]}}')" = 0 ] \
   && ok "policy-check accepts a record matching the policy" || fail "policy-check match"
 [ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"medium"}]}}')" = 20 ] \
   && ok "policy-check rejects the effort this bug actually produced (medium)" || fail "policy-check effort mismatch"
-[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-5.6-sol"},{"id":"reasoning_effort","currentValue":"xhigh"}]}}')" = 20 ] \
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-5.6-sol"},{"id":"reasoning_effort","currentValue":"high"}]}}')" = 20 ] \
   && ok "policy-check rejects a model float against the id we wrote" || fail "policy-check model mismatch"
 [ "$(pc '{"acpx":{"acpx_record_id":"x"}}')" = 21 ] \
   && ok "an absent config_options list is UNDECIDABLE, not a pass (the JetBrains-client shape)" || fail "policy-check absent options"
@@ -1172,7 +1172,7 @@ pc() { printf '%s' "$1" | "$AP" policy-check codex - >/dev/null 2>&1; printf '%s
 
 # policy-attest shares ONE verdict function with policy-check, so the pre- and post-turn
 # gates cannot drift into disagreeing about what the policy is.
-"$AP" policy-attest codex xhigh gpt-6.1-sol >/dev/null 2>&1 \
+"$AP" policy-attest codex high gpt-6.1-sol >/dev/null 2>&1 \
   && ok "policy-attest accepts an observed turn that ran the policy" || fail "policy-attest match"
 "$AP" policy-attest codex medium gpt-6.1-sol >/dev/null 2>&1; [ "$?" = 20 ] \
   && ok "policy-attest rejects an observed turn that ran shallower than declared" || fail "policy-attest mismatch"
@@ -1191,20 +1191,20 @@ sed 's/[[:space:]]*#.*$//' "$REPO/helpers/runphase.sh" | grep_full -qE 'gpt-6\.1
   || ok "runphase.sh holds no model or effort literal in code — it asks acp.sh"
 # B3 (codex, implement r1): BOTH keys are policy, so missing model evidence is undecidable.
 # It previously returned 0 and printed model=unknown — half the contract unverified.
-"$AP" policy-attest codex xhigh "" >/dev/null 2>&1; [ "$?" = 21 ] \
+"$AP" policy-attest codex high "" >/dev/null 2>&1; [ "$?" = 21 ] \
   && ok "an observation with no model is undecidable, not a pass" || fail "missing observed model passed"
-[ "$(pc '{"acpx":{"config_options":[{"id":"reasoning_effort","currentValue":"xhigh"}]}}')" = 21 ] \
+[ "$(pc '{"acpx":{"config_options":[{"id":"reasoning_effort","currentValue":"high"}]}}')" = 21 ] \
   && ok "a preflight record missing the model is undecidable, not a pass" || fail "preflight missing model passed"
 # B4 (codex, implement r1): the refuse-and-retire control was commented but NOT implemented —
 # the parser read only config_options, so a saved preference that acpx would replay onto a
 # replacement session was never seen.
-[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":{"reasoning_effort":"low"}}}')" = 20 ] \
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"high"}],"desired_config_options":{"reasoning_effort":"low"}}}')" = 20 ] \
   && ok "a saved effort preference conflicting with the policy is refused before the canary" || fail "conflicting desired preference accepted"
-[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":{"reasoning_effort":"xhigh"}}}')" = 0 ] \
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"high"}],"desired_config_options":{"reasoning_effort":"high"}}}')" = 0 ] \
   && ok "a saved preference matching the policy is accepted" || fail "matching desired preference refused"
-[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":[{"id":"reasoning_effort","currentValue":"low"}]}}')" = 20 ] \
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"high"}],"desired_config_options":[{"id":"reasoning_effort","currentValue":"low"}]}}')" = 20 ] \
   && ok "a conflicting saved preference in LIST shape is refused too" || fail "list-shaped desired preference missed"
-[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"xhigh"}],"desired_config_options":"weird"}}')" = 21 ] \
+[ "$(pc '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"high"}],"desired_config_options":"weird"}}')" = 21 ] \
   && ok "a saved-preference shape we do not understand is undecidable, not ignored" || fail "unknown desired shape ignored"
 
 section "acp.sh: the reviewer policy resolver"
@@ -1218,7 +1218,7 @@ res() { env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$@"; }
 MAPV="$(awk -F'\t' '$1=="version"{print $2; exit}' "$REPO/helpers/policy-map.tsv")"
 
 R="$(res "$AP" resolve codex)"
-[ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = xhigh ] \
+[ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = high ] \
   && [ "$(rv "$R" model_source)" = baseline ] && [ "$(rv "$R" pair)" = validated ] \
   && [ "$(rv "$R" verify)" = "model,effort" ] && [ "$(rv "$R" map_version)" = "$MAPV" ] \
   && ok "no candidate resolves to the map's baseline, validated, stamped with the map version" || fail "baseline resolution ($R)"
@@ -1240,13 +1240,13 @@ R2="$(res "$AP" resolve codex --tier balanced --effort xhigh --decision rd-a --r
   && [ "$(awk -F'\t' '$1=="ceiling" && $2=="codex"{print $4}' "$REPO/helpers/policy-map.tsv")" = gpt-6-astra ] \
   && ok "strong and the ceiling run gpt-6-astra; gpt-6.1-sol is the default and leads balanced only" || fail "strong/balanced split ($R / $R2)"
 R="$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing off)"
-[ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" fallback)" = routing-disabled ] \
+[ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = high ] && [ "$(rv "$R" fallback)" = routing-disabled ] \
   && ok "routing disabled keeps the concrete baseline and says why" || fail "routing off ($R)"
 R="$(res "$AP" resolve codex --tier fast --effort low --routing on)"
 [ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" fallback)" = no-decision ] \
   && ok "routing on with no decision keeps the baseline (never the abstract fail-open values)" || fail "no decision ($R)"
 R="$(res "$AP" resolve codex --tier none --effort none --decision rd-a --routing on --phase implement)"
-[ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = xhigh ] \
+[ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = high ] \
   && [ "$(rv "$R" fallback)" = "no-candidate-tier;no-candidate-effort" ] \
   && ok "a low-confidence (none) candidate selects the baseline once, recorded per dimension" || fail "none candidate ($R)"
 R="$(res COMMS_ACP_CODEX_MODEL=gpt-5.6-sol "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
@@ -1291,7 +1291,7 @@ OUT="$(res COMMS_ACP_CODEX_EFFORT=ultra "$AP" resolve codex --tier fast --effort
   && ok "an explicit decision that forms an invalid pair is refused, where a classified one falls back" || fail "explicit invalid pair (rc=$RC)"
 # THE CONCRETE POLICY'S IDENTITY (runphase names a mounted session after it).
 D1="$(rv "$(res "$AP" resolve codex)" policy_digest)"
-D2="$(rv "$(res "$AP" resolve codex --tier balanced --effort xhigh --decision rd-a --routing on --phase implement)" policy_digest)"
+D2="$(rv "$(res "$AP" resolve codex --tier balanced --effort high --decision rd-a --routing on --phase implement)" policy_digest)"
 D3="$(rv "$(res "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)" policy_digest)"
 D4="$(rv "$(res "$AP" resolve claude)" policy_digest)"
 [ -n "$D1" ] && [ "$D1" = "$D2" ] && [ "$D1" != "$D3" ] && [ "$D4" = none ] \
@@ -1299,7 +1299,7 @@ D4="$(rv "$(res "$AP" resolve claude)" policy_digest)"
   && ok "the policy digest names the concrete pair: same pair same digest, a changed pair a new one, none where nothing applies" || fail "policy digest ($D1/$D2/$D3/$D4)"
 # A pinned model the map does not know may not be combined with a ROUTED effort.
 R="$(res COMMS_ACP_CODEX_MODEL=gpt-9-preview "$AP" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
-[ "$(rv "$R" model)" = gpt-9-preview ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" effort_source)" = baseline ] \
+[ "$(rv "$R" model)" = gpt-9-preview ] && [ "$(rv "$R" effort)" = high ] && [ "$(rv "$R" effort_source)" = baseline ] \
   && [ "$(rv "$R" fallback)" = unverified-pin ] \
   && ok "a routed effort is dropped rather than paired with an unverified pinned model" || fail "unverified pin + route ($R)"
 PCO="$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-reserve"}]}}' \
@@ -1448,7 +1448,7 @@ res "$PM/acp.sh" resolve codex >/dev/null 2>&1; A=$?
 res "$PM/acp.sh" policy codex >/dev/null 2>&1; B=$?
 [ "$A" = 1 ] && [ "$B" = 1 ] \
   && ok "a missing map refuses resolution and the policy accessor (fail closed, no literal fallback)" || fail "missing map ($A/$B)"
-sed 's/^baseline	codex	acp-mounted	gpt-6.1-sol	xhigh$/baseline	codex	acp-mounted	gpt-6.1-sol"	xhigh/' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
+sed 's/^baseline	codex	acp-mounted	gpt-6.1-sol	high$/baseline	codex	acp-mounted	gpt-6.1-sol"	high/' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
 res "$PM/acp.sh" provider-config codex >/dev/null 2>&1 && fail "a map value carrying a quote reached the config" \
   || ok "a map value that is not a bare identifier refuses the whole map"
 { cat "$REPO/helpers/policy-map.tsv"; printf 'version\t9\n'; } > "$PM/policy-map.tsv"
@@ -1456,7 +1456,7 @@ res "$PM/acp.sh" resolve codex >/dev/null 2>&1 && fail "a map with two versions 
   || ok "a map with a duplicated version row is refused"
 grep -v '^pair	codex	acp-mounted	gpt-6-luna	' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
 R="$(res "$PM/acp.sh" resolve codex --tier fast --effort low --decision rd-a --routing on --phase implement)"
-[ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = xhigh ] && [ "$(rv "$R" fallback)" = unsupported-pair ] \
+[ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" effort)" = high ] && [ "$(rv "$R" fallback)" = unsupported-pair ] \
   && ok "a routed model the map lists no accepted efforts for is never run unvalidated" || fail "unpaired routed model ($R)"
 
 # FIXED: the baseline (plus pins) is applied and attested, routing is ignored.
@@ -1465,7 +1465,7 @@ R="$(res "$PM/acp.sh" resolve codex --tier fast --effort low --decision rd-a --r
 [ "$(rv "$R" capability)" = fixed ] && [ "$(rv "$R" model)" = gpt-6.1-sol ] && [ "$(rv "$R" verify)" = "model,effort" ] \
   && [ "$(rv "$R" fallback)" = capability-fixed ] \
   && printf '%s\n' "$R" > "$PM/fixed.tsv" \
-  && res "$PM/acp.sh" provider-config codex --policy-file "$PM/fixed.tsv" | grep_full -qx 'model_reasoning_effort = "xhigh"' \
+  && res "$PM/acp.sh" provider-config codex --policy-file "$PM/fixed.tsv" | grep_full -qx 'model_reasoning_effort = "high"' \
   && ok "a fixed combination still applies and attests its baseline, and ignores the route" || fail "fixed capability ($R)"
 # An explicit tier the map does not define is refused, not replaced.
 grep -v '^tier	codex	acp-mounted	fast	' "$REPO/helpers/policy-map.tsv" > "$PM/policy-map.tsv"
@@ -1485,12 +1485,12 @@ grep -qx 'model = "gpt-6-luna"' "$PR/luna.toml" && grep -qx 'model_reasoning_eff
 [ "$(res COMMS_ACP_CODEX_MODEL=gpt-5.6-sol "$AP" policy codex --policy-file "$PR/luna.tsv")" = "$(printf 'gpt-6-luna\tlow')" ] \
   && ok "policy --policy-file returns the persisted pair" || fail "policy --policy-file"
 res "$AP" policy-attest codex low gpt-6-luna --policy-file "$PR/luna.tsv" >/dev/null 2>&1; A=$?
-res "$AP" policy-attest codex xhigh gpt-6.1-sol --policy-file "$PR/luna.tsv" >/dev/null 2>&1; B=$?
+res "$AP" policy-attest codex high gpt-6.1-sol --policy-file "$PR/luna.tsv" >/dev/null 2>&1; B=$?
 [ "$A" = 0 ] && [ "$B" = 20 ] \
   && ok "the attestation's expectation is the persisted record: a baseline turn is a MISMATCH for a routed one" || fail "attest --policy-file ($A/$B)"
 [ "$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6-luna"},{"id":"reasoning_effort","currentValue":"low"}]}}' \
      | res "$AP" policy-check codex - --policy-file "$PR/luna.tsv" >/dev/null 2>&1; echo $?)" = 0 ] \
-  && [ "$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"xhigh"}]}}' \
+  && [ "$(printf '%s' '{"acpx":{"config_options":[{"id":"model","currentValue":"gpt-6.1-sol"},{"id":"reasoning_effort","currentValue":"high"}]}}' \
      | res "$AP" policy-check codex - --policy-file "$PR/luna.tsv" >/dev/null 2>&1; echo $?)" = 20 ] \
   && ok "the preflight compares a session against the persisted record (a warm baseline session is refused)" || fail "policy-check --policy-file"
 # A saved MODEL preference acpx would replay onto a replacement session is read too, now that a
@@ -1594,7 +1594,7 @@ pol_run pol-ok "$POL_OK" AX_CFG_LOG="$POL_CFG"
   && ok "the honest turn publishes exactly one review-feedback the lookup can see" || fail "the publication lookup is blind (honest control found $(pol_inbox_n pol-ok))"
 # Read from the CHILD's view: the mount is torn down when the turn ends, so asserting on the
 # parent's own write would prove less and be impossible here anyway.
-grep -q 'model_reasoning_effort = "xhigh"' "$POL_CFG" 2>/dev/null \
+grep -q 'model_reasoning_effort = "high"' "$POL_CFG" 2>/dev/null \
   && ok "the config the provider actually read carries the declared effort" || fail "provider-visible config lacks the effort key"
 grep -q 'model = "gpt-6.1-sol"' "$POL_CFG" 2>/dev/null \
   && ok "the config the provider actually read carries the declared model" || fail "provider-visible config lacks the model key"
@@ -1857,18 +1857,18 @@ RR_D5="$WORK/rr-5"; rr_run rr-arc "$RRX" "$RR_D5" COMMS_REVIEW_ROUTE=1
 # ROUTING OFF: a stamped id is ignored, never a reason to refuse; the baseline runs and says why.
 RR_D6="$WORK/rr-6"; rr_run rr-off "$RRX" "$RR_D6"
 [ "$(cn_status "$RR_D6")" = completed ] && [ "$(tv "$RR_D6" requested_model)" = gpt-6.1-sol ] \
-  && [ "$(tv "$RR_D6" requested_effort)" = xhigh ] && [ "$(tv "$RR_D6" policy_fallback)" = routing-disabled ] \
+  && [ "$(tv "$RR_D6" requested_effort)" = high ] && [ "$(tv "$RR_D6" policy_fallback)" = routing-disabled ] \
   && ok "with routing off the baseline runs, recorded as routing-disabled" || fail "routing off: status=$(cn_status "$RR_D6") fb=$(tv "$RR_D6" policy_fallback)"
 # THE EXPECTATION IS NEVER RELABELLED: a routed turn that ran the baseline pair is a mismatch.
 RRY="$(rr_decide rr-div fast low)"
-RR_D7="$WORK/rr-7"; rr_run rr-div "$RRY" "$RR_D7" COMMS_REVIEW_ROUTE=1 AX_ROLLOUT_MODEL=gpt-6.1-sol AX_ROLLOUT_EFFORT=xhigh
+RR_D7="$WORK/rr-7"; rr_run rr-div "$RRY" "$RR_D7" COMMS_REVIEW_ROUTE=1 AX_ROLLOUT_MODEL=gpt-6.1-sol AX_ROLLOUT_EFFORT=high
 [ "$(cn_status "$RR_D7")" = failed ] && [ "$(pol_inbox_n rr-div)" = 0 ] \
   && [ "$(tv "$RR_D7" requested_model)" = gpt-6-luna ] && [ "$(tv "$RR_D7" observed_model)" = gpt-6.1-sol ] \
   && ok "a routed turn whose rollout shows the baseline is refused unpublished, requested vs observed legible" || fail "routed divergence: status=$(cn_status "$RR_D7")"
 # A SESSION THAT WILL NOT SERVE the routed pair (a stale preference) is refused before the canary.
 RRZ="$(rr_decide rr-stale fast low)"
 RR_D8="$WORK/rr-8"; RR_L8="$WORK/rr-8.argv"
-rr_run rr-stale "$RRZ" "$RR_D8" COMMS_REVIEW_ROUTE=1 AX_MODEL=gpt-6.1-sol AX_EFFORT=xhigh AX_CWD_LOG="$RR_L8"
+rr_run rr-stale "$RRZ" "$RR_D8" COMMS_REVIEW_ROUTE=1 AX_MODEL=gpt-6.1-sol AX_EFFORT=high AX_CWD_LOG="$RR_L8"
 [ "$(cn_status "$RR_D8")" = failed ] && [ "$(tv "$RR_D8" adapter_check)" = mismatch ] \
   && ! awk -F'\t' '$2 ~ / --file / || $2 ~ /Reply with exactly/' "$RR_L8" 2>/dev/null | grep_full -q . \
   && ok "a session reporting the baseline for a routed turn is refused before any prompt" || fail "stale session: status=$(cn_status "$RR_D8") adapter=$(tv "$RR_D8" adapter_check)"
@@ -1977,7 +1977,7 @@ LU_JG="$(for k in provider agent status reason exit_code session_id message_file
 # THE LEG'S RESOLVED ROUTE — the fields `review-route plan` prints — lands beside its usage, read
 # from the turn's own hash-checked policy record.
 [ "$(ru "$LU_CX" route transport)" = acp-mounted ] && [ "$(ru "$LU_CX" route capability)" = eligible ] \
-  && [ "$(ru "$LU_CX" route model)" = gpt-6.1-sol ] && [ "$(ru "$LU_CX" route effort)" = xhigh ] \
+  && [ "$(ru "$LU_CX" route model)" = gpt-6.1-sol ] && [ "$(ru "$LU_CX" route effort)" = high ] \
   && [ "$(ru "$LU_CX" route limit_id)" = - ] && [ "$(ru "$LU_CX" route routing)" = off ] \
   && [ "$(ru "$LU_CX" route decision)" = none ] \
   && ok "a mounted codex leg's result.json carries its resolved route (transport, model, effort, limit_id, routing, decision)" \

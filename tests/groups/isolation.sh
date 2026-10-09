@@ -514,12 +514,12 @@ ISO_RQ="$WORK/turnobs-req"; rm -rf "$ISO_RQ"; mkdir -p "$ISO_RQ"
 env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$REPO/helpers/acp.sh" resolve codex > "$ISO_RQ/policy.tsv" 2>/dev/null
 ( eval "$ISO_TP"; eval "$ISO_TO2"; turn_policy "$ISO_RQ" "$ISO_RQ/policy.tsv" none
   turn_observe "$ISO_RQ" medium gpt-6-astra rec-9 t-9 /r/y.jsonl 7 )
-grep -qx "requested_effort	xhigh" "$ISO_RQ/turn.tsv" \
+grep -qx "requested_effort	high" "$ISO_RQ/turn.tsv" \
   && ok "turn.tsv records the REQUESTED effort from the persisted policy record" || fail "requested effort missing"
 grep -qx "requested_model	gpt-6.1-sol" "$ISO_RQ/turn.tsv" \
   && ok "turn.tsv records the REQUESTED model" || fail "requested model missing"
 # The divergence must be legible from the file alone, with no mount and no rollout.
-grep -qx "observed_effort	medium" "$ISO_RQ/turn.tsv" && grep -qx "requested_effort	xhigh" "$ISO_RQ/turn.tsv" \
+grep -qx "observed_effort	medium" "$ISO_RQ/turn.tsv" && grep -qx "requested_effort	high" "$ISO_RQ/turn.tsv" \
   && ok "a requested/observed divergence is readable from turn.tsv without the mount" || fail "divergence not legible"
 # ONE requested pair per turn: turn_observe must not append a second, re-read copy.
 [ "$(grep -c '^requested_effort	' "$ISO_RQ/turn.tsv")" = 1 ] \
@@ -527,9 +527,9 @@ grep -qx "observed_effort	medium" "$ISO_RQ/turn.tsv" && grep -qx "requested_effo
 # THE ORDERING LIMITATION, CLOSED. The requested pair is what was resolved when the config was
 # written; a pin changed afterwards (a reinstall, an edited env) must not relabel it.
 mkdir -p "$ISO_RQ-ov"
-env -u COMMS_ACP_CODEX_MODEL COMMS_ACP_CODEX_EFFORT=high "$REPO/helpers/acp.sh" resolve codex > "$ISO_RQ-ov/policy.tsv" 2>/dev/null
+env -u COMMS_ACP_CODEX_MODEL COMMS_ACP_CODEX_EFFORT=xhigh "$REPO/helpers/acp.sh" resolve codex > "$ISO_RQ-ov/policy.tsv" 2>/dev/null
 ( eval "$ISO_TP"; COMMS_ACP_CODEX_EFFORT=low turn_policy "$ISO_RQ-ov" "$ISO_RQ-ov/policy.tsv" none ) 2>/dev/null
-grep -qx "requested_effort	high" "$ISO_RQ-ov/turn.tsv" 2>/dev/null \
+grep -qx "requested_effort	xhigh" "$ISO_RQ-ov/turn.tsv" 2>/dev/null \
   && grep -qx "policy_effort_source	pin" "$ISO_RQ-ov/turn.tsv" 2>/dev/null \
   && ok "the requested pair is the one resolved before launch, not whatever the env says later" || fail "requested pair followed a later env change"
 # A refused resolution (no record) records unknown rather than silently claiming the default.

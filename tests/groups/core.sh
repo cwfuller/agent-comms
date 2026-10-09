@@ -227,7 +227,7 @@ LOCAL_OUT="$(cd "$INST_FIX" && bash "$REPO/install.sh" --scope=local 2>&1)"
   && ok "local scope installs the reviewer decider and the policy map" || fail "local scope misses route_review.py / policy-map.tsv"
 # THE INSTALLED accessor resolves through the map installed BESIDE it (sibling resolution is the
 # only lookup), so a local pin carries its own table rather than borrowing the source tree's.
-[ "$(env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$INST_FIX/.agent-comms/acp.sh" policy codex 2>/dev/null)" = "$(printf 'gpt-6.1-sol\txhigh')" ] \
+[ "$(env -u COMMS_ACP_CODEX_MODEL -u COMMS_ACP_CODEX_EFFORT "$INST_FIX/.agent-comms/acp.sh" policy codex 2>/dev/null)" = "$(printf 'gpt-6.1-sol\thigh')" ] \
   && ok "the locally installed acp.sh resolves the baseline from its own sibling map" || fail "installed acp.sh cannot resolve"
 [ -f "$INST_FIX/.claude/commands/auto.md" ] && ok "local scope installs commands" || fail "local scope installs commands"
 [ -f "$INST_FIX/.claude/commands/ask.md" ] && ok "local scope installs /ask" || fail "local scope installs ask.md"
@@ -1386,8 +1386,8 @@ ERR="$(st -- "$COMMS" review-route enabled 2>&1 >/dev/null)"
 printf 'COMMS_ROUTE=0\n' > "$ST_HOME/settings"
 [ "$(st -- "$COMMS" route -- 'rename a typo' 2>/dev/null | sed -n 's/^source: //p')" = disabled ] \
   && ok "python-backed helpers see settings too (route: disabled from the settings file)" || fail "route did not see settings"
-printf 'COMMS_ACP_CODEX_EFFORT=high\n' > "$ST_HOME/settings"
-[ "$(st COMMS_ACP_CODEX_PATH="$HARNESS_CODEX_RUNTIME" -- "$REPO/helpers/acp.sh" policy codex 2>/dev/null)" = "$(printf 'gpt-6.1-sol\thigh')" ] \
+printf 'COMMS_ACP_CODEX_EFFORT=xhigh\n' > "$ST_HOME/settings"
+[ "$(st COMMS_ACP_CODEX_PATH="$HARNESS_CODEX_RUNTIME" -- "$REPO/helpers/acp.sh" policy codex 2>/dev/null)" = "$(printf 'gpt-6.1-sol\txhigh')" ] \
   && ok "acp.sh reads settings when run directly (reviewer effort pin)" || fail "acp.sh did not read settings"
 : > "$ST_HOME/settings"
 # ISOLATION: under the harness env (AC_SETTINGS_LOADED=1) a settings file is never read, so the

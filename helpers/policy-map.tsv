@@ -156,7 +156,7 @@
 #   bindable, it names no effort. The 0.88.0 minimum is the adapter these rows were observed on (0.60.0's CLI cannot
 #   serve claude-opus-5-5, operator): a pin moved below it refuses them by name rather than letting the adapter's
 #   fuzzy model match pick a sibling.
-version	2026-10-08.1
+version	2026-10-09.1
 
 # No mapped model has a usage limit of its own yet, so there are no `limit` rows: every mapped codex
 # model spends the shared codex limit. A row is added with the evidence that the model is served
@@ -175,9 +175,11 @@ capability	gemini	headless	eligible	`agy -p= --input-format stream-json --output
 capability	gemini	acp	unsupported	none: agy has no ACP mode, so gemini has no ACP session	none	-	nothing applies or attests a policy
 capability	gemini	acp-mounted	unsupported	none: agy has no ACP mode, so gemini has no mounted ACP session	none	-	nothing applies or attests a policy
 
-baseline	codex	acp-mounted	gpt-6.1-sol	xhigh
+# Operator decision, 2026-10-09: the default codex review effort is `high` (gpt-6.1-sol stays the model). `xhigh` stays
+# reachable through the COMMS_ACP_CODEX_EFFORT pin or a routed decision; the use-max ceiling below is unchanged.
+baseline	codex	acp-mounted	gpt-6.1-sol	high
 # The ceiling is the FRONTIER model, not the default one: gpt-6-astra, at `ultra`, the highest effort
-# it accepts. It can run well past an xhigh review, so a `use max` loop may need a larger
+# it accepts. It can run well past a baseline review, so a `use max` loop may need a larger
 # COMMS_RUNPHASE_TIMEOUT_SECS; set `max` here for a lower ceiling.
 ceiling	codex	acp-mounted	gpt-6-astra	ultra
 

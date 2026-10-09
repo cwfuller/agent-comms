@@ -172,7 +172,7 @@ NODE_MIN_MINOR=13
 # refused turn, not a silent float to whatever the account now serves. (grok, plan r1/r3.)
 #
 # THE CONCRETE VALUES LIVE IN policy-map.tsv beside this file, and nowhere else: the baseline
-# (gpt-6.1-sol/xhigh as of map 2026-09-29.2), the tier->model and effort->value rows a routed
+# (gpt-6.1-sol/high as of map 2026-10-09.1), the tier->model and effort->value rows a routed
 # decision may select, and the efforts each model accepts. The operator's pins stay environment
 # variables (COMMS_ACP_CODEX_MODEL / COMMS_ACP_CODEX_EFFORT) and still win over everything. The
 # map is read ONLY from the sibling file, never from an environment override, so a second table

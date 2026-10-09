@@ -131,7 +131,7 @@ OUT="$(bd "$COMMS" review-route plan --bindings "$BD/b3.json" --phase implement 
 
 # THE LEGACY PLAN IS UNCHANGED, byte for byte: all-or-nothing, route-plan v1, no access fields.
 OUT="$(bd "$COMMS" review-route plan --to codex,grok 2>&1)"; A=$?
-case "$OUT" in "route-plan v1 agent=codex provider=codex transport=acp-mounted capability=eligible model=gpt-6.1-sol effort=xhigh limit_id=- model_source=baseline effort_source=baseline routing=off decision=none phase=implement map_version=$BD_MAPV
+case "$OUT" in "route-plan v1 agent=codex provider=codex transport=acp-mounted capability=eligible model=gpt-6.1-sol effort=high limit_id=- model_source=baseline effort_source=baseline routing=off decision=none phase=implement map_version=$BD_MAPV
 route-plan v1 agent=grok provider=grok "*) [ "$A" = 0 ] && ok "the legacy plan still prints route-plan v1 lines with no access fields" || fail "legacy plan rc=$A" ;; *) fail "legacy plan changed: $OUT" ;; esac
 
 # EVERY LEG'S VERDICT IS PRINTED, and a refusal is exit 1: Basis needs each candidate's answer to choose among them.

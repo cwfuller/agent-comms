@@ -790,7 +790,7 @@ mechanism, evidence source and versions tested). Precedence per dimension: opera
 (`COMMS_ACP_CODEX_MODEL` / `COMMS_ACP_CODEX_EFFORT`; for gemini `COMMS_ACP_GEMINI_MODEL` /
 `COMMS_ACP_GEMINI_EFFORT`) > the operator's "use max" ceiling
 (`COMMS_REVIEW_MAX=1`, the map's `ceiling` row) > an eligible, enabled, implement-phase route >
-baseline (gpt-6.1-sol/xhigh as of map 2026-09-29.2 — the everyday default; its `ceiling` is the
+baseline (gpt-6.1-sol/high as of map 2026-10-09.1 — the everyday default; `xhigh` stays reachable through the `COMMS_ACP_CODEX_EFFORT` pin or a routed decision; its `ceiling` is the
 frontier model, gpt-6-astra/ultra). A tier is
 an ORDERED list (`fast` = gpt-6-luna then gpt-5.6-luna; `balanced` = gpt-6.1-sol, gpt-6-sol, then
 gpt-5.6-terra; `strong` = gpt-6-astra): the first model the reviewer's codex runtime

@@ -920,7 +920,7 @@ RP_MAPV="$(awk -F'\t' '$1=="version"{print $2; exit}' "$REPO/helpers/policy-map.
 rpp() { rrc COMMS_DELIVERY=acp "$@"; }
 rp_line() { printf 'route-plan v1 agent=%s provider=%s transport=acp-mounted %s phase=%s map_version=%s' "$1" "$2" "$3" "$4" "$RP_MAPV"; }
 RP_UNSUP='capability=unsupported model=n/a effort=n/a limit_id=n/a model_source=unsupported effort_source=unsupported'
-RP_BASE='capability=eligible model=gpt-6.1-sol effort=xhigh limit_id=- model_source=baseline effort_source=baseline'
+RP_BASE='capability=eligible model=gpt-6.1-sol effort=high limit_id=- model_source=baseline effort_source=baseline'
 # The whole repo, contents included, so any file the verb creates, removes or rewrites shows.
 rp_tree() { ( cd "$RR_REPO" && find . -print | LC_ALL=C sort; find . -type f -exec shasum {} + | LC_ALL=C sort; git status --porcelain ); }
 RP_B0="$(rp_tree)"

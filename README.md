@@ -71,7 +71,7 @@ A classifier (Jev, via TypeSafe) sizes the work so easy things run cheap:
   from a versioned table: fast = GPT-6 Luna, balanced = GPT-6.1 Sol then GPT-6
   Sol, each falling back to GPT-5.6 when your codex is too old to serve it;
   strong = GPT-6 Astra, the frontier model. Low confidence keeps the default:
-  GPT-6.1 Sol at xhigh, which needs codex >= 0.159 (an older codex is refused,
+  GPT-6.1 Sol at high, which needs codex >= 0.159 (an older codex is refused,
   not downgraded; `acp.sh doctor` says so). "Use max" runs GPT-6 Astra at ultra.
 
 Off by default. `comms.sh setup` turns it on (TypeSafe key, then per-project

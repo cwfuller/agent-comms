@@ -20,7 +20,7 @@ OUT="$(bd $BD_CAN COMMS_WAIT=1 ACP_PARITY_PAYLOAD="$BD_PAY" AX_CFG_LOG="$BD_CFG"
 [ "$(bd_res codex status)" = completed ] \
   && ok "the bound leg completes" || fail "leg status: codex=$(bd_res codex status) / $(bd_res codex note)"
 grep -q '^model = "gpt-6-luna"$' "$BD_CFG" && grep -q '^model_reasoning_effort = "low"$' "$BD_CFG" \
-  && ok "the codex config the provider actually read carries EXACTLY the bound pair (gpt-6-luna / low), not the baseline (gpt-6.1-sol / xhigh)" || fail "codex config: $(cat "$BD_CFG" 2>/dev/null | tr '\n' ' ')"
+  && ok "the codex config the provider actually read carries EXACTLY the bound pair (gpt-6-luna / low), not the baseline (gpt-6.1-sol / high)" || fail "codex config: $(cat "$BD_CFG" 2>/dev/null | tr '\n' ' ')"
 BD_LEGF="$(grep -l '^leg_binding:' "$BD_REPO/.comms/to-codex/"*panel-codex* "$BD_REPO/.comms/archive/"*panel-codex* 2>/dev/null | head -1)"
 { [ -n "$BD_LEGF" ] && grep -q '^leg_binding_digest: [0-9a-f]\{64\}$' "$BD_LEGF" && ! grep -q '^route_decision:' "$BD_LEGF"; } \
   && ok "the leg's request carries the helper-stamped binding and its digest, and no routing decision" || fail "leg frontmatter (${BD_LEGF:-no leg file})"
@@ -228,8 +228,8 @@ section "binding: an unbound dispatch is unchanged, and its result.json marks a 
 # An UNBOUND dispatch, run end to end: same behaviour as before, with binding and quota null (a legacy leg).
 BD_UREQ="$(bd_req bd-unbound)"
 OUT="$(bd COMMS_WAIT=1 ACP_PARITY_PAYLOAD="$BD_PAY" AX_CFG_LOG="$BD/unbound.cfg" "$COMMS" panel dispatch --to codex "$BD_UREQ" 2>&1)"; A=$?
-{ [ "$A" = 0 ] && [ "$(bd_res codex status)" = completed ] && grep -q '^model = "gpt-6.1-sol"$' "$BD/unbound.cfg" && grep -q '^model_reasoning_effort = "xhigh"$' "$BD/unbound.cfg"; } \
-  && ok "an unbound dispatch still runs the map's baseline pair (gpt-6.1-sol / xhigh): nothing about it changed" || fail "unbound dispatch (rc=$A status=$(bd_res codex status)): $OUT"
+{ [ "$A" = 0 ] && [ "$(bd_res codex status)" = completed ] && grep -q '^model = "gpt-6.1-sol"$' "$BD/unbound.cfg" && grep -q '^model_reasoning_effort = "high"$' "$BD/unbound.cfg"; } \
+  && ok "an unbound dispatch still runs the map's baseline pair (gpt-6.1-sol / high): nothing about it changed" || fail "unbound dispatch (rc=$A status=$(bd_res codex status)): $OUT"
 { [ "$(bd_res codex binding)" = "<null>" ] && [ "$(bd_res codex quota)" = "<null>" ] && [ "$(bd_res codex route model_source)" = baseline ] && [ "$(bd_res codex route route_id)" = "<null>" ]; } \
   && ok "its result.json has binding null, quota null and a route with no route id: a legacy leg is recognisable" || fail "legacy result: binding=$(bd_res codex binding) route=$(bd_res codex route)"
 { ! grep -q '^leg_binding' "$(ls -t "$BD_REPO/.comms/to-codex/"*panel-codex-* "$BD_REPO/.comms/archive/"*panel-codex-* 2>/dev/null | head -1)"; } && ok "its leg request carries no binding stamp" || fail "an unbound leg carried a binding"
