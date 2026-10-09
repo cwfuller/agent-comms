@@ -244,7 +244,7 @@ profile binds its pinned model only (`model-mismatch` otherwise); no row is adde
 A bound claude leg needs an entry such as `"claude": {"route_id": "kernel-claude", "transport": "acp", "provider": "anthropic",
 "account": "main", "billing": "subscription", "credential": null}`; only `subscription` is supported. It runs on the login of the
 dispatch's own `CLAUDE_CONFIG_DIR` (or `~/.claude`), read back before launch; `account` is the operator's label and is not
-verified. Its model must be a launch id the policy map can attest (a `pair` and a `recorded` row: `claude-opus-5-5` and
-`claude-sonnet-5-5` today; an alias such as `sonnet` refuses `model-unservable` until it has rows), and `binding.observed` is the
-id Claude's transcript recorded.
+verified. Its model must be a launch id the policy map can attest (a `pair` and a `recorded` row: `claude-opus-5-5`,
+`claude-sonnet-5-5` and the alias `sonnet` today; `haiku` and `claude-fable-5-1` refuse `model-unservable` until they have rows),
+and `binding.observed` is the id Claude's transcript recorded (`sonnet` is observed as `claude-sonnet-5-5`).
 

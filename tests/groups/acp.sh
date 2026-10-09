@@ -1512,8 +1512,8 @@ res "$AP" policy-attest codex low gpt-6-luna --policy-file "$PR/absent.tsv" >/de
   && ok "an injected, doubled-key, foreign-provider or missing record is refused (attestation: undecidable)" || fail "record validation ($A/$B/$C/$D)"
 CAPS="$(res "$AP" capabilities)"
 printf '%s\n' "$CAPS" | grep -q "^map_version: $MAPV" && printf '%s\n' "$CAPS" | grep -q '^codex/acp-mounted: eligible' \
-  && printf '%s\n' "$CAPS" | grep -q '^claude/acp-mounted: unsupported' \
-  && ok "capabilities shows the map version and which combinations are routing-eligible" || fail "capabilities output"
+  && printf '%s\n' "$CAPS" | grep -q '^claude/acp-mounted: bound' && printf '%s\n' "$CAPS" | grep -q '^grok/acp-mounted: unsupported' \
+  && ok "capabilities shows the map version and which combinations are routing-eligible (claude: bound legs only)" || fail "capabilities output"
 # THE USAGE LIMIT a leg spends. The committed map gives no model a limit of its own (`-` = the
 # provider's shared limit); a synthetic `limit` row names one for its model only, whether the model
 # was reached by the baseline or by a route; nothing that applies no model claims one.

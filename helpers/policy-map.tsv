@@ -136,15 +136,26 @@
 #   main chain and subagent files, bounded by a snapshot before the canary and another before the review prompt
 #   (helpers/claude_transcript.py): every assistant record's `message.model` and `effort` must agree with the
 #   record's attest_model and effort. The canary's window gates the review prompt; the review's gates publication.
-# - Versions: STUB ONLY. Hermetic test stubs exercised the mechanism; no live claude turn has run through it.
+# - Versions: the RUNNER path is STUB ONLY (hermetic tests; no runner turn has run live). The mechanism was
+#   live-probed OUTSIDE the runner, 2026-10-08, acpx 0.13.1 + claude-agent-acp 0.88.0 (bundled CLI 2.1.293), in a
+#   scratch repo: `set model`, `set effort low`, `set-mode plan` printed exactly the lines the runner confirms;
+#   `sessions show` carried session_options.model, desired_config_options.effort and the effort option; one PONG
+#   each, read back with claude_transcript.py and judged by policy-attest:
+#     claude-opus-5-5 (CLAUDE_CODE_EFFORT_LEVEL=low on every call)  -> transcript claude-opus-5-5, effort low
+#     sonnet (set effort only, no variable)                          -> transcript claude-sonnet-5-5, effort low
+#     haiku (no effort set)                                          -> transcript claude-sonnet-5-5, effort medium
+#     claude-fable-5-1: `set model` printed success, then acpx's replay of it on the next connection failed
+#                        ("Network error", adapter "Internal error"); nothing was recorded
+#   The profile probed had no settings.json effortLevel, so whether the variable outranks one was not observed.
 #   The cell below changes when the operator's live trial is recorded.
-# - recorded rows: from local transcripts whose `requestedModel` names the launch id (Claude CLI 2.1.295,
-#   2026-10-08): claude-opus-5-5 -> claude-opus-5-5 and claude-sonnet-5-5 -> claude-sonnet-5-5. No record was
-#   found whose request named `sonnet`, `haiku` or `claude-fable-5-1`, so they have no row and refuse.
-# - pair efforts: the adapter's own effort list was NOT observed (no probe ran); low..max is the operator policy
-#   route `claude`'s effort list. The 0.88.0 minimum is the adapter these rows were written for (0.60.0's CLI
-#   cannot serve claude-opus-5-5, operator): a pin moved below it refuses them by name rather than letting the
-#   adapter's fuzzy model match pick a sibling.
+# - recorded rows: claude-opus-5-5 and sonnet from that probe; claude-opus-5-5 and claude-sonnet-5-5 also from local
+#   transcripts whose `requestedModel` names them (CLI 2.1.295). `haiku` ran ANOTHER model, and claude-fable-5-1
+#   recorded nothing, so neither has a row: both refuse model-unservable.
+# - pair efforts: the adapter's effort option seen in `sessions show` (default, low, medium, high, xhigh, max) for
+#   claude-opus-5-5 and for sonnet (recorded as claude-sonnet-5-5, so its full id shares the list); `default` is not
+#   bindable, it names no effort. The 0.88.0 minimum is the adapter these rows were observed on (0.60.0's CLI cannot
+#   serve claude-opus-5-5, operator): a pin moved below it refuses them by name rather than letting the adapter's
+#   fuzzy model match pick a sibling.
 version	2026-10-08.1
 
 # No mapped model has a usage limit of its own yet, so there are no `limit` rows: every mapped codex
@@ -154,7 +165,7 @@ version	2026-10-08.1
 capability	codex	acp-mounted	eligible	isolated CODEX_HOME config.toml (model, model_reasoning_effort), read at thread start/resume, with CODEX_PATH naming the runtime; a changed policy or runtime is a new session	preflight: acpx config_options + saved preferences; gate: the provider's own rollout turn_context (model, effort) per turn, behind the canary and reply-check	codex-acp 1.12.0; codex 0.154.0 (bundled) and 0.155.1, 0.159.0 (installed, via CODEX_PATH); acpx 0.13.1; codex-acp 2.1.1 with codex 0.160.0 (installed), 2026-10-05	the adapter is pinned (acp.sh adapter codex; acpx alone floats it under ^1.1.5); policy.tsv records the runtime resolved, turn.tsv the adapter and the runtime that created the session
 capability	codex	acp	unsupported	none: an unmounted turn runs the operator's own ~/.codex config	none	-	nothing applies or attests a policy
 capability	codex	headless	unsupported	none: codex review turns are ACP-only	none	-	-
-capability	claude	acp-mounted	bound	BOUND legs only, on the pinned adapter: `acpx set model <launch id>` then `set effort <effort>` (none for a model without an effort scale) before the first prompt, confirmed from acpx's output, plus CLAUDE_CODE_EFFORT_LEVEL from the persisted record; then `set-mode plan`	Claude's own transcript (message.model, effort), main chain and subagents, under ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<mount slug>[-*]: the canary's window gates the review prompt, the review's gates publication; the preflight reads sessions show (saved model preference, effort option)	stub only (hermetic test stubs; no live turn recorded)	unbound claude turns read this row as unsupported and run as before; the 2026-09-22 probe (claude-agent-acp 0.60.0, outside agent-comms) saw `set model|effort` honoured before the first prompt and "Internal error" after one, or for effort on a model without it
+capability	claude	acp-mounted	bound	BOUND legs only, on the pinned adapter: `acpx set model <launch id>` then `set effort <effort>` (none for a model without an effort scale) before the first prompt, confirmed from acpx's output, plus CLAUDE_CODE_EFFORT_LEVEL from the persisted record; then `set-mode plan`	Claude's own transcript (message.model, effort), main chain and subagents, under ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<mount slug>[-*]: the canary's window gates the review prompt, the review's gates publication; the preflight reads sessions show (saved model preference, effort option)	runner: stub only (no runner turn live); mechanism live-probed 2026-10-08 outside the runner (acpx 0.13.1, claude-agent-acp 0.88.0, CLI 2.1.293: claude-opus-5-5 and sonnet at low, set + sessions show + one PONG + transcript)	unbound claude turns read this row as unsupported and run as before; the 2026-09-22 probe (claude-agent-acp 0.60.0, outside agent-comms) saw `set model|effort` honoured before the first prompt and "Internal error" after one, or for effort on a model without it
 capability	claude	acp	unsupported	none: an unmounted turn has no transcript window bounded to the leg	none	-	-
 capability	claude	headless	unsupported	none: claude review turns are ACP-only	none	-	-
 capability	grok	acp-mounted	unsupported	none applied; newer builds expose ACP `model` + `reasoning_effort` (older builds: none)	~/.grok/sessions summary.json: effort per SESSION only	grok 1.0.40 (read from --help/docs, not exercised)	effort is dropped silently on models without supportsReasoningEffort; refused on Darwin without an uncontained override
@@ -218,5 +229,7 @@ pair	gemini	headless	gemini-3.8-flash	low,medium,high
 # Bound claude legs (see the CLAUDE note above): which launch ids can be attested, and their efforts.
 pair	claude	acp-mounted	claude-opus-5-5	low,medium,high,xhigh,max	0.88.0
 pair	claude	acp-mounted	claude-sonnet-5-5	low,medium,high,xhigh,max	0.88.0
+pair	claude	acp-mounted	sonnet	low,medium,high,xhigh,max	0.88.0
 recorded	claude	acp-mounted	claude-opus-5-5	claude-opus-5-5
 recorded	claude	acp-mounted	claude-sonnet-5-5	claude-sonnet-5-5
+recorded	claude	acp-mounted	sonnet	claude-sonnet-5-5

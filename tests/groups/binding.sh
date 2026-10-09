@@ -177,7 +177,7 @@ BD_REQ_FROM=codex   # claude cannot be both the author and a leg
 bd_refuse "claude with no access entry, bound to a model the map cannot attest for it" "model-unservable no-access-profile " "$(bj "$BD_L_CODEX" "d.update(agent='claude', ref='res-claude')")"
 # A BOUND CLAUDE LEG with the operator's entry: the resolution's codes and the login read-back, each before any write.
 bd_claude_on
-bd_refuse "claude: a launch id with no pair or recorded row (an alias the map cannot attest)" "model-unservable " "$(bj "$BD_L_CLAUDE" "d['model']='sonnet'")"
+bd_refuse "claude: a launch id with no pair or recorded row (an alias the map cannot attest)" "model-unservable " "$(bj "$BD_L_CLAUDE" "d['model']='haiku'")"
 bd_refuse "claude: a null effort for a model with an effort scale" "effort-mismatch " "$(bj "$BD_L_CLAUDE" "d['effort']=None")"
 bd_refuse "claude: an effort outside the model's list" "effort-refused " "$(bj "$BD_L_CLAUDE" "d['effort']='ultra'")"
 bd_refuse "claude: COMMS_REVIEW_MAX in the dispatching environment" "pin-conflict " "$BD_L_CLAUDE" COMMS_REVIEW_MAX=1
@@ -348,8 +348,9 @@ grep -q 'code=capability-unsupported' <<<"$OUT" \
 bda "$AP" resolve claude --transport acp-mounted --bound-model claude-opus-5-5 --bound-effort low --route-id kernel-claude --access-digest "$BD_DG_CODEX" > "$BD/cl.rec" 2>"$BD/cl.err"; A=$?
 BD_CL_DG="$(printf 'claude-opus-5-5\0low\0@agentclientprotocol/claude-agent-acp\0%s\0%s' "$(sed -n 's/^CLAUDE_ACP_VERSION="\(.*\)"$/\1/p' "$AP")" "$BD_DG_CODEX" | shasum -a 256 | cut -c1-12)"
 { [ "$A" = 0 ] && [ "$(awk -F'\t' '$1~/^(policy_record|capability|model|effort|verify|attest_model|runtime|runtime_version|pair)$/{printf "%s=%s ", $1, $2}' "$BD/cl.rec")" = "policy_record=2 capability=bound model=claude-opus-5-5 effort=low pair=validated runtime=@agentclientprotocol/claude-agent-acp runtime_version=0.88.0 verify=model,effort attest_model=claude-opus-5-5 " ] \
-  && [ "$(awk -F'\t' '$1=="policy_digest"{print $2}' "$BD/cl.rec")" = "$BD_CL_DG" ] && [ "$(awk -F'\t' '{print $1}' "$BD/cl.rec" | tail -3 | tr '\n' ' ')" = "route_id access_digest bound " ]; } \
-  && ok "acp.sh resolve claude --bound-* resolves: capability bound, attest_model, the pinned adapter as the runtime, and a digest that covers the adapter version" || fail "claude bound resolve (rc=$A): $(cat "$BD/cl.err") $(tr '\t\n' '= ' < "$BD/cl.rec")"
+  && [ "$(awk -F'\t' '$1=="policy_digest"{print $2}' "$BD/cl.rec")" = "$BD_CL_DG" ] && [ "$(awk -F'\t' '{print $1}' "$BD/cl.rec" | tail -3 | tr '\n' ' ')" = "route_id access_digest bound " ] \
+  && [ "$(bda "$AP" resolve claude --transport acp-mounted --bound-model sonnet --bound-effort high --route-id kernel-claude --access-digest "$BD_DG_CODEX" 2>/dev/null | awk -F'\t' '$1~/^(model|attest_model)$/{printf "%s=%s ", $1, $2}')" = "model=sonnet attest_model=claude-sonnet-5-5 " ]; } \
+  && ok "acp.sh resolve claude --bound-* resolves: capability bound, attest_model (an alias keeps its launch id beside the id its transcript records), the pinned adapter as the runtime, and a digest that covers the adapter version" || fail "claude bound resolve (rc=$A): $(cat "$BD/cl.err") $(tr '\t\n' '= ' < "$BD/cl.rec")"
 [ "$(bda "$AP" resolve claude 2>/dev/null | awk -F'\t' '$1~/^(policy_record|capability|verify|fallback|runtime)$/{printf "%s=%s ", $1, $2}')" = "policy_record=1 capability=unsupported runtime=n/a fallback=capability-unsupported verify=none " ] \
   && [ -z "$(bda "$AP" adapter claude)" ] && [ "$(bda "$AP" adapter claude --bound)" = "npx -y @agentclientprotocol/claude-agent-acp@0.88.0" ] \
   && ok "an UNBOUND claude resolution is unchanged (version 1, unsupported), and only a bound leg gets the pinned adapter" || fail "unbound claude: $(bda "$AP" resolve claude 2>&1 | tr '\t\n' '= ')"

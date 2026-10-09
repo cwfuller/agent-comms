@@ -809,7 +809,7 @@ refuses when any listed leg, optional included, is invalid (agent-comms is not a
 policy exists. (6) Gemini and Codex API routes bind only where an explicit authentication selection exists, never on the hope that an environment key beats a saved login.
 (7) Quota `refused` stays limited to providers with a classifier. No model mapping in this change is approved by the ticket; every model id enters from the caller.
 
-### BUILT ON BRANCH 2026-10-08, STUB ONLY: a bound claude review leg, attested from Claude's own transcript (task 421)
+### BUILT ON BRANCH 2026-10-08, RUNNER STUB ONLY: a bound claude review leg, attested from Claude's own transcript (task 421)
 
 **Why.** Codex-written work needs a bound cross-family reviewer before the repo pins are deleted (operator, Q6). `review-route
 capability` now reports `claude` and `claude-review` `bindable` (billing `subscription` with the operator's `claude` entry, `-`
@@ -832,14 +832,24 @@ credential table gained Claude's non-pattern credential names and its model/effo
 - Exercised: hermetic stubs only (groups `binding`, `bindrun`; `install` for the manifest): order of the sets, prompts and refusals,
   the scrub and read-back with credential, email and organisation canaries, `CLAUDE_CONFIG_DIR` set and unset, every window refusal.
 - Local and read-only: a strings survey of the CLI the 0.88.0 adapter bundles (claude-agent-sdk 0.3.293) and the 0.60.0 one
-  (0.3.215) for the credential rows; local transcripts whose `requestedModel` names a launch id for the two `recorded` rows
-  (`claude-opus-5-5`, `claude-sonnet-5-5`). No record named `sonnet`, `haiku` or `claude-fable-5-1`, so those refuse
-  `model-unservable` until a row has evidence.
-- NOT exercised: no live claude turn has run through this code. 0.88.0's behaviour is inferred from 0.60.0's source: whether `set
-  effort` survives a session load, whether `CLAUDE_CODE_EFFORT_LEVEL` outranks the adapter's own setting and accepts `max`, the
-  `sessions show` shape and the transcript fields. Each is checked per turn by the canary's attestation, so a wrong guess refuses for
-  the price of one PONG; it cannot pass a wrong pair. The pair efforts are the operator route's list, not the adapter's observed list.
-  Plan-mode containment on 0.88.0 is unmeasured. The map's versions cell says `stub only` until the operator's trial is recorded.
+  (0.3.215) for the credential rows; local transcripts whose `requestedModel` names `claude-opus-5-5` or `claude-sonnet-5-5`.
+- Live, OUTSIDE the runner (bounded probe, four prompts, a scratch repo and a `$TMPDIR` npm cache; acpx 0.13.1, claude-agent-acp
+  0.88.0, bundled CLI 2.1.293, the dispatching profile's own login): `set model`, `set effort low` and `set-mode plan` print exactly
+  the lines the runner confirms (`model set: <id>`, `config set: effort=low (N options)`, `mode set: plan`); `sessions show` carries
+  `session_options.model`, `desired_config_options.effort` and an `effort` option (default, low..max), and `policy-check claude`
+  passes on it; the login read-back passes on the real `claude auth status --json`. One PONG each, read with `claude_transcript.py`:
+  `claude-opus-5-5` with `CLAUDE_CODE_EFFORT_LEVEL=low` on every call ran claude-opus-5-5 at low (`policy-attest` match); `sonnet` with
+  `set effort low` alone ran claude-sonnet-5-5 at low. Hence the `recorded` rows (opus, `sonnet` -> claude-sonnet-5-5) and the pair
+  efforts. **`haiku` ran claude-sonnet-5-5 at medium** (no effort set), and **`claude-fable-5-1`** printed `model set` and then failed
+  when acpx replayed it on the next connection ("Network error", adapter "Internal error"), recording nothing: neither has a row, so
+  both refuse `model-unservable`. Policy revision 3 names both; the operator should not expect them to bind until a probe shows them
+  served. `sessions show` reports mode `default` beside `desired_mode_id plan` after a successful `set-mode plan`, on 0.88.0 and on
+  the builtin 0.60.x alike: that is how acpx records it, not a 0.88.0 change.
+- NOT exercised: no runner turn has run live (the operator's trial below). The probed profile had no `effortLevel` in its settings,
+  so whether `CLAUDE_CODE_EFFORT_LEVEL` outranks one (and accepts `max`) was not observed; the canary's attestation checks it per turn,
+  so a wrong guess refuses for the price of one PONG and cannot pass a wrong pair. Plan-mode containment on 0.88.0 (the ROADMAP
+  write, evasion and ExitPlanMode table) was not re-measured. The map's versions cell says the runner path is `stub only` and names
+  the probe separately, until the operator's trial is recorded.
 
 **Residuals, stated.** The INTERNALS claude residual holds for bound legs (open network, the shared config directory's settings and
 login). Managed (enterprise) settings files are not read. The scrub is still a list: repeat the survey on each adapter pin change.
