@@ -106,7 +106,7 @@ worktree list/retire: hand-run session-lifecycle retirement	112
 route-eval: more than one labeller	5
 compose: exactly one machine-readable compose-result line	22
 comms.sh version: the installed kernel commit and template version	18
-leg_usage.py: a leg's tokens come from the provider's own records	46
+leg_usage.py: a leg's tokens come from the provider's own records	47
 comms.sh: state idle/legacy (idle threads marked with evidence, never closed by age)	22
 worktree new: pins the workspace name for the new worktree	11
 profiles: parser, launch and evidence contracts	34
@@ -132,8 +132,8 @@ binding: quota states from real turns (observed, unavailable, refused with no ma
 binding: an unbound dispatch is unchanged, and its result.json marks a legacy leg	3
 binding: a bound claude-review leg on codex-authored work (pinned adapter, ACP set before the canary, transcript attestation)	8
 binding: a bound claude leg uses the dispatch's CLAUDE_CONFIG_DIR, set or unset, for its launch, login read-back and transcript window	2
-binding: a bound claude leg refuses before any prompt, before the review, or unpublished	21
-binding: a bound claude leg's transcript window is attributed by directory (subagents, a cd, a subdirectory's project, a truncated mount)	6
+binding: a bound claude leg refuses before any prompt, before the review, or unpublished	22
+binding: a bound claude leg's transcript window is attributed by directory (subagents, a cd, a subdirectory's project, a truncated mount)	7
 binding: a bound claude model with no effort scale binds with a null effort and is attested on the model alone	1
 reviewer guidance: the shared bundle is staged into a mounted codex home	11
 helpers/method_guidance.py: verify the staged bundle against its snapshot record	2

@@ -303,8 +303,9 @@ effort`, skipped for a null effort), pins `plan`, and preflights the session (th
 effort option; a session whose effort option disagrees with the map is refused `effort-mismatch`, any other
 difference `policy-unapplied`). The canary's transcript window must show the bound pair before the review prompt
 is sent, and the review's window before the reply is published; a mismatch, a window with more than one model or
-effort, no record, a replaced or truncated file, or a mount whose transcript directory Claude would truncate is
-refused `policy-unapplied` and nothing is delivered. `binding.expected` keeps the caller's launch id and
+effort, no record, a replaced or truncated file, a transcript root that cannot be listed or shown absent (an
+access error on it or on a directory above it is not absence), or a mount whose transcript directory Claude would
+truncate is refused `policy-unapplied` and nothing is delivered. `binding.expected` keeps the caller's launch id and
 `binding.observed` the id the transcript recorded (the map's `recorded` row joins them; for a full id they are
 equal); `turn.tsv` records `evidence_source claude-transcript` and the CLI version the records carry as
 `observed_runtime`.
@@ -1035,8 +1036,9 @@ leg's cwd, deduplicated by `(message.id, requestId)`, last copy wins. Fields fol
 `turns`, `responses` and `source`. gemini: agy keeps no record of a turn on disk, so the usage is the sum of the `result` events of the leg's own
 stream-json output (canary and review together; cache writes and rate limits are null). A codex leg also records `rate_limits`, its newest snapshot
 (`limit_id`, `window_minutes`, `used_percent`, `resets_at`). **Missing is null, never 0**: no
-records, an unbounded window (a file replaced, truncated or gone mid-turn), or a field some record
-lacks. `round-note` copies the leg's `usage` into the last column of `.comms/grades/rounds.tsv`:
+records, an unbounded window (a file replaced, truncated or gone mid-turn, or a records root that
+cannot be listed or shown absent: only "no such file" is absence, never an access error on the root
+or a directory above it), or a field some record lacks. `round-note` copies the leg's `usage` into the last column of `.comms/grades/rounds.tsv`:
 the run is the one under `logs/<in-reply-to>.*` whose `reply.md` carries the reply's
 `message_id` (a shadow reply reads its store's `<name>.result.json`). Writers of one ledger are
 serialised by a `rounds.tsv.lock` directory, since upgrading an old ledger's header rewrites it. A

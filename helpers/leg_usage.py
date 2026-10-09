@@ -65,8 +65,14 @@ def _boom(e):
 
 def absent(path):
     """True when path does not exist — an empty record set, which is a fact. A path that exists
-    but cannot be listed RAISES: that is not evidence of absence, and the window stays unbounded."""
-    if not os.path.lexists(path):
+    but cannot be listed RAISES: that is not evidence of absence, and the window stays unbounded.
+    So does a path whose existence cannot be told (a directory above it that cannot be searched):
+    only ENOENT is absence. os.path.lexists would answer False for EACCES too, and an empty
+    snapshot taken then lets every record already there count as the next window's. (code review
+    r1, task 421.)"""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
         return True
     os.listdir(path)
     return False

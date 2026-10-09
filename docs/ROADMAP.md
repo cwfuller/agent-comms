@@ -857,6 +857,14 @@ A subagent on another model or an SDK fallback is refused, not prevented. Claude
 characters, so a long `COMMS_MOUNT_BASE` (or a long home path) refuses bound claude legs with that remedy named; the default base is
 well under it.
 
+**Code review r1 (codex, two blockers, both reproduced and fixed).** (B1) `leg_usage.absent` used `os.path.lexists`, which answers
+False for an access error as well as for a missing path, so a snapshot taken while a directory above the transcript root could not be
+searched came back empty, and a historical matching record read once it could be searched passed the canary's gate. Only ENOENT is
+absence now; any other error refuses the snapshot. The usage reader shares the function, so its snapshot refuses in the same case
+(usage null, never a count of earlier records). (B2) `load_turn_identity` skipped an `unknown` observation, so a runner that died after
+a passing canary and an undecidable review was recovered with the canary's pair as `binding.observed`; the latest observation is now
+authoritative, an unknown one included.
+
 **Operator steps (not part of this change).** (1) Add the `claude` entry to `~/.agent-comms/access.json` (route `kernel-claude`,
 transport `acp`, provider `anthropic`, account `main`, billing `subscription`, credential null). (2) Add the `kernel-claude` policy
 route in Basis with the attested launch ids. (3) Run one bound `claude-review` leg on codex-authored work in a throwaway repo and compare

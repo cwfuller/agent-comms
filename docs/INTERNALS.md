@@ -862,7 +862,11 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
   file (never the usage snapshot). The window is attributed by DIRECTORY and file (the slug, or the slug followed by `-`), never by a
   record's own `cwd`, and a slug Claude would truncate (over 200 characters) is refused before the canary rather than filtered. A
   zero-usage `<synthetic>` record is exempt (the usage reader's rule); records disagreeing on (model, effort), a `perTurnEffort` that
-  differs, no record, or an unbounded window are undecidable. The verdict is `policy_verdict`, codex's.
+  differs, no record, or an unbounded window are undecidable. A records root is absent only on "no such file": an access error on it
+  or on a directory above it refuses the snapshot, because an empty snapshot would let records already there count as the next
+  prompt's. The verdict is `policy_verdict`, codex's. A crash after the canary is recovered from `turn.tsv`, where the canary's
+  observation is followed by the review's: the LATEST one is what the synthesized result reports, so an unreadable review window
+  clears the canary's pair rather than leaving it standing.
 - **Credential scrub.** The scrub set is the UNION of every configured credential name (all of `access.json`, every `agents.json` `credentials` mapping,
   the table's adapter destinations), the patterns `*_API_KEY`, `*_TOKEN`, `*_AUTH_TOKEN`, `*_SECRET*`, `*_ACCESS_KEY*`, and the table. It is
   applied as `env -u NAME` on every acpx call of the leg; only the bound `api` credential is then restored, under the variable its adapter

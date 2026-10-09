@@ -348,6 +348,15 @@ bd_cl_case t13 AX_CLAUDE_REVIEW_EXTRA=replace
 bd_cl_expect "a transcript file replaced during the review (an unbounded window) is refused unpublished" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
 bd_cl_case t14 AX_CLAUDE_REVIEW_MODEL=skip
 bd_cl_expect "a review that left no record (an absent window) is refused unpublished" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
+# A RUNNER THAT DIES after that failed review attestation (code review r1, B2): await rebuilds the result from the run's
+# own turn.tsv, where the canary's passing pair was appended BEFORE the review's unknown one. The latest observation is
+# authoritative, so the rebuilt result observes nothing rather than the canary's pair.
+BD_CK="$BD/clr-t14-crash"; mkdir -p "$BD_CK"; cp "$BD_CD/turn.tsv" "$BD_CK/turn.tsv"
+sh -c 'exit 0' & BD_P=$!; wait "$BD_P" 2>/dev/null || true; printf '%s\n' "$BD_P" > "$BD_CK/pid"
+bd "$RP" await "$BD_CK" --timeout-secs 30 >/dev/null 2>&1 || true
+{ [ "$(sed -n 's/^observed_model	//p' "$BD_CK/turn.tsv" | tr '\n' ' ')" = "claude-opus-5-5 unknown " ] && [ "$(bd_dir_res "$BD_CK" binding status)" = ran ] \
+  && [ "$(bd_dir_res "$BD_CK" binding observed)" = '{"effort":null,"model":null}' ]; } \
+  && ok "a runner killed after that review: the rebuilt result observes nothing, never the canary's earlier pair" || fail "crash after a failed review attestation: $(sed -n 's/^observed_model	//p' "$BD_CK/turn.tsv" | tr '\n' ' ') $(bd_dir_res "$BD_CK" binding)"
 # SNAPSHOT FAILURES at each boundary: a stale snapshot file at the path never stands in for a fresh one.
 bd_cl_pickup t15; BD_CD="$BD/clr-t15"; mkdir -p "$BD_CD"; printf '{"files": {}}' > "$BD_CD/transcript-canary-snapshot.json"
 chmod 000 "$BD_HOME/.claude/projects"; bd_cl_run t15; chmod 755 "$BD_HOME/.claude/projects"
@@ -373,6 +382,14 @@ mkdir -p "$BD_TXP/${BD_TXS:0:200}-0a1b2c"; printf '{"type":"assistant","effort":
 printf '{"files": {}}' > "$BD/tx-prefix.json"
 python3 -I "$REPO/helpers/claude_transcript.py" observe "$BD_TXP" "$BD_TXC" "$BD/tx-prefix.json" >/dev/null 2>&1; A=$?
 [ "$A" = 21 ] && ok "claude_transcript.py observe given only a prefix-matched (truncated) directory is undecidable (21)" || fail "prefix-matched observe returned $A"
+# AN ACCESS ERROR IS NOT ABSENCE (code review r1, B1). With the config directory ABOVE the records root unsearchable, the
+# root cannot be shown absent: an empty snapshot then would let a historical matching record, read again once the
+# directory is searchable, stand in for the next prompt's. The snapshot refuses and writes nothing.
+BD_TXA="$BD/tx-anc"; BD_TXAC="$BD_CMB/anc/view/tree"; BD_TXAS="$(printf '%s' "$BD_TXAC" | sed 's/[^a-zA-Z0-9]/-/g')"
+mkdir -p "$BD_TXAC" "$BD_TXA/cfg/projects/$BD_TXAS"; printf '{"type":"assistant","effort":"low","message":{"model":"claude-opus-5-5"}}\n' > "$BD_TXA/cfg/projects/$BD_TXAS/old.jsonl"
+chmod 000 "$BD_TXA/cfg"; python3 -I "$REPO/helpers/claude_transcript.py" snapshot "$BD_TXA/cfg/projects" "$BD_TXAC" "$BD_TXA/snap.json" >/dev/null 2>&1; A=$?; chmod 755 "$BD_TXA/cfg"
+[ "$A" = 21 ] && [ ! -e "$BD_TXA/snap.json" ] \
+  && ok "claude_transcript.py snapshot below a directory that cannot be searched refuses (21) and writes no snapshot" || fail "snapshot under an unsearchable ancestor returned $A ($(cat "$BD_TXA/snap.json" 2>/dev/null))"
 
 section "binding: a bound claude model with no effort scale binds with a null effort and is attested on the model alone"
 # The shipped map declares no such model yet (no transcript evidence for one), so a copy of the helpers carries a map that

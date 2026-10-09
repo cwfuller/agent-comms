@@ -292,6 +292,12 @@ LU_UNR="$LUW/unreadable-projects"; mkdir -p "$LU_UNR/x"; chmod 000 "$LU_UNR"
 python3 "$LU" snapshot claude "$LU_UNR" "$CLC" "$LUW/unr.snap" 2>/dev/null \
   && fail "an unreadable records root was snapshotted as empty" || ok "an unreadable records root refuses the snapshot rather than reading as empty"
 chmod 755 "$LU_UNR"
+# The same for a root BELOW a directory that cannot be searched: whether the root exists cannot be told, and an access
+# error is not absence (code review r1, task 421).
+LU_ANC="$LUW/unsearchable-config"; mkdir -p "$LU_ANC/projects/x"; chmod 000 "$LU_ANC"
+python3 "$LU" snapshot claude "$LU_ANC/projects" "$CLC" "$LUW/anc.snap" 2>/dev/null \
+  && fail "a records root below an unsearchable directory was snapshotted as empty" || ok "a records root below a directory that cannot be searched refuses the snapshot rather than reading as absent"
+chmod 755 "$LU_ANC"
 
 # ---- the command-line contract the runner depends on ----
 # runphase calls `snapshot` and `collect` and trusts two things: a refusal to SNAPSHOT is a

@@ -289,14 +289,17 @@ load_turn_identity() {
       provider) [ -n "$v" ] && RUN_PROVIDER="$v" ;;
       agent)    [ -n "$v" ] && RUN_AGENT="$v" ;;
       # A bound leg's stamp and what is known of its run, so a synthesized result keeps the bound contract.
-      # Unknown observations stay unknown: the observed pair is the provider's own record or nothing.
+      # Unknown observations stay unknown: the observed pair is the provider's own record or nothing. The LATEST
+      # observation is authoritative, an unknown one included: a bound claude leg appends the canary's pair and
+      # then the review's, so a review window that could not be read must clear the canary's, never leave it
+      # standing as what the review ran. (code review r1, task 421.)
       leg_binding)        RUN_BIND_STAMP="$v" ;;
       leg_binding_digest) RUN_BIND_DIGEST="$v" ;;
       bind_state)         case "$v" in ran|refused) RUN_BIND_STATE="$v" ;; esac ;;
       bind_auth)          case "$v" in observed|configured) RUN_BIND_AUTH="$v" ;; esac ;;
       guidance)           guidance_load "$v" ;;
-      observed_model)     case "$v" in ""|unknown) ;; *) RUN_BIND_OBS_MODEL="$v" ;; esac ;;
-      observed_effort)    case "$v" in ""|unknown) ;; *) RUN_BIND_OBS_EFFORT="$v" ;; esac ;;
+      observed_model)     case "$v" in ""|unknown) RUN_BIND_OBS_MODEL="" ;; *) RUN_BIND_OBS_MODEL="$v" ;; esac ;;
+      observed_effort)    case "$v" in ""|unknown) RUN_BIND_OBS_EFFORT="" ;; *) RUN_BIND_OBS_EFFORT="$v" ;; esac ;;
     esac
   done < "$f"
   return 0
