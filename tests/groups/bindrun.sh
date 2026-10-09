@@ -349,14 +349,32 @@ bd_cl_expect "a transcript file replaced during the review (an unbounded window)
 bd_cl_case t14 AX_CLAUDE_REVIEW_MODEL=skip
 bd_cl_expect "a review that left no record (an absent window) is refused unpublished" "failed|policy-unapplied|ran|$BD_CL_ALL|0" "could not attest the model/effort the review turn ran"
 # A RUNNER THAT DIES after that failed review attestation (code review r1, B2): await rebuilds the result from the run's
-# own turn.tsv, where the canary's passing pair was appended BEFORE the review's unknown one. The latest observation is
-# authoritative, so the rebuilt result observes nothing rather than the canary's pair.
+# own turn.tsv, where the canary's passing pair was appended BEFORE the clear written ahead of the review prompt and the
+# review's unknown one. The latest observation is authoritative, so the rebuilt result observes nothing rather than the
+# canary's pair.
 BD_CK="$BD/clr-t14-crash"; mkdir -p "$BD_CK"; cp "$BD_CD/turn.tsv" "$BD_CK/turn.tsv"
+sh -c 'exit 0' & BD_P=$!; wait "$BD_P" 2>/dev/null || true; printf '%s\n' "$BD_P" > "$BD_CK/pid"
+bd "$RP" await "$BD_CK" --timeout-secs 30 >/dev/null 2>&1 || true
+{ [ "$(sed -n 's/^observed_model	//p' "$BD_CK/turn.tsv" | tr '\n' ' ')" = "claude-opus-5-5 unknown unknown " ] && [ "$(bd_dir_res "$BD_CK" binding status)" = ran ] \
+  && [ "$(bd_dir_res "$BD_CK" binding observed)" = '{"effort":null,"model":null}' ]; } \
+  && ok "a runner killed after that review: the rebuilt result observes nothing, never the canary's earlier pair" || fail "crash after a failed review attestation: $(sed -n 's/^observed_model	//p' "$BD_CK/turn.tsv" | tr '\n' ' ') $(bd_dir_res "$BD_CK" binding)"
+# A REVIEW PROMPT THAT FAILS, or a runner that dies before the review window is read (code review r2): the canary's
+# pair is cleared, live and in turn.tsv, before the review prompt goes out, and the review's own records are read
+# whatever the exit. The stub copies turn.tsv while the review prompt runs: the record a kill at that moment leaves.
+bd_cl_case t21 AX_FAIL_RC=5 AX_CLAUDE_REVIEW_EFFORT=high AX_CLAUDE_REVIEW_COPY="$BD/clr-t21/turn.tsv"
+bd_cl_expect "a review prompt that exits nonzero fails unpublished" "failed|no-output|ran|$BD_CL_ALL|0" "acpx exited 5"
+[ "$(bd_dir_res "$BD_CD" binding observed)" = '{"effort":"high","model":"claude-opus-5-5"}' ] \
+  && ok "and binding.observed is the failed review's own pair, not the canary's" || fail "failed review observed: $(bd_dir_res "$BD_CD" binding observed)"
+BD_CK="$BD/clr-t21-crash"; mkdir -p "$BD_CK"; cp "$BD_CD/turn.tsv.at-review" "$BD_CK/turn.tsv"
 sh -c 'exit 0' & BD_P=$!; wait "$BD_P" 2>/dev/null || true; printf '%s\n' "$BD_P" > "$BD_CK/pid"
 bd "$RP" await "$BD_CK" --timeout-secs 30 >/dev/null 2>&1 || true
 { [ "$(sed -n 's/^observed_model	//p' "$BD_CK/turn.tsv" | tr '\n' ' ')" = "claude-opus-5-5 unknown " ] && [ "$(bd_dir_res "$BD_CK" binding status)" = ran ] \
   && [ "$(bd_dir_res "$BD_CK" binding observed)" = '{"effort":null,"model":null}' ]; } \
-  && ok "a runner killed after that review: the rebuilt result observes nothing, never the canary's earlier pair" || fail "crash after a failed review attestation: $(sed -n 's/^observed_model	//p' "$BD_CK/turn.tsv" | tr '\n' ' ') $(bd_dir_res "$BD_CK" binding)"
+  && ok "a runner killed while the review prompt ran: the rebuilt result observes nothing, never the canary's pair" || fail "crash during the review: $(sed -n 's/^observed_model	//p' "$BD_CK/turn.tsv" | tr '\n' ' ') $(bd_dir_res "$BD_CK" binding)"
+bd_cl_case t22 AX_FAIL_RC=5 AX_CLAUDE_REVIEW_MODEL=skip
+bd_cl_expect "a review prompt that exits nonzero having left no record fails unpublished" "failed|no-output|ran|$BD_CL_ALL|0" "acpx exited 5"
+[ "$(bd_dir_res "$BD_CD" binding observed)" = '{"effort":null,"model":null}' ] \
+  && ok "and binding.observed is null, never the canary's pair" || fail "failed review without records observed: $(bd_dir_res "$BD_CD" binding observed)"
 # SNAPSHOT FAILURES at each boundary: a stale snapshot file at the path never stands in for a fresh one.
 bd_cl_pickup t15; BD_CD="$BD/clr-t15"; mkdir -p "$BD_CD"; printf '{"files": {}}' > "$BD_CD/transcript-canary-snapshot.json"
 chmod 000 "$BD_HOME/.claude/projects"; bd_cl_run t15; chmod 755 "$BD_HOME/.claude/projects"

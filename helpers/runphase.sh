@@ -290,9 +290,10 @@ load_turn_identity() {
       agent)    [ -n "$v" ] && RUN_AGENT="$v" ;;
       # A bound leg's stamp and what is known of its run, so a synthesized result keeps the bound contract.
       # Unknown observations stay unknown: the observed pair is the provider's own record or nothing. The LATEST
-      # observation is authoritative, an unknown one included: a bound claude leg appends the canary's pair and
-      # then the review's, so a review window that could not be read must clear the canary's, never leave it
-      # standing as what the review ran. (code review r1, task 421.)
+      # observation is authoritative, an unknown one included: a bound claude leg appends the canary's pair, an
+      # unknown pair before the review prompt, and then the review's, so a review window that could not be read,
+      # or a runner that died before reading it, must clear the canary's, never leave it standing as what the
+      # review ran. (code review r1 and r2, task 421.)
       leg_binding)        RUN_BIND_STAMP="$v" ;;
       leg_binding_digest) RUN_BIND_DIGEST="$v" ;;
       bind_state)         case "$v" in ran|refused) RUN_BIND_STATE="$v" ;; esac ;;
@@ -4003,7 +4004,7 @@ AGYNOTE
     # home's rollout turn_contexts) or `transcript` (a BOUND claude leg: Claude's own transcript, read through
     # claude_transcript.py from acp_tx_root for the mount cwd acp_tx_cwd). Empty: nothing is applied, so the
     # preflight and the post-turn attestation do not run.
-    local acp_attest="" acp_tx_root="" acp_tx_cwd=""
+    local acp_attest="" acp_tx_root="" acp_tx_cwd="" acp_tx_rc=0 acp_tx_msg=""
     local RUN_SEED_STATUS="" RUN_SEED_KEY="" RUN_SEED_ROOT="" RUN_SEED_RT=""     # the codex plugin-cache seed (seed_codex_home); promoted from after the attestation
     # The pinned adapter command (acp.sh adapter), handed to acpx as `--agent` by acp_exec. Empty runs
     # acpx's builtin for the profile. Set only where a backend's containment depends on the adapter.
@@ -4795,34 +4796,40 @@ AGYNOTE
       python3 -I "$HELPER_DIR/claude_transcript.py" snapshot "$acp_tx_root" "$acp_tx_cwd" "$1" 2>>"$run_dir/runner.log" \
         && [ -f "$1" ]
     }
-    # acp_transcript_attest <snapshot> <canary|review> — what the window's records say ran, judged against the
-    # PERSISTED record through policy_verdict (acp.sh policy-attest), the function codex's attestation uses.
-    # binding.observed is what the transcript says, never the expectation; an undecidable reading is never a
-    # pass. Returns 1 after acp_refuse has published the refusal (nothing of the review is delivered).
-    acp_transcript_attest() {
-      local out="" rc=0 msg="" eff="" mod="" ver=""
-      out="$(python3 -I "$HELPER_DIR/claude_transcript.py" observe "$acp_tx_root" "$acp_tx_cwd" "$1" 2>>"$run_dir/runner.log")" || rc=$?
-      if [ "$rc" -eq 0 ]; then
+    # acp_transcript_observe <snapshot> — what the window's records say ran, recorded as binding.observed (live and
+    # in turn.tsv) and judged against the PERSISTED record through policy_verdict (acp.sh policy-attest), the
+    # function codex's attestation uses; the verdict is left in acp_tx_rc/acp_tx_msg for acp_transcript_gate.
+    # binding.observed is what the transcript says, never the expectation; an undecidable reading observes nothing.
+    acp_transcript_observe() {
+      local out="" eff="" mod="" ver=""
+      acp_tx_rc=0; acp_tx_msg=""
+      out="$(python3 -I "$HELPER_DIR/claude_transcript.py" observe "$acp_tx_root" "$acp_tx_cwd" "$1" 2>>"$run_dir/runner.log")" || acp_tx_rc=$?
+      if [ "$acp_tx_rc" -eq 0 ]; then
         # cut, not `IFS=$'\t' read`: an empty effort must not shift the model into its column
         eff="$(printf '%s' "$out" | cut -f1)"; mod="$(printf '%s' "$out" | cut -f2)"; ver="$(printf '%s' "$out" | cut -f5)"
         if ! policy_record_intact "$acp_policy" "$acp_policy_sha"; then
-          rc=22; msg="the resolved policy record changed during the turn"
+          acp_tx_rc=22; acp_tx_msg="the resolved policy record changed during the turn"
         else
-          msg="$("$acp_sh" policy-attest claude "${eff:-null}" "$mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || rc=$?
+          acp_tx_msg="$("$acp_sh" policy-attest claude "${eff:-null}" "$mod" --policy-file "$acp_policy" 2>>"$run_dir/runner.log")" || acp_tx_rc=$?
         fi
       fi
       RUN_BIND_OBS_MODEL="$mod"; RUN_BIND_OBS_EFFORT="$eff"
       turn_observe "$run_dir" "$eff" "$mod" "${acp_record_id:-}" "" "" "" "$ver" "" claude-transcript
+    }
+    # acp_transcript_gate <canary|review> — the verdict acp_transcript_observe left: an undecidable reading is never
+    # a pass. Returns 1 after acp_refuse has published the refusal (nothing of the review is delivered).
+    acp_transcript_gate() {
+      local rc="$acp_tx_rc" msg="$acp_tx_msg"
       if [ "$rc" -ne 0 ]; then
-        printf 'policy attestation (%s): rc=%s %s\n' "$2" "$rc" "$msg" >>"$run_dir/runner.log"
+        printf 'policy attestation (%s): rc=%s %s\n' "$1" "$rc" "$msg" >>"$run_dir/runner.log"
         if [ "$rc" -eq 20 ]; then
-          acp_refuse policy-unapplied "the $2 turn did not run the bound model/effort ($msg) — refusing $( [ "$2" = canary ] && echo 'before the review prompt' || echo 'to publish the review'); retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
+          acp_refuse policy-unapplied "the $1 turn did not run the bound model/effort ($msg) — refusing $( [ "$1" = canary ] && echo 'before the review prompt' || echo 'to publish the review'); retire it with \`$(policy_retire_cmd "$acp_profile" "$acp_session" "$workdir")\`, then re-send"
         else
-          acp_refuse policy-unapplied "could not attest the model/effort the $2 turn ran from Claude's transcript (status $rc${msg:+: $msg}; see runner.log) — refusing $( [ "$2" = canary ] && echo 'before the review prompt' || echo 'to publish a review of unknown depth')"
+          acp_refuse policy-unapplied "could not attest the model/effort the $1 turn ran from Claude's transcript (status $rc${msg:+: $msg}; see runner.log) — refusing $( [ "$1" = canary ] && echo 'before the review prompt' || echo 'to publish a review of unknown depth')"
         fi
         return 1
       fi
-      printf 'policy attested (%s): %s\n' "$2" "$msg" >>"$run_dir/runner.log"
+      printf 'policy attested (%s): %s\n' "$1" "$msg" >>"$run_dir/runner.log"
     }
     acp_session_prepare() {
       if [ "$acp_attest" = transcript ]; then acp_claude_set || return 1; fi
@@ -5010,7 +5017,8 @@ AGYNOTE
     # claude: the canary is the first prompt on this session, so its transcript window is the first evidence of
     # the model and effort it serves. A wrong or undecidable reading refuses BEFORE the review is paid for.
     if [ "$acp_attest" = transcript ]; then
-      acp_transcript_attest "$run_dir/transcript-canary-snapshot.json" canary || return 1
+      acp_transcript_observe "$run_dir/transcript-canary-snapshot.json"
+      acp_transcript_gate canary || return 1
     fi
 
     # NO SECOND set-mode. The plan (codex r2 B1) asked to re-pin AFTER the canary too, on the
@@ -5057,6 +5065,13 @@ AGYNOTE
     if [ "$acp_attest" = transcript ] && ! acp_transcript_snapshot "$run_dir/transcript-snapshot.json"; then
       acp_refuse policy-unapplied "could not snapshot Claude's transcript before the review prompt — refusing rather than paying for a review whose model/effort could not then be attested"
       return 1
+    fi
+    # The canary's pair is not the review's: cleared live AND in turn.tsv before the review prompt goes out, so a
+    # review that fails, or a runner that dies before the review window is read, observes nothing rather than the
+    # canary's pair (load_turn_identity takes the latest observation).
+    if [ "$acp_attest" = transcript ]; then
+      RUN_BIND_OBS_MODEL=""; RUN_BIND_OBS_EFFORT=""
+      printf 'observed_effort\tunknown\nobserved_model\tunknown\n' >> "$run_dir/turn.tsv" 2>/dev/null || true
     fi
     acp_t0="$(date +%s)"
     ( acp_exec "$workdir" \
@@ -5123,6 +5138,9 @@ AGYNOTE
       printf 'observed_sandbox\t%s\n' "${att_sbx:-unattested}" >> "$run_dir/turn.tsv" 2>/dev/null || true
       [ "$att_sbx" = read-only ] || acp_uncontained=1
     fi
+    # claude: the review window is read whatever the exit, so a failed or contaminated turn reports what its own
+    # records say ran (or nothing), never the canary's pair. Only a turn that could be published is gated on it.
+    [ "$acp_attest" != transcript ] || acp_transcript_observe "$run_dir/transcript-snapshot.json"
     log_event provider-result "$([ "$acp_rc" -eq 0 ] && echo completed || echo failed)" \
       "exit=$acp_rc elapsed=${acp_elapsed}s budget=${timeout}s via=acp${acp_reason:+ $([ "$acp_uncontained" = 1 ] && printf provider-)reason=$acp_reason}"
     if [ "$acp_uncontained" = 1 ]; then
@@ -5161,9 +5179,9 @@ AGYNOTE
     # (a throwaway mount deletes home/). A wrong-depth review is REFUSED UNPUBLISHED rather than
     # "failed" after the fact. Paying for a turn we then discard is the correct trade — accepting
     # it with a warning would re-open the very bug this closes. (grok, plan r2 blocking.)
-    # A bound claude leg's review window is judged the same way, from Claude's own transcript.
+    # A bound claude leg's review window is judged the same way, from Claude's own transcript (read above).
     if [ "$acp_rc" -eq 0 ] && [ "$acp_attest" = transcript ]; then
-      acp_transcript_attest "$run_dir/transcript-snapshot.json" review || return 1
+      acp_transcript_gate review || return 1
     elif [ "$acp_rc" -eq 0 ] && [ "$acp_attest" = rollout ]; then
       local att_eff="" att_mod="" att_msg="" att_turn="" att_src="" att_off="" att_rt="" att_rtc=""
       # codex's window was read once, for containment, right after the turn; its att_out/att_rc stand.

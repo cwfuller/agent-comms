@@ -523,6 +523,8 @@ esac
 # record in the project directory named for a subdirectory), `synthetic-zero`, `synthetic-billed`,
 # `perturn:<effort>` and `replace` (the session file replaced: an unbounded window). AX_CLAUDE_CANARY_BLOCK=<path>
 # makes <path> a directory during the canary, so a snapshot the runner writes there next cannot be made.
+# AX_CLAUDE_REVIEW_COPY=<file> copies <file> to <file>.at-review while the review prompt runs: a run's turn.tsv as a
+# runner killed during the review would leave it.
 if [ "$ax_claude" = 1 ] && [ -n "$ax_sname" ]; then
   case " $* " in *" sessions "*|*" set "*|*" set-mode "*) ;; *" --file "*|*" -s "*)
     ax_kind=CANARY; case " $* " in *" --file "*) ax_kind=REVIEW ;; esac
@@ -575,6 +577,7 @@ for x in extras:
         os.replace(tmp, main)
 AXTX
       [ "$ax_kind" = CANARY ] && [ -n "${AX_CLAUDE_CANARY_BLOCK:-}" ] && mkdir -p "$AX_CLAUDE_CANARY_BLOCK" 2>/dev/null
+      [ "$ax_kind" = REVIEW ] && [ -n "${AX_CLAUDE_REVIEW_COPY:-}" ] && cp "$AX_CLAUDE_REVIEW_COPY" "$AX_CLAUDE_REVIEW_COPY.at-review" 2>/dev/null
       ax_cs="$(sed -n 's/^model=//p' "${ax_rec%.json}.set" 2>/dev/null | tail -1)"
       ax_ce="$(sed -n 's/^effort=//p' "${ax_rec%.json}.set" 2>/dev/null | tail -1)"
       python3 -c "$ax_tx_py" "$ax_tx_root" "$(pwd -P)" "claude-$(printf '%s' "$ax_sname" | shasum -a 256 | cut -c1-12)" \

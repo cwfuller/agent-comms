@@ -132,7 +132,7 @@ binding: quota states from real turns (observed, unavailable, refused with no ma
 binding: an unbound dispatch is unchanged, and its result.json marks a legacy leg	3
 binding: a bound claude-review leg on codex-authored work (pinned adapter, ACP set before the canary, transcript attestation)	8
 binding: a bound claude leg uses the dispatch's CLAUDE_CONFIG_DIR, set or unset, for its launch, login read-back and transcript window	2
-binding: a bound claude leg refuses before any prompt, before the review, or unpublished	22
+binding: a bound claude leg refuses before any prompt, before the review, or unpublished	27
 binding: a bound claude leg's transcript window is attributed by directory (subagents, a cd, a subdirectory's project, a truncated mount)	7
 binding: a bound claude model with no effort scale binds with a null effort and is attested on the model alone	1
 reviewer guidance: the shared bundle is staged into a mounted codex home	11

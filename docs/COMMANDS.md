@@ -308,7 +308,8 @@ access error on it or on a directory above it is not absence), or a mount whose 
 truncate is refused `policy-unapplied` and nothing is delivered. `binding.expected` keeps the caller's launch id and
 `binding.observed` the id the transcript recorded (the map's `recorded` row joins them; for a full id they are
 equal); `turn.tsv` records `evidence_source claude-transcript` and the CLI version the records carry as
-`observed_runtime`.
+`observed_runtime`. A review prompt that fails, or a runner that dies during it, reports the review window's own
+reading or null, never the canary's pair.
 
 **`result.json` for a bound leg** (each key on its own line, after the string fields; `null` for a legacy leg):
 `binding` `{schema, capability_version, ref, role, requirement, status: ran|refused, route_id, access_digest,

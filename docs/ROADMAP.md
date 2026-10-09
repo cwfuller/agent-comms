@@ -865,6 +865,12 @@ absence now; any other error refuses the snapshot. The usage reader shares the f
 a passing canary and an undecidable review was recovered with the canary's pair as `binding.observed`; the latest observation is now
 authoritative, an unknown one included.
 
+**Code review r2 (codex, one blocker, reproduced and fixed).** The review window was read only when the review prompt exited 0, so a
+review that exited nonzero kept the canary's pair as `binding.observed` (`AX_FAIL_RC=5` with the review's records at effort `high`
+reported the canary's `low`), and a runner killed while the review prompt ran left only the canary's pair in `turn.tsv` for recovery.
+The runner now clears the observation, live and in `turn.tsv`, before the review prompt is sent, and reads the review's window whatever
+the exit; only the gate on publication still needs exit 0.
+
 **Operator steps (not part of this change).** (1) Add the `claude` entry to `~/.agent-comms/access.json` (route `kernel-claude`,
 transport `acp`, provider `anthropic`, account `main`, billing `subscription`, credential null). (2) Add the `kernel-claude` policy
 route in Basis with the attested launch ids. (3) Run one bound `claude-review` leg on codex-authored work in a throwaway repo and compare

@@ -864,9 +864,12 @@ refuses; it never classifies, picks a route or substitutes. The pieces, each wit
   zero-usage `<synthetic>` record is exempt (the usage reader's rule); records disagreeing on (model, effort), a `perTurnEffort` that
   differs, no record, or an unbounded window are undecidable. A records root is absent only on "no such file": an access error on it
   or on a directory above it refuses the snapshot, because an empty snapshot would let records already there count as the next
-  prompt's. The verdict is `policy_verdict`, codex's. A crash after the canary is recovered from `turn.tsv`, where the canary's
-  observation is followed by the review's: the LATEST one is what the synthesized result reports, so an unreadable review window
-  clears the canary's pair rather than leaving it standing.
+  prompt's. The verdict is `policy_verdict`, codex's. The canary's pair is not the review's: before the review prompt goes out the
+  runner clears the observation, live and in `turn.tsv` (an `unknown` pair), and it reads the review's window whatever the prompt's
+  exit, so a failed review reports what its own records say ran (or nothing) and only a turn that could be published is gated on
+  it. A crash after the canary is recovered from `turn.tsv`, where the canary's observation is followed by that clear and then the
+  review's: the LATEST one is what the synthesized result reports, so a runner that died during the review, or a review window that
+  could not be read, leaves no pair standing rather than the canary's.
 - **Credential scrub.** The scrub set is the UNION of every configured credential name (all of `access.json`, every `agents.json` `credentials` mapping,
   the table's adapter destinations), the patterns `*_API_KEY`, `*_TOKEN`, `*_AUTH_TOKEN`, `*_SECRET*`, `*_ACCESS_KEY*`, and the table. It is
   applied as `env -u NAME` on every acpx call of the leg; only the bound `api` credential is then restored, under the variable its adapter
