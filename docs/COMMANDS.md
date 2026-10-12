@@ -85,7 +85,7 @@ runs as one blocking acpx call (pinned, via npx; Node >= 22.13) and the answer
 lands directly in context, followed by acpx's token-usage line. Warm by default: a
 named per-repo session makes follow-ups pay only the delta (measured 2026-08-20:
 cold one-shot 18,562 fresh input tokens vs warm round-2 146 — ~127x). `--oneshot` forces a stateless
-exec. Every supported agent has an ACP profile (codex, claude, grok via `grok-build`) except gemini: the Antigravity CLI (`agy`) it runs through has no ACP mode, so `--via acp` for gemini is refused and a gemini consult goes through the mailbox (`comms.sh ask --to gemini`), where it runs as one cold `agy -p` turn.
+exec. A codex consult runs the same codex runtime a mounted turn resolves (`COMMS_ACP_CODEX_PATH`, else the installed `codex` on PATH, else the adapter's bundled copy), handed to the adapter as `CODEX_PATH` (unset for `bundled`); an explicit path that resolution rejects refuses the consult with the fallback. The warm session name carries a digest of that runtime (`agent-comms-ask+rt+<digest>`), so a changed runtime starts a new session instead of reusing an adapter that keeps its old codex. Every supported agent has an ACP profile (codex, claude, grok via `grok-build`) except gemini: the Antigravity CLI (`agy`) it runs through has no ACP mode, so `--via acp` for gemini is refused and a gemini consult goes through the mailbox (`comms.sh ask --to gemini`), where it runs as one cold `agy -p` turn.
 On any failure the helper names the fallback: rerun without `--via acp`.
 
 > **Internals.** `/send-to-codex` and `/read-from-codex` are the loop's individual steps.
@@ -821,6 +821,7 @@ auto-detects the installed `codex` on PATH (skipping cmux/asdf shims), falling b
 The `--version` probe is bounded (`COMMS_ACP_RUNTIME_PROBE_SECS`, default 5; the whole process group
 is killed): a hanging auto-detected binary stays bundled (`runtime-probe-failed`), an explicit one
 is refused.
+`acp.sh consult codex` (the `/ask --via acp` path) resolves the runtime the same way.
 Nothing needs setting on a new machine with a current codex installed; `acp.sh doctor` and
 `acp.sh capabilities` print which runtime reviewers will use. The record carries `runtime` /
 `runtime_version`, runphase passes it as the child's `CODEX_PATH` (and unsets an inherited one for

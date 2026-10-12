@@ -106,6 +106,7 @@ export ACP_STUB_LOG="$WORK/acp.log"
 cat > "$ACP_STUB/npx" <<'NSTUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "${ACP_STUB_LOG:-/dev/null}"
+printf 'CODEX_PATH=%s\n' "${CODEX_PATH-<unset>}" >> "${ACP_STUB_ENV_LOG:-/dev/null}"
 [ -n "${ACP_STUB_EXIT:-}" ] && exit "$ACP_STUB_EXIT"
 # ACP_STUB_EMPTY models the rc-0-zero-bytes turn (a dropped or empty model reply): the prompt
 # exits 0 having produced nothing, which the consult must refuse rather than pass as success.
@@ -129,13 +130,15 @@ echo "${ACP_STUB_NODE_V:-v22.22.3}"
 NODESTUB
 chmod +x "$ACP_STUB/node"
 
-run_acp() { PATH="$ACP_STUB:$PATH" bash "$ACP" "$@"; }
+# A consult resolves the codex runtime (policy_runtime_codex); default to `bundled` so the host's own
+# codex on PATH never changes these fixtures. The runtime assertions below set it explicitly.
+run_acp() { PATH="$ACP_STUB:$PATH" COMMS_ACP_CODEX_PATH="${COMMS_ACP_CODEX_PATH-bundled}" bash "$ACP" "$@"; }
 OUT="$(run_acp consult codex is the retry approach sound 2>&1)" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] && echo "$OUT" | grep -q 'stub answer' && ok "consult passes the answer through" || fail "consult happy path (rc=$rc)"
 grep -q -- '-y acpx@0.13.1 --timeout 300 codex sessions ensure --name agent-comms-ask' "$ACP_STUB_LOG" \
   && ok "warm consult ensures the pinned named session WITH a --timeout (a stalled ensure cannot hang)" || fail "session ensure argv/timeout"
-grep -q -- '-y acpx@0.13.1 --format quiet --timeout 300 --approve-reads --non-interactive-permissions deny codex -s agent-comms-ask is the retry approach sound' "$ACP_STUB_LOG" \
-  && ok "warm consult prompts the named session with the pinned acpx and a --timeout" || fail "warm prompt argv"
+grep -q -- '-y acpx@0.13.1 --format quiet --timeout 300 --approve-reads --non-interactive-permissions deny codex -s agent-comms-ask+rt+[0-9]* is the retry approach sound' "$ACP_STUB_LOG" \
+  && ok "warm consult prompts the runtime-keyed session with the pinned acpx and a --timeout" || fail "warm prompt argv"
 # A consult that cannot read is useless — it would answer from recall instead of the
 # tree. Denied permissions killed a real consult mid-answer before this was added.
 grep -q -- '--approve-reads' "$ACP_STUB_LOG" && ok "consults may READ the tree" || fail "consult read approval"
@@ -233,6 +236,65 @@ pf_check "missing agent" consult
 pf_check "missing question" consult codex
 pf_check "empty --file value" consult codex --file "" hello
 pf_check "nonexistent --file path" consult codex --file "$WORK/does-not-exist.md"
+# A codex consult runs the runtime a mounted turn resolves, passed the way runphase passes it
+# (same section: the assertions below it belong to the consult transport too).
+export ACP_STUB_ENV_LOG="$WORK/acp-env.log"
+RT_BIN="$WORK/acp-rt-bin"; mkdir -p "$RT_BIN"
+printf '#!/bin/bash\necho "codex-cli 0.162.1"\n' > "$RT_BIN/codex"; chmod +x "$RT_BIN/codex"
+RT_OLD="$WORK/acp-rt-old"; mkdir -p "$RT_OLD"
+printf '#!/bin/bash\necho "codex-cli 0.154.0"\n' > "$RT_OLD/codex"; chmod +x "$RT_OLD/codex"
+rt_reset() { : > "$ACP_STUB_LOG"; : > "$ACP_STUB_ENV_LOG"; }
+rt_names() { sed -n 's/.* sessions ensure --name \([^ ]*\).*/\1/p' "$ACP_STUB_LOG"; }
+# Auto-detection: the installed codex on PATH, over an inherited CODEX_PATH, for both warm and --oneshot.
+rt_reset
+CODEX_PATH=/inherited/codex PATH="$RT_BIN:$PATH" COMMS_ACP_CODEX_PATH= run_acp consult codex hello >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ -s "$ACP_STUB_ENV_LOG" ] && [ "$(sort -u "$ACP_STUB_ENV_LOG")" = "CODEX_PATH=$RT_BIN/codex" ] \
+  && ok "a warm codex consult hands the adapter the auto-detected codex as CODEX_PATH (ensure and prompt)" \
+  || fail "warm consult CODEX_PATH (rc=$rc): $(sort -u "$ACP_STUB_ENV_LOG" | tr '\n' ' ')"
+rt_reset
+CODEX_PATH=/inherited/codex PATH="$RT_BIN:$PATH" COMMS_ACP_CODEX_PATH= run_acp consult codex --oneshot hello >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(sort -u "$ACP_STUB_ENV_LOG")" = "CODEX_PATH=$RT_BIN/codex" ] \
+  && ok "a --oneshot codex consult hands the adapter the auto-detected codex as CODEX_PATH" \
+  || fail "oneshot consult CODEX_PATH (rc=$rc): $(sort -u "$ACP_STUB_ENV_LOG" | tr '\n' ' ')"
+rt_reset
+COMMS_ACP_CODEX_PATH="$RT_OLD/codex" run_acp consult codex --oneshot hello >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(sort -u "$ACP_STUB_ENV_LOG")" = "CODEX_PATH=$RT_OLD/codex" ] \
+  && ok "an explicit COMMS_ACP_CODEX_PATH is the runtime the consult runs" \
+  || fail "explicit-path consult CODEX_PATH (rc=$rc): $(sort -u "$ACP_STUB_ENV_LOG" | tr '\n' ' ')"
+# bundled UNSETS an inherited CODEX_PATH (an operator variable must not pick a different codex).
+rt_reset
+CODEX_PATH=/inherited/codex COMMS_ACP_CODEX_PATH=bundled run_acp consult codex hello >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ -s "$ACP_STUB_ENV_LOG" ] && [ "$(sort -u "$ACP_STUB_ENV_LOG")" = "CODEX_PATH=<unset>" ] \
+  && ok "a bundled codex consult unsets an inherited CODEX_PATH" \
+  || fail "bundled consult CODEX_PATH (rc=$rc): $(sort -u "$ACP_STUB_ENV_LOG" | tr '\n' ' ')"
+# A rejected explicit path refuses with the mailbox fallback before any acpx call.
+rt_reset
+OUT="$(COMMS_ACP_CODEX_PATH=/no/such/codex run_acp consult codex hello 2>&1)" && rc=0 || rc=$?
+[ "$rc" -ne 0 ] && echo "$OUT" | grep -q 'COMMS_ACP_CODEX_PATH' && echo "$OUT" | grep -qi 'mailbox' && [ ! -s "$ACP_STUB_LOG" ] \
+  && ok "a rejected explicit COMMS_ACP_CODEX_PATH refuses the consult with the fallback, before any acpx call" \
+  || fail "rejected codex path (rc=$rc, out: $(echo "$OUT" | head -1))"
+# The warm session is keyed by the runtime: a different runtime is a different session; the same one is reused.
+rt_reset
+COMMS_ACP_CODEX_PATH="$RT_BIN/codex" run_acp consult codex hello >/dev/null 2>&1
+COMMS_ACP_CODEX_PATH="$RT_BIN/codex" run_acp consult codex hello >/dev/null 2>&1
+COMMS_ACP_CODEX_PATH="$RT_OLD/codex" run_acp consult codex hello >/dev/null 2>&1
+COMMS_ACP_CODEX_PATH=bundled run_acp consult codex hello >/dev/null 2>&1
+RT_N="$(rt_names)"
+[ "$(echo "$RT_N" | sed -n 1p)" = "$(echo "$RT_N" | sed -n 2p)" ] && [ "$(echo "$RT_N" | sort -u | wc -l | tr -d ' ')" -eq 3 ] \
+  && ! echo "$RT_N" | grep -qx 'agent-comms-ask' && echo "$RT_N" | grep -q '^agent-comms-ask+rt+[0-9]*$' \
+  && ok "a warm codex consult keys its session by runtime: same runtime reuses, a changed one starts a new session" \
+  || fail "runtime-keyed session names: $(echo "$RT_N" | tr '\n' ' ')"
+RT_PNAME="$(echo "$RT_N" | sed -n 1p)"
+grep -q -- " codex -s $RT_PNAME hello" "$ACP_STUB_LOG" \
+  && ok "the prompt targets the runtime-keyed session" || fail "prompt session name (want $RT_PNAME)"
+# A claude consult is not a codex runtime concern: its session name and environment are untouched.
+rt_reset
+CODEX_PATH=/inherited/codex PATH="$RT_BIN:$PATH" COMMS_ACP_CODEX_PATH=/no/such/codex run_acp consult claude hello >/dev/null 2>&1 && rc=0 || rc=$?
+[ "$rc" -eq 0 ] && [ "$(rt_names)" = "agent-comms-ask" ] && [ "$(sort -u "$ACP_STUB_ENV_LOG")" = "CODEX_PATH=/inherited/codex" ] \
+  && ok "a claude consult ignores the codex runtime: plain session name, environment untouched" \
+  || fail "claude consult touched by codex runtime (rc=$rc): $(rt_names) $(sort -u "$ACP_STUB_ENV_LOG" | tr '\n' ' ')"
+: > "$ACP_STUB_LOG"
+unset ACP_STUB_ENV_LOG
 # Measurement consistency: one arithmetic, stated identically on every surface.
 if grep -rn '134x' "$REPO/helpers" "$REPO/docs" "$REPO/templates" >/dev/null 2>&1; then
   fail "stale 134x ratio still published somewhere"

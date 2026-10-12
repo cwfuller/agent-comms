@@ -13,7 +13,9 @@
 #       line. Warm by default: a named per-repo session (agent-comms-ask) so
 #       follow-ups pay only the delta (measured 2026-08-20: cold one-shot
 #       18,562 fresh input tokens vs warm round-2 146 — ~127x). --oneshot uses
-#       a stateless exec.
+#       a stateless exec. A codex consult runs the codex runtime a mounted turn
+#       resolves (policy_runtime_codex: COMMS_ACP_CODEX_PATH or the installed codex),
+#       and its session name carries a digest of that runtime.
 #   doctor
 #       report node/acpx availability, the supported agent map, the reviewer codex
 #       runtime and the Antigravity CLI (`agy`); exit 0 iff consults can run here AND that
@@ -385,6 +387,8 @@ ver_ge() {
 #                                  per-session wrapper shims), else the bundled one
 # Sets RT_PATH (absolute path, or `bundled`) and RT_VERSION (x.y.z, or `unknown`). Never fails:
 # an unusable explicit path is REFUSED by resolve, not silently swapped for another runtime.
+# `consult codex` (the /ask ACP path) resolves its runtime here too, so a consult and a mounted turn
+# run the same codex; an RT_ERR refuses the consult.
 ACP_RUNTIME_PATH_RE='^/[A-Za-z0-9._/+@-]+$'
 # cli_on_path <name> — the operator's installed CLI <name>: the first executable on PATH with a plain
 # absolute path, skipping per-session wrapper shims. THE ONE PATH WALK: codex's runtime auto-detection and
@@ -1478,6 +1482,21 @@ cmd_consult() {
     launcher=(python3 "$profile_py" acpx "$custom_binding" "$custom_home" "${launcher[@]}" --)
     # A pinned profile needs a named record so we can inspect the applied model before and after.
     if [ "$oneshot" = true ]; then ACP_SESSION_NAME="$ACP_SESSION_NAME+oneoff+$$-$RANDOM"; oneshot=false; fi
+  fi
+  # A codex consult runs the SAME runtime a mounted turn resolves (policy_runtime_codex), handed to the
+  # adapter the same way runphase does: CODEX_PATH=<path>, or CODEX_PATH UNSET for `bundled`. Without it
+  # the adapter's bundled codex serves the consult, and a configured model that needs a newer CLI than the
+  # bundled one fails (live 2026-10-12: gpt-6.1-sol refused by the bundled 0.154.0). An explicit
+  # COMMS_ACP_CODEX_PATH that resolution rejects refuses the consult rather than running another runtime.
+  # A warm session keeps the adapter process it started with, so the session NAME carries a digest of the
+  # runtime (path + version, or `bundled`): a changed runtime is a new session, never a silent reuse of the
+  # old adapter. Earlier unkeyed `agent-comms-ask` sessions are simply no longer addressed.
+  if [ "$agent" = codex ]; then
+    RT_PATH=bundled; RT_VERSION=unknown; RT_ERR=""; RT_NOTE=""; policy_runtime_codex
+    [ -z "$RT_ERR" ] || die_fb "consult: $RT_ERR — refusing rather than running another runtime"
+    if [ "$RT_PATH" = bundled ]; then launcher=(env -u CODEX_PATH "${launcher[@]}")
+    else launcher=(env "CODEX_PATH=$RT_PATH" "${launcher[@]}"); fi
+    ACP_SESSION_NAME="$ACP_SESSION_NAME+rt+$(printf '%s %s\n' "$RT_PATH" "$RT_VERSION" | cksum | cut -d' ' -f1)"
   fi
   # A consult that HANGS must not block forever, and a consult that returns rc=0 with ZERO bytes
   # must not read as a successful answer — the same rc-0-empty misdiagnosis the runphase path

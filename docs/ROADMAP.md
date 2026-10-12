@@ -36,6 +36,16 @@ orchestration here, and do not revive Symphony for it.
   `comms.sh version`. **Built 2026-09-25:** the last two — `compose-result v1` and
   `version [--json]` over an install stamp (docs/COMMANDS.md defines both).
 
+## DONE (2026-10-12): `acp.sh consult codex` runs the mounted-turn codex runtime (task 532)
+
+**Field cause.** `/ask codex --via acp` failed with "The 'gpt-6.1-sol' model is not supported when using
+Codex with a ChatGPT account": `cmd_consult` resolved no runtime, so the adapter ran its bundled codex
+(0.154.0) while the operator's config named a model that needs >= 0.159.0. Setting `CODEX_PATH` after the
+fact did not help either, because the warm `agent-comms-ask` session kept its first adapter process.
+**Fix.** The consult uses `policy_runtime_codex` and passes `CODEX_PATH` as `runphase.sh` does; a rejected
+explicit `COMMS_ACP_CODEX_PATH` refuses with the mailbox fallback. The session name is keyed by a digest of
+the runtime, so a changed runtime starts a new session. Pins in other repos are re-pinned separately.
+
 ## DONE (2026-10-05): the canary no longer cancels codex's pre-turn compaction
 
 **Field cause.** On long-lived mounted codex review sessions (gpt-6.1-sol/xhigh, window 258,400) the
@@ -940,7 +950,7 @@ records the installed runtime (0.160.0). 2.1.1 bundles `@openai/codex ^0.159.1`.
 instead of writing — fail-closed by design. The probe covered the installed runtime only, not the
 adapter's bundled codex (`COMMS_ACP_CODEX_PATH=bundled`); the attestation covers both. The `/ask`
 consult path (unmounted, `--approve-reads`, the operator's own `~/.codex`) still uses acpx's floating
-builtin and is not covered by this pin. The attestation is post-hoc: it refuses to SEND the review
+builtin and is not covered by this pin (it does run the same codex runtime since 2026-10-12). The attestation is post-hoc: it refuses to SEND the review
 prompt after a non-read-only canary and to PUBLISH after a non-read-only review, but it cannot undo a
 write either turn made outside the tree (writes inside it are the tree-identity check's).
 

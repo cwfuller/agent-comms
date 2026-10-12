@@ -769,6 +769,14 @@ tokens; warm round 2 **146** (~127x less). That number is why the ACP track exis
 review loops stay on runphase until this consult path proves the transport.
 This is the ONLY Node-dependent surface in the repo, and it is opt-in per call.
 
+A codex consult resolves its runtime with `policy_runtime_codex`, the resolver mounted turns use, and
+hands it to the adapter the way `runphase.sh` does (`CODEX_PATH=<path>`, or `CODEX_PATH` unset for
+`bundled`). Without it the adapter's bundled codex serves the consult, and a configured model that
+needs a newer CLI fails (2026-10-12: gpt-6.1-sol refused by the bundled 0.154.0). An adapter process
+keeps the runtime it started with, so the warm session name carries a digest of the runtime (path and
+version, or `bundled`): a changed runtime is a new session, never a reuse. The old unkeyed
+`agent-comms-ask` sessions are no longer addressed; retire them with `acpx codex sessions close`.
+
 ## Reviewer model/effort routing
 
 A reviewer turn's depth is a CONTRACT, not a hint: the isolated `CODEX_HOME` exists so the

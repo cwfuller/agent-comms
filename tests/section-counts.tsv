@@ -35,7 +35,7 @@ findings are LIST ITEMS in any markdown form (field bug, 2026-08-26)	16
 stamped authorities: workspace pin (#3) + send-time git metadata (#6)	46
 friction: a one-line seam for reporting harness problems	32
 transports emit the child\'s bytes, verbatim and identically	13
-acp.sh: consult transport (stubbed npx)	45
+acp.sh: consult transport (stubbed npx)	53
 acp.sh: the reviewer model+effort policy	29
 acp.sh: the reviewer policy resolver	54
 reviewer policy: a wrong-depth review is never published	33
