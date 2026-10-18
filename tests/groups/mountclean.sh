@@ -746,7 +746,7 @@ export AX_KDIR_RUN_LOG="$WORK/rt-kdir-run.log"; : > "$AX_KDIR_RUN_LOG"
 RT_X2="$(rt_turn rt-xray grok "" "$RT_XD")"
 unset AX_KDIR_RUN_LOG
 # The name is a fixed-length hash, not the run dir's name: this run dir is called `rt-xray-run`.
-RT_XT=0; printf '%s\n' "${RT_X2##*/}" | grep -Eq '^tmp-[0-9a-f]{12}$' && RT_XT=1
+RT_XT=0; grep -Eq '^tmp-[0-9a-f]{12}$' <<<"${RT_X2##*/}" && RT_XT=1
 [ "$RT_XT" = 1 ] && [ "$(sed -n '$p' "$WORK/rt-kdir-run.log")" = "$(cd "$RT_XD" && pwd -P)" ] && [ ! -e "$RT_X2" ] \
   && ok "a degraded turn's throwaway is named by a hash and records the physical run dir it was made for" \
   || fail "throwaway run record (x2=$RT_X2): $(cat "$WORK/rt-kdir-run.log")"
@@ -798,7 +798,7 @@ rt_slug() {  # <ident> — the Claude slug of that ident's cwd under the longest
 }
 RT_ZOLD="tmp-$(printf '%s' "${RT_GD##*/}" | tr -c 'A-Za-z0-9._-' '_')"
 RT_ZNEW="${RT_Z2##*/}"; RT_ZDUR="${RT_Z1##*/}"
-if [ -n "$RT_Z1" ] && [ -n "$RT_Z2" ] && printf '%s\n' "$RT_ZNEW" | grep -Eq '^tmp-[0-9a-f]{12}$' \
+if [ -n "$RT_Z1" ] && [ -n "$RT_Z2" ] && grep -Eq '^tmp-[0-9a-f]{12}$' <<<"$RT_ZNEW" \
    && [ "$(rt_slug "$RT_ZNEW" | wc -c | tr -d ' ')" -le 200 ] && [ "$(rt_slug "$RT_ZOLD" | wc -c | tr -d ' ')" -gt 200 ] \
    && [ "${#RT_ZDUR}" -le 70 ]; then
   ok "a long task and run name still give a 16-character throwaway ident and a Claude slug within 200 characters"
