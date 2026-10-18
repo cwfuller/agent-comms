@@ -745,17 +745,20 @@ RT_XD="$RT/.comms/logs/rt-xray-run"; mkdir -p "$RT_XD"
 export AX_KDIR_RUN_LOG="$WORK/rt-kdir-run.log"; : > "$AX_KDIR_RUN_LOG"
 RT_X2="$(rt_turn rt-xray grok "" "$RT_XD")"
 unset AX_KDIR_RUN_LOG
-case "$RT_X2" in */tmp-rt-xray-run) RT_XT=1 ;; *) RT_XT=0 ;; esac
+# The name is a fixed-length hash, not the run dir's name: this run dir is called `rt-xray-run`.
+RT_XT=0; printf '%s\n' "${RT_X2##*/}" | grep -Eq '^tmp-[0-9a-f]{12}$' && RT_XT=1
 [ "$RT_XT" = 1 ] && [ "$(sed -n '$p' "$WORK/rt-kdir-run.log")" = "$(cd "$RT_XD" && pwd -P)" ] && [ ! -e "$RT_X2" ] \
-  && ok "a degraded turn's throwaway records the physical run dir it was made for" \
+  && ok "a degraded turn's throwaway is named by a hash and records the physical run dir it was made for" \
   || fail "throwaway run record (x2=$RT_X2): $(cat "$WORK/rt-kdir-run.log")"
 # The shape a runner killed mid-turn on a degrade path leaves: a registered worktree holding the
 # artifact, its session bookkeeping, the run it was made for, and the runner's claim with a dead pid.
 RT_KEYDIR="$(dirname "$RT_PEER")"
-rt_tmp() {  # <run dir> <thread> [--no-run] — record the run as the thread's and leave its crashed throwaway; prints its path
+rt_tmp() {  # <run dir> <thread> [--no-run] [ident] — record the run as the thread's and leave its crashed throwaway; prints its path
+  # Without an ident the copy is named the way mounts were BEFORE their names were hashed
+  # (tmp-<the run dir's basename>), which cleanup must still find.
   local rd="$1" tw dead
   mkdir -p "$rd"; printf 'thread\t%s\nset\t\nagent\tgrok\nartifact\t%s\n' "$2" "$RT_ART" > "$rd/turn.tsv"
-  tw="$RT_KEYDIR/tmp-$(printf '%s' "$(basename "$rd")" | tr -c 'A-Za-z0-9._-' '_')"
+  tw="$RT_KEYDIR/${4:-tmp-$(printf '%s' "$(basename "$rd")" | tr -c 'A-Za-z0-9._-' '_')}"
   mkdir -p "$tw/view" "$tw/home"
   git -C "$RT" worktree add -q --detach "$tw/view/tree" "$RT_HEAD" >/dev/null 2>&1
   git -C "$tw/view/tree" read-tree -u --reset "$RT_ART" && git -C "$tw/view/tree" reset -q --mixed "$RT_HEAD"
@@ -780,6 +783,44 @@ RT_TT="$(rt_cm --thread rt-tango --yes)"; RT_TTC=$?
   && rt_gone "$RT_TW" && rt_intact "$RT_PEER" \
   && ok "a crashed run's throwaway copy that names the thread's run is selected and removed" \
   || fail "throwaway (rc=$RT_TTC): $RT_TT"
+# Fixed-length names. A run dir is named after a message id, so the old `tmp-<run dir>` ident made
+# the mount cwd (<base>/<64-hex key>/<ident>/view/tree) as long as the message id; Claude keeps 200
+# characters of a cwd for its transcript directory name and a truncated one cannot be attested.
+# The thread and the run dir here are far longer than any real one.
+RT_GT="rt-zulu-$(printf 'long-task-%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)"
+RT_GD="$RT/.comms/logs/$(printf 'long-run-%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24).1.2"
+RT_Z1="$(rt_turn "$RT_GT" grok)"; cp "$RT_Z1/.state.record" "$WORK/rt-z-record"; printf 'bad id!\n' > "$RT_Z1/.state.record"
+RT_Z2="$(rt_turn "$RT_GT" grok "" "$RT_GD")"
+cp "$WORK/rt-z-record" "$RT_Z1/.state.record"
+RT_ZKEY="${RT_Z2%/*}"; RT_ZKEY="${RT_ZKEY##*/}"
+rt_slug() {  # <ident> — the Claude slug of that ident's cwd under the longest realistic default base (a 40-character user name)
+  printf '%s' "/Users/$(printf '%040d' 0 | tr 0 u)/.local/state/agent-comms/mounts/$RT_ZKEY/$1/view/tree" | tr -c 'A-Za-z0-9' '-'
+}
+RT_ZOLD="tmp-$(printf '%s' "${RT_GD##*/}" | tr -c 'A-Za-z0-9._-' '_')"
+RT_ZNEW="${RT_Z2##*/}"; RT_ZDUR="${RT_Z1##*/}"
+if [ -n "$RT_Z1" ] && [ -n "$RT_Z2" ] && printf '%s\n' "$RT_ZNEW" | grep -Eq '^tmp-[0-9a-f]{12}$' \
+   && [ "$(rt_slug "$RT_ZNEW" | wc -c | tr -d ' ')" -le 200 ] && [ "$(rt_slug "$RT_ZOLD" | wc -c | tr -d ' ')" -gt 200 ] \
+   && [ "${#RT_ZDUR}" -le 70 ]; then
+  ok "a long task and run name still give a 16-character throwaway ident and a Claude slug within 200 characters"
+else
+  fail "long names (thread ${#RT_GT}, run dir ${#RT_GD}, throwaway '$RT_ZNEW', durable '$RT_ZDUR')"
+fi
+# Cleanup finds that throwaway from the run's ledger row alone: it recomputes the name from the run
+# dir (so it must be the name the runner chose) and takes the copy only on the run the copy records.
+# The leftover is recorded under a thread of its own (rt-zulu), so the long thread's warm mount stays out of it.
+RT_ZW="$(rt_tmp "$RT_GD" rt-zulu "" "$RT_ZNEW")"
+rt_state retire rt-zulu >/dev/null
+cp "$RT_ZW/.state.run" "$WORK/rt-z-run"; (cd "$RT/.comms/logs" && pwd -P) > "$RT_ZW/.state.run"
+RT_ZM="$(rt_cm --thread rt-zulu --yes)"; RT_ZMC=$?
+cp "$WORK/rt-z-run" "$RT_ZW/.state.run"
+[ "$RT_ZMC" = 4 ] && rt_line "$RT_ZM" "$RT_ZW" ambiguous run-mismatch && rt_intact "$RT_ZW" \
+  && ok "a hashed throwaway that records another run is kept: the record decides whose it is, not the name" \
+  || fail "hashed throwaway recording another run (rc=$RT_ZMC): $RT_ZM"
+RT_ZR="$(rt_cm --thread rt-zulu --yes)"; RT_ZRC=$?
+[ "$RT_ZRC" = 0 ] && grep -F " path=$RT_ZW" <<<"$RT_ZR" | grep_full -q "status=removed reason=proven kind=throwaway use=run " \
+  && rt_gone "$RT_ZW" && rt_intact "$RT_PEER" \
+  && ok "a crashed run's hashed throwaway is found through its recorded run and removed" \
+  || fail "hashed throwaway (rc=$RT_ZRC): $RT_ZR"
 # Run dirs `rt+tw` (thread rt-uniform) and `rt_tw` (thread rt-victor) both name `tmp-rt_tw`, and
 # both reviewed one artifact, so only the run the copy records can tell whose it is.
 RT_UD="$RT/.comms/logs/rt+tw"; mkdir -p "$RT_UD"

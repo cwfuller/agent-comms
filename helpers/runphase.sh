@@ -1653,6 +1653,31 @@ acp_mount_ident() {  # <main_root> <raw thread|message id> <agent> -> <slug>-<ha
   printf '%s-%s-%s' "$slug" "$h" "$agent"
 }
 
+# The ident of a run's disposable (throwaway) mount: `tmp-` and 12 hex of the run dir's PHYSICAL
+# path, so the name is 16 characters whatever the run dir is called. It used to be
+# `tmp-<safe_name of the run dir's basename>`, and a run dir is named after a message id, so the
+# mount cwd (<base>/<64-hex repo key>/<ident>/view/tree) could outgrow the 200 characters Claude
+# keeps of a cwd for its transcript directory name, and a Claude review whose transcript directory
+# would be truncated cannot be attested (claude_transcript.py refuses it).
+# The name only LOCATES the copy; `.state.run` (the physical run dir, written under the claim)
+# is what says whose it is, and nothing parses a run back out of the name.
+mount_throwaway_ident() {  # <run dir> -> tmp-<hash>, or non-zero when the run dir does not resolve
+  local phys h
+  phys="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+  h="$(printf 't\0%s' "$phys" | acp_hash12)"
+  [ -n "$h" ] || return 1
+  printf 'tmp-%s' "$h"
+}
+
+# Every ident a run's throwaway may carry, one per line: the hashed name, then the name copies made
+# before it were given (`tmp-<safe_name of the run dir's basename>`), which `clean mounts --thread`
+# must still find. Both are only candidates: cm_run_own decides whose a copy is.
+mount_throwaway_idents() {  # <run dir>
+  local hashed
+  if hashed="$(mount_throwaway_ident "$1")"; then printf '%s\n' "$hashed"; fi
+  printf 'tmp-%s\n' "$(safe_name "$(basename "$1")")"
+}
+
 # Parent git NEVER runs with the child's hooks or fsmonitor. Verified with a negative
 # control: without core.hooksPath=/dev/null a `worktree add` fires a post-checkout hook
 # from the shared .git/hooks, which an --approve-all child can write; with it, suppressed.
@@ -2409,7 +2434,7 @@ mount_tree_matches() {  # <mount> <artifact> <log> -> 0 identical
 # swallowed by `2>/dev/null || true`, stranding the claim every later round needs.
 # A DURABLE mount is deliberately left registered and on disk: removing it would unlink an
 # inode a queue owner may still hold, and the next round rebuilds it anyway. A THROWAWAY
-# mount (an external `<base>/<repo-key>/tmp-<run-id>/view/tree`, used by non-ACP parent-brokered
+# mount (an external `<base>/<repo-key>/tmp-<hash>/view/tree`, used by non-ACP parent-brokered
 # turns and by every degrade) is still removed, or every direct grok turn would leak an admin
 # dir and an isolated-home copy.
 MOUNT_PENDING_TMP=""; MOUNT_PENDING_ROOT=""
@@ -2464,11 +2489,14 @@ unmount_artifact() {
 # the non-ACP else-branch) lands here rather than the old `$run_dir/tree`, so a disposable
 # turn still runs OUTSIDE the repo. Reads mount_store/mount_key/main_root/run_dir by dynamic
 # scope (as unmount_artifact reads mount_dir/main_root) and sets mount_kdir/mount_dir/
-# mount_throwaway/mount_durable. The throwaway ident (`tmp-<run-id>`) passes mount_container's
-# ident rules and gets the same view/tree + home layout as a durable mount.
+# mount_throwaway/mount_durable. The throwaway ident (`tmp-<hash of the run dir>`) passes
+# mount_container's ident rules and gets the same view/tree + home layout as a durable mount.
 mount_use_throwaway() {  # -> 0 with globals set, or 1 + MOUNT_ALLOC_NOTE
   local tid
-  tid="tmp-$(safe_name "$(basename "$run_dir")")"
+  if ! tid="$(mount_throwaway_ident "$run_dir")"; then
+    MOUNT_ALLOC_NOTE="cannot resolve the run dir $run_dir to name its throwaway mount"
+    return 1
+  fi
   mount_alloc "$mount_store" "$mount_key" "$main_root" "$tid" || return 1
   mount_kdir="$MOUNT_ALLOC_DIR"; mount_dir="$MOUNT_ALLOC_DIR/view/tree"
   mount_throwaway="$MOUNT_ALLOC_DIR"; mount_durable=""
@@ -2481,11 +2509,12 @@ mount_use_throwaway() {  # -> 0 with globals set, or 1 + MOUNT_ALLOC_NOTE
     MOUNT_ALLOC_NOTE="could not claim the throwaway mount at $mount_kdir — $MOUNT_CLAIM_NOTE"
     return 1
   fi
-  # WHOSE copy this is. The name is safe_name of the run dir's BASENAME, so `run+1`, `run_1` and a
-  # `run_1` outside .comms/logs all name one throwaway; only the physical run dir it was made for
-  # lets `clean mounts --thread` prove a crashed leftover is its thread's. Written under the claim,
-  # so it always names the latest user. A failed write costs only that proof, never the turn — and
-  # it must not leave an earlier aliased run's value standing in for this one.
+  # WHOSE copy this is. The name is a hash, which locates the copy and proves nothing, so the
+  # physical run dir it was made for is what lets `clean mounts --thread` prove a crashed leftover
+  # is its thread's — as it was for the `tmp-<basename>` names, where `run+1`, `run_1` and a `run_1`
+  # outside .comms/logs all named one throwaway. Written under the claim, so it always names the
+  # latest user. A failed write costs only that proof, never the turn — and it must not leave an
+  # earlier run's value standing in for this one.
   local rdp
   if ! { rdp="$(cd "$run_dir" 2>/dev/null && pwd -P)" && mount_state_put "$mount_kdir" run "$rdp"; }; then
     rm -f "$mount_kdir/.state.run" 2>/dev/null || true
@@ -5578,9 +5607,9 @@ mount_scope_check() {  # <scope> <canonical main_root> -> 0 usable | 1 absent | 
 # owned elsewhere, is REPORT-ONLY. Every run record is enumerated before any is read: one that is
 # not a regular file, or sits behind a symlink, refuses the whole call rather than vanishing from
 # the evidence; one that names no agent is a use no thread can be credited with, never no use. A
-# throwaway (`tmp-<run>`) is named after safe_name of a run dir's BASENAME, which several run dirs
-# can share, so it is selected only when it records (.state.run, written by the runner under its
-# claim) the physical dir of a run T owns; any other copy is report-only.
+# throwaway (`tmp-<hash of the run dir>`; before that, `tmp-<run dir's basename>`, which several
+# run dirs could share) is selected only when it records (.state.run, written by the runner under
+# its claim) the physical dir of a run T owns; any other copy is report-only.
 #
 # EVERY GATE FAILS CLOSED and is re-run under a held claim before anything is destroyed: path
 # shape; an inventory of the ident dir, read only from listings that worked (anything the runner
@@ -6252,11 +6281,11 @@ cm_replay_tomb() {  # <ident> <tombstone> <kind> <raw> <agent> <physical run|-> 
   cm_tomb_release "$tclaim"
 }
 
-# cm_run_own <throwaway ident> <run dir> — is this throwaway PROVABLY the leftover of that run? Its
-# name is safe_name(basename(run dir)), which two run dirs can share (`run+1`, `run_1`, or one
-# outside .comms/logs), so the name proves nothing: the copy must record (.state.run) exactly this
-# run dir's physical path. On failure sets CM_ST — ambiguous, or refused when the record cannot be
-# read — and returns 1.
+# cm_run_own <throwaway ident> <run dir> — is this throwaway PROVABLY the leftover of that run? The
+# name only locates it (and a copy made before names were hashed is safe_name(basename(run dir)),
+# which two run dirs can share: `run+1`, `run_1`, or one outside .comms/logs), so the name proves
+# nothing: the copy must record (.state.run) exactly this run dir's physical path. On failure sets
+# CM_ST — ambiguous, or refused when the record cannot be read — and returns 1.
 cm_run_own() {
   local d="$CM_SCOPE/$1" have want rc=0
   have="$(mount_state_get "$d" run)" || rc=$?
@@ -6517,30 +6546,31 @@ cm_thread() {
       cm_target durable "$use" "$a" "$raw" "$ident" "$CM_ARTS"
     done
   done
-  # THROWAWAYS: a disposable copy (only a crashed turn leaves one) is named after its run dir's
-  # BASENAME through safe_name, which several run dirs can share. It is this thread's only when it
-  # records (.state.run) one of this thread's runs — or, once an interrupted removal moved it, when
-  # its tombstone's record names this thread and that run. So pass 1 selects each copy under the
-  # run it names, and pass 2 hands every other copy a run of this thread could have named to
-  # cm_target, whose ownership gate reports it (or finishes its tombstone) — it is never selected
-  # by name. A tombstone whose record names another thread never makes a candidate: it is that
-  # thread's alone to finish.
+  # THROWAWAYS: a disposable copy (only a crashed turn leaves one) is named from its run dir
+  # (mount_throwaway_idents: the hashed name, and the basename name copies had before it), a name
+  # that locates and does not prove. It is this thread's only when it records (.state.run) one of
+  # this thread's runs — or, once an interrupted removal moved it, when its tombstone's record
+  # names this thread and that run. So pass 1 selects each copy under the run it names, and pass 2
+  # hands every other copy a run of this thread could have named to cm_target, whose ownership
+  # gate reports it (or finishes its tombstone) — it is never selected by name. A tombstone whose
+  # record names another thread never makes a candidate: it is that thread's alone to finish.
   local rd tid rraw rart pass prd
   for pass in 1 2; do
     while IFS="$(printf '\t')" read -r rraw a other rart rd; do
       [ "$other" = "$CM_THREAD" ] && [ "$rd" != "-" ] && cm_agent_ok "$a" || continue
-      tid="tmp-$(safe_name "$(basename "$rd")")"
-      case "$done_idents" in *" $tid "*) continue ;; esac
-      if [ "$pass" = 1 ]; then
-        if ! cm_run_own "$tid" "$rd"; then
-          CM_NOTE=""; prd="$(cd "$rd" 2>/dev/null && pwd -P)" || prd=""
-          [ -n "$prd" ] && cm_tomb_scan "$tid" "$prd" || continue
+      for tid in $(mount_throwaway_idents "$rd"); do
+        case "$done_idents" in *" $tid "*) continue ;; esac
+        if [ "$pass" = 1 ]; then
+          if ! cm_run_own "$tid" "$rd"; then
+            CM_NOTE=""; prd="$(cd "$rd" 2>/dev/null && pwd -P)" || prd=""
+            [ -n "$prd" ] && cm_tomb_scan "$tid" "$prd" || continue
+          fi
+        elif [ ! -e "$CM_SCOPE/$tid" ] && [ ! -L "$CM_SCOPE/$tid" ] && ! cm_tomb_scan "$tid"; then
+          continue
         fi
-      elif [ ! -e "$CM_SCOPE/$tid" ] && [ ! -L "$CM_SCOPE/$tid" ] && ! cm_tomb_scan "$tid"; then
-        continue
-      fi
-      done_idents="$done_idents$tid "
-      cm_target throwaway run "$a" "$rraw" "$tid" "$rart" "$rd"
+        done_idents="$done_idents$tid "
+        cm_target throwaway run "$a" "$rraw" "$tid" "$rart" "$rd"
+      done
     done < "$uses"
   done
   rm -f "$uses"

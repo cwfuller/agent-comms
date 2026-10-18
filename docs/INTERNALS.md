@@ -569,12 +569,25 @@ waits on any other ident. Load-bearing choices:
   until the tombstone and the copy in it list, and `cm_drop_tomb` deletes the record only when a
   working listing shows nothing but journal and claims. The scope itself must list too, or a
   tombstone in it is never found and its moved ident reads as already absent (`store-error`).
-- **A throwaway's name is not its owner.** `tmp-<run>` is `safe_name` of the run dir's basename, and
-  `run+1`, `run_1` and a `--dir` elsewhere named `run_1` all map to one copy that the session and
-  content checks cannot tell apart when both runs reviewed one artifact. The runner therefore
+- **A throwaway's name is not its owner.** The ident was `tmp-<safe_name of the run dir's basename>`,
+  and `run+1`, `run_1` and a `--dir` elsewhere named `run_1` all mapped to one copy that the session
+  and content checks cannot tell apart when both runs reviewed one artifact. The runner therefore
   records, under its claim, the physical run dir it made the copy for (`.state.run`); cleanup
   selects the copy only for that run, re-reads it under its own claim, and reports any other
   copy one of T's runs could have named.
+- **A throwaway's name is short.** A run dir is named after a message id, so `tmp-<basename>` made
+  the mount cwd `<base>/<64-hex key>/<ident>/view/tree` as long as the message id plus the base,
+  and Claude keeps only 200 characters of a cwd (every non-alphanumeric becomes `-`) for its
+  transcript directory name; a longer one is refused by `claude_transcript.py`, so a Claude review
+  could not start. The ident is now `tmp-` and 12 hex characters of a digest of the run dir's
+  physical path (`mount_throwaway_ident`, one accessor for the runner and for cleanup): 16
+  characters, so the throwaway cwd is `len(base) + 92` characters (`+ 1 + 64 + 1 + 16 + 10`) and
+  fits whenever the base is at most 108 characters — the default base under a home of up to 76.
+  A durable ident is `<slug of at most 40>-<hash12>-<agent of at most 16>`, so its cwd is at most
+  `len(base) + 146` (the shipped review identities are at most 13, `len(base) + 143`) and fits a
+  base of 54 (57). The hash only locates a copy: `.state.run` is still what proves whose it is, no
+  reader parses a run back out of the name, and cleanup also looks for the old basename name of each
+  run so a copy made before the change is still found and proven the same way.
 - **"Dirty" means "not a retained artifact".** A mount is an uncommitted diff over its base by
   design, so git's dirtiness (and `git worktree remove` without `--force`) would refuse every
   mount, and with `--force` would prove nothing. The gate is tree identity against an artifact the
@@ -617,7 +630,7 @@ waits on any other ident. Load-bearing choices:
   reaches an empty tombstone first owns it and clears it, and its maker steps back.
 - **The journal also names its owning thread.** The claim decides WHO may replay a tombstone now;
   the record decides WHOSE removal it is. A throwaway's tombstone is named after `tmp-<safe_name of
-  the run dir's basename>`, which two threads' run dirs can share, and once a removal is interrupted
+  the run dir's basename>` (the pre-hash name), which two threads' run dirs can share, and once a removal is interrupted
   after the rename the moved copy's `.state.run` is no longer where selection looks — so a record of
   only (ident, tree, admin) let thread A's cleanup finish thread B's removal, retired or not. The
   record now carries the thread, use, agent and physical run; selection reads only this thread's

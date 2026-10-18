@@ -656,10 +656,13 @@ selected only when its ownership is PROVEN from `.comms/grades/sets.tsv` (one ro
 leg) and each run's `.comms/logs/<run>/turn.tsv`: every recorded use must belong to T or to
 another retired thread. The only way two threads share an identity is a leg thread that is also
 a thread's literal name (T's leg to codex is `T-codex`); such a copy is report-only until both
-are retired. A `tmp-<run>` throwaway (a crashed turn's leftover) is named after `safe_name` of
-its run dir's basename, which several run dirs can share (`run+1`, `run_1`, or a `--dir` outside
-`.comms/logs`), so the name proves nothing: it is selected only when its `.state.run` — the
-physical run dir the runner recorded when it made the copy — is a run T owns. Any other copy a
+are retired. A `tmp-<hash>` throwaway (a crashed turn's leftover) is named `tmp-` and 12 hex
+characters of a digest of its run dir's physical path, so the name is 16 characters whatever the
+run dir is called. Copies made before names were hashed are `tmp-<safe_name of the run dir's
+basename>`, which several run dirs can share (`run+1`, `run_1`, or a `--dir` outside
+`.comms/logs`); selection looks for both names of each of T's runs. Neither name proves anything:
+a copy is selected only when its `.state.run` — the physical run dir the runner recorded when it
+made the copy — is a run T owns. Any other copy a
 run of T's could have named is report-only (`no-ownership-evidence` when it records no run,
 `run-mismatch` when it records another). Every run record is enumerated before any is read: a
 `.comms/logs` that is a symlink, a symlinked entry in it, or a `turn.tsv` that is not a regular
@@ -703,7 +706,7 @@ ident or a tombstone a later run finishes — only after taking its claim, so a 
 maker is still alive (or a concurrent replay) is a scoped `busy-cleanup` skip, and only a maker
 proven dead is superseded. The record names its owner — the thread, the use, the agent and, for a
 throwaway, the physical run — because the tombstone's name carries only the ident, which run dirs
-that normalize alike share. A replay finishes it only when the record names this thread and this
+that normalize alike (a pre-hash name) share. A replay finishes it only when the record names this thread and this
 exact target, and, for a throwaway, only while the moved copy's `.state.run` still names that run;
 it re-reads both under the tombstone's claim. A replay destroys a payload and a registration as a
 first removal does, so it passes the same authority and ownership gates: a held use is refused

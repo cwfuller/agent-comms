@@ -36,6 +36,21 @@ orchestration here, and do not revive Symphony for it.
   `comms.sh version`. **Built 2026-09-25:** the last two — `compose-result v1` and
   `version [--json]` over an install stamp (docs/COMMANDS.md defines both).
 
+## DONE (2026-10-18): a disposable review mount has a fixed-length name (task 862)
+
+**Field cause.** A Claude review could not start twice (`review_unavailable`): the disposable mount was
+`tmp-<run dir's basename>`, and a run dir is named after a message id, so the mount cwd
+`<base>/<64-hex key>/<ident>/view/tree` outgrew the 200 characters Claude keeps of a cwd for its transcript
+directory name. `claude_transcript.py` refuses such a directory instead of guessing, which is right and
+left nothing to attest.
+**Fix.** The ident is `tmp-` and 12 hex characters of a digest of the run dir's physical path
+(`mount_throwaway_ident`), so the throwaway cwd is `len(base) + 92` characters at most; a durable ident
+(`<slug 40>-<hash12>-<agent 16>`) is unchanged and at most `len(base) + 146`. Ownership is still proven only
+by the copy's recorded `.state.run`; `clean mounts --thread` looks for both the hashed and the old basename
+name of each run, so copies made before the change are still found. **Not done:** a durable mount under a
+base longer than 54 characters (a home longer than 22) still exceeds 200; shortening its slug would change
+every warm session's identity.
+
 ## DONE (2026-10-12): `acp.sh consult codex` runs the mounted-turn codex runtime (task 532)
 
 **Field cause.** `/ask codex --via acp` failed with "The 'gpt-6.1-sol' model is not supported when using
